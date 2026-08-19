@@ -301,7 +301,23 @@ func (wrappedTimeoutErr) Temporary() bool { return false }
 
 // TestMain silences the default logger for any code path that falls back to
 // slog.Default, keeping suite output to real failures.
+//
+// It silences one non-slog line too. TestForkDialsQUICFromOpen makes a real
+// QUIC dial, and quic-go warns through the stdlib log package when it cannot
+// raise the socket buffers to its 7MB target — which it cannot on a stock
+// Linux runner, where net.core.rmem_max is orders of magnitude smaller and
+// the process lacks CAP_NET_ADMIN for SO_RCVBUFFORCE. The knob has to be set
+// here rather than with t.Setenv, which panics in a test that calls
+// t.Parallel.
+//
+// Setting it before m.Run is early enough only because quic-go reads it on
+// the connection-setup path (wrapConn, under a sync.Once) rather than in an
+// init, so a bump that moved the read into package init would un-silence the
+// line. Cosmetic either way: it is a log line, never a failure.
 func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.DiscardHandler))
+	// Errors are impossible on a literal key/value and there is nothing to
+	// fall back to if it ever did fail; the only cost is a cosmetic log line.
+	_ = os.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
 	os.Exit(m.Run())
 }

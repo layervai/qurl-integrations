@@ -5,7 +5,10 @@
  *
  * Options:
  *   --count N      Recipients per round (default: 100)
- *   --duration S   Total duration in seconds (default: 7200 = 2 hours)
+ *   --duration S   Total duration in seconds (default: 7200 = 2 hours). A HARD
+ *                  bound: a round in progress stops mid-leg when it expires,
+ *                  rather than running its full --count first. See "Duration
+ *                  is a hard bound" below.
  *   --interval S   Seconds between rounds (default: 60)
  *   --file PATH    Local file to upload (default: generates a 1MB test payload
  *                  in memory — nothing is written to disk)
@@ -79,6 +82,32 @@
  *   Only loopback is recognized without being named, so a run against a real
  *   sandbox needs LOADTEST_TARGET_HOSTS set. Note that 0.0.0.0 is NOT loopback
  *   (it is the unspecified address); name it explicitly if you bind there.
+ *
+ * Duration is a hard bound:
+ *   Both per-recipient loops check the deadline between requests, so a run
+ *   stops within roughly one request of --duration however large --count is.
+ *   Before this the deadline was consulted only BETWEEN rounds, so a single
+ *   round always ran to completion: `--count 20000 --duration 60` issued
+ *   2000 sequential mint batches and 20000 sequential location creates —
+ *   hours of traffic against the target — before the 60s bound was next
+ *   looked at. The per-request timeouts bound each call, not the round: 30s
+ *   for a mint batch, and up to three attempts of 30s for a location create.
+ *
+ *   The round that is stopped mid-way is reported as cut short, on its own
+ *   line and in the summary, and is excluded from the per-round AVERAGES
+ *   while still counting toward every total. A truncated round did less work
+ *   in less time; averaging it in reports a round time and a mint latency
+ *   that no complete round ever took.
+ *
+ *   Truncation is tracked per LEG as well as per round, because the two can
+ *   differ: a round that completes its whole mint plan and is then cut in the
+ *   location leg has a shortened total but a complete mint sample. It leaves
+ *   the round-time average and stays in the mint average. On a both-legs run
+ *   that is the usual shape of the final round.
+ *
+ *   The same predicate carries a signal (see Reclaim below), so Ctrl-C and an
+ *   expired clock stop the loops by one path rather than two conditions that
+ *   can disagree.
  *
  * Reclaim:
  *   Every resource this script creates is recorded to the ledger before it is
@@ -567,7 +596,23 @@ function resolveReclaimArg(argv) {
     // swept up by the boolean-flag literal guard in
     // tests/loadtest-silent-failure.test.js as though it were an ad-hoc flag
     // read. The name still appears, which is what the wiring check needs.
-    errors.push('a ledger path is required — pass it as --reclaim /tmp/loadtest-ledger-<ts>.jsonl');
+    errors.push('a ledger path is required — pass it as --reclaim <tmpdir>/loadtest-ledger-<ts>.jsonl');
+  } else if (requested && reclaimPath.trim() === '') {
+    // Whitespace-only is a mistyped flag, not a path — the same reasoning as
+    // --file and --ledger, and refused here rather than in parseReclaimArg for
+    // the reason that function's own header records: it reads a MODE switch,
+    // so a value it cannot use collapses to `path: null`, which is already how a
+    // bare --reclaim arrives. Collapsing this one too would cost the only
+    // thing that makes the message legible — the value, quoted. Unquoted, the
+    // fault renders as an invisible gap, and it is downstream in reclaim()'s
+    // `no ledger file at ${ledgerPath}` that an operator would meet it: a
+    // sentence with a hole in it, read by someone who has already lost a run.
+    //
+    // So this is a message fix, not a leak fix. The resources are safe either
+    // way — reclaim() finds no such file and main() exits 1 — which is why
+    // the refusal is worth having at preflight, where every other unusable
+    // argv value is already named back to the operator.
+    errors.push(`--reclaim must name the ledger file to reclaim from, got ${JSON.stringify(reclaimPath)}`);
   }
   return { requested, path: reclaimPath, errors };
 }
@@ -828,11 +873,25 @@ const { ledgerPath: LEDGER_PATH } = resolveLedgerArg(args, DEFAULT_LEDGER_PATH);
 // Prove the ledger is writable BEFORE anything creates a resource. Discovering
 // an unwritable ledger after the first mint orphans that resource: its id was
 // never recorded and, once the process stops, nothing knows it exists.
-function preflightLedger() {
+//
+// Takes the path rather than reading LEDGER_PATH, the way pruneLedger already
+// does. It proves the path writable by CREATING the ledger, so the mode below
+// is a property of a real file — and a runtime one, invisible to the static
+// write-ban in tests/loadtest-silent-failure.test.js. A parameterless function
+// reading a module-level const resolved from process.argv could only be aimed
+// at a temp file by argv surgery before require, so the mode went unpinned
+// while the sibling gateway-resume-spike.js pinned its own twice.
+function preflightLedger(ledgerPath) {
   try {
-    fs.closeSync(fs.openSync(LEDGER_PATH, 'a', 0o600));
+    // The mode applies on CREATION only: re-running against a ledger that
+    // already exists leaves whatever permissions it has. Deliberate — by then
+    // the file is one the operator named with --ledger, and re-permissioning
+    // it is not this probe's business. gateway-resume-spike.js does chmod
+    // after its write, but the file it may find waiting is its own crashed
+    // run's .tmp, not something the operator chose.
+    fs.closeSync(fs.openSync(ledgerPath, 'a', 0o600));
   } catch (e) {
-    console.error(`FATAL: reclaim ledger ${LEDGER_PATH} is not writable — ${e.message}`);
+    console.error(`FATAL: reclaim ledger ${ledgerPath} is not writable — ${e.message}`);
     console.error('Refusing to create resources that could not be recorded. Pass --ledger PATH.');
     process.exit(1);
   }
@@ -843,6 +902,35 @@ function preflightLedger() {
 // without this the loop keeps minting ids the snapshot can never see and the
 // script exits having reclaimed only part of what it made.
 let stopping = false;
+
+// When the run must be over, as an epoch ms. `main` owns the clock, but the
+// loops that have to respect it live in runRound, which takes no arguments —
+// so the deadline is module state for the same reason `stopping` is.
+//
+// Infinity until a run starts, so importing this module (or running --reclaim,
+// which never sets it) cannot leave a live deadline lying around.
+let runDeadline = Infinity;
+
+/**
+ * The stop decision, as a pure function of its three inputs.
+ *
+ * Split out because every loop that consults it lives in runRound, which no
+ * test can reach — it is not exported and its only caller is behind
+ * `require.main === module`. The same reason parsePositiveInt and runReport
+ * are pure: the rule is the regression surface, not the loop.
+ *
+ * A DEADLINE and a SIGNAL are deliberately one predicate rather than two
+ * conditions. Both mean "issue no further creates", they can arrive in either
+ * order, and a loop that consulted only one of them would keep minting for
+ * whichever reason it did not check. Adding a third reason to stop belongs
+ * here, not in a fourth loop header.
+ */
+function shouldStopNow({ stopping: isStopping, deadline, now }) {
+  return isStopping || now >= deadline;
+}
+
+/** The live predicate the loops call. */
+const shouldStop = () => shouldStopNow({ stopping, deadline: runDeadline, now: Date.now() });
 
 // Creates that have been issued but not yet recorded. `stopping` ends the
 // loops, but it cannot un-issue a request already awaiting a response: that
@@ -1185,10 +1273,30 @@ function reclaimOnce(ledgerPath) {
 // which also means a suite cannot exercise a second, independent sweep without
 // clearing it. No production path calls this; it exists so the memoization and
 // its rejection-clearing can be pinned rather than resting on a transcript.
+/**
+ * Test-only seam for the run deadline. main() is the only production setter,
+ * and it is unreachable from a suite (behind `require.main === module`), so
+ * without this the deadline half of shouldStop() could not be exercised
+ * against runRound at all — leaving the truncation behaviour pinned only by
+ * counting call sites, which cannot show that a truncated round reports
+ * itself correctly.
+ *
+ * Takes an absolute epoch-ms deadline so a test can express both "already
+ * expired" and "expires partway through a leg" (by calling it again from
+ * inside a connector mock) without touching Date.now, which expiryToISO and
+ * the ledger also read.
+ */
+function setRunDeadlineForTests(deadline) {
+  runDeadline = deadline;
+}
+
 function resetReclaimStateForTests() {
   reclaimInFlight = null;
   stopping = false;
   inFlightCreates = 0;
+  // Reset with the rest of the module's run state: a deadline left set by one
+  // test would make shouldStop() true for every test after it.
+  runDeadline = Infinity;
 }
 
 // Which ledger a signal should sweep: this run's own, or the one named by
@@ -1634,7 +1742,11 @@ function targetGuardReport({ targets, allowlistErrors = [], allowProdFlag, allow
  * what rendered #1168's 100%-failing file leg as `[30s] Round 1: total=0.3s`.
  */
 function roundReportLine({ elapsed, round, results }) {
-  let line = `[${elapsed}s] Round ${round}: `;
+  // Marked on the round's own line, not only in the summary. A soak is watched
+  // by tailing this output, and a round reporting ok=137 where every other one
+  // reports ok=20000 otherwise reads as a catastrophic failure rather than as
+  // the clock running out.
+  let line = `[${elapsed}s] Round ${round}${results.partial ? ' (cut short)' : ''}: `;
   if (results.fileLinks > 0 || results.fileFail > 0) {
     // reup= counts ATTEMPTS over time-spent-on-attempts: reuploadMs
     // accumulates outside the try/catch, so counting only successes would put
@@ -1809,6 +1921,10 @@ function formatRatePair(rate, threshold) {
  */
 function runReport({ allResults, roundsAttempted, maxFailRate }) {
   const sum = (pick) => allResults.reduce((total, r) => total + pick(r), 0);
+  // Takes its array, unlike `sum` above which closes over allResults — so the
+  // filtered subsets below average through the same helper rather than each
+  // spelling out its own reduce and divisor.
+  const mean = (rounds, pick) => rounds.reduce((total, r) => total + pick(r), 0) / rounds.length;
   const fileLinks = sum((r) => r.fileLinks);
   const fileFail = sum((r) => r.fileFail);
   const minted = fileLinks + sum((r) => r.locLinks);
@@ -1816,11 +1932,36 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   const attemptedLinks = minted + failedLinks;
   const roundsCompleted = allResults.length;
   const roundsFailed = Math.max(0, roundsAttempted - roundsCompleted);
+  // A round cut short by the deadline (or by a signal) did less work in less
+  // time. It stays in every TOTAL below — it really did mint what it minted —
+  // but it is excluded from the per-round AVERAGES, which would otherwise
+  // report a figure no complete round ever took. Kept as two arrays rather
+  // than a count so the two read as one partition: what the totals cover and
+  // what the averages cover, visible together rather than one derived from the
+  // other by arithmetic.
+  const partialRounds = allResults.filter((r) => r.partial);
+  const fullRounds = allResults.filter((r) => !r.partial);
 
   const lines = [];
   lines.push(roundsFailed > 0
     ? `Rounds: ${roundsCompleted} completed, ${roundsFailed} failed`
     : `Rounds: ${roundsCompleted}`);
+  // Named explicitly rather than left to be inferred from a short total. The
+  // whole point of cutting a round short is that --duration is honoured; a
+  // summary that then reports the truncated round as though it were a full one
+  // trades an unbounded run for a quietly wrong measurement.
+  if (partialRounds.length > 0) {
+    // Deliberately does NOT name the reason. `stopping` has a second setter
+    // besides the signal — an unwritable ledger stops the run from inside
+    // recordResource — so "at --duration or on a signal" was false for a case
+    // that already exists, and would go stale again for the next reason added.
+    // shouldStopNow exists to collapse those reasons; re-enumerating them here
+    // reinstates the coupling it removes. Whichever path fired has already
+    // logged itself immediately above.
+    lines.push(`Rounds cut short: ${partialRounds.length}`
+      + ' (stopped before the round finished its plan;'
+      + ' counted in totals, excluded from per-round averages)');
+  }
   lines.push(`Total links minted: ${minted}`);
   // "link failures", not "failures": this counts qURLs, and a round that dies
   // in the upload contributes nothing to it. An unqualified label put `Total
@@ -1834,12 +1975,18 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   lines.push(`Failure threshold: ${formatThresholdPct(maxFailRate)} (--max-fail-rate)`);
 
   if (roundsCompleted > 0) {
-    lines.push(`Avg round time: ${(sum((r) => r.totalMs) / roundsCompleted / 1000).toFixed(1)}s`);
+    // Averaged over COMPLETE rounds. A truncated round's totalMs measures how
+    // far it got before the clock ran out, not how long a round takes, so
+    // including it reports a round time shorter than any round actually ran.
+    // With every round truncated there is no such figure to report — say so
+    // rather than print the truncated mean under a label that denies it.
+    lines.push(fullRounds.length > 0
+      ? `Avg round time: ${(mean(fullRounds, (r) => r.totalMs) / 1000).toFixed(1)}s`
+      : 'Avg round time: n/a — every round was cut short');
     // Rounds that ran the file leg — every entry has completed it, since a
     // round throwing inside the leg never reaches allResults.
     const fileRounds = allResults.filter((r) => r.uploadMs > 0);
     if (fileRounds.length > 0) {
-      const mean = (rounds, pick) => rounds.reduce((total, r) => total + pick(r), 0) / rounds.length;
       // Every one of these rounds uploaded successfully, so the upload average
       // is over all of them however their mints then went.
       const avgUpload = mean(fileRounds, (r) => r.uploadMs).toFixed(0);
@@ -1859,7 +2006,14 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       // Residual limit, inherent to timing the batch loop as a whole rather
       // than each attempt: this is time per ROUND, not per qURL, and a
       // partially-failing round still blends its own failures into its mintMs.
-      const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0);
+      // Excludes rounds whose MINT LEG was cut off — not every truncated
+      // round. mintMs is a per-ROUND figure, so a round stopped mid-plan
+      // minted fewer links in less time and drags the mean toward however far
+      // it got. But a round that finished its mint plan and was then cut in
+      // the location leg has a complete sample, and on a both-legs run that is
+      // the usual shape of the final round: excluding it threw away good data
+      // on nearly every such soak. Hence mintPartial rather than partial.
+      const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0 && !r.mintPartial);
       // Nothing minted has two causes and they are not the same news: every
       // attempt failed, or nothing was ever attempted. Reporting the second as
       // "all 0 mint attempt(s) failed" states a failure that did not happen.
@@ -1868,9 +2022,19 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       // `--count 0` was how a run reached it, and parsePositiveInt now refuses
       // zero at preflight. See the reachability note on 'no qURL was
       // attempted' below.
-      const noMintNote = fileFail > 0
-        ? `n/a — all ${fileFail} mint attempt(s) failed`
-        : 'n/a — no mint was attempted';
+      //
+      // Third case, added with the deadline bound: rounds DID mint, but every
+      // one of them was cut short, so all of them are excluded above. Neither
+      // existing note is true then — "no mint was attempted" is plainly false,
+      // and "all N failed" blames a failure for what was a truncation. It is
+      // checked first because both other notes can also be true at the same
+      // time, and this is the one that explains why the average is missing.
+      const truncatedMinters = fileRounds.some((r) => r.fileLinks > 0 && r.mintPartial);
+      const noMintNote = truncatedMinters
+        ? 'n/a — every round that minted was cut short'
+        : fileFail > 0
+          ? `n/a — all ${fileFail} mint attempt(s) failed`
+          : 'n/a — no mint was attempted';
       lines.push(mintedRounds.length > 0
         ? `Avg upload: ${avgUpload}ms, avg mint/round: ${mean(mintedRounds, (r) => r.mintMs).toFixed(0)}ms`
         : `Avg upload: ${avgUpload}ms, avg mint/round: ${noMintNote}`);
@@ -1974,6 +2138,22 @@ async function runRound(roundNum) {
     fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
     uploadMs: 0, mintMs: 0, locMs: 0,
     reuploads: 0, reuploadFail: 0, reuploadMs: 0,
+    // True when the round stopped before doing everything it planned —
+    // anywhere. Present and false rather than absent, so a round object's
+    // shape does not depend on how it ended and runReport's filters need no
+    // `|| false`.
+    partial: false,
+    // True only when the FILE leg specifically was cut short. Separate from
+    // `partial` because the two answer different questions and a round can
+    // have one without the other: on a both-legs run (--file with --location)
+    // the terminal round typically finishes its mint plan in full and is then
+    // cut at the location boundary. Its totalMs is genuinely truncated — so it
+    // must leave `Avg round time` — while its mintMs is a complete, COUNT-wide
+    // sample that `avg mint/round` should keep. Keying the mint average off
+    // the whole-round flag discarded exactly that sample, on essentially every
+    // both-legs soak, and with a one-round duration reported the average as
+    // absent after having measured it.
+    mintPartial: false,
   };
 
   // Keyed by message and flushed once per leg below, so a round that mixes a
@@ -1985,7 +2165,18 @@ async function runRound(roundNum) {
   const locErrors = new Map();
 
   // File pipeline
-  if (!stopping && (FILE_PATH || !INCLUDE_LOCATION)) {
+  //
+  // One shouldStop() call feeding both branches, as if/else rather than two
+  // ifs over a sampled boolean: two calls could let the deadline fall between
+  // them, skipping the leg by the second while the first has already decided
+  // not to mark the round partial — the one combination that loses the
+  // truncation from the summary entirely. As if/else that is unrepresentable
+  // rather than warned against.
+  const wantsFile = FILE_PATH || !INCLUDE_LOCATION;
+  if (wantsFile && shouldStop()) {
+    results.partial = true;
+    results.mintPartial = true;
+  } else if (wantsFile) {
     const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
     // Upload through the bot's own connector client rather than a hand-rolled
@@ -2061,9 +2252,14 @@ async function runRound(roundNum) {
     // are not one population, and merging them would put a connector timeout
     // and a quota error under one heading.
     for (const batch of planMintBatches(COUNT)) {
-      // A sweep has started: stop before issuing another create it would have
-      // to chase, same as the location leg and the round loop.
-      if (stopping) break;
+      // A sweep has started, or the run is out of time: stop before issuing
+      // another create, same as the location leg and the round loop.
+      //
+      // This is where --duration becomes a real bound. Before it, a round ran
+      // its full COUNT however long that took, so `--count 20000 --duration 60`
+      // issued every one of its batches — hours of traffic — before the clock
+      // was consulted again between rounds.
+      if (shouldStop()) { results.partial = true; results.mintPartial = true; break; }
       if (batch.reupload) {
         const reStart = performance.now();
         let re = null;
@@ -2117,9 +2313,17 @@ async function runRound(roundNum) {
   }
 
   // Location pipeline
-  if (!stopping && INCLUDE_LOCATION) {
+  //
+  // One call, two branches, for the same reason as the file leg above.
+  if (INCLUDE_LOCATION && shouldStop()) {
+    results.partial = true;
+  } else if (INCLUDE_LOCATION) {
     const locStart = performance.now();
-    for (let i = 0; i < COUNT && !stopping; i++) {
+    // Guard inside the body rather than in the header, so both legs stop the
+    // same way and the partial flag is set at the point of truncation instead
+    // of being re-derived afterwards from a count.
+    for (let i = 0; i < COUNT; i++) {
+      if (shouldStop()) { results.partial = true; break; }
       try {
         await trackCreate(async () => {
           const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
@@ -2213,7 +2417,7 @@ async function main() {
   for (const line of report.warnings) console.warn(line);
 
   // After the guard: no point creating the ledger for a run that is refused.
-  preflightLedger();
+  preflightLedger(LEDGER_PATH);
 
   // Quick smoke test
   console.log('Running smoke test...');
@@ -2235,19 +2439,39 @@ async function main() {
   console.log('---');
 
   const startTime = Date.now();
-  const endTime = startTime + DURATION_S * 1000;
+  // Module scope so runRound's loops bound themselves by it too. Before this
+  // the deadline was consulted only BETWEEN rounds, so a single round ran to
+  // completion however far past --duration that took.
+  //
+  // Kept as the single spelling of the deadline rather than mirrored into a
+  // local: an edit that adjusted one and not the other — a grace period, an
+  // --extend flag — would desync the inter-round sleep from the predicate
+  // every loop consults, silently.
+  runDeadline = startTime + DURATION_S * 1000;
   let round = 0;
   const allResults = [];
 
-  // `stopping` ends the loop as well as the clock: a sweep triggered by a
-  // signal must not race rounds that keep appending ids behind it.
-  while (Date.now() < endTime && !stopping) {
+  // One predicate for both reasons to stop — see shouldStopNow. A signal must
+  // not race rounds that keep appending ids behind it, and the clock must not
+  // be reachable only from here.
+  while (!shouldStop()) {
     round++;
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`[${elapsed}s] Round ${round} starting...`);
 
     try {
       const results = await runRound(round);
+      // Pushed even when the round did nothing. The deadline can cross in the
+      // narrow window between this loop's own check and runRound's first
+      // sample, in which case both legs are skipped and an all-zero round
+      // comes back marked partial.
+      //
+      // Dropping it here would be worse than cosmetic, because roundsAttempted
+      // below is THIS counter, not allResults.length: runReport derives
+      // roundsFailed as the difference, so a round that was merely cut short
+      // before it began would be reported as a FAILED round — and can push
+      // roundFailRate past --max-fail-rate and flip the run's exit code. It is
+      // counted as attempted-and-truncated because that is what it was.
       allResults.push(results);
 
       console.log(roundReportLine({ elapsed, round, results }));
@@ -2255,9 +2479,12 @@ async function main() {
       console.error(`[${elapsed}s] Round ${round} FAILED: ${error.message}`);
     }
 
-    // Wait for next round
-    const remaining = endTime - Date.now();
-    if (remaining > INTERVAL_S * 1000 && !stopping) {
+    // Wait for next round. `remaining` already encodes the deadline, so this
+    // asks shouldStop() only for the signal — but it asks through the same
+    // predicate as everything else, so a future third reason to stop reaches
+    // the inter-round sleep without a separate edit here.
+    const remaining = runDeadline - Date.now();
+    if (remaining > INTERVAL_S * 1000 && !shouldStop()) {
       await new Promise(r => setTimeout(r, INTERVAL_S * 1000));
     } else {
       break;
@@ -2319,14 +2546,22 @@ if (require.main === module) {
 // in-flight-wait branch of the drain is otherwise unreachable from a test,
 // and it is the branch the sweep-vs-run-loop fix turns on.
 module.exports = {
+  // Run bounds
+  shouldStopNow,
   // Reclaim ledger
   LEDGER_PATH,
+  // Exported for the suite, not for callers: main() is the only caller, and
+  // the 0600 it creates the ledger with is unreachable from a test otherwise.
+  // Hand it a WRITABLE path — the refusal below is process.exit(1), which
+  // from a test takes the jest worker with it instead of failing a case.
+  preflightLedger,
   readLedger,
   pruneLedger,
   ledgerEndpoints,
   reclaim,
   reclaimOnce,
   resetReclaimStateForTests,
+  setRunDeadlineForTests,
   parseReclaimArg,
   trackCreate,
   recordResource,

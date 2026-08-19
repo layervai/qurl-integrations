@@ -35,8 +35,9 @@ const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
+  preflightLedger,
   readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
-  reclaimOnce, resetReclaimStateForTests, resolveLedgerArg,
+  reclaimOnce, resetReclaimStateForTests, resolveLedgerArg, resolveReclaimArg,
 } = require('../scripts/loadtest-standalone');
 
 let created = [];
@@ -44,6 +45,22 @@ let created = [];
 function tempLedger(contents) {
   const p = path.join(os.tmpdir(), `loadtest-ledger-test-${process.pid}-${created.length}.jsonl`);
   fs.writeFileSync(p, contents);
+  created.push(p);
+  return p;
+}
+
+// The same place, but absent when handed over — matching the `absent` naming
+// the readLedger cases use, and naming the precondition rather than the end
+// state, since the probe does go on to create it. Deliberately not created
+// here: that creation is the thing under test, and a file this helper had
+// already written would carry this process's umask rather than the mode the
+// probe asks for. Registered for the same cleanup, since the probe leaves it
+// behind. Its own `-absent-` infix, matching the readLedger case that already
+// spells a nonexistent path that way, keeps it out of tempLedger's namespace:
+// that helper suffixes with `created.length`, so sharing the prefix would let
+// a future numerically-named call here alias a fixture.
+function absentLedgerPath(name) {
+  const p = path.join(os.tmpdir(), `loadtest-ledger-absent-${process.pid}-${name}.jsonl`);
   created.push(p);
   return p;
 }
@@ -72,6 +89,73 @@ afterEach(() => {
   jest.restoreAllMocks();
   for (const p of created) fs.rmSync(p, { force: true });
   created = [];
+});
+
+describe('preflightLedger', () => {
+  // Mode bits do not map cleanly on Windows, so the two 0600 cases are
+  // Unix-only — the same guard, for the same reason, as the sibling
+  // tests/gateway-resume-spike.test.js.
+  const isUnix = process.platform !== 'win32';
+
+  it('creates the ledger rather than only probing for it', () => {
+    const ledger = absentLedgerPath('preflight-create');
+    preflightLedger(ledger);
+    expect(fs.existsSync(ledger)).toBe(true);
+  });
+
+  (isUnix ? it : it.skip)('creates it owner-only', () => {
+    // Opening is how this probe proves the path writable — a stat cannot —
+    // and opening with 'a' CREATES the ledger, so the mode it lands at is a
+    // lasting property of a real file. That file sits at a predictable path
+    // under a world-writable /tmp and holds live resource ids: the threat
+    // model the script's own comment inherits from gateway-resume-spike.js,
+    // whose 0600 is pinned twice while this one was pinned nowhere.
+    //
+    // Under umask 0, so this pins the MODE ARGUMENT rather than the runner.
+    // Dropping that argument leaves 0666 & ~umask, which on a host at umask
+    // 077 masks back down to exactly 0600 — the mutant would survive there
+    // while this stayed green, which is the failure a mode assertion is most
+    // likely to have. At umask 0 it lands 0666 and dies everywhere. Jest runs
+    // one test file at a time per worker and the cases within a file
+    // serially, so the window this widens is the try block.
+    //
+    // Both halves of that describe jest's default child-process runner. The
+    // setter is process-wide, so under a thread worker it does not widen a
+    // window at all — it throws ERR_WORKER_UNSUPPORTED_OPERATION, failing
+    // this case rather than skipping it, which is the direction a runner
+    // switch should fail in.
+    const ledger = absentLedgerPath('preflight-mode');
+    const priorUmask = process.umask(0o000);
+    try {
+      preflightLedger(ledger);
+    } finally {
+      process.umask(priorUmask);
+    }
+    expect(fs.statSync(ledger).mode & 0o777).toBe(0o600);
+  });
+
+  (isUnix ? it : it.skip)('leaves the mode of a ledger that already exists alone', () => {
+    // openSync applies its mode on CREATION only, so a second run against the
+    // same path does not re-permission it. Pinned rather than fixed: by then
+    // the file is one the operator named with --ledger, and the chmod that
+    // gateway-resume-spike.js does after its own write would silently narrow
+    // it. This is what makes that a decision rather than an oversight — and
+    // what stops the next reader from "finishing" the mirror of that file.
+    const ledger = tempLedger('');
+    fs.chmodSync(ledger, 0o644);
+    preflightLedger(ledger);
+    expect(fs.statSync(ledger).mode & 0o777).toBe(0o644);
+  });
+
+  it('appends rather than truncates, so a resumed run keeps what is outstanding', () => {
+    // 'a' vs 'w' is one character, and both prove the path writable. 'w'
+    // empties the ledger of a run being resumed under the same --ledger path,
+    // and the loss is silent in the worst direction: the sweep that follows
+    // reports nothing outstanding for resources that are still live.
+    const ledger = tempLedger(line('r_kept'));
+    preflightLedger(ledger);
+    expect(readLedger(ledger)).toEqual(['r_kept']);
+  });
 });
 
 describe('readLedger', () => {
@@ -309,6 +393,112 @@ describe('parseReclaimArg', () => {
 
   it('rejects an empty --reclaim= value', () => {
     expect(parseReclaimArg(['--reclaim='])).toEqual({ requested: true, path: null });
+  });
+});
+
+describe('resolveReclaimArg', () => {
+  it('forwards the mode parseReclaimArg read, adding only the refusal', () => {
+    // Scoped deliberately: the refusal itself is already the flag-table
+    // wiring check's job in tests/loadtest-silent-failure.test.js, which
+    // drives this same argv and asserts on the errors array alone — delete
+    // the push at the call site and that check fails first.
+    //
+    // What is pinned HERE is the shape around it. resolveReclaimArg
+    // re-exports the mode decision rather than forming a second opinion on
+    // it: main() reads the mode from parseReclaimArg directly and
+    // resolveArgErrors takes only the errors, so a divergence here would be
+    // one that nothing reads and nothing contradicts.
+    expect(resolveReclaimArg(['--reclaim'])).toEqual({
+      requested: true, path: null, errors: [expect.stringContaining('--reclaim')],
+    });
+  });
+
+  it('points at the temp directory rather than a hard-coded /tmp', () => {
+    // The path this message tells the operator to type has to be the one the
+    // run actually wrote to, and DEFAULT_LEDGER_PATH is built from
+    // os.tmpdir() — which is /tmp on neither platform that runs this. macOS
+    // resolves it per-user to /var/folders/.../T at 0700, Windows to %TEMP%.
+    // The macOS case is the common one and the sharper one: /tmp there is a
+    // symlink to the world-writable 1777 directory whose symlink hazard is
+    // the whole reason the ledger is created 0600, a few lines above
+    // DEFAULT_LEDGER_PATH. So the old text sent every operator to a
+    // directory the ledger had never been written to — and it is read by
+    // someone who has already lost a run and is trying to find thousands of
+    // live resources.
+    //
+    // The header docs spell the same default `<tmpdir>` twice; this was the
+    // third mention and the only one ever out of step with them.
+    const [message] = resolveReclaimArg(['--reclaim']).errors;
+    expect(message).toContain('--reclaim <tmpdir>/loadtest-ledger-');
+    expect(message).not.toContain('/tmp/');
+  });
+
+  it('stays silent on the paths that are not a refusal', () => {
+    // The first case is the one that closes a real gap: nothing else in this
+    // suite drives a VALID --reclaim PATH through this resolver, so without
+    // it the `&& !reclaimPath` conjunct is unpinned and `if (requested)`
+    // survives. The second case is the run that never asked to reclaim at
+    // all, which an always-erroring resolver would abort.
+    //
+    // Both asserted as the whole shape rather than just the silence, and
+    // both are needed for it: the refusal case above fixes `path` at null
+    // and `requested` at true, so this is the only place either field is
+    // pinned carrying anything else. Drop the shape here and `path` can stop
+    // propagating, or `requested` can hard-code true, with nothing failing —
+    // the two survive the whole 405-test loadtest battery otherwise.
+    //
+    // The /tmp literals here are opaque tokens, not guidance — this resolver
+    // reads argv and never opens the path, and the parseReclaimArg cases
+    // above use the same fixture. The refusal message is the only string in
+    // this file an operator is ever told to copy.
+    expect(resolveReclaimArg(['--reclaim', '/tmp/x.jsonl']))
+      .toEqual({ requested: true, path: '/tmp/x.jsonl', errors: [] });
+    expect(resolveReclaimArg(['--count', '10']))
+      .toEqual({ requested: false, path: null, errors: [] });
+  });
+
+  it('reports a whitespace-only path, quoting it so the fault is visible', () => {
+    // The sibling refusal in resolveLedgerArg above, which --reclaim did not
+    // have: `--reclaim '   '` was a real path as far as this resolver was
+    // concerned, so preflight passed it through.
+    //
+    // Not a resource leak — reclaim() finds no such file and main() exits 1 —
+    // which is exactly why the message is the whole of what this pins. The
+    // operator's answer arrived as `no ledger file at    — nothing was
+    // reclaimed.`, a sentence with a hole where the path should be, and the
+    // reader of it has already lost a run.
+    //
+    // So `got "   "` is asserted whole rather than as a `--reclaim must name`
+    // prefix: drop the JSON.stringify and the message still says every word
+    // it says now, still names the flag, and is still exactly as unreadable
+    // as the downstream line this exists to keep it from becoming.
+    //
+    // The full shape, because the refusal must not null the path the way
+    // resolveLedgerArg swaps in its fallback: main() re-reads the mode from
+    // parseReclaimArg, so a resolver that quietly disagreed about the value
+    // here would be a second opinion nothing reads.
+    expect(resolveReclaimArg(['--reclaim', '   '])).toEqual({
+      requested: true,
+      path: '   ',
+      errors: [expect.stringContaining(
+        '--reclaim must name the ledger file to reclaim from, got "   "',
+      )],
+    });
+  });
+
+  it('applies the same refusal to the inline spelling', () => {
+    // Not a restatement of the case above: the inline value never becomes a
+    // separate argv token, so the two reach the guard by different routes and
+    // a guard rewritten to read argv rather than the resolved value passes
+    // this file's separated case while ignoring this one.
+    //
+    // Which is the drift with history here rather than a hypothetical — an
+    // indexOf-based reader is what used to read `--ledger=/tmp/x` as absent,
+    // recorded by 'reads the inline form, which the removed reader silently
+    // ignored' above. This is the only case in the block that fails when the
+    // guard is written that way.
+    expect(resolveReclaimArg(['--reclaim=  ']).errors)
+      .toEqual([expect.stringContaining('got "  "')]);
   });
 });
 
