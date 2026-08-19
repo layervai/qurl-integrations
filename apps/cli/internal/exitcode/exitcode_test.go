@@ -47,6 +47,16 @@ var cliSentinels = map[string]struct {
 	"consume.ErrLinkFetch":         {consume.ErrLinkFetch, ServerError},
 	"consume.ErrUnopenableLink":    {consume.ErrUnopenableLink, ServerError},
 
+	// Platform access flow (direct downloads through the SDK opener). The
+	// two settings sentinels share the Hub triple's Config row; the local
+	// link check shares CRID verification's fail-closed row; a platform
+	// deny is Forbidden and a platform defer is Unavailable.
+	"consume.ErrAccessNotConfigured":    {consume.ErrAccessNotConfigured, Config},
+	"consume.ErrAccessSettingsMismatch": {consume.ErrAccessSettingsMismatch, Config},
+	"consume.ErrLinkVerification":       {consume.ErrLinkVerification, VerificationFailed},
+	"consume.ErrAccessDenied":           {consume.ErrAccessDenied, Forbidden},
+	"consume.ErrAccessBusy":             {consume.ErrAccessBusy, Unavailable},
+
 	// `qurl connector run` lifecycle sentinels. Each choice is argued at its
 	// case in connectorSentinelCode; the rows here are the tripwire's pin.
 	// The missing enrollment credential is the Auth row for this surface.

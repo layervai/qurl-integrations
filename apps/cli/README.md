@@ -12,8 +12,9 @@ they need one. Links expire on their own; the CRID does not.
 # Publish a URL and get its CRID
 qurl publish https://api.example.com/reports
 
-# Turn a CRID into a working access link (composes with anything)
-curl "$(qurl resolve <CRID>)"
+# Open what a CRID points to in your browser, or download it
+qurl get <CRID>
+qurl get <CRID> --file report.pdf
 ```
 
 ## Install
@@ -140,7 +141,11 @@ resource with a fresh CRID.
 `qurl resolve <CRID>` mints a temporary access link for the resource the
 CRID names. The link expires on its own; resolve again whenever you need
 a fresh one. When stdout is not a terminal the command prints the bare
-link and nothing else, so it composes: `curl "$(qurl resolve <CRID>)"`.
+link and nothing else, ready to share or open.
+
+The link opens in a browser. Passing it to a tool like curl fetches the
+page that opens the link, not the content itself — to download content
+from a script, use `qurl get <CRID> --file <path>`.
 
 | Flag | Description |
 |------|-------------|
@@ -158,11 +163,14 @@ acts on the verified link — nothing is ever acted on unverified:
 
 - **On a terminal**, get prints the link, then opens it in your browser
   (set `QURL_BROWSER` or `BROWSER` to choose which one).
-- **With `--file <path>`** it downloads to that path instead. The download
-  is atomic: bytes arrive in `<path>.part`, which becomes `<path>` only
-  when the download completes. Existing files are never replaced unless
-  `--force` is given, and an access link that expires mid-download is
-  refreshed and retried once automatically.
+- **With `--file <path>`** it downloads to that path instead. For links
+  that need a browser to open, get asks the qURL platform for direct
+  access and downloads the granted content — it never saves the
+  in-browser page in place of your file. The download is atomic: bytes
+  arrive in `<path>.part`, which becomes `<path>` only when the download
+  completes. Existing files are never replaced unless `--force` is given,
+  and an access link that expires mid-download is refreshed and retried
+  once automatically.
 - **With `--file -`** the raw bytes stream to stdout, clean for piping —
   gate pipelines on the exit status, since a mid-stream failure leaves
   already-written bytes behind.
@@ -177,6 +185,13 @@ When stdout is not a terminal, get never opens a browser: pass `--file`,
 or use `qurl resolve` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
+
+Direct downloads use the deployment settings shipped with the CLI. On a
+deployment they don't cover — the sandbox, or a self-hosted platform —
+set `QURL_DEPLOYMENT` to the path of that deployment's settings file (ask
+whoever runs the deployment for it). Without usable settings, `get
+--file` fails loudly with exit code 3 rather than downloading the wrong
+thing; browser mode needs no settings at all.
 
 ### qurl list
 

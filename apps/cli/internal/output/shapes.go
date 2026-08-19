@@ -156,7 +156,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 }
 
 // Resolve renders a minted temporary access link. Piped stdout gets the bare
-// link and nothing else, so `curl "$(qurl resolve <CRID>)"` works; a TTY
+// link and nothing else, so `link="$(qurl resolve <CRID>)"` captures it
+// cleanly (the link opens in a browser — fetching it with curl yields the
+// page that opens the link, which is why `qurl get --file` exists); a TTY
 // gets the link plus its expiry on stderr-free stdout decoration.
 func (p *Printer) Resolve(res *qurlapi.Resolved) error {
 	if p.format == FormatJSON {

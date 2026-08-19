@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 )
 
 // T3/T4 tests for `qurl get`: the real command tree against the mock qURL
@@ -421,6 +423,174 @@ func mustNotExistCmd(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("%s exists (stat err %v), want absent", path, err)
+	}
+}
+
+// portalServer returns a mock whose resolve answers mint a
+// fragment-credential link at the mock's own in-browser page route, plus
+// that link. A plain GET of it can only ever fetch the page (the fragment
+// never leaves the client), which is exactly what the tests below must
+// prove the CLI never does.
+func portalServer(t *testing.T) (srv *apitest.Server, link string) {
+	t.Helper()
+	srv = apitest.NewServer(t)
+	link = srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
+	srv.SetResolveQURL(link)
+	return srv, link
+}
+
+// mustNeverFetchPortalPage asserts no request ever reached the mock's
+// in-browser page route: downloading that page in place of content is the
+// defect this suite regression-tests.
+func mustNeverFetchPortalPage(t *testing.T, srv *apitest.Server) {
+	t.Helper()
+	for _, req := range srv.Requests() {
+		if req.Path == apitest.PortalPath {
+			t.Errorf("the CLI fetched the in-browser page (%s %s); downloads must fetch granted content only",
+				req.Method, req.Path)
+		}
+	}
+}
+
+// TestGetDownloadFetchesGrantedContentNotPortalPage is the regression test
+// for the fragment-credential defect: `get --file` on a qv2 link must ask
+// the platform for access and download the granted content URL — never the
+// link itself, whose plain GET serves the in-browser verification page.
+func TestGetDownloadFetchesGrantedContentNotPortalPage(t *testing.T) {
+	srv, link := portalServer(t)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var granted []string
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortal: func(_ context.Context, got string) (string, error) {
+			granted = append(granted, got)
+			return srv.URL + apitest.DownloadPath, nil
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if len(granted) != 1 || granted[0] != link {
+		t.Fatalf("access opener saw %q, want exactly the minted link once", granted)
+	}
+	got := readTestFile(t, dest)
+	if string(got) != apitest.DefaultDownloadPayload {
+		t.Errorf("downloaded file = %q, want the granted content payload", got)
+	}
+	if bytes.Contains(got, []byte(apitest.InterstitialTitle)) {
+		t.Errorf("downloaded file carries the in-browser page marker; the defect is back")
+	}
+	mustNeverFetchPortalPage(t, srv)
+	mustEmptyStdout(t, res)
+}
+
+// TestGetPortalLinkNotConfiguredFailsLoudly pins requirement three of the
+// defect report: when direct access cannot be granted, get fails loudly
+// with the configuration exit code and the QURL_DEPLOYMENT remedy — it
+// never saves the wrong bytes with a success message.
+func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
+	srv, _ := portalServer(t)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortal: func(context.Context, string) (string, error) {
+			return "", consume.ErrAccessNotConfigured
+		},
+	})
+	if res.code != 3 {
+		t.Fatalf("exit = %d, want 3 (configuration); stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	mustNotExistCmd(t, dest)
+	mustNotExistCmd(t, dest+".part")
+	if !strings.Contains(res.stderr.String(), "QURL_DEPLOYMENT") {
+		t.Errorf("stderr = %q, want the QURL_DEPLOYMENT remedy", res.stderr.String())
+	}
+	mustNeverFetchPortalPage(t, srv)
+}
+
+// TestGetDirectLinkDownloadsWithoutAccessRequest pins the split: a resolved
+// link with no in-link credential serves its bytes to a plain GET, so the
+// access opener is never consulted.
+func TestGetDirectLinkDownloadsWithoutAccessRequest(t *testing.T) {
+	srv := downloadServer(t)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	calls := 0
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortal: func(context.Context, string) (string, error) {
+			calls++
+			return "", errors.New("the direct path must not request access")
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if calls != 0 {
+		t.Errorf("access opener called %d times for a direct link, want 0", calls)
+	}
+	if got := readTestFile(t, dest); string(got) != apitest.DefaultDownloadPayload {
+		t.Errorf("downloaded file = %q, want the mock payload", got)
+	}
+}
+
+// TestGetExpiryRetryRepeatsAccessRequest extends the T3 retry contract to
+// the access flow: a 410 on the granted content URL re-resolves, re-runs
+// verification, and asks for access again — never reuses the stale grant.
+func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
+	srv, link := portalServer(t)
+	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var granted []string
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortal: func(_ context.Context, got string) (string, error) {
+			granted = append(granted, got)
+			return srv.URL + apitest.DownloadPath, nil
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if len(granted) != 2 || granted[0] != link || granted[1] != link {
+		t.Fatalf("access requests = %q, want the minted link exactly twice (initial + retry)", granted)
+	}
+	if got := readTestFile(t, dest); string(got) != apitest.DefaultDownloadPayload {
+		t.Errorf("downloaded file = %q, want the granted content payload", got)
+	}
+	mustNeverFetchPortalPage(t, srv)
+}
+
+// TestGetBrowserPathNeverRequestsAccess pins that browser mode carries the
+// full link to the browser and never consults the access opener: the
+// in-browser page is exactly what a browser needs, and browser mode must
+// keep working with no deployment settings at all.
+func TestGetBrowserPathNeverRequestsAccess(t *testing.T) {
+	srv, link := portalServer(t)
+	browser := &fakeBrowser{}
+	calls := 0
+
+	res := runCLI(t, &runOpts{
+		args:    []string{"--endpoint", srv.URL, "get", srv.Key.CRID},
+		tty:     true,
+		browser: browser,
+		enterPortal: func(context.Context, string) (string, error) {
+			calls++
+			return "", errors.New("browser mode must not request access")
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if calls != 0 {
+		t.Errorf("access opener called %d times in browser mode, want 0", calls)
+	}
+	if len(browser.opened) != 1 || browser.opened[0] != link {
+		t.Fatalf("browser opened %q, want exactly the full minted link", browser.opened)
 	}
 }
 

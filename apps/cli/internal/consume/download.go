@@ -36,7 +36,7 @@ func NewHTTPClient() *http.Client {
 }
 
 // Downloader fetches the bytes behind freshly minted, already-verified
-// access links. It is single-use and not safe for concurrent use (the
+// links. It is single-use and not safe for concurrent use (the
 // client-caching test reuses one instance only to assert the lazily built
 // Client is retained — a white-box check, not a supported pattern).
 type Downloader struct {
@@ -44,9 +44,11 @@ type Downloader struct {
 	// first use and kept on the Downloader so every request of one download
 	// — the expiry retry included — shares one connection pool.
 	Client Doer
-	// Mint resolves a fresh access link. The closure the CLI injects
-	// re-runs CRID verification on every call, so the retry path is exactly
-	// as fail-closed as the first attempt.
+	// Mint resolves a fresh URL whose plain GET serves the content bytes.
+	// The closure the CLI injects re-runs CRID verification on every call —
+	// and, for links that carry their credential in the URL fragment, the
+	// platform access request too — so the retry path is exactly as
+	// fail-closed as the first attempt.
 	Mint func(ctx context.Context) (string, error)
 }
 
@@ -140,10 +142,10 @@ func CheckDestination(path string, force bool) error {
 	}
 }
 
-// fetch mints a link and GETs it, retrying exactly once when the link host
-// says the link expired: mint a fresh (re-verified) link and start over.
-// Expiry is only trusted before any payload byte, so the retry can never
-// duplicate output.
+// fetch mints a fetchable URL and GETs it, retrying exactly once when the
+// host says the link expired: mint a fresh (re-verified, re-granted) URL
+// and start over. Expiry is only trusted before any payload byte, so the
+// retry can never duplicate output.
 //
 // TODO(upstream-contract): HTTP 410 is the pinned "this access link
 // expired" answer from the link host. If the platform ever adds another

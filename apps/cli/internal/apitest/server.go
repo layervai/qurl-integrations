@@ -48,6 +48,21 @@ const DownloadPath = "/file"
 // SetDownloadPayload overrides it. Fixed so goldens can pin byte counts.
 const DefaultDownloadPayload = "qURL mock file payload\n"
 
+// PortalPath is the mock's in-browser page route. A resolve answer of the
+// form srv.URL + PortalPath + "#qv2.…" mimics a real fragment-credential
+// link: the fragment stays client-side, so any plain HTTP GET of the link
+// lands here and receives the page — never the content bytes. Tests use it
+// to prove the CLI fetches granted content instead of this page.
+const PortalPath = "/portal"
+
+// InterstitialTitle is the page title the mock's PortalPath route serves,
+// shared with the live sandbox journey so both tiers reject the same page.
+//
+// TODO(upstream-contract): this is the <title> of the real in-browser
+// verification page qurl-service serves for fragment-credential links. If
+// the platform retitles that page, update this marker in lockstep.
+const InterstitialTitle = "qURL - Private Links That Expire"
+
 // NewServer starts a mock with consistent happy-path handlers for publish,
 // resolve, list, and delete. Close it via t.Cleanup automatically.
 func NewServer(t *testing.T) *Server {
@@ -185,6 +200,9 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == DownloadPath:
 		s.handleDownload(w)
 
+	case r.Method == http.MethodGet && r.URL.Path == PortalPath:
+		s.handlePortalPage(w)
+
 	default:
 		WriteProblem(s.t, w, http.StatusNotFound, "not_found", "Not Found", "no such route in the mock qURL API")
 	}
@@ -306,6 +324,19 @@ func (s *Server) handleDownload(w http.ResponseWriter) {
 	// as an octet-stream download; no browser or HTML context exists here.
 	if _, err := w.Write(payload); err != nil {
 		s.t.Errorf("write download payload: %v", err)
+	}
+}
+
+// handlePortalPage serves the stand-in for the platform's in-browser
+// verification page: an HTML document, never content bytes. Any download
+// that lands here fetched the link instead of the granted content — the
+// exact defect the PortalPath tests exist to catch.
+func (s *Server) handlePortalPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	page := "<!doctype html><html><head><title>" + InterstitialTitle +
+		"</title></head><body>This page needs a browser to open the link.</body></html>"
+	if _, err := io.WriteString(w, page); err != nil {
+		s.t.Errorf("write portal page: %v", err)
 	}
 }
 

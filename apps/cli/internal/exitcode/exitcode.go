@@ -211,6 +211,26 @@ func cliSentinelCode(err error) (int, bool) {
 		// A verified answer whose link is not a web URL is likewise the
 		// service outside its contract — never handed to a launcher.
 		return ServerError, true
+	case errors.Is(err, consume.ErrAccessNotConfigured),
+		errors.Is(err, consume.ErrAccessSettingsMismatch):
+		// Direct downloads need deployment settings (QURL_DEPLOYMENT or the
+		// build's own); absent or mismatched settings are the same remedy
+		// class as the Hub trust triple below — fix the configuration, not
+		// the command line.
+		return Config, true
+	case errors.Is(err, consume.ErrLinkVerification):
+		// A link discarded by its local check is the same fail-closed
+		// posture as CRID verification: nothing was fetched, nothing was
+		// emitted — treat as tampering, not transience.
+		return VerificationFailed, true
+	case errors.Is(err, consume.ErrAccessDenied):
+		// An authenticated platform refusal is the Forbidden row: command,
+		// operand, and settings are all valid — access itself was declined.
+		return Forbidden, true
+	case errors.Is(err, consume.ErrAccessBusy):
+		// The platform asked the caller to come back later: not serving
+		// this request now — the Unavailable row.
+		return Unavailable, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
 	case errors.Is(err, config.ErrInvalidProfileName),
