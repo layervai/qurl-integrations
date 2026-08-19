@@ -13,6 +13,7 @@ package ciworkflows
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -82,6 +83,19 @@ type requiredWorkflowSpec struct {
 	// field. Unsetting the field is no way around it either:
 	// TestAppWorkflowsRunOnStackedPRs fails an unrecorded intent by name.
 	pullRequestBranches []string
+	// pullRequestTypes and pullRequestPaths are the intended
+	// `on.pull_request.types` and `on.pull_request.paths` filters, the two
+	// sibling keys that also decide whether the workflow starts at all. All
+	// nine leave both unset: they narrow by diff with `dorny/paths-filter`
+	// inside the `changes` job, which keeps the workflow starting on every pull
+	// request so the `if: always()` aggregate still reports. Lifting that
+	// narrowing up to the trigger reads like the same intent spelled more
+	// cheaply and is not — see
+	// TestPullRequestWorkflowsRecordTheirTypeAndPathFilters, and
+	// TestNarrowTypeAndPathFiltersProduceNoRequiredContext for the same
+	// weighing against CONTRIBUTING.md the paragraph above describes.
+	pullRequestTypes []string
+	pullRequestPaths []string
 }
 
 var requiredWorkflowSpecs = []requiredWorkflowSpec{
@@ -849,16 +863,39 @@ func parseWorkflowTriggers(t *testing.T, workflow string, value any) map[string]
 // and either one filtered to [main] goes missing on a stacked PR.
 var pullRequestTriggers = []string{"pull_request", "pull_request_target"}
 
-// pullRequestBranchSpec records the intended base-branch filter
-// for a workflow that runs on pull requests but owns no required aggregate, and
-// so has no requiredWorkflowSpecs entry.
-type pullRequestBranchSpec struct {
+// pullRequestFilterKey names one of the `on.pull_request.*` keys these tables
+// record. The three are siblings rather than variations: each decides, on its
+// own axis, whether the workflow starts at all for a given pull request — and a
+// workflow that never starts reports nothing, which on the PR page is
+// indistinguishable from a check that has not finished yet.
+type pullRequestFilterKey struct {
+	name string
+	// ignoreName is the inverted spelling GitHub accepts in place of this key,
+	// or "" for a key that has none. `types` is the only one of the three with
+	// no inverted form, so it is the only one nothing has to be refused for.
+	ignoreName string
+}
+
+var (
+	branchesFilterKey = pullRequestFilterKey{name: "branches", ignoreName: "branches-ignore"}
+	typesFilterKey    = pullRequestFilterKey{name: "types"}
+	pathsFilterKey    = pullRequestFilterKey{name: "paths", ignoreName: "paths-ignore"}
+)
+
+// pullRequestTriggerSpec records the intended `on.pull_request` filters for a
+// workflow that runs on pull requests but owns no required aggregate, and so
+// has no requiredWorkflowSpecs entry.
+type pullRequestTriggerSpec struct {
 	path string
-	// branches is the intended filter. A nil value means the workflow must
-	// declare no `branches:` key at all — the same reach as ["**"], arrived at
-	// by omission rather than by a filter. The two are kept distinct so this
+	// branches, types and paths are the intended filters. A nil value means the
+	// workflow must declare no key of that name at all — for `branches` the
+	// same reach as ["**"], and for `types` the same reach as
+	// defaultPullRequestTypes — arrived at by omission rather than by a filter.
+	// Omission and an equivalent explicit filter are kept distinct so this
 	// table pins the spelling each workflow actually uses.
 	branches []string
+	types    []string
+	paths    []string
 	// producesRequiredContext records whether any job here reports a context
 	// main's protection requires. It is what decides whether a narrow filter is
 	// survivable, so it is verified against the tree by
@@ -872,7 +909,7 @@ type pullRequestBranchSpec struct {
 // requiredWorkflowSpecs already carries a completeness guard
 // (TestRequiredWorkflowSpecsCoverEveryAggregate), and the workflows here are
 // exactly the ones that guard cannot see.
-var otherPullRequestWorkflows = []pullRequestBranchSpec{
+var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 	{
 		path:     "codeql.yml",
 		branches: []string{"main"},
@@ -933,25 +970,42 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		why:                     "Already unfiltered, and produces a required context.",
 	},
 	{
-		path: "pr-title.yml",
-		why:  "Already unfiltered — it validates the PR title itself, which is worth checking on a stacked PR too.",
+		path:  "pr-title.yml",
+		types: []string{"opened", "edited", "synchronize", "reopened"},
+		why: "Already unfiltered by branch — it validates the PR title itself, which is worth checking on a " +
+			"stacked PR too. Its `types` adds `edited` to the default three, because the title is what it reads " +
+			"and retitling fires nothing else; adding to the default set widens reach rather than narrowing it.",
 	},
 	{
-		path: "dependabot-pr-title.yml",
-		why:  "Already unfiltered; same reasoning as pr-title.yml.",
+		path:  "dependabot-pr-title.yml",
+		types: []string{"opened", "edited"},
+		why: "Already unfiltered by branch; same reasoning as pr-title.yml. Its `types` does narrow — no " +
+			"`synchronize`, so a push to a Dependabot branch does not revalidate — which is survivable only " +
+			"because it produces no required context, the premise " +
+			"TestNarrowTypeAndPathFiltersProduceNoRequiredContext holds it to.",
 	},
 	{
-		path: "validate-issue-templates.yml",
-		why:  "Already unfiltered, and narrowed by `paths` rather than by base branch.",
+		path:  "validate-issue-templates.yml",
+		paths: []string{".github/ISSUE_TEMPLATE/**", ".github/workflows/validate-issue-templates.yml"},
+		why: "Already unfiltered by branch, and narrowed by trigger-level `paths` rather than by base branch. " +
+			"That is survivable only while it produces no required context: a required check behind a " +
+			"trigger-level `paths` never registers for a PR the filter misses, which is the failure the nine " +
+			"aggregates avoid by narrowing inside the `changes` job instead.",
 	},
 	{
 		path:                    "claude-code-review.yml",
+		types:                   []string{"opened", "synchronize", "reopened", "ready_for_review"},
 		producesRequiredContext: true,
 		why: "Already unfiltered, and on `pull_request_target` rather than `pull_request` because it " +
 			"holds ANTHROPIC_API_KEY and so must load its definition from the default branch. Its " +
 			"`claude-review` context became required in #1185, which is what pulled that trigger into " +
 			"scope here: narrowing it would leave every stacked PR waiting forever on a required check " +
-			"that never registers, the failure this package already caught once on 2026-08-14.",
+			"that never registers, the failure this package already caught once on 2026-08-14. Its `types` " +
+			"reaches the same failure by the sibling spelling, so the list is pinned exactly: it carries the " +
+			"full default three plus `ready_for_review`, and dropping any of the three would deregister " +
+			"`claude-review`. Pinning it exactly also holds the other end, which the premise test cannot — " +
+			"`converted_to_draft` must stay absent, or converting a reviewed PR to draft retriggers the job " +
+			"and lets the exemption pass replace a completed review on the same head SHA.",
 	},
 }
 
@@ -986,7 +1040,7 @@ func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 			if len(spec.pullRequestBranches) == 0 {
 				t.Fatalf("%s has no intended pull_request branches filter recorded", spec.path)
 			}
-			assertPullRequestBranches(t, spec.path, spec.pullRequestBranches)
+			assertPullRequestFilter(t, spec.path, branchesFilterKey, spec.pullRequestBranches)
 		})
 	}
 }
@@ -1021,8 +1075,10 @@ const editedActivityType = "edited"
 //
 // Two workflows declare `edited` today — pr-title.yml and
 // dependabot-pr-title.yml — and neither carries a `branches:` filter, so
-// neither is in scope. issue-priority.yml declares it on an `issues:` trigger,
-// which is a different event's activity type entirely.
+// neither is in scope. The second guard below pins that exact set: if the scan
+// stops reading `types:` or this account changes, the test fails rather than
+// leaving stale prose behind. issue-priority.yml declares it on an `issues:`
+// trigger, which is a different event's activity type entirely.
 //
 // Scope is any declared filter, not just a narrow one. Narrowness is recorded
 // in the tables above, which a commit can edit in the same breath as the
@@ -1032,6 +1088,7 @@ const editedActivityType = "edited"
 // reader can apply without first deciding which table an entry belongs to.
 func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 	filteredTriggers := 0
+	editedWorkflows := map[string]bool{}
 	for _, name := range workflowFiles(t) {
 		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
 		for _, trigger := range pullRequestTriggers {
@@ -1039,14 +1096,21 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 			if !ok {
 				continue
 			}
-			branches, declared := pullRequestBranchFilter(t, name, trigger, config)
-			if !declared {
-				continue
+			branches, filtered := pullRequestFilter(t, name, trigger, config, branchesFilterKey)
+			if filtered {
+				filteredTriggers++
 			}
-			filteredTriggers++
 
-			types, hasTypes := pullRequestActivityTypes(t, name, trigger, config)
-			if !hasTypes || !slices.Contains(types, editedActivityType) {
+			// Read `types` on every trigger rather than only the filtered ones
+			// this can fire on. The workflows asking for `edited` are exactly the
+			// unfiltered ones, so recording them across the whole scan is what gives
+			// this read an observation of its own — see the second guard below.
+			types, hasTypes := pullRequestFilter(t, name, trigger, config, typesFilterKey)
+			asksForEdited := hasTypes && slices.Contains(types, editedActivityType)
+			if asksForEdited {
+				editedWorkflows[name] = true
+			}
+			if !filtered || !asksForEdited {
 				continue
 			}
 			t.Errorf("%s %s declares branches %v and types %v; %q makes it re-run when a "+
@@ -1057,16 +1121,43 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 		}
 	}
 
-	// Couple the scan to a nonzero result, on the same reasoning as
-	// TestEveryPullRequestWorkflowRecordsItsBranchFilter's count check: with no
-	// filtered trigger found there is nothing to contradict, and this would
-	// pass vacuously whether the tree had genuinely widened or the scan had
-	// stopped matching. Only the total is read, so counting one workflow twice
-	// when it filters both its triggers costs nothing. The nine specs pin
-	// `["**"]` explicitly, so the tree cannot reach zero without
-	// requiredWorkflowSpecs changing too.
-	if filteredTriggers == 0 {
-		t.Errorf("no pull-request workflow declares a branches filter, so this test asserted nothing")
+	// Couple each read to a count, on the same reasoning as
+	// TestEveryPullRequestWorkflowRecordsItsBranchFilter's: with nothing found
+	// there is nothing to contradict, and this would pass vacuously whether the
+	// tree had genuinely widened or the scan had stopped matching.
+	//
+	// A bare nonzero total is what no longer settles that. pullRequestFilter
+	// takes its key as an argument, so a read aimed at the wrong one still
+	// returns something: pointing the branches read at pathsFilterKey finds
+	// validate-issue-templates.yml — the one pull-request workflow declaring
+	// `paths:` — which holds the total at 1 while the scan has stopped reading
+	// branches at all, and since that workflow declares no `types:` the loop
+	// above then reports nothing.
+	//
+	// The floor is requiredWorkflowSpecs, every entry of which declares a
+	// branches filter: TestAppWorkflowsRunOnStackedPRs fails an unrecorded one
+	// by name, and assertPullRequestFilter holds the workflow to what the entry
+	// records. It stays a floor rather than an equality because a workflow
+	// filtering both its triggers counts twice, and because the two `[main]`
+	// entries in otherPullRequestWorkflows land in this total as well.
+	if want := len(requiredWorkflowSpecs); filteredTriggers < want {
+		t.Errorf("found %d branch-filtered pull-request triggers, want at least %d — one per "+
+			"requiredWorkflowSpecs entry; the scan is reading something other than %q",
+			filteredTriggers, want, branchesFilterKey.name)
+	}
+
+	// The `types` read gets no floor from a table: no branch-filtered workflow
+	// declares `types:` today, so within the subset this test fires on there is
+	// nothing for that read to observe and a miswired key would sit unnoticed
+	// behind the count above. The exact whole-tree set is the observation
+	// instead, and pins both identities in the doc comment rather than merely
+	// proving that some workflow somewhere still asks for `edited`.
+	wantEditedWorkflows := map[string]bool{"dependabot-pr-title.yml": true, "pr-title.yml": true}
+	if !maps.Equal(editedWorkflows, wantEditedWorkflows) {
+		t.Errorf("pull-request workflows asking for %q = %v, want %v; either the scan is "+
+			"reading something other than %q, or the doc comment and retarget stall it "+
+			"describes need rewriting", editedActivityType, editedWorkflows,
+			wantEditedWorkflows, typesFilterKey.name)
 	}
 }
 
@@ -1081,7 +1172,7 @@ func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 			if strings.TrimSpace(spec.why) == "" {
 				t.Fatalf("%s needs a why explaining its intended filter", spec.path)
 			}
-			assertPullRequestBranches(t, spec.path, spec.branches)
+			assertPullRequestFilter(t, spec.path, branchesFilterKey, spec.branches)
 		})
 	}
 }
@@ -1216,6 +1307,11 @@ func reportsRequiredContext(path string, reported workflowContexts, required []s
 // `slack / required` still listed as required in CONTRIBUTING.md. Widened,
 // that second edit is what trips this test: the narrowing is now judged
 // against the documented gate rather than against its own paperwork.
+//
+// Scope is `branches:` alone. The same premise on the two sibling keys that
+// also decide whether a workflow starts is
+// TestNarrowTypeAndPathFiltersProduceNoRequiredContext's, which reaches it from
+// the workflow tree rather than from these tables.
 func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	narrow := narrowPullRequestWorkflows(requiredWorkflowSpecs, otherPullRequestWorkflows)
 	if len(narrow) == 0 {
@@ -1255,7 +1351,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 // narrow[spec.name] where narrow[spec.path] was meant, which for the shared
 // spec is "shared" against "shared-test.yml" — would ship green and simply
 // fail to fire on the day it mattered.
-func narrowPullRequestWorkflows(required []requiredWorkflowSpec, other []pullRequestBranchSpec) map[string]bool {
+func narrowPullRequestWorkflows(required []requiredWorkflowSpec, other []pullRequestTriggerSpec) map[string]bool {
 	narrow := map[string]bool{}
 	for i := range other {
 		if isNarrowBranchFilter(other[i].branches) {
@@ -1278,13 +1374,13 @@ func narrowPullRequestWorkflows(required []requiredWorkflowSpec, other []pullReq
 //
 // A negated pattern makes "**" stop meaning full reach: GitHub evaluates the
 // list in order, so `["**", "!justin/**"]` matches every base and then takes
-// back the stacked ones. That is the same failure pullRequestBranchFilter
+// back the stacked ones. That is the same failure pullRequestFilter
 // refuses branches-ignore for, in a spelling `branches:` can hold, so it is
 // read as narrow rather than waved through by the "**" already present.
 //
 // nil and []string{} part company here, which is why the guard is against nil
-// rather than against len. A nil is how pullRequestBranchSpec spells "declares
-// no filter", the reading assertPullRequestBranches already gives it. A
+// rather than against len. A nil is how pullRequestTriggerSpec spells "declares
+// no filter", the reading assertPullRequestFilter already gives it. A
 // present-but-empty one names no base at all, so nothing establishes that it
 // reaches a stacked PR and the conservative reading is the safe one. Neither
 // table spells it today; the split is pinned by TestIsNarrowBranchFilter so it
@@ -1308,7 +1404,7 @@ func isNarrowBranchFilter(branches []string) bool {
 // unrequired workflow alike, so each reading is spelled out rather than left to
 // be inferred from the callers.
 //
-// Not every reading is reachable from both tables: only pullRequestBranchSpec
+// Not every reading is reachable from both tables: only pullRequestTriggerSpec
 // can carry a present-but-empty filter, since TestAppWorkflowsRunOnStackedPRs
 // rejects that spelling on a requiredWorkflowSpec as an unrecorded intent
 // rather than honoring it.
@@ -1349,7 +1445,7 @@ func TestNarrowPullRequestWorkflowsKeyOnPath(t *testing.T) {
 			{name: "shared", path: "shared-test.yml", pullRequestBranches: []string{"main"}},
 			{name: "slack", path: "slack.yml", pullRequestBranches: []string{"**"}},
 		},
-		[]pullRequestBranchSpec{
+		[]pullRequestTriggerSpec{
 			{path: "codeql.yml", branches: []string{"main"}},
 			{path: "secrets-scan.yml"},
 		},
@@ -1361,10 +1457,281 @@ func TestNarrowPullRequestWorkflowsKeyOnPath(t *testing.T) {
 	}
 }
 
-// assertPullRequestBranches compares a workflow's declared pull-request
-// branches filter against the intended one. A nil want means the workflow must
-// declare no filter at all.
-func assertPullRequestBranches(t *testing.T, path string, want []string) {
+// TestPullRequestWorkflowsRecordTheirTypeAndPathFilters pins the two sibling
+// spellings of the failure the branch-filter tests above pin.
+//
+// `branches:` is not the only key on a pull-request trigger that decides
+// whether a workflow starts. `types:` narrows which activity on the pull
+// request starts it, and a trigger-level `paths:` narrows which diffs do.
+// Either one, on a workflow owning a required context, lands in the identical
+// place: the workflow never runs, so GitHub never registers its check, and the
+// PR sits on "Expected — Waiting for status to be reported" with nothing red to
+// point at. That is the 2026-08-14 shape reached without touching `branches:`
+// at all, which is why it is guarded in the same place rather than left to a
+// reviewer noticing the difference between three keys that read alike.
+//
+// The nine aggregates are what this most nearly happened to. They already
+// narrow by diff — but with `dorny/paths-filter` inside the `changes` job, so
+// the workflow still starts and the `if: always()` aggregate still reports.
+// Lifting that narrowing up to the trigger reads like the same intent spelled
+// more cheaply and is not: it deregisters `<app> / required` for every pull
+// request the filter misses.
+func TestPullRequestWorkflowsRecordTheirTypeAndPathFilters(t *testing.T) {
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		t.Run(spec.name, func(t *testing.T) {
+			assertPullRequestFilter(t, spec.path, typesFilterKey, spec.pullRequestTypes)
+			assertPullRequestFilter(t, spec.path, pathsFilterKey, spec.pullRequestPaths)
+		})
+	}
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		t.Run(strings.TrimSuffix(spec.path, ".yml"), func(t *testing.T) {
+			assertPullRequestFilter(t, spec.path, typesFilterKey, spec.types)
+			assertPullRequestFilter(t, spec.path, pathsFilterKey, spec.paths)
+		})
+	}
+}
+
+// defaultPullRequestTypes are the activity types GitHub starts a pull-request
+// trigger on when the workflow declares no `types:` key. Both events in
+// pullRequestTriggers share this default.
+//
+// `opened` and `synchronize` are the load-bearing pair: between them they cover
+// every head SHA an ordinary pull request presents, and this repo's protection
+// is strict, so the head moves again before any merge. A `types:` list dropping
+// either leaves some head SHA the workflow never ran on, and a required context
+// absent on the head SHA is exactly what branch protection reports as pending
+// forever. `reopened` is held to the same standard rather than argued case by
+// case: it is part of the baseline GitHub gives for free, so dropping it is a
+// decision, and this is where a decision about what starts a workflow belongs.
+var defaultPullRequestTypes = []string{"opened", "synchronize", "reopened"}
+
+// narrowPullRequestTriggerReason reports why a pull-request trigger fails to
+// start for some ordinary pull request, or "" when it always starts. It reads
+// the workflow rather than a recorded filter, which is what makes it a second
+// line behind the exact comparisons above; narrowPullRequestWorkflows is the
+// table-side equivalent for `branches:`.
+//
+// Reading the tree means it inherits pullRequestFilter's refusal of the
+// inverted spellings, so a `paths-ignore` anywhere in .github/workflows fails
+// here rather than being weighed. That is the intended contract — the tables
+// have no way to record one — and it costs nothing in reach, since every
+// pull-request workflow must carry a table entry regardless.
+//
+// Any declared `paths:` counts, with no "**" escape of the kind
+// isNarrowBranchFilter grants a branch filter. The two are not symmetric: a
+// base branch always exists to be matched, so `branches: ["**"]` genuinely
+// reaches every pull request, while a path filter is matched against the diff
+// and a pull request may carry no files at all — an empty commit, a
+// revert-of-a-revert — at which point even `paths: ["**"]` matches nothing and
+// the workflow does not start. There is no spelling of a trigger-level `paths:`
+// a required context can survive, so none is carved out.
+//
+// `paths` is reported ahead of `types` for a trigger carrying both. Either
+// alone disqualifies the workflow from owning a required context, so there is
+// nothing to gain by listing both, and one named reason is what the reader has
+// to act on.
+func narrowPullRequestTriggerReason(t *testing.T, path, trigger string, config any) string {
+	t.Helper()
+
+	if paths, declared := pullRequestFilter(t, path, trigger, config, pathsFilterKey); declared {
+		return fmt.Sprintf("%s.paths = %v, so it does not start for a pull request whose diff matches none of them",
+			trigger, paths)
+	}
+
+	types, declared := pullRequestFilter(t, path, trigger, config, typesFilterKey)
+	if !declared {
+		return ""
+	}
+	missing := []string{}
+	for _, activity := range defaultPullRequestTypes {
+		if !slices.Contains(types, activity) {
+			missing = append(missing, activity)
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s.types = %v, dropping %v from the default set, so it does not start for every head of an ordinary pull request",
+		trigger, types, missing)
+}
+
+// TestNarrowPullRequestTriggerReason pins each reading the predicate gives,
+// against synthetic triggers rather than the live tree.
+//
+// The tree cannot exercise it. No workflow today pairs a narrow filter with a
+// required context — that is the property the suite exists to keep true — so
+// every branch that builds a reason goes unrun by the assertions above, and
+// `missing` could be assembled wrongly, or the `paths`-before-`types`
+// precedence inverted, with the package still green. The mutation sweep in the
+// PR reaches those branches, but it runs out of band and CI never sees it.
+// This is the same argument TestIsNarrowBranchFilter rests on for the branch
+// half, and it belongs here for the same reason.
+//
+// Reasons are matched by substring, not compared whole: what has to hold is
+// that the message names the trigger, the offending value and — for a types
+// filter — which defaults went missing, not the sentence built around them.
+func TestNarrowPullRequestTriggerReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      any
+		narrow      bool
+		contains    []string
+		notContains []string
+	}{
+		{name: "a bare trigger declares nothing and starts for every pull request", config: nil},
+		{name: "an empty mapping is the same reach spelled longhand", config: map[string]any{}},
+		{name: "a branches filter alone is another test's business", config: map[string]any{"branches": []any{"main"}}},
+		{
+			name:   "the default set spelled out explicitly is not narrow",
+			config: map[string]any{"types": []any{"opened", "synchronize", "reopened"}},
+		},
+		{
+			name:   "adding to the default set widens rather than narrows",
+			config: map[string]any{"types": []any{"opened", "edited", "synchronize", "reopened"}},
+		},
+		{
+			name:     "dropping one default is narrow and names it",
+			config:   map[string]any{"types": []any{"opened", "reopened"}},
+			narrow:   true,
+			contains: []string{"pull_request.types = [opened reopened]", "[synchronize]"},
+		},
+		{
+			name:     "ready_for_review alone drops all three",
+			config:   map[string]any{"types": []any{"ready_for_review"}},
+			narrow:   true,
+			contains: []string{"pull_request.types = [ready_for_review]", "[opened synchronize reopened]"},
+		},
+		{
+			name:     "an empty types filter drops every default",
+			config:   map[string]any{"types": []any{}},
+			narrow:   true,
+			contains: []string{"pull_request.types = []", "[opened synchronize reopened]"},
+		},
+		{
+			name:     "a scalar types filter is read, not skipped",
+			config:   map[string]any{"types": "opened"},
+			narrow:   true,
+			contains: []string{"pull_request.types = [opened]", "[synchronize reopened]"},
+		},
+		{
+			name:     "any paths filter is narrow, ** included",
+			config:   map[string]any{"paths": []any{"**"}},
+			narrow:   true,
+			contains: []string{"pull_request.paths = [**]"},
+		},
+		{
+			name:     "a scalar paths filter is read too",
+			config:   map[string]any{"paths": "apps/slack/**"},
+			narrow:   true,
+			contains: []string{"pull_request.paths = [apps/slack/**]"},
+		},
+		{
+			name:        "paths is reported ahead of types when a trigger carries both",
+			config:      map[string]any{"paths": []any{"docs/**"}, "types": []any{"ready_for_review"}},
+			narrow:      true,
+			contains:    []string{"pull_request.paths = [docs/**]"},
+			notContains: []string{".types"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := narrowPullRequestTriggerReason(t, "synthetic.yml", "pull_request", test.config)
+			if (got != "") != test.narrow {
+				t.Fatalf("narrowPullRequestTriggerReason(%#v) = %q, want narrow = %t", test.config, got, test.narrow)
+			}
+			for _, want := range test.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("reason %q does not mention %q, so it does not say what to go fix", got, want)
+				}
+			}
+			for _, unwanted := range test.notContains {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("reason %q mentions %q; one named reason is what the reader acts on", got, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// TestNarrowTypeAndPathFiltersProduceNoRequiredContext enforces, for `types:`
+// and for trigger-level `paths:`, the premise
+// TestNarrowPullRequestWorkflowsProduceNoRequiredContext enforces for
+// `branches:` — that a workflow which cannot start for some ordinary pull
+// request is not one whose silence blocks a merge.
+//
+// It reads the workflow tree rather than the tables, where that test reads the
+// tables. Either source works while assertPullRequestFilter holds the two in
+// agreement, and the choice is deliberate on both sides: recording a filter is
+// what forces a `why` to be written, and re-deriving one is what survives a
+// commit that edits the workflow and its paperwork together. Taking one route
+// each leaves the pair covered from both ends.
+//
+// The workflows narrowing today all produce no required context:
+// dependabot-pr-title.yml drops `synchronize` because a Dependabot force-push
+// does not change the title it reads, and validate-issue-templates.yml runs
+// only for the templates it validates. pr-title.yml and claude-code-review.yml
+// declare a `types:` too but are not narrow by it — both carry the full default
+// set and add to it, which widens their reach rather than narrowing it.
+func TestNarrowTypeAndPathFiltersProduceNoRequiredContext(t *testing.T) {
+	narrow := map[string]string{}
+	scanned := 0
+	for _, name := range workflowFiles(t) {
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
+		for _, trigger := range pullRequestTriggers {
+			config, ok := triggers[trigger]
+			if !ok {
+				continue
+			}
+			scanned++
+			// Any narrow trigger marks the file, rather than only a workflow
+			// narrow on all of them. A workflow declaring both events would
+			// report its checks twice over, so the pair is not a fallback for
+			// one another, and holding each to full reach independently is
+			// what assertPullRequestFilter already does for `branches`. A file
+			// narrow on both keeps whichever reason came last, which is
+			// arbitrary but never wrong: each alone is disqualifying, so the
+			// one reported is a real reason to go fix the file.
+			if reason := narrowPullRequestTriggerReason(t, name, trigger, config); reason != "" {
+				narrow[name] = reason
+			}
+		}
+	}
+	// An empty narrow set is a legitimate state, so it cannot stand in for a
+	// scan that matched nothing. Couple the count instead: a renamed trigger
+	// key or an emptied pullRequestTriggers would otherwise leave every
+	// assertion below with nothing to contradict.
+	if scanned == 0 {
+		t.Fatal("no workflow was found running on a pull-request trigger; the scan matched nothing and this check would be vacuous")
+	}
+
+	reported := workflowReportedContexts(t)
+	for _, context := range documentedRequiredContexts(t) {
+		for _, file := range reported.direct[context] {
+			if reason, ok := narrow[file]; ok {
+				t.Errorf("%s reports required context %q, but %s; "+
+					"a required check that never registers leaves the pull request pending forever", file, context, reason)
+			}
+		}
+		// Reusable-workflow calls report as "<caller job> / <inner job>".
+		caller, _, ok := strings.Cut(context, contextSeparator)
+		if !ok {
+			continue
+		}
+		for _, file := range reported.reusable[caller] {
+			if reason, ok := narrow[file]; ok {
+				t.Errorf("%s has a caller job reporting required context %q, but %s; "+
+					"a required check that never registers leaves the pull request pending forever", file, context, reason)
+			}
+		}
+	}
+}
+
+// assertPullRequestFilter compares a workflow's declared filter for one key
+// against the intended one. A nil want means the workflow must declare no key
+// of that name at all.
+func assertPullRequestFilter(t *testing.T, path string, key pullRequestFilterKey, want []string) {
 	t.Helper()
 
 	triggers := parseWorkflowTriggers(t, path, readWorkflow(t, path).On)
@@ -1376,15 +1743,15 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 		}
 		checked++
 
-		got, declared := pullRequestBranchFilter(t, path, trigger, config)
+		got, declared := pullRequestFilter(t, path, trigger, config, key)
 		switch {
 		case want == nil && declared:
-			t.Errorf("%s %s declares branches %v, want no filter at all", path, trigger, got)
+			t.Errorf("%s %s declares %s %v, want no filter at all", path, trigger, key.name, got)
 		case want == nil:
 		case !declared:
-			t.Errorf("%s %s declares no branches filter, want %v", path, trigger, want)
+			t.Errorf("%s %s declares no %s filter, want %v", path, trigger, key.name, want)
 		case !slices.Equal(got, want):
-			t.Errorf("%s %s.branches = %v, want %v", path, trigger, got, want)
+			t.Errorf("%s %s.%s = %v, want %v", path, trigger, key.name, got, want)
 		}
 	}
 	if checked == 0 {
@@ -1392,17 +1759,17 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	}
 }
 
-// pullRequestBranchFilter reads the `branches` filter off a parsed pull-request
-// trigger, reporting whether one is declared at all. It accepts both YAML
-// spellings of a single filter — a bare scalar and a sequence — so `main` and
-// `[main]` are not treated as different decisions.
+// pullRequestFilter reads one filter key off a parsed pull-request trigger,
+// reporting whether it is declared at all. It accepts both YAML spellings of a
+// single filter — a bare scalar and a sequence — so `main` and `[main]` are not
+// treated as different decisions.
 //
 // The comparison this feeds is still order-sensitive, which matters only once a
 // workflow earns a multi-element filter: ["main", "release/**"] and
 // ["release/**", "main"] have identical reach but are not interchangeable here.
 // That is deliberate — the table records the spelling a reader will find in the
 // YAML — but it is stricter than reach alone, so record the order as written.
-func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any) (branches []string, declared bool) {
+func pullRequestFilter(t *testing.T, path, trigger string, pullRequest any, key pullRequestFilterKey) (values []string, declared bool) {
 	t.Helper()
 
 	if pullRequest == nil {
@@ -1413,20 +1780,32 @@ func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any
 		t.Fatalf("%s %s trigger has unexpected type %T", path, trigger, pullRequest)
 	}
 
-	// `branches-ignore` is the one spelling these tables cannot express, and it
-	// fails open rather than loudly: a workflow using it declares no `branches`
-	// key, which reads below as full reach — while `branches-ignore:
+	// The inverted spellings are the ones these tables cannot express, and they
+	// fail open rather than loudly: a workflow using one declares no key of the
+	// positive name, which reads below as full reach — while `branches-ignore:
 	// ["justin/**"]` would take the workflow off exactly the stacked PRs this
-	// suite exists to keep it on. Refuse it here instead, so adding one forces
-	// the decision into the table. Checked before `branches` and independently
-	// of it: GitHub rejects the two together, but this should not be the thing
-	// that assumes so.
-	if _, ok := config["branches-ignore"]; ok {
-		t.Fatalf("%s %s declares branches-ignore, which these tables cannot record; "+
-			"extend pullRequestBranchSpec to express it before using it", path, trigger)
+	// suite exists to keep it on, and `paths-ignore` does the same to a
+	// required context on the diff axis. Refuse them here instead, so adding
+	// one forces the decision into the table. Checked before the positive
+	// spelling and independently of it: GitHub rejects the two together, but
+	// this should not be the thing that assumes so.
+	//
+	// This refusal is reached from narrowPullRequestTriggerReason's scan of the
+	// tree as well as from the exact comparisons, so it fires for a workflow
+	// carrying no table entry too. That is not a wider net than the tabled one:
+	// TestEveryPullRequestWorkflowRecordsItsBranchFilter already requires an
+	// entry for every workflow with a pull-request trigger, so the two sets are
+	// the same. It does mean the message has to name the remedy for either
+	// caller, which is why it offers both.
+	if key.ignoreName != "" {
+		if _, ok := config[key.ignoreName]; ok {
+			t.Fatalf("%s %s declares %s, which these tables cannot record; extend pullRequestTriggerSpec "+
+				"to express it, or narrow inside the job as the nine aggregates do — a workflow reporting "+
+				"a required context has no survivable spelling of it", path, trigger, key.ignoreName)
+		}
 	}
 
-	raw, ok := config["branches"]
+	raw, ok := config[key.name]
 	if !ok {
 		return nil, false
 	}
@@ -1440,92 +1819,16 @@ func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any
 		return []string{typed}, true
 	case []any:
 		for _, value := range typed {
-			branch, ok := value.(string)
+			entry, ok := value.(string)
 			if !ok {
-				t.Fatalf("%s %s.branches contains non-string value %T", path, trigger, value)
+				t.Fatalf("%s %s.%s contains non-string value %T", path, trigger, key.name, value)
 			}
-			branches = append(branches, branch)
+			values = append(values, entry)
 		}
-		return branches, true
+		return values, true
 	default:
-		t.Fatalf("%s %s.branches has unexpected type %T", path, trigger, raw)
+		t.Fatalf("%s %s.%s has unexpected type %T", path, trigger, key.name, raw)
 		return nil, false
-	}
-}
-
-// pullRequestActivityTypes reads the `types` filter off a parsed pull-request
-// trigger, reporting whether one is declared at all. Like pullRequestBranchFilter
-// it accepts both YAML spellings of a single entry, a bare scalar and a
-// sequence, so `types: edited` and `types: [edited]` are the same decision.
-//
-// An undeclared filter is the load-bearing case rather than an edge one: it
-// means the workflow takes GitHub's three defaults, which exclude
-// editedActivityType. Callers reach this only after pullRequestBranchFilter has
-// accepted the same value, so a trigger config of any other shape has already
-// failed there and the type assertion below cannot swallow one silently.
-func pullRequestActivityTypes(t *testing.T, path, trigger string, pullRequest any) (types []string, declared bool) {
-	t.Helper()
-
-	config, ok := pullRequest.(map[string]any)
-	if !ok {
-		return nil, false
-	}
-	raw, ok := config["types"]
-	if !ok {
-		return nil, false
-	}
-
-	switch typed := raw.(type) {
-	case string:
-		return []string{typed}, true
-	case []any:
-		for _, value := range typed {
-			activity, ok := value.(string)
-			if !ok {
-				t.Fatalf("%s %s.types contains non-string value %T", path, trigger, value)
-			}
-			types = append(types, activity)
-		}
-		return types, true
-	default:
-		t.Fatalf("%s %s.types has unexpected type %T", path, trigger, raw)
-		return nil, false
-	}
-}
-
-// TestPullRequestActivityTypes keeps the negative tree assertion above from
-// passing only because its detector stopped recognizing an explicit filter.
-// None of today's branch-filtered workflows declares `types:`, so the live
-// scan exercises only the absent case unless these YAML-decoded shapes are
-// pinned independently.
-func TestPullRequestActivityTypes(t *testing.T) {
-	tests := []struct {
-		name         string
-		config       map[string]any
-		want         []string
-		wantDeclared bool
-	}{
-		{name: "absent", config: map[string]any{}},
-		{name: "scalar", config: map[string]any{"types": "edited"}, want: []string{"edited"}, wantDeclared: true},
-		{
-			name:         "sequence",
-			config:       map[string]any{"types": []any{"opened", "edited"}},
-			want:         []string{"opened", "edited"},
-			wantDeclared: true,
-		},
-		{name: "empty sequence", config: map[string]any{"types": []any{}}, wantDeclared: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, declared := pullRequestActivityTypes(t, "example.yml", "pull_request", test.config)
-			if declared != test.wantDeclared {
-				t.Errorf("declared = %t, want %t", declared, test.wantDeclared)
-			}
-			if !slices.Equal(got, test.want) {
-				t.Errorf("types = %v, want %v", got, test.want)
-			}
-		})
 	}
 }
 
