@@ -94,11 +94,82 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Ensure shell tools
+        shell: bash
+        timeout-minutes: 5
         run: |
-          if ! command -v envsubst >/dev/null || ! command -v shellcheck >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y gettext-base shellcheck
+          select_fallback_mirrors() {
+            local status
+            echo "::warning::Switching Linux package downloads away from the default package mirror"
+            # TODO(upstream-contract): actions/runner-images routes apt through
+            # /etc/apt/apt-mirrors.txt and configure-apt-sources.sh writes one
+            # URI plus a tab-delimited priority on each mirror-list line.
+            if printf '%s\tpriority:%s\n' \
+              'https://archive.ubuntu.com/ubuntu/' '1' \
+              'https://security.ubuntu.com/ubuntu/' '2' | \
+              sudo -n tee /etc/apt/apt-mirrors.txt >/dev/null; then
+              return 0
+            else
+              status=$?
+            fi
+            echo "::error::Unable to select the bounded Ubuntu package mirror fallback"
+            return "$status"
+          }
+
+          install_shell_tool_packages() {
+            local attempt status
+            for attempt in 1 2; do
+              echo "Installing shell tool packages (attempt ${attempt}/2)"
+              if sudo -n env DEBIAN_FRONTEND=noninteractive \
+                timeout --signal=TERM --kill-after=10s 90s \
+                apt-get \
+                  -o Acquire::Retries=2 \
+                  -o Acquire::http::Timeout=20 \
+                  -o Acquire::https::Timeout=20 \
+                  -o DPkg::Lock::Timeout=30 \
+                  -o Dpkg::Use-Pty=0 \
+                  install -y --no-install-recommends gettext-base shellcheck; then
+                return 0
+              else
+                status=$?
+              fi
+              echo "::warning::Shell tool package install attempt ${attempt}/2 failed with exit ${status}"
+              if [ "$attempt" -lt 2 ]; then
+                # runner-images already routes apt through this mirror list;
+                # the TODO(upstream-contract) above tracks that dependency.
+                # A slow-but-responsive Azure endpoint does not trigger apt's
+                # own failover, so make the official Ubuntu mirrors explicit
+                # before the one remaining bounded attempt.
+                # If timeout had to kill apt mid-transaction, the retry may
+                # still fail on package-manager state; its bounds keep that
+                # failure local and legible on this ephemeral runner.
+                if ! select_fallback_mirrors; then
+                  return 1
+                fi
+                sleep 5
+              fi
+            done
+            echo "::error::Shell tool package install failed after 2 bounded attempts"
+            return "$status"
+          }
+
+          # Both tools ship preinstalled on ubuntu-latest, so this apt path is
+          # near-dead — which is exactly why it must not be able to hang the
+          # job silently. Same failure mode that consumed the CLI matrix
+          # budget: the image's Azure mirror can stall indefinitely, and apt's
+          # own 120s Acquire timeout and mirror failover never fire against a
+          # slow-but-responsive endpoint. No index refresh here for the same
+          # reason — the image's package metadata already resolves its own
+          # release packages, and an `apt-get update` would add a second
+          # unbounded fetch through the same stalling mirror.
+          if ! command -v envsubst >/dev/null 2>&1 || ! command -v shellcheck >/dev/null 2>&1; then
+            install_shell_tool_packages || exit "$?"
           fi
+          for tool in envsubst shellcheck; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::Shell tool setup completed without required command: ${tool}"
+              exit 1
+            fi
+          done
 
       - name: Render config goldens
         run: bash test/render_test.sh
