@@ -112,6 +112,12 @@ describe('preflightLedger', () => {
     // likely to have. At umask 0 it lands 0666 and dies everywhere. Jest runs
     // one test file at a time per worker and the cases within a file
     // serially, so the window this widens is the try block.
+    //
+    // Both halves of that describe jest's default child-process runner. The
+    // setter is process-wide, so under a thread worker it does not widen a
+    // window at all — it throws ERR_WORKER_UNSUPPORTED_OPERATION, failing
+    // this case rather than skipping it, which is the direction a runner
+    // switch should fail in.
     const ledger = unusedLedgerPath('preflight-mode');
     const priorUmask = process.umask(0o000);
     try {
