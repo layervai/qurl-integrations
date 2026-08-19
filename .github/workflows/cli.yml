@@ -302,6 +302,14 @@ jobs:
           QURL_API_KEY: ${{ secrets.QURL_SANDBOX_API_KEY }}
           # The sandbox hostname is deliberately a secret, not a literal.
           QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+          # Deployment settings for the journey's direct-download step
+          # (`get --file` opens links through the platform access flow).
+          # Repository variables, not literals: the sandbox values live with
+          # the tenancy, mirroring the same-named qurl-connector variables.
+          # The journey converts them into a QURL_DEPLOYMENT settings file
+          # and never prints them — variables are not masked in logs.
+          QURL_SANDBOX_QV2_ISSUER_KEY: ${{ vars.QURL_SANDBOX_QV2_ISSUER_KEY }}
+          QURL_SANDBOX_QV2_RELAY_URL: ${{ vars.QURL_SANDBOX_QV2_RELAY_URL }}
         run: go test -tags=clisandbox -count=1 -v ./apps/cli/...
 
   goreleaser-check:

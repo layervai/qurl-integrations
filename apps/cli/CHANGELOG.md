@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0](https://github.com/layervai/qurl-integrations/compare/v1.1.0...v1.2.0) (2026-08-19)
+
+
+### Features
+
+* **cli:** adopt the customer term ID for the Connector run surface ([#1139](https://github.com/layervai/qurl-integrations/issues/1139)) ([d41b1fb](https://github.com/layervai/qurl-integrations/commit/d41b1fb8dc53ebf90a0a941e7dba99672a51a5d2))
+
+
+### Bug Fixes
+
+* **cli:** download target content through the platform access flow ([#1159](https://github.com/layervai/qurl-integrations/issues/1159)) ([f99bb13](https://github.com/layervai/qurl-integrations/commit/f99bb13af5db44aa7a331db3de583850e97ac40b))
+* **cli:** speak customer language for Connector enrollment failures ([#1153](https://github.com/layervai/qurl-integrations/issues/1153)) ([37a38bf](https://github.com/layervai/qurl-integrations/commit/37a38bfdaee2baba4acd7e841361a2f54d357738))
+* **cli:** tell the truth about republishing an already-published URL ([#1150](https://github.com/layervai/qurl-integrations/issues/1150)) ([be5f228](https://github.com/layervai/qurl-integrations/commit/be5f2288fd3d3d5ca29f72f78747c88f65dc0e79))
+
 ## [1.1.0](https://github.com/layervai/qurl-integrations/compare/v1.0.0...v1.1.0) (2026-08-18)
 
 
