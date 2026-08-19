@@ -44,8 +44,7 @@ const (
 	contextSeparator = " / "
 	aggregateSuffix  = contextSeparator + "required"
 
-	mergeGroupTrigger        = "merge_group"
-	claudeCodeReviewWorkflow = "claude-code-review.yml"
+	mergeGroupTrigger = "merge_group"
 	// The posture marker in CONTRIBUTING.md, and its two legal values. It is
 	// the offline stand-in for a setting CI cannot read: nothing here can see
 	// whether a queue is really configured, so the docs are the source of
