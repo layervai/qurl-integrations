@@ -98,9 +98,18 @@ type Options struct {
 	KeepaliveSeconds int
 	// DialTimeoutSeconds is the server connection timeout; 0 defaults to 10.
 	DialTimeoutSeconds int
-	// LoginFailExit controls whether the client exits on a failed login.
-	// The default false keeps FRP retrying with its internal backoff, which
-	// is what the supervisor's cycle model expects.
+	// LoginFailExit controls whether the client exits after a failed initial
+	// Login. It does not govern post-admission reconnects: the pinned fork
+	// retries those internally, and the supervisor's watchdog bounds that loop.
+	//
+	// TODO(upstream-contract): mirrors the client/service.go call sites also
+	// documented by the supervisor's version-guarded reconnect contract: Run
+	// passes this field to the initial Login loop, while keepControllerWorking
+	// passes false to its reconnect loop.
+	//
+	// Its zero value is false. The supervisor forces it true for every
+	// knock-then-login cycle so a failed initial Login returns for a fresh knock
+	// instead of retrying without knowing that cycle's admission open-time.
 	LoginFailExit bool
 }
 

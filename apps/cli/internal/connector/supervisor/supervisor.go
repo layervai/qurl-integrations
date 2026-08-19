@@ -702,9 +702,29 @@ func (s *Supervisor) overlayKnockResult(ctx context.Context, cycleCommon *v1.Cli
 		return false, err
 	}
 	// TLS-SNI guard, narrowed to IP-literal dial targets: with TLS enabled
-	// and no explicit ServerName, the FRP client uses ServerAddr as the SNI
-	// value, and most servers refuse an IP-literal SNI. Hostname targets
-	// pass through — they are valid SNI on their own.
+	// and no explicit ServerName, the FRP client derives the TLS server name
+	// from ServerAddr — which is the field this overlay is about to overwrite
+	// with the ACK dial target. Hostname targets pass through; they are valid
+	// server names on their own.
+	//
+	// An IP literal is not, and the failure is NOT that it travels as an
+	// IP-literal SNI: Go's crypto/tls drops an IP-literal ServerName from the
+	// SNI extension rather than sending it, so the dial arrives carrying no
+	// server name at all. An SNI-routed frontend then has nothing to route on,
+	// and wherever a trustedCaFile is configured the literal still has to
+	// appear as an IP SAN on the presented certificate. Both fail after the
+	// knock has already been spent, which is why this rejects before dialing.
+	//
+	// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+	// client/connector.go — both dial paths run
+	// `sn := c.cfg.Transport.TLS.ServerName; if sn == "" { sn = c.cfg.ServerAddr }`
+	// and hand sn to transport.NewClientTLSConfig, which assigns it straight to
+	// tls.Config.ServerName (pkg/transport/tls.go). realConnect does this inside
+	// its tlsEnable branch; Open's QUIC path does it unconditionally, which is
+	// consistent with that path always being TLS. If a fork bump changes what an
+	// empty ServerName falls back to, this guard stops describing the dial it
+	// guards. TestForkDerivesSNIFromServerAddr pins the fallback, and the
+	// IP-literal drop above, against the real connector.
 	if TLSEnabled(cycleCommon) && cycleCommon.Transport.TLS.ServerName == "" && IsIPLiteralHost(newAddr) {
 		err := fmt.Errorf("%w: IP-literal dial target %q with TLS enabled and empty ServerName for resource %q", errKnockResourceHostUnusable, host, s.cfg.KnockResourceID)
 		s.logOverlayReject(ctx, "knock_overlay_tls_guard", nil, err)
@@ -1006,7 +1026,46 @@ func IsIPLiteralHost(host string) bool {
 
 // TLSEnabled mirrors the pinned FRP client's own decision for whether the
 // dialer wraps the connection in TLS: the explicit enable flag, or a
-// TLS-implying transport protocol.
+// TLS-implying transport protocol. Both callers are the same IP-literal
+// TLS-SNI guard — once in the cycle overlay above, once in the redial
+// refresher's applyKnockResult — and both read a Complete()d config, the
+// command Completing before supervisor.New and the refresher working on the
+// running service's own common. Complete defaults the flag to true, so those
+// guards are live on the real path rather than branches nothing takes.
+//
+// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// client/connector.go. The fork makes this decision in two places and the
+// predicate below is their union:
+//
+//   - realConnect: `tlsEnable := lo.FromPtr(c.cfg.Transport.TLS.Enable)`, then
+//     `if c.cfg.Transport.Protocol == "wss" { tlsEnable = true }`.
+//   - Open: `if strings.EqualFold(c.cfg.Transport.Protocol, "quic")` takes a
+//     path that builds a *tls.Config on BOTH branches of that same enable flag
+//     and hands it to quic.DialAddr, so QUIC is TLS whatever the flag says.
+//
+// The fork's case handling is ASYMMETRIC, and is copied rather than tidied:
+// "wss" is matched with ==, "quic" with strings.EqualFold. Do not collapse the
+// two back into one switch. Case-insensitive "wss" would claim TLS for a
+// config the fork cannot dial at all — golib's dial rejects every protocol but
+// tcp and kcp, and realConnect rewrites only the lowercase websocket and wss
+// literals to tcp before it gets there — while case-sensitive "quic" misses a
+// dial the fork really does make,
+// because Open's EqualFold runs ahead of all of that. That second half was the
+// bug here: nothing on this repo's path runs frp's own protocol validation (a
+// case-sensitive lowercase membership test), so a mixed-case protocol does
+// reach the connector, and an exact-match "quic" left both SNI guards failing
+// open on the one protocol that is always TLS. physicalDialInOpen
+// already models the same branch with EqualFold; these two are twins and must
+// agree.
+//
+// samber/lo is an indirect dependency and nothing else in this module imports
+// it, so lo.FromPtr is written out rather than called. This is a
+// hand-maintained model of another repository's control flow and cannot be
+// checked by reading this package — if a fork bump moves the decision, update
+// it here in lockstep. TestForkTLSDecisionMatchesTLSEnabled drives the real
+// connector and observes whether the first bytes on the wire are a TLS
+// handshake, so such a bump reddens a test rather than only contradicting this
+// comment.
 func TLSEnabled(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return false
@@ -1014,18 +1073,34 @@ func TLSEnabled(common *v1.ClientCommonConfig) bool {
 	if common.Transport.TLS.Enable != nil && *common.Transport.TLS.Enable {
 		return true
 	}
-	switch common.Transport.Protocol {
-	case "wss", "quic":
+	if strings.EqualFold(common.Transport.Protocol, "quic") {
 		return true
 	}
-	return false
+	return common.Transport.Protocol == "wss"
 }
 
-// knownTransportProtocols lists the transport protocol values the TLS guard
-// above has been audited against for the pinned FRP version; empty means the
-// FRP default (tcp). The guard is fail-open for unknown protocols, so the
-// one-shot warning below is the operator breadcrumb to re-audit TLSEnabled
-// when a future FRP bump introduces a new TLS-implying protocol.
+// knownTransportProtocols is the fork's own set of valid transport protocol
+// values plus "", the pre-Complete() zero value. TLSEnabled is fail-open for
+// anything outside it, so the one-shot warning below is the operator
+// breadcrumb to re-audit TLSEnabled when a future FRP bump introduces a new
+// TLS-implying protocol.
+//
+// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// pkg/config/v1/validation.SupportedTransportProtocols — exactly
+// `{"tcp", "kcp", "quic", "websocket", "wss"}` — widened by "", which
+// `c.Protocol = util.EmptyOr(c.Protocol, "tcp")` in
+// ClientTransportConfig.Complete resolves to the tcp default. Empty is not
+// reachable from the command, which Completes before supervisor.New, but
+// warnIfUnknownTransportProtocol runs at the top of serve on whatever config
+// New was handed, so an uncompleted caller must not trip the warning.
+//
+// Unlike this package's other fork mirrors the fork EXPORTS this set, so
+// TestKnownTransportProtocolsMatchTheForkSupportedSet compares against it
+// directly and a bump that adds a protocol reddens that test instead of
+// silently widening the fail-open hole. The lockstep obligation the test
+// cannot discharge is the one this marker carries: a new protocol has to be
+// re-audited for whether it IMPLIES TLS, which is a claim about the fork's
+// dialer, not about this set.
 var knownTransportProtocols = map[string]struct{}{
 	"":          {},
 	"tcp":       {},
