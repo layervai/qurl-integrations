@@ -261,8 +261,9 @@ rather than pending, and the PR reads green having run none of them. Merging
 the base does not recover it: GitHub retargets the PR onto `main`, where the
 context applies again, but a base change arrives as the `edited` activity type,
 which no branch-filtered workflow here takes, so the PR then stalls at
-"Expected — Waiting for status to be reported" until its next push. That stall
-is the same lost coverage surfacing late, not a second failure.
+"Expected — Waiting for status to be reported" until its next push — which
+strict status checks require before merging anyway. That stall is the same lost
+coverage surfacing late, not a second failure.
 `internal/ciworkflows` records each pull-request workflow's intended filter and
 reads this block to tell which of them gate merges, so one recorded as
 deliberately narrow fails `Workflow Contract` the moment it starts gating. The

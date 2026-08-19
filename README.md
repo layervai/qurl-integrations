@@ -129,7 +129,8 @@ protection guards only `main`, so the stacked PR reads green having run none of 
 (#1183, #1185). Merging the base does not recover the run: GitHub retargets the PR onto
 `main`, where the context applies again, but a base change arrives as the `edited` activity
 type, which no branch-filtered workflow here takes, so the PR stalls on the check that never
-registered until its next push. One lost signal, surfacing late — not two failures.
+registered until its next push — which strict status checks require before merging anyway.
+One lost signal, surfacing late — not two failures.
 The package's own check — `Workflow Contract` — is unfiltered and reports on every
 PR, because a check behind a paths filter cannot police the paths filters (#1081).
 
