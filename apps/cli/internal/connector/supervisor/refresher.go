@@ -433,15 +433,26 @@ func (c *knockingConnector) Open() error {
 // Connect refreshes the knock first on transports whose physical dial happens
 // here, then dials through the underlying connector.
 //
-// WATCHDOG COUPLING: this branch is reached only when TCPMux is explicitly
-// disabled, and in that mode FRP dials once per WORK connection rather than
-// once per control redial. The reconnect watchdog counts every refresh as one
-// control redial, so under sustained traffic it would accumulate a storm on a
-// perfectly healthy tunnel and eventually force a false cycle restart. The
-// generated config never disables TCPMux — frpgen models no such field, so it
-// stays at FRP's default of on — and TestProductionConfigKeepsTheWatchdogOnTheOpenSeam
-// pins that. Anything that starts setting TCPMux=false must revisit
-// noteRedialLocked before it does.
+// WATCHDOG COUPLING: this branch is reached whenever TCPMux is off — set to
+// false, or left unset, which the fork treats identically (see
+// physicalDialInOpen). In that mode FRP dials once per WORK connection rather
+// than once per control redial. The reconnect watchdog counts every refresh
+// as one control redial, so under sustained traffic it would accumulate a
+// storm on a perfectly healthy tunnel and eventually force a false cycle
+// restart.
+//
+// Two independent things keep production off this branch, and only the first
+// is ours: frpgen models no TCPMux field, so the generated config leaves it
+// unset, and every path into the FRP service completes the config before the
+// connector sees it (the command at cmd/connector.go, and NewService itself —
+// TestForkServiceCompletesTheCommonConfigInPlace). Completion defaults TCPMux
+// to on, which is the Open seam.
+//
+// Note what is NOT pinned: TestProductionConfigKeepsTheWatchdogOnTheOpenSeam
+// re-runs frpgen.Generate and Complete itself rather than observing the
+// command, so it would stay green if cmd/connector.go stopped completing —
+// the fork's own completion is what would still save it. Anything that starts
+// setting TCPMux=false must revisit noteRedialLocked before it does.
 func (c *knockingConnector) Connect() (net.Conn, error) {
 	if !physicalDialInOpen(c.common) {
 		if err := c.refresher.refresh(c.ctx, c.common, "connect"); err != nil {
@@ -470,9 +481,49 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 }
 
 // physicalDialInOpen reports whether the pinned FRP fork performs the
-// physical connector dial from Open (QUIC, nil TCPMux, or TCPMux-enabled TCP)
-// or from Connect (TCPMux explicitly disabled). Revisit on an FRP connector
-// contract change.
+// physical connector dial from Open (QUIC or TCPMux-enabled TCP) or from
+// Connect (TCPMux off, whether explicitly false or left unset).
+//
+// Unset is NOT "default on" at this seam. A nil TCPMux returns from Open
+// having dialed nothing, leaving Connect to fall through to realConnect
+// exactly as an explicit false does; TCPMux becomes true only by way of
+// ClientCommonConfig.Complete. Answering "Open" for an uncompleted config
+// would attach BOTH the redial re-knock and the reconnect watchdog to a
+// method that never dials while the method that does goes unguarded.
+//
+// That is a model error rather than a live hazard, and the reason is worth
+// knowing before treating either answer as load-bearing: nothing reaches this
+// predicate uncompleted today. frpclient.NewService runs Common.Complete()
+// through the caller's own pointer before it stores that pointer as
+// svr.common and hands it to the ConnectorCreator, so knockingConnector is
+// always given a completed config whatever reached supervisor.New — see
+// TestForkServiceCompletesTheCommonConfigInPlace, which is what fails if a
+// fork bump drops that. Modeling the fork faithfully is still the right
+// posture: it costs nothing and it is what makes the seam analysis checkable.
+//
+// A nil common keeps answering Open. The fork would nil-panic before dialing
+// either way, so no real dial is at stake; Open is simply where the refresh
+// path reports errNilCommonConfig (from applyKnockResult, after the knock has
+// already been spent) and fails the cycle closed.
+//
+// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// client/connector.go — defaultConnectorImpl.Open dials for QUIC and, for
+// every other protocol, only past
+// `if !lo.FromPtr(c.cfg.Transport.TCPMux) { return nil }` (that guard is not
+// TCP-specific: kcp, websocket and wss pass through it too), while Connect
+// falls through to realConnect whenever neither a QUIC connection nor a mux
+// session was established. The expression below is that lo.FromPtr written
+// out: samber/lo is an indirect dependency and nothing else in this module
+// imports it, so the semantics are copied rather than the call. This is a
+// hand-maintained model of another repository's control flow and cannot be
+// checked by reading this package — if a fork bump moves the dial, update it
+// here in lockstep. TestForkDialsFromConnectWithoutTCPMux drives the real
+// connector and is what fails if the TCPMux branches drift. The QUIC branch
+// is asserted only against this predicate, so it is NOT pinned empirically —
+// a fork bump moving the QUIC dial into Connect would leave every test here
+// green. QUIC is unreachable config today (cmd/connector.go never sets
+// frpgen.Options.Protocol), which is why that gap is tolerated rather than
+// closed with a UDP probe.
 func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return true
@@ -480,8 +531,5 @@ func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if strings.EqualFold(common.Transport.Protocol, "quic") {
 		return true
 	}
-	if common.Transport.TCPMux == nil {
-		return true
-	}
-	return *common.Transport.TCPMux
+	return common.Transport.TCPMux != nil && *common.Transport.TCPMux
 }
