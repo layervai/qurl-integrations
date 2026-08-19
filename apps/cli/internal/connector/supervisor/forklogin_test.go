@@ -161,6 +161,7 @@ func runForkClientLoginFailure(t *testing.T, serverPort int) error {
 	if err != nil {
 		t.Fatalf("construct the fork client: %v", err)
 	}
+	t.Cleanup(svc.Close)
 	runErr := svc.Run(t.Context())
 	if runErr == nil {
 		t.Fatal("the fork client's Run returned nil against a server that refuses every Login; " +
