@@ -459,7 +459,13 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 	}
 }
 
-// pullRequestBranchSpec records the intended `on.pull_request.branches` filter
+// pullRequestTriggers are the two events that run a workflow against a pull
+// request and honor a base-branch filter. Both are in scope: what matters is
+// not which event fires but that a gate the PR is judged on actually reports,
+// and either one filtered to [main] goes missing on a stacked PR.
+var pullRequestTriggers = []string{"pull_request", "pull_request_target"}
+
+// pullRequestBranchSpec records the intended base-branch filter
 // for a workflow that runs on pull requests but owns no required aggregate, and
 // so has no requiredWorkflowSpecs entry.
 type pullRequestBranchSpec struct {
@@ -539,6 +545,14 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		path: "validate-issue-templates.yml",
 		why:  "Already unfiltered, and narrowed by `paths` rather than by base branch.",
 	},
+	{
+		path: "claude-code-review.yml",
+		why: "Already unfiltered, and on `pull_request_target` rather than `pull_request` because it " +
+			"holds ANTHROPIC_API_KEY and so must load its definition from the default branch. Its " +
+			"`claude-review` context became required in #1185, which is what pulled that trigger into " +
+			"scope here: narrowing it would leave every stacked PR waiting forever on a required check " +
+			"that never registers, the failure this package already caught once on 2026-08-14.",
+	},
 }
 
 // TestAppWorkflowsRunOnStackedPRs pins the `on.pull_request.branches` filter of
@@ -592,13 +606,12 @@ func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 // `branches: [main]` and no entry would be silently unenforced, which is the
 // same shape of gap that let an unregistered aggregate ship in #1081.
 //
-// Scope is the `pull_request` trigger alone. GitHub honors `branches:` on
-// `pull_request_target` identically, so the same footgun exists there in
-// principle — but claude-code-review.yml is the only workflow in this repo
-// using that trigger, it declares no `branches:` filter, and it produces no
-// required context, so there is nothing to pin today. A required gate arriving
-// on `pull_request_target` would evade this contract; widen the scan here in
-// the same change that adds one.
+// Scope is both pull-request triggers. It was `pull_request` alone until
+// #1185 made claude-code-review.yml's `claude-review` a required context —
+// the exact condition this comment previously named as the one that would
+// force the widening. GitHub honors `branches:` on `pull_request_target`
+// identically, so that workflow narrowing to [main] would now leave every
+// stacked PR waiting on a required check that never registers.
 func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	dir := filepath.Join("..", "..", ".github", "workflows")
 	entries, err := os.ReadDir(dir)
@@ -624,7 +637,15 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
 			continue
 		}
-		if _, ok := parseWorkflowTriggers(t, readWorkflow(t, name).On)["pull_request"]; !ok {
+		triggers := parseWorkflowTriggers(t, readWorkflow(t, name).On)
+		runsOnPullRequests := false
+		for _, trigger := range pullRequestTriggers {
+			if _, ok := triggers[trigger]; ok {
+				runsOnPullRequests = true
+				break
+			}
+		}
+		if !runsOnPullRequests {
 			continue
 		}
 		seen++
@@ -697,23 +718,27 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	t.Helper()
 
 	triggers := parseWorkflowTriggers(t, readWorkflow(t, path).On)
-	pullRequest, ok := triggers["pull_request"]
-	if !ok {
-		t.Fatalf("%s must run on pull_request", path)
-	}
-
-	got, declared := pullRequestBranchFilter(t, path, pullRequest)
-	if want == nil {
-		if declared {
-			t.Errorf("%s pull_request declares branches %v, want no filter at all", path, got)
+	checked := 0
+	for _, trigger := range pullRequestTriggers {
+		config, ok := triggers[trigger]
+		if !ok {
+			continue
 		}
-		return
+		checked++
+
+		got, declared := pullRequestBranchFilter(t, path, trigger, config)
+		switch {
+		case want == nil && declared:
+			t.Errorf("%s %s declares branches %v, want no filter at all", path, trigger, got)
+		case want == nil:
+		case !declared:
+			t.Errorf("%s %s declares no branches filter, want %v", path, trigger, want)
+		case !slices.Equal(got, want):
+			t.Errorf("%s %s.branches = %v, want %v", path, trigger, got, want)
+		}
 	}
-	if !declared {
-		t.Fatalf("%s pull_request declares no branches filter, want %v", path, want)
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("%s pull_request.branches = %v, want %v", path, got, want)
+	if checked == 0 {
+		t.Fatalf("%s must run on one of %v", path, pullRequestTriggers)
 	}
 }
 
@@ -727,7 +752,7 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 // ["release/**", "main"] have identical reach but are not interchangeable here.
 // That is deliberate — the table records the spelling a reader will find in the
 // YAML — but it is stricter than reach alone, so record the order as written.
-func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branches []string, declared bool) {
+func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any) (branches []string, declared bool) {
 	t.Helper()
 
 	if pullRequest == nil {
@@ -735,7 +760,7 @@ func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branch
 	}
 	config, ok := pullRequest.(map[string]any)
 	if !ok {
-		t.Fatalf("%s pull_request trigger has unexpected type %T", path, pullRequest)
+		t.Fatalf("%s %s trigger has unexpected type %T", path, trigger, pullRequest)
 	}
 
 	// `branches-ignore` is the one spelling these tables cannot express, and it
@@ -745,8 +770,8 @@ func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branch
 	// exactly the stacked PRs this suite exists to keep it on. Refuse it here
 	// instead, so adding one forces the decision into the table.
 	if _, ok := config["branches-ignore"]; ok {
-		t.Fatalf("%s pull_request declares branches-ignore, which these tables cannot record; "+
-			"extend pullRequestBranchSpec to express it before using it", path)
+		t.Fatalf("%s %s declares branches-ignore, which these tables cannot record; "+
+			"extend pullRequestBranchSpec to express it before using it", path, trigger)
 	}
 
 	raw, ok := config["branches"]
@@ -765,13 +790,13 @@ func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branch
 		for _, value := range typed {
 			branch, ok := value.(string)
 			if !ok {
-				t.Fatalf("%s pull_request.branches contains non-string value %T", path, value)
+				t.Fatalf("%s %s.branches contains non-string value %T", path, trigger, value)
 			}
 			branches = append(branches, branch)
 		}
 		return branches, true
 	default:
-		t.Fatalf("%s pull_request.branches has unexpected type %T", path, raw)
+		t.Fatalf("%s %s.branches has unexpected type %T", path, trigger, raw)
 		return nil, false
 	}
 }
