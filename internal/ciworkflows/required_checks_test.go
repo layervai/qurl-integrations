@@ -51,7 +51,7 @@ const (
 	// whether a queue is really configured, so the docs are the source of
 	// truth for what this repo intends, exactly as they are for the required
 	// contexts themselves.
-	mergeQueuePostureMarker = "<!-- merge-queue-posture: "
+	mergeQueuePostureMarker = "merge-queue-posture"
 	mergeQueuePostureNone   = "none"
 	mergeQueuePostureQueued = "required"
 	// The job id, which is also the required context: that job sets no `name:`.
@@ -563,27 +563,28 @@ func workflowMergeGroupTriggers(t *testing.T) map[string]bool {
 	return declared
 }
 
+// mergeQueuePosturePattern matches the marker whatever spacing it is written
+// with. Matching a literal instead would make `<!--merge-queue-posture:none-->`
+// fail as "no marker found", sending the reader after a missing line that is
+// sitting right in front of them — a misleading diagnostic on a file whose
+// whole job is to be believed.
+var mergeQueuePosturePattern = regexp.MustCompile(`<!--\s*` + mergeQueuePostureMarker + `\s*:\s*(\S*)\s*-->`)
+
 // documentedMergeQueuePosture reads the marker CONTRIBUTING.md uses to declare
-// whether this repo intends a merge queue. It requires exactly one marker, for
-// the same reason TestContributingCountsMatchTheDocumentedSet requires exactly
-// one match of each count phrase: a second copy, or a reworded one, must fail
-// loudly rather than let the first occurrence quietly decide the posture.
+// whether this repo intends a merge queue. It requires exactly one, for the
+// same reason TestContributingCountsMatchTheDocumentedSet requires exactly one
+// match of each count phrase: a second copy must fail loudly rather than let
+// the first occurrence quietly decide the posture.
 func documentedMergeQueuePosture(t *testing.T) string {
 	t.Helper()
 
-	body := readRepoFile(t, contributingPath)
-	if count := strings.Count(body, mergeQueuePostureMarker); count != 1 {
-		t.Fatalf("%s contains %d %q markers, want exactly 1 — it declares whether this repo intends a merge queue, and neither a missing nor a duplicated marker can be read as an answer",
-			contributingPath, count, strings.TrimSpace(mergeQueuePostureMarker))
+	matches := mergeQueuePosturePattern.FindAllStringSubmatch(readRepoFile(t, contributingPath), -1)
+	if len(matches) != 1 {
+		t.Fatalf("%s contains %d `%s` markers, want exactly 1 — it declares whether this repo intends a merge queue, and neither a missing nor a duplicated marker can be read as an answer",
+			contributingPath, len(matches), mergeQueuePostureMarker)
 	}
 
-	_, after, _ := strings.Cut(body, mergeQueuePostureMarker)
-	posture, _, ok := strings.Cut(after, " -->")
-	posture = strings.TrimSpace(posture)
-	if !ok {
-		t.Fatalf("%s has %q with no closing ` -->`", contributingPath, strings.TrimSpace(mergeQueuePostureMarker))
-	}
-	switch posture {
+	switch posture := matches[0][1]; posture {
 	case mergeQueuePostureNone, mergeQueuePostureQueued:
 		return posture
 	default:
