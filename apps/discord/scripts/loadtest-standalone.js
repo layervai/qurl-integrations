@@ -28,8 +28,10 @@
  * to run against a different one. Re-running --reclaim is safe: revoked ids
  * are pruned from the ledger and an already-gone resource counts as reclaimed.
  *
- * One window this cannot close: if a create succeeds server-side but the
- * response is lost, the resource exists and its id never reached the ledger.
+ * Two windows this cannot close, both leaking exactly the resource in hand:
+ * a create that succeeds server-side whose response is then lost, and a
+ * create whose id cannot be appended because the ledger became unwritable.
+ * Everything recorded before either is still swept.
  */
 
 const fs = require('fs');
@@ -287,6 +289,10 @@ async function reclaim(ledgerPath) {
   if (foreign.length > 0) {
     console.error(`Reclaim: this ledger records resources on ${foreign.join(', ')}, not ${config.QURL_ENDPOINT}.`);
     console.error('Refusing to delete against a different tenancy. Set QURL_ENDPOINT to match and re-run.');
+    // Only a trailing slash is normalized, so scheme and host casing have to
+    // match exactly — worth saying, because the alternative to knowing it is
+    // an operator guessing mid-incident.
+    console.error('The match is exact apart from a trailing slash: scheme and host casing must agree.');
     return { missing: false, revoked: 0, failed: 0, refused: true };
   }
 
@@ -306,11 +312,13 @@ async function reclaim(ledgerPath) {
       await new Promise(r => setTimeout(r, 100));
       continue;
     }
-    // Floor, not an estimate: the 50ms pacing gap is the only part that is
-    // known here, and per-request latency adds to it. Overstating the number
-    // the heartbeat exists to contextualise would undercut it.
+    // A floor built from the 50ms pacing gap alone; per-request latency adds
+    // to it and can dominate on a large sweep. Labelled as a minimum rather
+    // than an estimate, because an operator watching a number they read as an
+    // ETA sail past it is the "looks wedged, reach for kill -9" scenario this
+    // heartbeat exists to prevent.
     const seconds = Math.max(1, Math.round(pending.length * 0.05));
-    console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (>=${seconds}s)...`);
+    console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (at least ${seconds}s, likely longer)...`);
     let done = 0;
     // Serial with a short gap. The tenancy is shared and rate-limited per
     // account, and a burst of hundreds of deletes is what trips it.
