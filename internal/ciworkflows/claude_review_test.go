@@ -381,6 +381,11 @@ func TestClaudeReviewReportClassifiesEveryUnfinishedReview(t *testing.T) {
 //     binary is killed — measured, not assumed. Any reintroduced fallback has
 //     to name an absolute path, which is what the shell script this replaced
 //     did with a hard-coded /bin/date.
+//
+// The shim needs /bin/sh, which the caller's requireCommand(t, "bash") does not
+// cover. Not worth a second guard: POSIX fixes that path, the shell script this
+// replaced assumed the same thing, and a host without it fails loudly on the
+// first row rather than misreporting one.
 func stubbedDatePATH(t *testing.T) string {
 	t.Helper()
 
@@ -864,6 +869,11 @@ type claudeReviewBudgetWiring struct {
 // in the range loops of this package's workflow-wide assertions, and each sits
 // just under the size at which that copy becomes a lint finding. Growing them
 // for three fields only this file reads charges every one of those loops for it.
+//
+// Called once per test, so the file is read and parsed twice per run. Left
+// uncached deliberately: a package-level cache would be shared mutable state
+// across tests that run in parallel, which is a worse trade than two reads of a
+// file the OS already has in page cache.
 func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
 	t.Helper()
 
@@ -905,6 +915,11 @@ func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
 // step compares the budget arithmetically and the job cap is GitHub's own kill
 // timer; neither can take a value computed at run time, and an expression here
 // would leave the headroom floor comparing against something it cannot see.
+//
+// yaml.v3 decodes a bare integer scalar to int, so `13` and `17` pass. A quoted
+// `"17"` decodes to string and is rejected, which is intended rather than
+// incidental: the assertion is that a human can read the number off the
+// workflow, and a quoted cap is a step away from an expression.
 func claudeReviewMinutes(t *testing.T, label string, value any) int {
 	t.Helper()
 
