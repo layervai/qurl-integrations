@@ -12,6 +12,13 @@
  *   --allow-production
  *                  Run anyway when a target is refused by the guard below.
  *
+ * Load shape:
+ *   The file leg mirrors a real send's mintLinksInBatches: a resource's token
+ *   pool is TOKENS_PER_RESOURCE deep, so it re-uploads each time the pool
+ *   drains. --count N therefore issues ceil(N / TOKENS_PER_RESOURCE) uploads
+ *   and the same number of mint calls per round — 10 of each at the default
+ *   --count 100. See planMintBatches below.
+ *
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
  *   positively recognizes as non-production — loopback, or a hostname named in
@@ -52,8 +59,16 @@ if (require.main === module && fs.existsSync(envFile)) {
 }
 
 const config = require('../src/config');
-const { mintLinks } = require('../src/connector');
+const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink } = require('../src/qurl');
+
+// Max tokens the qURL API allows per resource; draining the pool means a new
+// resource (re-upload) is needed for a fresh one. Local copy of
+// TOKENS_PER_RESOURCE in ../src/commands.js — that module does not export it,
+// and requiring a ~9500-line command surface (plus its discord.js deps) into a
+// standalone script to read one integer is a bad trade. If the cap ever moves,
+// it moves in commands.js first and this copy has to follow.
+const TOKENS_PER_RESOURCE = 10;
 
 const args = process.argv.slice(2);
 function getArg(name, defaultVal) {
@@ -365,9 +380,42 @@ function targetGuardReport({ targets, allowlistErrors = [], allowProdFlag, allow
   return { refused, blocked, lines, warnings, fatal: lines.length > 0 };
 }
 
+/**
+ * Batch plan for minting `count` links against a token pool `tokensPerResource`
+ * deep — the load-test mirror of mintLinksInBatches in ../src/commands.js.
+ *
+ * Extracted as a pure function because scripts/ sits outside this app's jest
+ * `collectCoverageFrom`, so loop logic left inline here is unenforced. The plan
+ * is data, so tests/loadtest-mint-batches.test.js can pin it without a
+ * connector; runRound below only executes it.
+ *
+ * `reupload: true` marks every batch after the first, because the initial
+ * resource arrives with a full pool and each batch drains it. That reproduces
+ * mintLinksInBatches' `tokensUsed >= TOKENS_PER_RESOURCE && i > 0` guard: only
+ * the final batch can be short, so at every i > 0 the previous batch was full
+ * and tokensUsed has already reached the cap — the two conditions collapse into
+ * `i > 0`. Kept as an explicit per-batch flag so the mirror stays legible if
+ * the batcher's guard ever stops being equivalent.
+ *
+ * @param {number} count — links to mint across the whole plan.
+ * @param {number} [tokensPerResource] — pool depth; defaults to TOKENS_PER_RESOURCE.
+ * @returns {Array<{size: number, reupload: boolean}>} — empty when count < 1.
+ */
+function planMintBatches(count, tokensPerResource = TOKENS_PER_RESOURCE) {
+  const batches = [];
+  for (let i = 0; i < count; i += tokensPerResource) {
+    batches.push({ size: Math.min(tokensPerResource, count - i), reupload: i > 0 });
+  }
+  return batches;
+}
+
 async function runRound(roundNum) {
   const roundStart = performance.now();
-  const results = { fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0, uploadMs: 0, mintMs: 0, locMs: 0 };
+  const results = {
+    fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
+    uploadMs: 0, mintMs: 0, locMs: 0,
+    reuploads: 0, reuploadFail: 0, reuploadMs: 0,
+  };
 
   // File pipeline
   if (FILE_PATH || !INCLUDE_LOCATION) {
@@ -376,9 +424,10 @@ async function runRound(roundNum) {
     const blob = new Blob([fileBuffer], { type: 'application/octet-stream' });
 
     // Upload via fetch to connector (simulating what the bot does)
+    const uploadName = `loadtest-round${roundNum}.bin`;
     const uploadStart = performance.now();
     const form = new FormData();
-    form.append('file', blob, `loadtest-round${roundNum}.bin`);
+    form.append('file', blob, uploadName);
 
     const headers = {};
     if (config.QURL_API_KEY) headers['Authorization'] = `Bearer ${config.QURL_API_KEY}`;
@@ -390,20 +439,51 @@ async function runRound(roundNum) {
     const uploadResult = await uploadResp.json();
     results.uploadMs = performance.now() - uploadStart;
 
-    // Mint links in batches of 10
-    const mintStart = performance.now();
+    // Mint a pool at a time, re-uploading once each pool drains — the shape a
+    // real send takes through mintLinksInBatches (../src/commands.js).
+    //
+    // The re-upload leg is what makes this leg generate real load. Reusing one
+    // resource_id for every batch spends the initial pool on batch 1 and takes
+    // `quota_exceeded` for the rest, so a --count 100 round reported ok=10
+    // fail=90 and issued 1 upload where a real 100-recipient send issues 10.
     const expiresAt = expiryToISO('24h');
-    for (let i = 0; i < COUNT; i += 10) {
-      const batchSize = Math.min(10, COUNT - i);
+    let currentResourceId = uploadResult.resource_id;
+    for (const batch of planMintBatches(COUNT)) {
+      if (batch.reupload) {
+        const reStart = performance.now();
+        let re = null;
+        try {
+          re = await reUploadBuffer(fileBuffer, uploadName, 'application/octet-stream');
+        } catch (e) {
+          if (results.reuploadFail === 0) console.error(`  File re-upload error: ${e.message}`);
+          results.reuploadFail++;
+        }
+        results.reuploadMs += performance.now() - reStart;
+        // The previous resource's pool is spent, so there is nothing left to
+        // mint against — charge this batch as failed and keep going. That
+        // costs one batch per failed upload instead of abandoning the round,
+        // so a transient connector blip doesn't truncate the run.
+        if (!re) {
+          results.fileFail += batch.size;
+          continue;
+        }
+        currentResourceId = re.resource_id;
+        results.reuploads++;
+      }
+
+      const mintStart = performance.now();
       try {
-        await mintLinks(uploadResult.resource_id, { expiresAt, n: batchSize });
-        results.fileLinks += batchSize;
+        await mintLinks(currentResourceId, { expiresAt, n: batch.size });
+        results.fileLinks += batch.size;
       } catch (e) {
         if (results.fileFail === 0) console.error(`  File mint error: ${e.message}`);
-        results.fileFail += batchSize;
+        results.fileFail += batch.size;
       }
+      // Accumulated per batch rather than wrapped around the loop, so
+      // re-upload time stays out of the mint figure — otherwise the new leg
+      // would silently inflate reported mint latency.
+      results.mintMs += performance.now() - mintStart;
     }
-    results.mintMs = performance.now() - mintStart;
   }
 
   // Location pipeline
@@ -478,7 +558,15 @@ async function main() {
       allResults.push(results);
 
       let line = `[${elapsed}s] Round ${round}: `;
-      if (results.fileLinks > 0) line += `file(upload=${results.uploadMs.toFixed(0)}ms mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
+      // Reported whenever the file leg ran at all, not just on success: a
+      // round whose re-uploads all failed has fileLinks === 0, and the old
+      // `fileLinks > 0` gate would have printed nothing for it.
+      if (results.fileLinks > 0 || results.fileFail > 0) {
+        line += `file(upload=${results.uploadMs.toFixed(0)}ms `
+          + `reup=${results.reuploads}/${results.reuploadMs.toFixed(0)}ms `
+          + (results.reuploadFail > 0 ? `reupFail=${results.reuploadFail} ` : '')
+          + `mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
+      }
       if (results.locLinks > 0) line += `location(${results.locMs.toFixed(0)}ms ok=${results.locLinks} fail=${results.locFail}) `;
       line += `total=${(results.totalMs / 1000).toFixed(1)}s`;
       console.log(line);
@@ -507,6 +595,15 @@ async function main() {
       const avgUpload = allResults.reduce((s, r) => s + r.uploadMs, 0) / allResults.length;
       const avgMint = allResults.reduce((s, r) => s + r.mintMs, 0) / allResults.length;
       console.log(`Avg upload: ${avgUpload.toFixed(0)}ms, avg mint: ${avgMint.toFixed(0)}ms`);
+      // Uploads per round is the headline number for whether this test
+      // reproduces a real send's load: one initial upload plus one re-upload
+      // per drained pool, i.e. ceil(COUNT / TOKENS_PER_RESOURCE) in total.
+      const reuploads = allResults.reduce((s, r) => s + r.reuploads, 0);
+      const reuploadFail = allResults.reduce((s, r) => s + r.reuploadFail, 0);
+      const reuploadMs = allResults.reduce((s, r) => s + r.reuploadMs, 0);
+      console.log(`Uploads: ${allResults.length + reuploads} ok (${allResults.length} initial + ${reuploads} re-upload)`
+        + (reuploadFail > 0 ? `, ${reuploadFail} re-upload failed` : ''));
+      if (reuploads > 0) console.log(`Avg re-upload: ${(reuploadMs / (reuploads + reuploadFail)).toFixed(0)}ms`);
     }
   }
 }
@@ -518,6 +615,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  planMintBatches,
+  TOKENS_PER_RESOURCE,
   resolveGuardInputs,
   targetGuardReport,
   VERDICT_LABEL,
