@@ -313,6 +313,18 @@ describe('formatThresholdPct — the echo shows the threshold that was set', () 
   it('never renders a non-zero threshold as 0.0%', () => {
     expect(formatThresholdPct(0.0001)).not.toBe('0.0%');
   });
+
+  // Past the display bound the two cases diverge, and conflating them would
+  // reintroduce the defect this function exists to fix: a value too fine to
+  // show must not read as no threshold, and a value that is merely
+  // long-running must not read as too fine to show.
+  it('reports a threshold below the display bound as below it', () => {
+    expect(formatThresholdPct(1e-9)).toBe('<0.000001%');
+  });
+
+  it('shows a value that just needs more digits at the bound, not below it', () => {
+    expect(formatThresholdPct(0.333333333333)).toBe('33.333333%');
+  });
 });
 
 describe('parseMaxFailRate — a malformed threshold fails closed', () => {

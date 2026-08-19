@@ -549,20 +549,14 @@ function parseMaxFailRate(raw) {
 const formatPct = (rate, digits = 1) => `${(rate * 100).toFixed(digits)}%`;
 
 /**
- * Render a rate and the threshold it exceeded so the two never print the same
- * string. A rate that only just crosses the line — 1001/10000 against 10% —
- * rounds to the threshold's own spelling, and `10.0% exceeds 10.0%` reads as a
- * bug in the tool rather than a finding about the run. Widen both together
- * until they differ, bounded at four decimals — a gap smaller than that is
- * reachable only through float error, never through a ratio of two counts.
- */
-/**
  * The threshold exactly as it was set. One decimal like the verdict lines, but
  * widened whenever that would round the value away — the echo exists to
  * confirm what was applied, so `--max-fail-rate 0.05` reading back as `0.1%`
- * would defeat the only thing it is there for. Bounded at six decimals; a
- * threshold finer than one part in a hundred million is not a load test's
- * business, and is shown rounded.
+ * would defeat the only thing it is there for.
+ *
+ * Bounded at six decimals of a percent. Past that a value is shown at six
+ * decimals, except where that would render a real threshold as `0.000000%` —
+ * no threshold at all to read — which is reported as below the bound instead.
  */
 function formatThresholdPct(rate) {
   const pct = rate * 100;
@@ -570,9 +564,23 @@ function formatThresholdPct(rate) {
     const text = pct.toFixed(digits);
     if (Number(text) === pct) return `${text}%`;
   }
-  return `${pct.toFixed(6)}%`;
+  const text = pct.toFixed(6);
+  return Number(text) === 0 && pct > 0 ? '<0.000001%' : `${text}%`;
 }
 
+/**
+ * Render a rate and the threshold it exceeded so the two never print the same
+ * string. A rate that only just crosses the line — 1001/10000 against 10% —
+ * rounds to the threshold's own spelling, and `10.0% exceeds 10.0%` reads as a
+ * bug in the tool rather than a finding about the run. Widen both together
+ * until they differ.
+ *
+ * Bounded at four decimals, which a run large enough can genuinely reach: one
+ * failure in ten million is a gap of 0.00001%, below what four decimals
+ * resolve, so the two can still print alike. Only the wording is affected —
+ * the comparison is on the raw fractions and the counts are printed beside it,
+ * so the verdict and the exit code stay right either way.
+ */
 function formatRatePair(rate, threshold) {
   for (const digits of [1, 2, 3]) {
     if (formatPct(rate, digits) !== formatPct(threshold, digits)) {
