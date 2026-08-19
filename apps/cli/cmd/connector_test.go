@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,6 +129,9 @@ type connectorResourceRow struct {
 	Type               string `json:"type"`
 	Status             string `json:"status"`
 	Slug               string `json:"slug"`
+	// CRID is omitempty on purpose: it mirrors the optional-by-presence wire
+	// field, so a row left unset reproduces a platform that mints no CRID.
+	CRID string `json:"crid,omitempty"`
 }
 
 var connectorRoutingIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
@@ -457,6 +461,7 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 	}
 
 	row := mintConnectorRow(t, "cmd-slug")
+	row.CRID = exampleCRID
 	producer := newConnectorProducer(t, row)
 	recorder := newCmdProxyRecorder(t)
 	frpsPort := reserveCmdTCPPort(t)
@@ -517,7 +522,10 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 	}
 	mustEmptyStdout(t, res)
 	stderr := res.stderr.String()
-	for _, want := range []string{`Starting Connector "cmd-slug"`, "127.0.0.1:" + echoURL.Port(), "Stopped."} {
+	// The CRID line is asserted on the SUCCESSFUL start too, not only on the
+	// cheap failing-knock seam below: a start that goes on to serve traffic
+	// is the moment the customer actually needs the identity in hand.
+	for _, want := range []string{`Starting Connector "cmd-slug"`, "127.0.0.1:" + echoURL.Port(), "CRID: " + exampleCRID, "Stopped."} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}
@@ -730,6 +738,143 @@ func TestConnectorRunBudgetExhaustionIsUnavailable(t *testing.T) {
 	}
 	if _, _, closed := knocker.stats(); !closed {
 		t.Error("the command never Closed the knocker after the budget exit")
+	}
+}
+
+// connectorServeAttempt drives `qurl connector run` exactly as far as the
+// startup note and no further: the producer serves one resource carrying crid
+// (empty reproduces a platform that minted none, since the wire field is
+// omitempty), the note renders, then every knock fails against a budget of one
+// and the command exits Unavailable (11) in milliseconds. It is the cheapest
+// seam that reaches the rendering — the hermetic serve test reaches the same
+// line but pays for a real in-process tunnel to do it. Any extra global flags
+// are placed ahead of the subcommand, where the golden table puts them.
+func connectorServeAttempt(t *testing.T, crid string, globalArgs ...string) *runResult {
+	t.Helper()
+	skipWithoutPinnedState(t)
+	connectorTestEnv(t)
+
+	row := mintConnectorRow(t, connectorServeID)
+	row.CRID = crid
+	producer := newConnectorProducer(t, row)
+	knocker := &cmdCycleKnocker{knockErr: errors.New("assigned endpoint unreachable")}
+	args := append([]string{"--endpoint", producer.URL}, globalArgs...)
+	args = append(args, "connector", "run", "--id", row.Slug, "--target", ":8080", "--state-dir", t.TempDir())
+
+	res := runCLI(t, &runOpts{
+		args:          args,
+		env:           map[string]string{},
+		connectorOpen: fakeConnectorOpen(t, producer.URL),
+		newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
+			knocker.resourceID = knockResourceID
+			return knocker, nil
+		},
+		connectorTune: func(cfg *supervisor.Config) {
+			cfg.MinBackoff = time.Millisecond
+			cfg.MaxBackoff = 2 * time.Millisecond
+			cfg.MinKnockInterval = time.Millisecond
+			cfg.MaxConsecutiveKnockFailures = 1
+		},
+	})
+	if res.code != 11 {
+		t.Fatalf("exit = %d, want 11 (past the startup note, then out of budget); stderr: %s", res.code, res.stderr.String())
+	}
+	// connector run has no stdout document in any mode: it runs until it is
+	// interrupted, so `$(...)` around it could only hang.
+	mustEmptyStdout(t, res)
+	return res
+}
+
+// The startup note's rendered shape for the Connector connectorServeAttempt
+// runs. The headline half is byte-for-byte the note that shipped before the
+// CRID was added, which is what the no-CRID case asserts survives unchanged.
+const (
+	connectorServeID         = "cmd-id"
+	connectorServingHeadline = `Starting Connector "` + connectorServeID + `" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.`
+	connectorServingCRIDNote = "\n\n  Anyone authorized can reach it with `qurl get <CRID>`.\n\nCRID: " + exampleCRID + "\n"
+)
+
+// TestConnectorRunServingNoteCarriesCRID pins the reason this rendering
+// exists: the Connector already knows its own CRID, so starting one must not
+// send the customer off to list resources to find it. It pins the copy
+// contract (the CRID alone on its own line), the degradation (a platform that
+// minted no CRID prints the original note and no empty label), and that
+// neither --quiet nor --output json changes either answer.
+func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
+	t.Run("CRID renders as a copyable block", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, exampleCRID).stderr.String()
+
+		if want := connectorServingHeadline + connectorServingCRIDNote; !strings.Contains(stderr, want) {
+			t.Errorf("startup note is not the expected document\nwant contiguous:\n%s\ngot stderr:\n%s", want, stderr)
+		}
+		// The copy contract: the CRID owns a whole line, carrying nothing but
+		// its label before it and nothing at all after it.
+		if !slices.Contains(strings.Split(stderr, "\n"), "CRID: "+exampleCRID) {
+			t.Errorf("the CRID is not alone on its line, so it can't be selected cleanly:\n%s", stderr)
+		}
+	})
+
+	// The prose note above is written for a person; an unattended runner reads
+	// the structured events instead. Both must carry the identity, or headless
+	// operators are left scraping wording that is free to change.
+	t.Run("the structured event carries it for unattended runners", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, exampleCRID).stderr.String()
+
+		var starting string
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.Contains(line, "event=connector_starting") {
+				starting = line
+				break
+			}
+		}
+		if starting == "" {
+			t.Fatalf("no connector_starting event was logged:\n%s", stderr)
+		}
+		// Unquoted `crid=<value>` is the shape a consumer parses. slog's
+		// TextHandler quotes a value containing a space, '=', '"' or a
+		// control character, and a CRID is base32 over [a-z2-7], so it
+		// never triggers that — asserting the bare form pins the promise.
+		for _, want := range []string{"crid=" + exampleCRID, "connector_id=cmd-id"} {
+			if !strings.Contains(starting, want) {
+				t.Errorf("connector_starting event missing %q:\n%s", want, starting)
+			}
+		}
+	})
+
+	t.Run("the structured event omits an absent CRID rather than logging it empty", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, "").stderr.String()
+
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.Contains(line, "event=connector_starting") && strings.Contains(line, "crid=") {
+				t.Errorf("an absent CRID was logged anyway, so presence stops meaning anything:\n%s", line)
+			}
+		}
+	})
+
+	t.Run("no CRID leaves the note exactly as it was", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, "").stderr.String()
+
+		if !strings.Contains(stderr, connectorServingHeadline+"\n") {
+			t.Errorf("the original startup note did not survive a missing CRID:\n%s", stderr)
+		}
+		for _, banned := range []string{"CRID:", "qurl get <CRID>"} {
+			if strings.Contains(stderr, banned) {
+				t.Errorf("an absent CRID still printed %q:\n%s", banned, stderr)
+			}
+		}
+	})
+
+	// --quiet and --output json shape the stdout document; this command has
+	// none, and suppressing the CRID under either would restore exactly the
+	// friction the rendering removes.
+	for _, mode := range [][]string{{"--quiet"}, {"-o", "json"}} {
+		t.Run(strings.Join(mode, " ")+" renders the same note", func(t *testing.T) {
+			stderr := connectorServeAttempt(t, exampleCRID, mode...).stderr.String()
+
+			if want := connectorServingHeadline + connectorServingCRIDNote; !strings.Contains(stderr, want) {
+				t.Errorf("%v changed the startup note\nwant contiguous:\n%s\ngot stderr:\n%s", mode, want, stderr)
+			}
+		})
 	}
 }
 

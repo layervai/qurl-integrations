@@ -35,13 +35,20 @@ type resolveJSON struct {
 	SingleUse        bool       `json:"single_use,omitempty"`
 }
 
+// listItemJSON is the only projection that carries a row's publish-time
+// metadata: description, type and tags reach scripts here and nowhere else
+// (the text table deliberately omits them — see List). A sweeper identifying
+// throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	CRID       string     `json:"crid,omitempty"`
-	ResourceID string     `json:"resource_id"`
-	TargetURL  string     `json:"target_url,omitempty"`
-	Status     string     `json:"status,omitempty"`
-	CreatedAt  *time.Time `json:"created_at,omitempty"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	CRID        string     `json:"crid,omitempty"`
+	ResourceID  string     `json:"resource_id"`
+	TargetURL   string     `json:"target_url,omitempty"`
+	Type        string     `json:"type,omitempty"`
+	Status      string     `json:"status,omitempty"`
+	Description string     `json:"description,omitempty"`
+	Tags        []string   `json:"tags,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
 type listJSON struct {
@@ -150,9 +157,30 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
 	if res.CRID != "" {
-		ew.printf("\n%s %s\n", p.bold("CRID:"), res.CRID)
+		ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	}
 	return ew.flush(nil)
+}
+
+// ConnectorServing announces a Connector serve loop. The Connector resolved
+// its own resource at startup, so the note carries that resource's CRID
+// instead of leaving the customer to go find it: the anatomy mirrors the
+// publish document — headline, an indented detail line, then the CRID last
+// and alone on its line, the easiest thing to select and copy.
+//
+// The CRID is optional by presence on the wire, so a platform that returned
+// none gets the headline alone — never an empty label. Every mode renders
+// the same note: --quiet and --output json shape the stdout document, and a
+// serve loop that runs until interrupted has none (capturing its stdout
+// would only hang), so this stays a stderr status note throughout. Writes
+// are best-effort for the same reason Notef's are — a broken stderr must not
+// take down an otherwise healthy serve loop.
+func (p *Printer) ConnectorServing(id, target, crid string) {
+	p.Notef(msgConnectorServing, id, target)
+	if crid == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(p.err, "\n%s\n\n%s %s\n", p.dim("  "+msgConnectorReachIt), p.bold(labelCRID), crid)
 }
 
 // Resolve renders a minted temporary access link. Piped stdout gets the bare
@@ -210,24 +238,37 @@ func (p *Printer) resolveDetail(res *qurlapi.Resolved) string {
 // List renders one page of resources. The text table middle-ellipsizes the
 // CRID column; --quiet and JSON always carry full identifiers. An empty page
 // writes nothing to stdout — zero rows means zero data lines.
+//
+// The text table carries no description/type/tags column, deliberately. At
+// its truncation caps the five existing columns already run 93 characters
+// wide — past an 80-column terminal — and it middle-ellipsizes the CRID and
+// truncates the target to get even there, so a sixth column of unbounded
+// width would have to come out of those two. The consumer that needs this
+// metadata is a script, and scripts read -o json. Widen the table only for
+// something a human scanning rows cannot get any other way.
 func (p *Printer) List(page *qurlapi.ResourcePage) error {
 	switch {
 	case p.format == FormatJSON:
 		out := listJSON{Resources: make([]listItemJSON, 0, len(page.Items)), HasMore: page.HasMore, NextCursor: page.NextCursor}
-		for _, item := range page.Items {
+		for i := range page.Items {
+			item := &page.Items[i]
 			out.Resources = append(out.Resources, listItemJSON{
-				CRID:       item.CRID,
-				ResourceID: item.ResourceID,
-				TargetURL:  item.TargetURL,
-				Status:     item.Status,
-				CreatedAt:  item.CreatedAt,
-				ExpiresAt:  item.ExpiresAt,
+				CRID:        item.CRID,
+				ResourceID:  item.ResourceID,
+				TargetURL:   item.TargetURL,
+				Type:        item.Type,
+				Status:      item.Status,
+				Description: item.Description,
+				Tags:        item.Tags,
+				CreatedAt:   item.CreatedAt,
+				ExpiresAt:   item.ExpiresAt,
 			})
 		}
 		return p.writeJSON(out)
 	case p.quiet:
 		ew := &errWriter{w: p.out}
-		for _, item := range page.Items {
+		for i := range page.Items {
+			item := &page.Items[i]
 			ew.printf("%s\n", primaryID(item.CRID, item.ResourceID))
 		}
 		return ew.flush(nil)

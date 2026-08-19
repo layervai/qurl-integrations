@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -380,6 +381,41 @@ func TestConnectorRequestRejectedDropsSDKRemedy(t *testing.T) {
 	}
 }
 
+// TestConnectorServingNote pins the startup note byte-exactly at the
+// rendering seam: the CRID lands last and alone on its line (the copy
+// contract), a platform that returned no CRID gets the original one-line note
+// with no empty label, and color styles only the label — never the CRID
+// itself, which would bury escape bytes inside a value people paste.
+func TestConnectorServingNote(t *testing.T) {
+	const headline = "Starting Connector \"billing\" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.\n"
+
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
+	p.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
+	want := headline + "\n  Anyone authorized can reach it with `qurl get <CRID>`.\n\nCRID: acrid\n"
+	if got := errBuf.String(); got != want {
+		t.Errorf("serving note =\n%q\nwant\n%q", got, want)
+	}
+	// The note is status, not data: a serve loop that runs until interrupted
+	// has no stdout document to put it in.
+	if out.Len() != 0 {
+		t.Errorf("serving note wrote to stdout: %q", out.String())
+	}
+
+	errBuf.Reset()
+	p.ConnectorServing("billing", "127.0.0.1:8080", "")
+	if got := errBuf.String(); got != headline {
+		t.Errorf("note without a CRID =\n%q\nwant the unchanged one-liner\n%q", got, headline)
+	}
+
+	errBuf.Reset()
+	colored := newTestPrinter(&out, &errBuf, FormatText, false, true, false)
+	colored.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
+	if got := errBuf.String(); !strings.HasSuffix(got, " acrid\n") {
+		t.Errorf("colored note must end with the bare CRID, got %q", got)
+	}
+}
+
 // TestEveryConnectorMessageIsRegistered guards the jargon gate's reach: a
 // headline or hint that renders but is missing from CustomerMessages is never
 // checked for jargon by cmd's gate.
@@ -389,6 +425,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		registered[msg] = true
 	}
 	rendered := []string{
+		msgConnectorServing, msgConnectorReachIt, labelCRID,
 		msgConnectorTokenConsumed, hintConnectorTokenConsumed,
 		msgConnectorTokenRejected, hintConnectorTokenRejected,
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
@@ -425,6 +462,88 @@ func TestJSONProjectionIsRepoOwned(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("resolve JSON missing key %s:\n%s", want, got)
 		}
+	}
+}
+
+// TestListJSONCarriesRowMetadata pins the one projection that exposes a
+// row's publish-time metadata. Absent fields must stay absent rather than
+// render as empty values. The line this draws is "a real label is present"
+// versus "no visible label" — it deliberately does not separate unset from
+// redacted (the service omits description and tags on connector-owned rows,
+// and both cases arrive here as the zero value, so both drop the key). What
+// it buys is that the document never asserts `"description": ""` as though
+// the server had said so.
+func TestListJSONCarriesRowMetadata(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{
+		{
+			CRID:        "labeled",
+			ResourceID:  "r1",
+			TargetURL:   "https://a.example",
+			Type:        "url",
+			Status:      "active",
+			Description: "cli sandbox e2e journey (safe to delete)",
+			Tags:        []string{"sandbox", "e2e"},
+		},
+		{CRID: "bare", ResourceID: "r2", Status: "revoked"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		`"type": "url"`,
+		`"description": "cli sandbox e2e journey (safe to delete)"`,
+		`"sandbox"`,
+		`"e2e"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("list JSON missing %s:\n%s", want, got)
+		}
+	}
+	// The bare row is the second document element; nothing may synthesize
+	// an empty description, tag list, or type for it.
+	second := strings.Index(got, `"bare"`)
+	if second < 0 {
+		t.Fatalf("second row missing from the document:\n%s", got)
+	}
+	bare := got[second:]
+	for _, unwanted := range []string{`"description"`, `"tags"`, `"type"`} {
+		if strings.Contains(bare, unwanted) {
+			t.Errorf("row without metadata emitted %s:\n%s", unwanted, bare)
+		}
+	}
+}
+
+// TestListTextOmitsRowMetadata pins the deliberate table decision: the five
+// columns stay as they are, and the metadata reaches scripts through JSON
+// only. The apps/cli goldens pin the same thing from the other side (their
+// mock row carries a description that never appears in the table).
+func TestListTextOmitsRowMetadata(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{{
+		CRID:        "acrid",
+		ResourceID:  "r1",
+		TargetURL:   "https://a.example",
+		Type:        "url",
+		Status:      "active",
+		Description: "a description nobody asked the table to render",
+		Tags:        []string{"sandbox"},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, unwanted := range []string{"DESCRIPTION", "TAGS", "a description nobody asked", "sandbox"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("text table rendered %q; the metadata columns are deliberately absent:\n%s", unwanted, got)
+		}
+	}
+	// tabwriter pads the header into columns, so compare the fields rather
+	// than the raw line: exactly the five documented columns, in order.
+	header := strings.Fields(strings.SplitN(got, "\n", 2)[0])
+	if want := []string{"CRID", "TARGET", "STATUS", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
+		t.Errorf("table header = %v, want %v", header, want)
 	}
 }
 

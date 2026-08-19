@@ -50,6 +50,11 @@ const (
 	labelKeyring        = "OS keyring"
 	labelCredentialFile = "credential file"
 
+	// labelCRID prefixes the copyable identity line every document that has
+	// a CRID ends with, so publish and the Connector serve note cannot drift
+	// into two spellings of the same label.
+	labelCRID = "CRID:"
+
 	// msgLoggedInAs opens the login confirmation; %s is the account.
 	msgLoggedInAs = "Logged in as %s."
 
@@ -71,6 +76,18 @@ const (
 	// msgPublishFoundExisting is the text-document note for that same case:
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
+
+	// msgConnectorServing announces the serve loop: the Connector ID (as the
+	// platform records it), then the local app being served. It lives here
+	// rather than in the cmd package because it is no longer a bare note —
+	// Printer.ConnectorServing renders it as a document whose styling is
+	// this package's private business.
+	msgConnectorServing = "Starting Connector %q for your local app at %s. Press Ctrl-C to stop."
+
+	// msgConnectorReachIt is that document's detail line: what the CRID
+	// printed beneath it is for. It only renders when the platform actually
+	// returned a CRID, so it can never point at a value that isn't there.
+	msgConnectorReachIt = "Anyone authorized can reach it with `qurl get <CRID>`."
 
 	// Connector lifecycle renderings. Headlines say what happened in customer
 	// language; the operator detail (which stays technical) is appended by
@@ -223,12 +240,15 @@ func CustomerMessages() []string {
 		hintKeyInvalid,
 		labelKeyring,
 		labelCredentialFile,
+		labelCRID,
 		msgLoggedInAs,
 		msgLoggedOut,
 		msgNothingStored,
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,
+		msgConnectorServing,
+		msgConnectorReachIt,
 		msgConnectorTokenRequired,
 		hintConnectorTokenRequired,
 		msgConnectorIdentityConflict,

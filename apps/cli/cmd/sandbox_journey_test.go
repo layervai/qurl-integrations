@@ -68,7 +68,9 @@ import (
 const journeyTimeout = 4 * time.Minute
 
 // journeyDescription labels the throwaway resource so a human auditing the
-// sandbox tenancy can tell a leaked fixture from a real one.
+// sandbox tenancy — or a sweeper reading `qurl list -o json` — can tell a
+// leaked fixture from a real one. assertListFindsCRID holds the CLI to
+// surfacing it: a label no listing carries identifies nothing.
 const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
 
 // sandboxJourneyEnv reads the suite's env contract from the real process
@@ -171,7 +173,8 @@ type journeyPublishDoc struct {
 // presence — is the continuation signal, per the ResourcePage contract.
 type journeyListDoc struct {
 	Resources []struct {
-		CRID string `json:"crid"`
+		CRID        string `json:"crid"`
+		Description string `json:"description"`
 	} `json:"resources"`
 	HasMore    bool   `json:"has_more"`
 	NextCursor string `json:"next_cursor"`
@@ -247,7 +250,9 @@ const (
 // documented pagination contract — continue exactly while has_more, via
 // next_cursor — and requires the published CRID to appear exactly once in
 // what it walks (a page overlap or a dropped row is a pagination bug even
-// when the row is eventually found).
+// when the row is eventually found). It then holds the listed row to
+// carrying the label publish gave it, which is the only thing that makes a
+// leaked fixture identifiable to anything built on `qurl list`.
 //
 // The shared tenancy accumulates rows from every sandbox surface (bots,
 // suites), so the whole listing can legitimately outgrow any fixed page
@@ -257,18 +262,31 @@ const (
 // That window is sufficient because the row under test was published
 // moments ago and the platform lists newest first.
 //
-// TODO(upstream-contract): created_at descending is qurl-service's pinned
-// default sort for the resource listing (handlers/server.go, "default:
-// created_at:desc"). If that default ever changes, this window argument
-// breaks loudly — seen stays 0 — and the walk needs an explicit sort or a
-// different presence strategy.
+// The walk asks for --status active for the same reason: deleting a
+// resource is a status flip, not a row removal, so every run of every
+// sandbox suite leaves a permanent revoked row in the unfiltered listing.
+// Filtering spends the page budget on rows that could still be leaked
+// fixtures instead of on the tenancy's accumulated history. That filter
+// couples the exactly-once assertion to the row still being active when
+// the walk runs — it is, because the journey deletes only afterwards. A
+// future reordering that deletes first has to drop the filter with it.
+//
+// TODO(upstream-contract): two qurl-service behaviors hold this walk up.
+// created_at descending is its pinned default sort for the resource listing
+// (handlers/server.go, "default: created_at:desc") — if that default ever
+// changes, the window argument breaks loudly (seen stays 0) and the walk
+// needs an explicit sort or a different presence strategy. `?status=` is
+// honored server-side (handlers/resource.go parses it into ListFilters) —
+// if it ever stops being, the filter silently becomes a no-op and this walk
+// quietly reverts to scanning the whole history.
 func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
 	t.Helper()
 	seen := 0
+	label := ""
 	cursor := ""
 	pages := 0
 	for page := 1; ; page++ {
-		args := []string{"-o", "json", "list", "--limit", strconv.Itoa(listPageLimit)}
+		args := []string{"-o", "json", "list", "--limit", strconv.Itoa(listPageLimit), "--status", "active"}
 		if cursor != "" {
 			args = append(args, "--cursor", cursor)
 		}
@@ -283,6 +301,7 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 		for _, row := range doc.Resources {
 			if row.CRID == id {
 				seen++
+				label = row.Description
 			}
 		}
 		pages = page
@@ -300,6 +319,12 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 	}
 	if seen != 1 {
 		t.Fatalf("published CRID appeared %d times across %d newest-first list pages, want exactly once", seen, pages)
+	}
+	// Not a Fatal: the row was found, so the rest of the journey (resolve,
+	// download, delete) is still worth running and still reclaims the row.
+	if label != journeyDescription {
+		t.Errorf("listed row description = %q, want %q; nothing built on `qurl list` can identify this fixture",
+			label, journeyDescription)
 	}
 }
 
