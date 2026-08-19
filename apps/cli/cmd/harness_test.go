@@ -119,6 +119,14 @@ type runOpts struct {
 	// browser is the injected launcher recorder; nil means a fresh recorder
 	// (pass one to assert on what was — or was not — opened).
 	browser *fakeBrowser
+	// enterPortal is the injected platform access opener; nil means a
+	// refusing fake, so no hermetic test can ever send a real access
+	// request (the clisandbox journey uses the production wiring via
+	// realOpener instead).
+	enterPortal func(ctx context.Context, link string) (string, error)
+	// realOpener keeps the production access opener in place instead of the
+	// refusing fake. Only the clisandbox-tagged live suite sets it.
+	realOpener bool
 
 	// ctx, when non-nil, replaces context.Background() so a test can cancel
 	// a long-running command (connector run's simulated INT/TERM).
@@ -196,6 +204,17 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			return auth.NewChain(kr, auth.NewFileStore(dir), onFileRead)
 		}
 		g.openBrowser = browser.open
+		switch {
+		case o.enterPortal != nil:
+			g.enterPortal = o.enterPortal
+		case o.realOpener:
+			// nil is the production default: newRoot wires the real
+			// consume.AccessOpener over this invocation's lookupEnv.
+		default:
+			g.enterPortal = func(_ context.Context, link string) (string, error) {
+				return "", fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
+			}
+		}
 		switch {
 		case o.sleeps != nil:
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }

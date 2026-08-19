@@ -31,10 +31,14 @@ Before anything is printed, the CLI verifies that the service's answer
 matches the CRID you asked for — a mismatched answer is discarded and the
 command exits with code 12 without printing a link.
 
+The link opens in a browser. Passing it to a tool like curl fetches the
+page that opens the link, not the content itself — to download the content
+from a script, use ` + "`qurl get <CRID> --file <path>`" + `.
+
 When stdout is not a terminal the command prints the bare link and nothing
-else, so it composes: curl "$(qurl resolve <CRID>)".`,
+else, ready to share or open.`,
 		Example: "  qurl resolve " + exampleCRID + "\n" +
-			"  curl \"$(qurl resolve " + exampleCRID + ")\"",
+			"  qurl get " + exampleCRID + " --file report.pdf   # download instead of linking",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			assessment, err := cridux.Assess(args[0])
