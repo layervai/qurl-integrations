@@ -1081,6 +1081,96 @@ func narrowPullRequestTriggerReason(t *testing.T, path, trigger string, config a
 		trigger, types, missing)
 }
 
+// TestNarrowPullRequestTriggerReason pins each reading the predicate gives,
+// against synthetic triggers rather than the live tree.
+//
+// The tree cannot exercise it. No workflow today pairs a narrow filter with a
+// required context — that is the property the suite exists to keep true — so
+// every branch that builds a reason goes unrun by the assertions above, and
+// `missing` could be assembled wrongly, or the `paths`-before-`types`
+// precedence inverted, with the package still green. The mutation sweep in the
+// PR reaches those branches, but it runs out of band and CI never sees it.
+// This is the same argument TestIsNarrowBranchFilter rests on for the branch
+// half, and it belongs here for the same reason.
+//
+// Reasons are matched by substring, not compared whole: what has to hold is
+// that the message names the trigger, the offending value and — for a types
+// filter — which defaults went missing, not the sentence built around them.
+func TestNarrowPullRequestTriggerReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   any
+		narrow   bool
+		contains []string
+	}{
+		{name: "a bare trigger declares nothing and starts for every pull request", config: nil},
+		{name: "an empty mapping is the same reach spelled longhand", config: map[string]any{}},
+		{name: "a branches filter alone is another test's business", config: map[string]any{"branches": []any{"main"}}},
+		{
+			name:   "the default set spelled out explicitly is not narrow",
+			config: map[string]any{"types": []any{"opened", "synchronize", "reopened"}},
+		},
+		{
+			name:   "adding to the default set widens rather than narrows",
+			config: map[string]any{"types": []any{"opened", "edited", "synchronize", "reopened"}},
+		},
+		{
+			name:     "dropping one default is narrow and names it",
+			config:   map[string]any{"types": []any{"opened", "reopened"}},
+			narrow:   true,
+			contains: []string{"pull_request.types", "[synchronize]"},
+		},
+		{
+			name:     "ready_for_review alone drops all three",
+			config:   map[string]any{"types": []any{"ready_for_review"}},
+			narrow:   true,
+			contains: []string{"[opened synchronize reopened]"},
+		},
+		{
+			name:     "a scalar types filter is read, not skipped",
+			config:   map[string]any{"types": "opened"},
+			narrow:   true,
+			contains: []string{"[synchronize reopened]"},
+		},
+		{
+			name:     "any paths filter is narrow, ** included",
+			config:   map[string]any{"paths": []any{"**"}},
+			narrow:   true,
+			contains: []string{"pull_request.paths", "[**]"},
+		},
+		{
+			name:     "a scalar paths filter is read too",
+			config:   map[string]any{"paths": "apps/slack/**"},
+			narrow:   true,
+			contains: []string{"[apps/slack/**]"},
+		},
+		{
+			name:     "paths is reported ahead of types when a trigger carries both",
+			config:   map[string]any{"paths": []any{"docs/**"}, "types": []any{"ready_for_review"}},
+			narrow:   true,
+			contains: []string{".paths"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := narrowPullRequestTriggerReason(t, "synthetic.yml", "pull_request", test.config)
+			if (got != "") != test.narrow {
+				t.Fatalf("narrowPullRequestTriggerReason(%#v) = %q, want narrow = %t", test.config, got, test.narrow)
+			}
+			for _, want := range test.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("reason %q does not mention %q, so it does not say what to go fix", got, want)
+				}
+			}
+			// The precedence case would pass its substring check on a reason
+			// that named both keys, which is the one thing it exists to reject.
+			if test.name == "paths is reported ahead of types when a trigger carries both" && strings.Contains(got, ".types") {
+				t.Errorf("reason %q names both keys; one named reason is what the reader acts on", got)
+			}
+		})
+	}
+}
+
 // TestNarrowTypeAndPathFiltersProduceNoRequiredContext enforces, for `types:`
 // and for trigger-level `paths:`, the premise
 // TestNarrowPullRequestWorkflowsProduceNoRequiredContext enforces for
@@ -1115,7 +1205,10 @@ func TestNarrowTypeAndPathFiltersProduceNoRequiredContext(t *testing.T) {
 			// narrow on all of them. A workflow declaring both events would
 			// report its checks twice over, so the pair is not a fallback for
 			// one another, and holding each to full reach independently is
-			// what assertPullRequestFilter already does for `branches`.
+			// what assertPullRequestFilter already does for `branches`. A file
+			// narrow on both keeps whichever reason came last, which is
+			// arbitrary but never wrong: each alone is disqualifying, so the
+			// one reported is a real reason to go fix the file.
 			if reason := narrowPullRequestTriggerReason(t, name, trigger, config); reason != "" {
 				narrow[name] = reason
 			}
