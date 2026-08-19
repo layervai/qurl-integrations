@@ -373,7 +373,16 @@ async function reclaim(ledgerPath) {
 // had not reached yet.
 let reclaimInFlight = null;
 function reclaimOnce(ledgerPath) {
-  if (!reclaimInFlight) reclaimInFlight = reclaim(ledgerPath);
+  if (!reclaimInFlight) {
+    // Cleared on rejection. Without this, a sweep that threw would be
+    // memoized as a rejected promise, and main().catch's "reclaim on fatal
+    // error" fallback would re-await that same rejection — reading as a
+    // retry while being structurally incapable of retrying.
+    reclaimInFlight = reclaim(ledgerPath).catch((e) => {
+      reclaimInFlight = null;
+      throw e;
+    });
+  }
   return reclaimInFlight;
 }
 
@@ -404,6 +413,12 @@ async function reclaimAndExit(signal) {
   } catch (e) {
     console.error(`Reclaim failed: ${e.message}`);
   }
+  // Unlike the end-of-run path, this exits immediately rather than setting
+  // process.exitCode: a round may still be parked in the inter-round sleep,
+  // which would keep the process alive for up to --interval seconds after the
+  // operator asked it to stop. The tradeoff is that piped output can lose the
+  // final tally line, which is why that line is not the only place the
+  // outstanding count and the --reclaim command appear.
   process.exit(SIGNAL_EXIT_CODES[signal] || 1);
 }
 
@@ -647,6 +662,9 @@ if (require.main === module) {
 }
 
 // Exported so the suite covers them without live API traffic.
+// trackCreate is exported for the suite rather than for callers: the
+// in-flight-wait branch of the drain is otherwise unreachable from a test,
+// and it is the branch the sweep-vs-run-loop fix turns on.
 module.exports = {
-  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg,
+  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate,
 };

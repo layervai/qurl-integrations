@@ -29,7 +29,7 @@ jest.mock('../src/qurl', () => ({
 const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
 const {
-  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg,
+  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate,
 } = require('../scripts/loadtest-standalone');
 
 let created = [];
@@ -229,6 +229,31 @@ describe('reclaim', () => {
     expect(deleteLink).toHaveBeenCalledWith('r_late');
     expect(result).toMatchObject({ revoked: 2, failed: 0 });
     expect(readLedger(ledger)).toEqual([]);
+  });
+
+  it('waits for a create still in flight instead of finishing without it', async () => {
+    // The interleaving the whole sweep-vs-run-loop fix exists for: `stopping`
+    // cannot un-issue a request already awaiting a response, so a create can
+    // resolve and record AFTER the drain's last on-disk pass. Re-reading the
+    // ledger alone does not catch that — only waiting on the counter does.
+    const ledger = tempLedger(line('r_1'));
+    let release;
+    const suspended = new Promise((resolve) => { release = resolve; });
+    const creating = trackCreate(async () => {
+      await suspended;
+      fs.appendFileSync(ledger, line('r_late'));
+    });
+
+    const sweep = reclaim(ledger);
+    // Let the sweep revoke r_1 and reach an empty pass with the create still
+    // outstanding; without the in-flight wait it would resolve here.
+    await new Promise((r) => { setTimeout(r, 250); });
+    release();
+    await creating;
+    const result = await sweep;
+
+    expect(deleteLink).toHaveBeenCalledWith('r_late');
+    expect(result).toMatchObject({ revoked: 2, failed: 0 });
   });
 
   it('counts a 410 as already-gone, the same as a 404', async () => {
