@@ -62,6 +62,33 @@ type cycleRunner struct {
 // must be canonical and byte-identical to the cycle RunID this runner
 // presented — the RunID-to-session binding is what the whole knock-then-login
 // correlation rests on — so a mismatch rejects the accepted session.
+//
+// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// client/service.go — ServiceOptions.OnFirstLoginSuccess, dispatched by
+// runFirstLoginSuccessHook as `svr.onFirstLoginSuccess(svr.runID)` from
+// inside loopLoginUntilSuccess's loginFunc: synchronously, after
+// `svr.runID = sessionCtx.RunID` (the server's LoginResp.RunID, forwarded
+// verbatim — the fork validates nothing, which is why the canonical-RunID
+// check below is this side's job) and before both NewControl and
+// `ctl.Run(proxyCfgs, visitorCfgs)`, which is the proxy and visitor
+// registration. A returned error closes the session context, cancels the
+// service, and comes back out of Run wrapped in a *firstLoginSuccessHookError
+// whose message is fixed and whose Unwrap carries this cause. A sync.Once
+// guards the dispatch, so it fires at most once per Service and a later
+// internal reconnect reuses that admission without re-running this check;
+// the factory NewFRPRunnerFactory returns builds one Service per cycle, which
+// is what keeps the admitted latch above a per-cycle signal. If a fork bump
+// moves the dispatch after registration, drops the Once, or stops honoring
+// the error, update this in lockstep.
+//
+// Two things the hook therefore does NOT give, both load-bearing here. A
+// cancellation observed between Login acceptance and the dispatch skips it
+// outright — the fork returns on `svr.ctx.Err()` before assigning the RunID —
+// so admitted stays false for a session the server really did admit, and the
+// proxy_allow event that reads it is not emitted for that cycle. And
+// `svr.runID` is reassigned on EVERY login while the Once fires only on the
+// first, so a server handing back a different RunID on an internal reconnect
+// would be adopted without this check running again.
 func (r *cycleRunner) onFirstLoginSuccess(runID string) error {
 	if err := qurl.ValidateCycleRunID(runID); err != nil {
 		return fmt.Errorf("tunnel server accepted Login with a noncanonical RunID: %w", err)
