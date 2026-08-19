@@ -46,6 +46,14 @@ const (
 
 	claudeReviewEligibleGuard = "steps.eligibility.outputs.eligible == 'true'"
 
+	// The slug the eligibility step is handed as its own repository. A row
+	// setting head or base to it is a same-repo pull request; any other value
+	// is a fork. Deliberately not protectionRepo, which happens to spell the
+	// same string for an unrelated reason: that one is pinned to upstream so a
+	// fork still diffs against upstream's protection, while this is fixture
+	// input the step only ever compares against itself.
+	claudeReviewFixtureRepo = "layervai/qurl-integrations"
+
 	// claudeReviewBudgetEnv names the job-level minute budget. It is the one
 	// number the review step's cap, the report step's classification and the
 	// report step's message all derive from, which is what makes a single
@@ -143,7 +151,6 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 	t.Parallel()
 	requireCommand(t, "bash")
 
-	const repo = "layervai/qurl-integrations"
 	script := claudeReviewStepScript(t, claudeReviewEligibilityStepName)
 
 	tests := []struct {
@@ -157,16 +164,16 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 		baseRepo      string
 		wantExemption string
 	}{
-		{name: "human ready same-repo pull request is reviewed", author: "User", draft: "false", headRepo: repo, baseRepo: repo},
-		{name: "organization author is reviewed", author: "Organization", draft: "false", headRepo: repo, baseRepo: repo},
-		{name: "bot author is exempt", author: "Bot", draft: "false", headRepo: repo, baseRepo: repo, wantExemption: "bot"},
-		{name: "draft is exempt", author: "User", draft: "true", headRepo: repo, baseRepo: repo, wantExemption: "draft"},
-		{name: "fork head is exempt", author: "User", draft: "false", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "fork"},
-		{name: "foreign base is exempt", author: "User", draft: "false", headRepo: repo, baseRepo: "outsider/qurl-integrations", wantExemption: "fork"},
+		{name: "human ready same-repo pull request is reviewed", author: "User", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo},
+		{name: "organization author is reviewed", author: "Organization", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo},
+		{name: "bot author is exempt", author: "Bot", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo, wantExemption: "bot"},
+		{name: "draft is exempt", author: "User", draft: "true", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo, wantExemption: "draft"},
+		{name: "fork head is exempt", author: "User", draft: "false", headRepo: "outsider/qurl-integrations", baseRepo: claudeReviewFixtureRepo, wantExemption: "fork"},
+		{name: "foreign base is exempt", author: "User", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: "outsider/qurl-integrations", wantExemption: "fork"},
 		// Precedence: a bot can never receive this review, while a draft only
 		// waits for one, so the most durable reason is the one reported.
-		{name: "bot outranks fork and draft", author: "Bot", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "bot"},
-		{name: "fork outranks draft", author: "User", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "fork"},
+		{name: "bot outranks fork and draft", author: "Bot", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: claudeReviewFixtureRepo, wantExemption: "bot"},
+		{name: "fork outranks draft", author: "User", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: claudeReviewFixtureRepo, wantExemption: "fork"},
 	}
 
 	for _, tc := range tests {
@@ -178,7 +185,7 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 				"IS_DRAFT":    tc.draft,
 				"HEAD_REPO":   tc.headRepo,
 				"BASE_REPO":   tc.baseRepo,
-				"REPO":        repo,
+				"REPO":        claudeReviewFixtureRepo,
 			})
 			if run.err != nil {
 				t.Fatalf("eligibility step failed: %v\noutput:\n%s", run.err, run.combined)
@@ -213,15 +220,14 @@ func TestClaudeReviewEligibilityFailsClosedOnAnUnreadablePullRequest(t *testing.
 	t.Parallel()
 	requireCommand(t, "bash")
 
-	const repo = "layervai/qurl-integrations"
 	script := claudeReviewStepScript(t, claudeReviewEligibilityStepName)
 
 	base := map[string]string{
 		"AUTHOR_TYPE": "User",
 		"IS_DRAFT":    "false",
-		"HEAD_REPO":   repo,
-		"BASE_REPO":   repo,
-		"REPO":        repo,
+		"HEAD_REPO":   claudeReviewFixtureRepo,
+		"BASE_REPO":   claudeReviewFixtureRepo,
+		"REPO":        claudeReviewFixtureRepo,
 	}
 
 	tests := []struct {
