@@ -329,7 +329,24 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	// The resource resolved above already carries its own CRID — on the
 	// read-by-ID leg and the ensure leg alike — so the serve note can hand it
 	// to the customer with no extra lookup and no extra request.
-	printer.ConnectorServing(resource.Slug, net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort)), resource.CRID)
+	serveTarget := net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort))
+	printer.ConnectorServing(resource.Slug, serveTarget, resource.CRID)
+	// The same identity as a structured event, because the note above is prose
+	// written for a person: an unattended runner would have to scrape it, and
+	// the wording is free to change. A CRID is a public identifier — it names
+	// a resource and grants nothing — so it is safe in a log an operator
+	// collects, unlike a resolved link. It is omitted rather than logged empty
+	// when the platform returned none, so a consumer can treat presence as
+	// meaning.
+	servingAttrs := []any{
+		"event", "connector_starting",
+		"connector_id", resource.Slug,
+		"target", serveTarget,
+	}
+	if resource.CRID != "" {
+		servingAttrs = append(servingAttrs, "crid", resource.CRID)
+	}
+	logger.InfoContext(ctx, "connector: starting to serve local app", servingAttrs...)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}
