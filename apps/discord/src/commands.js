@@ -27,6 +27,7 @@ const {
   RESOURCE_TYPES,
   DM_STATUS,
   MAX_FILE_SIZE,
+  TOKENS_PER_RESOURCE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
@@ -61,10 +62,6 @@ const {
   decodePlaceIdSentinel,
   PLACE_ID_SHAPE_RE,
 } = require('./places');
-
-// Max tokens the QURL API allows per resource. When exceeded, a new
-// resource must be created (re-upload) to get a fresh token pool.
-const TOKENS_PER_RESOURCE = 10;
 
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
@@ -1688,6 +1685,12 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
 
+  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
+  // test issues the upload/mint pattern a real send does. Nothing ties the two
+  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
+  // loop as an oracle and diffs the shapes. If the guard, the increment or the
+  // batchSize formula below changes, update that oracle in the same PR or the
+  // load test keeps measuring the old shape while staying green.
   for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
     if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
       const re = await reuploadFn();
