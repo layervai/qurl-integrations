@@ -365,10 +365,22 @@ func TestClaudeReviewReportClassifiesEveryUnfinishedReview(t *testing.T) {
 
 // stubbedDatePATH writes a `date` shim into a fresh directory and returns a
 // PATH with that directory ahead of the inherited one, the way
-// scripts/test-resolve-validated-base.sh stubs `gh`. The shim answers the one
-// spelling the report step uses and defers anything else to the real binary,
-// so a step that started reading the clock some other way falls through to a
-// real `now` and fails its rows loudly rather than reading them as passes.
+// scripts/test-resolve-validated-base.sh stubs `gh`.
+//
+// It answers `date +%s`, the one spelling the report step uses, and refuses
+// everything else rather than delegating to the real binary. Two reasons, and
+// the second is a trap:
+//
+//   - A step that started reading the clock some other way would otherwise get
+//     a real `now`, roughly 7.8e8 seconds past the fixed one below. Every row
+//     would then classify as a timeout, and the under-budget rows would fail
+//     for a reason that looks nothing like the cause. Refusing puts the cause
+//     on stderr, which lands in the run's combined output.
+//   - Delegating cannot be written the obvious way. This directory is first on
+//     PATH, so `exec date "$@"` re-finds this shim and spins until the test
+//     binary is killed — measured, not assumed. Any reintroduced fallback has
+//     to name an absolute path, which is what the shell script this replaced
+//     did with a hard-coded /bin/date.
 func stubbedDatePATH(t *testing.T) string {
 	t.Helper()
 
@@ -382,7 +394,8 @@ if [ "$1" = "+%s" ]; then
   printf '%s\n' "$DATE_NOW_STUB"
   exit 0
 fi
-exec /bin/date "$@"
+echo "date stub: refusing 'date $*'; this stub models only the report step's 'date +%s'" >&2
+exit 127
 `
 	// #nosec G306 -- a shim is reachable through PATH only if it is
 	// executable, and this one is written into a t.TempDir() the test owns.
@@ -653,18 +666,12 @@ func anchorOccurrences(condition, expression string) []string {
 func claudeReviewRawSteps(t *testing.T) []string {
 	t.Helper()
 
-	// #nosec G304 -- a checked-in workflow file name, fixed by a constant.
-	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", claudeReviewWorkflow))
-	if err != nil {
-		t.Fatalf("read %s: %v", claudeReviewWorkflow, err)
-	}
-
 	var raw struct {
 		Jobs map[string]struct {
 			Steps []map[string]any `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeReviewWorkflow), &raw); err != nil {
 		t.Fatalf("parse %s: %v", claudeReviewWorkflow, err)
 	}
 
@@ -860,12 +867,6 @@ type claudeReviewBudgetWiring struct {
 func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
 	t.Helper()
 
-	// #nosec G304 -- a checked-in workflow file name, fixed by a constant.
-	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", claudeReviewWorkflow))
-	if err != nil {
-		t.Fatalf("read %s: %v", claudeReviewWorkflow, err)
-	}
-
 	var raw struct {
 		Jobs map[string]struct {
 			TimeoutMinutes any            `yaml:"timeout-minutes"`
@@ -876,7 +877,7 @@ func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeReviewWorkflow), &raw); err != nil {
 		t.Fatalf("parse %s: %v", claudeReviewWorkflow, err)
 	}
 
