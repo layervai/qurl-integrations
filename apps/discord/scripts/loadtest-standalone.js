@@ -453,7 +453,7 @@ async function runRound(roundNum) {
     for (let i = 0; i < COUNT; i += 10) {
       const batchSize = Math.min(10, COUNT - i);
       try {
-        await mintLinks(uploadResult.resource_id, expiresAt, batchSize);
+        await mintLinks(uploadResult.resource_id, { expiresAt, n: batchSize });
         results.fileLinks += batchSize;
       } catch (e) {
         if (results.fileFail === 0) console.error(`  File mint error: ${e.message}`);
