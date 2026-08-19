@@ -62,12 +62,18 @@ const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink } = require('../src/qurl');
 
-// Max tokens the qURL API allows per resource; draining the pool means a new
-// resource (re-upload) is needed for a fresh one. Local copy of
-// TOKENS_PER_RESOURCE in ../src/commands.js — that module does not export it,
-// and requiring a ~9500-line command surface (plus its discord.js deps) into a
-// standalone script to read one integer is a bad trade. If the cap ever moves,
-// it moves in commands.js first and this copy has to follow.
+// TODO(upstream-contract): max tokens the qURL API allows per resource;
+// draining the pool means a new resource (re-upload) is needed for a fresh
+// one. The cap is qurl-service's, not ours, and nothing here fails loudly if
+// it moves — a smaller cap silently reintroduces the quota_exceeded batches
+// this constant was added to remove, a larger one leaves the test issuing
+// more uploads than a real send does. Both read as a valid measurement.
+//
+// Local copy of TOKENS_PER_RESOURCE in ../src/commands.js — that module does
+// not export it, and requiring a ~9500-line command surface (plus its
+// discord.js deps) into a standalone script to read one integer is a bad
+// trade. commands.js is the authoritative mirror; if the cap moves it moves
+// there first and this copy follows.
 const TOKENS_PER_RESOURCE = 10;
 
 const args = process.argv.slice(2);
@@ -517,6 +523,15 @@ async function runRound(roundNum) {
     // leaving it off sends the same single `file` part, under the same
     // filename and content type, that the hand-rolled form did. What is new
     // is the timeout and the two response checks.
+    // Deliberately NOT wrapped: a failed initial upload throws out of
+    // runRound, main reports the round as FAILED and it never reaches
+    // allResults. The re-upload leg below does the opposite, charging its
+    // batch and continuing. The asymmetry is the point — a failed re-upload
+    // leaves the earlier batches' links already minted and the round still
+    // worth reporting, whereas a failed initial upload leaves nothing to mint
+    // against at all, so there is no partial round to salvage. Don't
+    // "harmonize" these.
+    //
     // Hoisted: the re-upload leg below registers each fresh resource under
     // the same filename, so a round's resources are one named series.
     const uploadName = `loadtest-round${roundNum}.bin`;
@@ -660,7 +675,11 @@ async function main() {
       // `fileLinks > 0` gate would have printed nothing for it.
       if (results.fileLinks > 0 || results.fileFail > 0) {
         line += `file(upload=${results.uploadMs.toFixed(0)}ms `
-          + `reup=${results.reuploads}/${results.reuploadMs.toFixed(0)}ms `
+          // Attempts over time-spent-on-attempts: reuploadMs accumulates
+          // outside the try/catch, so counting only successes here would put a
+          // numerator and denominator from different populations on one field.
+          // The failed subset is named separately by reupFail= below.
+          + `reup=${results.reuploads + results.reuploadFail}/${results.reuploadMs.toFixed(0)}ms `
           + (results.reuploadFail > 0 ? `reupFail=${results.reuploadFail} ` : '')
           + `mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
       }
@@ -700,7 +719,13 @@ async function main() {
       const reuploadMs = allResults.reduce((s, r) => s + r.reuploadMs, 0);
       console.log(`Uploads: ${allResults.length + reuploads} ok (${allResults.length} initial + ${reuploads} re-upload)`
         + (reuploadFail > 0 ? `, ${reuploadFail} re-upload failed` : ''));
-      if (reuploads > 0) console.log(`Avg re-upload: ${(reuploadMs / (reuploads + reuploadFail)).toFixed(0)}ms`);
+      // Gated on attempts, not successes: a run whose every re-upload failed
+      // still spent time on them, and a failure that sat on the connector's
+      // timeout is exactly the latency worth seeing. Averaged over attempts
+      // for the same reason the round line counts them.
+      if (reuploads + reuploadFail > 0) {
+        console.log(`Avg re-upload: ${(reuploadMs / (reuploads + reuploadFail)).toFixed(0)}ms`);
+      }
     }
   }
 }
