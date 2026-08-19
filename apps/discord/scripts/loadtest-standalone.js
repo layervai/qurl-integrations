@@ -372,7 +372,14 @@ async function reclaim(ledgerPath) {
           outstanding.delete(id);
         } else {
           outstanding.add(id);
-          causes.set(e.message, (causes.get(e.message) || 0) + 1);
+          // Keyed on the cause, not the raw message. callQurl embeds the
+          // request path — and therefore the resource id — in every message,
+          // so keying on it verbatim gives one bucket per failing id: a
+          // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
+          // instead of "5000x", defeating the tally and flooding the very
+          // scrollback the heartbeat is trying to keep readable.
+          const cause = e.message.replace(/\/qurls\/\S+/, '/qurls/<id>');
+          causes.set(cause, (causes.get(cause) || 0) + 1);
         }
       }
       done++;
@@ -1015,6 +1022,7 @@ if (require.main === module) {
 // and it is the branch the sweep-vs-run-loop fix turns on.
 module.exports = {
   // Reclaim ledger
+  LEDGER_PATH,
   readLedger,
   pruneLedger,
   ledgerEndpoints,

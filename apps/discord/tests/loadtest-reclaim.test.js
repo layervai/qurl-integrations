@@ -29,6 +29,7 @@ jest.mock('../src/qurl', () => ({
 const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
 const {
+  LEDGER_PATH,
   readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
 } = require('../scripts/loadtest-standalone');
 
@@ -129,6 +130,17 @@ describe('pruneLedger', () => {
 });
 
 describe('recordResource', () => {
+  afterAll(() => fs.rmSync(LEDGER_PATH, { force: true }));
+
+  it('writes an entry the ledger readers consume, endpoint included', () => {
+    // Round-trips through the real writer rather than this file's `line()`
+    // fixture. If the two drift, every tenancy-guard test above would still
+    // pass while the guard's actual input no longer carried an endpoint.
+    recordResource('r_roundtrip', 'upload');
+    expect(readLedger(LEDGER_PATH)).toContain('r_roundtrip');
+    expect([...ledgerEndpoints(LEDGER_PATH)]).toEqual([config.QURL_ENDPOINT]);
+  });
+
   // A malformed id would otherwise be recorded, then fail every sweep with
   // "Invalid resource ID format" — a message matching neither 404 nor 410 —
   // so it would be retried forever instead of reported as unreclaimable.
@@ -193,6 +205,23 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ missing: false, revoked: 4, failed: 1 });
     // Only the failure survives, so a re-run sweeps just that one.
     expect(readLedger(ledger)).toEqual(['r_2']);
+  });
+
+  it('aggregates failures sharing a cause into one tally line', async () => {
+    // callQurl embeds the resource id in every message, so keying the tally
+    // on the raw message gives one bucket per id — a uniform 401 across
+    // thousands of ids would print thousands of "1x" lines instead of one.
+    const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
+    deleteLink.mockImplementation(async (id) => {
+      throw new Error(`qURL API DELETE /qurls/${id} failed (401)`);
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 3 });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('3x qURL API DELETE /qurls/<id> failed (401)'),
+    );
   });
 
   it('counts an already-gone resource as revoked, not failed', async () => {
