@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/layervai/qurl-integrations/compare/v1.4.0...v1.5.0) (2026-08-19)
+
+
+### Features
+
+* **cli:** surface list-row description, type and tags in JSON output ([#1165](https://github.com/layervai/qurl-integrations/issues/1165)) ([76f33bd](https://github.com/layervai/qurl-integrations/commit/76f33bd09423df1a1c14827049f8e2ff56d0dab9))
+
 ## [1.4.0](https://github.com/layervai/qurl-integrations/compare/v1.3.0...v1.4.0) (2026-08-19)
 
 
