@@ -828,11 +828,25 @@ const { ledgerPath: LEDGER_PATH } = resolveLedgerArg(args, DEFAULT_LEDGER_PATH);
 // Prove the ledger is writable BEFORE anything creates a resource. Discovering
 // an unwritable ledger after the first mint orphans that resource: its id was
 // never recorded and, once the process stops, nothing knows it exists.
-function preflightLedger() {
+//
+// Takes the path rather than reading LEDGER_PATH, the way pruneLedger already
+// does. It proves the path writable by CREATING the ledger, so the mode below
+// is a property of a real file — and a runtime one, invisible to the static
+// write-ban in tests/loadtest-silent-failure.test.js. A parameterless function
+// reading a module-level const resolved from process.argv could only be aimed
+// at a temp file by argv surgery before require, so the mode went unpinned
+// while the sibling gateway-resume-spike.js pinned its own twice.
+function preflightLedger(ledgerPath) {
   try {
-    fs.closeSync(fs.openSync(LEDGER_PATH, 'a', 0o600));
+    // The mode applies on CREATION only: re-running against a ledger that
+    // already exists leaves whatever permissions it has. Deliberate — by then
+    // the file is one the operator named with --ledger, and re-permissioning
+    // it is not this probe's business. gateway-resume-spike.js does chmod
+    // after its write, but the file it may find waiting is its own crashed
+    // run's .tmp, not something the operator chose.
+    fs.closeSync(fs.openSync(ledgerPath, 'a', 0o600));
   } catch (e) {
-    console.error(`FATAL: reclaim ledger ${LEDGER_PATH} is not writable — ${e.message}`);
+    console.error(`FATAL: reclaim ledger ${ledgerPath} is not writable — ${e.message}`);
     console.error('Refusing to create resources that could not be recorded. Pass --ledger PATH.');
     process.exit(1);
   }
@@ -2213,7 +2227,7 @@ async function main() {
   for (const line of report.warnings) console.warn(line);
 
   // After the guard: no point creating the ledger for a run that is refused.
-  preflightLedger();
+  preflightLedger(LEDGER_PATH);
 
   // Quick smoke test
   console.log('Running smoke test...');
@@ -2321,6 +2335,9 @@ if (require.main === module) {
 module.exports = {
   // Reclaim ledger
   LEDGER_PATH,
+  // Exported for the suite, not for callers: main() is the only caller, and
+  // the 0600 it creates the ledger with is unreachable from a test otherwise.
+  preflightLedger,
   readLedger,
   pruneLedger,
   ledgerEndpoints,
