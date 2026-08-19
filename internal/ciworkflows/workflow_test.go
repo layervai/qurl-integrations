@@ -52,8 +52,10 @@ type requiredWorkflowSpec struct {
 	verifierStepName     string
 	unchangedOutput      string
 	// pullRequestBranches is the intended `on.pull_request.branches` filter.
-	// Every app workflow runs on "**" so a PR stacked on a feature branch runs
-	// the same gates as one targeting main; see TestAppWorkflowsRunOnStackedPRs.
+	// All nine carry "**" today, so a PR stacked on a feature branch runs the
+	// same gates as one targeting main. It is read per spec rather than
+	// assumed, so one that later earns a narrower filter records that decision
+	// here; see TestAppWorkflowsRunOnStackedPRs.
 	pullRequestBranches []string
 }
 
@@ -637,6 +639,54 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	// caught rather than left to rot.
 	if want := len(recorded); seen != want {
 		t.Errorf("found %d workflows running on pull_request, want %d (one per recorded entry)", seen, want)
+	}
+}
+
+// TestNarrowPullRequestWorkflowsProduceNoRequiredContext enforces the premise
+// the deliberately-narrow entries rest on, rather than leaving it to a comment
+// nobody rereads.
+//
+// Keeping codeql.yml and dependency-review.yml on `[main]` is defensible only
+// because neither produces a required context: a stacked PR that never runs
+// them is not reading green over a gate that blocks its merge, which is the
+// whole argument that widened the app workflows. Were either to become
+// required, the reasoning would be void — an unregistered required check
+// leaves the PR sitting on "Expected — Waiting for status to be reported"
+// forever, the same silent shape as the 2026-08-14 typo. This turns that
+// premise into something CI checks.
+func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
+	narrow := map[string]bool{}
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		// A nil filter reaches every base branch already, and one naming "**"
+		// is not narrow. Anything else keeps the workflow off stacked PRs.
+		if spec.branches != nil && !slices.Contains(spec.branches, "**") {
+			narrow[spec.path] = true
+		}
+	}
+	if len(narrow) == 0 {
+		t.Skip("no deliberately-narrow entries recorded, so there is no premise to enforce")
+	}
+
+	reported := workflowReportedContexts(t)
+	for _, context := range documentedRequiredContexts(t) {
+		for _, file := range reported.direct[context] {
+			if narrow[file] {
+				t.Errorf("%s is recorded as deliberately narrow but reports required context %q; "+
+					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+			}
+		}
+		// Reusable-workflow calls report as "<caller job> / <inner job>".
+		caller, _, ok := strings.Cut(context, contextSeparator)
+		if !ok {
+			continue
+		}
+		for _, file := range reported.reusable[caller] {
+			if narrow[file] {
+				t.Errorf("%s is recorded as deliberately narrow but its caller job reports required context %q; "+
+					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+			}
+		}
 	}
 }
 
