@@ -535,7 +535,7 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		producesRequiredContext: true,
 		why: "Already unfiltered, and produces a required context. It gates the repo-wide scripts, including " +
 			"the extension lockstep and i18n parity checks, which a stacked PR can break exactly as a " +
-			"main-targeting one can — and now blocks the merge rather than annotating it. Its single job " +
+			"main-targeting one can — and blocks the merge rather than annotating it. Its single job " +
 			"sets no `if:`, so it cannot report `skipped`; the step-level guards there decide which steps " +
 			"run, never whether the job reports.",
 	},
