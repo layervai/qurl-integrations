@@ -235,11 +235,25 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // falls back to config.QURL_API_KEY, and appendViewerTtl drops
     // viewerTtlSeconds unless it is positive-finite. A sixth parameter, or a
     // different one in fourth place, needs that reasoning done again.
+    //
+    // Matched across node shapes on purpose. This check exists to fail on a
+    // REORDER, not on a refactor that preserves the order: moving to an arrow
+    // or function expression, or giving a parameter a default, changes the
+    // AST without changing what position three means.
     let params = null;
+    const paramName = (param) =>
+      (param.type === 'AssignmentPattern' ? param.left.name : param.name);
+    const capture = (fn) => { params = fn.params.map(paramName); };
     traverse(parseFile('src', 'connector.js'), {
       FunctionDeclaration(p) {
-        if (p.node.id?.name !== 'reUploadBuffer') return;
-        params = p.node.params.map(param => param.name);
+        if (p.node.id?.name === 'reUploadBuffer') capture(p.node);
+      },
+      VariableDeclarator(p) {
+        if (p.node.id.type !== 'Identifier' || p.node.id.name !== 'reUploadBuffer') return;
+        const init = p.node.init;
+        if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+          capture(init);
+        }
       },
     });
     expect(params).toEqual([
