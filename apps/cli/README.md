@@ -322,6 +322,20 @@ it stops and asks for approval (exit 2) — approve by running once with
 as approval. Stop serving with Ctrl-C or SIGTERM; teardown gets a short
 grace period and the command exits 130.
 
+Once a tunnel has been admitted, losing the connection no longer fails
+quietly. The Connector says so on stderr, keeps retrying for a bounded
+window, and then starts a fresh connection cycle rather than retrying
+invisibly:
+
+```
+level=WARN msg="connector: the tunnel connection keeps dropping and is not staying up; still retrying, and consumers will time out while it is down" event=reconnect_retrying dial_attempts=3 retrying_seconds=48.2 gives_up_after_seconds=240
+```
+
+The message states the observation and not a cause: at that layer the
+Connector only sees transport errors with no reason attached, so naming
+one would be a guess. The retry budget is finite either way, and a
+Connector that never recovers exits 11 rather than looping forever.
+
 ### qurl login / logout / whoami
 
 `qurl login` reads the key from piped stdin or a hidden interactive
