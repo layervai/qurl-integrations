@@ -385,7 +385,10 @@ func TestApplyKnockResultContract(t *testing.T) {
 
 // TestRefreshStampsOnlyTheDialTargetAndToken pins the refresher's write set —
 // ServerAddr, ServerPort and the one knock-token metadata entry — against the
-// config production actually runs.
+// config production actually runs: frpgen's output after Complete(). The pin
+// is against that COMPLETED shape specifically, which is the shape the
+// concurrency argument is about; a write to a field left at its zero value
+// until completion would not show up here.
 //
 // It is load-bearing for the concurrency argument on redialKnockRefresher, not
 // tidiness. The fork reads the stamped config without synchronization from
