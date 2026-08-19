@@ -110,7 +110,21 @@ function parsePositiveInt(flag, raw) {
  *
  * The space form wins if both are somehow given, so what a doubled flag
  * resolves to is what it already resolved to before the equals form was read
- * at all.
+ * at all. It is the space-form TOKEN that wins, not a usable value: bare
+ * `--count` followed by `--count=200` still consumes the next token as its
+ * raw value and fails the parse on it, rather than reaching past it.
+ *
+ * Scoped to the three numeric flags deliberately. `--file` still resolves
+ * through getArg, which is `indexOf` only, so `--file=/tmp/x` reads as absent
+ * and the run generates its own 1MB payload instead. This change makes that
+ * easier to hit — an operator who learns `=` works here has every reason to
+ * try it there — but it stays bounded: the fallback is echoed as
+ * `File: auto-generated 1MB` in the header printed before the first round,
+ * which is the "visible in the next line of output" class rather than the
+ * `--max-fail-rate` class that decides an exit code two hours later.
+ * Widening this to --file is #1174's job, which routes every flag through one
+ * parser; doing half of it here would duplicate that work and conflict with
+ * it.
  */
 function readFlagToken(argv, flag) {
   const token = `--${flag}`;
