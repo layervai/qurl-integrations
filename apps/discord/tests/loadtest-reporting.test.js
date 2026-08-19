@@ -17,9 +17,18 @@
  * behind `require.main === module`.
  */
 
+const fs = require('fs');
+const path = require('path');
+const parser = require('@babel/parser');
+const traverseModule = require('@babel/traverse');
+const traverse = traverseModule.default || traverseModule;
+
 const {
   readArg,
   argValueMissing,
+  valuedBooleanFlags,
+  BOOLEAN_FLAGS,
+  resolveGuardInputs,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
@@ -205,6 +214,68 @@ describe('argValueMissing — a decision-carrying flag rejects a missing value',
   it('leaves a following flag to the parser, which names it', () => {
     expect(argValueMissing(['--max-fail-rate', '--location'], 'max-fail-rate')).toBe(false);
     expect(parseMaxFailRate('--location').error).toContain("'--location'");
+  });
+});
+
+describe('valuedBooleanFlags — a boolean written with a value is not absence', () => {
+  // hasFlag matches the bare token, so `--location=true` reads as the flag
+  // being absent — and the file leg runs whenever location does not, so the
+  // run silently measures the opposite of what was typed. Worth rejecting
+  // once `--count=20` works and an operator has reason to try `=` here.
+  it('catches a valued --location', () => {
+    expect(valuedBooleanFlags(['--count', '20', '--location=true'])).toEqual(['location']);
+  });
+
+  it('catches a valued --allow-production', () => {
+    expect(valuedBooleanFlags(['--allow-production=1'])).toEqual(['allow-production']);
+  });
+
+  it('reports every offender, not just the first', () => {
+    expect(valuedBooleanFlags(['--location=1', '--allow-production=1']))
+      .toEqual(['location', 'allow-production']);
+  });
+
+  it.each([
+    ['the bare flags', ['--location', '--allow-production']],
+    ['a valued flag that does take a value', ['--max-fail-rate=100', '--count=20']],
+    ['no flags at all', []],
+  ])('passes %s', (_label, argv) => {
+    expect(valuedBooleanFlags(argv)).toEqual([]);
+  });
+
+  // Guards the pairing for real, by reading the script's own hasFlag call
+  // sites rather than restating the constant: a boolean flag added to the
+  // parser but not to BOOLEAN_FLAGS gets no rejection, which is the
+  // silent-absence trap all over again. Parsed statically because the calls
+  // sit at module scope in a file whose main() a suite cannot run — the same
+  // approach as tests/ddb-reserved-words-static.test.js.
+  it('covers every flag hasFlag reads', () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, '..', 'scripts', 'loadtest-standalone.js'), 'utf8',
+    );
+    const names = [];
+    traverse(parser.parse(source, { sourceType: 'script' }), {
+      CallExpression({ node }) {
+        if (node.callee.type !== 'Identifier' || node.callee.name !== 'hasFlag') return;
+        const [arg] = node.arguments;
+        // A computed argument would silently contribute nothing, so fail
+        // rather than let the check quietly stop covering that call.
+        expect(arg && arg.type).toBe('StringLiteral');
+        names.push(arg.value);
+      },
+    });
+    expect(names.length).toBeGreaterThan(0);
+    // Subset, not equality: BOOLEAN_FLAGS is the set of value-less flags, and
+    // hasFlag is only one of the two ways this script reads one.
+    expect(BOOLEAN_FLAGS).toEqual(expect.arrayContaining([...new Set(names)]));
+  });
+
+  // The other way, and the reason the assertion above is a subset:
+  // --allow-production is read by resolveGuardInputs off argv directly, not
+  // through hasFlag, so nothing in that traversal would ever mention it.
+  it('covers --allow-production, which resolveGuardInputs reads off argv', () => {
+    expect(resolveGuardInputs({}, ['--allow-production']).allowProdFlag).toBe(true);
+    expect(BOOLEAN_FLAGS).toContain('allow-production');
   });
 });
 

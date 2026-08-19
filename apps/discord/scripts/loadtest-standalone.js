@@ -111,6 +111,28 @@ function argValueMissing(argv, name) {
 }
 const hasFlag = (name) => args.includes(`--${name}`);
 
+// Flags that carry no value. Named so a valued spelling can be rejected
+// rather than read as absence — see valuedBooleanFlags.
+const BOOLEAN_FLAGS = ['location', 'allow-production'];
+
+/**
+ * Boolean flags written with a value: `--location=true`.
+ *
+ * hasFlag matches the bare token, so a valued spelling reads as the flag being
+ * ABSENT — and for `--location` that silently inverts what the run measures,
+ * since the file leg runs whenever location does not. It became worth
+ * rejecting once readArg started accepting `--count=20`: an operator who has
+ * learned that `=` works has every reason to try it here, and this is the only
+ * place it would quietly mean the opposite of what they typed.
+ *
+ * `--allow-production=1` fails closed on its own — the guard refuses and says
+ * which flag to pass — so this is about saying so at once rather than after
+ * the target table.
+ */
+function valuedBooleanFlags(argv, names = BOOLEAN_FLAGS) {
+  return names.filter((name) => argv.some((a) => a.startsWith(`--${name}=`)));
+}
+
 const COUNT = parseInt(getArg('count', '100'));
 const DURATION_S = parseInt(getArg('duration', '7200'));
 const INTERVAL_S = parseInt(getArg('interval', '60'));
@@ -719,6 +741,15 @@ async function main() {
   // Parsed up here with the other preflight checks: a mistyped threshold that
   // was only read at the summary would surface as a green exit code two hours
   // after the run it was meant to judge.
+  const valued = valuedBooleanFlags(args);
+  if (valued.length > 0) {
+    const names = valued.map((n) => `--${n}`).join(', ');
+    const clause = valued.length === 1
+      ? 'takes no value — pass it on its own.'
+      : 'take no value — pass them on their own.';
+    console.error(`FATAL: ${names} ${clause}`);
+    process.exit(1);
+  }
   if (argValueMissing(args, 'max-fail-rate')) {
     console.error('FATAL: --max-fail-rate needs a percentage, e.g. --max-fail-rate 10.');
     process.exit(1);
@@ -809,6 +840,8 @@ module.exports = {
   // the "Run reporting" section for why they are pure rather than inline.
   readArg,
   argValueMissing,
+  valuedBooleanFlags,
+  BOOLEAN_FLAGS,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
