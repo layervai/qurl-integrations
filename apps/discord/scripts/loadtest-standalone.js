@@ -10,6 +10,8 @@
  *   --file PATH    Local file to upload (default: generates a 1MB test payload
  *                  in memory — nothing is written to disk)
  *   --location     Include a location link in each round
+ *   --ledger PATH  Where to record created resources (default: <tmpdir>/loadtest-ledger-<ts>.jsonl)
+ *   --reclaim PATH Revoke everything in a previous run's ledger, then exit
  *   --max-fail-rate PCT
  *                  Exit non-zero when the failure rate exceeds this percentage
  *                  (default: DEFAULT_MAX_FAIL_RATE_PCT below, currently 10).
@@ -77,9 +79,35 @@
  *   Only loopback is recognized without being named, so a run against a real
  *   sandbox needs LOADTEST_TARGET_HOSTS set. Note that 0.0.0.0 is NOT loopback
  *   (it is the unspecified address); name it explicitly if you bind there.
+ *
+ * Reclaim:
+ *   Every resource this script creates is recorded to the ledger before it is
+ *   used, and revoked before the script exits — on the normal path, on a
+ *   thrown error, and on Ctrl-C, which stops the run rather than racing it.
+ *   Minted links are therefore dead once a run ends; don't expect to open one
+ *   after the summary prints.
+ *
+ *   If the process is killed hard enough to skip all of that (SIGKILL, a dead
+ *   laptop), the ledger is the recovery path:
+ *
+ *     node scripts/loadtest-standalone.js --reclaim <tmpdir>/loadtest-ledger-<ts>.jsonl
+ *
+ *   --reclaim runs BEFORE the target guard: revoking resources that already
+ *   exist is always the safe direction, and a refused target must not strand
+ *   a ledger the operator is trying to clean up. Reclaim resolves its host
+ *   from the ambient QURL_ENDPOINT, so each ledger line records the endpoint
+ *   it was written against and a sweep refuses to run against a different one.
+ *   Re-running is safe: revoked ids are pruned and an already-gone resource
+ *   counts as reclaimed.
+ *
+ *   Two windows this cannot close, both leaking exactly the resource in hand:
+ *   a create that succeeds server-side whose response is then lost, and a
+ *   create whose id cannot be appended because the ledger became unwritable.
+ *   Everything recorded before either is still swept.
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // Load env from .env.loadtest (so user doesn't need to pass env vars on CLI).
@@ -105,7 +133,7 @@ if (require.main === module && fs.existsSync(envFile)) {
 
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
-const { createOneTimeLink } = require('../src/qurl');
+const { createOneTimeLink, deleteLink } = require('../src/qurl');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -158,6 +186,11 @@ const FLAGS = [
   { name: 'interval', takesValue: true, defaultValue: '60' },
   { name: 'file', takesValue: true, defaultValue: null, defaultLabel: 'an auto-generated 1MB test file' },
   { name: 'max-fail-rate', takesValue: true, defaultValue: '10' },
+  { name: 'ledger', takesValue: true, defaultValue: null, defaultLabel: 'a generated path under the temp directory' },
+  // --reclaim has no default: it is a mode switch, and the absence of a value
+  // is refused rather than filled in. The label is what the missing-value
+  // message says instead of naming one.
+  { name: 'reclaim', takesValue: true, defaultValue: null, defaultLabel: 'no default — a ledger path is required' },
   { name: 'location', takesValue: false },
   { name: 'allow-production', takesValue: false },
 ].map((spec) => Object.freeze(spec));
@@ -489,6 +522,56 @@ function resolveFileArg(argv) {
   return { filePath: value, errors };
 }
 
+// --ledger, read through the same reader for the same reasons. It was the last
+// flag still on the removed indexOf-based getArg, which means `--ledger=/x`
+// read as absent and the run recorded to a generated path instead — and the
+// ledger is the one file an operator has to be able to find afterwards, so
+// silently writing it somewhere else is the worst version of that fault.
+//
+// `fallback` is passed rather than closed over so the function stays pure and
+// resolveArgErrors can call it for its errors alone.
+function resolveLedgerArg(argv, fallback = null) {
+  const errors = [];
+  const { defaultValue, defaultLabel } = flagSpec('ledger', true);
+  const { value, error } = readFlag(argv, 'ledger', defaultValue, defaultLabel);
+  if (error) {
+    errors.push(error);
+    return { ledgerPath: fallback, errors };
+  }
+  if (value === null) return { ledgerPath: fallback, errors };
+  // Whitespace-only is a mistyped flag, not a path — same reasoning as --file,
+  // and here it would put the reclaim ledger somewhere unfindable.
+  if (value.trim() === '') {
+    errors.push(`--ledger must name a file to record created resources in, got ${JSON.stringify(value)}`);
+    return { ledgerPath: fallback, errors };
+  }
+  return { ledgerPath: value, errors };
+}
+
+/**
+ * --reclaim's SHAPE, reported into the single preflight pass.
+ *
+ * The mode decision itself stays in parseReclaimArg and is read by main(); what
+ * belongs here is only the refusal, because a flag declared in FLAGS whose
+ * reader reports nothing is accepted by resolveUnknownArgs and then ignored —
+ * the exact defect the table exists to remove. For --reclaim that would be the
+ * worst version of it: the flag silently doing nothing means a full load test
+ * runs where the operator asked to delete.
+ */
+function resolveReclaimArg(argv) {
+  const errors = [];
+  const { requested, path: reclaimPath } = parseReclaimArg(argv);
+  if (requested && !reclaimPath) {
+    // Deliberately not opening with the flag name, unlike the messages nearby:
+    // those are template literals, while a plain string starting with `--` is
+    // swept up by the boolean-flag literal guard in
+    // tests/loadtest-silent-failure.test.js as though it were an ad-hoc flag
+    // read. The name still appears, which is what the wiring check needs.
+    errors.push('a ledger path is required — pass it as --reclaim /tmp/loadtest-ledger-<ts>.jsonl');
+  }
+  return { requested, path: reclaimPath, errors };
+}
+
 /**
  * The flag a token names, or null for one that names none. Both spellings
  * resolve to the same spec, so `--file` and `--file=/tmp/x` are one flag
@@ -698,14 +781,19 @@ function checkUploadFile(filePath) {
 function resolveArgErrors(argv, check = checkUploadFile) {
   const { errors: numericErrors } = resolveNumericArgs(argv);
   const { filePath, errors: fileErrors } = resolveFileArg(argv);
+  const { errors: ledgerErrors } = resolveLedgerArg(argv);
   const { errors: booleanErrors } = resolveBooleanArgs(argv);
   const { errors: unknownErrors } = resolveUnknownArgs(argv);
-  // Unknown arguments report LAST among the argv faults. The three resolvers
-  // above each diagnose a flag the operator did get right the name of, which
-  // is the more specific answer; this one is the catch-all for what none of
-  // them claimed. The readability check stays after all of them, being the
-  // only one that looks past argv.
-  const errors = [...numericErrors, ...fileErrors, ...booleanErrors, ...unknownErrors];
+  // Unknown arguments report LAST among the argv faults. The resolvers above
+  // each diagnose a flag the operator did get right the name of, which is the
+  // more specific answer; this one is the catch-all for what none of them
+  // claimed. The readability check stays after all of them, being the only one
+  // that looks past argv.
+  const { errors: reclaimErrors } = resolveReclaimArg(argv);
+  const errors = [
+    ...numericErrors, ...fileErrors, ...ledgerErrors, ...reclaimErrors,
+    ...booleanErrors, ...unknownErrors,
+  ];
   // Guarded on filePath rather than run unconditionally: null means either no
   // --file was given or its shape already failed above, and statting that
   // would add a second message naming a path the operator never typed.
@@ -728,6 +816,453 @@ const {
 const { filePath: FILE_PATH } = resolveFileArg(args);
 const { includeLocation: INCLUDE_LOCATION } = resolveBooleanArgs(args);
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
+
+// Default under os.tmpdir() and created 0600, following the rationale
+// gateway-resume-spike.js records in this same directory: a predictable path
+// in a world-writable /tmp can be pre-created as a symlink, and appendFileSync
+// follows symlinks. The contents are only resource ids, but the write
+// primitive is real.
+const DEFAULT_LEDGER_PATH = path.join(os.tmpdir(), `loadtest-ledger-${Date.now()}.jsonl`);
+const { ledgerPath: LEDGER_PATH } = resolveLedgerArg(args, DEFAULT_LEDGER_PATH);
+
+// Prove the ledger is writable BEFORE anything creates a resource. Discovering
+// an unwritable ledger after the first mint orphans that resource: its id was
+// never recorded and, once the process stops, nothing knows it exists.
+function preflightLedger() {
+  try {
+    fs.closeSync(fs.openSync(LEDGER_PATH, 'a', 0o600));
+  } catch (e) {
+    console.error(`FATAL: reclaim ledger ${LEDGER_PATH} is not writable — ${e.message}`);
+    console.error('Refusing to create resources that could not be recorded. Pass --ledger PATH.');
+    process.exit(1);
+  }
+}
+
+// Set as soon as a sweep begins. The run loop and the per-recipient loops
+// check it: a sweep snapshots the ledger and then yields at every await, so
+// without this the loop keeps minting ids the snapshot can never see and the
+// script exits having reclaimed only part of what it made.
+let stopping = false;
+
+// Creates that have been issued but not yet recorded. `stopping` ends the
+// loops, but it cannot un-issue a request already awaiting a response: that
+// response still resolves and still appends. The drain re-reads the ledger,
+// which only catches an append that has already happened — so it also waits
+// on this counter, or a create resolving just after the final pass would
+// leave an id no pass ever saw.
+let inFlightCreates = 0;
+async function trackCreate(fn) {
+  inFlightCreates++;
+  try {
+    return await fn();
+  } finally {
+    inFlightCreates--;
+  }
+}
+
+// Every resource is appended to the ledger the moment it exists, before any
+// further work. Holding the ids only in memory would not survive how these
+// runs actually end — a two-hour soak gets Ctrl-C'd. Recovering an unrecorded
+// resource means finding it by description or target through the listing's
+// free-text search, which is imprecise and would collaterally revoke another
+// run's resources; the ledger is exact.
+//
+// Recipient links from mintLinks are deliberately not recorded individually:
+// deleting the parent file resource revokes every qURL minted against it
+// (shared/client/client.go documents the cascade).
+function recordResource(resourceId, kind) {
+  // The same charset guard deleteLink applies bot-side (validateResourceId,
+  // src/qurl.js), not a stricter one. A revision of this check also required
+  // qurl-service's `r_` prefix, on the reasoning that an id passing charset
+  // but failing the SDK's semantic check would be swept as a failure forever.
+  // That reasoning is sound but the check was wrong here: `validateResourceId`
+  // is charset-only *by design*, deferring the prefix to the SDK, and `res-1`
+  // is this repo's fixture convention for a resource id across eight test
+  // files. Being stricter than the codebase's own guard rejected ids the rest
+  // of it treats as valid, and warned on ordinary fixtures.
+  //
+  // The residual risk is accepted: a charset-clean non-`r_` id can only come
+  // from the server, which does not produce one, and if it ever did the
+  // repeated failure is visible in the sweep's cause tally.
+  if (!resourceId || typeof resourceId !== 'string' || !/^[\w-]+$/.test(resourceId)) {
+    // Loud, but deliberately NOT fatal to the run.
+    //
+    // An earlier revision set `stopping` here, on the reasoning that whatever
+    // produced one unusable id produces another every round. The reasoning
+    // holds; the mechanism does not. It couples a diagnostic to destructive
+    // control flow — one malformed id silently truncates the round mid-batch —
+    // and `res-1` is this repo's fixture convention for a resource id across
+    // eight test files, so any caller or suite that stubs an upload trips it.
+    // Merging #1173's re-upload leg surfaced exactly that: nine accounting
+    // tests failed because the round stopped after its first batch.
+    //
+    // In production the id is always `r_`-shaped, so this branch is
+    // effectively unreachable and stopping bought nothing real. The warning is
+    // what carries the diagnostic.
+    console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
+    return;
+  }
+  try {
+    fs.appendFileSync(
+      LEDGER_PATH,
+      // The endpoint travels with the id: --reclaim resolves its target from
+      // ambient config, so without provenance a ledger handed to an operator
+      // in the wrong shell issues bulk deletes against the wrong tenancy.
+      `${JSON.stringify({ resource_id: resourceId, kind, endpoint: config.QURL_ENDPOINT })}\n`,
+    );
+  } catch (e) {
+    // A ledger we cannot write is a leak we cannot reclaim, so stop minting.
+    // Deliberately NOT process.exit: everything recorded before this point is
+    // still on disk and still reclaimable, and exiting here would skip the
+    // sweep that reclaims it — giving up hardest exactly where giving up
+    // leaks most.
+    console.error(`FATAL: cannot write reclaim ledger ${LEDGER_PATH} — ${e.message}`);
+    console.error('Stopping the run; reclaiming what was recorded before the failure.');
+    stopping = true;
+  }
+}
+
+// Returns an array of ids, or null when the ledger file does not exist.
+// Null and [] mean opposite things in recovery mode — "your path is wrong,
+// nothing was swept" versus "nothing is outstanding" — and collapsing them
+// is how an operator walks away believing they are clean.
+function readLedger(ledgerPath, quiet = false) {
+  // statSync rather than existsSync: existsSync is true for a directory, and
+  // readFileSync would then throw EISDIR out of the sweep.
+  let stat;
+  try {
+    stat = fs.statSync(ledgerPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) return null;
+  const ids = [];
+  fs.readFileSync(ledgerPath, 'utf8').split('\n').forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      const { resource_id: id } = JSON.parse(trimmed);
+      if (id) ids.push(id);
+    } catch {
+      // A torn final line is what a hard kill mid-append looks like: skip it
+      // and reclaim the rest rather than abandon the whole ledger. Report
+      // position and size only, never content — --reclaim takes an arbitrary
+      // operator-supplied path, and one aimed at .env.loadtest would echo the
+      // API key into the scrollback.
+      // Quiet on drain passes: the same torn line would otherwise be reported
+      // once per pass and read as several torn lines.
+      if (!quiet) console.error(`  Skipping unparseable ledger line ${index + 1} (${Buffer.byteLength(trimmed)} bytes)`);
+    }
+  });
+  return ids;
+}
+
+// Stands in for an entry that records no endpoint, so such an entry reads as
+// foreign to the tenancy guard rather than as an absence of evidence.
+const UNRECORDED_ENDPOINT = '(no endpoint recorded)';
+
+// Endpoints recorded in a ledger, so a sweep can refuse to delete against a
+// tenancy other than the one the resources were created on.
+function ledgerEndpoints(ledgerPath) {
+  const endpoints = new Set();
+  // Same stat guard as readLedger rather than existsSync: a directory path
+  // would otherwise throw EISDIR here. Today reclaim returns before reaching
+  // this, but that ordering should not be what keeps it safe.
+  try {
+    if (!fs.statSync(ledgerPath).isFile()) return endpoints;
+  } catch {
+    return endpoints;
+  }
+  for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const { resource_id: id, endpoint } = JSON.parse(trimmed);
+      if (!id) continue;
+      // Fail closed. An entry with no recorded endpoint — an older or
+      // hand-edited ledger, or a run with QURL_ENDPOINT unset — would
+      // otherwise contribute nothing to the set and let the guard pass
+      // trivially, which is the opposite of what a safety rail should do
+      // when its input is missing.
+      endpoints.add(endpoint || UNRECORDED_ENDPOINT);
+    } catch { /* torn line — readLedger already reports it */ }
+  }
+  return endpoints;
+}
+
+// Rewrite the ledger with only what is still outstanding, so a re-run sweeps
+// the remainder instead of re-revoking everything. Truncated rather than
+// deleted on a clean sweep: an empty ledger reads as "nothing outstanding",
+// while a missing one is indistinguishable from a mistyped path.
+// Surviving entries are kept as their ORIGINAL lines rather than
+// re-serialized, so nothing recorded is lost in a prune. Re-serializing had
+// dropped `endpoint`, which silently disarmed the tenancy guard on exactly
+// the recovery re-run it exists to protect; keeping the line verbatim makes
+// that class of loss impossible rather than merely fixed once.
+function pruneLedger(ledgerPath, remainingIds) {
+  try {
+    const kept = [];
+    const seen = new Set();
+    for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const { resource_id: id } = JSON.parse(trimmed);
+        if (id && remainingIds.has(id) && !seen.has(id)) {
+          seen.add(id);
+          kept.push(trimmed);
+        }
+      } catch { /* torn line: carries no id, so there is nothing to keep */ }
+    }
+    fs.writeFileSync(ledgerPath, kept.length ? `${kept.join('\n')}\n` : '');
+  } catch (e) {
+    console.error(`  Could not prune ledger ${ledgerPath} — ${e.message}`);
+  }
+}
+
+// Revoke everything recorded in the ledger. Returns { missing, revoked, failed }.
+// Safe to re-run: successfully revoked ids are pruned, and an already-gone
+// resource counts as revoked rather than failed.
+async function reclaim(ledgerPath) {
+  stopping = true;
+
+  const initial = readLedger(ledgerPath);
+  if (initial === null) {
+    console.error(`Reclaim: no ledger file at ${ledgerPath} — nothing was reclaimed.`);
+    return { missing: true, revoked: 0, failed: 0 };
+  }
+
+  // A ledger with content but no readable ids is corruption, not cleanliness.
+  // Recovery mode exists because something already went wrong, so this must
+  // not read as an all-clear the way a genuinely empty ledger does.
+  const populatedLines = fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(l => l.trim()).length;
+  if (initial.length === 0 && populatedLines > 0) {
+    console.error(`Reclaim: ${ledgerPath} holds ${populatedLines} line(s) but no readable resource ids — treating as corrupt, not clean.`);
+    return { missing: false, revoked: 0, failed: 0, unreadable: true };
+  }
+
+  // Always say which tenancy is about to be deleted from — this is a bulk
+  // delete whose target list comes from a file and whose target host comes
+  // from ambient config, and those two can disagree.
+  console.log(`Reclaim: target endpoint ${config.QURL_ENDPOINT}`);
+  // Every recorded endpoint must be the current one, not merely include it:
+  // deletes are issued per id with no per-id host, so a ledger mixing two
+  // tenancies would otherwise pass and then delete the other one's resources.
+  // Compared with a trailing slash trimmed: QURL_ENDPOINT is not normalized
+  // in config.js, so the same tenancy spelled with and without one would
+  // otherwise refuse a legitimate recovery sweep mid-incident.
+  const normalizeEndpoint = (value) => String(value).replace(/\/+$/, '');
+  const current = normalizeEndpoint(config.QURL_ENDPOINT);
+  const foreign = [...ledgerEndpoints(ledgerPath)].filter(e => normalizeEndpoint(e) !== current);
+  if (foreign.length > 0) {
+    console.error(`Reclaim: this ledger records resources on ${foreign.join(', ')}, not ${config.QURL_ENDPOINT}.`);
+    console.error('Refusing to delete against a different tenancy. Set QURL_ENDPOINT to match and re-run.');
+    // Only a trailing slash is normalized, so scheme and host casing have to
+    // match exactly — worth saying, because the alternative to knowing it is
+    // an operator guessing mid-incident.
+    console.error('The match is exact apart from a trailing slash: scheme and host casing must agree.');
+    return { missing: false, revoked: 0, failed: 0, refused: true };
+  }
+
+  const swept = new Set();
+  const outstanding = new Set();
+  const causes = new Map();
+  let revoked = 0;
+
+  // Drain rather than sweep once. An in-flight round can append after the
+  // snapshot is taken, so keep passing until a pass finds nothing new.
+  for (;;) {
+    const pending = [...new Set(readLedger(ledgerPath, true) || [])].filter(id => !swept.has(id));
+    if (pending.length === 0) {
+      // Nothing new on disk, but a create may still be in flight and about to
+      // append. Wait for it rather than finishing and exiting past it.
+      //
+      // Liveness rests on creates eventually settling. On the end-of-run path
+      // every round has already awaited them, so the counter is zero. On the
+      // signal path a genuinely stuck create would spin here, bounded only by
+      // the second-SIGINT abort — so whoever adds the timeout the upload fetch
+      // currently lacks should keep that connection in mind rather than
+      // treating the two as unrelated.
+      if (inFlightCreates === 0) break;
+      await new Promise(r => setTimeout(r, 100));
+      continue;
+    }
+    // A floor built from the 50ms pacing gap alone; per-request latency adds
+    // to it and can dominate on a large sweep. Labelled as a minimum rather
+    // than an estimate, because an operator watching a number they read as an
+    // ETA sail past it is the "looks wedged, reach for kill -9" scenario this
+    // heartbeat exists to prevent.
+    const seconds = Math.max(1, Math.round(pending.length * 0.05));
+    console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (at least ${seconds}s, likely longer)...`);
+    let done = 0;
+    // Serial with a short gap. The tenancy is shared and rate-limited per
+    // account, and a burst of hundreds of deletes is what trips it.
+    for (const id of pending) {
+      swept.add(id);
+      try {
+        await deleteLink(id);
+        revoked++;
+        outstanding.delete(id);
+      } catch (e) {
+        // An already-gone resource is the successful end state for a reclaim.
+        // callQurl collapses API errors to a status-only string, so matching
+        // the status is all that is available.
+        //
+        // TODO(upstream-contract): 404 and 410 are the statuses qurl-service
+        // uses for a resource that no longer exists. If it adopts another,
+        // nothing here fails loudly — a re-run would simply sweep the same
+        // ids forever, reporting them as failures.
+        if (/\((404|410)\)/.test(e.message)) {
+          revoked++;
+          outstanding.delete(id);
+        } else {
+          outstanding.add(id);
+          // Keyed on the cause, not the raw message. callQurl embeds the
+          // request path — and therefore the resource id — in every message,
+          // so keying on it verbatim gives one bucket per failing id: a
+          // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
+          // instead of "5000x", defeating the tally and flooding the very
+          // scrollback the heartbeat is trying to keep readable.
+          const cause = e.message.replace(/\/qurls\/\S+/, '/qurls/<id>');
+          causes.set(cause, (causes.get(cause) || 0) + 1);
+        }
+      }
+      done++;
+      // Without a heartbeat a 12,000-id sweep looks wedged for ten minutes
+      // after the summary has printed, and the operator reaches for kill -9 —
+      // the exact hard kill this whole mechanism exists to survive.
+      if (done % 250 === 0) console.log(`  ...${done}/${pending.length}`);
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  // Load-bearing and invisible: there is no await between the breaking
+  // readLedger above and this write, so recordResource cannot interleave and
+  // have its append truncated away. Inserting any await (including an
+  // awaiting log) between them silently reintroduces the leak.
+  pruneLedger(ledgerPath, outstanding);
+
+  const failed = outstanding.size;
+  if (swept.size === 0) {
+    console.log(`Reclaim: nothing outstanding in ${ledgerPath}.`);
+    return { missing: false, revoked: 0, failed: 0 };
+  }
+  console.log(`Reclaim: ${revoked} revoked, ${failed} failed.`);
+  // A tally rather than one sampled message: 401 (key rotated mid-soak), 429
+  // (rate limited) and the rest demand different responses, and one sample
+  // only identifies the cause if the run failed uniformly.
+  for (const [message, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) {
+    console.error(`  ${n}x ${message}`);
+  }
+  if (failed > 0) {
+    console.error(`Reclaim: ${failed} resource(s) still on the tenancy — re-run with --reclaim ${ledgerPath}`);
+  }
+  return { missing: false, revoked, failed };
+}
+
+// Every reclaim path goes through here: the normal end of a run, a thrown
+// error, and both signals. The promise is memoized rather than guarded by a
+// boolean so a Ctrl-C arriving *during* the end-of-run sweep waits for the
+// sweep already in flight instead of either starting a competing one or
+// exiting out from under it — both of which strand the resources the sweep
+// had not reached yet.
+let reclaimInFlight = null;
+function reclaimOnce(ledgerPath) {
+  if (!reclaimInFlight) {
+    // Cleared on rejection. Without this, a sweep that threw would be
+    // memoized as a rejected promise, and main().catch's "reclaim on fatal
+    // error" fallback would re-await that same rejection — reading as a
+    // retry while being structurally incapable of retrying.
+    reclaimInFlight = reclaim(ledgerPath).catch((e) => {
+      reclaimInFlight = null;
+      throw e;
+    });
+  }
+  return reclaimInFlight;
+}
+
+// Test-only seam. The memo is process-global on purpose — one run, one sweep —
+// which also means a suite cannot exercise a second, independent sweep without
+// clearing it. No production path calls this; it exists so the memoization and
+// its rejection-clearing can be pinned rather than resting on a transcript.
+function resetReclaimStateForTests() {
+  reclaimInFlight = null;
+  stopping = false;
+  inFlightCreates = 0;
+}
+
+// Which ledger a signal should sweep: this run's own, or the one named by
+// --reclaim while that recovery mode is running.
+let activeLedgerPath = LEDGER_PATH;
+
+// Exit codes follow the convention gateway-resume-spike.js documents, so a
+// wrapper can tell user-cancel from external termination: 130 for SIGINT,
+// 143 for SIGTERM. An interrupted soak is never a success, even when its
+// sweep succeeds.
+const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
+
+let signalled = false;
+async function reclaimAndExit(signal) {
+  if (signalled) {
+    // The first signal starts a sweep that can run for minutes. Swallowing
+    // every later one leaves no way out but kill -9 — the hard kill this
+    // mechanism exists to survive — so the second one is an immediate abort.
+    console.error(`\nSecond ${signal} — aborting without finishing the sweep.`);
+    console.error(`Resources already created are still recorded; re-run with --reclaim ${activeLedgerPath}`);
+    process.exit(SIGNAL_EXIT_CODES[signal] || 1);
+  }
+  signalled = true;
+  console.log(`\nReceived ${signal} — stopping the run and reclaiming what it created...`);
+  try {
+    await reclaimOnce(activeLedgerPath);
+  } catch (e) {
+    console.error(`Reclaim failed: ${e.message}`);
+  }
+  // Unlike the end-of-run path, this exits immediately rather than setting
+  // process.exitCode: a round may still be parked in the inter-round sleep,
+  // which would keep the process alive for up to --interval seconds after the
+  // operator asked it to stop. The tradeoff is that piped output can lose the
+  // final tally line, which is why that line is not the only place the
+  // outstanding count and the --reclaim command appear.
+  process.exit(SIGNAL_EXIT_CODES[signal] || 1);
+}
+
+// Registered before anything can create a resource — including the preflight
+// smoke link, which is minted well before the run loop starts.
+function installSignalHandlers() {
+  process.on('SIGINT', () => { reclaimAndExit('SIGINT'); });
+  process.on('SIGTERM', () => { reclaimAndExit('SIGTERM'); });
+}
+
+// Extracted from main so the suite can cover it. This guard prevents the
+// worst outcome in the file: `--reclaim` with no value would fall through to
+// a FULL LOAD TEST, minting thousands of resources when the operator asked to
+// delete some, and `--reclaim --ledger x` would take the next flag as the
+// path, find no such file, and report a clean exit.
+// Reads through readFlag like every other value-taking flag, but keeps its own
+// return shape: --reclaim is a MODE switch, so "not given" and "given without
+// a usable value" have to stay distinguishable. readFlag collapses them (both
+// yield no value), and acting on that collapse is precisely the failure this
+// guard exists to prevent — a bare --reclaim falling through to a full load
+// test, minting thousands of resources when the operator asked to delete some.
+// So presence is detected here and the value is delegated.
+function parseReclaimArg(argv) {
+  // Flag name written WITHOUT the dashes, the shape the boolean-literal guard
+  // in tests/loadtest-silent-failure.test.js sanctions: a bare '--reclaim'
+  // literal here is indistinguishable from the ad-hoc flag reads that guard
+  // exists to catch, even though this one is a presence check for a mode
+  // switch rather than a value read.
+  const FLAG = 'reclaim';
+  const requested = argv.some(a => a === `--${FLAG}` || a.startsWith(`--${FLAG}=`));
+  if (!requested) return { requested: false, path: null };
+  const { defaultValue, defaultLabel } = flagSpec(FLAG, true);
+  const { value, error } = readFlag(argv, FLAG, defaultValue, defaultLabel);
+  // An error is a missing or flag-shaped value; an empty inline value
+  // (`--reclaim=`) arrives as '' and is equally unusable. Both are "asked to
+  // reclaim, told us nothing to reclaim", which main() refuses loudly.
+  if (error || !value) return { requested: true, path: null };
+  return { requested: true, path: value };
+}
 
 // The auto-generated payload is byte-identical on every round — `Buffer.alloc`
 // fills a fixed length with a fixed byte — and the upload filename comes from
@@ -1450,7 +1985,7 @@ async function runRound(roundNum) {
   const locErrors = new Map();
 
   // File pipeline
-  if (FILE_PATH || !INCLUDE_LOCATION) {
+  if (!stopping && (FILE_PATH || !INCLUDE_LOCATION)) {
     const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
     // Upload through the bot's own connector client rather than a hand-rolled
@@ -1488,11 +2023,20 @@ async function runRound(roundNum) {
     // the same filename, so a round's resources are one named series.
     const uploadName = `loadtest-round${roundNum}.bin`;
     const uploadStart = performance.now();
-    const uploadResult = await reUploadBuffer(
-      fileBuffer,
-      uploadName,
-      'application/octet-stream',
-    );
+    // Wrapped in trackCreate so the reclaim drain waits on it: the upload is
+    // a create like any other, and one still in flight when a sweep starts
+    // would otherwise record its parent after the final pass had run.
+    const uploadResult = await trackCreate(async () => {
+      const parsed = await reUploadBuffer(
+        fileBuffer,
+        uploadName,
+        'application/octet-stream',
+      );
+      // Recorded before anything is minted against it. Reclaiming this parent
+      // is what reclaims the recipient links, so it has to be on disk first.
+      recordResource(parsed.resource_id, 'upload');
+      return parsed;
+    });
     results.uploadMs = performance.now() - uploadStart;
 
     // Mint a pool at a time, re-uploading once each pool drains — the shape a
@@ -1517,11 +2061,24 @@ async function runRound(roundNum) {
     // are not one population, and merging them would put a connector timeout
     // and a quota error under one heading.
     for (const batch of planMintBatches(COUNT)) {
+      // A sweep has started: stop before issuing another create it would have
+      // to chase, same as the location leg and the round loop.
+      if (stopping) break;
       if (batch.reupload) {
         const reStart = performance.now();
         let re = null;
         try {
-          re = await reUploadBuffer(fileBuffer, uploadName, 'application/octet-stream');
+          // Tracked and recorded exactly like the round's first upload. A
+          // re-upload mints a NEW parent resource, and the old one's tokens
+          // being spent does not make it go away — an unrecorded re-upload
+          // leaks a full resource per batch, which is the failure this ledger
+          // exists to prevent and the easiest one to miss when the leg was
+          // added for an unrelated reason.
+          re = await trackCreate(async () => {
+            const parsed = await reUploadBuffer(fileBuffer, uploadName, 'application/octet-stream');
+            recordResource(parsed.resource_id, 'upload');
+            return parsed;
+          });
         } catch (e) {
           tallyFailure(reuploadErrors, e.message, 1);
           results.reuploadFail++;
@@ -1560,11 +2117,14 @@ async function runRound(roundNum) {
   }
 
   // Location pipeline
-  if (INCLUDE_LOCATION) {
+  if (!stopping && INCLUDE_LOCATION) {
     const locStart = performance.now();
-    for (let i = 0; i < COUNT; i++) {
+    for (let i = 0; i < COUNT && !stopping; i++) {
       try {
-        await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
+        await trackCreate(async () => {
+          const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
+          recordResource(loc.resource_id, 'location');
+        });
         results.locLinks++;
       } catch (e) {
         tallyFailure(locErrors, e.message, 1);
@@ -1592,6 +2152,9 @@ async function main() {
     process.exit(1);
   }
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
+
+  installSignalHandlers();
+
   // The threshold is resolved up here with the other preflight checks: read
   // only at the summary, a mistyped one would surface as a green exit code two
   // hours after the run it was meant to judge.
@@ -1608,6 +2171,26 @@ async function main() {
   if (maxFailRateShapeError) { console.error(`FATAL: ${maxFailRateShapeError}`); process.exit(1); }
   const { rate: maxFailRate, error: maxFailRateError } = parseMaxFailRate(maxFailRateRaw);
   if (maxFailRateError) { console.error(`FATAL: ${maxFailRateError}`); process.exit(1); }
+
+  // Recovery mode for a previous run that was killed before it could reclaim.
+  // Sits after the pure argv validation above — a malformed command line is
+  // worth refusing before anything acts on it — but BEFORE the target guard
+  // below: revoking resources that already exist is always the safe direction,
+  // wherever they were created, and a refused target must not strand a ledger
+  // the operator is trying to clean up.
+  // No missing-value check here: resolveArgErrors above owns that refusal and
+  // has already exited, so a requested reclaim always carries a path by now.
+  const { requested, path: reclaimOnly } = parseReclaimArg(args);
+  if (requested) {
+    activeLedgerPath = reclaimOnly;
+    const {
+      missing, failed, refused, unreadable,
+    } = await reclaimOnce(reclaimOnly);
+    // A missing ledger is a failure in recovery mode, not "nothing to do":
+    // the operator is here because something already went wrong, and a
+    // cheerful exit 0 on a mistyped path is how live resources get abandoned.
+    process.exit(missing || refused || unreadable || failed > 0 ? 1 : 0);
+  }
   // Refuse any target not positively recognized as non-production. See the
   // "Target safety guard" section above for why this is an allowlist.
   const { allowProdFlag, allowProdEnv, hosts: allowedHosts, errors: allowlistErrors } =
@@ -1629,10 +2212,17 @@ async function main() {
   if (report.fatal) process.exit(1);
   for (const line of report.warnings) console.warn(line);
 
+  // After the guard: no point creating the ledger for a run that is refused.
+  preflightLedger();
+
   // Quick smoke test
   console.log('Running smoke test...');
   try {
-    const r = await createOneTimeLink('https://example.com', '24h', 'smoke test');
+    const r = await trackCreate(async () => {
+      const link = await createOneTimeLink('https://example.com', '24h', 'smoke test');
+      recordResource(link.resource_id, 'smoke');
+      return link;
+    });
     console.log(`Smoke test OK: ${r.resource_id}`);
   } catch (e) {
     console.error(`FATAL: Smoke test failed — ${e.message}`);
@@ -1641,6 +2231,7 @@ async function main() {
 
   console.log(`Load test: ${COUNT} recipients/round, ${DURATION_S}s duration, ${INTERVAL_S}s interval`);
   console.log(`File: ${FILE_PATH || 'auto-generated 1MB'}, Location: ${INCLUDE_LOCATION}`);
+  console.log(`Ledger: ${LEDGER_PATH}`);
   console.log('---');
 
   const startTime = Date.now();
@@ -1648,7 +2239,9 @@ async function main() {
   let round = 0;
   const allResults = [];
 
-  while (Date.now() < endTime) {
+  // `stopping` ends the loop as well as the clock: a sweep triggered by a
+  // signal must not race rounds that keep appending ids behind it.
+  while (Date.now() < endTime && !stopping) {
     round++;
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`[${elapsed}s] Round ${round} starting...`);
@@ -1664,7 +2257,7 @@ async function main() {
 
     // Wait for next round
     const remaining = endTime - Date.now();
-    if (remaining > INTERVAL_S * 1000) {
+    if (remaining > INTERVAL_S * 1000 && !stopping) {
       await new Promise(r => setTimeout(r, INTERVAL_S * 1000));
     } else {
       break;
@@ -1686,15 +2279,57 @@ async function main() {
   // exitCode rather than exit: writes to a pipe are asynchronous in Node, and
   // exiting here can truncate the summary that explains the code being set.
   if (summary.failed) process.exitCode = 1;
+
+  // The minted counts above and the sweep's count below measure different
+  // things — recipient links versus the parent resources that own them — so
+  // say so, or the two numbers look like a leak of the difference.
+  //
+  // quiet: reclaim reads the ledger again below, and a torn line reported by
+  // both reads looks like two torn lines.
+  const parents = [...new Set(readLedger(LEDGER_PATH, true) || [])].length;
+  const minted = allResults.reduce((s, r) => s + r.fileLinks + r.locLinks, 0);
+  console.log(`Reclaimable parents: ${parents} (covering ${minted} minted qURLs)`);
+  console.log(`Ledger: ${LEDGER_PATH}`);
+
+  // Set independently of summary.failed: a run whose rounds all succeeded can
+  // still leave resources on the tenancy, and that is worth a non-zero exit on
+  // its own.
+  const { failed } = await reclaimOnce(LEDGER_PATH);
+  if (failed > 0) process.exitCode = 1;
 }
 
 // Only run the CLI entry point when invoked directly. Imported-from-test loads
-// only the exported helpers — see tests/loadtest-target-guard.test.js.
+// only the exported helpers — see tests/loadtest-target-guard.test.js and
+// tests/loadtest-reclaim.test.js.
 if (require.main === module) {
-  main().catch(e => { console.error('Fatal:', e); process.exit(1); });
+  main().catch(async (e) => {
+    console.error('Fatal:', e);
+    // The run may already have created resources before falling over. Reclaim
+    // them rather than leave them on a shared tenancy.
+    try {
+      await reclaimOnce(activeLedgerPath);
+    } catch (reclaimError) {
+      console.error('Reclaim failed:', reclaimError.message);
+    }
+    process.exit(1);
+  });
 }
 
+// trackCreate is exported for the suite rather than for callers: the
+// in-flight-wait branch of the drain is otherwise unreachable from a test,
+// and it is the branch the sweep-vs-run-loop fix turns on.
 module.exports = {
+  // Reclaim ledger
+  LEDGER_PATH,
+  readLedger,
+  pruneLedger,
+  ledgerEndpoints,
+  reclaim,
+  reclaimOnce,
+  resetReclaimStateForTests,
+  parseReclaimArg,
+  trackCreate,
+  recordResource,
   // Reporting decisions, exported for tests/loadtest-reporting.test.js — see
   // the "Run reporting" section for why they are pure rather than inline.
   roundReportLine,
@@ -1715,9 +2350,13 @@ module.exports = {
   parsePositiveInt,
   resolveNumericArgs,
   resolveFileArg,
+  resolveLedgerArg,
+  resolveReclaimArg,
   resolveUnknownArgs,
   checkUploadFile,
   resolveArgErrors,
+  // The payload a run without --file uploads
+  generateTestPayload,
   // Mint batching / token pool
   planMintBatches,
   TOKENS_PER_RESOURCE,
