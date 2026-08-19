@@ -474,28 +474,31 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 
 // physicalDialInOpen reports whether the pinned FRP fork performs the
 // physical connector dial from Open (QUIC or TCPMux-enabled TCP) or from
-// Connect (TCPMux off, whether explicitly false or left unset). Revisit on an
-// FRP connector contract change.
+// Connect (TCPMux off, whether explicitly false or left unset).
 //
-// Unset is NOT "default on" at this seam. The fork's Open guards its TCP path
-// on `if !lo.FromPtr(c.cfg.Transport.TCPMux) { return nil }`, and lo.FromPtr
-// yields the zero value for a nil pointer — so a nil TCPMux returns from Open
+// Unset is NOT "default on" at this seam. A nil TCPMux returns from Open
 // having dialed nothing, leaving Connect to fall through to realConnect
-// exactly as an explicit false does. The expression below is that lo.FromPtr
-// written out — samber/lo is an indirect dependency here and nothing else in
-// this module imports it, so the semantics are copied rather than the call.
-// TestForkDialsFromConnectWithoutTCPMux pins the fork half against the real
-// connector.
-//
-// TCPMux only becomes true by way of ClientCommonConfig.Complete, which the
-// connector command runs before New. A caller that skips it arrives here with
-// a nil pointer, and answering "Open" for that config would attach BOTH the
-// redial re-knock and the reconnect watchdog to a method that never dials
-// while the method that does goes unguarded.
+// exactly as an explicit false does — TCPMux only becomes true by way of
+// ClientCommonConfig.Complete, which the connector command runs before New.
+// Answering "Open" for an uncompleted config would attach BOTH the redial
+// re-knock and the reconnect watchdog to a method that never dials while the
+// method that does goes unguarded.
 //
 // A nil common keeps answering Open: the fork would nil-panic before dialing
 // either way, so no real dial is at stake, and Open is where refresh's own
 // nil-common check reports errNilCommonConfig and fails the cycle closed.
+//
+// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// client/connector.go — defaultConnectorImpl.Open dials for QUIC and, for
+// TCP, only past `if !lo.FromPtr(c.cfg.Transport.TCPMux) { return nil }`,
+// while Connect falls through to realConnect whenever neither a QUIC
+// connection nor a mux session was established. The expression below is that
+// lo.FromPtr written out: samber/lo is an indirect dependency and nothing
+// else in this module imports it, so the semantics are copied rather than the
+// call. This is a hand-maintained model of another repository's control flow
+// and cannot be checked by reading this package — if a fork bump moves the
+// dial, update it here in lockstep. TestForkDialsFromConnectWithoutTCPMux
+// drives the real connector and is what fails if it drifts.
 func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return true
