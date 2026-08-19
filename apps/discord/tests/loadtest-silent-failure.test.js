@@ -1945,9 +1945,14 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // And nothing to remove, which is the other half of why no cleanup path
     // was added for the payload — a removal would mean the litter is back and
     // merely swept, leaving a run that is killed mid-window still littering.
-    // Unscoped, including inside the ledger: reclaim deliberately truncates
-    // rather than deletes, so a removal anywhere here is the litter-and-sweep
-    // shape.
+    // Unscoped, including inside the ledger: reclaim deliberately shortens the
+    // ledger rather than deleting it, so a removal anywhere here is the
+    // litter-and-sweep shape. "Shortens" and not "truncates", because it is
+    // pruneLedger's writeFileSync rewriting the file — possibly to '' — and
+    // not a call to truncate. That distinction is why adding truncate and
+    // ftruncate to WRITE_PRIMITIVES could not have collided with the ledger:
+    // the script calls exactly three of the banned names, and all three are
+    // the LEDGER_WRITES rows above.
     //
     // Every spelling, for a reason this assertion learned the hard way: it
     // named unlinkSync alone, and `fs.rmSync(path)` is the same call in the
