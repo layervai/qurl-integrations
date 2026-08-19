@@ -191,12 +191,28 @@ required on 2026-08-19, after #1173 merged three minutes before its review
 posted. That review is the long pole — roughly four minutes against a minute or
 less for every other context — so the merge box turns green while it is still
 running, and a review landing afterwards lands on a closed PR nobody rereads.
-The job's own `if:` withholds the review from bot-authored, draft, and fork
-PRs, which report `skipped`, and GitHub scores a skipped required check as
-satisfied. This context therefore gates the *timing* of a review that runs, not
-the *existence* of one: returning a PR to draft satisfies it empty. Release PRs
-are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run at
-all, so it already reports none of these contexts and merges by admin override.
+That job runs `if: always()` and decides inside itself, for the same reason the
+per-app aggregates above do: a job-level `if:` that withholds the review
+reports `skipped`, GitHub scores a skipped required check as satisfied, and
+withholding a review would then also satisfy the context meant to gate on it.
+Its first step classifies the PR and its last step refuses to finish green
+unless the run either published a review or declared why it withheld one, so a
+pass with nothing behind it fails instead of going quietly green.
+
+Bot-authored and fork PRs cannot receive this secrets-bearing review and still
+pass without one. That exemption is deliberate, and it is now annotated on the
+check and written to the run summary rather than left as an unexplained skip —
+a green `claude-review` on one of those PRs means the changes are unreviewed by
+Claude, and says so. Drafts are exempt too but cannot merge on it: GitHub
+blocks merging a draft, and marking one ready retriggers the workflow. Release
+PRs are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run
+at all, so it already reports none of these contexts and merges by admin
+override.
+
+`internal/ciworkflows` pins that shape and executes both of those steps
+directly. It has to: the workflow runs on `pull_request_target`, so a PR
+editing it is checked by the default branch's copy of the file, and its own
+green `claude-review` is never evidence about the edit.
 
 The full required set is the block below — those nine aggregates plus
 `Workflow Contract`, `Validate GitHub Actions pins`, `Lint and test scripts`,
@@ -299,6 +315,51 @@ PRs opened by release-please carry no checks at all, because GitHub does not
 fire workflows for events created by `GITHUB_TOKEN` — the same recursion
 guard `release-please.yml` documents for tag pushes. Those PRs need an admin
 override to merge regardless of the required set.
+
+No workflow here runs on `merge_group`, deliberately. Merges are manual squashes
+and no queue is configured. Ask GraphQL, not branch protection:
+
+```bash
+gh api graphql -f query='{repository(owner:"layervai",name:"qurl-integrations"){mergeQueue(branch:"main"){id}}}'
+```
+
+That returns `{"data":{"repository":{"mergeQueue":null}}}` today. The classic
+protection response carries no merge-queue field at all, so reaching for
+`--jq '.required_merge_queue'` there prints nothing whether or not a queue
+exists — confirm with `--jq 'has("required_merge_queue")'`, which is `false`.
+That is a check that cannot fail, the same shape as a required context matching
+no job, and it does not belong in this section.
+
+A queue evaluates required contexts against its own temporary ref, so a required
+context whose workflow does not handle that event never reports for a queue
+entry, leaving it at "Expected — Waiting for status to be reported" — the
+2026-08-14 stall above, moved from one pull request onto every queue entry.
+Until this change exactly two workflows carried the trigger,
+`workflow-contract.yml` from #1092 and `scripts.yml` from #940 for "future
+merge-queue compatibility", while the required contexts never followed; the
+configuration read as queue support that would have hung on first use. Both
+lines are gone, and `internal/ciworkflows` now fails when the required set stops
+agreeing, in either direction.
+
+Enabling a queue later is more than restoring those two lines. Every workflow
+behind a required context needs the trigger; the nine aggregates need a
+merge-group path in their `changes` detector, since `dorny/paths-filter` runs
+its pull-request path or its push path here and a queue ref is neither; and
+`claude-review` cannot be given one as written. `claude-code-review.yml` is
+`pull_request_target`-only because it holds `ANTHROPIC_API_KEY` and must load
+from the trusted default branch, and its job `if:` plus three of its five steps
+read `github.event.pull_request` — the head and base SHAs the review is pinned
+to, the number it publishes against, the draft and fork guards. A merge group
+carries no pull request, so that workflow has to be restructured before the
+required set can agree on `merge_group` at all.
+
+The marker below is the machine-readable half, read by `internal/ciworkflows`
+the same way the required-contexts block is. While it reads `none`, no workflow
+may declare `merge_group`; flipping it to `required` means every workflow behind
+a required context must declare the trigger in the same change — after clearing
+the `claude-review` blocker above, which no offline check can verify for you.
+
+<!-- merge-queue-posture: none -->
 
 ## Code Conventions
 
