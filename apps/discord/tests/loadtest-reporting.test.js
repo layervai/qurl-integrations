@@ -24,8 +24,7 @@ const traverseModule = require('@babel/traverse');
 const traverse = traverseModule.default || traverseModule;
 
 const {
-  readArg,
-  argValueMissing,
+  readFlag,
   valuedBooleanFlags,
   BOOLEAN_FLAGS,
   resolveGuardInputs,
@@ -162,61 +161,70 @@ describe('errorTallyLines — failures are deduped by message, not by count', ()
   });
 });
 
-describe('readArg — both flag spellings, so neither falls through silently', () => {
-  // The equals form used to miss entirely and hand back the default.
-  // --max-fail-rate forced the fix, since it decides the exit code: an
-  // operator waiving the check with `=100` would have been failed by the
-  // strict default two hours later. Every value-taking flag reads through
-  // here now — a rule that held for only some of them is one an operator
-  // could not rely on for any.
-  it('reads the equals form', () => {
-    expect(readArg(['--max-fail-rate=100'], 'max-fail-rate', '10')).toBe('100');
-  });
+describe('--max-fail-rate — the flag that decides the exit code, end to end', () => {
+  // Pins the WIRING, not either half. readFlag's own mechanics — both
+  // spellings, last-wins, prefix non-matching, refusing a dropped value — are
+  // covered against --file in tests/loadtest-silent-failure.test.js. What only
+  // this flag can lose is the connection between them: it is the one whose
+  // value decides an exit code two hours after the run, so a value that never
+  // reached parseMaxFailRate would surface as a green run at the strict
+  // default, with nothing in the log naming the threshold that applied.
+  //
+  // Mirrors main()'s two steps in order, so a reordering there shows up here.
+  const resolve = (argv) => {
+    const { value, error } = readFlag(argv, 'max-fail-rate', String(DEFAULT_MAX_FAIL_RATE_PCT));
+    return error ? { error } : parseMaxFailRate(value);
+  };
 
-  it('reads the space form', () => {
-    expect(readArg(['--max-fail-rate', '100'], 'max-fail-rate', '10')).toBe('100');
-  });
-
-  it('falls back to the default when the flag is absent', () => {
-    expect(readArg(['--location'], 'max-fail-rate', '10')).toBe('10');
-  });
-
-  it('does not match a flag that merely starts with the name', () => {
-    expect(readArg(['--max-fail-rate-extra=5'], 'max-fail-rate', '10')).toBe('10');
-  });
-
-  // A value can legitimately contain '=' — only the flag token is split on it.
-  it('keeps an equals sign inside the value', () => {
-    expect(readArg(['--file=/tmp/a=b.bin'], 'file', null)).toBe('/tmp/a=b.bin');
-  });
-});
-
-describe('argValueMissing — a decision-carrying flag rejects a missing value', () => {
-  // readArg collapses "flag absent" and "flag present with nothing usable
-  // after it" onto the same default, so this predicate is what splits the
-  // second case off — for --max-fail-rate, which decides the exit code, and
-  // for the numeric flags via resolveNumericArgs.
   it.each([
-    ['the flag is the last token', ['--count', '20', '--max-fail-rate']],
-    ['the equals form has no value', ['--max-fail-rate=']],
-    ['the value is empty', ['--max-fail-rate', '', '--location']],
-  ])('is true when %s', (_label, argv) => {
-    expect(argValueMissing(argv, 'max-fail-rate')).toBe(true);
+    ['the equals form', ['--max-fail-rate=100'], 1],
+    ['the space form', ['--max-fail-rate', '100'], 1],
+    ['a fractional threshold', ['--max-fail-rate=0.5'], 0.005],
+  ])('resolves %s', (_label, argv, rate) => {
+    // `=100` is the waiver spelling an operator reaches for to turn the check
+    // off; it used to miss the reader entirely and run at the strict default.
+    expect(resolve(argv)).toEqual({ rate });
   });
 
   it.each([
-    ['a space-form value', ['--max-fail-rate', '25']],
-    ['an equals-form value', ['--max-fail-rate=25']],
     ['the flag is absent', ['--location']],
-  ])('is false for %s', (_label, argv) => {
-    expect(argValueMissing(argv, 'max-fail-rate')).toBe(false);
+    ['a longer flag merely starts with the name', ['--max-fail-rate-extra=5']],
+  ])('takes the default when %s', (_label, argv) => {
+    expect(resolve(argv)).toEqual({ rate: DEFAULT_MAX_FAIL_RATE_PCT / 100 });
   });
 
-  // A following flag IS taken as the value, and parseMaxFailRate then rejects
-  // it by name — a clear preflight FATAL, not a silent default.
-  it('leaves a following flag to the parser, which names it', () => {
-    expect(argValueMissing(['--max-fail-rate', '--location'], 'max-fail-rate')).toBe(false);
-    expect(parseMaxFailRate('--location').error).toContain("'--location'");
+  it.each([
+    ['the equals form carries nothing', ['--max-fail-rate=']],
+    ['the value is an empty token', ['--max-fail-rate', '', '--location']],
+    ['the value is whitespace', ['--max-fail-rate', '   ']],
+  ])('refuses a threshold when %s', (_label, argv) => {
+    // Refused by parseMaxFailRate rather than by the reader: readFlag hands an
+    // empty inline value on deliberately, leaving "what counts as empty" to
+    // the caller. Whitespace is the one that matters most — Number('   ') is
+    // 0, so a blank value would otherwise become the STRICTEST possible
+    // threshold rather than an error.
+    const { rate, error } = resolve(argv);
+    expect(rate).toBeUndefined();
+    expect(error).toContain('--max-fail-rate must be a percentage');
+  });
+
+  it('refuses the flag left as the last token, naming the default', () => {
+    const { error } = resolve(['--count', '20', '--max-fail-rate']);
+    expect(error).toBe(`--max-fail-rate was given no value (omit it to use the default of ${DEFAULT_MAX_FAIL_RATE_PCT})`);
+  });
+
+  it('refuses a following flag rather than swallowing it as the value', () => {
+    // Changed with the #1174 merge and worth pinning at the new answer: the
+    // old reader took '--location' as the value and let parseMaxFailRate
+    // reject it by name, which reported a threshold fault for what was really
+    // a forgotten value — and consumed a real flag on the way.
+    const { error } = resolve(['--max-fail-rate', '--location']);
+    expect(error).toBe('--max-fail-rate was given no value — the next argument is the flag --location (omit it to use the default of 10)');
+  });
+
+  it('rejects an out-of-range threshold by name', () => {
+    expect(resolve(['--max-fail-rate=101']).error).toContain("got '101'");
+    expect(resolve(['--max-fail-rate=-1']).error).toContain("got '-1'");
   });
 });
 
@@ -260,7 +268,11 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
     traverse(parser.parse(source, { sourceType: 'script' }), {
       CallExpression({ node }) {
         if (node.callee.type !== 'Identifier' || node.callee.name !== 'hasFlag') return;
-        const [arg] = node.arguments;
+        // The NAME is the second argument: #1174 made hasFlag take argv first,
+        // like every other reader here, so the flag moved along one. Reading
+        // argument 0 now yields the `args`/`argv` identifier, which is what
+        // the StringLiteral assertion below caught when that merge landed.
+        const arg = node.arguments[1];
         // A computed argument would silently contribute nothing, so fail
         // rather than let the check quietly stop covering that call.
         expect(arg && arg.type).toBe('StringLiteral');
@@ -268,14 +280,19 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
       },
     });
     expect(names.length).toBeGreaterThan(0);
-    // Subset, not equality: BOOLEAN_FLAGS is the set of value-less flags, and
-    // hasFlag is only one of the two ways this script reads one.
+    // Still a subset rather than an equality, but for a weaker reason than it
+    // used to be. Both boolean flags now reach hasFlag — #1174 moved
+    // --allow-production onto it inside resolveGuardInputs — so the two sets
+    // happen to coincide today. Pinning equality would then fail the moment a
+    // value-less flag is added that some other reader owns, which is a design
+    // choice this check has no business forcing.
     expect(BOOLEAN_FLAGS).toEqual(expect.arrayContaining([...new Set(names)]));
   });
 
-  // The other way, and the reason the assertion above is a subset:
-  // --allow-production is read by resolveGuardInputs off argv directly, not
-  // through hasFlag, so nothing in that traversal would ever mention it.
+  // resolveGuardInputs is the reader for --allow-production. It went through
+  // hasFlag in #1174, so the traversal above does now see it — but the
+  // traversal only proves the flag is SPELLED somewhere, and this proves the
+  // guard actually honours it. Those are different failures.
   it('covers --allow-production, which resolveGuardInputs reads off argv', () => {
     expect(resolveGuardInputs({}, ['--allow-production']).allowProdFlag).toBe(true);
     expect(BOOLEAN_FLAGS).toContain('allow-production');
