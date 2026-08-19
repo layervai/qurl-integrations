@@ -266,7 +266,10 @@ const (
 // resource is a status flip, not a row removal, so every run of every
 // sandbox suite leaves a permanent revoked row in the unfiltered listing.
 // Filtering spends the page budget on rows that could still be leaked
-// fixtures instead of on the tenancy's accumulated history.
+// fixtures instead of on the tenancy's accumulated history. That filter
+// couples the exactly-once assertion to the row still being active when
+// the walk runs — it is, because the journey deletes only afterwards. A
+// future reordering that deletes first has to drop the filter with it.
 //
 // TODO(upstream-contract): two qurl-service behaviors hold this walk up.
 // created_at descending is its pinned default sort for the resource listing
