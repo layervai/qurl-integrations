@@ -372,6 +372,17 @@ mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/website"
 expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
 
+# A viewer path carrying percent-encoded CR/LF must not splice a second request
+# past S3_PREFIX into the signer hop. styles/app.css exists only at the bucket
+# root; under S3_PREFIX=site a legit request signs /site/styles/app.css, so any
+# upstream GET for the bare /styles/app.css means the prefix boundary escaped.
+mark="$(stub_log_mark)"
+curl -s --path-as-is -o /dev/null \
+  "$base/q%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css"
+expect_stub_gets_since "CRLF request-splitting cannot escape S3_PREFIX" "$mark" 'GET /styles/app.css ' 0
+expect_eq "control-char viewer path is rejected, not proxied" \
+  "$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$base/a%0d%0ab.html")" 404
+
 # 15. The entrypoint supervisor exits the container if either child dies.
 for child in envoy nginx; do
   docker rm -f "$ORIGIN" >/dev/null 2>&1
