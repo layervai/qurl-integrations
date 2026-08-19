@@ -164,6 +164,10 @@ function readLedger(ledgerPath) {
   return ids;
 }
 
+// Stands in for an entry that records no endpoint, so such an entry reads as
+// foreign to the tenancy guard rather than as an absence of evidence.
+const UNRECORDED_ENDPOINT = '(no endpoint recorded)';
+
 // Endpoints recorded in a ledger, so a sweep can refuse to delete against a
 // tenancy other than the one the resources were created on.
 function ledgerEndpoints(ledgerPath) {
@@ -180,8 +184,14 @@ function ledgerEndpoints(ledgerPath) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const { endpoint } = JSON.parse(trimmed);
-      if (endpoint) endpoints.add(endpoint);
+      const { resource_id: id, endpoint } = JSON.parse(trimmed);
+      if (!id) continue;
+      // Fail closed. An entry with no recorded endpoint — an older or
+      // hand-edited ledger, or a run with QURL_ENDPOINT unset — would
+      // otherwise contribute nothing to the set and let the guard pass
+      // trivially, which is the opposite of what a safety rail should do
+      // when its input is missing.
+      endpoints.add(endpoint || UNRECORDED_ENDPOINT);
     } catch { /* torn line — readLedger already reports it */ }
   }
   return endpoints;
@@ -191,14 +201,27 @@ function ledgerEndpoints(ledgerPath) {
 // the remainder instead of re-revoking everything. Truncated rather than
 // deleted on a clean sweep: an empty ledger reads as "nothing outstanding",
 // while a missing one is indistinguishable from a mistyped path.
-// `endpoint` is rewritten with each surviving id, not dropped: the tenancy
-// guard keys off it, and a pruned ledger is exactly what the documented
-// recovery re-run reads. Losing provenance here would silently disarm that
-// guard on the one path most likely to be run against the wrong tenancy.
-function pruneLedger(ledgerPath, remainingIds, endpoint = config.QURL_ENDPOINT) {
+// Surviving entries are kept as their ORIGINAL lines rather than
+// re-serialized, so nothing recorded is lost in a prune. Re-serializing had
+// dropped `endpoint`, which silently disarmed the tenancy guard on exactly
+// the recovery re-run it exists to protect; keeping the line verbatim makes
+// that class of loss impossible rather than merely fixed once.
+function pruneLedger(ledgerPath, remainingIds) {
   try {
-    const kept = [...remainingIds].map(id => `${JSON.stringify({ resource_id: id, endpoint })}\n`).join('');
-    fs.writeFileSync(ledgerPath, kept);
+    const kept = [];
+    const seen = new Set();
+    for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const { resource_id: id } = JSON.parse(trimmed);
+        if (id && remainingIds.has(id) && !seen.has(id)) {
+          seen.add(id);
+          kept.push(trimmed);
+        }
+      } catch { /* torn line: carries no id, so there is nothing to keep */ }
+    }
+    fs.writeFileSync(ledgerPath, kept.length ? `${kept.join('\n')}\n` : '');
   } catch (e) {
     console.error(`  Could not prune ledger ${ledgerPath} — ${e.message}`);
   }
@@ -274,6 +297,10 @@ async function reclaim(ledgerPath) {
     }
   }
 
+  // Load-bearing and invisible: there is no await between the breaking
+  // readLedger above and this write, so recordResource cannot interleave and
+  // have its append truncated away. Inserting any await (including an
+  // awaiting log) between them silently reintroduces the leak.
   pruneLedger(ledgerPath, outstanding);
 
   const failed = outstanding.size;
@@ -341,6 +368,19 @@ async function reclaimAndExit(signal) {
 function installSignalHandlers() {
   process.on('SIGINT', () => { reclaimAndExit('SIGINT'); });
   process.on('SIGTERM', () => { reclaimAndExit('SIGTERM'); });
+}
+
+// Extracted from main so the suite can cover it. This guard prevents the
+// worst outcome in the file: `--reclaim` with no value would fall through to
+// a FULL LOAD TEST, minting thousands of resources when the operator asked to
+// delete some, and `--reclaim --ledger x` would take the next flag as the
+// path, find no such file, and report a clean exit.
+function parseReclaimArg(argv) {
+  const index = argv.indexOf('--reclaim');
+  if (index === -1) return { requested: false, path: null };
+  const value = argv[index + 1];
+  if (!value || value.startsWith('--')) return { requested: true, path: null };
+  return { requested: true, path: value };
 }
 
 async function generateTestFile() {
@@ -427,13 +467,9 @@ async function main() {
   // Recovery mode for a previous run that was killed before it could reclaim.
   // Runs before the endpoint guard below: revoking resources that already
   // exist is always the safe direction, wherever they were created.
-  const reclaimOnly = getArg('reclaim', null);
-  if (hasFlag('reclaim')) {
-    // Validated rather than defaulted. `--reclaim` with no value would fall
-    // through to a FULL LOAD TEST — minting thousands of resources when the
-    // operator asked to delete some — and `--reclaim --ledger x` would take
-    // the next flag as the path, find no such file, and report a clean exit.
-    if (!reclaimOnly || reclaimOnly.startsWith('--')) {
+  const { requested, path: reclaimOnly } = parseReclaimArg(args);
+  if (requested) {
+    if (!reclaimOnly) {
       console.error('FATAL: --reclaim needs a ledger path, e.g. --reclaim /tmp/loadtest-ledger-<ts>.jsonl');
       process.exit(1);
     }
@@ -557,4 +593,4 @@ if (require.main === module) {
 }
 
 // Exported so the suite covers them without live API traffic.
-module.exports = { readLedger, pruneLedger, ledgerEndpoints, reclaim };
+module.exports = { readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg };

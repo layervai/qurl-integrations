@@ -28,7 +28,9 @@ jest.mock('../src/qurl', () => ({
 
 const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
-const { readLedger, pruneLedger, ledgerEndpoints, reclaim } = require('../scripts/loadtest-standalone');
+const {
+  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg,
+} = require('../scripts/loadtest-standalone');
 
 let created = [];
 
@@ -39,8 +41,17 @@ function tempLedger(contents) {
   return p;
 }
 
+// Mirrors what recordResource actually writes, endpoint included — the
+// tenancy guard is fail-closed, so a fixture without one is refused.
 function line(id, extra = {}) {
-  return `${JSON.stringify({ resource_id: id, kind: 'location', ...extra })}\n`;
+  return `${JSON.stringify({
+    resource_id: id, kind: 'location', endpoint: config.QURL_ENDPOINT, ...extra,
+  })}\n`;
+}
+
+// An older or hand-edited entry carrying no provenance.
+function bareLine(id) {
+  return `${JSON.stringify({ resource_id: id, kind: 'location' })}\n`;
 }
 
 beforeEach(() => {
@@ -104,8 +115,38 @@ describe('pruneLedger', () => {
     // recovery re-run it exists to protect: ledgerEndpoints would come back
     // empty and the sweep would delete against whatever host is configured.
     const ledger = tempLedger(line('r_1', { endpoint: 'https://sandbox.example' }));
-    pruneLedger(ledger, new Set(['r_1']), 'https://sandbox.example');
+    pruneLedger(ledger, new Set(['r_1']));
     expect([...ledgerEndpoints(ledger)]).toEqual(['https://sandbox.example']);
+  });
+
+  it('keeps the whole original entry, not just the fields a reader happens to use', () => {
+    const ledger = tempLedger(line('r_1', { endpoint: 'https://sandbox.example' }));
+    pruneLedger(ledger, new Set(['r_1']));
+    expect(JSON.parse(fs.readFileSync(ledger, 'utf8').trim())).toEqual({
+      resource_id: 'r_1', kind: 'location', endpoint: 'https://sandbox.example',
+    });
+  });
+});
+
+describe('parseReclaimArg', () => {
+  it('reports no request when the flag is absent', () => {
+    expect(parseReclaimArg(['--count', '10'])).toEqual({ requested: false, path: null });
+  });
+
+  it('rejects a bare --reclaim rather than letting it start a load test', () => {
+    // The worst outcome in the file: falling through here mints thousands of
+    // resources when the operator asked to delete some.
+    expect(parseReclaimArg(['--reclaim'])).toEqual({ requested: true, path: null });
+  });
+
+  it('rejects the next flag being taken as the ledger path', () => {
+    expect(parseReclaimArg(['--reclaim', '--ledger', '/tmp/x.jsonl']))
+      .toEqual({ requested: true, path: null });
+  });
+
+  it('accepts a real path', () => {
+    expect(parseReclaimArg(['--reclaim', '/tmp/x.jsonl']))
+      .toEqual({ requested: true, path: '/tmp/x.jsonl' });
   });
 });
 
@@ -172,5 +213,15 @@ describe('reclaim', () => {
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
     expect(deleteLink).toHaveBeenCalledWith('r_1');
+  });
+
+  it('refuses an entry that records no endpoint at all', async () => {
+    // Missing provenance must read as foreign, not as absence of evidence —
+    // otherwise the guard passes trivially on the ledger most likely to have
+    // come from somewhere else.
+    const ledger = tempLedger(bareLine('r_1'));
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ refused: true });
+    expect(deleteLink).not.toHaveBeenCalled();
   });
 });
