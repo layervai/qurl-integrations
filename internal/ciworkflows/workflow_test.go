@@ -529,8 +529,8 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
 			"that never runs it is not reading green over a gate it skipped — the honest-signal " +
 			"argument that widened the app workflows does not apply. The code is still analyzed " +
-			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
-			"main, and the analysis runs on the next push rather than on the retarget itself " +
+			"before it reaches main: deleting a merged base branch retargets the PRs stacked on it " +
+			"onto main, and the analysis runs on the next push rather than on the retarget itself " +
 			"(TestBranchFilteredWorkflowsExcludeEditedActivityType) — and strict status checks " +
 			"require that push before the merge anyway. Against that second look sits a " +
 			"two-language analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
@@ -542,7 +542,8 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		branches: []string{"main"},
 		why: "Deliberately narrow, on the same reasoning as codeql.yml: no required context, " +
 			"and a stacked PR's dependency delta is reviewed again inside the combined diff once " +
-			"it retargets to main. Cheaper to widen than CodeQL, so this is the entry to revisit " +
+			"the merged base is deleted and it retargets to main. Cheaper to widen than CodeQL, so " +
+			"this is the entry to revisit " +
 			"first — the cost is not runtime but noise, since `comment-summary-in-pr: always` " +
 			"would post a summary onto every stacked PR.",
 	},
@@ -622,9 +623,9 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 // nothing reports does to a PR targeting main, which then blocks until an admin
 // override lands it. Nothing protects the base of a stacked PR, so there is no
 // required context there to wait on. Both failures are silent, and while the PR
-// is stacked it is this one that merges. The retarget that follows a base merge
-// does put the PR under main's protection, which is exactly when the other
-// shape appears — the second half, pinned below by
+// is stacked it is this one that merges. Deleting the merged base retargets the
+// PR onto main and puts it under main's protection, which is exactly when the
+// other shape appears — the second half, pinned below by
 // TestBranchFilteredWorkflowsExcludeEditedActivityType.
 //
 // CONTRIBUTING.md's required-contexts section is the wording to match, and the
@@ -671,12 +672,12 @@ const editedActivityType = "edited"
 // TestAppWorkflowsRunOnStackedPRs above covers the first half: a workflow
 // filtered to `branches: [main]` is never registered on a PR stacked on a
 // feature branch, so its checks are absent rather than skipped and the PR reads
-// green having run none of them. Merging that base looks like the backstop, and
-// is not. GitHub retargets the stacked PR onto main, where the required
-// contexts do apply — but the retarget arrives as activity type `edited`, which
-// the defaults exclude, so it re-runs nothing. The check that never registered
-// finally has a merge box to hold, and the PR sits at "Expected — Waiting for
-// status to be reported" until the next push.
+// green having run none of them. Merging and then deleting that base looks like
+// the backstop, and is not. The deletion retargets the stacked PR onto main,
+// where the required contexts do apply — but the retarget arrives as activity
+// type `edited`, which the defaults exclude, so it re-runs nothing. The check
+// that never registered finally has a merge box to hold, and the PR sits at
+// "Expected — Waiting for status to be reported" until the next push.
 //
 // That second phase holds only while no branch-filtered workflow asks for
 // `edited`. One that did would re-run on the retarget and report, and the stall

@@ -257,13 +257,13 @@ rename that orphans a documented context fails `Workflow Contract` at PR time.
 This block also bounds which workflows may narrow their `branches:`. A workflow
 reporting a context listed here must run on PRs stacked on a feature branch
 too: `main`'s protection does not reach such a PR, so its checks are absent
-rather than pending, and the PR reads green having run none of them. Merging
-the base does not recover the run: GitHub retargets the PR onto `main`, where
-the context applies again, but a base change arrives as the `edited` activity
-type, which no branch-filtered workflow here takes, so the PR then stalls at
-"Expected — Waiting for status to be reported" until its next push — which
-strict status checks require before merging anyway. One lost signal surfacing
-late, not a second failure.
+rather than pending, and the PR reads green having run none of them. Deleting
+the merged base does not recover the run: GitHub retargets the PR onto `main`,
+where the context applies again, but a base change arrives as the `edited`
+activity type, which no branch-filtered workflow here takes, so the PR then
+stalls at "Expected — Waiting for status to be reported" until its next push —
+which strict status checks require before merging anyway. One lost signal
+surfacing late, not a second failure.
 `internal/ciworkflows` records each pull-request workflow's intended filter and
 reads this block to tell which of them gate merges, so one recorded as
 deliberately narrow fails `Workflow Contract` the moment it starts gating. The

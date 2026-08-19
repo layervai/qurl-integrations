@@ -127,11 +127,11 @@ documented contexts rather than only against itself, so narrowing one cannot be 
 editing `requiredWorkflowSpecs` to match. This is the paths filter's trap inverted: a
 workflow filtered off PRs stacked on a feature branch never registers its checks at all, and
 protection guards only `main`, so the stacked PR reads green having run none of them
-(#1183, #1185). Merging the base does not recover the run: GitHub retargets the PR onto `main`,
-but a base change arrives as the `edited` activity type, which no branch-filtered workflow here
-takes, so the retarget re-runs nothing. The PR stalls on the check that never registered until its
-next push (#1219). The package's own check — `Workflow Contract` — is unfiltered and reports on
-every PR, because a check behind a paths filter cannot police the paths filters (#1081).
+(#1183, #1185). Deleting the merged base does not recover the run: GitHub retargets the PR onto
+`main`, but a base change arrives as the `edited` activity type, which no branch-filtered workflow
+here takes, so the retarget re-runs nothing. The PR stalls on the check that never registered until
+its next push (#1219). The package's own check — `Workflow Contract` — is unfiltered and reports
+on every PR, because a check behind a paths filter cannot police the paths filters (#1081).
 
 ## License
 
