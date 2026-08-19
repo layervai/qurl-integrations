@@ -2,8 +2,8 @@
 # Exercise scripts/verify-cli-release.sh against a fixture manifest and a stub
 # `gh`. The verifier itself only ever runs on a push to main, after a release
 # has already been made or dropped, so a defect in it ships green and surfaces
-# exactly when it is needed — the same reason the Claude review budget report
-# is tested here rather than trusted. Every branch is pinned below.
+# exactly when it is needed — the same reason the validated-base resolver is
+# tested here rather than trusted. Every branch is pinned below.
 #
 # Two properties matter as much as the exit codes: a lookup failure must not be
 # reported as a dropped release (the recovery for a drop repairs nothing when
