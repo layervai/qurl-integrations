@@ -383,9 +383,14 @@ func TestClaudeReviewReportClassifiesEveryUnfinishedReview(t *testing.T) {
 //     did with a hard-coded /bin/date.
 //
 // The shim needs /bin/sh, which the caller's requireCommand(t, "bash") does not
-// cover. Not worth a second guard: POSIX fixes that path, the shell script this
-// replaced assumed the same thing, and a host without it fails loudly on the
-// first row rather than misreporting one.
+// cover. Not worth a second guard: POSIX fixes that path, and a host without it
+// fails loudly on the first row rather than misreporting one — a second
+// requireCommand would only turn that into a skip, which is the wrong outcome
+// for a test whose point is that no branch goes quiet.
+//
+// The shell script this replaced assumed the same path, but note the reach is
+// not the same: it ran only under the Scripts workflow, while this runs on
+// every `go test ./...`, so the precondition widened along with the coverage.
 func stubbedDatePATH(t *testing.T) string {
 	t.Helper()
 
