@@ -16,8 +16,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -396,8 +396,8 @@ func assertJobPermissions(t *testing.T, jobID string, permissions any, want map[
 		}
 	}
 
-	sort.Strings(extra)
-	sort.Strings(missing)
+	slices.Sort(extra)
+	slices.Sort(missing)
 	if len(extra) > 0 {
 		t.Errorf("%s.permissions grants %v beyond what this job is documented to need", jobID, extra)
 	}
@@ -1065,7 +1065,150 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 	}
 }
 
+// TestExtensionWorkflowsStayInLockstep pins chrome-extension.yml and
+// edge-extension.yml as one file with the browser's name swapped.
+//
+// apps/edge-extension is a platform fork of apps/chrome-extension, and their
+// workflows are the same copy-and-swap: a timeout raised, a step dropped, or an
+// action pinned forward on one side only is invisible in review, because
+// nothing ever puts the two files side by side. What ships is one browser's
+// extension going out through a weaker gate than the other's.
+//
+// TestAppWorkflowsRunOnStackedPRs above covers one key of these same two files,
+// pinning each one's pull_request branch filter against the intent recorded in
+// its spec. That is a per-workflow assertion about a value; this is a whole-file
+// assertion about a pair, so a one-sided edit to any other line — which no
+// recorded intent exists for — fails here instead of nowhere.
+//
+// The Chrome<->Edge lockstep section of CLAUDE.md carries the policy: why these
+// two files are guarded here rather than by scripts/check-extension-lockstep.sh,
+// which covers the two app trees.
+func TestExtensionWorkflowsStayInLockstep(t *testing.T) {
+	chromePath, chrome := maskedExtensionWorkflow(t, "chrome-extension", "Chrome")
+	edgePath, edge := maskedExtensionWorkflow(t, "edge-extension", "Edge")
+
+	// Reported with the first diverging line and its text, not the counts alone:
+	// "184 lines and 182" says a step was added or dropped without saying where,
+	// which is the one thing the reader needs in order to go look.
+	if len(chrome) != len(edge) {
+		n := firstDivergentLine(chrome, edge)
+		t.Fatalf("%s has %d lines and %s has %d, first diverging at line %d: a step, key, or comment exists in only one copy\n\t%s: %s\n\t%s: %s",
+			chromePath, len(chrome), edgePath, len(edge), n,
+			chromePath, lineAt(chrome, n), edgePath, lineAt(edge, n))
+	}
+	for i := range chrome {
+		if chrome[i] == edge[i] {
+			continue
+		}
+		t.Errorf("line %d has diverged (shown with the sanctioned tokens masked):\n\t%s: %s\n\t%s: %s",
+			i+1, chromePath, chrome[i], edgePath, edge[i])
+	}
+}
+
+// maskedExtensionWorkflow reads one extension workflow and returns its path
+// alongside its lines, with every sanctioned delta rewritten to a shared
+// placeholder so the two copies can be compared exactly.
+//
+// The app slug, change output and verifier env var are read out of that app's
+// requiredWorkflowSpecs entry rather than restated here, so renaming one there
+// cannot leave a stale duplicate quietly widening what this ignores. Only the
+// browser's prose name is spelled out: the specs carry it too, but embedded in
+// composite strings (verifierStepName, unchangedOutput) that would have to be
+// taken apart to recover it.
+//
+// The four rules cannot interfere with one another because each matches a
+// spelling the others do not: the hyphenated slug, the underscored output, the
+// SCREAMING_CASE env var, and — case-sensitively, under \b anchors — the
+// capitalized prose word. Store names (Chrome Web Store, Microsoft Edge
+// Add-ons) are deliberately not masked, unlike check-extension-lockstep.sh:
+// these workflows carry none today, and a step that adds one is publishing to a
+// different store, which is a real divergence worth stopping on rather than
+// normalizing away. The same goes for any future browser-specific publish step
+// or lowercase store URL: this test failing is the intended signal, and the fix
+// is a new mask documented here and in CLAUDE.md, never deleting the assertion.
+//
+// Each copy is masked for its own slug and browser name only, not for both.
+// That is stricter than check-extension-lockstep.sh, which masks both on both
+// sides: a copy naming the wrong browser reads as a match there and is reported
+// here. The cost is that neither file can name the other — a "keep in lockstep
+// with edge-extension.yml" comment diverges under its own slug mask, as does any
+// prose naming both browsers. A sibling-agnostic pointer does work, and is what
+// both files carry at the top. Relaxing this to symmetric masking would buy
+// those cross-references back at the price of the wrong-browser catch, which
+// would then need a separate assertion, the way check-i18n-parity.sh covers the
+// same blind spot in the script.
+func maskedExtensionWorkflow(t *testing.T, specName, browser string) (path string, lines []string) {
+	t.Helper()
+
+	const browserMask = "<browser>"
+	// Literal matches rather than lookaheads, because RE2 has none. The article
+	// rule runs second, against the placeholder the browser rule leaves behind:
+	// "a Chrome extension" and "an Edge extension" are the same sentence, and
+	// the article is forced by the word just erased. Both cases are matched so a
+	// sentence-initial "A Chrome…"/"An Edge…" is covered too — safe, because the
+	// replacement is fixed-case, so nothing can hide in the article's own
+	// capitalization that is not already visible in the rest of the line.
+	browserWord := regexp.MustCompile(`\b` + regexp.QuoteMeta(browser) + `\b`)
+	article := regexp.MustCompile(`\b[Aa]n? ` + browserMask)
+
+	spec := requiredWorkflowSpecByName(t, specName)
+	source := readWorkflowSource(t, spec.path)
+	source = strings.ReplaceAll(source, spec.name, "<app>")
+	source = strings.ReplaceAll(source, spec.changeOutput, "<change-output>")
+	source = strings.ReplaceAll(source, spec.changedEnv, "<changed-env>")
+	source = browserWord.ReplaceAllString(source, browserMask)
+	source = article.ReplaceAllString(source, "<article> "+browserMask)
+	return spec.path, strings.Split(source, "\n")
+}
+
+// lineAt returns the 1-based line n, or a marker when that copy ended first —
+// which is the normal case for the shorter side of a length mismatch.
+func lineAt(lines []string, n int) string {
+	if n-1 >= len(lines) {
+		return "(end of file)"
+	}
+	return lines[n-1]
+}
+
+// firstDivergentLine returns the 1-based line where two masked copies first
+// differ, or one past the shorter copy when it is a prefix of the longer.
+func firstDivergentLine(a, b []string) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return i + 1
+		}
+	}
+	return min(len(a), len(b)) + 1
+}
+
+func requiredWorkflowSpecByName(t *testing.T, name string) *requiredWorkflowSpec {
+	t.Helper()
+
+	for i := range requiredWorkflowSpecs {
+		if requiredWorkflowSpecs[i].name == name {
+			return &requiredWorkflowSpecs[i]
+		}
+	}
+	t.Fatalf("no requiredWorkflowSpecs entry named %q", name)
+	return nil
+}
+
 func readWorkflow(t *testing.T, name string) githubWorkflow {
+	t.Helper()
+
+	var workflow githubWorkflow
+	if err := yaml.Unmarshal(readWorkflowBytes(t, name), &workflow); err != nil {
+		t.Fatalf("parse %s workflow: %v", name, err)
+	}
+	return workflow
+}
+
+// readWorkflowBytes returns a workflow file's raw contents. It returns bytes
+// rather than a string because parsing is the overwhelmingly common use — the
+// tests in this package read the workflow directory many times over — and only
+// the lockstep comparison wants text, so the conversion belongs on that path
+// rather than on every parse.
+func readWorkflowBytes(t *testing.T, name string) []byte {
 	t.Helper()
 
 	// #nosec G304 -- callers pass checked-in workflow file names, either from
@@ -1074,12 +1217,17 @@ func readWorkflow(t *testing.T, name string) githubWorkflow {
 	if err != nil {
 		t.Fatalf("read %s workflow: %v", name, err)
 	}
+	return data
+}
 
-	var workflow githubWorkflow
-	if err := yaml.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse %s workflow: %v", name, err)
-	}
-	return workflow
+// readWorkflowSource returns a workflow file's raw text. Callers that only need
+// its shape should use readWorkflow; this exists for the lockstep comparison,
+// which is about the bytes — comments and formatting included — and would be
+// blind to a divergence YAML parsing throws away.
+func readWorkflowSource(t *testing.T, name string) string {
+	t.Helper()
+
+	return string(readWorkflowBytes(t, name))
 }
 
 // workflowFiles lists the workflow files in .github/workflows. It fails rather
@@ -1146,7 +1294,7 @@ func sortedQualityGateIDs(qualityGates map[string]bool) []string {
 	for id := range qualityGates {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 
