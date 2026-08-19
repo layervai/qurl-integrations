@@ -245,17 +245,29 @@ const (
 
 // assertListFindsCRID walks `qurl list -o json` page by page under the
 // documented pagination contract — continue exactly while has_more, via
-// next_cursor — and requires the published CRID to appear exactly once
-// across the whole listing (a page overlap or a dropped row is a pagination
-// bug even when the row is eventually found).
+// next_cursor — and requires the published CRID to appear exactly once in
+// what it walks (a page overlap or a dropped row is a pagination bug even
+// when the row is eventually found).
+//
+// The shared tenancy accumulates rows from every sandbox surface (bots,
+// suites), so the whole listing can legitimately outgrow any fixed page
+// budget — it first crossed listMaxPages*listPageLimit rows on 2026-08-19,
+// turning the old walk-everything Fatal into a permanent red. The walk
+// therefore stops at the budget and asserts over the window it scanned.
+// That window is sufficient because the row under test was published
+// moments ago and the platform lists newest first.
+//
+// TODO(upstream-contract): created_at descending is qurl-service's pinned
+// default sort for the resource listing (handlers/server.go, "default:
+// created_at:desc"). If that default ever changes, this window argument
+// breaks loudly — seen stays 0 — and the walk needs an explicit sort or a
+// different presence strategy.
 func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
 	t.Helper()
 	seen := 0
 	cursor := ""
+	pages := 0
 	for page := 1; ; page++ {
-		if page > listMaxPages {
-			t.Fatalf("list pagination did not terminate within %d pages of %d; refusing to walk further", listMaxPages, listPageLimit)
-		}
 		args := []string{"-o", "json", "list", "--limit", strconv.Itoa(listPageLimit)}
 		if cursor != "" {
 			args = append(args, "--cursor", cursor)
@@ -273,16 +285,21 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 				seen++
 			}
 		}
+		pages = page
 		if !doc.HasMore {
 			break
 		}
 		if doc.NextCursor == "" {
 			t.Fatalf("list page %d reports has_more with no next_cursor; pagination cannot continue", page)
 		}
+		if page == listMaxPages {
+			t.Logf("list still reports more rows after %d pages of %d; asserting over the newest-first window walked so far", listMaxPages, listPageLimit)
+			break
+		}
 		cursor = doc.NextCursor
 	}
 	if seen != 1 {
-		t.Fatalf("published CRID appeared %d times across the paginated listing, want exactly once", seen)
+		t.Fatalf("published CRID appeared %d times across %d newest-first list pages, want exactly once", seen, pages)
 	}
 }
 
