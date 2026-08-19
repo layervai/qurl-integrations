@@ -36,7 +36,98 @@ const (
 	// counts physical-redial knocks inside ONE tunnel run; exhausting it
 	// requests a cycle restart carrying ErrTooManyKnockFailures.
 	redialKnockMaxFailures = 5
+
+	// The three delays that can separate two consecutive dials in a storm
+	// that is still FAILING. Every one is a real, checked value, not an
+	// estimate: the watchdog's whole correctness rests on the settled gap
+	// being longer than their sum, so they are named rather than folded
+	// into a magic number.
+	//
+	//   - failingDialConnectBudget: transport.dialServerTimeout, which
+	//     frpgen sets to defaultDialTimeoutSeconds.
+	//   - failingDialLoginReadBudget: the pinned fork's Login response read
+	//     deadline, hard-coded in client/control_session.go.
+	//   - failingDialBackoffCeiling: the post-admission reconnect loop's
+	//     backoff cap (keepControllerWorking passes 20s as maxInterval).
+	//
+	// A single failing attempt can burn the first two in sequence — a TCP
+	// connect that succeeds slowly, then a server that never answers the
+	// Login — before the loop waits out the third.
+	failingDialConnectBudget   = 10 * time.Second
+	failingDialLoginReadBudget = 10 * time.Second
+	failingDialBackoffCeiling  = 20 * time.Second
+
+	// failingDialPeriod is how far apart two dials of a still-failing storm
+	// can be, before the per-dial re-knock's own round trip is added.
+	failingDialPeriod = failingDialConnectBudget + failingDialLoginReadBudget + failingDialBackoffCeiling
+
+	// reconnectSettledGap is the quiet period that ends a redial storm. The
+	// FRP client does not dial while a control session is up, so a gap this
+	// long means one of the redials succeeded and the tunnel served again.
+	//
+	// It MUST stay comfortably above failingDialPeriod. This is the
+	// watchdog's fail-open edge: if a failing storm's own dial spacing can
+	// reach the gap, every dial looks like a fresh start, the storm never
+	// accumulates, and the watchdog silently never fires — leaving exactly
+	// the unbounded loop this file exists to bound. 3x failingDialPeriod
+	// leaves room for the re-knock round trip and for a slower server
+	// without ever needing this constant re-tuned alongside them.
+	//
+	// The inference is one-directional, and the wording of both operator
+	// lines depends on that: a long gap proves the tunnel served, but a
+	// short one does NOT prove it did not. A connection that re-establishes,
+	// serves briefly and drops again inside this window is counted as one
+	// unbroken storm, which is why neither line claims the tunnel failed to
+	// come back — only that it is not staying up. Treating a sub-gap flap as
+	// a storm is deliberate and is an accepted trade: such a tunnel is not
+	// serving usefully, the recovery (end the cycle, re-knock, take a fresh
+	// dial target) suits it too, and sustained flapping does eventually
+	// spend the knock budget and exit. The window below is sized so that
+	// takes tens of minutes, not seconds.
+	reconnectSettledGap = 3 * failingDialPeriod
+
+	// reconnectStallWindow bounds how long the FRP client may sit in its own
+	// post-admission reconnect loop before this package takes the cycle back.
+	//
+	// It exists because that loop is unbounded and unobservable: after a
+	// cycle's first Login succeeds the pinned fork retries internally forever
+	// (keepControllerWorking passes firstLoginExit=false, hard-coded, so the
+	// LoginFailExit this package forces does not reach it) and Run stays
+	// blocked, so the supervisor's knock budget, its failure classification
+	// and every operator-facing message are unreachable for the rest of the
+	// run. Without this watchdog a Connector in that state loops in silence.
+	//
+	// Sized to outlast the measured cause with margin. The tunnel-server
+	// fleet is an ASG that rolls instances with an instance refresh; a
+	// replacement measured 80, 83 and 80 seconds from launch to serving
+	// across the three replacements of one 2026-08-18 sandbox roll. It must
+	// also stay above reconnectSettledGap, or a storm that keeps resetting
+	// could never reach it.
+	//
+	// Overrunning it is cheap and sometimes better: the cycle ends, the
+	// supervisor re-knocks, and the ACK returns a fresh dial target. The
+	// operator is told long before that, at reconnectStallNoticeAfter dials.
+	reconnectStallWindow = 2 * reconnectSettledGap
+
+	// reconnectStallNoticeAfter is how many dials into a storm the operator
+	// notice fires. Three means the tunnel dropped and TWO redials have
+	// already failed. Two would fire while only one had failed, and the dial
+	// about to run might well succeed — a routine two-attempt reconnect
+	// would then be announced as a tunnel that "keeps dropping".
+	reconnectStallNoticeAfter = 3
 )
+
+// reasonReconnectStalled is the classification bucket for a cycle the
+// reconnect watchdog took back.
+const reasonReconnectStalled = "reconnect_stalled"
+
+// errReconnectStalled ends a cycle whose tunnel was admitted and then could
+// not re-establish inside reconnectStallWindow. Unexported on purpose: like
+// the other per-cycle conditions it is retried under the supervisor's budget
+// and never becomes a process exit of its own, so it stays out of the CLI's
+// exported-sentinel exit-code contract. The budget exit it eventually
+// produces is ErrTooManyKnockFailures, which already has a code.
+var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could not re-establish after it was admitted")
 
 // redialKnockRefresher re-knocks before physical tunnel redials. All state is
 // mutex-guarded: the lock deliberately spans the knock call and the common
@@ -56,10 +147,111 @@ type redialKnockRefresher struct {
 	// distinct attempts into one debounce window.
 	now func() time.Time
 
+	// stallWindow and settledGap override the package defaults; zero means
+	// the default. Test-only injection, like the supervisor's own knobs.
+	stallWindow time.Duration
+	settledGap  time.Duration
+
 	mu                 sync.Mutex
 	lastKnockAt        time.Time
 	consecutiveFailure int
 	requestRestart     func(error)
+
+	// Reconnect-watchdog state, guarded by mu with everything above.
+	// lastDialAt stamps the previous physical dial, stormStartedAt opens the
+	// current unbroken redial storm (zero outside one), stormDials counts the
+	// dials inside it, stormNoticed latches the one operator notice, and
+	// stormStalled latches the one stall report.
+	lastDialAt     time.Time
+	stormStartedAt time.Time
+	stormDials     int
+	stormNoticed   bool
+	stormStalled   bool
+}
+
+// noteRedialLocked advances the reconnect watchdog for one physical dial and
+// reports the error the dial should fail with, if any. The caller holds r.mu.
+//
+// Every call reaching it is a redial: the supervisor's own first dial of a
+// cycle is consumed by the first-cycle handoff in refresh, and FRP does not
+// dial again while a control session is up. So a run of calls separated by
+// less than settledGap is precisely "the tunnel is down and not coming back",
+// which is the condition the FRP client cannot report and this watchdog can.
+func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time) error {
+	if !r.lastDialAt.IsZero() && t.Sub(r.lastDialAt) >= r.settled() {
+		// Quiet long enough that a redial must have served: start over, so a
+		// tunnel that reconnects normally never accumulates toward the window.
+		r.stormStartedAt = time.Time{}
+		r.stormDials = 0
+		r.stormNoticed = false
+		r.stormStalled = false
+	}
+	r.lastDialAt = t
+	if r.stormStartedAt.IsZero() {
+		r.stormStartedAt = t
+	}
+	r.stormDials++
+
+	elapsed := t.Sub(r.stormStartedAt)
+	if elapsed >= r.stall() {
+		stalled := fmt.Errorf("%w: no tunnel session for %s across %d dial attempts", errReconnectStalled, elapsed.Round(time.Second), r.stormDials)
+		// Latched like the notice above. Canceling the cycle does not stop
+		// FRP instantly, so it can dial again before its Run observes the
+		// cancellation; without this the same stall would report twice.
+		// requestRestart is already idempotent on the cause — this is about
+		// not emitting a duplicate operator line.
+		if !r.stormStalled {
+			r.stormStalled = true
+			r.log().WarnContext(ctx, "connector: the tunnel connection kept dropping for too long; restarting the connection cycle",
+				"event", reasonReconnectStalled,
+				"resource_id", r.resourceID,
+				"stalled_seconds", elapsed.Seconds(),
+				"dial_attempts", r.stormDials)
+			if r.requestRestart != nil {
+				r.requestRestart(stalled)
+			}
+		}
+		// Returned on every dial, latched or not: each one must still fail.
+		return stalled
+	}
+	if r.stormDials >= reconnectStallNoticeAfter && !r.stormNoticed {
+		r.stormNoticed = true
+		// Said once per storm, in customer language, because this is the
+		// window in which the Connector otherwise looks healthy while
+		// consumers time out: the knocks below keep succeeding and the FRP
+		// client logs only its own transport errors.
+		//
+		// Deliberately states the observation and NOT a cause. The dial
+		// failures underneath are multiplexer transport errors with no
+		// server-supplied reason, so naming one — a held previous session, a
+		// network fault — would be a guess printed as fact. It also avoids
+		// claiming the tunnel never came back: see reconnectSettledGap, a
+		// flap inside the gap reads as one storm.
+		r.log().WarnContext(ctx, "connector: the tunnel connection keeps dropping and is not staying up; still retrying, and consumers will time out while it is down",
+			"event", "reconnect_retrying",
+			"resource_id", r.resourceID,
+			// Not stalled_seconds: at this point it is still retrying, and
+			// the tunnel may even be coming back between dials. The stall
+			// line below is the one that has stalled.
+			"retrying_seconds", elapsed.Seconds(),
+			"dial_attempts", r.stormDials,
+			"gives_up_after_seconds", r.stall().Seconds())
+	}
+	return nil
+}
+
+func (r *redialKnockRefresher) stall() time.Duration {
+	if r.stallWindow > 0 {
+		return r.stallWindow
+	}
+	return reconnectStallWindow
+}
+
+func (r *redialKnockRefresher) settled() time.Duration {
+	if r.settledGap > 0 {
+		return r.settledGap
+	}
+	return reconnectSettledGap
 }
 
 // refresh performs one gated knock and restamps common in place. The pinned
@@ -86,9 +278,18 @@ func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCom
 	if r.lastKnockAt.IsZero() && commonKnockToken(common) != "" {
 		// First-cycle handoff: the supervisor already knocked and stamped
 		// this cycle's token. Start the redial gate at handoff time so quick
-		// connector retries stay inside the same admission window.
+		// connector retries stay inside the same admission window, and return
+		// before the watchdog — this is the supervisor's own dial, not a
+		// redial, so it must not open a storm or count toward one.
 		r.lastKnockAt = t
 		return nil
+	}
+	// Ahead of the gate on purpose: the watchdog must see EVERY physical
+	// dial. During a storm the FRP client redials faster than the gate, so
+	// most calls return debounced below — counting only the ungated ones
+	// would undercount the storm by roughly the ratio of the two intervals.
+	if err := r.noteRedialLocked(ctx, t); err != nil {
+		return err
 	}
 	if !r.lastKnockAt.IsZero() {
 		if wait := r.gate - t.Sub(r.lastKnockAt); wait > 0 {
@@ -231,6 +432,16 @@ func (c *knockingConnector) Open() error {
 
 // Connect refreshes the knock first on transports whose physical dial happens
 // here, then dials through the underlying connector.
+//
+// WATCHDOG COUPLING: this branch is reached only when TCPMux is explicitly
+// disabled, and in that mode FRP dials once per WORK connection rather than
+// once per control redial. The reconnect watchdog counts every refresh as one
+// control redial, so under sustained traffic it would accumulate a storm on a
+// perfectly healthy tunnel and eventually force a false cycle restart. The
+// generated config never disables TCPMux — frpgen models no such field, so it
+// stays at FRP's default of on — and TestProductionConfigKeepsTheWatchdogOnTheOpenSeam
+// pins that. Anything that starts setting TCPMux=false must revisit
+// noteRedialLocked before it does.
 func (c *knockingConnector) Connect() (net.Conn, error) {
 	if !physicalDialInOpen(c.common) {
 		if err := c.refresher.refresh(c.ctx, c.common, "connect"); err != nil {
