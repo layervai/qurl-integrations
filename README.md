@@ -129,8 +129,9 @@ workflow filtered off PRs stacked on a feature branch never registers its checks
 protection guards only `main`, so the stacked PR reads green having run none of them
 (#1183, #1185). Merging the base does not recover the run: the retarget onto `main` arrives as
 the `edited` activity type, which no branch-filtered workflow here takes, so the PR stalls on the
-check that never registered until its next push (#1219). The package's own check — `Workflow Contract` — is unfiltered and reports on every
-PR, because a check behind a paths filter cannot police the paths filters (#1081).
+check that never registered until its next push (#1219). The package's own check —
+`Workflow Contract` — is unfiltered and reports on every PR, because a check behind a paths
+filter cannot police the paths filters (#1081).
 
 ## License
 
