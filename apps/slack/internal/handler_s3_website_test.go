@@ -1315,6 +1315,12 @@ func TestRenderDockerS3WebsiteInstructions(t *testing.T) {
 		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
 	}
 	for _, want := range []string{
+		// The qURL Connector runs in the origin container's network namespace,
+		// so an origin recreate or auto-restart strands it. Keep the recovery
+		// note pinned here: a prose edit that drops it leaves the operator with
+		// two "running" containers and a dead qURL.
+		"Docker auto-restarts it after a crash",
+		"recreate or restart the qURL Connector container",
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
 		`AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"`,
@@ -1462,6 +1468,18 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	}
 	if !strings.Contains(got, "QURL_API_URL_YAML="+shellSingleQuote(quotedAPIURL)) {
 		t.Fatalf("Compose instructions missing shell-quoted API URL assignment:\n%s", got)
+	}
+	// The qURL Connector shares the origin service's network namespace, so an
+	// origin recreate or auto-restart strands it. Keep both recovery notes
+	// pinned here: a prose edit that drops them leaves the operator with two
+	// "running" services and a dead qURL.
+	for _, want := range []string{
+		"Docker auto-restarts the S3 origin service after a crash",
+		"After a Docker daemon restart, verify both services are running",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Compose instructions missing shared-namespace recovery note %q:\n%s", want, got)
+		}
 	}
 	assertNoS3SecretLeaks(t, got)
 }
