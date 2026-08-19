@@ -25,6 +25,9 @@ const {
   isRefusedTarget,
   normalizeHost,
   isTargetAuthorized,
+  targetGuardReport,
+  resolveGuardInputs,
+  VERDICT_LABEL,
 } = require('../scripts/loadtest-standalone');
 
 const NO_ALLOWLIST = new Set();
@@ -87,6 +90,7 @@ describe('loadtest target guard — unrecognized hosts fail closed', () => {
     ['a customer custom domain', 'https://links.acme-corp.com'],
     ['a staging host not named in the allowlist', 'https://api.staging.layerv.ai'],
     ['a lookalike domain', 'https://api.layerv.ai.evil.example'],
+    ['a domain merely ending in the prod name', 'https://notqurl.site'],
     ['a non-loopback private address', 'http://10.0.0.5:8080'],
     ['an RFC1918 /16 address', 'http://192.168.1.10:9808'],
     ['a link-local address', 'http://169.254.169.254'],
@@ -98,6 +102,7 @@ describe('loadtest target guard — unrecognized hosts fail closed', () => {
     ['empty', ''],
     ['not a URL', 'not a url'],
     ['scheme-relative', '//api.layerv.ai'],
+    ['scheme-less host:port', 'localhost:8080'],
   ])('refuses an unparseable target (%s)', (_label, url) => {
     expect(verdictFor(url)).toBe('unparseable');
     expect(targetHost(url)).toBeNull();
@@ -318,11 +323,17 @@ describe('loadtest target guard — override strength is asymmetric', () => {
   const NEITHER = { allowProdFlag: false, allowProdEnv: false };
   const target = (verdict) => ({ name: 'QURL_ENDPOINT', rawUrl: 'x', host: 'h', verdict });
 
-  it('lets the env var clear a merely unrecognized target', () => {
-    // An unnamed sandbox is a recognition failure, not a known-dangerous
-    // target, so the cheaper override is enough.
+  it('lets the env var clear an unnamed sandbox', () => {
+    // A host the operator simply did not enumerate is a recognition failure,
+    // not a known-dangerous target, so the cheaper override is enough.
     expect(isTargetAuthorized(target('unrecognized'), ENV_ONLY)).toBe(true);
-    expect(isTargetAuthorized(target('unparseable'), ENV_ONLY)).toBe(true);
+  });
+
+  it('does NOT let the env var clear an unparseable target', () => {
+    // A URL that will not parse is never a legitimate sandbox, so there is
+    // nothing for the weaker override to mean.
+    expect(isTargetAuthorized(target('unparseable'), ENV_ONLY)).toBe(false);
+    expect(isTargetAuthorized(target('unparseable'), FLAG_ONLY)).toBe(true);
   });
 
   it('does NOT let the env var clear a production target', () => {
@@ -364,6 +375,10 @@ describe('loadtest target guard — the mirrored production hostnames are real',
     process.env.NODE_ENV = 'production';
     delete process.env.QURL_ENDPOINT;
     delete process.env.CONNECTOR_URL;
+    // config.js throws at module load if this is set under NODE_ENV=production.
+    // Unset here so the drift check fails on drift, not on the DDB-mock setup
+    // a future runner might have in its environment.
+    delete process.env.DDB_TEST_ENDPOINT;
     try {
       return require('../src/config');
     } finally {
@@ -380,5 +395,150 @@ describe('loadtest target guard — the mirrored production hostnames are real',
       allowedHosts: NO_ALLOWLIST,
     });
     expect(targets.map((t) => t.verdict)).toEqual(['production', 'production']);
+  });
+});
+
+describe('loadtest target guard — the enforcement decision', () => {
+  // main() is unreachable from a test (it runs the load test) and scripts/ is
+  // outside collectCoverageFrom, so this is the only thing standing between a
+  // refactor and a guard that silently stops guarding.
+  const build = (urls, opts = {}) => targetGuardReport({
+    targets: classifyTargets({
+      qurlEndpoint: urls.qurl,
+      connectorUrl: urls.connector,
+      allowedHosts: opts.allowedHosts || NO_ALLOWLIST,
+    }),
+    allowlistErrors: opts.allowlistErrors || [],
+    allowProdFlag: opts.allowProdFlag || false,
+    allowProdEnv: opts.allowProdEnv || false,
+  });
+  const SAFE = { qurl: 'http://localhost:8080', connector: 'http://localhost:9808' };
+  const PROD = { qurl: 'https://api.layerv.ai', connector: 'http://localhost:9808' };
+
+  it('is not fatal and says nothing when both targets are recognized', () => {
+    const r = build(SAFE);
+    expect(r.fatal).toBe(false);
+    expect(r.lines).toEqual([]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('blocks a production target when no override is given', () => {
+    const r = build(PROD);
+    expect(r.fatal).toBe(true);
+    expect(r.blocked.map((t) => t.name)).toEqual(['QURL_ENDPOINT']);
+    expect(r.lines.join('\n')).toContain('pass --allow-production on the command line');
+  });
+
+  it('blocks a production target under the env override alone', () => {
+    // The regression that matters most: .env.loadtest must not be able to do
+    // this. Asserted on the real decision, not just on isTargetAuthorized.
+    const r = build(PROD, { allowProdEnv: true });
+    expect(r.fatal).toBe(true);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('permits a production target under the typed flag, and says which override fired', () => {
+    const r = build(PROD, { allowProdFlag: true });
+    expect(r.fatal).toBe(false);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain('overridden via --allow-production');
+  });
+
+  it('names the env override by name when it is the one that fired', () => {
+    const r = build({ qurl: 'https://sbx.example.invalid', connector: 'http://localhost:9808' }, { allowProdEnv: true });
+    expect(r.fatal).toBe(false);
+    expect(r.warnings[0]).toContain('overridden via LOADTEST_ALLOW_PRODUCTION=1');
+  });
+
+  it('keeps the port visible in the override warning', () => {
+    // rawUrl, not host — a warning that hid :9808 would misreport the target.
+    const r = build({ qurl: 'http://localhost:8080', connector: 'https://sbx.example.invalid:9808' }, { allowProdFlag: true });
+    expect(r.warnings[0]).toContain('sbx.example.invalid:9808');
+  });
+
+  it('offers a paste-ready allowlist line naming only the unrecognized host', () => {
+    const r = build({ qurl: 'https://api-eu.layerv.ai:8443/v1', connector: 'https://api.layerv.ai' });
+    const line = r.lines.find((l) => l.includes('LOADTEST_TARGET_HOSTS='));
+    expect(line).toBe('If that is the intended sandbox: LOADTEST_TARGET_HOSTS=api-eu.layerv.ai');
+    // Never offers to allowlist the production host alongside it.
+    expect(line).not.toContain('api.layerv.ai,');
+  });
+
+  it('tells the operator a scheme is missing rather than offering an empty grant', () => {
+    const r = build({ qurl: 'localhost:8080', connector: 'http://localhost:9808' });
+    expect(r.fatal).toBe(true);
+    expect(r.lines.join('\n')).toContain('needs a scheme');
+    expect(r.lines.join('\n')).not.toContain('LOADTEST_TARGET_HOSTS=\n');
+    expect(r.lines.some((l) => l.endsWith('LOADTEST_TARGET_HOSTS='))).toBe(false);
+  });
+
+  it('is fatal on a malformed allowlist entry even when the targets are fine', () => {
+    const r = build(SAFE, { allowlistErrors: ['bad entry'] });
+    expect(r.fatal).toBe(true);
+    expect(r.lines[0]).toBe('FATAL: bad entry');
+  });
+
+  it('is fatal on a malformed allowlist entry even under the typed flag', () => {
+    const r = build(SAFE, { allowlistErrors: ['bad entry'], allowProdFlag: true });
+    expect(r.fatal).toBe(true);
+  });
+
+  it('always prints both targets so the operator sees which half was fine', () => {
+    const table = build(PROD).lines.filter((l) => l.startsWith('  '));
+    expect(table).toHaveLength(2);
+    expect(table[0]).toContain('QURL_ENDPOINT');
+    expect(table[1]).toContain('CONNECTOR_URL');
+  });
+
+  it('labels every verdict, marking safe ones ok and the rest REFUSED', () => {
+    // A verdict added to neither SAFE_VERDICTS nor VERDICT_LABEL would print
+    // `[undefined]` in the operator's table.
+    const verdicts = ['loopback', 'allowlisted', 'production', 'unrecognized', 'unparseable'];
+    for (const v of verdicts) {
+      expect(VERDICT_LABEL[v]).toBeDefined();
+      const safe = !isRefusedTarget({ verdict: v });
+      expect(VERDICT_LABEL[v].startsWith(safe ? 'ok' : 'REFUSED')).toBe(true);
+    }
+  });
+});
+
+describe('loadtest target guard — requiring the script is inert', () => {
+  it('does not run the load test or touch process.env', () => {
+    // The file gates BOTH main() and the .env.loadtest splice on
+    // `require.main === module`. If a future edit dropped the conjunct on the
+    // splice, a developer with a .env.loadtest would silently get it merged
+    // into the jest process while CI, which has no such file, stayed green.
+    const before = JSON.stringify(process.env);
+    jest.isolateModules(() => { require('../scripts/loadtest-standalone'); });
+    expect(JSON.stringify(process.env)).toBe(before);
+  });
+});
+
+describe('loadtest target guard — the names read from the outside world', () => {
+  // Pins the literal env-var and flag spellings. Every other test supplies
+  // these values directly, so without this a rename here would be invisible.
+  it('reads the allowlist from LOADTEST_TARGET_HOSTS', () => {
+    const r = resolveGuardInputs({ LOADTEST_TARGET_HOSTS: 'sbx.example.internal' }, []);
+    expect([...r.hosts]).toEqual(['sbx.example.internal']);
+    expect(r.errors).toEqual([]);
+  });
+
+  it('ignores an allowlist under any other variable name', () => {
+    const r = resolveGuardInputs({ LOADTEST_TARGET_OK: 'sbx.example.internal' }, []);
+    expect(r.hosts.size).toBe(0);
+  });
+
+  it('reads the env override from LOADTEST_ALLOW_PRODUCTION=1 only', () => {
+    expect(resolveGuardInputs({ LOADTEST_ALLOW_PRODUCTION: '1' }, []).allowProdEnv).toBe(true);
+    // Must be the literal '1' — 'true'/'yes' stay off, matching the repo's
+    // posture on MAP_COMMAND_ENABLED, so a typo cannot enable an override.
+    expect(resolveGuardInputs({ LOADTEST_ALLOW_PRODUCTION: 'true' }, []).allowProdEnv).toBe(false);
+    expect(resolveGuardInputs({}, []).allowProdEnv).toBe(false);
+  });
+
+  it('reads the flag from argv as --allow-production', () => {
+    expect(resolveGuardInputs({}, ['--allow-production']).allowProdFlag).toBe(true);
+    expect(resolveGuardInputs({}, ['--allow-prod']).allowProdFlag).toBe(false);
+    expect(resolveGuardInputs({}, []).allowProdFlag).toBe(false);
   });
 });

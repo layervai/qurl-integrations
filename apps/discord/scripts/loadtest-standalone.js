@@ -45,6 +45,10 @@ if (require.main === module && fs.existsSync(envFile)) {
     const [key, ...rest] = trimmed.split('=');
     if (key && rest.length) process.env[key.trim()] = rest.join('=').trim();
   }
+  // Say so: this splice OVERWRITES the caller's environment, so an operator
+  // who just exported QURL_ENDPOINT would otherwise see a different value in
+  // the guard's verdict table with no explanation for where it came from.
+  console.log(`Loaded env overrides from ${envFile}`);
 }
 
 const config = require('../src/config');
@@ -140,7 +144,13 @@ function normalizeHost(host) {
 /** Normalized hostname of a target URL, or null when it won't parse. */
 function targetHost(rawUrl) {
   try {
-    return normalizeHost(new URL(rawUrl).hostname);
+    const host = normalizeHost(new URL(rawUrl).hostname);
+    // `localhost:8080` — the realistic scheme-less typo — parses with
+    // `localhost:` AS the scheme and an EMPTY host. Reporting that as a host
+    // would label it 'unrecognized' and then offer the operator an empty
+    // `LOADTEST_TARGET_HOSTS=` to set, which refuses identically: a closed
+    // loop. Call it unparseable, which is both true and actionable.
+    return host === '' ? null : host;
   } catch {
     // Unparseable is not "safe" — the caller files null as its own refused
     // verdict, so a malformed target fails closed like an unknown host does.
@@ -166,9 +176,12 @@ function isLoopbackHost(host) {
   if (host === 'localhost') return true;
   if (host.startsWith('[') && host.endsWith(']')) {
     const inner = host.slice(1, -1);
-    // ipv6LocalScope's documented contract: the caller gates on the ':'. Its
-    // leading parseInt is a lenient prefix parse, so an un-gated DNS name
-    // could read as a hextet.
+    // Honors ipv6LocalScope's documented contract, which requires the caller
+    // to gate on the ':' (its leading parseInt is a lenient prefix parse, so
+    // an un-gated DNS name can read as a hextet). This particular call cannot
+    // change result either way — it compares against 'loopback', which that
+    // function returns only for the exact string '::1' — so the gate is
+    // conformance to a documented contract, not a live guard.
     return inner.includes(':') && ipv6LocalScope(inner) === 'loopback';
   }
   return ipv4LocalScope(parseIPv4Octets(host)) === 'loopback';
@@ -198,8 +211,10 @@ function parseTargetAllowlist(raw) {
   for (const entry of entries) {
     if (entry.includes('/') || entry.includes(':')) {
       // Covers `https://host`, `host/path` and `host:9808` alike. Bracketed
-      // IPv6 is rejected by the same rule and needs no entry — loopback is
-      // recognized without one.
+      // IPv6 is rejected by the same rule. Accepted limitation: loopback needs
+      // no entry, but a sandbox reached by IPv6 LITERAL rather than by name
+      // cannot be allowlisted at all — it would need --allow-production.
+      // Sandboxes here have DNS names; revisit if one ever does not.
       errors.push(`LOADTEST_TARGET_HOSTS entry '${entry}' must be a bare hostname — no scheme, path, or port.`);
     } else if (/^\d+$/.test(entry)) {
       // `LOADTEST_TARGET_HOSTS=1` reads like a boolean and would otherwise be
@@ -256,19 +271,88 @@ const isRefusedTarget = (target) => !SAFE_VERDICTS.has(target.verdict);
  * Which override authorizes a refused target. The two strengths are
  * deliberately asymmetric.
  *
- * A target the guard merely fails to RECOGNIZE — an unnamed sandbox, a value
- * that will not parse — can be waved through from the environment. A host
- * known to be PRODUCTION needs the typed command-line flag, because
- * `.env.loadtest` is spliced into process.env at the top of this file: an
- * env-only override would let a gitignored file sitting in a working copy
- * disable this guard permanently and silently, which is the same vector
- * parseTargetAllowlist refuses for LOADTEST_TARGET_HOSTS. Refusing it there
- * and allowing it here would leave the small hole shut and the large one open.
+ * The typed flag clears anything. The environment clears exactly one case: a
+ * real sandbox the operator did not enumerate ('unrecognized').
+ *
+ * It deliberately does not clear PRODUCTION, because `.env.loadtest` is
+ * spliced into process.env at the top of this file — an env-only override
+ * would let a gitignored file sitting in a working copy disable this guard
+ * permanently and silently, the same vector parseTargetAllowlist refuses for
+ * LOADTEST_TARGET_HOSTS. Refusing it there and allowing it here would leave
+ * the small hole shut and the large one open.
+ *
+ * It does not clear 'unparseable' either: a URL that will not parse is never
+ * a legitimate sandbox, so there is nothing for the weaker override to mean.
  */
 function isTargetAuthorized(target, { allowProdFlag, allowProdEnv }) {
   if (!isRefusedTarget(target)) return true;
-  if (target.verdict === 'production') return allowProdFlag;
-  return allowProdFlag || allowProdEnv;
+  if (allowProdFlag) return true;
+  return target.verdict === 'unrecognized' && allowProdEnv;
+}
+
+/**
+ * Resolve every input the guard reads from the outside world.
+ *
+ * Takes env and argv as arguments rather than reaching for the globals so the
+ * VARIABLE NAMES themselves are pinnable by a test. That is not hypothetical:
+ * this allowlist variable has already been renamed once, and renaming it here
+ * while updating only the error strings would ship an allowlist that is always
+ * empty, with every test still green.
+ */
+function resolveGuardInputs(env, argv) {
+  return {
+    allowProdFlag: argv.includes('--allow-production'),
+    allowProdEnv: env.LOADTEST_ALLOW_PRODUCTION === '1',
+    ...parseTargetAllowlist(env.LOADTEST_TARGET_HOSTS),
+  };
+}
+
+/**
+ * The entire enforcement decision, as data — main() only prints and exits.
+ *
+ * Split out because main() is not reachable from the test suite (it runs the
+ * load test), and scripts/ is outside jest's collectCoverageFrom, so nothing
+ * flags the gap. That combination once hid a live hazard: with the decision
+ * inline, renaming the allowlist env var and updating only the error strings
+ * would ship an allowlist that is always empty, with a green suite.
+ */
+function targetGuardReport({ targets, allowlistErrors = [], allowProdFlag, allowProdEnv }) {
+  const refused = targets.filter(isRefusedTarget);
+  const blocked = refused.filter((t) => !isTargetAuthorized(t, { allowProdFlag, allowProdEnv }));
+  const lines = [];
+  for (const err of allowlistErrors) lines.push(`FATAL: ${err}`);
+  if (blocked.length > 0) {
+    lines.push('FATAL: refusing to load test a target that is not a recognized sandbox.');
+    for (const t of targets) {
+      lines.push(`  ${t.name.padEnd(14)} = ${t.rawUrl}  [${VERDICT_LABEL[t.verdict]}]`);
+    }
+    lines.push('This run mints thousands of resources; a target has to be recognized as');
+    lines.push('non-production before it gets that volume.');
+    // The verdict table prints whole URLs, but the variable takes hostnames —
+    // hand back the parsed host so the operator does not have to extract it.
+    const nameable = [...new Set(blocked.filter((t) => t.verdict === 'unrecognized').map((t) => t.host))];
+    if (nameable.length > 0) {
+      lines.push(`If that is the intended sandbox: LOADTEST_TARGET_HOSTS=${nameable.join(',')}`);
+    }
+    if (blocked.some((t) => t.verdict === 'unparseable')) {
+      lines.push('A target that will not parse needs a scheme, e.g. https://host:port.');
+    }
+    if (blocked.some((t) => t.verdict === 'production')) {
+      // Named separately because LOADTEST_ALLOW_PRODUCTION will NOT clear a
+      // production verdict — see isTargetAuthorized.
+      lines.push('To load test production anyway, pass --allow-production on the command line.');
+    }
+  }
+  const warnings = [];
+  if (blocked.length === 0 && refused.length > 0) {
+    // Name the override that fired: only the env leg can come from a
+    // gitignored .env.loadtest the operator has forgotten about. Prints
+    // rawUrl, not host, so a non-default port stays visible.
+    const via = allowProdFlag ? '--allow-production' : 'LOADTEST_ALLOW_PRODUCTION=1';
+    const named = refused.map((t) => `${t.name}=${t.rawUrl} (${t.verdict})`).join(', ');
+    warnings.push(`WARNING: target guard overridden via ${via} — running against ${named}`);
+  }
+  return { refused, blocked, lines, warnings, fatal: lines.length > 0 };
 }
 
 async function runRound(roundNum) {
@@ -336,49 +420,24 @@ async function main() {
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
   // Refuse any target not positively recognized as non-production. See the
   // "Target safety guard" section above for why this is an allowlist.
-  const allowProdFlag = process.argv.includes('--allow-production');
-  const allowProdEnv = process.env.LOADTEST_ALLOW_PRODUCTION === '1';
-  const { hosts: allowedHosts, errors: allowlistErrors } = parseTargetAllowlist(process.env.LOADTEST_TARGET_HOSTS);
-  // A malformed entry is reported even under --allow-production: it means the
-  // operator believes they granted a host they did not, which is worth knowing
-  // before the next run relies on it.
-  if (allowlistErrors.length > 0) {
-    for (const err of allowlistErrors) console.error(`FATAL: ${err}`);
-    process.exit(1);
-  }
-  const targets = classifyTargets({
-    qurlEndpoint: config.QURL_ENDPOINT,
-    connectorUrl: config.CONNECTOR_URL,
-    allowedHosts,
+  const { allowProdFlag, allowProdEnv, hosts: allowedHosts, errors: allowlistErrors } =
+    resolveGuardInputs(process.env, process.argv);
+  const report = targetGuardReport({
+    targets: classifyTargets({
+      qurlEndpoint: config.QURL_ENDPOINT,
+      connectorUrl: config.CONNECTOR_URL,
+      allowedHosts,
+    }),
+    // Reported even under --allow-production: a malformed entry means the
+    // operator believes they granted a host they did not, which is worth
+    // knowing before the next run relies on it.
+    allowlistErrors,
+    allowProdFlag,
+    allowProdEnv,
   });
-  const refused = targets.filter(isRefusedTarget);
-  const blocked = refused.filter((t) => !isTargetAuthorized(t, { allowProdFlag, allowProdEnv }));
-  if (blocked.length > 0) {
-    console.error('FATAL: refusing to load test a target that is not a recognized sandbox.');
-    for (const t of targets) {
-      console.error(`  ${t.name.padEnd(14)} = ${t.rawUrl}  [${VERDICT_LABEL[t.verdict]}]`);
-    }
-    console.error('This run mints thousands of resources; a target has to be recognized as');
-    console.error('non-production before it gets that volume.');
-    // The verdict table prints whole URLs, but the variable takes hostnames —
-    // hand back the parsed host so the operator does not have to extract it.
-    const nameable = [...new Set(blocked.filter((t) => t.verdict === 'unrecognized').map((t) => t.host))];
-    if (nameable.length > 0) {
-      console.error(`If that is the intended sandbox: LOADTEST_TARGET_HOSTS=${nameable.join(',')}`);
-    }
-    if (blocked.some((t) => t.verdict === 'production')) {
-      // Named separately because LOADTEST_ALLOW_PRODUCTION will NOT clear a
-      // production verdict — see isTargetAuthorized.
-      console.error('To load test production anyway, pass --allow-production on the command line.');
-    }
-    process.exit(1);
-  }
-  if (refused.length > 0) {
-    // Worded for either override — the flag and LOADTEST_ALLOW_PRODUCTION=1
-    // both land here, so naming only the flag would misreport the env path.
-    const named = refused.map((t) => `${t.name}=${t.host || t.rawUrl} (${t.verdict})`).join(', ');
-    console.warn(`WARNING: target guard overridden — running against ${named}`);
-  }
+  for (const line of report.lines) console.error(line);
+  if (report.fatal) process.exit(1);
+  for (const line of report.warnings) console.warn(line);
 
   // Quick smoke test
   console.log('Running smoke test...');
@@ -449,6 +508,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  resolveGuardInputs,
+  targetGuardReport,
+  VERDICT_LABEL,
   isTargetAuthorized,
   normalizeHost,
   targetHost,
