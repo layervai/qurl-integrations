@@ -123,6 +123,57 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
+  // The spelling indexOf cannot see. `--count=200` is not the token `--count`,
+  // so it read as the flag being ABSENT and quietly ran the default — the same
+  // silent fallback the tests below refuse for a dropped value, reached by
+  // typing the value the other way round. `--duration=60` is the one that
+  // hurts: a run the operator sized at a minute held the target for the
+  // default two hours and reported nothing wrong.
+  it.each([
+    ['count', 'count', 200],
+    ['duration', 'durationS', 60],
+    ['interval', 'intervalS', 30],
+  ])('reads --%s=value as well as the space-separated form', (flag, key, value) => {
+    const resolved = resolveNumericArgs([`--${flag}=${value}`]);
+    expect(resolved[key]).toBe(value);
+    expect(resolved.errors).toEqual([]);
+  });
+
+  it('does not let a longer flag match the one it starts with', () => {
+    // '--counter=9' starts with '--count', and would set count if the equals
+    // form were matched on the flag name rather than on the name plus '='.
+    expect(resolveNumericArgs(['--counter=9'])).toEqual({
+      count: 100, durationS: 7200, intervalS: 60, errors: [],
+    });
+  });
+
+  it('takes the space-separated value when a flag is given both ways', () => {
+    // Pinned in both argv orders: reading the equals form must not change what
+    // an argv that already had a usable space-separated value resolved to.
+    expect(resolveNumericArgs(['--count=200', '--count', '7']).count).toBe(7);
+    expect(resolveNumericArgs(['--count', '7', '--count=200']).count).toBe(7);
+  });
+
+  it('lets the bare token win even when that makes the run fail', () => {
+    // It is the space-form TOKEN that wins, not a usable value. `--count`
+    // followed by `--count=200` consumes the next argv entry as its raw value
+    // and fails the parse on it rather than reaching past it to the 200.
+    // Pinned because readFlagToken's doc comment now states this, and a
+    // reordering of the two lookups would make that comment quietly false
+    // with nothing else here failing.
+    const { count, errors } = resolveNumericArgs(['--count', '--count=200']);
+    expect(count).toBeNaN();
+    expect(errors).toEqual(['--count must be a positive whole number, got "--count=200"']);
+  });
+
+  it('splits on the first equals and leaves the rest to the parser', () => {
+    // `--count==200` is a value of '=200', not an empty value and not 200.
+    // Deciding what counts as malformed belongs to parsePositiveInt, so the
+    // token splitter must hand the whole remainder over untouched.
+    expect(resolveNumericArgs(['--count==200']).errors[0]).toContain('got "=200"');
+    expect(resolveNumericArgs(['--count=2=0']).errors[0]).toContain('got "2=0"');
+  });
+
   // The case getArg cannot express: `--count` as the final token has no value
   // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
   // the same 100 as not passing the flag at all. Silently running the default
@@ -137,6 +188,23 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     const { count, errors } = resolveNumericArgs(['--count', '']);
     expect(count).toBeNaN();
     expect(errors[0]).toContain('got ""');
+  });
+
+  it('refuses the equals form with the value left off', () => {
+    // '--count=' and a trailing '--count' are the same dropped value, so they
+    // report the same way. Distinct from `--count ''` just above, which is a
+    // value that was passed and is unusable rather than one that went missing.
+    const { count, errors } = resolveNumericArgs(['--count=']);
+    expect(count).toBeNaN();
+    expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
+  });
+
+  it('validates an equals-form value through the same parser', () => {
+    // Otherwise the new spelling would be a way around parsePositiveInt rather
+    // than a second way into it.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--duration=0']).errors[0]).toContain('greater than zero');
+    expect(resolveNumericArgs(['--interval=-1']).errors[0]).toContain('got "-1"');
   });
 
   it('refuses the following flag when the value was forgotten', () => {
