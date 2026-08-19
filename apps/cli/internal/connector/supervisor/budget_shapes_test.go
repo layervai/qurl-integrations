@@ -50,7 +50,7 @@ func TestReconnectStallCountsAgainstBudget(t *testing.T) {
 }
 
 // TestOrdinaryLoginFailureStillResetsTheBudget is the counterweight: only the
-// three named shapes count. A plain connectivity failure must keep resetting
+// two named shapes count. A plain connectivity failure must keep resetting
 // the budget, because the supervisor's job there is to keep retrying — turning
 // every transport blip into budget pressure would make a flaky network exit
 // the Connector.

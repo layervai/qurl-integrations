@@ -135,7 +135,12 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 		t.Fatalf("restart exit = %d, want 11 (retry budget) or 130 (canceled); an unbounded loop is the defect\nstderr: %s", second.code, stderr)
 	}
 
-	// And it must never have gone quiet for longer than the watchdog window.
+	// And no gap BETWEEN operator-facing lines may exceed the watchdog
+	// window. This cannot see trailing silence — a run that emits one line
+	// and then goes quiet until the harness cancels leaves no second
+	// timestamp to measure against. That shape is caught by the explained
+	// and exit-code checks above, which is why this is the last check and
+	// not the only one.
 	if gap, ok := longestSilentGap(stderr); ok && gap > 2*time.Minute {
 		t.Fatalf("restart went %s without any operator-facing line; the watchdog window is 90s\nstderr: %s", gap, stderr)
 	}
@@ -146,7 +151,8 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 var slogTime = regexp.MustCompile(`time=(\S+)`)
 
 // longestSilentGap returns the longest interval between consecutive stderr
-// lines carrying a slog timestamp. FRP's own logger uses a different format
+// lines carrying a slog timestamp. It measures only the gaps between two
+// observed lines, so silence after the final line is invisible to it. FRP's own logger uses a different format
 // and is skipped on purpose: its transport noise is exactly what does NOT
 // count as the Connector explaining itself.
 func longestSilentGap(stderr string) (time.Duration, bool) {
