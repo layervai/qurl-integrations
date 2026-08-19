@@ -253,24 +253,39 @@ function resolveFileArg(argv) {
 // that stays pure, and out of module load so `require()`ing this file from
 // the suite does not stat the operator's disk.
 function checkUploadFile(filePath) {
+  // Quoted, like resolveFileArg quotes its own rejection. That function goes
+  // out of its way to PRESERVE a leading or trailing space in a real
+  // filename, so this is exactly where such a path lands — and rendered raw,
+  // `--file /tmp/ spaced  is not a regular file` reads as `/tmp/spaced` and
+  // sends the operator looking for the wrong file. A path containing a
+  // newline is worse: it splits the line, and only the first half carries the
+  // FATAL prefix, so the second reads as a separate fabricated error.
+  const shown = JSON.stringify(filePath);
   let stats;
   try {
     // statSync rather than existsSync: existsSync is also true for a
     // directory, and readFileSync would then throw EISDIR out of the round
-    // this check exists to protect.
+    // this check exists to protect. It also FOLLOWS symlinks, matching what
+    // readFileSync will do — lstatSync here would reject a symlink pointing
+    // at a perfectly good payload.
     stats = fs.statSync(filePath);
   } catch (e) {
-    return `--file ${filePath} cannot be read — ${e.message}`;
+    return `--file ${shown} cannot be read — ${e.message}`;
   }
   if (!stats.isFile()) {
-    return `--file ${filePath} is not a regular file`;
+    // Not just directories. A FIFO, socket, or character device reaches
+    // readFileSync too, and runRound re-reads the file once PER ROUND: a pipe
+    // would upload real bytes on round one and nothing on every round after,
+    // which is a silently wrong measurement rather than a failure. A FIFO
+    // with no writer blocks readFileSync forever.
+    return `--file ${shown} is not a regular file`;
   }
   try {
     // Existence is not readability: a file owned by another user is the
     // realistic way this bites, and statSync succeeds on it.
     fs.accessSync(filePath, fs.constants.R_OK);
   } catch (e) {
-    return `--file ${filePath} is not readable — ${e.message}`;
+    return `--file ${shown} is not readable — ${e.message}`;
   }
   return null;
 }

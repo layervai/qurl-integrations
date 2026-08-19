@@ -137,6 +137,61 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
+  // Pinned at the RESOLVER, not only at readFlag. The AST guard counts
+  // readFlag call sites, so a per-flag shortcut back to an inline
+  // `argv.indexOf` inside `read` leaves that count untouched and stays green
+  // while `--duration=60` silently resolves to 7200 again. readFlag's own
+  // block covers the equals form for --file; these cover it where such a
+  // shortcut would actually be reintroduced.
+  it.each([
+    ['count', 'count', 200],
+    ['duration', 'durationS', 60],
+    ['interval', 'intervalS', 30],
+  ])('resolves --%s=value, not only the space-separated form', (flag, key, value) => {
+    const resolved = resolveNumericArgs([`--${flag}=${value}`]);
+    expect(resolved[key]).toBe(value);
+    expect(resolved.errors).toEqual([]);
+  });
+
+  it('validates an equals-form value rather than trusting it', () => {
+    // Pins that the equals spelling is a second way INTO parsePositiveInt,
+    // not a way around it.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--count=0']).errors[0]).toContain('greater than zero');
+  });
+
+  it('takes the last value when a flag is repeated in either spelling', () => {
+    // Kills a first-wins mutant, which the per-flag rows above do not.
+    expect(resolveNumericArgs(['--count=5', '--count=9']).count).toBe(9);
+    expect(resolveNumericArgs(['--count', '5', '--count=9']).count).toBe(9);
+    expect(resolveNumericArgs(['--count=5', '--count', '9']).count).toBe(9);
+  });
+
+  it('does not let a longer flag match the one it starts with', () => {
+    // '--counter=9' starts with '--count'. Guarded in readFlag by the `=` the
+    // inline prefix carries; pinned here because the resolver is where a
+    // per-flag shortcut would drop that guard.
+    expect(resolveNumericArgs(['--counter=9'])).toEqual({
+      count: 100, durationS: 7200, intervalS: 60, errors: [],
+    });
+  });
+
+  it('reports an empty value as empty, whichever spelling delivered it', () => {
+    // A deliberate divergence, pinned so it stays deliberate: `--count=`
+    // reports the empty value it was given rather than "was given no value".
+    //
+    // These are different operator mistakes. A trailing `--count` supplies no
+    // value TOKEN; `--count=` and `--count ""` supply an empty one. Making
+    // `--count=` say "was given no value" would collapse it with the former
+    // and split it from the latter — reinstating exactly the
+    // spelling-dependent divergence readFlag exists to remove.
+    const inline = resolveNumericArgs(['--count=']).errors;
+    const separated = resolveNumericArgs(['--count', '']).errors;
+    expect(inline).toEqual(separated);
+    expect(inline[0]).toContain('got ""');
+    expect(resolveNumericArgs(['--count']).errors[0]).toContain('was given no value');
+  });
+
   // The case getArg cannot express: `--count` as the final token has no value
   // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
   // the same 100 as not passing the flag at all. Silently running the default
@@ -242,6 +297,29 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
     expect(readFlag(['--file='], 'file', null)).toEqual({ value: '' });
   });
 
+  it('keeps everything after the first = in an inline value', () => {
+    // Mutation this kills: `raw.slice(inlinePrefix.length)` ->
+    // `raw.split('=')[1]`. That satisfies every other inline assertion here
+    // (`--file=/tmp/x`, `--file=`, `--file=a`, `--file=b`) while silently
+    // truncating `--file=/tmp/run=3.bin` to `/tmp/run`. Paths with `=` are
+    // ordinary, and the failure is the silent-wrong-payload class again.
+    expect(readFlag(['--file=a=b'], 'file', null)).toEqual({ value: 'a=b' });
+    expect(readFlag(['--file=/tmp/run=3.bin'], 'file', null)).toEqual({ value: '/tmp/run=3.bin' });
+  });
+
+  it('reaches a path that genuinely starts with -- through the inline form', () => {
+    // The documented escape hatch for the flag-shaped-value refusal. Without
+    // a test, a mutation that applied the `--` refusal to the inline branch
+    // too would survive and remove the only way to pass such a path.
+    expect(readFlag(['--file=--weird'], 'file', null)).toEqual({ value: '--weird' });
+  });
+
+  it('does not let an inline value be mistaken for another flag', () => {
+    // `--file=--count=9` contains `--count=`, but it is a VALUE, not a token
+    // of its own. If it were scanned as one, --count would silently take 9.
+    expect(readFlag(['--file=--count=9'], 'count', '100')).toEqual({ value: '100' });
+  });
+
   it('takes the last occurrence when a flag is repeated', () => {
     // indexOf took the FIRST, so appending `--count 5` to a recalled command
     // line left the earlier value in force — the run silently ignored the
@@ -326,7 +404,9 @@ describe('loadtest --file — proving it is readable before anything is minted',
   });
 
   afterAll(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
+    // Guarded: if mkdtempSync above threw, `dir` is undefined and
+    // rmSync(undefined) throws a TypeError that masks the original failure.
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('accepts a readable regular file', () => {
@@ -351,23 +431,60 @@ describe('loadtest --file — proving it is readable before anything is minted',
     expect(checkUploadFile(dir)).toMatch(/^--file /);
   });
 
-  it('reports a file that exists but cannot be read', () => {
+  // Root bypasses the permission bits entirely, and Windows chmod does not
+  // remove read access — under either, this would assert the opposite of what
+  // it says. it.skip rather than an early `return`, so the run REPORTS that
+  // it did not execute: a test that quietly passes without asserting is the
+  // same "did nothing, looked like it worked" shape this whole file is about.
+  const permissionsApply = process.platform !== 'win32' && process.getuid?.() !== 0;
+  (permissionsApply ? it : it.skip)('reports a file that exists but cannot be read', () => {
     // Existence is not readability — a file owned by another user is the
     // realistic way this bites, and statSync succeeds on it.
-    //
-    // Skipped as root, which bypasses the permission bits entirely and would
-    // make this assert the opposite of what it says. Guarded rather than
-    // deleted: the check it covers is the one that is only reachable as a
-    // non-root operator, which is how this script is actually run.
-    if (typeof process.getuid === 'function' && process.getuid() === 0) return;
     const locked = path.join(dir, 'locked.bin');
     fs.writeFileSync(locked, 'x');
     fs.chmodSync(locked, 0o000);
     try {
-      expect(checkUploadFile(locked)).toContain('is not readable');
+      const message = checkUploadFile(locked);
+      expect(message).toContain('is not readable');
+      // The third branch's flag prefix, which the message test above cannot
+      // reach without a locked file.
+      expect(message).toMatch(/^--file /);
     } finally {
       fs.chmodSync(locked, 0o600);
     }
+  });
+
+  it('rejects a non-regular file that is not a directory', () => {
+    // Mutation this kills: `!stats.isFile()` -> `stats.isDirectory()`. Every
+    // other assertion in this block still passes under it, but a character
+    // device, socket or FIFO then reaches fs.readFileSync inside the round —
+    // and runRound re-reads once per round, so a pipe uploads real bytes on
+    // round one and nothing after. A FIFO with no writer blocks forever,
+    // which is the hang this file's header exists to prevent.
+    expect(checkUploadFile('/dev/null')).toContain('is not a regular file');
+  });
+
+  it('follows a symlink to a real file', () => {
+    // Mutation this kills: statSync -> lstatSync. Passes every other
+    // assertion here while rejecting a symlink that points at a perfectly
+    // good payload, because readFileSync would have followed it.
+    const link = path.join(dir, 'link.bin');
+    fs.symlinkSync(readable, link);
+    expect(checkUploadFile(link)).toBeNull();
+  });
+
+  it('reports a dangling symlink as unreadable', () => {
+    const dangling = path.join(dir, 'dangling.bin');
+    fs.symlinkSync(path.join(dir, 'gone.bin'), dangling);
+    expect(checkUploadFile(dangling)).toContain('cannot be read');
+  });
+
+  it('quotes the path so whitespace in it stays visible', () => {
+    // resolveFileArg deliberately PRESERVES a leading or trailing space in a
+    // real filename, so this is where such a path surfaces. Rendered raw,
+    // `--file /tmp/x/ spaced  is not a regular file` reads as `/tmp/x/spaced`
+    // and sends the operator after the wrong file.
+    expect(checkUploadFile(path.join(dir, ' spaced '))).toContain(`"${path.join(dir, ' spaced ')}"`);
   });
 });
 
