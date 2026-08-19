@@ -13,6 +13,15 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 verifier="$repo_root/scripts/verify-cli-release.sh"
+
+# Run the verifier under dash when it is installed, not under whatever /bin/sh
+# happens to be. The verifier is #!/bin/sh, and /bin/sh is dash on the runners
+# but bash on a macOS developer's machine — a gap that already shipped one bug
+# here: `${VAR:?msg}` exits 2 under dash and 1 under bash, so the missing-repo
+# case passed locally and failed in CI. Preferring dash makes the local run
+# faithful to the one that gates the merge.
+verifier_sh='sh'
+command -v dash >/dev/null 2>&1 && verifier_sh='dash'
 tmp="$(mktemp -d)"
 
 trap 'rm -rf "$tmp"' EXIT
@@ -75,7 +84,7 @@ run_case() {
     RELEASE_LOOKUP_ATTEMPTS=3 \
     RELEASE_LOOKUP_DELAY=0 \
     "$@" \
-    "$verifier" 2>&1)" || status=$?
+    "$verifier_sh" "$verifier" 2>&1)" || status=$?
 
   if [[ "$status" != "$expected_status" ]]; then
     printf '%s: expected exit %s, got %s\n%s\n' "$name" "$expected_status" "$status" "$log" >&2

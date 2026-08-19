@@ -49,7 +49,15 @@ delay="${RELEASE_LOOKUP_DELAY:-5}"
 
 cd "$(git rev-parse --show-toplevel)"
 
-: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set (this script queries the releases of that repository)}"
+# Spelled out rather than `: "${GITHUB_REPOSITORY:?...}"`: POSIX leaves the
+# exit status of the :? expansion unspecified, and it differs across the shells
+# this runs under — dash (the runner's /bin/sh) exits 2 where bash exits 1. An
+# explicit check keeps every failure here exit 1, which is what the harness and
+# a reader both expect.
+if [ -z "${GITHUB_REPOSITORY:-}" ]; then
+    echo "Error: GITHUB_REPOSITORY must be set ($0 queries the releases of that repository)" >&2
+    exit 1
+fi
 
 for tool in python3 gh; do
     command -v "$tool" >/dev/null 2>&1 || {
