@@ -177,6 +177,18 @@ jobs:
         with:
           syft-version: 'v1.42.3'
 
+      # The Hub public key is public configuration, so it lives in a
+      # repository variable rather than secret storage. The committed file
+      # carries only its reviewed raw-key SHA-256 fingerprint. This command
+      # uses the same strict decoder as CLI startup and fails before artifact
+      # publication if either value is absent, malformed, or mismatched.
+      - name: Verify production Hub pin
+        env:
+          QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 }}
+        run: >-
+          go run ./apps/cli/internal/connector/hub/cmd/verify-production-pin
+          apps/cli/internal/connector/hub/production-public-key.sha256
+
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
       # keeps its notes.
@@ -188,6 +200,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 }}
           # Pin which tag is being released. A combined release PR can tag
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.

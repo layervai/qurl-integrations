@@ -19,7 +19,10 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      # Snapshots stay dark when the release-only variable is absent. The
+      # official release workflow still fails closed in its verifier before
+      # GoReleaser can use this value.
+      - -s -w -X main.version={{.Version}} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ envOrDefault "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64" "" }}
     goos:
       - linux
       - darwin

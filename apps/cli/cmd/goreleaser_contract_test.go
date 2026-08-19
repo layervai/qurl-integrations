@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra/doc"
@@ -24,6 +25,10 @@ import (
 // command tree.
 
 type goreleaserConfig struct {
+	Builds []struct {
+		ID      string   `yaml:"id"`
+		LDFlags []string `yaml:"ldflags"`
+	} `yaml:"builds"`
 	Archives []struct {
 		Files []string `yaml:"files"`
 	} `yaml:"archives"`
@@ -31,6 +36,29 @@ type goreleaserConfig struct {
 		Manpages    []string          `yaml:"manpages"`
 		Completions map[string]string `yaml:"completions"`
 	} `yaml:"homebrew_casks"`
+}
+
+func TestReleaseBuildInjectsVerifiedProductionHubPinAndSnapshotsDefaultDark(t *testing.T) {
+	cfg := loadGoreleaserConfig(t)
+	if n := len(cfg.Builds); n != 1 {
+		t.Fatalf("expected exactly 1 build in .goreleaser.yml, got %d", n)
+	}
+	if got := cfg.Builds[0].ID; got != "qurl" {
+		t.Fatalf("build id = %q, want qurl", got)
+	}
+
+	ldflags := strings.Join(cfg.Builds[0].LDFlags, " ")
+	for _, want := range []string{
+		"-X main.version={{.Version}}",
+		`-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ envOrDefault "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64" "" }}`,
+	} {
+		if !strings.Contains(ldflags, want) {
+			t.Fatalf("qurl build ldflags = %q, missing %q", ldflags, want)
+		}
+	}
+	if strings.Contains(ldflags, ".Env.QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64") {
+		t.Fatalf("qurl build ldflags = %q, raw .Env lookup breaks snapshot builds when the release-only variable is absent", ldflags)
+	}
 }
 
 func loadGoreleaserConfig(t *testing.T) goreleaserConfig {

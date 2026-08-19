@@ -1,0 +1,6 @@
+# Production NHP Hub public-key fingerprint.
+#
+# Provisioning is intentionally pending until the production Control root has
+# created /prod/nhp/control/hub/identity/public-key. Replace this comments-only
+# state with exactly one lowercase SHA-256 of the decoded 32-byte X25519 key.
+# The CLI release workflow fails closed while no fingerprint is present.
