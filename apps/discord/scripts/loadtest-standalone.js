@@ -224,7 +224,11 @@ function parsePositiveInt(flag, raw) {
 //
 // Argv shape comes from readFlag above, so these three answer a malformed
 // command line the same way --file does; what stays here is the part that is
-// specific to a number.
+// specific to a number. That includes both spellings: `--count=200` is not
+// `--count` to an indexOf, so it read as the flag being ABSENT and ran the
+// default of 100 with nothing said. `--duration=60` is the one that hurts —
+// it held the target for the default 7200 seconds, so an operator who asked
+// for a minute got two hours.
 //
 // The defaults are ROUTED THROUGH parsePositiveInt rather than returned
 // beside it, so a default that the validator would reject cannot ship, and

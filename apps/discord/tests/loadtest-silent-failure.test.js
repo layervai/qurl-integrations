@@ -137,12 +137,15 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
+  // The spelling indexOf cannot see. `--count=200` is not the token `--count`,
+  // so it read as the flag being ABSENT and quietly ran the default.
+  // `--duration=60` is the one that hurts: a run the operator sized at a
+  // minute held the target for the default two hours and reported nothing.
+  //
   // Pinned at the RESOLVER, not only at readFlag. The AST guard counts
   // readFlag call sites, so a per-flag shortcut back to an inline
   // `argv.indexOf` inside `read` leaves that count untouched and stays green
-  // while `--duration=60` silently resolves to 7200 again. readFlag's own
-  // block covers the equals form for --file; these cover it where such a
-  // shortcut would actually be reintroduced.
+  // while `--duration=60` silently resolves to 7200 again.
   it.each([
     ['count', 'count', 200],
     ['duration', 'durationS', 60],
@@ -153,23 +156,30 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolved.errors).toEqual([]);
   });
 
-  it('validates an equals-form value rather than trusting it', () => {
-    // Pins that the equals spelling is a second way INTO parsePositiveInt,
-    // not a way around it.
-    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
-    expect(resolveNumericArgs(['--count=0']).errors[0]).toContain('greater than zero');
-  });
-
   it('takes the last value when a flag is repeated in either spelling', () => {
     // Kills a first-wins mutant, which the per-flag rows above do not.
+    //
+    // This REPLACES the space-form-priority rule #1175 landed, under which the
+    // inline form could never override an earlier space form: `--count 7
+    // --count=200` resolved to 7 in both argv orders. Appending an override
+    // and having it silently ignored is the same fault class as the default
+    // this file exists to refuse, so position decides, not spelling.
     expect(resolveNumericArgs(['--count=5', '--count=9']).count).toBe(9);
     expect(resolveNumericArgs(['--count', '5', '--count=9']).count).toBe(9);
     expect(resolveNumericArgs(['--count=5', '--count', '9']).count).toBe(9);
   });
 
+  it('lets a later inline value override an earlier space-separated one', () => {
+    // The specific pair #1175 pinned the other way round. Kept as its own case
+    // so the reversal is visible rather than folded into the row above.
+    expect(resolveNumericArgs(['--count', '7', '--count=200']).count).toBe(200);
+    expect(resolveNumericArgs(['--count=200', '--count', '7']).count).toBe(7);
+  });
+
   it('does not let a longer flag match the one it starts with', () => {
-    // '--counter=9' starts with '--count'. Guarded in readFlag by the `=` the
-    // inline prefix carries; pinned here because the resolver is where a
+    // '--counter=9' starts with '--count', and would set count if the equals
+    // form were matched on the flag name rather than on the name plus '='.
+    // Pinned here as well as at readFlag because the resolver is where a
     // per-flag shortcut would drop that guard.
     expect(resolveNumericArgs(['--counter=9'])).toEqual({
       count: 100, durationS: 7200, intervalS: 60, errors: [],
@@ -177,19 +187,39 @@ describe('loadtest numeric flags — resolving them from argv', () => {
   });
 
   it('reports an empty value as empty, whichever spelling delivered it', () => {
-    // A deliberate divergence, pinned so it stays deliberate: `--count=`
-    // reports the empty value it was given rather than "was given no value".
+    // A deliberate divergence from #1175, pinned so it stays deliberate:
+    // `--count=` reports the empty value it was given rather than "was given
+    // no value".
     //
     // These are different operator mistakes. A trailing `--count` supplies no
-    // value TOKEN; `--count=` and `--count ""` supply an empty one. Making
-    // `--count=` say "was given no value" would collapse it with the former
-    // and split it from the latter — reinstating exactly the
-    // spelling-dependent divergence readFlag exists to remove.
+    // value TOKEN; `--count=` and `--count ""` supply an empty one. #1175
+    // mapped `--count=` onto the former, which splits it from `--count ""` —
+    // reinstating by spelling exactly the divergence one reader exists to
+    // remove. Held together here instead.
     const inline = resolveNumericArgs(['--count=']).errors;
     const separated = resolveNumericArgs(['--count', '']).errors;
     expect(inline).toEqual(separated);
     expect(inline[0]).toContain('got ""');
     expect(resolveNumericArgs(['--count']).errors[0]).toContain('was given no value');
+  });
+
+  it('splits on the first equals and leaves the rest to the parser', () => {
+    // `--count==200` is a value of '=200', not an empty value and not 200.
+    // Deciding what counts as malformed belongs to parsePositiveInt, so the
+    // reader hands the whole remainder over untouched. Kept from #1175; it is
+    // the resolver-level companion to readFlag's own `--file=a=b` case.
+    expect(resolveNumericArgs(['--count==200']).errors[0]).toContain('got "=200"');
+    expect(resolveNumericArgs(['--count=2=0']).errors[0]).toContain('got "2=0"');
+  });
+
+  it('resolves a bare token followed by an inline value to the inline one', () => {
+    // #1175 pinned this the other way — the bare `--count` won and the run
+    // failed parsing '--count=200' as its value. Under one reader the last
+    // occurrence wins, so the complete spelling the operator typed second is
+    // the one that takes effect.
+    expect(resolveNumericArgs(['--count', '--count=200'])).toEqual({
+      count: 200, durationS: 7200, intervalS: 60, errors: [],
+    });
   });
 
   // The case the old getArg could not express: `--count` as the final token
@@ -207,6 +237,14 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     const { count, errors } = resolveNumericArgs(['--count', '']);
     expect(count).toBeNaN();
     expect(errors[0]).toContain('got ""');
+  });
+
+  it('validates an equals-form value through the same parser', () => {
+    // Otherwise the new spelling would be a way around parsePositiveInt rather
+    // than a second way into it.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--duration=0']).errors[0]).toContain('greater than zero');
+    expect(resolveNumericArgs(['--interval=-1']).errors[0]).toContain('got "-1"');
   });
 
   it('refuses the following flag when the value was forgotten', () => {
