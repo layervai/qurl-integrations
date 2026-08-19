@@ -372,14 +372,10 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 // claudeCodeReviewWorkflow is restructured, and no offline check can verify
 // that restructuring for you.
 //
-// Which property carries that — and which one only ever looked like it did —
-// is stated at the tail of this test, on the assertion that pins it, and for
-// contributors in CONTRIBUTING.md's "Merge-result checks" section. It is
-// deliberately not restated a third time here. This paragraph used to carry
-// its own copy: #1187 wrote it, #1188 invalidated it by moving the gate it
-// described, #1208 repointed the assertion past it, and #1204 corrected it by
-// hand — a restatement with no assertion under it, which is what this package
-// removes rather than maintains.
+// The mechanism and migration constraints are documented beside the assertion
+// at the tail of this test and in CONTRIBUTING.md's "Merge-result checks"
+// section; keep those accounts colocated with the code and contributor guidance
+// rather than restating them here.
 func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 	t.Parallel()
 
