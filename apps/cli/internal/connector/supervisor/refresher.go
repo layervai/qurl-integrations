@@ -53,6 +53,47 @@ const (
 	// A single failing attempt can burn the first two in sequence — a TCP
 	// connect that succeeds slowly, then a server that never answers the
 	// Login — before the loop waits out the third.
+	//
+	// The third is counted once, not twice, even though keepControllerWorking
+	// wraps the dial loop in a second 20s-capped backoff of its own: that
+	// outer one does not tick during a sustained storm, because the inner
+	// loop it calls only returns once a Login succeeds or the context ends.
+	//
+	// TODO(upstream-contract): failingDialLoginReadBudget and
+	// failingDialBackoffCeiling mirror github.com/layervai/frp
+	// v0.70.0-layerv.4 — named, not numbered, because the third constant in
+	// this block is NOT a fork mirror. Neither has a config seam; both are
+	// literals inside the fork:
+	//
+	//   - failingDialLoginReadBudget — client/control_session.go's
+	//     `conn.SetReadDeadline(time.Now().Add(10 * time.Second))`, which
+	//     exchangeLogin arms right after writing the Login msg and disarms on
+	//     return, so it bounds the login response reads (the v2 ServerHello
+	//     frame, then the LoginResp) rather than the whole dial.
+	//   - failingDialBackoffCeiling — client/service.go's
+	//     `svr.loopLoginUntilSuccess(20*time.Second, false)` in
+	//     keepControllerWorking, whose maxInterval becomes MaxDuration on the
+	//     wait.FastBackoffOptions pacing the dials inside that loop. It is a
+	//     true ceiling and not a pre-jitter base: pkg/util/wait/backoff.go
+	//     applies Jitter first and clamps second. Its fast-retry branch does
+	//     return early and skip that clamp, but only ever with a
+	//     FastRetryDelay-sized value — SHORTER, which an upper bound
+	//     tolerates. What would invalidate this one is a larger MaxDuration,
+	//     a FastRetryDelay above it, or a wait outside this manager. The
+	//     first login is paced separately (Run passes 10s) and here never
+	//     backs off at all: the LoginFailExit forceLoginFailExit sets makes
+	//     the fork cancel on its first failed dial instead.
+	//
+	// reconnectStallWindow's marker below quotes this same call for its OTHER
+	// hard-coded argument. One fork edit can invalidate both; update the pair.
+	//
+	// Nothing local fails if either drifts, and the one test that names them
+	// is weaker than it looks: TestWatchdogWindowOutlivesATunnelServerReplacement
+	// compares reconnectSettledGap against a multiple of failingDialPeriod,
+	// but reconnectSettledGap is DEFINED as 3x that period — both sides move
+	// together, so no value of these three can fail it. It guards that
+	// multiplier, not these delays. On a fork bump re-read both call sites
+	// and update the values here in lockstep.
 	failingDialConnectBudget   = 10 * time.Second
 	failingDialLoginReadBudget = 10 * time.Second
 	failingDialBackoffCeiling  = 20 * time.Second
@@ -96,6 +137,20 @@ const (
 	// blocked, so the supervisor's knock budget, its failure classification
 	// and every operator-facing message are unreachable for the rest of the
 	// run. Without this watchdog a Connector in that state loops in silence.
+	//
+	// TODO(upstream-contract): that unboundedness mirrors
+	// github.com/layervai/frp v0.70.0-layerv.4 client/service.go —
+	// `svr.loopLoginUntilSuccess(20*time.Second, false)` in
+	// keepControllerWorking, where the literal false is firstLoginExit.
+	// LoginFailExit is consulted once, on the first login, where Run passes
+	// `lo.FromPtr(svr.common.LoginFailExit)` instead — so the true this
+	// package forces in forceLoginFailExit never reaches the post-admission
+	// loop. With firstLoginExit false a failed dial no longer cancels
+	// svr.ctx, so wait.BackoffUntil redials until the caller cancels while
+	// Run is parked on `<-svr.ctx.Done()`. If a fork bump gives that loop an
+	// exit of its own, this watchdog becomes redundant rather than wrong —
+	// but re-read it here before treating it as either. The 20s in that same
+	// call is failingDialBackoffCeiling's marker above; update the pair.
 	//
 	// Sized to outlast the measured cause with margin. The tunnel-server
 	// fleet is an ASG that rolls instances with an instance refresh; a
