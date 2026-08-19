@@ -1038,6 +1038,18 @@ func TestConnectorRunEnrollmentFailuresAreCustomerLanguage(t *testing.T) {
 			want:     []string{"couldn't give this Connector its platform assignment"},
 		},
 		{
+			name:     "reassignment shares the busy story on exit 11",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentReassignmentRequired),
+			wantCode: 11,
+			want:     []string{"couldn't give this Connector its platform assignment"},
+		},
+		{
+			name:     "recovery required shares the busy story on exit 11",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentRecoveryRequired),
+			wantCode: 11,
+			want:     []string{"couldn't give this Connector its platform assignment"},
+		},
+		{
 			name:     "invalid response is a platform-side fault",
 			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentInvalidResponse),
 			wantCode: 10,
