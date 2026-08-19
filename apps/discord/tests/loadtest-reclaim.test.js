@@ -149,6 +149,9 @@ describe('recordResource', () => {
     ['empty', ''],
     ['non-string', 12345],
     ['malformed', 'not a valid id!'],
+    // Charset-clean but missing the r_ prefix client.delete() requires: it
+    // would fail every sweep with a message matching neither 404 nor 410.
+    ['unprefixed', 'abc123'],
   ])('warns and records nothing for a %s resource_id', (_label, value) => {
     recordResource(value, 'upload');
     expect(console.error).toHaveBeenCalledWith(

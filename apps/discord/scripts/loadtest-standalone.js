@@ -151,14 +151,15 @@ async function trackCreate(fn) {
 // deleting the parent file resource revokes every qURL minted against it
 // (shared/client/client.go documents the cascade).
 function recordResource(resourceId, kind) {
-  // Shape-checked against deleteLink's own accepted form, not merely tested
-  // for truthiness. A malformed id would be recorded happily and then fail
-  // every sweep with "Invalid resource ID format" — a message matching
-  // neither 404 nor 410 — so it would be retried forever instead of ever
-  // being reported as the unreclaimable resource it is. The upload path
-  // hand-rolls its fetch and does not validate the response shape the way
-  // connector.js does, so this is where that shows up.
-  if (!resourceId || typeof resourceId !== 'string' || !/^[\w-]+$/.test(resourceId)) {
+  // Shape-checked against BOTH halves of what deleteLink will accept: the
+  // charset check in validateResourceId and the semantic `r_` prefix that
+  // client.delete() adds on top (src/qurl.js). Checking only the charset
+  // would let an id through that fails every sweep with a client-validation
+  // message matching neither 404 nor 410 — retried forever, which is the
+  // exact outcome this check exists to prevent. The upload path hand-rolls
+  // its fetch and does not validate the response shape the way connector.js
+  // does, so this is where that shows up.
+  if (!resourceId || typeof resourceId !== 'string' || !/^r_[\w-]+$/.test(resourceId)) {
     // Loud, not silent: a created-but-unrecorded resource makes the closing
     // "N revoked" a lie by omission, and this is the only place that notices.
     console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
@@ -338,6 +339,13 @@ async function reclaim(ledgerPath) {
     if (pending.length === 0) {
       // Nothing new on disk, but a create may still be in flight and about to
       // append. Wait for it rather than finishing and exiting past it.
+      //
+      // Liveness rests on creates eventually settling. On the end-of-run path
+      // every round has already awaited them, so the counter is zero. On the
+      // signal path a genuinely stuck create would spin here, bounded only by
+      // the second-SIGINT abort — so whoever adds the timeout the upload fetch
+      // currently lacks should keep that connection in mind rather than
+      // treating the two as unrelated.
       if (inFlightCreates === 0) break;
       await new Promise(r => setTimeout(r, 100));
       continue;
