@@ -29,6 +29,33 @@ name: Release Please
 # set to the affected tag. Do NOT "Re-run all jobs": release-please then
 # sees the release already exists and skips release-cli. Asset re-uploads
 # are idempotent (release.replace_existing_artifacts in .goreleaser.yml).
+#
+# The other failure mode, and the worse one, is a release release-please
+# never made. What it looks like: this workflow runs green, main carries an
+# updated .release-please-manifest.json and apps/cli/CHANGELOG.md, and there
+# is no tag and no GitHub Release for that version. release-cli never fires
+# (apps/cli--release_created is false), so nothing goes red. Every later
+# release-please run then aborts with "There are untagged, merged release PRs
+# outstanding", which blocks release PRs for EVERY component until someone
+# relabels the merged PR "autorelease: pending" -> "autorelease: tagged".
+#
+# Why: release-please matches a merged release PR to a package before
+# building its release. A PR body carrying a single componentless section
+# takes the "standalone release PR" path, which compares the PR's *branch*
+# component against getBranchComponent() — and getBranchComponent(), unlike
+# getComponent(), ignores include-component-in-tag. The manifest release PR
+# always sits on `release-please--branches--main` (branch component:
+# undefined) and the CLI's section is componentless because the CLI is
+# bare-tagged, so a `component` declared for apps/cli loses that comparison
+# and the release is skipped with a warning while the action exits 0. A CLI
+# release sharing its PR with any other component takes the multi-section
+# path and succeeds, so this bites only when the CLI is released alone. It
+# dropped v1.1.0, v1.3.0 and v1.4.0 that way.
+#
+# Both halves are now pinned. apps/cli declares no component, and
+# scripts/check-release-please-sync.sh fails the build if one comes back.
+# scripts/verify-cli-release.sh runs below on every push and turns a dropped
+# release from a green run into a red one that names the recovery.
 
 on:
   push:
@@ -65,6 +92,27 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # Checked out after the release step, not before: release-please works
+      # entirely over the API and never reads the workspace, so ordering it
+      # this way keeps this change provably unable to affect the release
+      # itself. Default fetch-depth is enough — the verifier reads one file at
+      # this push's commit and asks the API about the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The header above describes what this catches. It is silent on ordinary
+      # pushes: the manifest names the last released CLI version and that
+      # release exists. It fails the run only when the manifest names a version
+      # nothing released — the state that otherwise reports green and then
+      # blocks every component's next release PR.
+      #
+      # Deliberately not `if: always()`. A release-please step that already
+      # failed has reddened the run; this exists for the case where it
+      # succeeded and released nothing.
+      - name: Verify the CLI release was created
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/verify-cli-release.sh
 
   release-cli:
     needs: release-please

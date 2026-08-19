@@ -29,6 +29,14 @@ const (
 	workflowContractCheckName = "Workflow Contract"
 	workflowContractTestName  = "Test workflow contract"
 	workflowContractTestRun   = "go test -count=1 ./internal/ciworkflows/..."
+
+	releasePleaseWorkflow      = "release-please.yml"
+	releasePleaseJobID         = "release-please"
+	releasePleaseActionStepID  = "release"
+	releasePleasePushCondition = "github.event_name == 'push'"
+	cliReleaseVerifierStepName = "Verify the CLI release was created"
+	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
+	checkoutActionPrefix       = "actions/checkout@"
 )
 
 type requiredWorkflowSpec struct {
@@ -161,10 +169,11 @@ type githubWorkflow struct {
 }
 
 type githubJob struct {
-	If    string `yaml:"if"`
-	Name  string `yaml:"name"`
-	Needs any    `yaml:"needs"`
-	Steps []step `yaml:"steps"`
+	If          string `yaml:"if"`
+	Name        string `yaml:"name"`
+	Needs       any    `yaml:"needs"`
+	Permissions any    `yaml:"permissions"`
+	Steps       []step `yaml:"steps"`
 	// Uses is set only on a job that calls a reusable workflow. Such a job
 	// reports its checks as "<this job> / <inner job>" rather than under its
 	// own name, which is why required_checks_test.go resolves it separately.
@@ -172,9 +181,16 @@ type githubJob struct {
 }
 
 type step struct {
+	ID    string `yaml:"id"`
+	If    string `yaml:"if"`
 	Name  string `yaml:"name"`
 	Run   string `yaml:"run"`
 	Shell string `yaml:"shell"`
+	Uses  string `yaml:"uses"`
+	// ContinueOnError accepts a bool or an expression, so it is read as `any`
+	// and asserted absent rather than compared: either spelling would turn a
+	// failing guard into a green one.
+	ContinueOnError any `yaml:"continue-on-error"`
 }
 
 // TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup pins the premise
@@ -229,6 +245,145 @@ func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
 		return
 	}
 	t.Fatalf("contract job is missing %s step", workflowContractTestName)
+}
+
+// TestReleasePleaseVerifiesTheCLIReleaseWasCreated pins the guard on the one
+// release failure that reports success. release-please matches a merged release
+// PR to a package before building that package's release; a PR body carrying a
+// single componentless section takes the "standalone release PR" path, which
+// compares the PR's *branch* component against getBranchComponent() — and
+// getBranchComponent(), unlike getComponent(), ignores
+// include-component-in-tag. The manifest release PR always sits on
+// `release-please--branches--main`, whose branch component is undefined, and the
+// bare-tagged CLI's section is componentless, so a `component` declared for
+// apps/cli loses that comparison: the release is skipped and the action still
+// exits 0. That dropped v1.1.0, v1.3.0 and v1.4.0 — a green run, no tag, no
+// GitHub Release, and every component's next release PR blocked behind "There
+// are untagged, merged release PRs outstanding".
+//
+// release-please-config.json no longer declares that component, and
+// scripts/check-release-please-sync.sh keeps it that way. This pins the runtime
+// half — the half that still reports if a drop ever returns by another route.
+func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	job, ok := workflow.Jobs[releasePleaseJobID]
+	if !ok {
+		t.Fatalf("%s is missing the %s job", releasePleaseWorkflow, releasePleaseJobID)
+	}
+	if !strings.Contains(job.If, releasePleasePushCondition) {
+		t.Errorf("%s.if = %q, want it to contain %q — a recovery dispatch expects no new release and must not be verified as if it did",
+			releasePleaseJobID, job.If, releasePleasePushCondition)
+	}
+
+	release, checkout, verify := -1, -1, -1
+	for i := range job.Steps {
+		current := &job.Steps[i]
+		switch {
+		case current.ID == releasePleaseActionStepID:
+			release = i
+		case checkout < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			checkout = i
+		case current.Name == cliReleaseVerifierStepName:
+			verify = i
+		}
+	}
+
+	if release < 0 {
+		t.Fatalf("%s %s job has no step with id %q", releasePleaseWorkflow, releasePleaseJobID, releasePleaseActionStepID)
+	}
+	if verify < 0 {
+		t.Fatalf("%s %s job is missing the %q step", releasePleaseWorkflow, releasePleaseJobID, cliReleaseVerifierStepName)
+	}
+	if checkout < 0 {
+		t.Fatalf("%s %s job never checks out the repository, so %s is not on disk to run",
+			releasePleaseWorkflow, releasePleaseJobID, cliReleaseVerifierScript)
+	}
+
+	// Order is the assertion, not decoration. Verifying before the action ran
+	// would read the state the push arrived with and pass on exactly the push
+	// that dropped a release.
+	if release > verify {
+		t.Errorf("%q is step %d, ahead of the release-please action at step %d — it would verify the state the push arrived with, not the state the action left",
+			cliReleaseVerifierStepName, verify, release)
+	}
+	if checkout > verify {
+		t.Errorf("the checkout is step %d, behind %q at step %d, so the script would not be on disk to run",
+			checkout, cliReleaseVerifierStepName, verify)
+	}
+
+	verifyStep := &job.Steps[verify]
+	if !strings.Contains(verifyStep.Run, cliReleaseVerifierScript) {
+		t.Errorf("%q runs %q, want it to invoke %s", cliReleaseVerifierStepName, strings.TrimSpace(verifyStep.Run), cliReleaseVerifierScript)
+	}
+	// A conditional or continue-on-error guard reports green on the very run it
+	// exists to redden, which is the silent pass this whole change removes.
+	if condition := strings.TrimSpace(verifyStep.If); condition != "" {
+		t.Errorf("%q is conditional (if = %q); the job's own push condition is the only gate it should carry",
+			cliReleaseVerifierStepName, condition)
+	}
+	if verifyStep.ContinueOnError != nil {
+		t.Errorf("%q sets continue-on-error = %#v, restoring the silent green it exists to remove",
+			cliReleaseVerifierStepName, verifyStep.ContinueOnError)
+	}
+
+	assertExecutableRepoScript(t, cliReleaseVerifierScript)
+
+	// A dropped release is a visibility problem, not a reason to widen the
+	// token: reading a release needs no more than the contents access this job
+	// already holds to create one.
+	assertJobPermissions(t, releasePleaseJobID, job.Permissions, map[string]string{
+		"contents":      "write",
+		"pull-requests": "write",
+	})
+}
+
+func assertExecutableRepoScript(t *testing.T, name string) {
+	t.Helper()
+
+	info, err := os.Stat(filepath.Join("..", "..", name))
+	if err != nil {
+		t.Fatalf("stat %s: %v", name, err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("%s is mode %v and not executable, but a workflow invokes it directly", name, info.Mode().Perm())
+	}
+}
+
+func assertJobPermissions(t *testing.T, jobID string, permissions any, want map[string]string) {
+	t.Helper()
+
+	got, ok := permissions.(map[string]any)
+	if !ok {
+		t.Fatalf("%s.permissions has unexpected type %T, want a mapping", jobID, permissions)
+	}
+
+	extra, missing := []string{}, []string{}
+	for scope, value := range got {
+		wanted, documented := want[scope]
+		if !documented {
+			extra = append(extra, scope)
+			continue
+		}
+		if value != wanted {
+			t.Errorf("%s.permissions[%q] = %v, want %q", jobID, scope, value, wanted)
+		}
+	}
+	for scope := range want {
+		if _, ok := got[scope]; !ok {
+			missing = append(missing, scope)
+		}
+	}
+
+	sort.Strings(extra)
+	sort.Strings(missing)
+	if len(extra) > 0 {
+		t.Errorf("%s.permissions grants %v beyond what this job is documented to need", jobID, extra)
+	}
+	if len(missing) > 0 {
+		t.Errorf("%s.permissions is missing %v", jobID, missing)
+	}
 }
 
 func TestParseWorkflowTriggers(t *testing.T) {
