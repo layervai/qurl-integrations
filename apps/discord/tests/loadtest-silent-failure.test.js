@@ -13,7 +13,7 @@
  *     empty or flag-shaped value silently became the DEFAULT, so the run did
  *     something real that nobody asked for.
  *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
- *     round runs — the file leg's `i += 10` batches and the location leg's
+ *     round runs — the file leg's batch plan and the location leg's
  *     `i++` alike — so the script holds the target for its full duration
  *     issuing no requests and reports "Total links minted: 0".
  *   - The --file flag. Defaulting sends a generated 1MB payload instead of
@@ -1010,9 +1010,18 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(preflight).toBeLessThan(smokeTest);
   });
 
-  it('uploads through reUploadBuffer', () => {
-    // Fails closed if the call disappears or a second one appears unreviewed.
-    expect(callsNamed('reUploadBuffer')).toHaveLength(1);
+  it('uploads through reUploadBuffer, twice and only twice', () => {
+    // Fails closed if a call disappears or a third one appears unreviewed.
+    //
+    // Two, reviewed: the round's initial upload, and the re-upload leg that
+    // runs each time a resource's TOKENS_PER_RESOURCE pool drains. Dropping
+    // the second is the regression tests/loadtest-mint-batches.test.js
+    // documents — every later batch mints against a spent pool.
+    //
+    // Counted rather than located because both calls are the same call: same
+    // callee, same three arguments, same buffer and filename. A check that
+    // told them apart would be asserting on which line they sit.
+    expect(callsNamed('reUploadBuffer')).toHaveLength(2);
   });
 
   it('passes the first three parameters positionally and omits the last two', () => {
@@ -1050,7 +1059,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(params).toEqual([
       'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds',
     ]);
-    expect(callsNamed('reUploadBuffer')[0].arguments).toHaveLength(3);
+    // Every call site, not just the first: the reasoning above is about which
+    // two parameters are being omitted, so it has to hold for the re-upload
+    // leg exactly as it does for the initial upload.
+    const calls = callsNamed('reUploadBuffer');
+    expect(calls).not.toHaveLength(0);
+    for (const call of calls) expect(call.arguments).toHaveLength(3);
   });
 
   it('imports reUploadBuffer from the connector client', () => {
