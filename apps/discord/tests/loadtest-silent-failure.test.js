@@ -1230,20 +1230,25 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     });
 
   const ast = parseFile('scripts', 'loadtest-standalone.js');
-
-  // A name the source states outright, in whichever of the two spellings it
-  // is written: `fs.writeFileSync` and `fs['writeFileSync']` are one call,
-  // and so are `{ writeFileSync: w }` and `{ 'writeFileSync': w }`. A key
-  // computed from anything else is not stated here, and reads as null.
+  // A name the source states outright, in whichever spelling it is written:
+  // `fs.writeFileSync`, `fs['writeFileSync']` and ``fs[`writeFileSync`]`` are
+  // one call, and so are `{ writeFileSync: w }` and `{ 'writeFileSync': w }`.
+  // The template arm is limited to a lone quasi with no expressions — that is
+  // the whole of what a template can state outright; the moment one
+  // interpolates it is assembled at runtime and reads as null, as does a key
+  // computed from anything else.
   const staticName = (node, computed) => {
     if (node.type === 'StringLiteral') return node.value;
+    if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+      return node.quasis[0]?.value.cooked ?? null;
+    }
     if (!computed && node.type === 'Identifier') return node.name;
     return null;
   };
 
-  // Names bound exactly ONCE in this file, and what the binding makes them
-  // mean. Three shapes land here, each of which reached a primitive while
-  // naming something else, and so walked past every check below:
+  // Names bound exactly ONCE in a file, and what the binding makes them mean.
+  // Three shapes land here, each of which reached a primitive while naming
+  // something else, and so walked past every check below:
   //
   //   const w = fs.writeFileSync       →  w      is writeFileSync
   //   const { writeFileSync: w } = fs  →  w      is writeFileSync
@@ -1254,25 +1259,31 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // which; it is dropped here and resolves to itself, which is what every
   // name did before this map existed. Plenty are — `line` and `error` are
   // each declared in several functions — and dropping them is why this map
-  // cannot make a count wrong. No name any check here counts is aliased in
-  // the script today, so the map moves nothing as it stands; it is here for
-  // the edit that introduces one.
+  // cannot make a count wrong.
+  //
+  // The coupling that buys, stated because it is invisible at the call sites:
+  // this map feeds calleeName, so it is not only the bans that read through
+  // it — the per-round `readFileSync` and `generateTestPayload` counts do
+  // too. Those counts are correct only while no name they count is aliased in
+  // the script. None is today. If one ever is, the count moves silently, and
+  // the check below that resolves each spelling to writeFileSync is what
+  // should fail first and say so.
   //
   // One hop, and only from a declaration. `let w; w = fs.writeFileSync`, an
-  // alias of an alias, and a key assembled at runtime all still escape —
-  // this closes the spellings an ordinary edit reaches for, which is the
-  // same standard WRITE_PRIMITIVES below is held to and the same one the
-  // whole file is: these checks stop a regression, not an author who is
-  // trying to get one past them. Scope is not tracked either, so a parameter
-  // shadowing an aliased name would read as the alias — which cannot happen
-  // until an alias exists, and fails loudly rather than passing silently.
-  const ALIASES = (() => {
+  // alias of an alias, and an interpolated key all still escape — this closes
+  // the spellings an ordinary edit reaches for, which is the same standard
+  // WRITE_PRIMITIVES below is held to and the same one the whole file is:
+  // these checks stop a regression, not an author who is trying to get one
+  // past them. Scope is not tracked either, so a parameter shadowing an
+  // aliased name would read as the alias — which cannot happen until an alias
+  // exists, and fails loudly rather than passing silently.
+  const resolveAliases = (sourceAst) => {
     const bound = new Map();
     // A second sighting does not overwrite the first, it makes the name
     // ambiguous — which is what null means here, alongside a binding whose
     // target cannot be read statically.
     const note = (name, target) => bound.set(name, bound.has(name) ? null : target);
-    traverse(ast, {
+    traverse(sourceAst, {
       VariableDeclarator(p) {
         const { id, init } = p.node;
         if (id.type === 'Identifier') {
@@ -1291,30 +1302,41 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       },
     });
     return new Map([...bound].filter(([, target]) => target !== null));
-  })();
+  };
 
   // Matches a member expression on its property name too, so `client.fetch()`
   // counts as a fetch. Wider than strictly needed, in the direction these
   // checks want to err.
   //
-  // Both ends resolve through ALIASES, because a check keyed on the spelling
-  // at the call site is a check on that spelling. `w(...)` after `const w =
-  // fs.writeFileSync` IS a writeFileSync, and so is `fs[W]` with W a const
-  // string; reading them as `w` and as `W` is how a scratch write dropped
-  // into runRound used to leave the ban below green.
-  const calleeName = (node) => {
-    const callee = node.callee;
-    if (callee.type === 'Identifier') return ALIASES.get(callee.name) ?? callee.name;
-    if (callee.type !== 'MemberExpression') return null;
-    const named = staticName(callee.property, callee.computed);
-    if (named !== null) return named;
-    // A computed key that is itself a name: `fs[W]`. Unresolvable means
-    // unknown, not the identifier's own name — `fs[W]` is not a call to W.
-    if (callee.computed && callee.property.type === 'Identifier') {
-      return ALIASES.get(callee.property.name) ?? null;
-    }
-    return null;
+  // Both ends resolve through the alias map, because a check keyed on the
+  // spelling at the call site is a check on that spelling. `w(...)` after
+  // `const w = fs.writeFileSync` IS a writeFileSync, and so is `fs[W]` with W
+  // a const string; reading them as `w` and as `W` is how a scratch write
+  // dropped into runRound used to leave the ban below green.
+  //
+  // Built per-AST rather than closing over the module's one `ast`, so the
+  // check below can run this same resolver over a fixture. Nothing in the
+  // load-test script uses any of these spellings — that is the point of the
+  // ban — so a resolver wired only to the real file would be logic no test
+  // could reach, green whether or not it still worked.
+  const makeCalleeName = (sourceAst) => {
+    const aliases = resolveAliases(sourceAst);
+    return (node) => {
+      const callee = node.callee;
+      if (callee.type === 'Identifier') return aliases.get(callee.name) ?? callee.name;
+      if (callee.type !== 'MemberExpression') return null;
+      const named = staticName(callee.property, callee.computed);
+      if (named !== null) return named;
+      // A computed key that is itself a name: `fs[W]`. Unresolvable means
+      // unknown, not the identifier's own name — `fs[W]` is not a call to W.
+      if (callee.computed && callee.property.type === 'Identifier') {
+        return aliases.get(callee.property.name) ?? null;
+      }
+      return null;
+    };
   };
+
+  const calleeName = makeCalleeName(ast);
 
   // Every `--`-prefixed string literal in the file, in sorted order and
   // deliberately NOT de-duplicated. The shared readers build their token from
@@ -1423,6 +1445,61 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // stays correct if a caller ever passes the function node itself.
   const callsWithin = (fn, name) => callsNamed(name)
     .filter((node) => node.start >= fn.start && node.end <= fn.end);
+
+  it('resolves every spelling of a call that reaches the same primitive', () => {
+    // The guard on the guard. None of these spellings appears in
+    // loadtest-standalone.js — keeping it that way is what the ban below is
+    // for — so the resolver they all flow through is logic no other check in
+    // this file can reach. Wired only to the real script it would sit green
+    // whether or not it still worked, and the mutation run that proved it
+    // once does not re-run in CI. Hence a fixture.
+    //
+    // The last three rows are the documented fail-open cases, pinned so that
+    // closing one is a deliberate edit rather than a side effect: a name
+    // declared twice is ambiguous and resolves to ITSELF, and a key that is
+    // computed rather than stated resolves to null.
+    const fixture = [
+      "const fs = require('fs');",
+      "const aliased = fs.writeFileSync;",
+      "const { writeFileSync: renamed } = require('fs');",
+      "const KEY = 'writeFileSync';",
+      // Two bindings in two scopes, which is what makes `dup` ambiguous. The
+      // second is returned rather than called so this contributes exactly one
+      // call site.
+      "function one() { const dup = fs.writeFileSync; dup('x'); }",
+      "function two() { const dup = fs.appendFileSync; return dup; }",
+      "fs.writeFileSync('a');",
+      "fs['writeFileSync']('b');",
+      "fs[`writeFileSync`]('c');",
+      "fs[KEY]('d');",
+      "aliased('e');",
+      "renamed('f');",
+      "fs[String('writeFileSync')]('g');",
+    ].join('\n');
+    const fixtureAst = parser.parse(fixture, { sourceType: 'unambiguous' });
+    const resolve = makeCalleeName(fixtureAst);
+    // Keyed by the callee AS WRITTEN, so a failure names the spelling that
+    // broke rather than an index into a list.
+    const resolved = {};
+    traverse(fixtureAst, {
+      CallExpression(p) {
+        const { callee } = p.node;
+        resolved[fixture.slice(callee.start, callee.end)] = resolve(p.node);
+      },
+    });
+    expect(resolved).toEqual({
+      "require": 'require',
+      'fs.writeFileSync': 'writeFileSync',
+      "fs['writeFileSync']": 'writeFileSync',
+      'fs[`writeFileSync`]': 'writeFileSync',
+      'fs[KEY]': 'writeFileSync',
+      'aliased': 'writeFileSync',
+      'renamed': 'writeFileSync',
+      'dup': 'dup',
+      'String': 'String',
+      "fs[String('writeFileSync')]": null,
+    });
+  });
 
   it('hand-rolls no HTTP call of its own', () => {
     // The three guards that went missing — AbortSignal.timeout(60000), the
@@ -1906,7 +1983,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     });
     // Non-empty, or this is asserting over a list it failed to build — the
     // same vacuous-green failure the ledger exemption above guards against.
-    expect(required).toContain('fs');
+    // Matched with the same `node:`-tolerant shape as the ban below rather
+    // than pinning the bare specifier: a move to `require('node:fs')` is the
+    // same modernization that put rmSync in DELETE_PRIMITIVES, and it should
+    // not fail here as a missing-list error that says nothing about prefixes.
+    expect({ readsFs: required.some((mod) => /^(?:node:)?fs$/.test(mod)) })
+      .toEqual({ readsFs: true });
     expect(required.filter((mod) => /^(?:node:)?child_process$/.test(mod))).toEqual([]);
   });
 
