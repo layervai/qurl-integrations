@@ -1025,6 +1025,16 @@ module.exports = {
   // Mint batching / token pool
   planMintBatches,
   TOKENS_PER_RESOURCE,
+  // The round itself. Exported for tests/loadtest-round-accounting.test.js:
+  // planMintBatches covers the batch *plan*, but the per-round accounting
+  // wrapped around it — which counter a failed re-upload charges, and which
+  // latency lands in which figure — is stateful, lives here, and is reachable
+  // no other way. main() is behind `require.main === module` and scripts/ is
+  // outside jest's collectCoverageFrom, so without this line nothing enforces
+  // any of it. The test stubs ../src/connector; the call sites below stay
+  // exactly as written, which is what keeps the AST assertions in
+  // tests/loadtest-silent-failure.test.js meaningful.
+  runRound,
   // Target safety guard
   resolveGuardInputs,
   targetGuardReport,
