@@ -66,6 +66,7 @@ func TestRunnerCancelsCycleContextAfterOrdinaryReturn(t *testing.T) {
 	got := svc.runCtx.Load()
 	if got == nil {
 		t.Fatal("service never ran")
+		return
 	}
 	if (*got).Err() == nil {
 		t.Fatal("cycle context still live after Run returned; cycle-scoped goroutines could leak")
