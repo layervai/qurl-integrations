@@ -1718,6 +1718,8 @@ module.exports = {
   resolveUnknownArgs,
   checkUploadFile,
   resolveArgErrors,
+  // The payload a run without --file uploads
+  generateTestPayload,
   // Mint batching / token pool
   planMintBatches,
   TOKENS_PER_RESOURCE,
