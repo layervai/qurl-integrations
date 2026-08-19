@@ -858,19 +858,53 @@ func TestParseResourceHost(t *testing.T) {
 	}
 }
 
+// TestTLSEnabledAndIPLiteralHost is a table over the two predicates the
+// overlay's TLS-SNI guard is built from.
+//
+// It is deliberately NOT the guard against fork drift, and its failures must
+// not claim to be. Every expectation here is written from TLSEnabled itself,
+// so the table agrees with any change made to the predicate — the tautology
+// that let an exact-match "quic" sit here looking verified. The fork-driven
+// tests are what can actually falsify it: TestForkTLSDecisionMatchesTLSEnabled
+// reads the TLS decision off the wire, and
+// TestForkTLSEnabledAgreesWithTheForkOnMixedCaseQUIC covers the QUIC branch no
+// TCP probe can see. What this table is still good for is cheap, total
+// coverage of the shapes those tests do not each re-enumerate — nil, the
+// zero config, and both spellings of each protocol.
 func TestTLSEnabledAndIPLiteralHost(t *testing.T) {
 	t.Parallel()
 	enabled, disabled := true, false
-	tlsOn := commonForTest()
-	tlsOn.Transport.TLS.Enable = &enabled
-	tlsOff := commonForTest()
-	tlsOff.Transport.TLS.Enable = &disabled
-	quic := commonForTest()
-	quic.Transport.Protocol = "quic"
-	wss := commonForTest()
-	wss.Transport.Protocol = "wss"
-	if !TLSEnabled(tlsOn) || TLSEnabled(tlsOff) || !TLSEnabled(quic) || !TLSEnabled(wss) || TLSEnabled(nil) || TLSEnabled(commonForTest()) {
-		t.Fatal("TLSEnabled decision table drifted from the pinned FRP dialer semantics")
+	withEnable := func(v *bool) *v1.ClientCommonConfig {
+		c := commonForTest()
+		c.Transport.TLS.Enable = v
+		return c
+	}
+	withProtocol := func(p string) *v1.ClientCommonConfig {
+		c := commonForTest()
+		c.Transport.Protocol = p
+		return c
+	}
+	for name, tc := range map[string]struct {
+		common *v1.ClientCommonConfig
+		want   bool
+	}{
+		"explicit enable":  {withEnable(&enabled), true},
+		"explicit disable": {withEnable(&disabled), false},
+		"nil config":       {nil, false},
+		"zero config":      {commonForTest(), false},
+		"quic":             {withProtocol("quic"), true},
+		// The fork matches quic with strings.EqualFold, so a mixed-case
+		// spelling is still the always-TLS QUIC path.
+		"mixed-case quic": {withProtocol("QUIC"), true},
+		"wss":             {withProtocol("wss"), true},
+		// ...and matches wss with ==, so a mixed-case spelling is NOT wss to
+		// it. See the uppercase-wss subtest for why that leaves nothing to
+		// force TLS on.
+		"mixed-case wss": {withProtocol("WSS"), false},
+	} {
+		if got := TLSEnabled(tc.common); got != tc.want {
+			t.Errorf("TLSEnabled(%s) = %v, want %v", name, got, tc.want)
+		}
 	}
 	for host, want := range map[string]bool{
 		"10.0.0.1": true, "[::1]": true, "::1": true,
