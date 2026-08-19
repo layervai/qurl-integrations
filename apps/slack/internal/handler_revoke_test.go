@@ -118,24 +118,23 @@ func TestRevokeResource_Success(t *testing.T) {
 }
 
 // TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote fences the
-// teardown story without assuming Docker: the reply must condition Connector
-// cleanup on one having been installed and reserve the S3-origin instruction
-// for the S3 static-site flow.
+// teardown story without assuming Docker: the reply must open with what revoke
+// DID do (new viewers blocked, viewer sessions deleted) before naming the gap,
+// condition Connector cleanup on one having been installed, and reserve the
+// S3-origin instruction for the S3 static-site flow.
 func TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote(t *testing.T) {
 	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNoContent, "")
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
 	for _, want := range []string{
-		"customer-hosted workloads",
-		"If you installed a qURL Connector for this resource",
-		"For an S3 static site",
-		"S3 origin workload",
+		"New viewers are blocked",
+		"viewer sessions deleted",
+		"Workloads you run",
+		"if you installed a qURL Connector for this resource",
+		"S3 origin workload for an S3 static site",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("success message = %q, want workload-neutral teardown contract %q", msg, want)
 		}
-	}
-	if strings.Contains(msg, "if this was a static site") {
-		t.Errorf("success message = %q, must not claim every static site has an S3 origin", msg)
 	}
 }
 
