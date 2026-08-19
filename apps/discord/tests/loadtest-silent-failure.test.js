@@ -713,7 +713,8 @@ describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
     // carry what DOES exist or the operator is told only that they are wrong.
     expect(errorsFor(['--locatoin'])).toEqual([
       '--locatoin is not a flag this script accepts — accepted flags are '
-        + '--count, --duration, --interval, --file, --max-fail-rate, --location, --allow-production',
+        + '--count, --duration, --interval, --file, --max-fail-rate, --ledger, --reclaim, '
+        + '--location, --allow-production',
     ]);
     expect(errorsFor(['payload.bin'])[0])
       .toContain('this script takes no positional arguments; accepted flags are --count');
@@ -877,6 +878,12 @@ describe('loadtest flag table — the one list everything reads', () => {
       .toEqual([
         ['count', '100'], ['duration', '7200'], ['interval', '60'],
         ['file', null], ['max-fail-rate', '10'],
+        // Both null: --ledger's real default is generated per run (a timestamped
+        // path under the temp directory) so the table cannot hold it, and
+        // --reclaim is a mode switch with no default at all — its absent value
+        // is refused rather than filled in. Their defaultLabels carry the
+        // wording instead, asserted below.
+        ['ledger', null], ['reclaim', null],
       ]);
     // --max-fail-rate's default reaches the run as a NUMBER through an export
     // of its own, so the table has to be what feeds it or the two drift: the
@@ -1372,7 +1379,9 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // the copy agrees with the table right up until somebody edits one of
     // them. That regression changes no behaviour on the day it lands, so no
     // runtime test can see it; the count is what does.
-    expect(callsNamed('flagSpec')).toHaveLength(5);
+    // Seven: the five that shipped with the table, plus --ledger and --reclaim
+    // reading their defaults from it like every other value-taking flag.
+    expect(callsNamed('flagSpec')).toHaveLength(7);
   });
 
   it('reads --max-fail-rate in main() through the shared reader', () => {
@@ -1418,12 +1427,15 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // defect itself. Weak alone — the identical body under any other name
     // passes it — which is precisely what the indexOf ban above covers.
     expect(callsNamed('getArg')).toHaveLength(0);
-    // Three call sites: the numeric resolver, --file, and --max-fail-rate.
-    // The third arrived with #1170's exit-code work and had to be routed
-    // through the shared reader deliberately — which is the whole point of
-    // counting rather than name-checking. A new flag cannot be added with its
-    // own ad-hoc lookup without failing here first.
-    expect(callsNamed('readFlag')).toHaveLength(3);
+    // Five call sites: the numeric resolver, --file, --max-fail-rate, and the
+    // reclaim ledger's --ledger and --reclaim. Each was routed through the
+    // shared reader deliberately rather than given its own lookup, which is
+    // the whole point of counting rather than name-checking — a new flag
+    // cannot be added with an ad-hoc scan without failing here first.
+    //
+    // The count rises as flags adopt the reader; what must stay at zero are
+    // the bans above. Raising it is only correct alongside those staying 0.
+    expect(callsNamed('readFlag')).toHaveLength(5);
     // One call site, unlike the resolvers' two: this one produces no constant
     // for the run to read, only errors, so resolveArgErrors is its only
     // caller. A second would mean argv being scanned for strays somewhere the
