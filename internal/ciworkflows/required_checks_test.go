@@ -464,16 +464,35 @@ func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 	// Everything above rests on claude-review being *unable* to report on a
 	// merge group, which is what makes `none` the only available posture today
 	// rather than a preference. Pin the mechanism rather than just asserting
-	// it: the job's own gate reads pull-request context, which a merge group
-	// does not carry. If that stops being true the rationale needs rewriting
-	// before anyone acts on it — and nothing else in this repo would notice.
-	claudeReview, ok := readWorkflow(t, claudeCodeReviewWorkflow).Jobs[claudeReviewContext]
-	if !ok {
+	// it — but pin the one that actually carries the property.
+	//
+	// That used to be the job's own `if:`, which read pull-request context a
+	// merge group does not carry. #1188 deliberately removed that gate:
+	// `claude-review` is a required context, GitHub scores a *skipped* required
+	// check as satisfied, and so a job-level `if:` that withholds the job is
+	// indistinguishable from a completed review. The job now starts on every
+	// pull request and decides eligibility inside its steps instead.
+	//
+	// The property survived that change because it never rested on the job at
+	// all: the workflow is triggered ONLY by pull_request_target, so a merge
+	// group never starts it. That is what this pins now, and adding
+	// merge_group to the trigger list is the edit that would invalidate the
+	// rationale above.
+	workflow := readWorkflow(t, claudeCodeReviewWorkflow)
+	if _, ok := workflow.Jobs[claudeReviewContext]; !ok {
 		t.Fatalf("%s has no %q job, but %q is a required context", claudeCodeReviewWorkflow, claudeReviewContext, claudeReviewContext)
 	}
-	if !strings.Contains(claudeReview.If, pullRequestContextExpression) {
-		t.Errorf("%s's %q job no longer gates on %s (if = %q).\nThe merge-group rationale documented on this test assumes it cannot run without pull-request context; recheck that before trusting it.",
-			claudeCodeReviewWorkflow, claudeReviewContext, pullRequestContextExpression, claudeReview.If)
+	if _, ok := parseWorkflowTriggers(t, claudeCodeReviewWorkflow, workflow.On)[mergeGroupTrigger]; ok {
+		// Deliberately unconditional on posture, which means flipping the
+		// marker to `queued` fails here AND in the agreement check above, with
+		// the two messages appearing to ask for opposite things. They are not
+		// in conflict: the one above says every required-context workflow must
+		// declare the trigger, and this one says claude-review cannot honor
+		// that until it is restructured. Restructure first — the note on the
+		// posture constants is the order to do it in — rather than satisfying
+		// either message on its own.
+		t.Errorf("%s declares %s, so %q can report on a merge group.\nThe merge-group rationale documented on this test assumes it cannot; recheck that before trusting it.\nIf you are flipping the merge-queue posture, this failure is expected and pairs with the agreement check above; restructure %q first.",
+			claudeCodeReviewWorkflow, mergeGroupTrigger, claudeReviewContext, claudeReviewContext)
 	}
 }
 
