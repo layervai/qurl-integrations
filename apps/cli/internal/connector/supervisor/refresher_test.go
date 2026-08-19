@@ -383,6 +383,13 @@ func TestApplyKnockResultContract(t *testing.T) {
 
 // TestPhysicalDialInOpen pins which connector method owns the physical dial
 // per transport shape on the pinned FRP fork.
+//
+// The two TCPMux-off rows must agree. The fork reads the field through
+// lo.FromPtr, which flattens nil to false, so an unset TCPMux takes the same
+// unmuxed path as an explicit false — the config that never ran
+// ClientCommonConfig.Complete is not a config with muxing on.
+// TestForkDialsFromConnectWithoutTCPMux proves that against the real
+// connector; this table is the predicate's side of the same fact.
 func TestPhysicalDialInOpen(t *testing.T) {
 	t.Parallel()
 	muxOn, muxOff := true, false
@@ -400,7 +407,7 @@ func TestPhysicalDialInOpen(t *testing.T) {
 	}{
 		{"nil common", nil, true},
 		{"quic case-insensitive", quic, true},
-		{"nil tcpmux", muxNil, true},
+		{"unset tcpmux dials in connect", muxNil, false},
 		{"tcpmux enabled", muxTrue, true},
 		{"tcpmux disabled dials in connect", muxFalse, false},
 	}
@@ -408,6 +415,15 @@ func TestPhysicalDialInOpen(t *testing.T) {
 		if got := physicalDialInOpen(tc.common); got != tc.want {
 			t.Fatalf("%s: physicalDialInOpen = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	// A backstop against a future edit to the TABLE, not to the predicate:
+	// the two rows above already pin both values, so this can only fire once
+	// one of them is deleted or relaxed. That is worth keeping — the unset row
+	// is exactly the one that was wrong before, so losing it again should not
+	// be silent — but it is not what guards the predicate. The empirical guard
+	// is TestForkDialsFromConnectWithoutTCPMux.
+	if physicalDialInOpen(muxNil) != physicalDialInOpen(muxFalse) {
+		t.Fatal("unset and explicitly-disabled TCPMux disagree, but the fork treats them identically")
 	}
 }
 
