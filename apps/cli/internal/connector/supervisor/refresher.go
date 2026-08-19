@@ -161,7 +161,12 @@ func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time
 		// window in which the Connector otherwise looks healthy while
 		// consumers time out: the knocks below keep succeeding and the FRP
 		// client logs only its own transport errors.
-		r.log().WarnContext(ctx, "connector: lost the tunnel connection and is reconnecting; if this Connector was just restarted, its previous session is still registered and this one takes over once the qURL platform releases it",
+		//
+		// Deliberately states the observation and NOT a cause. The dial
+		// failures underneath are multiplexer transport errors with no
+		// server-supplied reason, so naming one — a held previous session, a
+		// network fault — would be a guess printed as fact.
+		r.log().WarnContext(ctx, "connector: lost the tunnel connection after it was admitted and cannot re-establish it yet; still retrying, and consumers will time out until it recovers",
 			"event", "reconnect_retrying",
 			"resource_id", r.resourceID,
 			"stalled_seconds", elapsed.Seconds(),

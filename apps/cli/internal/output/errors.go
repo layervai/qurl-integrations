@@ -83,7 +83,7 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 	case errors.Is(err, hub.ErrConfig):
 		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
 	case supervisor.IsTooManyKnockFailures(err):
-		headline, hint = connectorRetryBudgetLines(err)
+		headline, hint = msgConnectorRetryBudget, hintConnectorRetryBudget
 
 	// qurl-go's assignment taxonomy comes last so the CLI's own lifecycle
 	// reading always wins: agent.ErrRefreshAlreadyAttempted, for one, is
@@ -144,22 +144,6 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 }
 
 // apiErrorLines is the RFC 7807 anatomy: headline with status, detail
-// connectorRetryBudgetLines splits the serve loop's retry-budget exit by the
-// cause it carries. The exit joins ErrTooManyKnockFailures with the last
-// cycle's error, so one sentinel covers several very different situations;
-// the duplicate-session refusal is the one whose remedy is "wait for the
-// previous session to be released", and the generic wording would send the
-// reader to check a network that is fine.
-//
-// Split here rather than as a second case in connectorErrorLines so that
-// switch keeps one case per condition class: it already sits at the
-// cyclomatic-complexity ceiling the linter enforces.
-func connectorRetryBudgetLines(err error) (headline, hint string) {
-	if supervisor.IsSessionConflictError(err) {
-		return msgConnectorPreviousSessionActive, hintConnectorPreviousSessionActive
-	}
-	return msgConnectorRetryBudget, hintConnectorRetryBudget
-}
 
 // paragraph, sorted invalid fields, one hint, request id.
 func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {

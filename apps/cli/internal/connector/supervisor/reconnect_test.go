@@ -197,9 +197,9 @@ func TestWatchdogGapExactlyAtSettledResets(t *testing.T) {
 
 // TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm: the operator hears about
 // the outage on the second dial of a storm and only once, and the wording
-// names the stale-session possibility without asserting it — the transport
-// errors underneath carry no reason, so claiming it outright would mislabel a
-// real outage.
+// states the observation without naming a cause. The dial failures underneath
+// are transport errors with no server-supplied reason, so any cause in this
+// sentence would be a guess printed as fact — the assertion below pins that.
 func TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm(t *testing.T) {
 	t.Parallel()
 	clk := newManualClock()
@@ -219,9 +219,16 @@ func TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm(t *testing.T) {
 		t.Fatalf("reconnect_retrying emitted %d time(s) across one storm, want exactly 1\nlog:\n%s", got, buf.String())
 	}
 	notice := buf.String()
-	for _, want := range []string{"previous session is still registered", "takes over", "gives_up_after_seconds"} {
+	for _, want := range []string{"lost the tunnel connection", "consumers will time out", "gives_up_after_seconds"} {
 		if !strings.Contains(notice, want) {
-			t.Errorf("operator notice is missing %q; it must say what happened and that the wait is bounded\nlog:\n%s", want, notice)
+			t.Errorf("operator notice is missing %q; it must say what happened, its consequence, and that the wait is bounded\nlog:\n%s", want, notice)
+		}
+	}
+	// No cause may be asserted: nothing at this layer knows why the dials
+	// fail, so a named cause would be a guess printed as fact.
+	for _, forbidden := range []string{"previous session", "already online", "network fault", "platform released"} {
+		if strings.Contains(notice, forbidden) {
+			t.Errorf("operator notice asserts the unverifiable cause %q; the transport errors underneath carry no server reason\nlog:\n%s", forbidden, notice)
 		}
 	}
 	// A single dial is an ordinary reconnect and must stay silent.

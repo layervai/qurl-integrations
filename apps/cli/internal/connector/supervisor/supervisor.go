@@ -523,11 +523,6 @@ func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutc
 			"login_token_rejected",
 			"connector: tunnel login rejected the knock token; will re-knock on next cycle",
 			"a token-rejected login")
-	case IsSessionConflictError(outcome.runErr):
-		return s.recordUnhealthyLogin(ctx, outcome.runErr,
-			"login_session_conflict",
-			"connector: this Connector's previous session is still registered with the qURL platform, so this one could not take over yet; retrying",
-			"a duplicate-session refusal")
 	case errors.Is(outcome.runErr, errReconnectStalled):
 		return s.recordUnhealthyLogin(ctx, outcome.runErr,
 			"reconnect_stalled",

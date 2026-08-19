@@ -31,30 +31,6 @@ func runToBudgetExit(t *testing.T, runErr error) (*fakeMarker, error) {
 	return marker, <-done
 }
 
-// TestSessionConflictLoginCountsAgainstBudget: a cycle that knocked cleanly and
-// was then refused because this Connector's previous session is still
-// registered must count against the unified budget. Before this, the refusal
-// fell through to the healthy branch and RESET the budget on every cycle, so a
-// Connector in this state retried forever — never reaching the budget exit,
-// never rendering a customer message, and never exiting non-zero.
-func TestSessionConflictLoginCountsAgainstBudget(t *testing.T) {
-	t.Parallel()
-	conflict := errors.New("login to the server failed: client_id [c-1] for user [u-1] is already online")
-	marker, runErr := runToBudgetExit(t, conflict)
-	if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, conflict) {
-		t.Fatalf("Run = %v, want the budget exit wrapping the duplicate-session refusal", runErr)
-	}
-	// The rendering layer keys the customer message off this predicate, so the
-	// terminal error must still classify after the budget exit wraps it.
-	if !IsSessionConflictError(runErr) {
-		t.Fatalf("the budget exit stopped classifying as a session conflict: %v", runErr)
-	}
-	armed, cleared := marker.snapshot()
-	if len(armed) != 1 || cleared != 0 {
-		t.Fatalf("marker transitions = armed %v cleared %d, want one armed episode and no clears", armed, cleared)
-	}
-}
-
 // TestReconnectStallCountsAgainstBudget: a cycle the reconnect watchdog took
 // back must count too. Without it, a Connector whose tunnel is admitted and
 // then never re-establishes would restart its cycle forever — the watchdog

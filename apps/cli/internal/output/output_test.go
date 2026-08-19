@@ -15,7 +15,6 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -356,44 +355,6 @@ func TestConnectorAssignmentOrdering(t *testing.T) {
 			t.Errorf("want the refresh-exhausted headline, got:\n%s", buf.String())
 		}
 	})
-}
-
-// TestConnectorPreviousSessionActiveRendering pins the stale-session
-// rendering and its ordering. The supervisor's budget exit joins
-// ErrTooManyKnockFailures with its last cause, so a duplicate-session refusal
-// matches BOTH that sentinel and the conflict predicate; the specific reading
-// has to win, or the operator is sent to check a network that is fine while
-// the real answer is "wait for the previous session to be released".
-func TestConnectorPreviousSessionActiveRendering(t *testing.T) {
-	conflict := errors.New("login to the server failed: client_id [c-1] for user [u-1] is already online")
-	budgetExit := errors.Join(
-		supervisor.ErrTooManyKnockFailures,
-		fmt.Errorf("5 consecutive unhealthy knocks, last was a duplicate-session refusal: %w", conflict),
-	)
-	var buf bytes.Buffer
-	RenderError(&buf, budgetExit, false)
-	got := buf.String()
-	if !strings.Contains(got, msgConnectorPreviousSessionActive) {
-		t.Errorf("want the previous-session headline, got:\n%s", got)
-	}
-	if !strings.Contains(got, hintConnectorPreviousSessionActive) {
-		t.Errorf("want the previous-session hint, got:\n%s", got)
-	}
-	if strings.Contains(got, msgConnectorRetryBudget) {
-		t.Errorf("the generic retry-budget headline must not win over the specific cause:\n%s", got)
-	}
-
-	// A budget exit with any other cause keeps the generic rendering, so the
-	// new case cannot swallow the one it was inserted in front of.
-	plain := errors.Join(
-		supervisor.ErrTooManyKnockFailures,
-		errors.New("5 consecutive unhealthy knocks, last was a token-rejected login: knock_invalid: knock token rejected"),
-	)
-	var plainBuf bytes.Buffer
-	RenderError(&plainBuf, plain, false)
-	if !strings.Contains(plainBuf.String(), msgConnectorRetryBudget) {
-		t.Errorf("want the generic retry-budget headline for a non-conflict cause, got:\n%s", plainBuf.String())
-	}
 }
 
 // TestConnectorRequestRejectedDropsSDKRemedy is the regression guard for the
