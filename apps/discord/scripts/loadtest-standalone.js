@@ -590,7 +590,23 @@ function resolveReclaimArg(argv) {
     // swept up by the boolean-flag literal guard in
     // tests/loadtest-silent-failure.test.js as though it were an ad-hoc flag
     // read. The name still appears, which is what the wiring check needs.
-    errors.push('a ledger path is required — pass it as --reclaim /tmp/loadtest-ledger-<ts>.jsonl');
+    errors.push('a ledger path is required — pass it as --reclaim <tmpdir>/loadtest-ledger-<ts>.jsonl');
+  } else if (requested && reclaimPath.trim() === '') {
+    // Whitespace-only is a mistyped flag, not a path — the same reasoning as
+    // --file and --ledger, and refused here rather than in parseReclaimArg for
+    // the reason that function's own header records: it reads a MODE switch,
+    // so a value it cannot use collapses to `path: null`, which is already how a
+    // bare --reclaim arrives. Collapsing this one too would cost the only
+    // thing that makes the message legible — the value, quoted. Unquoted, the
+    // fault renders as an invisible gap, and it is downstream in reclaim()'s
+    // `no ledger file at ${ledgerPath}` that an operator would meet it: a
+    // sentence with a hole in it, read by someone who has already lost a run.
+    //
+    // So this is a message fix, not a leak fix. The resources are safe either
+    // way — reclaim() finds no such file and main() exits 1 — which is why
+    // the refusal is worth having at preflight, where every other unusable
+    // argv value is already named back to the operator.
+    errors.push(`--reclaim must name the ledger file to reclaim from, got ${JSON.stringify(reclaimPath)}`);
   }
   return { requested, path: reclaimPath, errors };
 }
