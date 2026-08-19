@@ -29,8 +29,10 @@ import (
 // the gate. Treat a green suite here as "the shape and the scripts are right",
 // never as "the job concludes correctly".
 const (
-	claudeReviewWorkflow = "claude-code-review.yml"
-	claudeReviewJobID    = "claude-review"
+	// The file name. Not to be confused with claudeReviewJobID below: the job
+	// id inside it is "claude-review", a different string.
+	claudeCodeReviewWorkflow = "claude-code-review.yml"
+	claudeReviewJobID        = "claude-review"
 
 	claudeReviewEligibilityStepName = "Resolve Claude review eligibility"
 	claudeReviewCheckoutStepName    = "Checkout trusted default branch history"
@@ -69,7 +71,7 @@ const (
 func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 	t.Parallel()
 
-	job := claudeReviewJob(t, readWorkflow(t, claudeReviewWorkflow))
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
 
 	if got := strings.TrimSpace(job.If); got != "always()" {
 		t.Errorf("%s.if = %q, want always() — a conditional job reports `skipped`, which GitHub scores as a satisfied required check", claudeReviewJobID, got)
@@ -576,7 +578,7 @@ func TestClaudeReviewGateRefusesAnEmptyPass(t *testing.T) {
 func TestClaudeReviewHoldsEverySecretBearingStepBehindTheChain(t *testing.T) {
 	t.Parallel()
 
-	job := claudeReviewJob(t, readWorkflow(t, claudeReviewWorkflow))
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
 	raw := claudeReviewRawSteps(t)
 	if len(raw) != len(job.Steps) {
 		t.Fatalf("parsed %d steps but %d raw steps; the two views disagree", len(job.Steps), len(raw))
@@ -686,8 +688,8 @@ func claudeReviewRawSteps(t *testing.T) []string {
 			Steps []map[string]any `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeReviewWorkflow), &raw); err != nil {
-		t.Fatalf("parse %s: %v", claudeReviewWorkflow, err)
+	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeCodeReviewWorkflow), &raw); err != nil {
+		t.Fatalf("parse %s: %v", claudeCodeReviewWorkflow, err)
 	}
 
 	steps := raw.Jobs[claudeReviewJobID].Steps
@@ -713,18 +715,18 @@ func claudeReviewRawSteps(t *testing.T) []string {
 func TestClaudeReviewKeepsItsSecurityProperties(t *testing.T) {
 	t.Parallel()
 
-	workflow := readWorkflow(t, claudeReviewWorkflow)
-	triggers := parseWorkflowTriggers(t, claudeReviewWorkflow, workflow.On)
+	workflow := readWorkflow(t, claudeCodeReviewWorkflow)
+	triggers := parseWorkflowTriggers(t, claudeCodeReviewWorkflow, workflow.On)
 	if _, ok := triggers["pull_request_target"]; !ok {
-		t.Errorf("%s must stay on pull_request_target, which loads this file from the trusted default branch", claudeReviewWorkflow)
+		t.Errorf("%s must stay on pull_request_target, which loads this file from the trusted default branch", claudeCodeReviewWorkflow)
 	}
 	if _, ok := triggers["pull_request"]; ok {
-		t.Errorf("%s must not run on pull_request; that trigger would load pull-request-authored workflow code into a secrets-bearing run", claudeReviewWorkflow)
+		t.Errorf("%s must not run on pull_request; that trigger would load pull-request-authored workflow code into a secrets-bearing run", claudeCodeReviewWorkflow)
 	}
 
 	permissions, ok := workflow.Permissions.(map[string]any)
 	if !ok || len(permissions) != 0 {
-		t.Errorf("%s workflow-level permissions = %#v, want an empty mapping so every job opts in explicitly", claudeReviewWorkflow, workflow.Permissions)
+		t.Errorf("%s workflow-level permissions = %#v, want an empty mapping so every job opts in explicitly", claudeCodeReviewWorkflow, workflow.Permissions)
 	}
 
 	job := claudeReviewJob(t, workflow)
@@ -825,7 +827,7 @@ func claudeReviewJob(t *testing.T, workflow githubWorkflow) githubJob {
 
 	job, ok := workflow.Jobs[claudeReviewJobID]
 	if !ok {
-		t.Fatalf("%s is missing the %s job; that job id is the required context's name", claudeReviewWorkflow, claudeReviewJobID)
+		t.Fatalf("%s is missing the %s job; that job id is the required context's name", claudeCodeReviewWorkflow, claudeReviewJobID)
 	}
 	// The check renders under the job id only while the job sets no name.
 	// TestDocumentedRequiredContextsResolveToWorkflowJobs would also catch a
@@ -843,7 +845,7 @@ func claudeReviewJob(t *testing.T, workflow githubWorkflow) githubJob {
 func claudeReviewStepScript(t *testing.T, name string) string {
 	t.Helper()
 
-	job := claudeReviewJob(t, readWorkflow(t, claudeReviewWorkflow))
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
 	return claudeReviewStep(t, &job, name).Run
 }
 
@@ -897,13 +899,13 @@ func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeReviewWorkflow), &raw); err != nil {
-		t.Fatalf("parse %s: %v", claudeReviewWorkflow, err)
+	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeCodeReviewWorkflow), &raw); err != nil {
+		t.Fatalf("parse %s: %v", claudeCodeReviewWorkflow, err)
 	}
 
 	job, ok := raw.Jobs[claudeReviewJobID]
 	if !ok {
-		t.Fatalf("%s is missing the %s job", claudeReviewWorkflow, claudeReviewJobID)
+		t.Fatalf("%s is missing the %s job", claudeCodeReviewWorkflow, claudeReviewJobID)
 	}
 
 	wiring := claudeReviewBudgetWiring{

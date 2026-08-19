@@ -1230,18 +1230,124 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     });
 
   const ast = parseFile('scripts', 'loadtest-standalone.js');
+  // A name the source states outright, in whichever spelling it is written:
+  // `fs.writeFileSync`, `fs['writeFileSync']` and ``fs[`writeFileSync`]`` are
+  // one call, and so are `{ writeFileSync: w }` and `{ 'writeFileSync': w }`.
+  // The template arm is limited to a lone quasi with no expressions — that is
+  // the whole of what a template can state outright; the moment one
+  // interpolates it is assembled at runtime and reads as null, as does a key
+  // computed from anything else.
+  //
+  // `computed` gates the Identifier arm ALONE, which is deliberate rather than
+  // an oversight: a string or template key is name-shaped in either position,
+  // so `fs['x']` and `{ 'x': v }` read the same, while a bare `x` is a name
+  // only when it is NOT computed — computed, it is a variable to resolve.
+  const staticName = (node, computed) => {
+    if (node.type === 'StringLiteral') return node.value;
+    if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+      return node.quasis[0]?.value.cooked ?? null;
+    }
+    if (!computed && node.type === 'Identifier') return node.name;
+    return null;
+  };
+
+  // Names bound exactly ONCE in a file, and what the binding makes them mean.
+  // Three shapes land here, each of which reached a primitive while naming
+  // something else, and so walked past every check below:
+  //
+  //   const w = fs.writeFileSync       →  w      is writeFileSync
+  //   const { writeFileSync: w } = fs  →  w      is writeFileSync
+  //   const W = 'writeFileSync'        →  fs[W]  is writeFileSync
+  //
+  // ONCE is the rule rather than a convenience. A name declared twice means
+  // whichever binding reached the call site, and a static walk cannot see
+  // which; it is dropped here and resolves to itself, which is what every
+  // name did before this map existed. Plenty are — `line` and `error` are
+  // each declared in several functions — and dropping them is why this map
+  // cannot make a count wrong.
+  //
+  // Once READABLY, to be exact. A first binding whose target cannot be read
+  // statically records null, and null is what a second sighting records too,
+  // so such a name is never rescued by a later readable binding. Both roads
+  // lead to "resolves to itself", which is the conservative end either way —
+  // but "declared exactly once" alone would not have told you that.
+  //
+  // The coupling that buys, stated because it is invisible at the call sites:
+  // this map feeds calleeName, so it is not only the bans that read through
+  // it — the per-round `readFileSync` and `generateTestPayload` counts do
+  // too. Those counts are correct only while no name they count is aliased in
+  // the script. None is today. If one ever is, the count moves silently, and
+  // the check below that resolves each spelling to writeFileSync is what
+  // should fail first and say so.
+  //
+  // One hop, and only from a declaration. `let w; w = fs.writeFileSync`, an
+  // alias of an alias, and an interpolated key all still escape — this closes
+  // the spellings an ordinary edit reaches for, which is the same standard
+  // WRITE_PRIMITIVES below is held to and the same one the whole file is:
+  // these checks stop a regression, not an author who is trying to get one
+  // past them. Scope is not tracked either, so a parameter shadowing an
+  // aliased name would read as the alias — which cannot happen until an alias
+  // exists, and fails loudly rather than passing silently.
+  const resolveAliases = (sourceAst) => {
+    const bound = new Map();
+    // A second sighting does not overwrite the first, it makes the name
+    // ambiguous — which is what null means here, alongside a binding whose
+    // target cannot be read statically.
+    const note = (name, target) => bound.set(name, bound.has(name) ? null : target);
+    traverse(sourceAst, {
+      VariableDeclarator(p) {
+        const { id, init } = p.node;
+        if (id.type === 'Identifier') {
+          if (init?.type === 'MemberExpression') {
+            note(id.name, staticName(init.property, init.computed));
+          } else {
+            note(id.name, init?.type === 'StringLiteral' ? init.value : null);
+          }
+          return;
+        }
+        if (id.type !== 'ObjectPattern') return;
+        for (const prop of id.properties) {
+          if (prop.type !== 'ObjectProperty' || prop.value.type !== 'Identifier') continue;
+          note(prop.value.name, staticName(prop.key, prop.computed));
+        }
+      },
+    });
+    return new Map([...bound].filter(([, target]) => target !== null));
+  };
 
   // Matches a member expression on its property name too, so `client.fetch()`
   // counts as a fetch. Wider than strictly needed, in the direction these
   // checks want to err.
-  const calleeName = (node) => {
-    const callee = node.callee;
-    if (callee.type === 'Identifier') return callee.name;
-    if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-      return callee.property.name;
-    }
-    return null;
+  //
+  // Both ends resolve through the alias map, because a check keyed on the
+  // spelling at the call site is a check on that spelling. `w(...)` after
+  // `const w = fs.writeFileSync` IS a writeFileSync, and so is `fs[W]` with W
+  // a const string; reading them as `w` and as `W` is how a scratch write
+  // dropped into runRound used to leave the ban below green.
+  //
+  // Built per-AST rather than closing over the module's one `ast`, so the
+  // check below can run this same resolver over a fixture. Nothing in the
+  // load-test script uses any of these spellings — that is the point of the
+  // ban — so a resolver wired only to the real file would be logic no test
+  // could reach, green whether or not it still worked.
+  const makeCalleeName = (sourceAst) => {
+    const aliases = resolveAliases(sourceAst);
+    return (node) => {
+      const callee = node.callee;
+      if (callee.type === 'Identifier') return aliases.get(callee.name) ?? callee.name;
+      if (callee.type !== 'MemberExpression') return null;
+      const named = staticName(callee.property, callee.computed);
+      if (named !== null) return named;
+      // A computed key that is itself a name: `fs[W]`. Unresolvable means
+      // unknown, not the identifier's own name — `fs[W]` is not a call to W.
+      if (callee.computed && callee.property.type === 'Identifier') {
+        return aliases.get(callee.property.name) ?? null;
+      }
+      return null;
+    };
   };
+
+  const calleeName = makeCalleeName(ast);
 
   // Every `--`-prefixed string literal in the file, in sorted order and
   // deliberately NOT de-duplicated. The shared readers build their token from
@@ -1350,6 +1456,71 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // stays correct if a caller ever passes the function node itself.
   const callsWithin = (fn, name) => callsNamed(name)
     .filter((node) => node.start >= fn.start && node.end <= fn.end);
+
+  it('resolves every spelling of a call that reaches the same primitive', () => {
+    // The guard on the guard. None of these spellings appears in
+    // loadtest-standalone.js — keeping it that way is what the ban below is
+    // for — so the resolver they all flow through is logic no other check in
+    // this file can reach. Wired only to the real script it would sit green
+    // whether or not it still worked, and the mutation run that proved it
+    // once does not re-run in CI. Hence a fixture.
+    //
+    // The last three rows are the documented fail-open cases, pinned so that
+    // closing one is a deliberate edit rather than a side effect: a name
+    // declared twice is ambiguous and resolves to ITSELF, and a key that is
+    // computed rather than stated resolves to null.
+    const fixture = [
+      "const fs = require('fs');",
+      "const aliased = fs.writeFileSync;",
+      "const { writeFileSync: renamed } = require('fs');",
+      // Shorthand resolves to ITSELF, which is the same answer as no alias at
+      // all — pinned because the comment above claims the ObjectPattern arm
+      // reads both spellings of a key, and a fixture that only ever exercised
+      // the renamed form would let the quoted one rot unnoticed.
+      "const { writeFileSync } = fs;",
+      "const { 'writeFileSync': quoted } = fs;",
+      "const KEY = 'writeFileSync';",
+      // Two bindings in two scopes, which is what makes `dup` ambiguous. The
+      // second is returned rather than called so this contributes exactly one
+      // call site.
+      "function one() { const dup = fs.writeFileSync; dup('x'); }",
+      "function two() { const dup = fs.appendFileSync; return dup; }",
+      "fs.writeFileSync('a');",
+      "fs['writeFileSync']('b');",
+      "fs[`writeFileSync`]('c');",
+      "fs[KEY]('d');",
+      "aliased('e');",
+      "renamed('f');",
+      "writeFileSync('h');",
+      "quoted('i');",
+      "fs[String('writeFileSync')]('g');",
+    ].join('\n');
+    const fixtureAst = parser.parse(fixture, { sourceType: 'unambiguous' });
+    const resolve = makeCalleeName(fixtureAst);
+    // Keyed by the callee AS WRITTEN, so a failure names the spelling that
+    // broke rather than an index into a list.
+    const resolved = {};
+    traverse(fixtureAst, {
+      CallExpression(p) {
+        const { callee } = p.node;
+        resolved[fixture.slice(callee.start, callee.end)] = resolve(p.node);
+      },
+    });
+    expect(resolved).toEqual({
+      "require": 'require',
+      'fs.writeFileSync': 'writeFileSync',
+      "fs['writeFileSync']": 'writeFileSync',
+      'fs[`writeFileSync`]': 'writeFileSync',
+      'fs[KEY]': 'writeFileSync',
+      'aliased': 'writeFileSync',
+      'renamed': 'writeFileSync',
+      'writeFileSync': 'writeFileSync',
+      'quoted': 'writeFileSync',
+      'dup': 'dup',
+      'String': 'String',
+      "fs[String('writeFileSync')]": null,
+    });
+  });
 
   it('hand-rolls no HTTP call of its own', () => {
     // The three guards that went missing — AbortSignal.timeout(60000), the
@@ -1623,15 +1794,56 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // not", and a list that drifted between them would leave a gap in whichever
   // copy was not updated.
   //
-  // Every one of them, not just the writeFileSync a straight revert of #1177
-  // would use: appendFileSync and an openSync/writeSync pair reintroduce the
-  // same scratch file while leaving a narrower ban green, and copyFileSync
-  // does it without ever naming the bytes. The list is not exhaustive of the
-  // fs surface — cpSync, truncateSync and the promise-API equivalents are all
-  // absent — so it stops the plausible regressions, not a determined author.
+  // The rule is every fs entry point that CREATES a filesystem entry or
+  // CHANGES the bytes behind one, in both spellings — the callback name and
+  // its Sync twin. Pairing them is what was missing rather than the names
+  // themselves: the list used to ban copyFileSync, writeSync and openSync
+  // while letting copyFile, write and open through, so the same regression
+  // written async walked past a ban that already named its sync twin. Member
+  // matching is what makes one entry cover three call shapes — `fs.writeFile`,
+  // `fs.promises.writeFile` and `fsp.writeFile` all read as writeFile — which
+  // is why no promise-API row is needed here.
+  //
+  // Grouped by what an author would be reaching for, because the second and
+  // third groups are the ones a ban written around "writing" keeps missing:
+  // a scratch directory and a rename are litter that never calls a write.
+  //
+  // Deliberately NOT here: chmod, chown and utimes change a path's metadata
+  // without placing a byte or creating an entry, and readFileSync, statSync,
+  // accessSync and existsSync are how this script legitimately reads.
+  //
+  // The cost is that matching is by member NAME, so every short entry —
+  // write, open, link, cp, rm, rename — also matches that method on an
+  // object which is not fs at all. `write` is the one that bites today: it
+  // matches any `.write()`, so a progress bar on process.stdout fails this
+  // test, which was checked rather than assumed. It is kept because it is the
+  // only entry that catches a write through a descriptor or stream this file
+  // did not open itself, and because a list banning writeSync but not write
+  // is the very asymmetry this is fixing. Every line of output here goes
+  // through console.*, so the cost is currently zero — but a later `.open()`
+  // or `.link()` on some unrelated object will fail here too. That is the
+  // over-banning direction these checks take on purpose; the fix when it
+  // happens is to look at the call, not to trim the list.
   const WRITE_PRIMITIVES = [
-    'writeFileSync', 'writeFile', 'createWriteStream',
-    'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
+    // Bytes at a path.
+    'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync',
+    'write', 'writeSync', 'writev', 'writevSync',
+    'truncate', 'truncateSync', 'ftruncate', 'ftruncateSync',
+    'copyFile', 'copyFileSync', 'cp', 'cpSync',
+    // A descriptor or a stream to write through.
+    'open', 'openSync', 'createWriteStream',
+    // An entry where there was none.
+    'mkdir', 'mkdirSync', 'mkdtemp', 'mkdtempSync',
+    'rename', 'renameSync', 'link', 'linkSync', 'symlink', 'symlinkSync',
+  ];
+
+  // Removal, banned everywhere including inside the ledger — see the
+  // assertion at the end of the whole-file test for why deleting is the
+  // litter shape and not the cure for it. Same both-spellings rule as above,
+  // and rmSync is the reason this is a list at all: unlinkSync alone was the
+  // ban, and `fs.rmSync(path)` is the modern spelling of exactly that call.
+  const DELETE_PRIMITIVES = [
+    'unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync',
   ];
 
   // The three writes the reclaim ledger is SUPPOSED to make, each pinned to
@@ -1643,8 +1855,10 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     { writer: 'pruneLedger', primitive: 'writeFileSync' },
   ];
 
-  // The ledger path, as spelled at those three call sites: the module-level
-  // const, and pruneLedger's parameter of the same name.
+  // The ledger path, as spelled at those three call sites: recordResource
+  // reads the module-level const, while preflightLedger and pruneLedger each
+  // take a parameter of the same name — both are exported and aimed at a temp
+  // file by tests/loadtest-reclaim.test.js.
   const LEDGER_TARGET = /^(?:LEDGER_PATH|ledgerPath)$/;
 
   it('writes nothing to disk outside the reclaim ledger', () => {
@@ -1678,13 +1892,13 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // there is no legitimate call to distinguish it from. (Only explicit —
     // readFileSync and the two ledger writes open descriptors of their own.)
     // That call takes 'a', so it creates the ledger as a side effect of
-    // proving it writable; it is a create-and-close, not a pure probe. Its
-    // MODE is pinned nowhere: this is a static check, and preflightLedger is
-    // unexported and reads a module-level LEDGER_PATH, so nothing runtime
-    // reaches it. Read this as "the ledger is the only opener", not as "the
-    // ledger opens 0600" — the sibling gateway-resume-spike.js does pin its
-    // own 0600, and the ledger inherited that file's threat model without
-    // inheriting its test.
+    // proving it writable; it is a create-and-close, not a pure probe. Read
+    // this as "the ledger is the only opener", not as "the ledger opens
+    // 0600": the mode is a runtime property, which no static check can see.
+    // It is pinned in tests/loadtest-reclaim.test.js instead — the sibling
+    // gateway-resume-spike.js pins its own 0600 the same way, and giving
+    // preflightLedger a path parameter and an export is what brought that
+    // mode within reach of a test at all.
     //
     // The cost, stated because this file's convention is to state it: moving
     // the three writes behind one shared ledger-write helper, or swapping
@@ -1728,15 +1942,26 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       expect({ primitive, callsOutsideLedger: stray.length })
         .toEqual({ primitive, callsOutsideLedger: 0 });
     }
-    // And nothing to unlink, which is the other half of why no cleanup path
-    // was added for the payload — an unlink would mean the litter is back and
+    // And nothing to remove, which is the other half of why no cleanup path
+    // was added for the payload — a removal would mean the litter is back and
     // merely swept, leaving a run that is killed mid-window still littering.
-    // Unscoped, including inside the ledger: reclaim deliberately truncates
-    // rather than deletes, so an unlink anywhere here is the litter-and-sweep
-    // shape. Same caveat as WRITE_PRIMITIVES above — rmSync and the promise
-    // API are not covered, so this stops the plausible regression, not a
-    // determined author.
-    expect(callsNamed('unlinkSync')).toHaveLength(0);
+    // Unscoped, including inside the ledger: reclaim deliberately shortens the
+    // ledger rather than deleting it, so a removal anywhere here is the
+    // litter-and-sweep shape. "Shortens" and not "truncates", because it is
+    // pruneLedger's writeFileSync rewriting the file — possibly to '' — and
+    // not a call to truncate. That distinction is why adding truncate and
+    // ftruncate to WRITE_PRIMITIVES could not have collided with the ledger:
+    // the script calls exactly three of the banned names, and all three are
+    // the LEDGER_WRITES rows above.
+    //
+    // Every spelling, for a reason this assertion learned the hard way: it
+    // named unlinkSync alone, and `fs.rmSync(path)` is the same call in the
+    // API an author reaches for now. A ban on the older name reads as a rule
+    // about deleting while only being a rule about one function.
+    for (const primitive of DELETE_PRIMITIVES) {
+      expect({ primitive, calls: callsNamed(primitive).length })
+        .toEqual({ primitive, calls: 0 });
+    }
   });
 
   it('writes nothing from the round itself', () => {
@@ -1758,6 +1983,58 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       expect({ primitive, callsInRunRound: inRound.length })
         .toEqual({ primitive, callsInRunRound: 0 });
     }
+  });
+
+  it('spawns no subprocess to write on its behalf', () => {
+    // The hole under every check above. `execSync('dd if=/dev/zero
+    // of=/tmp/p.bin bs=1M count=1')` reinstates the scratch file exactly,
+    // and to the two bans above it is a call named execSync — no fs
+    // primitive anywhere — carrying a string that is only a string. Less a
+    // hypothetical evasion than the shape a "just shell out to it" edit
+    // naturally takes.
+    //
+    // Pinned on the IMPORT rather than on the spawner names. That is the
+    // opposite of how the primitives above are banned, and deliberate:
+    // `exec` is also RegExp.prototype.exec, so a call-name ban would fail
+    // the day someone parses a ledger line with a regex — a false failure
+    // inside a disk-write test, which is the kind that gets fixed by
+    // deleting the rule. The import is unambiguous, and every spawner needs
+    // it: there is no execSync without first reaching child_process.
+    //
+    // The cost is a real narrowing, stated rather than papered over. This
+    // reads calls to `require` with a literal argument, so three shapes
+    // escape it, each verified to: an aliased require (`const req = require;
+    // req('child_process')`, whose init is a bare Identifier and so is not
+    // an alias this map records), a dynamic `import('child_process')` (a
+    // CallExpression whose callee is `Import`, not `require`), and a
+    // subprocess reached without importing at all — process.binding, or a
+    // helper under src/ that spawns on this script's behalf. The script
+    // imports three Node builtins — fs, os, path — and otherwise only its
+    // own src/; the ban is on the one line an ordinary edit would add before
+    // any spawner became reachable.
+    const required = [];
+    traverse(ast, {
+      CallExpression(p) {
+        if (calleeName(p.node) !== 'require') return;
+        const [source] = p.node.arguments;
+        if (source?.type === 'StringLiteral') required.push(source.value);
+      },
+    });
+    // Non-empty, or this is asserting over a list it failed to build — the
+    // same vacuous-green failure the ledger exemption above guards against.
+    // Matched with the same `node:`-tolerant shape as the ban below rather
+    // than pinning the bare specifier: a move to `require('node:fs')` is the
+    // same modernization that put rmSync in DELETE_PRIMITIVES, and it should
+    // not fail here as a missing-list error that says nothing about prefixes.
+    //
+    // It does still assume the script keeps a plain `fs` require. Moving
+    // wholesale to `fs/promises` would fail this as `readsFs: false`, which
+    // says nothing about subprocesses and reads as a broken test rather than
+    // the sentinel it is. That is the price of proving the list got built at
+    // all; if it ever fires, widen the specifier, do not drop the guard.
+    expect({ readsFs: required.some((mod) => /^(?:node:)?fs$/.test(mod)) })
+      .toEqual({ readsFs: true });
+    expect(required.filter((mod) => /^(?:node:)?child_process$/.test(mod))).toEqual([]);
   });
 
   it('keeps the per-round read for --file and drops it for the generated payload', () => {

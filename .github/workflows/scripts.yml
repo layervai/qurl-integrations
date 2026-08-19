@@ -8,9 +8,14 @@ name: Scripts
 
 # No `merge_group`. #940 added it here for "future merge-queue compatibility",
 # but no queue was ever configured and the required contexts never followed, so
-# it only made a half-wired repo look queue-ready. This check is not even
-# required, so it would have gated nothing in a queue regardless. See the note
-# in workflow-contract.yml; CONTRIBUTING.md declares the posture that both obey.
+# it only made a half-wired repo look queue-ready. Correct while the posture is
+# `none`, and load-bearing the other way now that this check is required: a
+# queue evaluates required contexts against its own ref, so enabling one means
+# adding the trigger back here in the same change, or every entry hangs on a
+# context that never reports. The absence is what the posture check enforces
+# today, and the presence is what it would enforce after the flip — it fails in
+# both directions. See the note in workflow-contract.yml; CONTRIBUTING.md
+# declares the posture that both obey.
 on:
   pull_request:
   workflow_dispatch:

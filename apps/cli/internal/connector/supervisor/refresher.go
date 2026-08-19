@@ -129,10 +129,59 @@ const reasonReconnectStalled = "reconnect_stalled"
 // produces is ErrTooManyKnockFailures, which already has a code.
 var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could not re-establish after it was admitted")
 
-// redialKnockRefresher re-knocks before physical tunnel redials. All state is
-// mutex-guarded: the lock deliberately spans the knock call and the common
-// config mutation, so pipelined connector dials in a future FRP version would
-// serialize rather than race the ServerAddr/Metadatas writes.
+// redialKnockRefresher re-knocks before physical tunnel redials. All refresher
+// state is mutex-guarded, and the lock spans the knock call and the common
+// config stamp so concurrent refreshes serialize against each other: the token
+// and the dial target one stamp leaves behind always come from a single ACK,
+// never interleaved from two.
+//
+// The lock does NOT make that stamp safe to READ. It is released when refresh
+// returns, before the dial it precedes, and the fork then reads the stamped
+// fields unsynchronized: ServerAddr and ServerPort in realConnect and in
+// Open's QUIC branch, and Metadatas in buildLoginMsg — whose map contents are
+// actually walked a frame later, when exchangeLogin marshals the Login.
+// Transport.* has more readers still, several of them concurrent: the fork's
+// own heartbeatWorker and proxy manager, plus physicalDialInOpen — ours, but
+// called on the work-connection goroutines all the same. That is why the
+// write-set pin matters beyond the two fields named here.
+//
+// Writes serialize against writes; the fork's reads of them are unguarded.
+// Holding the lock across the dial would cover the connector's reads but not
+// buildLoginMsg's, which runs inside Dial after Connect returns — past
+// anything this package can lock across the Connector seam.
+//
+// That is latent rather than live. Production runs a completed config, so the
+// refresh sits on the Open seam (see the WATCHDOG COUPLING note on Connect),
+// and the fork calls Open from exactly one place — controlSessionDialer.Dial,
+// driven serially by loopLoginUntilSuccess. Every read of a stamped field
+// therefore happens later on the goroutine that wrote it. The concurrent dials
+// the fork does have are the work connections, one goroutine per ReqWorkConn
+// through msg.AsyncHandler, and on this seam each dials through
+// knockingConnector.Connect — which refreshes nothing, and reads nothing a
+// refresh writes (TestRefreshStampsOnlyTheDialTargetAndToken).
+//
+// On the unmuxed seam those goroutines refresh concurrently, and a -race
+// harness driving the real fork connector there reports write/read races on
+// ServerAddr and ServerPort against realConnect. A config copy does settle
+// those two — they are value fields — but only at per-CONNECT granularity:
+// the ConnectorCreator runs once per Dial and every work connection dials
+// through that one connector, so a copy taken there just puts the same shared
+// struct behind a new pointer. What no copy settles is the token; see refresh
+// for the map it has to land on. Making that seam safe needs fork-side
+// changes, and noteRedialLocked revisited first per the same WATCHDOG
+// COUPLING note.
+//
+// TODO(upstream-contract): the goroutine topology above mirrors
+// github.com/layervai/frp v0.70.0-layerv.4 — client/control_session.go (Dial
+// is the only connector.Open call site, and buildLoginMsg reads Metadatas off
+// the same pointer the ConnectorCreator is handed), client/service.go (Run's
+// first-login loop returns before `go keepControllerWorking()`, so Dial never
+// overlaps itself) and client/control.go (registerMsgHandlers wraps
+// handleReqWorkConn in msg.AsyncHandler, which is `go f(m)`). Nothing local
+// fails if any of that drifts: no test drives two concurrent refreshes against
+// the real fork, and TestRefreshStampsOnlyTheDialTargetAndToken pins only this
+// side's write set. A second Open call site upstream would make this race live
+// with every test here still green.
 type redialKnockRefresher struct {
 	knocker    knock.Knocker
 	resourceID string
@@ -254,10 +303,20 @@ func (r *redialKnockRefresher) settled() time.Duration {
 	return reconnectSettledGap
 }
 
-// refresh performs one gated knock and restamps common in place. The pinned
-// FRP fork reads the common config synchronously from the connector dial path
-// after this returns; a future FRP that reads it from background goroutines
-// would require a per-refresh copy instead of in-place mutation.
+// refresh performs one gated knock and restamps common in place. In place is
+// required rather than incidental, and a copy is not the escape it looks like:
+// the fork's buildLoginMsg reads Metadatas off the control-session dialer's own
+// pointer to this struct, so a DEEP copy would carry the token nowhere. A
+// shallow one lands it only by aliasing that same map — and loses it outright
+// when the shared map is nil, since the branch below then allocates a fresh one
+// on the copy. Either way the write stays on the shared map, and so does the
+// Login read racing it. The dial target is the separable half: ServerAddr and
+// ServerPort are value fields, so a copy does take them out of the shared
+// struct — but only a per-CONNECT copy helps, since the fork's connector
+// captures one config pointer per Dial and every work connection dials through
+// it. The stamp is unsynchronized once this returns — see the type's doc
+// comment for what that costs and why the completed production config does not
+// pay it.
 func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCommonConfig, reason string) error {
 	if r == nil || r.knocker == nil {
 		return nil
@@ -517,13 +576,21 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 // imports it, so the semantics are copied rather than the call. This is a
 // hand-maintained model of another repository's control flow and cannot be
 // checked by reading this package — if a fork bump moves the dial, update it
-// here in lockstep. TestForkDialsFromConnectWithoutTCPMux drives the real
-// connector and is what fails if the TCPMux branches drift. The QUIC branch
-// is asserted only against this predicate, so it is NOT pinned empirically —
-// a fork bump moving the QUIC dial into Connect would leave every test here
-// green. QUIC is unreachable config today (cmd/connector.go never sets
-// frpgen.Options.Protocol), which is why that gap is tolerated rather than
-// closed with a UDP probe.
+// here in lockstep. Both transport branches below are also pinned empirically
+// against the real connector — the nil-common branch has no dial to observe —
+// so a fork bump that moves a dial reddens a test instead of only
+// contradicting this comment. TestForkDialsFromConnectWithoutTCPMux drives a
+// loopback listener and is what fails if the TCPMux branches drift;
+// TestForkDialsQUICFromOpen drives a UDP probe, a QUIC dial's observable event
+// being a datagram rather than an accept, and is what fails if the QUIC dial
+// moves into Connect or if the fork stops handling QUIC ahead of the TCPMux
+// guard. Why that test disables TCPMux, and why it spells the protocol in
+// caps, are argued at its own doc comment rather than restated here: two
+// separately editable copies of one argument drift apart. QUIC remains
+// unreachable config today (cmd/connector.go never sets
+// frpgen.Options.Protocol), so it guards a branch nothing currently takes —
+// which is the point. It is cheap, and it turns the ordering above from a
+// claim about another repository into one this package can check.
 func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return true
