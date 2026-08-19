@@ -61,8 +61,11 @@ type requiredWorkflowSpec struct {
 	//
 	// Recording a narrower filter here does not by itself authorize one. Every
 	// spec's requiredName is a documented required context, so
-	// TestNarrowPullRequestWorkflowsProduceNoRequiredContext rejects any value
-	// short of "**" until that context stops gating merges.
+	// TestNarrowPullRequestWorkflowsProduceNoRequiredContext rejects any
+	// recorded filter that names bases without "**" until that context stops
+	// gating merges. Leaving the field unset is not the way around that: an
+	// unset filter is nil, which isNarrowBranchFilter reads as reaching every
+	// base, and TestAppWorkflowsRunOnStackedPRs fails it by name instead.
 	pullRequestBranches []string
 }
 
