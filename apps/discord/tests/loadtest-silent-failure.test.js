@@ -12,6 +12,12 @@
  *     the mistakes it has to catch are the same for all of them: a missing,
  *     empty or flag-shaped value silently became the DEFAULT, so the run did
  *     something real that nobody asked for.
+ *   - Unknown arguments. Those readers are pull-based, so a token that matched
+ *     NO flag was seen by none of them: `--locatoin` and `-count 5` read as
+ *     "flag absent" and ran the full window on the defaults, and
+ *     `--location false` turned the leg ON while the operator asked for it
+ *     off. One rule refuses all of them, and the flag table it reads is the
+ *     thing this half mostly guards.
  *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
  *     round runs — the file leg's `i += 10` batches and the location leg's
  *     `i++` alike — so the script holds the target for its full duration
@@ -44,9 +50,9 @@ const traverseModule = require('@babel/traverse');
 const traverse = traverseModule.default || traverseModule;
 
 const {
-  readFlag, readBooleanFlag, resolveBooleanArgs,
-  parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
-  resolveArgErrors,
+  FLAGS, flagSpec, readFlag, readBooleanFlag, resolveBooleanArgs,
+  parsePositiveInt, resolveNumericArgs, resolveFileArg, resolveUnknownArgs,
+  checkUploadFile, resolveArgErrors,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -456,27 +462,34 @@ describe('loadtest boolean flags — the `=` spelling that read as absent', () =
     expect(readBooleanFlag(['--location', '--location'], 'location')).toEqual({ value: true });
   });
 
-  it('leaves a following positional alone, for better and for worse', () => {
-    // `--location true` is deliberately NOT refused: the flag reads as on,
-    // which is what was asked for, and `true` stays a positional this script
-    // has never read.
+  it('leaves a following positional alone — refusing it is not this reader\'s job', () => {
+    // This case used to be titled `for better and for worse`, and the second
+    // assertion was the `for worse`: `--location false` read as ON, so the
+    // operator asked for the leg off and got it on with nothing said. It was
+    // pinned as the honest boundary of the change that introduced this reader.
+    //
+    // The assertion does NOT invert now that the gap is closed, because the
+    // reader is not what closed it. `false` is a token nothing consumed, which
+    // resolveUnknownArgs refuses under one rule covering the whole class — so
+    // the run stops, while this reader goes on reporting only what it can
+    // actually see. Teaching it to refuse a positional as well would have two
+    // readers reporting the same argument twice.
     expect(readBooleanFlag(['--location', 'true'], 'location')).toEqual({ value: true });
-    // `--location false` gets the SAME treatment, and there the operator asked
-    // for the leg off and gets it on with nothing said. Pinned deliberately:
-    // it is the honest boundary of this change, not a case it covers. It is
-    // the unknown-flag gap still recorded at readFlag in the script, whose
-    // push-based argv pass subsumes this one — the two are one change.
     expect(readBooleanFlag(['--location', 'false'], 'location')).toEqual({ value: true });
+    // Where the refusal actually comes from, asserted here so this case cannot
+    // be read as the gap still being open.
+    expect(resolveUnknownArgs(['--location', 'false']).errors).toHaveLength(1);
   });
 
   it('matches the flag name case-sensitively', () => {
     // Documented, not accidental. `--LOCATION=true` is not this flag, so it is
-    // neither refused nor read — the same silent-off the `=` spelling had,
-    // reachable by a shift-key slip. Flags are case-sensitive everywhere else
-    // in this script, and widening the match here would mean deciding what
-    // `--FILE` does too.
+    // neither refused nor read here. Flags are case-sensitive everywhere else
+    // in this script, and widening the match would mean deciding what `--FILE`
+    // does too — so the shift-key slip is refused as an unknown token instead,
+    // where one rule can carry every flag and suggest the right spelling.
     expect(readBooleanFlag(['--LOCATION=true'], 'location')).toEqual({ value: false });
     expect(readBooleanFlag(['--Location'], 'location')).toEqual({ value: false });
+    expect(resolveUnknownArgs(['--LOCATION=true']).errors[0]).toContain('did you mean --location?');
   });
 
   it('does not match a longer flag that starts with the same letters', () => {
@@ -569,6 +582,237 @@ describe('loadtest boolean flags — resolving them from argv', () => {
     // refused, and the flag that was typed still reads as on.
     expect(resolveBooleanArgs(['--count', '--location']).includeLocation).toBe(true);
     expect(resolveNumericArgs(['--count', '--location']).errors).toHaveLength(1);
+  });
+});
+
+describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
+  // The last member of the class the three changes before this one closed a
+  // spelling at a time. Those all fixed a flag the script RECOGNIZES; this
+  // covers everything it does not, where nothing was reported because nothing
+  // was looking. Every case below used to be silently ignored.
+
+  const errorsFor = (argv) => resolveUnknownArgs(argv).errors;
+
+  it('accepts a command line made only of declared flags and their values', () => {
+    expect(errorsFor([])).toEqual([]);
+    expect(errorsFor(['--count', '5', '--duration=60', '--interval', '2',
+      '--file=/tmp/x', '--location', '--allow-production'])).toEqual([]);
+  });
+
+  // The four shapes the previous change recorded as its deliberate boundary,
+  // plus the two single-dash spellings — which are worth their own rows in a
+  // polyglot repo whose Go apps take `-count 5` from Go's flag package, so the
+  // habit is live here rather than hypothetical.
+  it.each([
+    ['a misspelled boolean flag', ['--locatoin']],
+    ['a misspelled numeric flag', ['--cont', '5']],
+    ['a case slip', ['--LOCATION=true']],
+    ['a single-dash boolean flag', ['-location']],
+    ['a single-dash numeric flag', ['-count', '5']],
+    ['a value handed to a boolean flag positionally', ['--location', 'false']],
+    ['a bare positional', ['payload.bin']],
+  ])('refuses %s with exactly one message', (_label, argv) => {
+    expect(errorsFor(argv)).toHaveLength(1);
+  });
+
+  it('says the leg was about to be turned on when a boolean flag was given a value', () => {
+    // The worst row in the set, and the reason a generic "no positionals here"
+    // is not enough: the operator asked for the location leg OFF and the run
+    // used to turn it ON. Naming the flag is what turns the message into the
+    // correction, and the recovery matches readBooleanFlag's `=` refusal
+    // because the two spellings are one mistake.
+    expect(errorsFor(['--location', 'false'])).toEqual([
+      'unexpected argument "false" after --location — --location takes no value; '
+        + 'pass it on its own to turn it on, or omit it to leave it off',
+    ]);
+    // `--location true` asked for what it got, and is still refused: the token
+    // is unconsumed either way, and a reader that honoured one and not the
+    // other would be interpreting a vocabulary — the edge readBooleanFlag
+    // refused the `=` form to avoid.
+    expect(errorsFor(['--location', 'true'])).toHaveLength(1);
+    expect(errorsFor(['--allow-production', '1'])[0]).toContain('--allow-production takes no value');
+    // Attributed only to a flag that really takes none. `--file=/tmp/x`
+    // carries its own value, so the token after it is a stray token and has
+    // nothing to do with --file's arity — a message saying otherwise would be
+    // flatly untrue, and the inline spelling is the one shape where a
+    // value-taking flag is still the previous token.
+    expect(errorsFor(['--file=/tmp/x', 'stray'])).toEqual([
+      expect.stringContaining('this script takes no positional arguments'),
+    ]);
+    expect(errorsFor(['--file=/tmp/x', 'stray'])[0]).not.toContain('--file takes no value');
+  });
+
+  it('suggests the flag a near miss was meant to be', () => {
+    // One normalization — leading dashes, `=value`, case — carries all three
+    // slips, which is why there is no edit-distance search here.
+    expect(errorsFor(['-count', '5'])).toEqual([
+      '-count is not a flag this script accepts — did you mean --count? '
+        + '(flag names are case-sensitive, and take two dashes)',
+    ]);
+    expect(errorsFor(['--LOCATION=true'])[0]).toContain('did you mean --location?');
+    expect(errorsFor(['---count'])[0]).toContain('did you mean --count?');
+    expect(errorsFor(['-allow-production'])[0]).toContain('did you mean --allow-production?');
+  });
+
+  it('needs exactly two dashes before it will resolve a token to a flag', () => {
+    // Contrived input, deliberately: the realistic single-dash spellings are
+    // the rows above, and they are refused whether the prefix test asks for
+    // one dash or two, because `-count` past its first two characters is
+    // `ount`. `-fcount` is what separates them — loosen the test to one dash
+    // and this resolves to --count and silently takes 5 as its value, which is
+    // the fault class this whole pass exists to close.
+    expect(errorsFor(['-fcount', '5'])).toHaveLength(1);
+    expect(errorsFor(['-fcount', '5'])[0]).toContain('-fcount is not a flag');
+  });
+
+  it('falls back to the flag list when nothing is close enough to suggest', () => {
+    // A genuine misspelling matches no normalization, so the message has to
+    // carry what DOES exist or the operator is told only that they are wrong.
+    expect(errorsFor(['--locatoin'])).toEqual([
+      '--locatoin is not a flag this script accepts — accepted flags are '
+        + '--count, --duration, --interval, --file, --location, --allow-production',
+    ]);
+    expect(errorsFor(['payload.bin'])[0])
+      .toContain('this script takes no positional arguments; accepted flags are --count');
+  });
+
+  it('builds the accepted-flag list from the table rather than restating it', () => {
+    // Pins the list against FLAGS itself, so a seventh flag cannot be added
+    // and then go unmentioned by the message that exists to name them all.
+    const listed = errorsFor(['--locatoin'])[0].split('accepted flags are ')[1];
+    expect(listed).toBe(FLAGS.map((spec) => `--${spec.name}`).join(', '));
+  });
+
+  it('costs one message for one mistake when an unknown flag has a value', () => {
+    // `--cont 5` is one typo. An unrecognized flag's arity is unknowable — that
+    // is what unrecognized means — so `5` is swallowed rather than reported as
+    // a second fault, which would send the operator hunting a mistake they did
+    // not make. Nothing is hidden: the run stops on `--cont` either way.
+    expect(errorsFor(['--cont', '5'])).toEqual([expect.stringContaining('--cont')]);
+    // The swallow reaches exactly one token, and only a token that could have
+    // been a value. A following FLAG is still its own token and still reported.
+    expect(errorsFor(['--cont', '5', '7'])).toHaveLength(2);
+    expect(errorsFor(['--locatoin', '--cont'])).toHaveLength(2);
+    // A bare positional swallows nothing — it is not a flag, so there is no
+    // value for it to have taken.
+    expect(errorsFor(['payload.bin', 'other.bin'])).toHaveLength(2);
+  });
+
+  it('skips a declared value-taking flag\'s value on exactly readFlag\'s terms', () => {
+    // The two passes have to agree about what counts as a value, or a token is
+    // consumed here AND reported unknown, or claimed by neither.
+    for (const argv of [
+      ['--count', '5'], ['--file', '/tmp/x'], ['--file', ''],
+      ['--file', '-weird'], ['--count', '-5'], ['--file', 'a', '--file', 'b'],
+    ]) {
+      expect([argv, errorsFor(argv)]).toEqual([argv, []]);
+      // The agreement itself: readFlag took that same token as the value.
+      expect(readFlag(argv, argv[0].slice(2), null).value).toBe(argv[argv.length - 1]);
+    }
+  });
+
+  it('leaves a flag-shaped token after a value-taking flag to readFlag', () => {
+    // `--file --count 5` is one mistake with one owner. readFlag refuses the
+    // flag-shaped value; this pass must not ALSO report `5` as a positional,
+    // which it would if it had consumed `--count` as --file's value.
+    expect(errorsFor(['--file', '--count', '5'])).toEqual([]);
+    expect(resolveFileArg(['--file', '--count', '5']).errors).toHaveLength(1);
+    expect(resolveArgErrors(['--file', '--count', '5'], () => null)).toHaveLength(1);
+  });
+
+  it('reads an inline value as a value and not as another flag', () => {
+    // `--file=--count=9` names a bizarre but legal path. Scanning it as a token
+    // of its own would refuse a command line that is correct — the one failure
+    // this pass could introduce.
+    expect(errorsFor(['--file=--count=9'])).toEqual([]);
+    expect(errorsFor(['--file=--weird'])).toEqual([]);
+    expect(errorsFor(['--file=/tmp/run=3.bin'])).toEqual([]);
+    // An inline value carries its own value, so the NEXT token is not one.
+    expect(errorsFor(['--file=/tmp/x', 'stray'])).toHaveLength(1);
+  });
+
+  it('leaves a flag with no value at all to readFlag', () => {
+    // `--file` as the final token is already refused, by name, upstream.
+    // Reporting it here as well would double every trailing-flag mistake.
+    expect(errorsFor(['--file'])).toEqual([]);
+    expect(errorsFor(['--count'])).toEqual([]);
+    expect(resolveArgErrors(['--file'], () => null)).toHaveLength(1);
+  });
+
+  it('refuses -- rather than honouring it', () => {
+    // Decided, not overlooked. `--` separates flags from positionals and this
+    // script has none, so honouring it would either refuse everything after it
+    // anyway or require readFlag and readBooleanFlag to learn about it too —
+    // both scan the whole argv and would otherwise keep reading flags this
+    // pass had written off.
+    expect(errorsFor(['--'])).toEqual([
+      '-- has nothing to separate here — this script takes no positional '
+        + 'arguments, so every argument is a flag',
+    ]);
+    // Not swallowed by the near-miss suggestion, which would otherwise strip
+    // its dashes to the empty string and match nothing usefully.
+    expect(errorsFor(['--'])[0]).not.toContain('did you mean');
+    // And it does not turn off the pass for what follows it, nor swallow a
+    // token the way an unrecognized FLAG does — `--` is the one refused token
+    // whose arity is known, so there is no guess to make about the next one.
+    expect(errorsFor(['--', '--locatoin'])).toHaveLength(2);
+    expect(errorsFor(['--', 'payload.bin'])).toHaveLength(2);
+  });
+
+  it('reports every stray token in one pass, in command-line order', () => {
+    expect(errorsFor(['--locatoin', '--count', '5', 'stray'])).toEqual([
+      expect.stringContaining('--locatoin'), expect.stringContaining('"stray"'),
+    ]);
+  });
+});
+
+describe('loadtest flag table — the one list everything reads', () => {
+  const never = () => null;
+
+  it.each(FLAGS.map((spec) => [spec.name, spec]))(
+    'wires --%s to a reader instead of accepting it and ignoring it',
+    (name, spec) => {
+      // The drift direction no throw can catch. A row added to FLAGS but read
+      // by nothing is ACCEPTED by resolveUnknownArgs and then ignored — the
+      // exact defect the table exists to remove, reintroduced by the table.
+      // So each declared flag is driven to the shape its own reader must
+      // refuse: a value-taking flag left with no value, a valueless flag given
+      // one. If nothing reads it, nothing objects and this fails.
+      const argv = spec.takesValue ? [`--${name}`] : [`--${name}=x`];
+      expect(resolveArgErrors(argv, never)).toEqual([expect.stringContaining(`--${name}`)]);
+    },
+  );
+
+  it('refuses to hand out a spec for a flag it does not declare', () => {
+    // A wiring bug, not an operator mistake, so it throws where the readers
+    // collect — and it throws at module load, since the resolvers run there.
+    // That is what stops a fourth numeric flag from being honoured by
+    // resolveNumericArgs and refused as unknown two functions down.
+    expect(() => flagSpec('warmup', true)).toThrow('--warmup is read but not declared in FLAGS');
+  });
+
+  it('refuses to hand out a spec read at the wrong arity', () => {
+    // The other half of the same guard. A boolean flag mistakenly declared
+    // value-taking would have resolveUnknownArgs swallow the token after it
+    // while readBooleanFlag still turned the leg on — silent again.
+    expect(() => flagSpec('location', true)).toThrow(/declared valueless in FLAGS but read as the opposite/);
+    expect(() => flagSpec('count', false)).toThrow(/declared value-taking in FLAGS but read as the opposite/);
+  });
+
+  it('carries every default the resolvers fall back to', () => {
+    // The defaults live in the table and nowhere else, which is what makes it
+    // a single source rather than a second list. Asserted against the values
+    // the resolvers actually produce, so moving one back into a resolver shows
+    // up here rather than in a comment that has quietly gone stale.
+    expect(resolveNumericArgs([])).toEqual({ count: 100, durationS: 7200, intervalS: 60, errors: [] });
+    expect(FLAGS.filter((spec) => spec.takesValue).map((spec) => [spec.name, spec.defaultValue]))
+      .toEqual([['count', '100'], ['duration', '7200'], ['interval', '60'], ['file', null]]);
+    // --file's default is prose rather than a value, and the table owns that
+    // wording too — without it readFlag falls back to String(null) and the
+    // operator is told to omit the flag to get "the default of null".
+    const file = FLAGS.find((spec) => spec.name === 'file');
+    expect(resolveFileArg(['--file']).errors[0]).toContain(`the default of ${file.defaultLabel}`);
+    expect(file.defaultLabel).toBe('an auto-generated 1MB test file');
   });
 });
 
@@ -751,6 +995,45 @@ describe('loadtest preflight — the composition main() used to hold inline', ()
     expect(resolveArgErrors(['--allow-production=1'], never)).toHaveLength(1);
   });
 
+  it('carries the unknown-argument errors too', () => {
+    // Mutation: dropping `...unknownErrors` from the composition. Every case
+    // in the unknown-arguments block above stays green while `--locatoin` and
+    // `--location false` go straight back to being ignored — the whole change
+    // undone by one spread, in the one function no other test reaches.
+    expect(resolveArgErrors(['--locatoin'], never)).toEqual([
+      expect.stringContaining('--locatoin is not a flag'),
+    ]);
+    expect(resolveArgErrors(['--location', 'false'], never)).toEqual([
+      expect.stringContaining('--location takes no value'),
+    ]);
+  });
+
+  it('reports unknown arguments after the flags it recognized', () => {
+    // Order is a decision, not an accident: the three resolvers each diagnose
+    // a flag whose NAME the operator got right, which is the more specific
+    // answer, so the catch-all follows them.
+    expect(resolveArgErrors(['--locatoin', '--count', 'abc'], never)).toEqual([
+      expect.stringContaining('--count must be'),
+      expect.stringContaining('--locatoin'),
+    ]);
+    // Against each of the three resolvers, not just the first: the spread
+    // orders four lists, so pinning only the numeric one leaves the other two
+    // free to swap places with the catch-all.
+    expect(resolveArgErrors(['--locatoin', '--location=1'], never)).toEqual([
+      expect.stringContaining('--location takes no value'),
+      expect.stringContaining('--locatoin'),
+    ]);
+    expect(resolveArgErrors(['--locatoin', '--file', ''], never)).toEqual([
+      expect.stringContaining('--file must name a file'),
+      expect.stringContaining('--locatoin'),
+    ]);
+    // And the readability check stays last of all, being the only one that
+    // looks past argv.
+    expect(resolveArgErrors(['--locatoin', '--file', '/x'], () => 'file is bad')).toEqual([
+      expect.stringContaining('--locatoin'), 'file is bad',
+    ]);
+  });
+
   it('names a bad boolean flag alongside a bad numeric one', () => {
     // The one-pass claim, across resolvers rather than within one: an
     // operator who typed two different kinds of mistake sees both at once.
@@ -830,6 +1113,32 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return [...new Set(found)].sort();
   };
 
+  // Flag names written as a DECLARATION rather than a read. A name in an
+  // object property or an array element is part of a list of flags; a name
+  // passed to a call is a use of one — `read('count')`, `flagSpec('file',
+  // true)`, and the target guard's own `includes('--allow-production')`. The
+  // `--` prefix is tolerated either way, so a second list spelled in tokens is
+  // caught by this as well as by flagLiterals above.
+  const flagNameDeclarations = () => {
+    const declared = [];
+    traverse(ast, {
+      StringLiteral(p) {
+        const bare = p.node.value.replace(/^--/, '');
+        if (!FLAGS.some((spec) => spec.name === bare)) return;
+        if (!p.parentPath.isObjectProperty() && !p.parentPath.isArrayExpression()) return;
+        // The OUTERMOST enclosing literal, not the nearest: each row of the
+        // table is its own object, so the nearest would report six lists where
+        // there is one.
+        let list = null;
+        for (let up = p.parentPath; up; up = up.parentPath) {
+          if (up.isArrayExpression() || up.isObjectExpression()) list = up;
+        }
+        declared.push({ name: bare, list: list === null ? null : list.node });
+      },
+    });
+    return declared;
+  };
+
   const callsNamed = (name) => {
     const found = [];
     traverse(ast, {
@@ -858,6 +1167,32 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(callsNamed('parseInt')).toHaveLength(0);
   });
 
+  it('declares its flags in exactly one table', () => {
+    // The hazard in introducing a flag table is introducing a SECOND one. The
+    // unknown-argument pass has to agree with the readers about which flags
+    // exist, and two lists that agree today drift the first time a flag is
+    // added to one of them — a flag the readers honour and the pass refuses,
+    // or the reverse, which is the silent-ignore defect all over again.
+    //
+    // flagSpec's throw closes the direction where a reader outruns the table.
+    // Nothing at runtime can see a second list, because a second list is not
+    // wrong until it disagrees; this is what makes writing one fail now.
+    const declared = flagNameDeclarations();
+    expect(declared.map((d) => d.name).sort()).toEqual(FLAGS.map((spec) => spec.name).sort());
+    expect(new Set(declared.map((d) => d.list)).size).toBe(1);
+  });
+
+  it('reads the flag table in every resolver that has a flag to look up', () => {
+    // Three call sites, one per resolver: `read` inside resolveNumericArgs,
+    // resolveFileArg, and `read` inside resolveBooleanArgs. A resolver that
+    // stops consulting the table goes back to carrying its own copy of a
+    // default or an arity — the second list the table replaced — and the copy
+    // agrees with the table right up until somebody edits one of them. That
+    // regression changes no behaviour on the day it lands, so no runtime test
+    // can see it; the count is what does.
+    expect(callsNamed('flagSpec')).toHaveLength(3);
+  });
+
   it('resolves its numeric flags in one place', () => {
     // Fails closed if a fourth numeric flag is added with its own ad-hoc
     // parse instead of going through the resolver. Two call sites: the
@@ -884,6 +1219,11 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // passes it — which is precisely what the indexOf ban above covers.
     expect(callsNamed('getArg')).toHaveLength(0);
     expect(callsNamed('readFlag')).toHaveLength(2);
+    // One call site, unlike the resolvers' two: this one produces no constant
+    // for the run to read, only errors, so resolveArgErrors is its only
+    // caller. A second would mean argv being scanned for strays somewhere the
+    // single-pass report cannot collect from.
+    expect(callsNamed('resolveUnknownArgs')).toHaveLength(1);
   });
 
   it('reads every boolean flag through the one shared reader', () => {
@@ -906,8 +1246,19 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // `read('dry-run')` inside resolveBooleanArgs — writes 'dry-run' without
     // the dashes and leaves this list untouched.
     //
-    // `/^--\w/` so readFlag's own `'--'` prefix test and the `'---'` console
-    // divider are not swept up.
+    // The FLAGS table did not change this expectation, which is worth saying
+    // because it plainly could have. A table keyed by TOKEN would put five new
+    // entries here, and widening the list to admit them would have retired the
+    // check in the same commit that gave it its largest thing to guard. Keying
+    // it by NAME instead — the spelling every reader in this file already
+    // takes, and the one the comment above already reasons about — leaves the
+    // rule intact: a `--`-prefixed literal is still written only by an ad-hoc
+    // read, and an ad-hoc read is still the defect. What guards the table
+    // itself is the declaration scan in 'declares its flags in exactly one
+    // table' above, which is a different question and gets a different check.
+    //
+    // `/^--\w/` so readFlag's own `'--'` prefix test, the `'--'` refused by
+    // resolveUnknownArgs and the `'---'` console divider are not swept up.
     expect(flagLiterals()).toEqual(['--allow-production']);
     expect(callsNamed('readBooleanFlag')).toHaveLength(1);
     // Two call sites, like resolveNumericArgs and resolveFileArg above: the
