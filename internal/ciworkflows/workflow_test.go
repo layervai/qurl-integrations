@@ -484,7 +484,7 @@ type pullRequestBranchSpec struct {
 }
 
 // otherPullRequestWorkflows covers every remaining workflow with a
-// pull_request trigger. Splitting the record in two is deliberate:
+// pull-request trigger. Splitting the record in two is deliberate:
 // requiredWorkflowSpecs already carries a completeness guard
 // (TestRequiredWorkflowSpecsCoverEveryAggregate), and the workflows here are
 // exactly the ones that guard cannot see.
@@ -661,16 +661,16 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 		}
 		seen++
 		if !recorded[name] {
-			t.Errorf("%s runs on pull_request but records no intended branches filter", name)
+			t.Errorf("%s runs on a pull-request trigger but records no intended branches filter", name)
 		}
 	}
 
 	// Couple the counts, so a scan that matches nothing (renamed directory,
 	// changed extension) fails instead of passing every assertion vacuously,
-	// and so an entry for a workflow that no longer runs on pull_request is
-	// caught rather than left to rot.
+	// and so an entry for a workflow that no longer runs on a pull-request
+	// trigger is caught rather than left to rot.
 	if want := len(recorded); seen != want {
-		t.Errorf("found %d workflows running on pull_request, want %d (one per recorded entry)", seen, want)
+		t.Errorf("found %d workflows running on a pull-request trigger, want %d (one per recorded entry)", seen, want)
 	}
 }
 
@@ -777,7 +777,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	}
 }
 
-// assertPullRequestBranches compares a workflow's declared pull_request
+// assertPullRequestBranches compares a workflow's declared pull-request
 // branches filter against the intended one. A nil want means the workflow must
 // declare no filter at all.
 func assertPullRequestBranches(t *testing.T, path string, want []string) {
@@ -808,7 +808,7 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	}
 }
 
-// pullRequestBranchFilter reads the `branches` filter off a parsed pull_request
+// pullRequestBranchFilter reads the `branches` filter off a parsed pull-request
 // trigger, reporting whether one is declared at all. It accepts both YAML
 // spellings of a single filter — a bare scalar and a sequence — so `main` and
 // `[main]` are not treated as different decisions.
@@ -1102,7 +1102,7 @@ func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, work
 		if !looksLikeRequiredWorkflowQualityGate(spec, &job, needs) {
 			continue
 		}
-		if !containsString(needs, "changes") {
+		if !slices.Contains(needs, "changes") {
 			t.Errorf("%s quality gate %q must include changes in needs", spec.name, id)
 			continue
 		}
@@ -1122,7 +1122,7 @@ func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job *githu
 	if job.Name == spec.detectChangesName || job.Name == spec.requiredName {
 		return false
 	}
-	return !containsString(needs, "required")
+	return !slices.Contains(needs, "required")
 }
 
 func sortedQualityGateIDs(qualityGates map[string]bool) []string {
@@ -1158,15 +1158,6 @@ func parseWorkflowNeeds(t *testing.T, jobID string, needs any) []string {
 		t.Fatalf("%s.needs has unexpected type %T", jobID, needs)
 		return nil
 	}
-}
-
-func containsString(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func stringSet(values []string) map[string]bool {
