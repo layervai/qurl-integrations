@@ -315,11 +315,19 @@ merge-group path in their `changes` detector, since `dorny/paths-filter` runs
 its pull-request path or its push path here and a queue ref is neither; and
 `claude-review` cannot be given one as written. `claude-code-review.yml` is
 `pull_request_target`-only because it holds `ANTHROPIC_API_KEY` and must load
-from the trusted default branch, and its job `if:` plus three of its five steps
-read `github.event.pull_request` — the head and base SHAs the review is pinned
-to, the number it publishes against, the draft and fork guards. A merge group
-carries no pull request, so that workflow has to be restructured before the
-required set can agree on `merge_group` at all.
+from the trusted default branch, and its steps read `github.event.pull_request`
+throughout — the head and base SHAs the review is pinned to, the number it
+publishes against, the draft and fork guards. A merge group carries no pull
+request, so that workflow has to be restructured before the required set can
+agree on `merge_group` at all.
+
+The job's own `if:` used to carry the draft and fork guards and is now
+`always()`: #1188 moved them into the eligibility step, because `claude-review`
+is a required context and GitHub scores a *skipped* required check as
+satisfied, so a job-level gate that withheld the job was indistinguishable from
+a completed review. The restructuring blocker above is unchanged by that — it
+was never the job gate, it is that a merge group carries no pull request for
+those steps to read.
 
 The marker below is the machine-readable half, read by `internal/ciworkflows`
 the same way the required-contexts block is. While it reads `none`, no workflow
