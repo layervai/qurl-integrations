@@ -1099,12 +1099,14 @@ func TestExtensionWorkflowsStayInLockstep(t *testing.T) {
 	chromePath, chrome := maskedExtensionWorkflow(t, "chrome-extension", "Chrome")
 	edgePath, edge := maskedExtensionWorkflow(t, "edge-extension", "Edge")
 
-	// Reported with the first diverging line, not the counts alone: "184 lines
-	// and 182" says a step was added or dropped without saying where, which is
-	// the one thing the reader needs to go look at.
+	// Reported with the first diverging line and its text, not the counts alone:
+	// "184 lines and 182" says a step was added or dropped without saying where,
+	// which is the one thing the reader needs in order to go look.
 	if len(chrome) != len(edge) {
-		t.Fatalf("%s has %d lines and %s has %d, first diverging at line %d: a step, key, or comment exists in only one copy",
-			chromePath, len(chrome), edgePath, len(edge), firstDivergentLine(chrome, edge))
+		n := firstDivergentLine(chrome, edge)
+		t.Fatalf("%s has %d lines and %s has %d, first diverging at line %d: a step, key, or comment exists in only one copy\n\t%s: %s\n\t%s: %s",
+			chromePath, len(chrome), edgePath, len(edge), n,
+			chromePath, lineAt(chrome, n), edgePath, lineAt(edge, n))
 	}
 	for i := range chrome {
 		if chrome[i] == edge[i] {
@@ -1133,7 +1135,9 @@ func TestExtensionWorkflowsStayInLockstep(t *testing.T) {
 // Add-ons) are deliberately not masked, unlike check-extension-lockstep.sh:
 // these workflows carry none today, and a step that adds one is publishing to a
 // different store, which is a real divergence worth stopping on rather than
-// normalizing away.
+// normalizing away. The same goes for any future browser-specific publish step
+// or lowercase store URL: this test failing is the intended signal, and the fix
+// is a new mask documented here and in CLAUDE.md, never deleting the assertion.
 //
 // Each copy is masked for its own slug and browser name only, not for both.
 // That is stricter than check-extension-lockstep.sh, which masks both on both
@@ -1167,6 +1171,15 @@ func maskedExtensionWorkflow(t *testing.T, specName, browser string) (path strin
 	source = browserWord.ReplaceAllString(source, browserMask)
 	source = article.ReplaceAllString(source, "<article> "+browserMask)
 	return spec.path, strings.Split(source, "\n")
+}
+
+// lineAt returns the 1-based line n, or a marker when that copy ended first —
+// which is the normal case for the shorter side of a length mismatch.
+func lineAt(lines []string, n int) string {
+	if n-1 >= len(lines) {
+		return "(end of file)"
+	}
+	return lines[n-1]
 }
 
 // firstDivergentLine returns the 1-based line where two masked copies first
