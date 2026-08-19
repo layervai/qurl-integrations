@@ -468,9 +468,8 @@ func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 		}
 	}
 
-	// Guard against the scan silently matching nothing (renamed directory,
-	// changed extension), which would make every assertion above vacuous.
-	// This deliberately couples the two counts: a workflow that grows a job
+	// workflowFiles already fatals on an empty scan, so this is purely the
+	// count coupling: a workflow that grows a job
 	// keyed `required` must land its spec entry in the same change, or the
 	// whole suite goes red rather than quietly under-enforcing the new
 	// aggregate.
@@ -657,6 +656,33 @@ func readWorkflow(t *testing.T, name string) githubWorkflow {
 		t.Fatalf("parse %s workflow: %v", name, err)
 	}
 	return workflow
+}
+
+// workflowFiles lists the workflow files in .github/workflows. It fails rather
+// than returning an empty list: a renamed directory or a changed extension
+// would otherwise leave every scan built on it with nothing to contradict, and
+// so passing vacuously.
+func workflowFiles(t *testing.T) []string {
+	t.Helper()
+
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		t.Fatalf("no workflow files found in %s", dir)
+	}
+	return names
 }
 
 func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) map[string]bool {

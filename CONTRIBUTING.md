@@ -269,18 +269,29 @@ recursion guard `release-please.yml` documents for tag pushes. Those PRs need
 an admin override to merge regardless of the required set.
 
 No workflow here runs on `merge_group`, deliberately. Merges are manual squashes
-and no queue is configured: `gh api
-repos/layervai/qurl-integrations/branches/main/protection --jq
-'.required_merge_queue'` returns nothing. A queue evaluates required contexts
-against its own temporary ref, so a required context whose workflow does not
-handle that event never reports for a queue entry, pinning it at "Expected —
-Waiting for status to be reported" — the 2026-08-14 stall above, strung across
-every entry rather than one pull request. Until 2026-08-19 exactly two workflows
-carried the trigger, `workflow-contract.yml` from #1092 and `scripts.yml` from
-#940 for "future merge-queue compatibility", while the required contexts never
-followed; the configuration read as queue support that would have hung on first
-use. Both lines are gone, and `internal/ciworkflows` now fails when the required
-set stops agreeing, in either direction.
+and no queue is configured. Ask GraphQL, not branch protection:
+
+```bash
+gh api graphql -f query='{repository(owner:"layervai",name:"qurl-integrations"){mergeQueue(branch:"main"){id}}}'
+```
+
+That returns `{"data":{"repository":{"mergeQueue":null}}}` today. The classic
+protection response carries no merge-queue field at all — `has(
+"required_merge_queue")` on it is `false` — so reaching for
+`--jq '.required_merge_queue'` there prints nothing whether or not a queue
+exists. That is a check that cannot fail, the same shape as a required context
+matching no job, and it does not belong in this section.
+
+A queue evaluates required contexts against its own temporary ref, so a required
+context whose workflow does not handle that event never reports for a queue
+entry, leaving it at "Expected — Waiting for status to be reported" — the
+2026-08-14 stall above, moved from one pull request onto every queue entry.
+Until this change exactly two workflows carried the trigger,
+`workflow-contract.yml` from #1092 and `scripts.yml` from #940 for "future
+merge-queue compatibility", while the required contexts never followed; the
+configuration read as queue support that would have hung on first use. Both
+lines are gone, and `internal/ciworkflows` now fails when the required set stops
+agreeing, in either direction.
 
 Enabling a queue later is more than restoring those two lines. Every workflow
 behind a required context needs the trigger; the nine aggregates need a
@@ -288,11 +299,19 @@ merge-group path in their `changes` detector, since `dorny/paths-filter` runs
 its pull-request path or its push path here and a queue ref is neither; and
 `claude-review` cannot be given one as written. `claude-code-review.yml` is
 `pull_request_target`-only because it holds `ANTHROPIC_API_KEY` and must load
-from the trusted default branch, and every step reads
-`github.event.pull_request` — the head and base SHAs the review is pinned to,
-the number it publishes against, the draft and fork guards. A merge group
+from the trusted default branch, and its job `if:` plus three of its five steps
+read `github.event.pull_request` — the head and base SHAs the review is pinned
+to, the number it publishes against, the draft and fork guards. A merge group
 carries no pull request, so that workflow has to be restructured before the
 required set can agree on `merge_group` at all.
+
+The marker below is the machine-readable half, read by `internal/ciworkflows`
+the same way the required-contexts block is. While it reads `none`, no workflow
+may declare `merge_group`; flipping it to `required` means every workflow behind
+a required context must declare the trigger in the same change — after clearing
+the `claude-review` blocker above, which no offline check can verify for you.
+
+<!-- merge-queue-posture: none -->
 
 ## Code Conventions
 
