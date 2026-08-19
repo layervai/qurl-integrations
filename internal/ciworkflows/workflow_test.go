@@ -733,13 +733,13 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 			if !ok {
 				continue
 			}
-			branches, declared := pullRequestBranchFilter(t, name, trigger, config)
+			branches, declared := pullRequestFilter(t, name, trigger, config, branchesFilterKey)
 			if !declared {
 				continue
 			}
 			filteredTriggers++
 
-			types, hasTypes := pullRequestActivityTypes(t, name, trigger, config)
+			types, hasTypes := pullRequestFilter(t, name, trigger, config, typesFilterKey)
 			if !hasTypes || !slices.Contains(types, editedActivityType) {
 				continue
 			}
@@ -1177,10 +1177,11 @@ func narrowPullRequestTriggerReason(t *testing.T, path, trigger string, config a
 // filter — which defaults went missing, not the sentence built around them.
 func TestNarrowPullRequestTriggerReason(t *testing.T) {
 	tests := []struct {
-		name     string
-		config   any
-		narrow   bool
-		contains []string
+		name        string
+		config      any
+		narrow      bool
+		contains    []string
+		notContains []string
 	}{
 		{name: "a bare trigger declares nothing and starts for every pull request", config: nil},
 		{name: "an empty mapping is the same reach spelled longhand", config: map[string]any{}},
@@ -1197,37 +1198,44 @@ func TestNarrowPullRequestTriggerReason(t *testing.T) {
 			name:     "dropping one default is narrow and names it",
 			config:   map[string]any{"types": []any{"opened", "reopened"}},
 			narrow:   true,
-			contains: []string{"pull_request.types", "[synchronize]"},
+			contains: []string{"pull_request.types = [opened reopened]", "[synchronize]"},
 		},
 		{
 			name:     "ready_for_review alone drops all three",
 			config:   map[string]any{"types": []any{"ready_for_review"}},
 			narrow:   true,
-			contains: []string{"[opened synchronize reopened]"},
+			contains: []string{"pull_request.types = [ready_for_review]", "[opened synchronize reopened]"},
+		},
+		{
+			name:     "an empty types filter drops every default",
+			config:   map[string]any{"types": []any{}},
+			narrow:   true,
+			contains: []string{"pull_request.types = []", "[opened synchronize reopened]"},
 		},
 		{
 			name:     "a scalar types filter is read, not skipped",
 			config:   map[string]any{"types": "opened"},
 			narrow:   true,
-			contains: []string{"[synchronize reopened]"},
+			contains: []string{"pull_request.types = [opened]", "[synchronize reopened]"},
 		},
 		{
 			name:     "any paths filter is narrow, ** included",
 			config:   map[string]any{"paths": []any{"**"}},
 			narrow:   true,
-			contains: []string{"pull_request.paths", "[**]"},
+			contains: []string{"pull_request.paths = [**]"},
 		},
 		{
 			name:     "a scalar paths filter is read too",
 			config:   map[string]any{"paths": "apps/slack/**"},
 			narrow:   true,
-			contains: []string{"[apps/slack/**]"},
+			contains: []string{"pull_request.paths = [apps/slack/**]"},
 		},
 		{
-			name:     "paths is reported ahead of types when a trigger carries both",
-			config:   map[string]any{"paths": []any{"docs/**"}, "types": []any{"ready_for_review"}},
-			narrow:   true,
-			contains: []string{".paths"},
+			name:        "paths is reported ahead of types when a trigger carries both",
+			config:      map[string]any{"paths": []any{"docs/**"}, "types": []any{"ready_for_review"}},
+			narrow:      true,
+			contains:    []string{"pull_request.paths = [docs/**]"},
+			notContains: []string{".types"},
 		},
 	}
 	for _, test := range tests {
@@ -1241,10 +1249,10 @@ func TestNarrowPullRequestTriggerReason(t *testing.T) {
 					t.Errorf("reason %q does not mention %q, so it does not say what to go fix", got, want)
 				}
 			}
-			// The precedence case would pass its substring check on a reason
-			// that named both keys, which is the one thing it exists to reject.
-			if test.name == "paths is reported ahead of types when a trigger carries both" && strings.Contains(got, ".types") {
-				t.Errorf("reason %q names both keys; one named reason is what the reader acts on", got)
+			for _, unwanted := range test.notContains {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("reason %q mentions %q; one named reason is what the reader acts on", got, unwanted)
+				}
 			}
 		})
 	}
@@ -1424,82 +1432,6 @@ func pullRequestFilter(t *testing.T, path, trigger string, pullRequest any, key 
 	default:
 		t.Fatalf("%s %s.%s has unexpected type %T", path, trigger, key.name, raw)
 		return nil, false
-	}
-}
-
-// pullRequestActivityTypes reads the `types` filter off a parsed pull-request
-// trigger, reporting whether one is declared at all. Like pullRequestBranchFilter
-// it accepts both YAML spellings of a single entry, a bare scalar and a
-// sequence, so `types: edited` and `types: [edited]` are the same decision.
-//
-// An undeclared filter is the load-bearing case rather than an edge one: it
-// means the workflow takes GitHub's three defaults, which exclude
-// editedActivityType. Callers reach this only after pullRequestBranchFilter has
-// accepted the same value, so a trigger config of any other shape has already
-// failed there and the type assertion below cannot swallow one silently.
-func pullRequestActivityTypes(t *testing.T, path, trigger string, pullRequest any) (types []string, declared bool) {
-	t.Helper()
-
-	config, ok := pullRequest.(map[string]any)
-	if !ok {
-		return nil, false
-	}
-	raw, ok := config["types"]
-	if !ok {
-		return nil, false
-	}
-
-	switch typed := raw.(type) {
-	case string:
-		return []string{typed}, true
-	case []any:
-		for _, value := range typed {
-			activity, ok := value.(string)
-			if !ok {
-				t.Fatalf("%s %s.types contains non-string value %T", path, trigger, value)
-			}
-			types = append(types, activity)
-		}
-		return types, true
-	default:
-		t.Fatalf("%s %s.types has unexpected type %T", path, trigger, raw)
-		return nil, false
-	}
-}
-
-// TestPullRequestActivityTypes keeps the negative tree assertion above from
-// passing only because its detector stopped recognizing an explicit filter.
-// None of today's branch-filtered workflows declares `types:`, so the live
-// scan exercises only the absent case unless these YAML-decoded shapes are
-// pinned independently.
-func TestPullRequestActivityTypes(t *testing.T) {
-	tests := []struct {
-		name         string
-		config       map[string]any
-		want         []string
-		wantDeclared bool
-	}{
-		{name: "absent", config: map[string]any{}},
-		{name: "scalar", config: map[string]any{"types": "edited"}, want: []string{"edited"}, wantDeclared: true},
-		{
-			name:         "sequence",
-			config:       map[string]any{"types": []any{"opened", "edited"}},
-			want:         []string{"opened", "edited"},
-			wantDeclared: true,
-		},
-		{name: "empty sequence", config: map[string]any{"types": []any{}}, wantDeclared: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, declared := pullRequestActivityTypes(t, "example.yml", "pull_request", test.config)
-			if declared != test.wantDeclared {
-				t.Errorf("declared = %t, want %t", declared, test.wantDeclared)
-			}
-			if !slices.Equal(got, test.want) {
-				t.Errorf("types = %v, want %v", got, test.want)
-			}
-		})
 	}
 }
 
