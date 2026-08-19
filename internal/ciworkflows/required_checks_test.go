@@ -44,6 +44,26 @@ const (
 	contextSeparator = " / "
 	aggregateSuffix  = contextSeparator + "required"
 
+	mergeGroupTrigger        = "merge_group"
+	claudeCodeReviewWorkflow = "claude-code-review.yml"
+	// The posture marker in CONTRIBUTING.md, and its two legal values. It is
+	// the offline stand-in for a setting CI cannot read: nothing here can see
+	// whether a queue is really configured, so the docs are the source of
+	// truth for what this repo intends, exactly as they are for the required
+	// contexts themselves.
+	mergeQueuePostureMarker = "merge-queue-posture"
+	mergeQueuePostureNone   = "none"
+	mergeQueuePostureQueued = "required"
+	// The job id, which is also the required context: that job sets no `name:`.
+	claudeReviewContext          = "claude-review"
+	pullRequestContextExpression = "github.event.pull_request"
+	// How GitHub renders a required context that no job ever reports, in the
+	// merge box. It is not a failure state, which is why every assertion in
+	// this file exists. Quoted into failure messages only — nothing compares it
+	// against live API output, so GitHub rewording it cannot cause a false pass
+	// or a false failure here.
+	waitingForStatus = "Expected — Waiting for status to be reported"
+
 	liveProtectionEnv = "QURL_LIVE_BRANCH_PROTECTION"
 	// Pinned to the canonical repo rather than derived from the local remote:
 	// the docs in this checkout describe upstream's protection, so a fork
@@ -309,6 +329,173 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 	}
 }
 
+// TestMergeGroupTriggersAgreeAcrossRequiredContexts pins the one question every
+// required context has to answer the same way: does the workflow behind it run
+// on `merge_group`?
+//
+// A merge queue evaluates required contexts against its own temporary ref, so a
+// required context whose workflow does not handle that event never reports for
+// a queue entry. The queue then stalls exactly the way the merge box stalled on
+// 2026-08-14 — at waitingForStatus, which is not a failure and so is not
+// noticed — only it strands every entry rather than one PR.
+//
+// This repo's answer is "no", for all of them. Merges here are manual squashes
+// and no queue is configured:
+//
+//	gh api graphql -f query='{repository(owner:"layervai",name:"qurl-integrations"){mergeQueue(branch:"main"){id}}}'
+//	=> {"data":{"repository":{"mergeQueue":null}}}
+//
+// Ask GraphQL, not branch protection. The classic protection response carries
+// no merge-queue field at all, so `gh api .../branches/main/protection --jq
+// '.required_merge_queue'` prints nothing whether or not a queue exists — it
+// reads like evidence and discriminates nothing, which is the same
+// can't-fail shape this package exists to remove. `has("required_merge_queue")`
+// on that response returns false.
+//
+// Two workflows answered "yes" until this change — workflow-contract.yml from
+// #1092, and scripts.yml from #940 explicitly for "future merge-queue
+// compatibility" — and only one of those two backed a required context at all,
+// leaving every other required context on an event it was never wired for.
+// Nothing consumed that, so nothing was broken by it; it only meant the repo
+// would have hung on the first queue entry anyone ever tried, with the config
+// reading as though it would not.
+//
+// The answer is not hardcoded here. It is read from the posture marker in
+// CONTRIBUTING.md, so this test checks that the docs and the workflows agree
+// rather than pinning one state — the same job every other assertion in this
+// file does, and the reason flipping the posture does not require editing a
+// test to go green. Both directions fail: workflows declaring the trigger under
+// `none`, and workflows missing it under `required`. A mixed set fails under
+// either.
+//
+// Flipping to `required` is still not a matter of adding the trigger back
+// everywhere. `claude-review` comes from claudeCodeReviewWorkflow, which is
+// `pull_request_target`-only by design — it holds ANTHROPIC_API_KEY and so must
+// load from the trusted default branch — and its job `if:` plus three of its
+// five steps read `github.event.pull_request`: the head and base SHAs the
+// review is pinned to, the number it publishes against, the draft and fork
+// guards. A merge group carries no pull request, so that context cannot report
+// on the event at all until the workflow is restructured. No offline check can
+// verify that for you, which is why the tail of this test pins the mechanism.
+func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
+	t.Parallel()
+
+	onMergeGroup := workflowMergeGroupTriggers(t)
+	reported := workflowReportedContexts(t)
+
+	handling, ignoring, unresolved := []string{}, []string{}, []string{}
+	partitioned := map[string]bool{}
+	for _, wanted := range documentedRequiredContexts(t) {
+		files := requiredContextWorkflows(wanted, reported)
+		if len(files) == 0 {
+			unresolved = append(unresolved, wanted)
+			continue
+		}
+		// Partition files rather than contexts, counting each file once,
+		// because the mapping is many-to-many in both directions. All four
+		// dependency-age-check-*.yml shims key their calling job `age-check`,
+		// so reported.reusable resolves *each* `age-check / *` context to *all
+		// four* files; and `Validate GitHub Actions pins` shares
+		// dependency-age-check-actions.yml with `age-check / Check GitHub
+		// Actions pin ages`. Without the dedup a file would be classified once
+		// per context that reaches it.
+		for _, file := range files {
+			if partitioned[file] {
+				continue
+			}
+			partitioned[file] = true
+			if onMergeGroup[file] {
+				handling = append(handling, file)
+			} else {
+				ignoring = append(ignoring, file)
+			}
+		}
+	}
+
+	// A context that resolves to no workflow falls out of both sides, which
+	// would let a genuinely mixed repo read as uniform here. Refuse to
+	// partition a set this test cannot see all of.
+	if len(unresolved) > 0 {
+		sort.Strings(unresolved)
+		t.Fatalf("%d documented required context(s) resolve to no workflow, so this partition covers less than the required set: %s\nTestDocumentedRequiredContextsResolveToWorkflowJobs names the cause; fix that first.",
+			len(unresolved), strings.Join(unresolved, ", "))
+	}
+	sort.Strings(handling)
+	sort.Strings(ignoring)
+
+	// A mixed set is wrong under either posture, so it is checked first and on
+	// its own: whichever answer the docs give, half the required contexts are
+	// giving the other one.
+	posture := documentedMergeQueuePosture(t)
+	switch {
+	case len(handling) > 0 && len(ignoring) > 0:
+		t.Errorf("required-context workflows disagree about %s — %d declare it (%s) and %d do not (%s).\nA queue entry would never merge: it evaluates required contexts against its own ref, so the second group would never report and the entry would sit at %q. Make the whole set agree in one change; see the %q section of %s.",
+			mergeGroupTrigger, len(handling), strings.Join(handling, ", "), len(ignoring), strings.Join(ignoring, ", "),
+			waitingForStatus, "Merge-result checks", contributingPath)
+
+	case posture == mergeQueuePostureNone && len(handling) > 0:
+		t.Errorf("%s declares merge-queue posture %q, but every required-context workflow declares %s (%s).\nEnable a queue by flipping the marker in the same change — after confirming %s can report on the event at all, since it is pull_request_target-only and its job gate reads %s, which a merge group does not carry.",
+			contributingPath, posture, mergeGroupTrigger, strings.Join(handling, ", "), claudeCodeReviewWorkflow, pullRequestContextExpression)
+
+	case posture == mergeQueuePostureQueued && len(ignoring) > 0:
+		// The mirror image, and the one that actually strands a queue: the
+		// docs promise queue support that the workflows do not implement.
+		t.Errorf("%s declares merge-queue posture %q, but %d required-context workflow(s) do not declare %s (%s).\nEvery one of them must, or a queue entry hangs at %q on the contexts they back.",
+			contributingPath, posture, len(ignoring), mergeGroupTrigger, strings.Join(ignoring, ", "), waitingForStatus)
+	}
+
+	// A workflow outside the required set cannot strand a queue, because
+	// nothing waits on it — so this only bites under the `none` posture, where
+	// the trigger is simply dead config. scripts.yml carrying it for a check
+	// branch protection does not require was half of what made the old state
+	// read as merge-queue support, and one straggler restores that reading.
+	extra := []string{}
+	for file, declared := range onMergeGroup {
+		if declared && !partitioned[file] {
+			extra = append(extra, file)
+		}
+	}
+	if posture == mergeQueuePostureNone && len(extra) > 0 {
+		sort.Strings(extra)
+		t.Errorf("%s declares merge-queue posture %q, but %s is declared by workflows that produce no required context: %s\nDrop the trigger — it gates nothing and reads as queue support this repo does not have.",
+			contributingPath, posture, mergeGroupTrigger, strings.Join(extra, ", "))
+	}
+
+	// Everything above rests on claude-review being *unable* to report on a
+	// merge group, which is what makes `none` the only available posture today
+	// rather than a preference. Pin the mechanism rather than just asserting
+	// it — but pin the one that actually carries the property.
+	//
+	// That used to be the job's own `if:`, which read pull-request context a
+	// merge group does not carry. #1188 deliberately removed that gate:
+	// `claude-review` is a required context, GitHub scores a *skipped* required
+	// check as satisfied, and so a job-level `if:` that withholds the job is
+	// indistinguishable from a completed review. The job now starts on every
+	// pull request and decides eligibility inside its steps instead.
+	//
+	// The property survived that change because it never rested on the job at
+	// all: the workflow is triggered ONLY by pull_request_target, so a merge
+	// group never starts it. That is what this pins now, and adding
+	// merge_group to the trigger list is the edit that would invalidate the
+	// rationale above.
+	workflow := readWorkflow(t, claudeCodeReviewWorkflow)
+	if _, ok := workflow.Jobs[claudeReviewContext]; !ok {
+		t.Fatalf("%s has no %q job, but %q is a required context", claudeCodeReviewWorkflow, claudeReviewContext, claudeReviewContext)
+	}
+	if _, ok := parseWorkflowTriggers(t, claudeCodeReviewWorkflow, workflow.On)[mergeGroupTrigger]; ok {
+		// Deliberately unconditional on posture, which means flipping the
+		// marker to `queued` fails here AND in the agreement check above, with
+		// the two messages appearing to ask for opposite things. They are not
+		// in conflict: the one above says every required-context workflow must
+		// declare the trigger, and this one says claude-review cannot honor
+		// that until it is restructured. Restructure first — the note on the
+		// posture constants is the order to do it in — rather than satisfying
+		// either message on its own.
+		t.Errorf("%s declares %s, so %q can report on a merge group.\nThe merge-group rationale documented on this test assumes it cannot; recheck that before trusting it.\nIf you are flipping the merge-queue posture, this failure is expected and pairs with the agreement check above; restructure %q first.",
+			claudeCodeReviewWorkflow, mergeGroupTrigger, claudeReviewContext, claudeReviewContext)
+	}
+}
+
 // TestContributingCountsMatchTheDocumentedSet checks the two spelled-out counts
 // in the prose. A truncated list reads as plausible; a list of fifteen
 // described as "fifteen in all" that now holds fourteen does not.
@@ -444,18 +631,8 @@ type workflowContexts struct {
 func workflowReportedContexts(t *testing.T) workflowContexts {
 	t.Helper()
 
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	found := workflowContexts{direct: map[string][]string{}, reusable: map[string][]string{}}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
 			// A check renders under the job's `name:` when it sets one and
 			// under its job id otherwise.
@@ -478,6 +655,79 @@ func workflowReportedContexts(t *testing.T) workflowContexts {
 		t.Fatal("no direct jobs found in .github/workflows; the scan matched nothing and every resolution check would be vacuous")
 	}
 	return found
+}
+
+// workflowMergeGroupTriggers reports, for every workflow file, whether it
+// declares the merge_group trigger — false entries included, so the caller can
+// name the files it scanned and found clean rather than only the ones it
+// flagged.
+//
+// An unusable `on:` is parseWorkflowTriggers' problem, not this scan's: it
+// takes the file name precisely so a malformed one is named rather than
+// reported as a bare type, which across a scan of every workflow in the repo
+// would identify no file at all.
+func workflowMergeGroupTriggers(t *testing.T) map[string]bool {
+	t.Helper()
+
+	declared := map[string]bool{}
+	for _, name := range workflowFiles(t) {
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
+		if len(triggers) == 0 {
+			t.Errorf("%s declares no triggers, so nothing can ever run it", name)
+		}
+		_, ok := triggers[mergeGroupTrigger]
+		declared[name] = ok
+	}
+	return declared
+}
+
+// mergeQueuePosturePattern matches the marker whatever spacing it carries, and
+// captures everything up to the close rather than a single word. Both halves
+// exist to keep the diagnostic honest: a literal match would report
+// `<!--merge-queue-posture:none-->` as "no marker found", and a `\S*` capture
+// would report `<!-- merge-queue-posture: none oops -->` the same way — each
+// sending the reader after a missing line that is sitting in front of them.
+// Anything the marker does hold is validated below and named if it is wrong,
+// which is the diagnostic a file whose whole job is to be believed owes its
+// reader.
+var mergeQueuePosturePattern = regexp.MustCompile(`<!--\s*` + mergeQueuePostureMarker + `\s*:([^>]*)-->`)
+
+// documentedMergeQueuePosture reads the marker CONTRIBUTING.md uses to declare
+// whether this repo intends a merge queue. It requires exactly one, for the
+// same reason TestContributingCountsMatchTheDocumentedSet requires exactly one
+// match of each count phrase: a second copy must fail loudly rather than let
+// the first occurrence quietly decide the posture.
+func documentedMergeQueuePosture(t *testing.T) string {
+	t.Helper()
+
+	matches := mergeQueuePosturePattern.FindAllStringSubmatch(readRepoFile(t, contributingPath), -1)
+	if len(matches) != 1 {
+		t.Fatalf("%s contains %d `%s` markers, want exactly 1 — it declares whether this repo intends a merge queue, and neither a missing nor a duplicated marker can be read as an answer",
+			contributingPath, len(matches), mergeQueuePostureMarker)
+	}
+
+	switch posture := strings.TrimSpace(matches[0][1]); posture {
+	case mergeQueuePostureNone, mergeQueuePostureQueued:
+		return posture
+	default:
+		t.Fatalf("%s declares merge-queue posture %q, which is neither %q nor %q",
+			contributingPath, posture, mergeQueuePostureNone, mergeQueuePostureQueued)
+		return ""
+	}
+}
+
+// requiredContextWorkflows resolves a documented required context to the
+// workflow file(s) that would report it, by the same rule
+// TestDocumentedRequiredContextsResolveToWorkflowJobs applies: a direct job
+// name first, then the caller half of a "<caller> / <inner>" reusable call.
+func requiredContextWorkflows(wanted string, reported workflowContexts) []string {
+	if files, ok := reported.direct[wanted]; ok {
+		return files
+	}
+	if caller, _, isPrefixed := strings.Cut(wanted, contextSeparator); isPrefixed {
+		return reported.reusable[caller]
+	}
+	return nil
 }
 
 // documentedRequiredContexts reads the block CONTRIBUTING.md marks as the

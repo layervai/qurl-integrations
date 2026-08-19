@@ -692,7 +692,7 @@ func TestClaudeReviewKeepsItsSecurityProperties(t *testing.T) {
 	t.Parallel()
 
 	workflow := readWorkflow(t, claudeReviewWorkflow)
-	triggers := parseWorkflowTriggers(t, workflow.On)
+	triggers := parseWorkflowTriggers(t, claudeReviewWorkflow, workflow.On)
 	if _, ok := triggers["pull_request_target"]; !ok {
 		t.Errorf("%s must stay on pull_request_target, which loads this file from the trusted default branch", claudeReviewWorkflow)
 	}

@@ -7,7 +7,7 @@
 // which matches `.github/workflows/slack.yml` alone — so a PR adding a new
 // workflow skipped them entirely and shipped an unregistered aggregate green
 // (#1081). `.github/workflows/workflow-contract.yml` runs this package
-// unfiltered on every PR and merge group instead.
+// unfiltered on every PR instead.
 package ciworkflows
 
 import (
@@ -38,6 +38,8 @@ const (
 	cliReleaseVerifierStepName = "Verify the CLI release was created"
 	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
 	checkoutActionPrefix       = "actions/checkout@"
+
+	workflowContractWorkflow = "workflow-contract.yml"
 )
 
 type requiredWorkflowSpec struct {
@@ -215,14 +217,19 @@ type step struct {
 	ContinueOnError any `yaml:"continue-on-error"`
 }
 
-// TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup pins the premise
-// that makes these repo-wide tests useful. A paths filter or conditional job
-// would put the check back behind the same green-when-broken hole this package
-// exists to close: a workflow edit outside the filter could violate the
-// contract without causing this check to report at all.
-func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
-	workflow := readWorkflow(t, "workflow-contract.yml")
-	triggers := parseWorkflowTriggers(t, workflow.On)
+// TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
+// these repo-wide tests useful. A paths filter or conditional job would put the
+// check back behind the same green-when-broken hole this package exists to
+// close: a workflow edit outside the filter could violate the contract without
+// causing this check to report at all.
+//
+// Whether this workflow also runs on merge_group is not asserted here.
+// TestMergeGroupTriggersAgreeAcrossRequiredContexts owns that, because the
+// answer has to be the same for every required context rather than for this
+// one workflow.
+func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
+	workflow := readWorkflow(t, workflowContractWorkflow)
+	triggers := parseWorkflowTriggers(t, workflowContractWorkflow, workflow.On)
 
 	pullRequest, ok := triggers["pull_request"]
 	if !ok {
@@ -238,9 +245,6 @@ func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
 				t.Fatalf("workflow-contract.yml pull_request trigger must not define %s", filter)
 			}
 		}
-	}
-	if _, ok := triggers["merge_group"]; !ok {
-		t.Fatal("workflow-contract.yml must run on merge_group")
 	}
 
 	contract, ok := workflow.Jobs["contract"]
@@ -422,7 +426,7 @@ func TestParseWorkflowTriggers(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := parseWorkflowTriggers(t, test.value)
+			got := parseWorkflowTriggers(t, "example.yml", test.value)
 			if len(got) != len(test.want) {
 				t.Fatalf("trigger count = %d, want %d", len(got), len(test.want))
 			}
@@ -435,7 +439,7 @@ func TestParseWorkflowTriggers(t *testing.T) {
 	}
 }
 
-func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
+func parseWorkflowTriggers(t *testing.T, workflow string, value any) map[string]any {
 	t.Helper()
 
 	switch typed := value.(type) {
@@ -446,7 +450,7 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 		for _, raw := range typed {
 			trigger, ok := raw.(string)
 			if !ok {
-				t.Fatalf("workflow on sequence contains non-string value %T", raw)
+				t.Fatalf("%s on sequence contains non-string value %T", workflow, raw)
 			}
 			triggers[trigger] = nil
 		}
@@ -459,8 +463,14 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 		return triggers
 	case map[string]any:
 		return typed
+	case nil:
+		// A bare `on:` with no value unmarshals to nil. Named separately from
+		// the default below because it is the one malformed shape a human
+		// actually writes, and "unexpected type <nil>" describes it poorly.
+		t.Fatalf("%s has an empty `on:`, so nothing can ever run it", workflow)
+		return nil
 	default:
-		t.Fatalf("workflow on has unexpected type %T", value)
+		t.Fatalf("%s on has unexpected type %T", workflow, value)
 		return nil
 	}
 }
@@ -630,12 +640,6 @@ func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 // identically, so that workflow narrowing to [main] would now leave every
 // stacked PR waiting on a required check that never registers.
 func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	recorded := make(map[string]bool, len(requiredWorkflowSpecs)+len(otherPullRequestWorkflows))
 	for i := range requiredWorkflowSpecs {
 		recorded[requiredWorkflowSpecs[i].path] = true
@@ -649,12 +653,8 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	}
 
 	seen := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
-		triggers := parseWorkflowTriggers(t, readWorkflow(t, name).On)
+	for _, name := range workflowFiles(t) {
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
 		runsOnPullRequests := false
 		for _, trigger := range pullRequestTriggers {
 			if _, ok := triggers[trigger]; ok {
@@ -789,7 +789,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	t.Helper()
 
-	triggers := parseWorkflowTriggers(t, readWorkflow(t, path).On)
+	triggers := parseWorkflowTriggers(t, path, readWorkflow(t, path).On)
 	checked := 0
 	for _, trigger := range pullRequestTriggers {
 		config, ok := triggers[trigger]
@@ -882,23 +882,13 @@ func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any
 // exactly how apps/teams shipped an aggregate-less workflow in #1001 and went
 // unregistered until #1023.
 func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	registered := make(map[string]bool, len(requiredWorkflowSpecs))
 	for i := range requiredWorkflowSpecs {
 		registered[requiredWorkflowSpecs[i].path] = true
 	}
 
 	seen := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		if _, ok := readWorkflow(t, name).Jobs["required"]; !ok {
 			continue
 		}
@@ -908,9 +898,8 @@ func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 		}
 	}
 
-	// Guard against the scan silently matching nothing (renamed directory,
-	// changed extension), which would make every assertion above vacuous.
-	// This deliberately couples the two counts: a workflow that grows a job
+	// workflowFiles already fatals on an empty scan, so this is purely the
+	// count coupling: a workflow that grows a job
 	// keyed `required` must land its spec entry in the same change, or the
 	// whole suite goes red rather than quietly under-enforcing the new
 	// aggregate.
@@ -1245,6 +1234,33 @@ func readWorkflowSource(t *testing.T, name string) string {
 	t.Helper()
 
 	return string(readWorkflowBytes(t, name))
+}
+
+// workflowFiles lists the workflow files in .github/workflows. It fails rather
+// than returning an empty list: a renamed directory or a changed extension
+// would otherwise leave every scan built on it with nothing to contradict, and
+// so passing vacuously.
+func workflowFiles(t *testing.T) []string {
+	t.Helper()
+
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		t.Fatalf("no workflow files found in %s", dir)
+	}
+	return names
 }
 
 func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) map[string]bool {
