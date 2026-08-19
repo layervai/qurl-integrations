@@ -38,8 +38,8 @@ var commentWrap = regexp.MustCompile(`\n\s*//\s*`)
 // the version is prose: nothing couples it to go.mod, and the edit that most
 // needs the markers re-read is exactly the one with no automation on it.
 // Dependabot proposes bumps to the require line and does not rewrite replace
-// targets, so bumping the fork is a hand edit, and a hand edit that leaves
-// four comments confidently citing a version that is no longer compiled.
+// targets, so bumping the fork is a hand edit, and a hand edit can leave the
+// markers confidently citing a version that is no longer compiled.
 //
 // This does NOT check that the claims are still true — nothing local can, and
 // that is why the markers exist. It checks the cheaper half: that the version

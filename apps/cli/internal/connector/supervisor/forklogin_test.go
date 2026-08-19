@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	frpclient "github.com/fatedier/frp/client"
@@ -36,6 +37,12 @@ import (
 // mounted at. The fork posts every op to this one endpoint and distinguishes
 // them by the "op" field in the body, which is why the handler filters on it.
 const forkLoginRejectPluginPath = "/"
+
+// The pinned fork's server constructor writes the package-global
+// vhost.NotFoundPagePath, so concurrent constructors race even for distinct
+// Service instances. Keep only construction serialized; the tests themselves
+// remain parallel.
+var forkLoginServerConstructionMu sync.Mutex
 
 // refusingLoopbackPort returns a loopback TCP port that is verified CLOSED at
 // the moment it is returned.
@@ -118,7 +125,9 @@ func startLoginRejectingFRPS(t *testing.T, bindPort int, rejectReason string) {
 	if err := cfg.Complete(); err != nil {
 		t.Fatalf("complete the login-rejecting server config: %v", err)
 	}
+	forkLoginServerConstructionMu.Lock()
 	svc, err := frpserver.NewService(cfg)
+	forkLoginServerConstructionMu.Unlock()
 	if err != nil {
 		t.Fatalf("construct the login-rejecting server on 127.0.0.1:%d: %v", bindPort, err)
 	}
@@ -162,8 +171,14 @@ func runForkClientLoginFailure(t *testing.T, serverPort int) error {
 		t.Fatalf("construct the fork client: %v", err)
 	}
 	t.Cleanup(svc.Close)
-	runErr := svc.Run(t.Context())
+	runCtx, cancel := context.WithTimeout(t.Context(), forkDialAcceptWait)
+	defer cancel()
+	runErr := svc.Run(runCtx)
 	if runErr == nil {
+		if runCtx.Err() == context.DeadlineExceeded {
+			t.Fatalf("the fork client's Run did not report the failed Login within %s; "+
+				"the rejecting or refusing peer may have been accepted unexpectedly", forkDialAcceptWait)
+		}
 		t.Fatal("the fork client's Run returned nil against a server that refuses every Login; " +
 			"the failure these tests classify never happened")
 	}
