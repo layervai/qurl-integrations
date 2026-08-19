@@ -346,12 +346,11 @@ jobs:
       # expected), and the suite inside arms on its env contract. -v keeps a
       # suite-level skip visible in the log instead of silent green.
       #
-      # The unified local-publish smoke uses the same ordinary login key plus
-      # the qurl-connector sandbox Hub trust variables below. It needs neither
-      # a pre-issued one-shot nor durable shared device state: the command
-      # mints in memory, enrolls a temporary device, and reclaims its resource.
-      # The legacy Connector smoke remains gated on its separate arming switch
-      # and credentials.
+      # The Connector smokes are deliberately NOT armed here: beyond an
+      # endpoint they need explicit arming and credentials. In particular, the
+      # local-publish smoke enrolls a native device, so a one-off proof must
+      # also supply its JWT cleanup credential instead of leaking one durable
+      # device/assignment per hosted-runner invocation.
       - name: Run sandbox e2e suite
         env:
           QURL_API_KEY: ${{ secrets.QURL_SANDBOX_API_KEY }}
@@ -365,9 +364,6 @@ jobs:
           # and never prints them — variables are not masked in logs.
           QURL_SANDBOX_QV2_ISSUER_KEY: ${{ vars.QURL_SANDBOX_QV2_ISSUER_KEY }}
           QURL_SANDBOX_QV2_RELAY_URL: ${{ vars.QURL_SANDBOX_QV2_RELAY_URL }}
-          QURL_CONNECTOR_HUB_HOST: ${{ vars.QURL_CONNECTOR_SANDBOX_HUB_HOST }}
-          QURL_CONNECTOR_HUB_PORT: ${{ vars.QURL_CONNECTOR_SANDBOX_HUB_PORT }}
-          QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_CONNECTOR_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64 }}
         run: go test -tags=clisandbox -count=1 -v ./apps/cli/...
 
   goreleaser-check:

@@ -11,7 +11,7 @@ require (
 	github.com/distribution/reference v0.6.0
 	github.com/fatedier/frp v0.70.1
 	github.com/fatedier/golib v0.7.0
-	github.com/layervai/qurl-go v0.5.4-0.20260819143328-87d8e68d3bbf
+	github.com/layervai/qurl-go v0.5.4-0.20260819151745-3f1dde13ce26
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
