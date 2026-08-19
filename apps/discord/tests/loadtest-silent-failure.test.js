@@ -1415,6 +1415,15 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return found;
   };
 
+  // Calls to `name` lexically inside `fn`, by source range. Three checks below
+  // need this and an off-by-one in the predicate would silently widen or empty
+  // a scope rather than fail, so it is written once. Containment is >=/<= on
+  // both ends: a call node is strictly interior to the function that holds it,
+  // so the boundaries never actually tie, but the closed form is the one that
+  // stays correct if a caller ever passes the function node itself.
+  const callsWithin = (fn, name) => callsNamed(name)
+    .filter((node) => node.start >= fn.start && node.end <= fn.end);
+
   it('hand-rolls no HTTP call of its own', () => {
     // The three guards that went missing — AbortSignal.timeout(60000), the
     // `success` check and the `resource_id` check — live in connector.js and
@@ -1801,8 +1810,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       // ever undefined, `!== null` would pass and the range filter below
       // would throw a TypeError instead of asserting.
       expect({ writer, found: Boolean(fn) }).toEqual({ writer, found: true });
-      const owned = callsNamed(primitive)
-        .filter((node) => node.start >= fn.start && node.end <= fn.end);
+      const owned = callsWithin(fn, primitive);
       // Exactly one, which is two assertions in one. It pins the "each writer
       // writes once" invariant the pairing is built on, and it keeps the
       // exemption from going vacuous — delete the ledger's writes and a
@@ -1860,8 +1868,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     const runRound = findFunction('runRound');
     expect({ found: Boolean(runRound) }).toEqual({ found: true });
     for (const primitive of WRITE_PRIMITIVES) {
-      const inRound = callsNamed(primitive)
-        .filter((node) => node.start >= runRound.start && node.end <= runRound.end);
+      const inRound = callsWithin(runRound, primitive);
       expect({ primitive, callsInRunRound: inRound.length })
         .toEqual({ primitive, callsInRunRound: 0 });
     }
@@ -1927,8 +1934,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // the cheaper side of the trade.
     const runRound = findFunction('runRound');
     expect(runRound).not.toBeNull();
-    const inRunRound = (name) => callsNamed(name)
-      .filter((node) => node.start >= runRound.start && node.end <= runRound.end);
+    const inRunRound = (name) => callsWithin(runRound, name);
     expect(inRunRound('readFileSync')).toHaveLength(1);
     expect(inRunRound('generateTestPayload')).toHaveLength(1);
     expect(inRunRound('alloc')).toHaveLength(0);
