@@ -19,6 +19,7 @@
 
 const {
   readArg,
+  argValueMissing,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
@@ -179,6 +180,34 @@ describe('readArg — both flag spellings, so neither falls through silently', (
   });
 });
 
+describe('argValueMissing — a decision-carrying flag rejects a missing value', () => {
+  // readArg hands back the default for both of these, which is fine for a flag
+  // whose value shows up in the next line of output and not for the one that
+  // decides the exit code.
+  it.each([
+    ['the flag is the last token', ['--count', '20', '--max-fail-rate']],
+    ['the equals form has no value', ['--max-fail-rate=']],
+    ['the value is empty', ['--max-fail-rate', '', '--location']],
+  ])('is true when %s', (_label, argv) => {
+    expect(argValueMissing(argv, 'max-fail-rate')).toBe(true);
+  });
+
+  it.each([
+    ['a space-form value', ['--max-fail-rate', '25']],
+    ['an equals-form value', ['--max-fail-rate=25']],
+    ['the flag is absent', ['--location']],
+  ])('is false for %s', (_label, argv) => {
+    expect(argValueMissing(argv, 'max-fail-rate')).toBe(false);
+  });
+
+  // A following flag IS taken as the value, and parseMaxFailRate then rejects
+  // it by name — a clear preflight FATAL, not a silent default.
+  it('leaves a following flag to the parser, which names it', () => {
+    expect(argValueMissing(['--max-fail-rate', '--location'], 'max-fail-rate')).toBe(false);
+    expect(parseMaxFailRate('--location').error).toContain("'--location'");
+  });
+});
+
 describe('formatRatePair — a breach never prints as "X% exceeds X%"', () => {
   // 1001/10000 is 10.01%: over a 10% threshold, but identical to it at one
   // decimal place. Printed that way the line reads as a bug in the tool
@@ -205,7 +234,13 @@ describe('parseMaxFailRate — a malformed threshold fails closed', () => {
   // Each of these is NaN or out of range under a bare `Number`, and NaN
   // compares false against every rate — so an unvalidated parse would disable
   // the threshold silently and report the run as a pass.
-  it.each([['not a number', 'ten'], ['a percent sign', '10%'], ['negative', '-1'], ['over 100', '101']])(
+  // Whitespace is the sharp one: `Number('   ')` is 0, so an unguarded parse
+  // turns a blank value into the strictest possible threshold rather than an
+  // error — silently failing runs the operator meant to be lenient about.
+  it.each([
+    ['not a number', 'ten'], ['a percent sign', '10%'], ['negative', '-1'],
+    ['over 100', '101'], ['whitespace', '   '], ['empty', ''],
+  ])(
     'rejects %s',
     (_label, raw) => {
       const parsed = parseMaxFailRate(raw);
@@ -276,6 +311,16 @@ describe('runReport — the summary and the exit code', () => {
     expect(report(results).lines).toContain(
       'FAILED: link failure rate 10.01% (1001/10000) exceeds --max-fail-rate 10.00%',
     );
+  });
+
+  // Rounds ran, nothing was attempted (--count 0). Both rates are 0/0, so
+  // without this the run reads as clean while having measured nothing.
+  it('fails a run that attempted no qURL, and does not call it a failure', () => {
+    const result = report([round({ uploadMs: 200, totalMs: 300 })]);
+    expect(result.failed).toBe(true);
+    expect(result.lines).toContain('FAILED: no qURL was attempted');
+    expect(result.lines).toContain('Avg upload: 200ms, avg mint/round: n/a — no mint was attempted');
+    expect(result.lines.join('\n')).not.toContain('all 0 mint attempt(s) failed');
   });
 
   it('fails a run in which every mint failed', () => {

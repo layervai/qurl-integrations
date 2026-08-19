@@ -92,6 +92,23 @@ function readArg(argv, name, defaultVal) {
 }
 
 const getArg = (name, defaultVal) => readArg(args, name, defaultVal);
+
+/**
+ * True when `--name` is present but carries no value — as the final token, or
+ * as `--name=`. readArg hands back the default for both, which is the same
+ * silent fallback the equals form used to have, and it is only tolerable for a
+ * flag whose value shows up in the next line of output. A flag that decides
+ * the exit code has to reject it: `--max-fail-rate` with the value fat-fingered
+ * off would otherwise run at the strict default while the operator believed
+ * they had set something else.
+ */
+function argValueMissing(argv, name) {
+  const flag = `--${name}`;
+  const idx = argv.indexOf(flag);
+  if (idx !== -1) return !argv[idx + 1];
+  const inline = argv.find((a) => a.startsWith(`${flag}=`));
+  return inline !== undefined && inline.slice(flag.length + 1) === '';
+}
 const hasFlag = (name) => args.includes(`--${name}`);
 
 const COUNT = parseInt(getArg('count', '100'));
@@ -495,6 +512,11 @@ const DEFAULT_MAX_FAIL_RATE_PCT = 10;
  * otherwise be discovered as a green exit code after a two-hour run.
  */
 function parseMaxFailRate(raw) {
+  // Checked before Number, which reads whitespace as 0 — a blank value would
+  // otherwise become the strictest possible threshold rather than an error.
+  if (String(raw).trim() === '') {
+    return { error: `--max-fail-rate must be a percentage between 0 and 100, got '${raw}'.` };
+  }
   const pct = Number(raw);
   if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
     return { error: `--max-fail-rate must be a percentage between 0 and 100, got '${raw}'.` };
@@ -509,7 +531,8 @@ const formatPct = (rate, digits = 1) => `${(rate * 100).toFixed(digits)}%`;
  * string. A rate that only just crosses the line — 1001/10000 against 10% —
  * rounds to the threshold's own spelling, and `10.0% exceeds 10.0%` reads as a
  * bug in the tool rather than a finding about the run. Widen both together
- * until they differ.
+ * until they differ, bounded at four decimals — a gap smaller than that is
+ * reachable only through float error, never through a ratio of two counts.
  */
 function formatRatePair(rate, threshold) {
   for (const digits of [1, 2, 3]) {
@@ -582,9 +605,16 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       // than each attempt: this is time per ROUND, not per qURL, and a
       // partially-failing round still blends its own failures into its mintMs.
       const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0);
+      // Nothing minted has two causes and they are not the same news: every
+      // attempt failed, or nothing was ever attempted (--count 0). Reporting
+      // the second as "all 0 mint attempt(s) failed" states a failure that
+      // did not happen.
+      const noMintNote = fileFail > 0
+        ? `n/a — all ${fileFail} mint attempt(s) failed`
+        : 'n/a — no mint was attempted';
       lines.push(mintedRounds.length > 0
         ? `Avg upload: ${avgUpload}ms, avg mint/round: ${mean(mintedRounds, (r) => r.mintMs).toFixed(0)}ms`
-        : `Avg upload: ${avgUpload}ms, avg mint/round: n/a — all ${fileFail} mint attempt(s) failed`);
+        : `Avg upload: ${avgUpload}ms, avg mint/round: ${noMintNote}`);
     }
   }
 
@@ -595,6 +625,10 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   // pass is the failure this exit code exists to prevent, and no rate above
   // catches it when roundsAttempted is itself 0.
   if (roundsCompleted === 0) reasons.push('no round completed');
+  // Rounds ran but no qURL was ever attempted — `--count 0`, or legs that all
+  // did nothing. Both rates are 0/0 and read as a clean run, so this is the
+  // same unmeasured-run pass one level down from 'no round completed'.
+  if (roundsCompleted > 0 && attemptedLinks === 0) reasons.push('no qURL was attempted');
   if (linkFailRate > maxFailRate) {
     const [rate, limit] = formatRatePair(linkFailRate, maxFailRate);
     reasons.push(`link failure rate ${rate} (${failedLinks}/${attemptedLinks}) exceeds --max-fail-rate ${limit}`);
@@ -682,6 +716,10 @@ async function main() {
   // Parsed up here with the other preflight checks: a mistyped threshold that
   // was only read at the summary would surface as a green exit code two hours
   // after the run it was meant to judge.
+  if (argValueMissing(args, 'max-fail-rate')) {
+    console.error('FATAL: --max-fail-rate needs a percentage, e.g. --max-fail-rate 10.');
+    process.exit(1);
+  }
   const { rate: maxFailRate, error: maxFailRateError } =
     parseMaxFailRate(getArg('max-fail-rate', String(DEFAULT_MAX_FAIL_RATE_PCT)));
   if (maxFailRateError) { console.error(`FATAL: ${maxFailRateError}`); process.exit(1); }
@@ -767,6 +805,7 @@ module.exports = {
   // Reporting decisions, exported for tests/loadtest-reporting.test.js — see
   // the "Run reporting" section for why they are pure rather than inline.
   readArg,
+  argValueMissing,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
