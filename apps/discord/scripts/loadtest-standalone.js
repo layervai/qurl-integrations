@@ -714,7 +714,12 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
     ? `Rounds: ${roundsCompleted} completed, ${roundsFailed} failed`
     : `Rounds: ${roundsCompleted}`);
   lines.push(`Total links minted: ${minted}`);
-  lines.push(`Total failures: ${failedLinks}`);
+  // "link failures", not "failures": this counts qURLs, and a round that dies
+  // in the upload contributes nothing to it. An unqualified label put `Total
+  // failures: 0` directly above a FAILED verdict on a run where every round
+  // died — a reader scanning for the failure count would find a zero and stop.
+  // The Rounds line above carries the other class.
+  lines.push(`Total link failures: ${failedLinks}`);
   // Echoed on every run, passing or failing. This is the value that decided
   // the exit code, and printing it only on the FAILED lines meant a run that
   // silently took the default had nothing in its log to say so.
@@ -748,9 +753,13 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       // partially-failing round still blends its own failures into its mintMs.
       const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0);
       // Nothing minted has two causes and they are not the same news: every
-      // attempt failed, or nothing was ever attempted (--count 0). Reporting
-      // the second as "all 0 mint attempt(s) failed" states a failure that
-      // did not happen.
+      // attempt failed, or nothing was ever attempted. Reporting the second as
+      // "all 0 mint attempt(s) failed" states a failure that did not happen.
+      //
+      // The second is defensive rather than live since #1171 was merged in:
+      // `--count 0` was how a run reached it, and parsePositiveInt now refuses
+      // zero at preflight. See the reachability note on 'no qURL was
+      // attempted' below.
       const noMintNote = fileFail > 0
         ? `n/a — all ${fileFail} mint attempt(s) failed`
         : 'n/a — no mint was attempted';
@@ -767,9 +776,22 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   // pass is the failure this exit code exists to prevent, and no rate above
   // catches it when roundsAttempted is itself 0.
   if (roundsCompleted === 0) reasons.push('no round completed');
-  // Rounds ran but no qURL was ever attempted — `--count 0`, or legs that all
-  // did nothing. Both rates are 0/0 and read as a clean run, so this is the
-  // same unmeasured-run pass one level down from 'no round completed'.
+  // Rounds ran but no qURL was ever attempted. Both rates are 0/0 and read as
+  // a clean run, so this is the same unmeasured-run pass one level down from
+  // 'no round completed'.
+  //
+  // DEFENSIVE, not live, since #1171 was merged into this branch. `--count 0`
+  // was the way in and parsePositiveInt now refuses zero at preflight, so
+  // COUNT is at least 1 by the time a round runs — and both legs loop from 0
+  // to COUNT (`i += 10` and `i++` alike), so every completed round attempts at
+  // least one qURL. A round that attempts none threw, which leaves it out of
+  // allResults and counted by roundFailRate instead.
+  //
+  // Kept because the alternative is reporting an unmeasured run as a pass,
+  // which is the fault this exit code exists to prevent, and because a future
+  // leg that legitimately attempts nothing would land here. runReport is pure
+  // and called directly by the suite, so the branch stays covered even though
+  // no command line reaches it.
   if (roundsCompleted > 0 && attemptedLinks === 0) reasons.push('no qURL was attempted');
   if (linkFailRate > maxFailRate) {
     const [rate, limit] = formatRatePair(linkFailRate, maxFailRate);

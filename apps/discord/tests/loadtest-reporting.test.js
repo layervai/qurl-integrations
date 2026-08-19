@@ -398,7 +398,7 @@ describe('runReport — the summary and the exit code', () => {
     expect(result.lines).toEqual([
       'Rounds: 2',
       'Total links minted: 200',
-      'Total failures: 0',
+      'Total link failures: 0',
       'Failure threshold: 10.0% (--max-fail-rate)',
       'Avg round time: 0.6s',
       'Avg upload: 200ms, avg mint/round: 300ms',
@@ -499,7 +499,7 @@ describe('runReport — the summary and the exit code', () => {
       locLinks: 50, locFail: 50, locMs: 300, totalMs: 600,
     })]);
     expect(result.lines).toContain('Total links minted: 100');
-    expect(result.lines).toContain('Total failures: 100');
+    expect(result.lines).toContain('Total link failures: 100');
     expect(result.linkFailRate).toBe(0.5);
   });
 
