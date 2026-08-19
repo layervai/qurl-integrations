@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -284,6 +285,24 @@ func TestWatchdogWindowOutlivesATunnelServerReplacement(t *testing.T) {
 			reconnectSettledGap, settledGapSafetyFactor, settledGapSafetyFactor*failingDialPeriod,
 			failingDialConnectBudget, failingDialLoginReadBudget, failingDialBackoffCeiling)
 	}
+	// Bounded from above as well. Every assertion above is a floor, so an
+	// accidental order-of-magnitude widening — which restores the silent
+	// loop this package exists to remove — would pass all of them.
+	const settledGapCeiling = 4 * time.Minute
+	const stallWindowCeiling = 10 * time.Minute
+	if reconnectSettledGap > settledGapCeiling {
+		t.Errorf("reconnectSettledGap = %s, want at most %s; beyond that an ordinary reconnect stays inside one storm for minutes", reconnectSettledGap, settledGapCeiling)
+	}
+	if reconnectStallWindow > stallWindowCeiling {
+		t.Errorf("reconnectStallWindow = %s, want at most %s; beyond that a dead tunnel is unbounded for practical purposes", reconnectStallWindow, stallWindowCeiling)
+	}
+	// The notice threshold's comment argues specifically why three and not
+	// two: two would fire while only ONE redial had failed. Pin that claim,
+	// which is otherwise only bounded from above by the flap test.
+	if reconnectStallNoticeAfter < 3 {
+		t.Errorf("reconnectStallNoticeAfter = %d, want at least 3 so the notice follows two failed redials; at 2 a routine two-attempt reconnect is announced as a tunnel that keeps dropping",
+			reconnectStallNoticeAfter)
+	}
 	if reconnectSettledGap >= reconnectStallWindow {
 		t.Errorf("reconnectSettledGap = %s must stay below reconnectStallWindow = %s, or no storm can ever reach the window",
 			reconnectSettledGap, reconnectStallWindow)
@@ -333,3 +352,168 @@ func TestWatchdogFlapInsideTheGapIsNotCalledUnrecovered(t *testing.T) {
 		}
 	}
 }
+
+// TestWatchdogStallFiresExactlyAtTheWindow pins the stall boundary as
+// "at least", the same semantics the settled gap and the knock gate use. A
+// strict > would let a storm that lands a dial exactly on the window run one
+// more full dial interval before being taken back.
+func TestWatchdogStallFiresExactlyAtTheWindow(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	r, rec := newWatchdogRefresher(clk.now, discardLogger(), 90*time.Second, 45*time.Second)
+	common := handedOffCommon()
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	clk.advance(10 * time.Second) // opens the storm; elapsed is 0 here
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("storm open: %v", err)
+	}
+	// Accumulate to exactly the window in sub-settled-gap steps. A single
+	// 90s jump would exceed the 45s settled gap and reset the storm instead,
+	// which is the whole reason the two constants are ordered.
+	for i, want := range []time.Duration{30 * time.Second, 60 * time.Second} {
+		clk.advance(30 * time.Second)
+		if err := r.refresh(context.Background(), common, "open"); err != nil {
+			t.Fatalf("dial %d at elapsed %s: %v", i, want, err)
+		}
+	}
+	clk.advance(30 * time.Second) // elapsed is now exactly 90s
+	err := r.refresh(context.Background(), common, "open")
+	if !errors.Is(err, errReconnectStalled) {
+		t.Fatalf("dial exactly at the window returned %v, want errReconnectStalled (the boundary is at-least)", err)
+	}
+	if len(rec.errs) != 1 {
+		t.Fatalf("requestRestart called %d time(s), want 1", len(rec.errs))
+	}
+}
+
+// TestWatchdogNoticeFiresAgainAfterARecovery covers the storm-reset half of
+// the once-per-storm latch: stormNoticed must clear when a settled gap ends a
+// storm, or only the FIRST outage in a cycle is ever announced and every later
+// one is silent until the stall window. The once-per-storm test never crosses
+// a settled gap, so nothing else pins the reset.
+func TestWatchdogNoticeFiresAgainAfterARecovery(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	var buf bytes.Buffer
+	r, _ := newWatchdogRefresher(clk.now, slog.New(slog.NewJSONHandler(&buf, nil)), 90*time.Second, 45*time.Second)
+	common := handedOffCommon()
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	storm := func(label string) {
+		t.Helper()
+		for i := 0; i < 3; i++ {
+			clk.advance(5 * time.Second)
+			if err := r.refresh(context.Background(), common, "open"); err != nil {
+				t.Fatalf("%s dial %d: %v", label, i, err)
+			}
+		}
+	}
+	storm("first outage")
+	clk.advance(50 * time.Second) // longer than the settled gap: the tunnel served again
+	storm("second outage")
+	if got := strings.Count(buf.String(), `"event":"reconnect_retrying"`); got != 2 {
+		t.Fatalf("reconnect_retrying emitted %d time(s) across two separate outages, want 2 — the latch must reset when a storm ends\nlog:\n%s", got, buf.String())
+	}
+}
+
+// TestWatchdogStallLineIsGreppable pins the line an operator greps when the
+// watchdog takes a cycle back. It carries no assertions otherwise: the event
+// name, the dial count and the elapsed detail could all be renamed or dropped
+// without a single test noticing.
+func TestWatchdogStallLineIsGreppable(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	var buf bytes.Buffer
+	r, rec := newWatchdogRefresher(clk.now, slog.New(slog.NewJSONHandler(&buf, nil)), 90*time.Second, 45*time.Second)
+	common := handedOffCommon()
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	var last error
+	for i := 0; i < 12; i++ {
+		clk.advance(20 * time.Second)
+		if last = r.refresh(context.Background(), common, "open"); last != nil {
+			break
+		}
+	}
+	if !errors.Is(last, errReconnectStalled) {
+		t.Fatalf("never stalled: %v", last)
+	}
+	// Isolate the stall line. Asserting against the whole buffer would let
+	// the retrying notice — which carries dial_attempts too — satisfy checks
+	// the stall line had dropped.
+	stallLine := ""
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(l, `"event":"reconnect_stalled"`) {
+			stallLine = l
+			break
+		}
+	}
+	if stallLine == "" {
+		t.Fatalf("no reconnect_stalled line emitted\nlog:\n%s", buf.String())
+	}
+	for _, want := range []string{`"dial_attempts":`, `"stalled_seconds":`, "restarting the connection cycle"} {
+		if !strings.Contains(stallLine, want) {
+			t.Errorf("stall line is missing %q\nline:\n%s", want, stallLine)
+		}
+	}
+	// The wrapped cause is what the budget exit's detail ends up quoting, so
+	// it must name the shape and the evidence, not just the sentinel.
+	if got := rec.errs[0].Error(); !strings.Contains(got, "no tunnel session for") || !strings.Contains(got, "dial attempts") {
+		t.Errorf("stall cause = %q, want it to name the elapsed time and the dial count", got)
+	}
+}
+
+// TestWatchdogReachesTheProductionConnectorSeam drives a stall through the
+// seam production actually uses — knockingConnector.Open, the wrapper FRP
+// calls on every physical dial — rather than calling refresh directly like
+// every other test here. It pins that the wrapper forwards the watchdog's
+// error to FRP instead of swallowing it, which is what makes the dial fail
+// and the cycle unwind.
+func TestWatchdogReachesTheProductionConnectorSeam(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	r, rec := newWatchdogRefresher(clk.now, discardLogger(), 90*time.Second, 45*time.Second)
+	common := handedOffCommon()
+	// TCPMux defaults on, so the physical dial — and therefore the refresh —
+	// happens in Open. Guarded by TestPhysicalDialInOpen.
+	if !physicalDialInOpen(common) {
+		t.Fatal("test premise broken: this common config does not dial in Open")
+	}
+	conn := &knockingConnector{base: noopConnector{}, ctx: context.Background(), common: common, refresher: r}
+
+	if err := conn.Open(); err != nil { // handoff
+		t.Fatalf("handoff Open: %v", err)
+	}
+	var last error
+	for i := 0; i < 12; i++ {
+		clk.advance(20 * time.Second)
+		if last = conn.Open(); last != nil {
+			break
+		}
+	}
+	if !errors.Is(last, errReconnectStalled) {
+		t.Fatalf("Open() returned %v after a sustained storm; the connector wrapper must surface the watchdog's stall to FRP", last)
+	}
+	if len(rec.errs) != 1 {
+		t.Fatalf("requestRestart called %d time(s) through the production seam, want 1", len(rec.errs))
+	}
+}
+
+// noopConnector stands in for the FRP connector the wrapper delegates to, so
+// the seam test exercises the wrapper and the watchdog without a network.
+type noopConnector struct{}
+
+func (noopConnector) Open() error { return nil }
+
+// Connect must never be reached: TCPMux is on, so the physical dial — and
+// therefore the refresh the watchdog rides on — belongs to Open. Returning an
+// error rather than a nil conn makes a seam change fail loudly here instead
+// of nil-dereferencing somewhere downstream.
+func (noopConnector) Connect() (net.Conn, error) {
+	return nil, errors.New("noopConnector.Connect called: the physical dial moved off Open, so the watchdog is attached to the wrong method")
+}
+func (noopConnector) Close() error { return nil }

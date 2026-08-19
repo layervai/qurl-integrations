@@ -37,6 +37,22 @@ import (
 // present the SAME enrolled identity — a fresh temp dir would enroll a new one
 // and test nothing. A one-shot enrollment token cannot satisfy that (it burns
 // on the first start), so this test requires QURL_CLI_SANDBOX_CONNECTOR_STATE_DIR.
+const (
+	// firstStartBudget only has to reach admission, which took under two
+	// seconds against the live sandbox; the rest is slack for a slow knock.
+	firstStartBudget = 45 * time.Second
+	// restartBudget must exceed the production reconnectStallWindow (240s)
+	// so a stalled restart can be reported AND acted on inside this run.
+	// Deliberately a literal rather than an import of the constant: this is
+	// the live suite's own budget, and it should fail loudly if the window
+	// is retuned past it rather than silently stretch to match.
+	restartBudget = 300 * time.Second
+	// maxSilentGap is the longest run of wall-clock this test tolerates with
+	// no operator-facing line at all. Anchored to the ~10s redial re-knock
+	// cadence, not to the watchdog window.
+	maxSilentGap = 60 * time.Second
+)
+
 func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 	if os.Getenv("QURL_CLI_SANDBOX_CONNECTOR") != "enabled" {
 		t.Skip("SKIPPED LOUDLY: live sandbox Connector restart smoke is disarmed — QURL_CLI_SANDBOX_CONNECTOR != enabled. " +
@@ -67,26 +83,20 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// stopWhenAdmitted lets the first start end as soon as it has proved
-	// admission instead of burning its whole budget: the run only has to
-	// reach login_success, and waiting out the rest adds nothing but
-	// wall-clock to an already slow tagged suite.
-	serve := func(label string, budget time.Duration, stopWhenAdmitted bool) *runResult {
+	// Each start runs for a fixed budget and is then interrupted. Note there
+	// is deliberately no "stop as soon as admitted" shortcut: runCLI
+	// allocates and returns its own runResult, so a watcher goroutine here
+	// cannot observe the CLI's stderr while runCLI is still blocked, and an
+	// early-stop written that way silently never fires.
+	serve := func(label string, budget time.Duration) *runResult {
 		t.Helper()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		res := &runResult{}
 		go func() {
-			deadline := time.Now().Add(budget)
-			for time.Now().Before(deadline) {
-				if stopWhenAdmitted && strings.Contains(res.stderr.String(), "login_success") {
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
+			time.Sleep(budget)
 			cancel()
 		}()
-		res = runCLI(t, &runOpts{
+		res := runCLI(t, &runOpts{
 			ctx: ctx,
 			args: []string{
 				"--endpoint", os.Getenv("QURL_CLI_SANDBOX_ENDPOINT"), "connector", "run",
@@ -104,9 +114,9 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 
 	// First start: reach a real admission, then stop. This is the state the
 	// report starts from — a Connector that served and was then stopped.
-	first := serve("first start", 90*time.Second, true)
+	first := serve("first start", firstStartBudget)
 	if !strings.Contains(first.stderr.String(), "login_success") {
-		t.Fatalf("first start never reached tunnel admission in 45s; the sandbox is not in a testable state\nstderr: %s", first.stderr.String())
+		t.Fatalf("first start never reached tunnel admission in %s; the sandbox is not in a testable state\nstderr: %s", firstStartBudget, first.stderr.String())
 	}
 
 	// Second start, immediately: the reported defect. Budgeted past the
@@ -115,7 +125,7 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 	// harness. Deliberately not derived from the constant: this is the live
 	// suite's own budget, and it should fail loudly if the window is retuned
 	// past it rather than silently stretch.
-	second := serve("immediate restart", 300*time.Second, false)
+	second := serve("immediate restart", restartBudget)
 	stderr := second.stderr.String()
 
 	// Outcome 1 — it served. Nothing more to prove.
@@ -139,7 +149,7 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 		}
 	}
 	if !explained {
-		t.Fatalf("restart neither served nor explained itself in 150s — this is the reported defect: the operator sees only transport noise and no actionable event\nstderr: %s", stderr)
+		t.Fatalf("restart neither served nor explained itself in %s — this is the reported defect: the operator sees only transport noise and no actionable event\nstderr: %s", restartBudget, stderr)
 	}
 
 	// Bounded: a run that ends on its own must carry a real exit code, not
@@ -149,14 +159,17 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 		t.Fatalf("restart exit = %d, want 11 (retry budget) or 130 (canceled); an unbounded loop is the defect\nstderr: %s", second.code, stderr)
 	}
 
-	// And no gap BETWEEN operator-facing lines may exceed the watchdog
-	// window. This cannot see trailing silence — a run that emits one line
-	// and then goes quiet until the harness cancels leaves no second
+	// And no gap BETWEEN operator-facing lines may exceed maxSilentGap. That
+	// bound is the redial re-knock cadence, not the watchdog window: the
+	// refresher logs an ok/fail line per gated dial roughly every 10s, so a
+	// minute of total silence already means the Connector has stopped
+	// narrating. This cannot see trailing silence — a run that emits one
+	// line and then goes quiet until the harness cancels leaves no second
 	// timestamp to measure against. That shape is caught by the explained
 	// and exit-code checks above, which is why this is the last check and
 	// not the only one.
-	if gap, ok := longestSilentGap(stderr); ok && gap > 2*time.Minute {
-		t.Fatalf("restart went %s without any operator-facing line; the watchdog window is 90s\nstderr: %s", gap, stderr)
+	if gap, ok := longestSilentGap(stderr); ok && gap > maxSilentGap {
+		t.Fatalf("restart went %s without any operator-facing line, more than the %s this test allows\nstderr: %s", gap, maxSilentGap, stderr)
 	}
 }
 

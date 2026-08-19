@@ -1,11 +1,20 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
+	"time"
 )
+
+// errBudgetExitNotReached is returned on the unreachable path after t.Fatalf,
+// which stops the test goroutine before any caller can observe it. It exists
+// so the helper never returns a nil error beside a nil value.
+var errBudgetExitNotReached = errors.New("supervisor did not reach the budget exit")
 
 // runToBudgetExit drives a supervisor whose every cycle fails with runErr and
 // returns the terminal error, with the budget set to two so the exit lands on
@@ -22,13 +31,28 @@ func runToBudgetExit(t *testing.T, runErr error) (*fakeMarker, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	done := make(chan error, 1)
-	go func() { done <- sup.Run(context.Background()) }()
+	go func() { done <- sup.Run(runCtx) }()
 	waitForRunners(t, log, 1)
 	close(log.snapshot()[0].done)
 	waitForRunners(t, log, 2)
 	close(log.snapshot()[1].done)
-	return marker, <-done
+	// Bounded on purpose. If the shape under test stops counting against the
+	// budget, the supervisor never exits and a bare <-done would hang until
+	// the package-wide go-test timeout, reporting a goroutine dump instead of
+	// naming the assertion that broke.
+	select {
+	case err := <-done:
+		return marker, err
+	case <-time.After(10 * time.Second):
+		cancelRun()
+		closeAllRunners(log)
+		<-done
+		t.Fatalf("supervisor never reached the budget exit: this cycle shape is not counting against the unhealthy-knock budget")
+		return nil, errBudgetExitNotReached
+	}
 }
 
 // TestReconnectStallCountsAgainstBudget: a cycle the reconnect watchdog took
@@ -43,9 +67,60 @@ func TestReconnectStallCountsAgainstBudget(t *testing.T) {
 	if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, errReconnectStalled) {
 		t.Fatalf("Run = %v, want the budget exit wrapping the stalled reconnect", runErr)
 	}
+	// The exit's detail is what triage reads to learn the LAST cause without
+	// unwrapping. A summary naming the wrong shape would be worse than none,
+	// and errors.Is above cannot see it.
+	if got := runErr.Error(); !strings.Contains(got, "a stalled reconnect") {
+		t.Errorf("budget exit detail = %q, want it to name the stalled reconnect as the last cause", got)
+	}
+	if strings.Contains(runErr.Error(), "token-rejected") {
+		t.Errorf("budget exit detail names a token rejection for a stalled reconnect: %q", runErr.Error())
+	}
 	armed, _ := marker.snapshot()
 	if len(armed) != 1 {
 		t.Fatalf("armed episodes = %v, want exactly one", armed)
+	}
+}
+
+// TestReconnectStallBookingLineIsGreppable pins the supervisor's own line for
+// a stalled cycle. It is a different layer and a different event name from the
+// watchdog's detection line (reconnect_stalled), and it is the one that
+// carries the budget position — the number an operator needs to know how close
+// the Connector is to giving up. Nothing else asserts it.
+func TestReconnectStallBookingLineIsGreppable(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	log := &runnerLog{}
+	stalled := fmt.Errorf("%w: no tunnel session for 4m0s across 9 dial attempts", errReconnectStalled)
+	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("h.example:1")}}
+	cfg := testConfig(knocker, makeFactory(log, []error{stalled}))
+	cfg.MaxConsecutiveKnockFailures = 2
+	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, nil))
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(context.Background()) }()
+	waitForRunners(t, log, 1)
+	close(log.snapshot()[0].done)
+	waitForRunners(t, log, 2)
+	close(log.snapshot()[1].done)
+	<-done
+
+	out := buf.String()
+	for _, want := range []string{
+		`"event":"reconnect_stall_counted"`, // distinct from the watchdog's reconnect_stalled
+		`"consecutive_unhealthy_knocks":`,   // where the Connector is against the budget
+		`"max_failures":`,
+		"kept dropping",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("supervisor stall booking line is missing %q\nlog:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"event":"login_token_rejected"`) {
+		t.Errorf("a stalled reconnect was booked as a token rejection\nlog:\n%s", out)
 	}
 }
 
