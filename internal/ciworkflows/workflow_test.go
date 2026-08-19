@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -539,7 +540,7 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 }
 
 // TestAppWorkflowsRunOnStackedPRs pins the `on.pull_request.branches` filter of
-// every workflow that runs on pull requests.
+// each workflow that owns a required aggregate.
 //
 // A workflow filtered to `branches: [main]` does not merely skip a PR stacked on
 // a feature branch — GitHub never registers it, so its checks are absent from
@@ -549,18 +550,30 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 //
 // The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
 // discord.yml (#1179) — and each time a one-line revert would have undone it
-// with every check still green. This table is what notices. It records the
-// intended value per workflow rather than asserting "**" across the board,
-// because two workflows deliberately stay on main and a blanket assertion would
-// either fail on them or quietly bless whatever a future edit leaves behind.
+// with every check still green. This is what notices. It reads the intended
+// value off each spec rather than asserting "**" across the board, so that a
+// workflow which later earns a narrower filter records that decision here
+// instead of being quietly blessed by a blanket assertion.
 func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 	for i := range requiredWorkflowSpecs {
 		spec := &requiredWorkflowSpecs[i]
 		t.Run(spec.name, func(t *testing.T) {
+			// An unset field would otherwise mean "declare no filter at all"
+			// and fail further down with a message about the workflow rather
+			// than about the missing entry.
+			if len(spec.pullRequestBranches) == 0 {
+				t.Fatalf("%s has no intended pull_request branches filter recorded", spec.path)
+			}
 			assertPullRequestBranches(t, spec.path, spec.pullRequestBranches)
 		})
 	}
+}
 
+// TestOtherPullRequestWorkflowsRecordTheirBranchFilter does the same for the
+// workflows that own no aggregate. Two of them deliberately stay on main and
+// the rest are already unfiltered; recording both kinds is what makes either a
+// narrowing or an undocumented widening fail here rather than pass unnoticed.
+func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 	for i := range otherPullRequestWorkflows {
 		spec := &otherPullRequestWorkflows[i]
 		t.Run(strings.TrimSuffix(spec.path, ".yml"), func(t *testing.T) {
@@ -649,13 +662,8 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	if !declared {
 		t.Fatalf("%s pull_request declares no branches filter, want %v", path, want)
 	}
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("%s pull_request.branches = %v, want %v", path, got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("%s pull_request.branches = %v, want %v", path, got, want)
-		}
 	}
 }
 
