@@ -516,6 +516,11 @@ func (s *Supervisor) forceLoginFailExit(ctx context.Context, cycleCommon *v1.Cli
 // cycle, so a Connector that could knock but never serve retried forever
 // without ever reaching the budget exit or its customer message.
 func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutcome) error {
+	// Structurally true for any cycle that ran a runner at all: cycle()
+	// returns early on every path where applyKnockOverlay did not stamp a
+	// token, so a stalled reconnect — which by definition was admitted, and
+	// therefore dialed — always arrives here with this set. The guard exists
+	// for the failed-knock paths, which already counted themselves.
 	if !outcome.tokenStamped {
 		return nil
 	}

@@ -432,6 +432,16 @@ func (c *knockingConnector) Open() error {
 
 // Connect refreshes the knock first on transports whose physical dial happens
 // here, then dials through the underlying connector.
+//
+// WATCHDOG COUPLING: this branch is reached only when TCPMux is explicitly
+// disabled, and in that mode FRP dials once per WORK connection rather than
+// once per control redial. The reconnect watchdog counts every refresh as one
+// control redial, so under sustained traffic it would accumulate a storm on a
+// perfectly healthy tunnel and eventually force a false cycle restart. The
+// generated config never disables TCPMux — frpgen models no such field, so it
+// stays at FRP's default of on — and TestProductionConfigKeepsTheWatchdogOnTheOpenSeam
+// pins that. Anything that starts setting TCPMux=false must revisit
+// noteRedialLocked before it does.
 func (c *knockingConnector) Connect() (net.Conn, error) {
 	if !physicalDialInOpen(c.common) {
 		if err := c.refresher.refresh(c.ctx, c.common, "connect"); err != nil {
