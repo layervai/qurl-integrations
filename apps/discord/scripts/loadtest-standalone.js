@@ -455,6 +455,16 @@ function reclaimOnce(ledgerPath) {
   return reclaimInFlight;
 }
 
+// Test-only seam. The memo is process-global on purpose — one run, one sweep —
+// which also means a suite cannot exercise a second, independent sweep without
+// clearing it. No production path calls this; it exists so the memoization and
+// its rejection-clearing can be pinned rather than resting on a transcript.
+function resetReclaimStateForTests() {
+  reclaimInFlight = null;
+  stopping = false;
+  inFlightCreates = 0;
+}
+
 // Which ledger a signal should sweep: this run's own, or the one named by
 // --reclaim while that recovery mode is running.
 let activeLedgerPath = LEDGER_PATH;
@@ -1046,6 +1056,8 @@ module.exports = {
   pruneLedger,
   ledgerEndpoints,
   reclaim,
+  reclaimOnce,
+  resetReclaimStateForTests,
   parseReclaimArg,
   trackCreate,
   recordResource,

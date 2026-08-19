@@ -31,6 +31,7 @@ const config = require('../src/config');
 const {
   LEDGER_PATH,
   readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
+  reclaimOnce, resetReclaimStateForTests,
 } = require('../scripts/loadtest-standalone');
 
 let created = [];
@@ -126,6 +127,33 @@ describe('pruneLedger', () => {
     expect(JSON.parse(fs.readFileSync(ledger, 'utf8').trim())).toEqual({
       resource_id: 'r_1', kind: 'location', endpoint: 'https://sandbox.example',
     });
+  });
+});
+
+describe('reclaimOnce', () => {
+  beforeEach(() => resetReclaimStateForTests());
+  afterAll(() => resetReclaimStateForTests());
+
+  it('shares one sweep between concurrent callers instead of racing them', async () => {
+    // The guarantee the memoization exists for: a Ctrl-C landing during the
+    // end-of-run sweep must join it, not start a competitor that doubles the
+    // delete rate and then exits out from under the first.
+    const ledger = tempLedger(line('r_1'));
+    const [first, second] = await Promise.all([reclaimOnce(ledger), reclaimOnce(ledger)]);
+    expect(deleteLink).toHaveBeenCalledTimes(1);
+    expect(first).toBe(second);
+  });
+
+  it('clears the memo on rejection so the error path can genuinely retry', async () => {
+    // Without clearing, main().catch's fallback re-awaits the same rejected
+    // promise — reading as a retry while structurally unable to retry.
+    const ledger = tempLedger(line('r_1'));
+    const spy = jest.spyOn(fs, 'readFileSync').mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    await expect(reclaimOnce(ledger)).rejects.toThrow('boom');
+    spy.mockRestore();
+    await expect(reclaimOnce(ledger)).resolves.toMatchObject({ revoked: 1, failed: 0 });
   });
 });
 
