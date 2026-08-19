@@ -626,12 +626,6 @@ func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 // identically, so that workflow narrowing to [main] would now leave every
 // stacked PR waiting on a required check that never registers.
 func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	recorded := make(map[string]bool, len(requiredWorkflowSpecs)+len(otherPullRequestWorkflows))
 	for i := range requiredWorkflowSpecs {
 		recorded[requiredWorkflowSpecs[i].path] = true
@@ -645,11 +639,7 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	}
 
 	seen := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		triggers := parseWorkflowTriggers(t, readWorkflow(t, name).On)
 		runsOnPullRequests := false
 		for _, trigger := range pullRequestTriggers {
