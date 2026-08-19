@@ -131,15 +131,10 @@ http {
             # Honor object Cache-Control/Expires for TTL; ignore Set-Cookie/Vary.
             proxy_ignore_headers Set-Cookie Vary;
 
-            # Strip the headers that identify the origin's internals. S3 stamps
-            # x-amz-request-id/x-amz-id-2 on every response and adds the
-            # encryption/version pair to object hits; Envoy adds its timing
-            # header. None are part of the static-origin contract, and together
-            # they fingerprint the viewer's site as S3 behind an Envoy signer.
-            proxy_hide_header x-amz-request-id;
-            proxy_hide_header x-amz-id-2;
-            proxy_hide_header x-amz-server-side-encryption;
-            proxy_hide_header x-amz-version-id;
+            # Envoy strips the complete x-amz-* response namespace before this
+            # cache boundary. Strip Envoy's timing header here too; neither is
+            # part of the static-origin contract, and together they fingerprint
+            # the viewer's site as S3 behind an Envoy signer.
             proxy_hide_header x-envoy-upstream-service-time;
 
             # Never leak S3 responses — bodies, headers, or the 403/404
@@ -155,9 +150,10 @@ http {
             # Every omission is a response nginx generates itself, never one
             # derived from upstream: 304 (conditional/revalidation; no body, and
             # proxy_cache_revalidate needs it), 416 (the viewer's Range never
-            # reaches S3, so only nginx's range filter can raise it), 499
-            # (rejected by error_page), and the 405 method guard above, which
-            # returns a body and so answers without consulting error_page.
+            # reaches S3, so only nginx's range filter can raise it), and 499
+            # (rejected by error_page). Upstream 405 is deliberately listed;
+            # the local 405 method guard above returns its own body without
+            # consulting error_page.
             proxy_intercept_errors on;
             error_page
                 300 301 302 303 305 306 307 308 309 310 311 312 313 314 315

@@ -135,8 +135,13 @@ class Handler(BaseHTTPRequestHandler):
         # its own 304, which the status-intercept list must keep working.
         self._send(200, body, ctype=ctype, cache=cache, head_only=head_only,
                    extra={"Last-Modified": "Wed, 21 Oct 2026 07:28:00 GMT",
-                          "x-amz-server-side-encryption": "AES256",
-                          "x-amz-version-id": "3HL4kqtJlcpXroDTDmjVBH40Nrjfkd"})
+                          "x-amz-meta-internal-project": "private-site",
+                          "x-amz-server-side-encryption": "aws:kms",
+                          "x-amz-server-side-encryption-aws-kms-key-id":
+                              "arn:aws:kms:us-east-1:123456789012:key/stub-key",
+                          "x-amz-version-id": "3HL4kqtJlcpXroDTDmjVBH40Nrjfkd",
+                          "x-amz-website-redirect-location":
+                              "/internal-destination"})
 
     def do_GET(self):
         self._serve(head_only=False)

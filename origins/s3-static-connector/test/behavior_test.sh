@@ -358,13 +358,16 @@ if [ "$waive_security_contract" != "true" ]; then
   # they are explicitly hidden.
   fetch "$base/metrics.json"
   expect_eq "object hit forwards unhidden upstream headers" "$(hval X-Stub-Path)" "/metrics.json"
-  for header in x-amz-request-id x-amz-id-2 x-amz-server-side-encryption \
-                x-amz-version-id x-envoy-upstream-service-time; do
+  for header in x-amz-request-id x-amz-id-2 x-amz-meta-internal-project \
+                x-amz-server-side-encryption \
+                x-amz-server-side-encryption-aws-kms-key-id x-amz-version-id \
+                x-amz-website-redirect-location \
+                x-envoy-upstream-service-time; do
     expect_eq "object hit hides $header" "$(hval "$header")" ""
   done
 
-  # The method guard answers with its own body, which is what keeps it out of
-  # the intercept list; masking it to 404 would hide the 405 contract.
+  # The method guard answers with its own body without consulting error_page;
+  # upstream 405 remains in the intercept list and is masked to 404.
   fetch -X POST "$base/"
   expect_eq "POST / body is the origin's own text" "$(cat "$B")" "Method Not Allowed"
 fi

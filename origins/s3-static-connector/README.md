@@ -140,19 +140,21 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 
 Only a `2xx` object hit reaches the viewer. Every other upstream status is
 intercepted, so a status S3 starts returning in future is masked by default
-rather than passed through. The exceptions are responses nginx produces itself:
-the `405` method guard, `304` for a viewer's conditional GET, and `416` for an
-unsatisfiable range.
+rather than passed through. Upstream `405` is included in that mapping; nginx's
+local method guard returns its own `405` body without consulting the upstream
+error mapping. The other exceptions are responses nginx produces itself: `304`
+for a viewer's conditional GET and `416` for an unsatisfiable range.
 
-S3 response bodies and headers, and the 403-vs-404 distinction, are never leaked
-to clients; the distinction is preserved in the access log for alarming. The
-`x-amz-*` headers S3 attaches (including `x-amz-request-id`, `x-amz-id-2`,
-`x-amz-server-side-encryption`, and `x-amz-version-id`) and Envoy's
-`x-envoy-upstream-service-time` are stripped, so a viewer cannot fingerprint the
-site as S3 behind a SigV4 signer. Production deployments must wire the
-SigV4-denied alarm on `upstream_status:403` before relying on this image,
-because a signing or IAM failure intentionally looks like a normal 404 to
-viewers.
+S3 error bodies, `x-amz-*` response headers, and the 403-vs-404 distinction are
+never leaked to clients; the distinction is preserved in the access log for
+alarming. Envoy strips the complete `x-amz-*` namespace, including user-defined
+`x-amz-meta-*` values, KMS key IDs, and website redirect metadata, while nginx
+strips Envoy's `x-envoy-upstream-service-time`. Standard HTTP object metadata
+such as `Content-Type`, `Cache-Control`, `Content-Encoding`, `ETag`,
+`Last-Modified`, `Expires`, and range headers still passes through. Production
+deployments must wire the SigV4-denied alarm on `upstream_status:403` before
+relying on this image, because a signing or IAM failure intentionally looks like
+a normal 404 to viewers.
 
 Range serving is intended for uncompressed objects. nginx gzip takes precedence
 for compressible content types such as CSS, JS, JSON, SVG, and XML, so text
