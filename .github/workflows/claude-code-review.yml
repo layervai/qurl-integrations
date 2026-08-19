@@ -8,6 +8,15 @@ on:
     # Primary engineering review happens while the PR is draft. Spend the
     # terminal Claude pass only when the author declares the candidate ready;
     # later ready-head updates still retrigger through synchronize.
+    #
+    # `converted_to_draft` is deliberately absent, and adding it "for
+    # completeness" would reopen the hole this workflow was restructured to
+    # close. Converting a reviewed pull request to draft would retrigger the
+    # job, the eligibility step would classify it `draft`, and the exemption
+    # pass would replace a completed review on the same head SHA — a green
+    # `claude-review` attesting nothing, reached from the other direction. A
+    # draft that is never converted back cannot merge anyway, so there is
+    # nothing to gain and a review to lose.
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
