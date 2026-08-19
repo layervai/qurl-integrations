@@ -635,9 +635,10 @@ func claudeReviewStepScript(t *testing.T, name string) string {
 func claudeReviewStep(t *testing.T, job *githubJob, name string) step {
 	t.Helper()
 
-	for _, candidate := range job.Steps {
+	for i := range job.Steps {
+		candidate := &job.Steps[i]
 		if candidate.Name == name {
-			return candidate
+			return *candidate
 		}
 	}
 	t.Fatalf("%s job is missing the %q step", claudeReviewJobID, name)
