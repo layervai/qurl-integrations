@@ -1,14 +1,15 @@
 package supervisor
 
 import (
-	"context"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
 	frpclient "github.com/fatedier/frp/client"
+	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/policy/security"
 )
 
 // forkDialAcceptWait bounds how long a dial-detecting assertion waits. The
@@ -37,14 +38,17 @@ type dialProbe struct {
 //
 // Teardown is registered ONCE, before the accept goroutine starts, and owns
 // both the listener and every connection accepted through it. Keep it that
-// way: t.Cleanup panics if called after the test has completed, so the accept
-// goroutine must never register one. Per-connection cleanup from inside the
-// loop would survive only on the LIFO ordering that happens to close the
-// listener last, which is not an invariant this file should depend on.
+// way. Registering per-connection cleanups from inside the accept loop works
+// only under the LIFO ordering that happens to close the listener last, and
+// the failure when that ordering changes is silent rather than loud:
+// testing.(*common).Cleanup appends to a slice with no completed-test check
+// (it panics only inside a fuzz target), so a registration that lands after
+// runCleanup has drained is simply never run and the connection leaks to the
+// end of the process.
 func newDialProbe(t *testing.T) *dialProbe {
 	t.Helper()
 	var lc net.ListenConfig
-	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen on loopback: %v", err)
 	}
@@ -114,10 +118,18 @@ func (p *dialProbe) quiet(t *testing.T, what string) {
 
 // forkDialCommon returns a production-shaped common config aimed at the
 // probe, Complete()d so every field except the one under test carries its
-// real default. TLS is then forced off: the fork's realConnect would
-// otherwise start a handshake the bare listener never answers, and this test
-// asserts on the TCP accept that precedes it either way — off keeps the
-// connection from being left mid-handshake.
+// real default, then pinned to the two defaults that would otherwise send the
+// dial somewhere other than the probe:
+//
+//   - TLS off. The fork's realConnect would start a handshake the bare
+//     listener never answers. This test asserts on the TCP accept that
+//     precedes it either way; off just avoids leaving a connection
+//     mid-handshake.
+//   - ProxyURL cleared. Complete seeds it from the http_proxy ENVIRONMENT
+//     VARIABLE, and realConnect hands that to libnet.WithProxy — so on any
+//     machine or runner with http_proxy exported, every dial below goes to
+//     the proxy instead of the probe and both subtests fail. Nothing in frp
+//     or golib consults no_proxy, so even a correctly scoped proxy breaks it.
 func forkDialCommon(t *testing.T, p *dialProbe) *v1.ClientCommonConfig {
 	t.Helper()
 	common := commonForTest()
@@ -127,6 +139,7 @@ func forkDialCommon(t *testing.T, p *dialProbe) *v1.ClientCommonConfig {
 	common.ServerAddr, common.ServerPort = p.addr, p.port
 	off := false
 	common.Transport.TLS.Enable = &off
+	common.Transport.ProxyURL = ""
 	return common
 }
 
@@ -146,6 +159,11 @@ func forkDialCommon(t *testing.T, p *dialProbe) *v1.ClientCommonConfig {
 func TestForkDialsFromConnectWithoutTCPMux(t *testing.T) {
 	t.Parallel()
 
+	// The connectors below take t.Context(), not context.Background():
+	// it is canceled just before the cleanups run, so the fork's dial path
+	// gets a stop signal that does not depend on Close() being the only
+	// thing a future fork version listens to.
+	//
 	// Control first: with TCPMux on, Open owns the dial. Without this the
 	// no-dial assertion below would also pass against a probe that simply
 	// cannot observe dials.
@@ -156,7 +174,7 @@ func TestForkDialsFromConnectWithoutTCPMux(t *testing.T) {
 		on := true
 		common.Transport.TCPMux = &on
 
-		connector := frpclient.NewConnector(context.Background(), common)
+		connector := frpclient.NewConnector(t.Context(), common)
 		t.Cleanup(func() { _ = connector.Close() })
 		if err := connector.Open(); err != nil {
 			t.Fatalf("Open with TCPMux enabled: %v", err)
@@ -175,7 +193,7 @@ func TestForkDialsFromConnectWithoutTCPMux(t *testing.T) {
 		common := forkDialCommon(t, probe)
 		common.Transport.TCPMux = nil
 
-		connector := frpclient.NewConnector(context.Background(), common)
+		connector := frpclient.NewConnector(t.Context(), common)
 		t.Cleanup(func() { _ = connector.Close() })
 		if err := connector.Open(); err != nil {
 			t.Fatalf("Open with unset TCPMux: %v", err)
@@ -216,5 +234,57 @@ func TestForkTCPMuxCompletionDefault(t *testing.T) {
 	}
 	if !physicalDialInOpen(common) {
 		t.Fatal("a Complete()d config must dial from Open")
+	}
+}
+
+// TestForkServiceCompletesTheCommonConfigInPlace pins the guarantee that
+// actually protects production, and which nothing else in this repo pins.
+//
+// physicalDialInOpen's nil-TCPMux case reads like a live hazard for any
+// caller that hands supervisor.New an uncompleted config. It is not, and the
+// reason is inside the fork: frpclient.NewService runs
+// setServiceOptionsDefault -> options.Common.Complete() BEFORE it builds
+// anything, mutating the caller's config through the same pointer it then
+// stores as svr.common, hands to controlSessionDialer, and finally passes to
+// the ConnectorCreator. So the knockingConnector this package installs is
+// always handed an already-completed config — TCPMux non-nil — no matter what
+// reached supervisor.New.
+//
+// That makes the fork the load-bearing guard, so a fork bump that dropped the
+// Complete call would silently remove it while every comment in this package
+// still pointed at cmd/connector.go. This test is what fails instead.
+func TestForkServiceCompletesTheCommonConfigInPlace(t *testing.T) {
+	t.Parallel()
+	common := commonForTest()
+	if common.Transport.TCPMux != nil {
+		t.Fatal("premise gone: commonForTest is already completed")
+	}
+
+	cfgSource := source.NewConfigSource()
+	if err := cfgSource.ReplaceAll(nil, nil); err != nil {
+		t.Fatalf("seed an empty proxy source: %v", err)
+	}
+	// The error is deliberately ignored: setServiceOptionsDefault is the very
+	// first thing NewService does, so the completion under test has already
+	// happened whether or not the rest of construction succeeds. Asserting on
+	// the mutation rather than on a successful build keeps this test pinned to
+	// the one behavior it is about.
+	_, _ = frpclient.NewService(frpclient.ServiceOptions{
+		Common:                 common,
+		ConfigSourceAggregator: source.NewAggregator(cfgSource),
+		UnsafeFeatures:         &security.UnsafeFeatures{},
+		ConnectorCreator:       newKnockingConnectorCreator(nil),
+	})
+
+	if common.Transport.TCPMux == nil {
+		t.Fatal("NewService left TCPMux nil: the fork no longer completes the caller's config, " +
+			"so an uncompleted config now reaches knockingConnector and the dial-seam comments in " +
+			"refresher.go and supervisor.go are no longer true")
+	}
+	if !*common.Transport.TCPMux {
+		t.Fatalf("NewService completed TCPMux to %v, want true", *common.Transport.TCPMux)
+	}
+	if !physicalDialInOpen(common) {
+		t.Fatal("a config completed by NewService must dial from Open")
 	}
 }

@@ -126,15 +126,21 @@ type Config struct {
 	// caller. The supervisor treats it as READ-ONLY and overlays a per-cycle
 	// copy with each knock's token and dial target.
 	//
-	// Complete()ing it is the caller's contract, and New cannot check it —
-	// v1.ClientCommonConfig carries no "completed" bit, and the fields it
-	// fills are indistinguishable from ones a caller set by hand. The
-	// connector command satisfies it (cmd/connector.go calls common.Complete
-	// before New); anything else must too. The load-bearing field is
-	// Transport.TCPMux, which Complete defaults to true: left nil it selects
-	// the Connect dial seam (see physicalDialInOpen), which moves the redial
-	// re-knock and puts the reconnect watchdog on a per-work-connection
-	// counter it is not sized for.
+	// Complete()ing it is the caller's contract. New does not enforce it:
+	// v1.ClientCommonConfig carries no "completed" bit, and for the
+	// value-typed fields a filled default is indistinguishable from one a
+	// caller set by hand, so any check would be a guess about intent. The
+	// connector command satisfies it at cmd/connector.go before New.
+	//
+	// The field that matters for this package is Transport.TCPMux, which
+	// Complete defaults to true; left nil it names the Connect dial seam (see
+	// physicalDialInOpen), which is where the reconnect watchdog would sit on
+	// a per-work-connection counter it is not sized for. That is a latent
+	// concern rather than a live one, because frpclient.NewService completes
+	// the config again in place before the connector seam ever reads it
+	// (TestForkServiceCompletesTheCommonConfigInPlace) — so an uncompleted
+	// config handed to New still dials from Open today. Complete anyway: that
+	// second completion belongs to the pinned fork, not to this package.
 	Common *v1.ClientCommonConfig
 
 	// Knocker performs the per-cycle NHP knock. Required. When it also
