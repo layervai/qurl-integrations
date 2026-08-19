@@ -1037,6 +1037,12 @@ var defaultPullRequestTypes = []string{"opened", "synchronize", "reopened"}
 // line behind the exact comparisons above; narrowPullRequestWorkflows is the
 // table-side equivalent for `branches:`.
 //
+// Reading the tree means it inherits pullRequestFilter's refusal of the
+// inverted spellings, so a `paths-ignore` anywhere in .github/workflows fails
+// here rather than being weighed. That is the intended contract — the tables
+// have no way to record one — and it costs nothing in reach, since every
+// pull-request workflow must carry a table entry regardless.
+//
 // Any declared `paths:` counts, with no "**" escape of the kind
 // isNarrowBranchFilter grants a branch filter. The two are not symmetric: a
 // base branch always exists to be matched, so `branches: ["**"]` genuinely
@@ -1206,10 +1212,19 @@ func pullRequestFilter(t *testing.T, path, trigger string, pullRequest any, key 
 	// one forces the decision into the table. Checked before the positive
 	// spelling and independently of it: GitHub rejects the two together, but
 	// this should not be the thing that assumes so.
+	//
+	// This refusal is reached from narrowPullRequestTriggerReason's scan of the
+	// tree as well as from the exact comparisons, so it fires for a workflow
+	// carrying no table entry too. That is not a wider net than the tabled one:
+	// TestEveryPullRequestWorkflowRecordsItsBranchFilter already requires an
+	// entry for every workflow with a pull-request trigger, so the two sets are
+	// the same. It does mean the message has to name the remedy for either
+	// caller, which is why it offers both.
 	if key.ignoreName != "" {
 		if _, ok := config[key.ignoreName]; ok {
-			t.Fatalf("%s %s declares %s, which these tables cannot record; "+
-				"extend pullRequestTriggerSpec to express it before using it", path, trigger, key.ignoreName)
+			t.Fatalf("%s %s declares %s, which these tables cannot record; extend pullRequestTriggerSpec "+
+				"to express it, or narrow inside the job as the nine aggregates do — a workflow reporting "+
+				"a required context has no survivable spelling of it", path, trigger, key.ignoreName)
 		}
 	}
 
