@@ -163,11 +163,12 @@ describe('errorTallyLines — failures are deduped by message, not by count', ()
 });
 
 describe('readArg — both flag spellings, so neither falls through silently', () => {
-  // The equals form used to miss entirely and hand back the default. Harmless
-  // for --count, whose value shows up in the very next line of output; not
-  // harmless for --max-fail-rate, which decides the exit code, so an operator
-  // waiving the check with `=100` would have been failed by the strict
-  // default two hours later.
+  // The equals form used to miss entirely and hand back the default.
+  // --max-fail-rate forced the fix, since it decides the exit code: an
+  // operator waiving the check with `=100` would have been failed by the
+  // strict default two hours later. Every value-taking flag reads through
+  // here now — a rule that held for only some of them is one an operator
+  // could not rely on for any.
   it('reads the equals form', () => {
     expect(readArg(['--max-fail-rate=100'], 'max-fail-rate', '10')).toBe('100');
   });
@@ -191,9 +192,10 @@ describe('readArg — both flag spellings, so neither falls through silently', (
 });
 
 describe('argValueMissing — a decision-carrying flag rejects a missing value', () => {
-  // readArg hands back the default for both of these, which is fine for a flag
-  // whose value shows up in the next line of output and not for the one that
-  // decides the exit code.
+  // readArg collapses "flag absent" and "flag present with nothing usable
+  // after it" onto the same default, so this predicate is what splits the
+  // second case off — for --max-fail-rate, which decides the exit code, and
+  // for the numeric flags via resolveNumericArgs.
   it.each([
     ['the flag is the last token', ['--count', '20', '--max-fail-rate']],
     ['the equals form has no value', ['--max-fail-rate=']],
@@ -449,8 +451,14 @@ describe('runReport — the summary and the exit code', () => {
     );
   });
 
-  // Rounds ran, nothing was attempted (--count 0). Both rates are 0/0, so
-  // without this the run reads as clean while having measured nothing.
+  // Rounds ran, nothing was attempted. Both rates are 0/0, so without this
+  // the run reads as clean while having measured nothing.
+  //
+  // Defensive rather than live since #1171 merged in — `--count 0` was the
+  // way in and parsePositiveInt refuses zero at preflight now. Kept, and
+  // exercised through runReport directly, because the guarantee it rests on
+  // lives in a different function: the branch has to survive that one
+  // changing. See the reachability note in runReport.
   it('fails a run that attempted no qURL, and does not call it a failure', () => {
     const result = report([round({ uploadMs: 200, totalMs: 300 })]);
     expect(result.failed).toBe(true);
