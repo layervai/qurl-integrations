@@ -254,6 +254,17 @@ every context in it resolves to a job this repo actually defines — a job's
 `requiredWorkflowSpecs` and README.md exactly. A typo, a case slip, or a job
 rename that orphans a documented context fails `Workflow Contract` at PR time.
 
+This block also bounds which workflows may narrow their `branches:`. A workflow
+reporting a context listed here must run on PRs stacked on a feature branch
+too: `main`'s protection does not reach such a PR, so its checks are absent
+rather than pending, and the PR reads green having run none of them.
+`internal/ciworkflows` records each pull-request workflow's intended filter and
+reads this block to tell which of them gate merges, so one recorded as
+deliberately narrow fails `Workflow Contract` the moment it starts gating. The
+nine aggregate workflows are pinned against their own recorded filter instead —
+narrowing one is an edit to `requiredWorkflowSpecs`, which a reviewer has to
+catch (#1183).
+
 The four `age-check / *` contexts are the one partial exception. Only their
 caller half — the `age-check` job in each `dependency-age-check-*.yml` — is
 defined here; the inner half is a job in the reusable workflow upstream. So a
