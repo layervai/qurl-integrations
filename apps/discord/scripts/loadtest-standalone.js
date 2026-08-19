@@ -78,9 +78,80 @@ function getArg(name, defaultVal) {
 }
 const hasFlag = (name) => args.includes(`--${name}`);
 
-const COUNT = parseInt(getArg('count', '100'));
-const DURATION_S = parseInt(getArg('duration', '7200'));
-const INTERVAL_S = parseInt(getArg('interval', '60'));
+// Numeric flags are validated, not merely parsed. `parseInt` fails silently
+// in three directions here: a non-numeric value gives NaN, a negative one is
+// returned intact, and with no radix '0x64' reads as 100 while '1e9'
+// truncates to 1. NaN and negatives converge on the worst outcome — every
+// loop a round runs is bounded by COUNT, the file leg's `i += 10` batches and
+// the location leg's `i++` alike, so none of them enter. The run then holds
+// the target for its whole DURATION_S window issuing zero requests and prints
+// "Total links minted: 0" as though that were a measurement.
+//
+// The value is the next argv token verbatim, so a flag typed without its
+// value ('--count --location') arrives here as '--location' — while also
+// turning the location leg on. Matching the whole string against digits
+// refuses that, rather than parsing its leading characters.
+//
+// Kept pure so the suite can cover it: the loops it protects live in
+// runRound, which no test can reach — it is not exported and its only caller
+// is behind `require.main === module`.
+function parsePositiveInt(flag, raw) {
+  const text = String(raw);
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    // Quotes the value as given, not the trimmed one, so '' and '  ' are
+    // visible as themselves rather than as a message that looks truncated.
+    return { error: `--${flag} must be a positive whole number, got ${JSON.stringify(text)}` };
+  }
+  const value = Number(trimmed);
+  if (value === 0) return { error: `--${flag} must be greater than zero` };
+  // Past 2^53 the parse stops being exact, so the number the loops would run
+  // on is not the number echoed back to the operator. This bounds the parse,
+  // not the workload — a count that is exactly representable can still be far
+  // more than DURATION_S has room for.
+  if (!Number.isSafeInteger(value)) return { error: `--${flag} is too large to be exact: ${trimmed}` };
+  return { value };
+}
+
+// Resolve all three numeric flags from an argv array. Pure and taking argv as
+// a parameter, following resolveGuardInputs above, so the suite covers the
+// wiring and not merely the parser: the constants below are the actual
+// regression surface, and a call site quietly reverted to `parseInt` would
+// leave a green parsePositiveInt behind it.
+//
+// Reads argv directly rather than through getArg, which cannot express the
+// case that matters here. getArg collapses "flag absent" and "flag present
+// with nothing usable after it" onto the same default — so `--count` as the
+// final token, and `--count ""`, both run 100 recipients while the operator
+// believes they asked for something else. Separating those is the whole point
+// of the flag being present.
+function resolveNumericArgs(argv) {
+  const errors = [];
+  const read = (flag, defaultValue) => {
+    const idx = argv.indexOf(`--${flag}`);
+    if (idx === -1) return defaultValue;
+    const raw = argv[idx + 1];
+    if (raw === undefined) {
+      errors.push(`--${flag} was given no value (omit it to use the default of ${defaultValue})`);
+      return NaN;
+    }
+    const { value, error } = parsePositiveInt(flag, raw);
+    if (error) {
+      errors.push(error);
+      return NaN;
+    }
+    return value;
+  };
+  // Collected rather than thrown: this runs at module load, which the suite
+  // reaches through require(), so the exit belongs in main() alongside every
+  // other fatal. Collecting also names every bad flag in one pass instead of
+  // one per re-run.
+  return { count: read('count', 100), durationS: read('duration', 7200), intervalS: read('interval', 60), errors };
+}
+
+const {
+  count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S, errors: numericArgErrors,
+} = resolveNumericArgs(args);
 const FILE_PATH = getArg('file', null);
 const INCLUDE_LOCATION = hasFlag('location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
@@ -421,22 +492,40 @@ async function runRound(roundNum) {
   if (FILE_PATH || !INCLUDE_LOCATION) {
     const filePath = FILE_PATH || await generateTestFile();
     const fileBuffer = fs.readFileSync(filePath);
-    const blob = new Blob([fileBuffer], { type: 'application/octet-stream' });
 
-    // Upload via fetch to connector (simulating what the bot does)
+    // Upload through the bot's own connector client rather than a hand-rolled
+    // fetch. The copy this replaced put the same multipart body on the wire
+    // but kept none of the guards around it, and each absence bites hardest
+    // in exactly this script:
+    //
+    //   - no `signal`, so a connector that accepts the connection and then
+    //     stalls hangs the round forever, with nothing in a run designed to
+    //     be left alone for two hours to notice.
+    //   - no `success` check.
+    //   - no `resource_id` check, so a 200 carrying no id fed `undefined`
+    //     into mintLinks and every batch threw `Invalid resource ID format:
+    //     undefined` — reporting 100% MINT failure for what was an upload
+    //     fault. That is the same misdirected blame #1168 removed from the
+    //     mint call just below.
+    //
+    // reUploadBuffer despite the name: the "re-" only distinguishes it from
+    // the sibling that first downloads from Discord CDN, and registering an
+    // in-memory buffer as a fresh resource is precisely what this needs. Its
+    // two trailing parameters are deliberately omitted — apiKey falls back to
+    // config.QURL_API_KEY, which is what the hand-rolled header read, and
+    // appendViewerTtl drops viewerTtlSeconds unless it is positive-finite, so
+    // leaving it off sends the same single `file` part, under the same
+    // filename and content type, that the hand-rolled form did. What is new
+    // is the timeout and the two response checks.
+    // Hoisted: the re-upload leg below registers each fresh resource under
+    // the same filename, so a round's resources are one named series.
     const uploadName = `loadtest-round${roundNum}.bin`;
     const uploadStart = performance.now();
-    const form = new FormData();
-    form.append('file', blob, uploadName);
-
-    const headers = {};
-    if (config.QURL_API_KEY) headers['Authorization'] = `Bearer ${config.QURL_API_KEY}`;
-
-    const uploadResp = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
-      method: 'POST', body: form, headers,
-    });
-    if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
-    const uploadResult = await uploadResp.json();
+    const uploadResult = await reUploadBuffer(
+      fileBuffer,
+      uploadName,
+      'application/octet-stream',
+    );
     results.uploadMs = performance.now() - uploadStart;
 
     // Mint a pool at a time, re-uploading once each pool drains — the shape a
@@ -507,6 +596,14 @@ async function runRound(roundNum) {
 
 async function main() {
   // Preflight checks
+  //
+  // Numeric flags first: the check needs no config, no network and no target
+  // guard, and an unvalidated one is the only fault here that reaches the end
+  // of a full run and exits 0 having done nothing at all.
+  if (numericArgErrors.length > 0) {
+    for (const message of numericArgErrors) console.error(`FATAL: ${message}`);
+    process.exit(1);
+  }
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
   // Refuse any target not positively recognized as non-production. See the
   // "Target safety guard" section above for why this is an allowlist.
@@ -615,8 +712,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  // CLI argument validation
+  parsePositiveInt,
+  resolveNumericArgs,
+  // Mint batching / token pool
   planMintBatches,
   TOKENS_PER_RESOURCE,
+  // Target safety guard
   resolveGuardInputs,
   targetGuardReport,
   VERDICT_LABEL,
