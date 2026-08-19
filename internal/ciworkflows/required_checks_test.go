@@ -55,8 +55,7 @@ const (
 	mergeQueuePostureNone   = "none"
 	mergeQueuePostureQueued = "required"
 	// The job id, which is also the required context: that job sets no `name:`.
-	claudeReviewContext          = "claude-review"
-	pullRequestContextExpression = "github.event.pull_request"
+	claudeReviewContext = "claude-review"
 	// How GitHub renders a required context that no job ever reports, in the
 	// merge box. It is not a failure state, which is why every assertion in
 	// this file exists. Quoted into failure messages only — nothing compares it
@@ -434,8 +433,8 @@ func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 			waitingForStatus, "Merge-result checks", contributingPath)
 
 	case posture == mergeQueuePostureNone && len(handling) > 0:
-		t.Errorf("%s declares merge-queue posture %q, but every required-context workflow declares %s (%s).\nEnable a queue by flipping the marker in the same change — after confirming %s can report on the event at all, since it is pull_request_target-only and its job gate reads %s, which a merge group does not carry.",
-			contributingPath, posture, mergeGroupTrigger, strings.Join(handling, ", "), claudeCodeReviewWorkflow, pullRequestContextExpression)
+		t.Errorf("%s declares merge-queue posture %q, but every required-context workflow declares %s (%s).\nEnable a queue by flipping the marker in the same change — after confirming %s can report on the event at all, since it is pull_request_target-only and declares no %s trigger of its own.",
+			contributingPath, posture, mergeGroupTrigger, strings.Join(handling, ", "), claudeCodeReviewWorkflow, mergeGroupTrigger)
 
 	case posture == mergeQueuePostureQueued && len(ignoring) > 0:
 		// The mirror image, and the one that actually strands a queue: the
@@ -464,16 +463,31 @@ func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 	// Everything above rests on claude-review being *unable* to report on a
 	// merge group, which is what makes `none` the only available posture today
 	// rather than a preference. Pin the mechanism rather than just asserting
-	// it: the job's own gate reads pull-request context, which a merge group
-	// does not carry. If that stops being true the rationale needs rewriting
-	// before anyone acts on it — and nothing else in this repo would notice.
-	claudeReview, ok := readWorkflow(t, claudeCodeReviewWorkflow).Jobs[claudeReviewContext]
-	if !ok {
+	// it: the workflow declares no merge_group trigger, so a queue entry never
+	// starts the job at all. If that stops being true the rationale needs
+	// rewriting before anyone acts on it — and nothing else in this repo would
+	// notice.
+	//
+	// This pinned the job's own `if:` reading pull-request context until #1188
+	// moved that decision into the job's first step, so the job could report on
+	// every pull request rather than skipping into a satisfied required check.
+	// The property survived; its mechanism moved, and the two pull requests
+	// landed minutes apart without either noticing. The trigger is the more
+	// durable place to pin it: a job guard can be relaxed a condition at a
+	// time, while declaring merge_group is one deliberate edit.
+	if _, ok := readWorkflow(t, claudeCodeReviewWorkflow).Jobs[claudeReviewContext]; !ok {
 		t.Fatalf("%s has no %q job, but %q is a required context", claudeCodeReviewWorkflow, claudeReviewContext, claudeReviewContext)
 	}
-	if !strings.Contains(claudeReview.If, pullRequestContextExpression) {
-		t.Errorf("%s's %q job no longer gates on %s (if = %q).\nThe merge-group rationale documented on this test assumes it cannot run without pull-request context; recheck that before trusting it.",
-			claudeCodeReviewWorkflow, claudeReviewContext, pullRequestContextExpression, claudeReview.If)
+	// Read through the scan rather than re-parsing, so a workflow the scan
+	// cannot see fails here instead of reporting "declares no merge_group" —
+	// which is what a vacuous pass would look like.
+	declaresMergeGroup, scanned := onMergeGroup[claudeCodeReviewWorkflow]
+	if !scanned {
+		t.Fatalf("%s was not among the scanned workflow files, so this assertion would pass without checking anything", claudeCodeReviewWorkflow)
+	}
+	if declaresMergeGroup {
+		t.Errorf("%s declares %s, so %q can report on a merge group.\nThe merge-group rationale documented on this test assumes it cannot; recheck that before trusting it.",
+			claudeCodeReviewWorkflow, mergeGroupTrigger, claudeReviewContext)
 	}
 }
 
