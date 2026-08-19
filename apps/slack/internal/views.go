@@ -70,8 +70,14 @@ const (
 	blockKitFieldSubmit          = "submit"
 	blockKitFieldTitle           = "title"
 	blockKitFieldType            = "type"
-	blockKitTypeModal            = "modal"
-	blockKitTypeMultiConvSelect  = "multi_conversations_select"
+	// blockKitFieldText is Block Kit's `text` field. Deliberately separate
+	// from fieldText in process.go, which is the slash-command form field of
+	// the same name — two different wire contracts that happen to match.
+	blockKitFieldText           = "text"
+	blockKitTypeModal           = "modal"
+	blockKitTypeSection         = "section"
+	blockKitTypeMrkdwn          = "mrkdwn"
+	blockKitTypeMultiConvSelect = "multi_conversations_select"
 	// Button styles: Slack renders `primary` filled-green and `danger` red.
 	blockKitStylePrimary = "primary"
 	blockKitStyleDanger  = "danger"
@@ -522,10 +528,10 @@ func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 // shape is verbose.
 func sectionBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: map[string]any{
+			blockKitFieldType: blockKitTypeMrkdwn,
+			blockKitFieldText: text,
 		},
 	}
 }
@@ -537,8 +543,8 @@ func sectionBlock(text string) map[string]any {
 // short; today the only caller uses the short [listHeaderBlockText] constant.
 func headerBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "header",
-		"text": plainTextObj(text),
+		blockKitFieldType: "header",
+		blockKitFieldText: plainTextObj(text),
 	}
 }
 
@@ -555,14 +561,14 @@ func headerBlock(text string) map[string]any {
 // Callers pass raw, already-validated snippet text.
 func richTextPreformattedBlock(code string) map[string]any {
 	return map[string]any{
-		"type": "rich_text",
+		blockKitFieldType: "rich_text",
 		blockKitFieldElements: []any{
 			map[string]any{
-				"type": "rich_text_preformatted",
+				blockKitFieldType: "rich_text_preformatted",
 				blockKitFieldElements: []any{
 					map[string]any{
-						"type": "text",
-						"text": code,
+						blockKitFieldType: "text",
+						blockKitFieldText: code,
 					},
 				},
 			},
@@ -578,10 +584,10 @@ func richTextPreformattedBlock(code string) map[string]any {
 // button is clicked, so the handler knows which row was tapped.
 func sectionWithAccessory(text string, accessory map[string]any) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: map[string]any{
+			blockKitFieldType: blockKitTypeMrkdwn,
+			blockKitFieldText: text,
 		},
 		"accessory": accessory,
 	}
@@ -593,8 +599,8 @@ func sectionWithAccessory(text string, accessory map[string]any) map[string]any 
 // actionsBlock (the multi-button admin `/qurl list` rows).
 func buttonElement(buttonText, actionID, value string) map[string]any {
 	return map[string]any{
-		"type":                "button",
-		"text":                plainTextObj(buttonText),
+		blockKitFieldType:     "button",
+		blockKitFieldText:     plainTextObj(buttonText),
 		blockKitFieldActionID: actionID,
 		blockKitFieldValue:    value,
 	}
@@ -610,8 +616,8 @@ func buttonElement(buttonText, actionID, value string) map[string]any {
 // handleBlockActions (the unrecognized-action `200 OK` path handles this).
 func urlButtonElement(buttonText, actionID, url string) map[string]any {
 	return map[string]any{
-		"type":                "button",
-		"text":                plainTextObj(buttonText),
+		blockKitFieldType:     "button",
+		blockKitFieldText:     plainTextObj(buttonText),
 		blockKitFieldActionID: actionID,
 		"url":                 url,
 	}
@@ -652,11 +658,11 @@ func dangerButtonElement(buttonText, actionID, value string) map[string]any {
 // Mutates and returns button for call-site chaining.
 func withConfirmDialog(button map[string]any, title, text, confirmLabel string) map[string]any {
 	button["confirm"] = map[string]any{
-		"title":   plainTextObj(title),
-		"text":    map[string]any{"type": "mrkdwn", "text": text},
-		"confirm": plainTextObj(confirmLabel),
-		"deny":    plainTextObj("Cancel"),
-		"style":   blockKitStyleDanger,
+		"title":           plainTextObj(title),
+		blockKitFieldText: map[string]any{blockKitFieldType: blockKitTypeMrkdwn, blockKitFieldText: text},
+		"confirm":         plainTextObj(confirmLabel),
+		"deny":            plainTextObj("Cancel"),
+		"style":           blockKitStyleDanger,
 	}
 	return button
 }
@@ -680,11 +686,11 @@ func actionsBlock(elements ...map[string]any) map[string]any {
 // Used for the "subtext" rows in modals (e.g. the `:lock:` warning).
 func contextBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "context",
+		blockKitFieldType: "context",
 		blockKitFieldElements: []any{
 			map[string]any{
-				"type": "mrkdwn",
-				"text": text,
+				blockKitFieldType: blockKitTypeMrkdwn,
+				blockKitFieldText: text,
 			},
 		},
 	}
@@ -697,7 +703,7 @@ func contextBlock(text string) map[string]any {
 // plain_text for the same injection-defense reason).
 func plainTextContextBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "context",
+		blockKitFieldType: "context",
 		blockKitFieldElements: []any{
 			plainTextObj(text),
 		},
@@ -709,18 +715,18 @@ func plainTextContextBlock(text string) map[string]any {
 // title/submit/close fields require `plain_text` specifically.
 func plainTextObj(text string) map[string]any {
 	return map[string]any{
-		"type":  "plain_text",
-		"text":  text,
-		"emoji": true,
+		blockKitFieldType: "plain_text",
+		blockKitFieldText: text,
+		"emoji":           true,
 	}
 }
 
 func inputBlock(blockID, label, hint string, optional bool, element map[string]any) map[string]any {
 	block := map[string]any{
-		"type":     "input",
-		"block_id": blockID,
-		"label":    plainTextObj(label),
-		"element":  element,
+		blockKitFieldType: "input",
+		"block_id":        blockID,
+		"label":           plainTextObj(label),
+		"element":         element,
 	}
 	if hint != "" {
 		block["hint"] = plainTextObj(hint)
@@ -733,7 +739,7 @@ func inputBlock(blockID, label, hint string, optional bool, element map[string]a
 
 func plainTextInput(actionID, placeholder, initialValue string) map[string]any {
 	element := map[string]any{
-		"type":                "plain_text_input",
+		blockKitFieldType:     "plain_text_input",
 		blockKitFieldActionID: actionID,
 	}
 	if placeholder != "" {
@@ -755,7 +761,7 @@ func multilinePlainTextInput(actionID, placeholder, initialValue string) map[str
 
 func staticSelect(actionID string, options []map[string]any, initial map[string]any) map[string]any {
 	element := map[string]any{
-		"type":                "static_select",
+		blockKitFieldType:     "static_select",
 		blockKitFieldActionID: actionID,
 		"options":             options,
 	}
@@ -771,7 +777,7 @@ func staticSelect(actionID string, options []map[string]any, initial map[string]
 
 func radioButtons(actionID string, options []map[string]any, initial map[string]any) map[string]any {
 	element := map[string]any{
-		"type":                "radio_buttons",
+		blockKitFieldType:     "radio_buttons",
 		blockKitFieldActionID: actionID,
 		"options":             options,
 	}
@@ -789,7 +795,7 @@ func radioButtons(actionID string, options []map[string]any, initial map[string]
 // empty array there.
 func multiConversationsSelect(actionID string, initialConversations []string) map[string]any {
 	element := map[string]any{
-		"type":                blockKitTypeMultiConvSelect,
+		blockKitFieldType:     blockKitTypeMultiConvSelect,
 		blockKitFieldActionID: actionID,
 		"placeholder":         plainTextObj("Select channels"),
 		"filter": map[string]any{
@@ -809,7 +815,7 @@ func multiConversationsSelect(actionID string, initialConversations []string) ma
 
 func optionObj(text, value string) map[string]any {
 	return map[string]any{
-		"text":             plainTextObj(text),
+		blockKitFieldText:  plainTextObj(text),
 		blockKitFieldValue: value,
 	}
 }
@@ -828,8 +834,8 @@ func optionObjWithDescription(text, value, description string) map[string]any {
 // the operator-visible feedback channel.
 func plainTextSectionBlock(text string) map[string]any {
 	return map[string]any{
-		"type": "section",
-		"text": plainTextObj(text),
+		blockKitFieldType: blockKitTypeSection,
+		blockKitFieldText: plainTextObj(text),
 	}
 }
 

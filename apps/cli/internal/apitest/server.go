@@ -63,6 +63,23 @@ const PortalPath = "/portal"
 // the platform retitles that page, update this marker in lockstep.
 const InterstitialTitle = "qURL - Private Links That Expire"
 
+// Field names and fixture values repeated across the mock's JSON payloads.
+// Lifted to constants so the builders and the route handlers cannot drift.
+const (
+	// fieldStatus and fieldCRID are keys of the *resource* payloads this file
+	// serves. builders.go's RFC7807 problem document has its own "status" (an
+	// int echo of the HTTP status) and deliberately does not share this one.
+	fieldStatus = "status"
+	fieldCRID   = "crid"
+	// fixtureCreatedAt is the mock's fixed resource created_at. The apps/cli
+	// goldens pin it (mutating it reddens them), so it must not drift. It is
+	// not shared with builders.go's tombstone closed_at, which no golden pins.
+	fixtureCreatedAt = "2026-03-01T00:00:00Z"
+	// authTypeAPIKey is the auth_type/kind *value* — distinct from the
+	// "api_key" JSON field name that carries the key object.
+	authTypeAPIKey = "api_key"
+)
+
 // NewServer starts a mock with consistent happy-path handlers for publish,
 // resolve, list, and delete. Close it via t.Cleanup automatically.
 func NewServer(t *testing.T) *Server {
@@ -188,10 +205,10 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
 		WriteEnvelope(s.t, w, http.StatusOK, []map[string]any{{
 			"resource_id": s.Key.ResourceID,
-			"crid":        s.Key.CRID,
+			fieldCRID:     s.Key.CRID,
 			"target_url":  "https://example.com/data",
-			"status":      "active",
-			"created_at":  "2026-03-01T00:00:00Z",
+			fieldStatus:   "active",
+			"created_at":  fixtureCreatedAt,
 		}}, map[string]any{"has_more": false})
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
@@ -240,13 +257,13 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	data := map[string]any{
 		"resource_id": s.Key.ResourceID,
-		"crid":        s.Key.CRID,
+		fieldCRID:     s.Key.CRID,
 		"target_url":  body.TargetURL,
-		"status":      "active",
-		"created_at":  "2026-03-01T00:00:00Z",
+		fieldStatus:   "active",
+		"created_at":  fixtureCreatedAt,
 	}
 	if omitCRID {
-		delete(data, "crid")
+		delete(data, fieldCRID)
 	}
 	WriteEnvelope(s.t, w, http.StatusCreated, data, meta)
 }
@@ -271,7 +288,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey := map[string]any{
 		"key_id": MeKeyID,
-		"kind":   "api_key",
+		"kind":   authTypeAPIKey,
 		"scopes": []string{"qurl:read", "qurl:resolve", "qurl:write"},
 	}
 	if len(bearer) >= 12 {
@@ -279,7 +296,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"owner_id":  MeOwnerID,
-		"auth_type": "api_key",
+		"auth_type": authTypeAPIKey,
 		"api_key":   apiKey,
 	}, nil)
 }
@@ -303,7 +320,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"qurl":               qurlLink,
-		"crid":               s.cridFor(id),
+		fieldCRID:            s.cridFor(id),
 		"type":               "qv2",
 		"expires_at":         "2026-03-01T00:05:00Z",
 		"expires_in_seconds": 300,
@@ -320,8 +337,6 @@ func (s *Server) handleDownload(w http.ResponseWriter) {
 		payload = []byte(DefaultDownloadPayload)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	// #nosec G705 -- the mock link host echoes the test's own payload bytes
-	// as an octet-stream download; no browser or HTML context exists here.
 	if _, err := w.Write(payload); err != nil {
 		s.t.Errorf("write download payload: %v", err)
 	}

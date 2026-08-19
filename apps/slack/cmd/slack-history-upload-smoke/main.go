@@ -241,30 +241,18 @@ func prepareScanConfig(cfg *scanConfig) error {
 // difference between an actionable error and a guessing game once -token-env has been
 // pointed somewhere custom.
 //
-// The two nolints below suppress a G705 false positive that never actually looks at the
-// flag value. gosec taints the result of any call that received a tainted argument, and
-// parseFlags takes stderr and args, which main sources from os.Stderr (an *os.File) and
-// os.Args[1:] — rooted in two of G705's configured sources, and taint follows the
-// slice. So every value in its return tuple arrives tainted; a returned compile-time
-// constant would too. The write is safe on its own terms anyway: stderr on a CLI is not
-// a browser, and slacksmoke.IsEnvVarName has already constrained the value to a POSIX
-// environment variable name before it gets this far, so it cannot carry a control
-// character either.
-//
-// That is gosec v2.23.0, the version golangci-lint v2.10.1 pins. By gosec v2.26.1 (in
-// golangci-lint v2.12.x) the finding is gone, at which point nolintlint fails these two
-// lines as unused instead. Delete both directives and this paragraph then, along with
-// the slack-dm-smoke mirror's account of why it carries none — that copy's refactor
-// caveat is guarded on the pinned linter still reporting G705, so it lapses on its own.
-//
-// The slack-dm-smoke mirror of this function deliberately carries no directives, for the
-// reason documented there.
+// Echoing tokenEnv back verbatim is safe only because slacksmoke.IsEnvVarName has
+// already constrained it to a POSIX environment variable name before it gets this far,
+// so it cannot carry a control character — any of them, not just the newline a forged
+// operator-facing diagnostic would need. TestRunDoesNotEchoTokenEnvName pins that here,
+// and TestIsEnvVarName pins the charset rule itself (ESC, NUL, BEL and DEL rows) on the
+// strength of this absolute claim.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, slacksmoke.ErrMissingBotToken):
-		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv)
 	case errors.Is(err, slacksmoke.ErrBotTokenControlCharacters):
-		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv)
 	default:
 		_, _ = fmt.Fprintln(stderr, err)
 	}

@@ -344,21 +344,6 @@ func newSmokeResult(cfg *smokeConfig) smokeResult {
 // name. Echoing the value is safe: stderr on a CLI is not a browser, and
 // slacksmoke.IsEnvVarName has already constrained tokenEnv to a POSIX environment
 // variable name back in run, so it cannot carry a control character either.
-//
-// That mirror carries two //nolint:gosec directives citing G705 on the matching Fprintf
-// lines and this copy carries none — a toolchain artifact, not a weaker safety
-// argument. gosec taints the result of any call that received a tainted argument, and
-// there tokenEnv comes back from parseFlags(stderr, args), whose arguments run forwards
-// from the os.Stderr and os.Args[1:] that main gave it. Here nothing tainted ever flows
-// in. fs.Parse(args) does receive a tainted argument, but it fills tokenEnv by writing
-// through the pointer fs.StringVar registered earlier, and the analysis follows call
-// results, not pointer writes. The one call result stored into tokenEnv is
-// strings.TrimSpace(tokenEnv), whose sole argument is that same untainted local. gosec
-// does examine this copy; it just finds it clean.
-//
-// Copying the directives over is therefore not an option: nolintlint's allow-unused
-// defaults to off, so it fails an unused directive. If a refactor ever lifts the flag
-// parsing out of run while the pinned linter still reports G705, add them at that point.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, errMissingSlackUserID):

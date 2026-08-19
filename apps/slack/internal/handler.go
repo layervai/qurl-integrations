@@ -303,6 +303,13 @@ const maxRequestBodyBytes = 1 << 20
 // of a richer payload fails (unreachable for current callers).
 const internalErrorEnvelope = `{"error":"internal"}`
 
+// errEnvelopeKey is the single JSON key of this handler's OWN HTTP error
+// envelope — the 400/401/404/405/413 replies on the non-Slack surfaces. It is
+// deliberately not one of the respField* Slack slash-command response keys
+// further down. internalErrorEnvelope above spells the same key literally
+// because it is pre-marshaled for the path where marshaling itself failed.
+const errEnvelopeKey = "error"
+
 // Config carries the runtime wiring for [NewHandler]. Every field is
 // captured by value into [Handler.cfg] once and then read on the
 // request hot path without synchronization — callers MUST NOT mutate
@@ -1115,16 +1122,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// /slack/commands); logging each would be noise. Slack and
 		// health paths are the only legitimate surface and they get
 		// their own log lines.
-		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		respondJSON(w, http.StatusNotFound, map[string]string{errEnvelopeKey: "not found"})
 		return
 	}
 
-	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
+	slog.Info("received request", "path", r.URL.Path, "method", r.Method)
 
 	// Honest oversize declarations get rejected before allocation.
 	// MaxBytesReader still catches dishonest senders during the read.
 	if r.ContentLength > maxRequestBodyBytes {
-		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength)
 		respondPayloadTooLarge(w)
 		return
 	}
@@ -1135,17 +1142,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// above; bucket them together so dashboards see one 413 stream.
 		var mbErr *http.MaxBytesError
 		if errors.As(err, &mbErr) {
-			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read") //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read")
 			respondPayloadTooLarge(w)
 			return
 		}
-		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path)
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid body"})
 		return
 	}
 
 	if err := h.verifySlackRequest(r, body); err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+		respondJSON(w, http.StatusUnauthorized, map[string]string{errEnvelopeKey: "signature verification failed"})
 		return
 	}
 
@@ -1186,9 +1193,9 @@ func (h *Handler) verifySlackRequest(r *http.Request, body []byte) error {
 		// Empty secret means the deployment is effectively open — page on
 		// it distinctly from ordinary 401 noise.
 		if errors.Is(err, errSlackSigningSecretEmpty) {
-			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
 		} else {
-			slog.Warn("slack signature verification failed", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Warn("slack signature verification failed", attrs...)
 		}
 	}
 	return err
@@ -1264,7 +1271,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup", uninstallVerb, "feedback"}
+var userVerbs = []string{"get", "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1373,7 +1380,7 @@ func stripUnsetDisplayNamePrefix(text string) string {
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form body"})
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid form body"})
 		return
 	}
 
@@ -1485,7 +1492,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// routing here. The parser then produces ErrEmptyResource
 		// for a bare `get`.
 		h.handleGet(w, values)
-	case text == "aliases":
+	case text == string(SubcmdAliases):
 		h.handleAliases(w, values)
 	case slashSubcommand(text, "feedback"):
 		// feedback is a user verb available to any workspace member — no
@@ -2744,14 +2751,14 @@ func (h *Handler) adminHelpMessage(command string) string {
 // from "missing path" (404) and "auth-gated" (401).
 func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
-	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{errEnvelopeKey: "method not allowed"})
 }
 
 // respondPayloadTooLarge writes 413 for both the Content-Length pre-check
 // and the MaxBytesReader-during-read paths. Centralizing keeps the wire
 // envelope identical so operator dashboards bucket them together.
 func respondPayloadTooLarge(w http.ResponseWriter) {
-	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
+	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{errEnvelopeKey: "body too large"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, body any) {

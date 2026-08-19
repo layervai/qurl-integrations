@@ -148,9 +148,9 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 		{"token env name with a newline", []string{flagTokenEnv, "SLACK\nTOKEN"}, testToken, wantTokenEnvName},
 		{"token env name with a hyphen", []string{flagTokenEnv, "SLACK-TOKEN"}, testToken, wantTokenEnvName},
 		{"token env name starting with a digit", []string{flagTokenEnv, "1TOKEN"}, testToken, wantTokenEnvName},
-		// This row and "no token in the environment" above are the two //nolint:gosec
-		// branches in writeConfigValidationError, so the echoed env name is part of what
-		// they pin — "missing Slack bot token" without it is a guessing game once
+		// This row and "no token in the environment" above are the two branches of
+		// writeConfigValidationError that echo the env name back, so that echo is
+		// part of what they pin — "missing Slack bot token" without it is a guessing game once
 		// -token-env has been pointed somewhere custom. This branch's text was pinned
 		// nowhere.
 		{"token with control characters", nil, "xoxb-\ntest", testTokenEnv + " contains control characters"},
@@ -192,8 +192,8 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 			}
 			// Nothing may follow the diagnostic except the flag package's usage block.
 			// Checking only the first line would otherwise let a regression append a
-			// forged second line — the failure the //nolint:gosec suppressions in
-			// writeConfigValidationError make possible — with the package staying green.
+			// forged second line — the failure writeConfigValidationError's echo of
+			// -token-env would make possible — with the package staying green.
 			// The usage text itself is still not pinned, for the reason given above — but
 			// its header is a fourth piece of stdlib wording this table leans on, and a
 			// Go release rewording it fails the same three rows as the others.
@@ -204,10 +204,10 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 	}
 }
 
-// TestRunDoesNotEchoTokenEnvName pins the claim the two //nolint:gosec suppression
-// reasons in writeConfigValidationError make: -token-env is echoed back verbatim in the
-// errors an operator hits first, so parseFlags has to reject a name that is not a POSIX
-// environment variable before any of that echo can run.
+// TestRunDoesNotEchoTokenEnvName pins the claim writeConfigValidationError rests on:
+// -token-env is echoed back verbatim in the errors an operator hits first, so parseFlags
+// has to reject a name that is not a POSIX environment variable before any of that echo
+// can run.
 // TestRunRejectsBadInvocationBeforeCallingSlack covers names of this shape and now pins
 // that error's wording, but it compares only the first line of stderr — a forged line
 // appended after a legitimate diagnostic still satisfies it.
@@ -223,7 +223,7 @@ func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 		// a rule.
 		{"forged diagnostic", "SMOKE\nSLACK_BOT_TOKEN is not set or is empty\nFORGED"},
 		// Valid POSIX apart from the ESC, so this row is the one that fails if the
-		// charset stops rejecting terminal escapes — the suppressions claim the value
+		// charset stops rejecting terminal escapes — the claim is that the value
 		// "cannot carry a control character", not merely that it cannot carry a
 		// newline, and the row above is too punctuated to notice.
 		{"terminal escape", "SMOKE\x1bFORGED"},
