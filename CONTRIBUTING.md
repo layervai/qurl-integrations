@@ -161,13 +161,27 @@ context. It is separate from the existing
 `age-check / Check GitHub Actions pin ages` context, even though both contexts
 are produced by the same workflow file.
 
+Every human-authored, non-draft PR is also gated by `claude-review`, the
+terminal Claude pass in `.github/workflows/claude-code-review.yml`. It became
+required on 2026-08-19, after #1173 merged three minutes before its review
+posted. That review is the long pole — roughly four minutes against a minute or
+less for every other context — so the merge box turns green while it is still
+running, and a review landing afterwards lands on a closed PR nobody rereads.
+The job's own `if:` withholds the review from bot-authored, draft, and fork
+PRs, which report `skipped`, and GitHub scores a skipped required check as
+satisfied. This context therefore gates the *timing* of a review that runs, not
+the *existence* of one: returning a PR to draft satisfies it empty. Release PRs
+are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run at
+all, so it already reports none of these contexts and merges by admin override.
+
 The full required set is the block below — those nine aggregates plus
-`Workflow Contract`, `Validate GitHub Actions pins`, and the four
-`age-check / *` contexts, fifteen in all. That block is the machine-readable
-source of truth: `internal/ciworkflows` parses it, so a context added, removed,
-or respelled belongs there first. **Required contexts match case-sensitively**,
-and a context that matches no job does not fail open: it pins the merge box at
-"Expected — Waiting for status to be reported" until an admin overrides it.
+`Workflow Contract`, `Validate GitHub Actions pins`, `claude-review`, and the
+four `age-check / *` contexts, sixteen in all. That block is the
+machine-readable source of truth: `internal/ciworkflows` parses it, so a
+context added, removed, or respelled belongs there first. **Required contexts
+match case-sensitively**, and a context that matches no job does not fail open:
+it pins the merge box at "Expected — Waiting for status to be reported" until
+an admin overrides it.
 
 <!-- BEGIN required-contexts -->
 
@@ -183,6 +197,7 @@ e2e / required
 shared / required
 Workflow Contract
 Validate GitHub Actions pins
+claude-review
 age-check / Check GitHub Actions pin ages
 age-check / check-docker-age
 age-check / check-go-age
