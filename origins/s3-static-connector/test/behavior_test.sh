@@ -191,6 +191,16 @@ expect_security_headers() {
   expect_eq "Referrer-Policy ($label)" "$(hval Referrer-Policy)" "no-referrer"
   expect_eq "X-Robots-Tag ($label)" "$(hval X-Robots-Tag)" "noindex, nofollow, noarchive, nosnippet, noimageindex"
 }
+# nginx writes its access line after the response reaches the client, and the
+# container log pipeline adds its own lag, so a bare grep right after curl races
+# the writer — it flaked on emulated arm64. Poll like expect_stub_gets_since.
+expect_origin_log() {
+  for _ in $(seq 1 20); do
+    if docker logs "$ORIGIN" 2>&1 | grep -q "$2"; then ok "$1"; return; fi
+    sleep 0.25
+  done
+  no "$1"
+}
 expect_stub_gets_since() {
   label="$1"
   mark="$2"
@@ -328,21 +338,21 @@ expect_eq "missing body" "$(cat "$B")" "Not Found"
 # 9. upstream 403 -> client 404 (no leak), but logged as upstream_status 403
 code=$(curl -s -o /dev/null -w '%{http_code}' "$base/forbidden.json")
 expect_eq "forbidden client status" "$code" 404
-if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"403"'; then ok "forbidden logged upstream_status 403"; else no "forbidden not logged as upstream 403"; fi
+expect_origin_log "forbidden logged upstream_status 403" '"upstream_status":"403"'
 
 # 9b. other S3-side 4xx responses are also masked; clients must never see XML
 # error bodies or distinguish malformed/denied/missing object states.
 fetch "$base/badrequest.json"
 expect_eq "badrequest client status" "$(status_code)" 404
 expect_eq "badrequest body" "$(cat "$B")" "Not Found"
-if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"400"'; then ok "badrequest logged upstream_status 400"; else no "badrequest not logged as upstream 400"; fi
+expect_origin_log "badrequest logged upstream_status 400" '"upstream_status":"400"'
 
 # 9c. throttle-class responses are retryable upstream failures, not missing
 # objects, and still never leak S3 XML.
 fetch "$base/throttle.json"
 expect_eq "throttle status" "$(status_code)" 502
 expect_eq "throttle body" "$(cat "$B")" "Bad Gateway"
-if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"429"'; then ok "throttle logged upstream_status 429"; else no "throttle not logged as upstream 429"; fi
+expect_origin_log "throttle logged upstream_status 429" '"upstream_status":"429"'
 
 # 10. upstream 5xx -> 502 Bad Gateway
 fetch "$base/boom.json"
@@ -527,22 +537,16 @@ else
     expect_eq "preflight refuses to serve on upstream $prefix" "$(origin_running)" "false"
     expect_eq "preflight exits non-zero on upstream $prefix" \
       "$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN")" "1"
-    if docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_auth_failed"'; then
-      ok "preflight names the credential failure for upstream $prefix"
-    else
-      no "preflight names the credential failure for upstream $prefix"
-    fi
+    expect_origin_log "preflight names the credential failure for upstream $prefix" \
+      '"msg":"preflight_auth_failed"'
   done
 
   # An object that has not been synced yet is not a credential failure: keep
   # serving so a deploy that starts the origin before the sync still recovers.
   preflight_case not-synced-yet
   expect_eq "preflight serves when only the index object is missing" "$(origin_running)" "true"
-  if docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_object_missing"'; then
-    ok "preflight distinguishes a missing object from a rejected credential"
-  else
-    no "preflight distinguishes a missing object from a rejected credential"
-  fi
+  expect_origin_log "preflight distinguishes a missing object from a rejected credential" \
+    '"msg":"preflight_object_missing"'
 
   # 17. Runtime credential failures stay masked to a viewer 404 but must be
   # greppable as themselves, so an expired credential is not misread as a bad key.
