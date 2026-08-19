@@ -154,6 +154,26 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--count', '7', '--count=200']).count).toBe(7);
   });
 
+  it('lets the bare token win even when that makes the run fail', () => {
+    // It is the space-form TOKEN that wins, not a usable value. `--count`
+    // followed by `--count=200` consumes the next argv entry as its raw value
+    // and fails the parse on it rather than reaching past it to the 200.
+    // Pinned because readFlagToken's doc comment now states this, and a
+    // reordering of the two lookups would make that comment quietly false
+    // with nothing else here failing.
+    const { count, errors } = resolveNumericArgs(['--count', '--count=200']);
+    expect(count).toBeNaN();
+    expect(errors).toEqual(['--count must be a positive whole number, got "--count=200"']);
+  });
+
+  it('splits on the first equals and leaves the rest to the parser', () => {
+    // `--count==200` is a value of '=200', not an empty value and not 200.
+    // Deciding what counts as malformed belongs to parsePositiveInt, so the
+    // token splitter must hand the whole remainder over untouched.
+    expect(resolveNumericArgs(['--count==200']).errors[0]).toContain('got "=200"');
+    expect(resolveNumericArgs(['--count=2=0']).errors[0]).toContain('got "2=0"');
+  });
+
   // The case getArg cannot express: `--count` as the final token has no value
   // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
   // the same 100 as not passing the flag at all. Silently running the default
