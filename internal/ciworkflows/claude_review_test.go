@@ -13,6 +13,18 @@ import (
 // reviewed by the default branch's copy of the file. Its own green check is
 // therefore not evidence about the change, and this package is where the shape
 // of that file gets pinned instead.
+//
+// What these tests do not cover: they read the job's guards and execute each
+// step's script in isolation with hand-supplied env, so they cannot observe
+// how a step's conclusion propagates to the job — that a failed review really
+// does redden the job and skip the gate, or that `if: success()` really does
+// run after skipped steps. That is runner behavior, and the only way to see it
+// is to run the chain on a runner. It was confirmed once on a throwaway
+// push-triggered probe branch (2026-08-19): the exempt paths concluded
+// `success` with the four middle steps `skipped` and the gate still running,
+// and a run where nothing failed but nothing published concluded `failure` from
+// the gate. Treat a green suite here as "the shape and the scripts are right",
+// never as "the job concludes correctly".
 const (
 	claudeReviewWorkflow = "claude-code-review.yml"
 	claudeReviewJobID    = "claude-review"
@@ -404,7 +416,11 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 }
 
 // claudeArgsToolList pulls one `--flag "a,b,c"` value out of the review step's
-// claude_args string.
+// claude_args string. It assumes the single-line, double-quoted form the step
+// uses today: each flag's value is one quoted token, and no value contains
+// another flag's `--name "` spelling. Reflow claude_args across lines and this
+// parser needs revisiting — it would fail loudly on the missing flag rather
+// than silently accept a widened tool list.
 func claudeArgsToolList(t *testing.T, args, flag string) []string {
 	t.Helper()
 
@@ -494,9 +510,12 @@ func runClaudeReviewStep(t *testing.T, script string, env map[string]string) cla
 	for key, value := range env {
 		stepEnv[key] = value
 	}
-	// Set last so they win the dedupe against a real runner's own values when
-	// this test runs inside Actions. A step that wrote to the ambient file
-	// instead would read back empty here, which fails rather than passes.
+	// Set last because os/exec's dedupEnv keeps the *last* duplicate, so these
+	// override a real runner's own values when this test runs inside Actions.
+	// The mechanism is Go's, not the shell's — a libc getenv would take the
+	// first. Nothing rests on getting that right, though: a step that wrote to
+	// the ambient file instead would read back empty here, which fails loudly
+	// rather than passing.
 	stepEnv["GITHUB_OUTPUT"] = outputPath
 	stepEnv["GITHUB_STEP_SUMMARY"] = summaryPath
 

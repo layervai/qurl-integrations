@@ -533,6 +533,13 @@ jobs:
         # later edit, a publish step that never ran — is an empty pass, and
         # empty passes fail here instead.
         #
+        # In today's wiring the review-never-published branch is unreachable:
+        # `publish_review` skips only when the review did not succeed, which
+        # already reddens the job and skips this step. That is the point. The
+        # branch exists for the edit that changes the chain, and
+        # TestClaudeReviewGateRefusesAnEmptyPass drives it directly — it is not
+        # dead code, and deleting it restores the hole silently.
+        #
         # `if: success()` confines this to the otherwise-green path, which is
         # the only path it has anything to add. A review that failed has already
         # reddened the job and been annotated by the step above; a second red
