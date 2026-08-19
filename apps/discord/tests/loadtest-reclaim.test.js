@@ -372,6 +372,50 @@ describe('resolveReclaimArg', () => {
     expect(resolveReclaimArg(['--count', '10']))
       .toEqual({ requested: false, path: null, errors: [] });
   });
+
+  it('reports a whitespace-only path, quoting it so the fault is visible', () => {
+    // The sibling refusal in resolveLedgerArg above, which --reclaim did not
+    // have: `--reclaim '   '` was a real path as far as this resolver was
+    // concerned, so preflight passed it through.
+    //
+    // Not a resource leak — reclaim() finds no such file and main() exits 1 —
+    // which is exactly why the message is the whole of what this pins. The
+    // operator's answer arrived as `no ledger file at    — nothing was
+    // reclaimed.`, a sentence with a hole where the path should be, and the
+    // reader of it has already lost a run.
+    //
+    // So `got "   "` is asserted whole rather than as a `--reclaim must name`
+    // prefix: drop the JSON.stringify and the message still says every word
+    // it says now, still names the flag, and is still exactly as unreadable
+    // as the downstream line this exists to keep it from becoming.
+    //
+    // The full shape, because the refusal must not null the path the way
+    // resolveLedgerArg swaps in its fallback: main() re-reads the mode from
+    // parseReclaimArg, so a resolver that quietly disagreed about the value
+    // here would be a second opinion nothing reads.
+    expect(resolveReclaimArg(['--reclaim', '   '])).toEqual({
+      requested: true,
+      path: '   ',
+      errors: [expect.stringContaining(
+        '--reclaim must name the ledger file to reclaim from, got "   "',
+      )],
+    });
+  });
+
+  it('applies the same refusal to the inline spelling', () => {
+    // Not a restatement of the case above: the inline value never becomes a
+    // separate argv token, so the two reach the guard by different routes and
+    // a guard rewritten to read argv rather than the resolved value passes
+    // this file's separated case while ignoring this one.
+    //
+    // Which is the drift with history here rather than a hypothetical — an
+    // indexOf-based reader is what used to read `--ledger=/tmp/x` as absent,
+    // recorded by 'reads the inline form, which the removed reader silently
+    // ignored' above. This is the only case in the block that fails when the
+    // guard is written that way.
+    expect(resolveReclaimArg(['--reclaim=  ']).errors)
+      .toEqual([expect.stringContaining('got "  "')]);
+  });
 });
 
 describe('reclaim', () => {
