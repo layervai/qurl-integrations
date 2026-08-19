@@ -446,6 +446,12 @@ describe('runReport — the summary and the exit code', () => {
       'Failure threshold: 10.0% (--max-fail-rate)',
       'Avg round time: 0.6s',
       'Avg upload: 200ms, avg mint/round: 300ms',
+      // One upload per round and no re-uploads: these rounds are built with
+      // --count at or below a pool's depth, so the plan is a single batch.
+      // The line prints anyway — uploads-per-round is how a reader judges
+      // whether the run reproduced a real send's load, and it is exactly as
+      // informative when the answer is "no re-uploads were needed".
+      'Uploads: 2 ok (2 initial + 0 re-upload)',
     ]);
   });
 
