@@ -38,6 +38,8 @@ func productionCommon(t *testing.T, seed string) *v1.ClientCommonConfig {
 	if err != nil {
 		t.Fatalf("generate the production client config: %v", err)
 	}
+	// The discarded second value is the proxy configurer list, not an error;
+	// this helper only needs the common config.
 	common, _ := cfg.FRPClientConfig()
 	if err := common.Complete(); err != nil {
 		t.Fatalf("complete the production common config: %v", err)

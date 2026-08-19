@@ -391,9 +391,10 @@ func TestApplyKnockResultContract(t *testing.T) {
 // tidiness. The fork reads the stamped config without synchronization from
 // several of its own goroutines, and what keeps that harmless is that none of
 // them reads a field a refresh writes. Let a refresh start restamping a
-// Transport field — physicalDialInOpen reads two of those once per ReqWorkConn,
-// realConnect and heartbeatWorker read more — and those reads become a live
-// data race in production rather than the latent one the unmuxed seam has.
+// Transport field — physicalDialInOpen reads two of those once per
+// ReqWorkConn, realConnect and heartbeatWorker read more — and those reads
+// become a live data race in production rather than the latent one the
+// unmuxed seam has.
 //
 // It drives refresh rather than applyKnockResult alone because refresh is free
 // to write common outside that helper, and nothing else in the package would

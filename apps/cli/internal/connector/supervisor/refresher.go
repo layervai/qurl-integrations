@@ -137,17 +137,18 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 //
 // The lock does NOT make that stamp safe to READ. It is released when refresh
 // returns, before the dial it precedes, and the fork then reads the stamped
-// fields unsynchronized: ServerAddr and ServerPort in realConnect and in Open's
-// QUIC branch, and Metadatas in buildLoginMsg — whose map contents are actually
-// walked a frame later, when exchangeLogin marshals the Login. Transport.* has
-// more readers still, several of them concurrent: the fork's own heartbeatWorker
-// and proxy manager, plus physicalDialInOpen — ours, but called on the
-// work-connection goroutines all the same. That is why the write-set pin
-// matters beyond the two fields named here. Writes serialize against writes; the fork's
-// reads of them are unguarded. Holding the lock across the dial would cover the
-// connector's reads but not buildLoginMsg's, which runs inside Dial after
-// Connect returns — past anything this package can lock across the Connector
-// seam.
+// fields unsynchronized: ServerAddr and ServerPort in realConnect and in
+// Open's QUIC branch, and Metadatas in buildLoginMsg — whose map contents are
+// actually walked a frame later, when exchangeLogin marshals the Login.
+// Transport.* has more readers still, several of them concurrent: the fork's
+// own heartbeatWorker and proxy manager, plus physicalDialInOpen — ours, but
+// called on the work-connection goroutines all the same. That is why the
+// write-set pin matters beyond the two fields named here.
+//
+// Writes serialize against writes; the fork's reads of them are unguarded.
+// Holding the lock across the dial would cover the connector's reads but not
+// buildLoginMsg's, which runs inside Dial after Connect returns — past
+// anything this package can lock across the Connector seam.
 //
 // That is latent rather than live. Production runs a completed config, so the
 // refresh sits on the Open seam (see the WATCHDOG COUPLING note on Connect),
@@ -162,12 +163,13 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 // On the unmuxed seam those goroutines refresh concurrently, and a -race
 // harness driving the real fork connector there reports write/read races on
 // ServerAddr and ServerPort against realConnect. A config copy does settle
-// those two — they are value fields — but only at per-CONNECT granularity: the
-// ConnectorCreator runs once per Dial and every work connection dials through
-// that one connector, so a copy taken there just puts the same shared struct
-// behind a new pointer. What no copy settles is the token; see refresh for the
-// map it has to land on. Making that seam safe needs fork-side changes, and
-// noteRedialLocked revisited first per the same WATCHDOG COUPLING note.
+// those two — they are value fields — but only at per-CONNECT granularity:
+// the ConnectorCreator runs once per Dial and every work connection dials
+// through that one connector, so a copy taken there just puts the same shared
+// struct behind a new pointer. What no copy settles is the token; see refresh
+// for the map it has to land on. Making that seam safe needs fork-side
+// changes, and noteRedialLocked revisited first per the same WATCHDOG
+// COUPLING note.
 //
 // TODO(upstream-contract): the goroutine topology above mirrors
 // github.com/layervai/frp v0.70.0-layerv.4 — client/control_session.go (Dial
