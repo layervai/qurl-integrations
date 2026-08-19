@@ -210,6 +210,39 @@ When more results exist, text mode says so on stderr with the `--cursor`
 value to pass next. See [JSON output](#json-output--o-json) for the
 pagination contract scripts should follow.
 
+`-o json` additionally carries each row's `type` and its publish-time
+`description` and `tags` — the metadata `qurl publish --description` and
+`--tag` set. The text table deliberately does not: its five columns
+already run past an 80-column terminal, and it shortens the CRID and
+truncates the target to get even that far. Scripts that recognize resources
+by the label their publisher gave them read the JSON document:
+
+```bash
+cursor=""
+while :; do
+  if [ -n "$cursor" ]; then
+    page=$(qurl list --status active -o json --cursor "$cursor")
+  else
+    page=$(qurl list --status active -o json)
+  fi
+  jq -r '.resources[] | select((.description // "") | test("safe to delete")) | .crid' <<<"$page"
+  jq -e '.has_more' <<<"$page" >/dev/null || break
+  cursor=$(jq -r '.next_cursor // empty' <<<"$page")
+  [ -n "$cursor" ] || break
+done
+```
+
+The loop is the point: a single `qurl list` call returns one page, so a
+sweeper that reads only `.resources[]` from one invocation silently misses
+everything behind `has_more`. `(.description // "")` matters too — the key is
+absent on rows that carry no description, and `null | test(...)` is a jq
+error, not a non-match.
+
+`--status active` matters for a different reason: deleting a resource flips
+its status rather than removing the row, so an unfiltered listing keeps
+returning resources you have already deleted. Pass it on anything that walks
+the whole listing.
+
 ### qurl delete
 
 `qurl delete <CRID>` deletes a published resource. Deletion cannot be

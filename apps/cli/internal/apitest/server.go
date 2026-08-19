@@ -71,6 +71,13 @@ const (
 	// int echo of the HTTP status) and deliberately does not share this one.
 	fieldStatus = "status"
 	fieldCRID   = "crid"
+	// fieldType is the `type` key of the resource and resolve payloads. The
+	// two objects give the key different value spaces (url|tunnel for a
+	// resource, the link type for a resolve), but it is one wire field name
+	// and must not drift between them. builders.go's RFC7807 problem
+	// document has its own "type" (a URI derived from code) and deliberately
+	// does not share this one, same as "status" above.
+	fieldType = "type"
 	// fixtureCreatedAt is the mock's fixed resource created_at. The apps/cli
 	// goldens pin it (mutating it reddens them), so it must not drift. It is
 	// not shared with builders.go's tombstone closed_at, which no golden pins.
@@ -203,11 +210,19 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 		s.handleResolve(w, r)
 
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
+		// A fully populated list row: the publish-time metadata (type,
+		// description, tags) rides every real list row and the CLI projects
+		// it into `-o json`, so the default row carries it or the goldens
+		// would pin a shape no deployment serves. Like fixtureCreatedAt,
+		// these values are pinned by the apps/cli goldens.
 		WriteEnvelope(s.t, w, http.StatusOK, []map[string]any{{
 			"resource_id": s.Key.ResourceID,
 			fieldCRID:     s.Key.CRID,
 			"target_url":  "https://example.com/data",
+			fieldType:     "url",
 			fieldStatus:   "active",
+			"description": "example data drop",
+			"tags":        []string{"demo", "fixture"},
 			"created_at":  fixtureCreatedAt,
 		}}, map[string]any{"has_more": false})
 
@@ -321,7 +336,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"qurl":               qurlLink,
 		fieldCRID:            s.cridFor(id),
-		"type":               "qv2",
+		fieldType:            "qv2",
 		"expires_at":         "2026-03-01T00:05:00Z",
 		"expires_in_seconds": 300,
 		"single_use":         true,
