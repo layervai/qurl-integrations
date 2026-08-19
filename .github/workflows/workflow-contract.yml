@@ -1,14 +1,21 @@
 # Repo-wide CI contract tests: every workflow that defines a required
 # aggregate is registered in requiredWorkflowSpecs, lists all of its quality
 # gates in needs, and ships a verifier script that fails on a skipped or red
-# gate.
+# gate. They also record every pull-request workflow's intended `branches:`
+# filter, so one recorded as deliberately narrow fails the moment it reports
+# a required context, and narrowing one that already gates merges means
+# editing that record rather than quietly editing a trigger (#1183, #1185).
 #
-# Unfiltered on purpose. These tests read every file in .github/workflows, so
-# any workflow edit can break them. They used to live in apps/slack and rode
-# slack.yml's paths filter, which matches `.github/workflows/slack.yml` alone
-# — a PR adding a new workflow skipped them entirely, reported every check
-# green, and would have reddened main on merge (#1081). The filter was the
-# bug, not the tests.
+# Unfiltered on purpose, in both dimensions. These tests read every file in
+# .github/workflows, so any workflow edit can break them. They used to live
+# in apps/slack and rode slack.yml's paths filter, which matches
+# `.github/workflows/slack.yml` alone — a PR adding a new workflow skipped
+# them entirely, reported every check green, and would have reddened main on
+# merge (#1081). The filter was the bug, not the tests. A `branches:` filter
+# here would do the same along the base-branch axis, taking the whole CI
+# contract off PRs stacked on a feature branch — this test included. This
+# file's otherPullRequestWorkflows entry records that, and since the check
+# below is required, adding one fails there.
 name: Workflow Contract
 
 # No `merge_group`. This repo merges by hand with squash commits and configures
