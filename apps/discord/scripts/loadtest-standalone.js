@@ -444,6 +444,13 @@ function resolveFileArg(argv) {
   // Compared against the table's default rather than a repeated `null`: that
   // table owns what "no --file given" resolves to, and this is the one reading
   // of this flag that may fall back to the generated payload.
+  //
+  // Sound only because that default is a SENTINEL no operator can type. It is
+  // readFlag's "flag absent" return, not a value, so `null` here cannot have
+  // come from argv. A future flag given a real string default must not copy
+  // this line — an operator passing that exact string would be misread as
+  // having passed nothing, which is the silent-default bug this file exists to
+  // remove, arriving from the one direction the table made easier.
   if (value === defaultValue) return { filePath: null, errors };
   // Whitespace is checked but NOT stripped: a filename may legitimately carry
   // a leading or trailing space, so trimming would resolve a real path to a
