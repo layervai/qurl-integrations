@@ -65,10 +65,16 @@ const (
 	//     frame, then the LoginResp) rather than the whole dial.
 	//   - client/service.go's `svr.loopLoginUntilSuccess(20*time.Second,
 	//     false)` in keepControllerWorking, whose maxInterval becomes
-	//     wait.FastBackoffOptions.MaxDuration. 20s is a true ceiling rather
-	//     than a pre-jitter base: pkg/util/wait/backoff.go clamps to
-	//     MaxDuration AFTER applying Jitter. Only the FIRST login is paced
-	//     differently — Run passes 10s — and that one is not this storm.
+	//     MaxDuration on the wait.FastBackoffOptions that paces the dials
+	//     inside that loop. 20s is a true ceiling and not a pre-jitter base:
+	//     pkg/util/wait/backoff.go applies Jitter first and clamps second.
+	//     Read that clamp as this manager's rather than the file's — the same
+	//     file has a fast-retry return that skips it, which this manager
+	//     escapes only by leaving FastRetryCount zero. Only the FIRST login
+	//     is paced differently — Run passes 10s — and it is not this storm.
+	//
+	// reconnectStallWindow's marker below quotes this same call for its OTHER
+	// hard-coded argument. One fork edit can invalidate both; update the pair.
 	//
 	// Nothing local fails if either drifts: the only guard over them,
 	// TestWatchdogWindowOutlivesATunnelServerReplacement, checks their SUM
@@ -130,7 +136,8 @@ const (
 	// svr.ctx, so wait.BackoffUntil redials until the caller cancels while
 	// Run is parked on `<-svr.ctx.Done()`. If a fork bump gives that loop an
 	// exit of its own, this watchdog becomes redundant rather than wrong —
-	// but re-read it here before treating it as either.
+	// but re-read it here before treating it as either. The 20s in that same
+	// call is failingDialBackoffCeiling's marker above; update the pair.
 	//
 	// Sized to outlast the measured cause with margin. The tunnel-server
 	// fleet is an ASG that rolls instances with an instance refresh; a
