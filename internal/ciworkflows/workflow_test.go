@@ -1380,6 +1380,12 @@ func readWorkflow(t *testing.T, name string) githubWorkflow {
 	// assertion reached it first. Every githubWorkflow in this package comes
 	// from here, so this is also what lets a Jobs lookup anywhere below take
 	// its *githubJob as non-nil without re-checking.
+	//
+	// Unasserted, like the other fatals here: a fixture carrying a null job
+	// would have to sit in .github/workflows, where every other scan in this
+	// package would read it too. Verified by mutation instead — a bare
+	// `orphan:` added under a workflow's `jobs:` names that file and id rather
+	// than panicking. Re-run that if you touch this.
 	for id, job := range workflow.Jobs {
 		if job == nil {
 			t.Fatalf("%s job %q has an empty body", name, id)
