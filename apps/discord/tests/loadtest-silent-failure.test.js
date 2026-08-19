@@ -1237,6 +1237,11 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // the whole of what a template can state outright; the moment one
   // interpolates it is assembled at runtime and reads as null, as does a key
   // computed from anything else.
+  //
+  // `computed` gates the Identifier arm ALONE, which is deliberate rather than
+  // an oversight: a string or template key is name-shaped in either position,
+  // so `fs['x']` and `{ 'x': v }` read the same, while a bare `x` is a name
+  // only when it is NOT computed — computed, it is a variable to resolve.
   const staticName = (node, computed) => {
     if (node.type === 'StringLiteral') return node.value;
     if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
@@ -1260,6 +1265,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // name did before this map existed. Plenty are — `line` and `error` are
   // each declared in several functions — and dropping them is why this map
   // cannot make a count wrong.
+  //
+  // Once READABLY, to be exact. A first binding whose target cannot be read
+  // statically records null, and null is what a second sighting records too,
+  // so such a name is never rescued by a later readable binding. Both roads
+  // lead to "resolves to itself", which is the conservative end either way —
+  // but "declared exactly once" alone would not have told you that.
   //
   // The coupling that buys, stated because it is invisible at the call sites:
   // this map feeds calleeName, so it is not only the bans that read through
@@ -1462,6 +1473,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       "const fs = require('fs');",
       "const aliased = fs.writeFileSync;",
       "const { writeFileSync: renamed } = require('fs');",
+      // Shorthand resolves to ITSELF, which is the same answer as no alias at
+      // all — pinned because the comment above claims the ObjectPattern arm
+      // reads both spellings of a key, and a fixture that only ever exercised
+      // the renamed form would let the quoted one rot unnoticed.
+      "const { writeFileSync } = fs;",
+      "const { 'writeFileSync': quoted } = fs;",
       "const KEY = 'writeFileSync';",
       // Two bindings in two scopes, which is what makes `dup` ambiguous. The
       // second is returned rather than called so this contributes exactly one
@@ -1474,6 +1491,8 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       "fs[KEY]('d');",
       "aliased('e');",
       "renamed('f');",
+      "writeFileSync('h');",
+      "quoted('i');",
       "fs[String('writeFileSync')]('g');",
     ].join('\n');
     const fixtureAst = parser.parse(fixture, { sourceType: 'unambiguous' });
@@ -1495,6 +1514,8 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       'fs[KEY]': 'writeFileSync',
       'aliased': 'writeFileSync',
       'renamed': 'writeFileSync',
+      'writeFileSync': 'writeFileSync',
+      'quoted': 'writeFileSync',
       'dup': 'dup',
       'String': 'String',
       "fs[String('writeFileSync')]": null,
