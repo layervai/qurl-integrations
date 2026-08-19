@@ -154,8 +154,8 @@ endef
 # cli.yml's quality gates for the host OS, so a contributor can run them
 # before pushing. Adding or removing a gate there means updating this target
 # too. What it deliberately cannot mirror: the three-OS matrix (only the host
-# OS runs here; the workflow's per-OS keyring setup is dormant until apps/cli
-# references a keyring, so omitting it matches CI today) and the sandbox
+# OS runs here; CI provisions an ephemeral platform keyring while this target
+# uses the host's configured keyring) and the sandbox
 # gate's vars.CLI_SANDBOX_E2E arming plus repo-wide serialization — the tagged
 # test command itself still runs. `goreleaser check` needs goreleaser on PATH,
 # like release-snapshot above. The 40 floor mirrors cli.yml's coverage gate;

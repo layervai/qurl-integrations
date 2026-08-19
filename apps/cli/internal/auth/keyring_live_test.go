@@ -10,8 +10,8 @@ import (
 // the Keychain on macOS, gnome-keyring over D-Bus on Linux — with one
 // set/get/delete of a throwaway value. It runs only under the CI matrix
 // harness (QURL_TEST_HARNESS=1, exported by cli.yml's `cli / matrix` job,
-// whose keychain-unlock and gnome-keyring-under-dbus setup steps arm
-// themselves when apps/cli references a keyring). Everything behavioral is
+// whose keychain-unlock and gnome-keyring-under-dbus setup steps make the live
+// store available before the suite starts). Everything behavioral is
 // asserted against fakes and the file fallback elsewhere; this smoke only
 // proves the platform glue actually reaches a live keyring on all three
 // OSes.
