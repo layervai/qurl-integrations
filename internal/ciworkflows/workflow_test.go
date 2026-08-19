@@ -815,12 +815,43 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 // reaches them explicitly; anything else names the bases it runs on and skips
 // the rest.
 //
-// The two tables spell an absent filter differently — pullRequestBranchSpec
-// leaves branches nil on purpose, while an empty pullRequestBranches means an
-// app workflow's intent was never recorded, which TestAppWorkflowsRunOnStackedPRs
-// fails on by name. Neither is narrow, so both are safe to read through here.
+// nil and []string{} part company here, which is why the guard is against nil
+// rather than against len. A nil is how pullRequestBranchSpec spells "declares
+// no filter", the reading assertPullRequestBranches already gives it. A
+// present-but-empty one names no base branch at all and so runs nowhere —
+// narrow in the strictest sense, and the one reading that is not merely a
+// stricter version of [main]. No entry in either table spells it today, and an
+// app spec whose intent went unrecorded is nil and fails
+// TestAppWorkflowsRunOnStackedPRs by name before reaching here; the split is
+// pinned by TestIsNarrowBranchFilter so it stays a decision.
 func isNarrowBranchFilter(branches []string) bool {
 	return branches != nil && !slices.Contains(branches, "**")
+}
+
+// TestIsNarrowBranchFilter pins the readings both tables now share. The helper
+// is a one-liner, but it is the single point where "does this filter keep the
+// workflow off a stacked PR" is decided for a required aggregate and for an
+// unrequired workflow alike, so each reading is spelled out rather than left to
+// be inferred from the two callers.
+func TestIsNarrowBranchFilter(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		branches []string
+		want     bool
+	}{
+		{name: "nil declares no filter and reaches every base", branches: nil},
+		{name: "** reaches every base explicitly", branches: []string{"**"}},
+		{name: "** alongside a named base still reaches every base", branches: []string{"main", "**"}},
+		{name: "main alone skips a stacked PR", branches: []string{"main"}, want: true},
+		{name: "named bases without ** skip the rest", branches: []string{"main", "release"}, want: true},
+		{name: "present but empty names no base at all", branches: []string{}, want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isNarrowBranchFilter(testCase.branches); got != testCase.want {
+				t.Errorf("isNarrowBranchFilter(%#v) = %t, want %t", testCase.branches, got, testCase.want)
+			}
+		})
+	}
 }
 
 // assertPullRequestBranches compares a workflow's declared pull-request
