@@ -1603,31 +1603,56 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     for (const call of calls) expect(call.arguments).toHaveLength(3);
   });
 
-  it('writes nothing to disk', () => {
+  it('writes nothing to disk outside the reclaim ledger', () => {
     // The rule is the primitive, not the helper. Counting calls to
     // generateTestPayload cannot express "and nothing else writes a scratch
     // file either", which is the regression that actually recurs — the
     // round-scoped temp file was itself the second-most-obvious way to hand
-    // runRound some bytes. This script reads a payload and posts it; it has
-    // no business writing anywhere.
+    // runRound some bytes.
+    //
+    // The ledger is the one thing this script legitimately writes. #1161 gave
+    // it one so that a run killed mid-window can still be reclaimed; it is a
+    // durable record the operator names and re-reads, which is the opposite
+    // of the litter this test exists to keep out. The two landed 19 seconds
+    // apart and neither PR's CI ever saw the other, so this test's original
+    // whole-file ban reached main already contradicted by main.
+    //
+    // Exempted by ENCLOSING FUNCTION rather than by dropping the primitives
+    // from the list, which is what keeps the ban total everywhere else: a
+    // writeFileSync added to runRound, to main(), or at module level still
+    // fails here. Relaxing the list instead would have re-opened the exact
+    // hole — writeFileSync and appendFileSync are the two most obvious ways
+    // to reinstate the temp file, and both are ledger primitives.
     //
     // Every fs primitive that can put bytes on disk, not just the
     // writeFileSync a straight revert of #1177 would use: appendFileSync and
     // an openSync/writeSync pair reintroduce the same file while leaving a
     // narrower ban green, and copyFileSync does it without ever naming the
-    // bytes. openSync is banned outright rather than by mode — this script
-    // opens no descriptors at all, for reading or writing, so there is no
-    // legitimate call to distinguish it from.
+    // bytes. openSync is banned outside the ledger rather than by mode: the
+    // only descriptor this script opens is preflightLedger's 0600 probe, so
+    // anywhere else there is still no legitimate call to distinguish it from.
+    const ledgerWriters = ['preflightLedger', 'recordResource', 'pruneLedger']
+      .map((name) => {
+        const fn = findFunction(name);
+        // Not a soft skip: a renamed writer must fail here rather than
+        // silently widen the exemption to nothing and pass.
+        expect({ writer: name, found: fn !== null }).toEqual({ writer: name, found: true });
+        return fn;
+      });
+    const inLedgerWriter = (node) =>
+      ledgerWriters.some((fn) => node.start >= fn.start && node.end <= fn.end);
     for (const primitive of [
       'writeFileSync', 'writeFile', 'createWriteStream',
       'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
     ]) {
-      expect({ primitive, calls: callsNamed(primitive).length })
-        .toEqual({ primitive, calls: 0 });
+      const stray = callsNamed(primitive).filter((node) => !inLedgerWriter(node));
+      expect({ primitive, calls: stray.length }).toEqual({ primitive, calls: 0 });
     }
     // And nothing to unlink, which is the other half of why no cleanup path
     // was added here — an unlink would mean the litter is back and merely
-    // swept, leaving a run that is killed mid-window still littering.
+    // swept, leaving a run that is killed mid-window still littering. Not
+    // exempted for the ledger either: reclaim prunes it in place through
+    // pruneLedger's writeFileSync and leaves the emptied file behind.
     expect(callsNamed('unlinkSync')).toHaveLength(0);
   });
 
