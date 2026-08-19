@@ -164,16 +164,12 @@ jobs:
       # Mirrors the *_PRODUCER_FIXTURE_REQUIRED knobs in
       # layervai/qurl-connector's cross-repo-contracts.yml.
       CONNECTOR_RELEASE_IMAGE_REQUIRED: "false"
-      # PR #1158 adds a security assertion the currently pinned immutable
-      # origin predates. Waive only that exact digest so the producer fix can
-      # merge and publish; behavior_test.sh rejects a malformed or mismatched
-      # waiver. The pin-rotation PR must remove this line.
-      S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
-      # Same situation for the request preflight this PR adds: the pinned
-      # immutable origin predates it. Waive only that exact digest so the
-      # producer fix can publish; behavior_test.sh rejects a malformed or
-      # mismatched waiver. The pin-rotation PR must remove this line too.
-      S3_ORIGIN_REQUEST_PREFLIGHT_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
+      # The currently pinned immutable origin predates the control-char,
+      # upstream-response, and request-preflight assertion sets. Waive only that
+      # exact digest so the producer fixes can merge and publish;
+      # behavior_test.sh rejects a malformed or mismatched waiver. The
+      # pin-rotation PR must remove this line.
+      S3_ORIGIN_SECURITY_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
