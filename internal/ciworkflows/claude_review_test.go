@@ -98,7 +98,7 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 		t.Errorf("last step = %q, want %q — a step after the gate is a conclusion the gate never saw", last.Name, claudeReviewGateStepName)
 	}
 
-	eligibility := claudeReviewStep(t, &job, claudeReviewEligibilityStepName)
+	eligibility := claudeReviewStep(t, job, claudeReviewEligibilityStepName)
 	if eligibility.ID != claudeReviewEligibilityStepID {
 		t.Errorf("%s id = %q, want %q", claudeReviewEligibilityStepName, eligibility.ID, claudeReviewEligibilityStepID)
 	}
@@ -109,21 +109,21 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 	// The checkout guard is the root of the chain: every later step already
 	// keys off `steps.checkout.outcome`, so this is the single place the
 	// withheld paths are cut off from the secrets-bearing work.
-	checkout := claudeReviewStep(t, &job, claudeReviewCheckoutStepName)
+	checkout := claudeReviewStep(t, job, claudeReviewCheckoutStepName)
 	if strings.TrimSpace(checkout.If) != claudeReviewEligibleGuard {
 		t.Errorf("%s if = %q, want %q", claudeReviewCheckoutStepName, checkout.If, claudeReviewEligibleGuard)
 	}
 
-	gate := claudeReviewStep(t, &job, claudeReviewGateStepName)
+	gate := claudeReviewStep(t, job, claudeReviewGateStepName)
 	if strings.TrimSpace(gate.If) != "success()" {
 		t.Errorf("%s if = %q, want success() — the gate speaks only on the otherwise-green path; a failed review is already red and annotated, and a `concurrency` cancellation is not its to report", claudeReviewGateStepName, gate.If)
 	}
 
 	// The reporting paths exist so a missing review can never read as a passing
 	// one. A restructure that drops either is the failure they guard against.
-	report := claudeReviewStep(t, &job, claudeReviewReportStepName)
-	publish := claudeReviewStep(t, &job, claudeReviewPublishStepName)
-	for _, reporter := range []step{report, publish} {
+	report := claudeReviewStep(t, job, claudeReviewReportStepName)
+	publish := claudeReviewStep(t, job, claudeReviewPublishStepName)
+	for _, reporter := range []*step{report, publish} {
 		if reporter.ContinueOnError != nil {
 			t.Errorf("%s sets continue-on-error = %v; a swallowed failure here is the silent pass this workflow reports on", reporter.Name, reporter.ContinueOnError)
 		}
@@ -284,7 +284,8 @@ func TestClaudeReviewReportClassifiesEveryUnfinishedReview(t *testing.T) {
 	// Read from the workflow rather than restated, so raising the budget moves
 	// these rows with it instead of leaving them asserting against a value the
 	// workflow no longer uses.
-	budgetMinutes := readClaudeReviewBudgetWiring(t).budgetMinutes
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
+	budgetMinutes := claudeReviewMinutes(t, claudeReviewBudgetEnv, job.Env[claudeReviewBudgetEnv])
 	budgetSeconds := budgetMinutes * 60
 
 	// The step reads `date +%s`, so the wall clock decides which branch it
@@ -441,7 +442,10 @@ func countErrorAnnotations(output string) int {
 func TestClaudeReviewBudgetFitsInsideTheJobCap(t *testing.T) {
 	t.Parallel()
 
-	wiring := readClaudeReviewBudgetWiring(t)
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
+	budgetMinutes := claudeReviewMinutes(t, claudeReviewBudgetEnv, job.Env[claudeReviewBudgetEnv])
+	jobCapMinutes := claudeReviewMinutes(t, claudeReviewJobID+" job timeout-minutes", job.TimeoutMinutes)
+	reviewStepCap := claudeReviewStep(t, job, claudeReviewRunStepName).TimeoutMinutes
 
 	// The single-source-of-truth property: the cap that stops the review and
 	// the budget its annotation names must be the same number, or the message
@@ -449,9 +453,9 @@ func TestClaudeReviewBudgetFitsInsideTheJobCap(t *testing.T) {
 	// than matched anywhere in the file, so the expression appearing on some
 	// other step cannot satisfy it.
 	wantCap := "${{ fromJSON(env." + claudeReviewBudgetEnv + ") }}"
-	if got, _ := wiring.reviewStepCap.(string); got != wantCap {
+	if got, _ := reviewStepCap.(string); got != wantCap {
 		t.Errorf("%s timeout-minutes = %#v, want %q — a cap that does not derive from %s lets the report step name a budget that stopped nothing",
-			claudeReviewRunStepName, wiring.reviewStepCap, wantCap, claudeReviewBudgetEnv)
+			claudeReviewRunStepName, reviewStepCap, wantCap, claudeReviewBudgetEnv)
 	}
 
 	// The job cap must clear the review budget by more than the steps around
@@ -470,9 +474,9 @@ func TestClaudeReviewBudgetFitsInsideTheJobCap(t *testing.T) {
 	// floor on the gap, not a prediction of it.
 	const minHeadroomMinutes = 4
 
-	if headroom := wiring.jobCapMinutes - wiring.budgetMinutes; headroom < minHeadroomMinutes {
+	if headroom := jobCapMinutes - budgetMinutes; headroom < minHeadroomMinutes {
 		t.Errorf("job cap %dm leaves %dm over the %dm review budget, under the %dm floor; too thin for setup, checkout retry and verify",
-			wiring.jobCapMinutes, headroom, wiring.budgetMinutes, minHeadroomMinutes)
+			jobCapMinutes, headroom, budgetMinutes, minHeadroomMinutes)
 	}
 }
 
@@ -738,7 +742,7 @@ func TestClaudeReviewKeepsItsSecurityProperties(t *testing.T) {
 
 	// PR-authored files never enter this workspace: the checkout takes the
 	// default branch, and the review reads the pull request through GitHub MCP.
-	checkout := claudeReviewStep(t, &job, claudeReviewCheckoutStepName)
+	checkout := claudeReviewStep(t, job, claudeReviewCheckoutStepName)
 	if !strings.HasPrefix(checkout.Uses, checkoutActionPrefix) {
 		t.Errorf("%s uses = %q, want an %s action", claudeReviewCheckoutStepName, checkout.Uses, checkoutActionPrefix)
 	}
@@ -749,8 +753,8 @@ func TestClaudeReviewKeepsItsSecurityProperties(t *testing.T) {
 		t.Errorf("checkout persist-credentials = %v, want false — the review origin is credential-free and the steps assert it stayed that way", got)
 	}
 
-	review := claudeReviewStep(t, &job, claudeReviewRunStepName)
-	assertClaudeReviewToolAccess(t, &review)
+	review := claudeReviewStep(t, job, claudeReviewRunStepName)
+	assertClaudeReviewToolAccess(t, review)
 }
 
 // assertClaudeReviewToolAccess holds the review to read-only GitHub MCP. The
@@ -822,7 +826,7 @@ func claudeArgsToolList(t *testing.T, args, flag string) []string {
 	return tools
 }
 
-func claudeReviewJob(t *testing.T, workflow githubWorkflow) githubJob {
+func claudeReviewJob(t *testing.T, workflow githubWorkflow) *githubJob {
 	t.Helper()
 
 	job, ok := workflow.Jobs[claudeReviewJobID]
@@ -846,81 +850,19 @@ func claudeReviewStepScript(t *testing.T, name string) string {
 	t.Helper()
 
 	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
-	return claudeReviewStep(t, &job, name).Run
+	return claudeReviewStep(t, job, name).Run
 }
 
-func claudeReviewStep(t *testing.T, job *githubJob, name string) step {
+func claudeReviewStep(t *testing.T, job *githubJob, name string) *step {
 	t.Helper()
 
-	for _, candidate := range job.Steps {
-		if candidate.Name == name {
-			return candidate
+	for i := range job.Steps {
+		if job.Steps[i].Name == name {
+			return &job.Steps[i]
 		}
 	}
 	t.Fatalf("%s job is missing the %q step", claudeReviewJobID, name)
-	return step{}
-}
-
-// claudeReviewBudgetWiring is the job's declared review budget together with
-// the two caps that have to bracket it.
-type claudeReviewBudgetWiring struct {
-	budgetMinutes int
-	jobCapMinutes int
-	// reviewStepCap stays `any` so a cap written as a bare number reports as
-	// the wrong value rather than as a missing one: timeout-minutes accepts a
-	// literal or a `${{ }}` expression, and only one of those is correct here.
-	reviewStepCap any
-}
-
-// readClaudeReviewBudgetWiring re-reads the workflow as untyped YAML for the
-// three values around the budget. None is on the job's or the step's `if:`, so
-// none is reachable by executing a step.
-//
-// Read raw rather than by widening githubJob and step, for the reason
-// claudeReviewRawSteps gives one field over: both structs are copied by value
-// in the range loops of this package's workflow-wide assertions, and each sits
-// just under the size at which that copy becomes a lint finding. Growing them
-// for three fields only this file reads charges every one of those loops for it.
-//
-// Called once per test, so the file is read and parsed twice per run. Left
-// uncached deliberately: a package-level cache would be shared mutable state
-// across tests that run in parallel, which is a worse trade than two reads of a
-// file the OS already has in page cache.
-func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
-	t.Helper()
-
-	var raw struct {
-		Jobs map[string]struct {
-			TimeoutMinutes any            `yaml:"timeout-minutes"`
-			Env            map[string]any `yaml:"env"`
-			Steps          []struct {
-				Name           string `yaml:"name"`
-				TimeoutMinutes any    `yaml:"timeout-minutes"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeCodeReviewWorkflow), &raw); err != nil {
-		t.Fatalf("parse %s: %v", claudeCodeReviewWorkflow, err)
-	}
-
-	job, ok := raw.Jobs[claudeReviewJobID]
-	if !ok {
-		t.Fatalf("%s is missing the %s job", claudeCodeReviewWorkflow, claudeReviewJobID)
-	}
-
-	wiring := claudeReviewBudgetWiring{
-		budgetMinutes: claudeReviewMinutes(t, claudeReviewBudgetEnv, job.Env[claudeReviewBudgetEnv]),
-		jobCapMinutes: claudeReviewMinutes(t, claudeReviewJobID+" job timeout-minutes", job.TimeoutMinutes),
-	}
-
-	for _, current := range job.Steps {
-		if current.Name == claudeReviewRunStepName {
-			wiring.reviewStepCap = current.TimeoutMinutes
-			return wiring
-		}
-	}
-	t.Fatalf("%s job is missing the %q step, which is where the budget is spent", claudeReviewJobID, claudeReviewRunStepName)
-	return claudeReviewBudgetWiring{}
+	return nil
 }
 
 // claudeReviewMinutes reads a minute count that has to be a literal. The report

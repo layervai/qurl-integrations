@@ -191,7 +191,7 @@ func TestRequiredContextJobsCannotConcludeSkipped(t *testing.T) {
 type requiredContextJob struct {
 	workflow string
 	id       string
-	job      githubJob
+	job      *githubJob
 }
 
 // workflowJobsByDisplayName indexes every job in .github/workflows under the
