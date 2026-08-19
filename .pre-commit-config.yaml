@@ -88,6 +88,13 @@ repos:
         pass_filenames: false
         files: '^scripts/(verify-cli-release|test-verify-cli-release)\.sh$'
 
+      - id: release-please-sync-check
+        name: release-please sync check tests
+        entry: scripts/test-check-release-please-sync.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(check-release-please-sync|test-check-release-please-sync)\.sh$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w

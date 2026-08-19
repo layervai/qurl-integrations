@@ -52,6 +52,13 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-release-please-sync.sh
 
+      # Its three invariants are the only pre-merge check on release-please's
+      # config, and each passes by accident while the repo is already correct,
+      # so an assertion that stopped biting would be silent.
+      - name: Test release-please sync check
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-check-release-please-sync.sh
+
       # The verifier it exercises only ever runs on a push to main, after a
       # CLI release has already been made or dropped, so a defect in it ships
       # green and surfaces exactly when it is needed. Same reason as the
