@@ -659,6 +659,85 @@ func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 	}
 }
 
+// editedActivityType is the `pull_request` activity type GitHub sends when a
+// PR's base branch changes, which is what retargeting a stacked PR onto main
+// does. It is not among the three types a workflow gets when it declares no
+// `types:` of its own — opened, synchronize, reopened — so a workflow taking
+// the defaults never sees one.
+const editedActivityType = "edited"
+
+// TestBranchFilteredWorkflowsExcludeEditedActivityType pins the tree fact that
+// makes the second half of the stacked-PR stall real.
+//
+// TestAppWorkflowsRunOnStackedPRs above covers the first half: a workflow
+// filtered to `branches: [main]` is never registered on a PR stacked on a
+// feature branch, so its checks are absent rather than skipped and the PR reads
+// green having run none of them. Merging that base looks like the backstop, and
+// is not. GitHub retargets the stacked PR onto main, where the required
+// contexts do apply — but the retarget arrives as activity type `edited`, which
+// the defaults exclude, so it re-runs nothing. The check that never registered
+// finally has a merge box to hold, and the PR sits at "Expected — Waiting for
+// status to be reported" until the next push.
+//
+// That second phase holds only while no branch-filtered workflow asks for
+// `edited`. One that did would re-run on the retarget and report, and the stall
+// would stop happening — leaving the account above describing a repo that no
+// longer exists. It is a claim about the tree, so it belongs in a test rather
+// than in prose: "produces a required context" sat in a comment nobody reread
+// until #1185 falsified it the same day it was written, which is what
+// TestPullRequestWorkflowsRecordWhetherTheyGateMerges now exists to prevent.
+//
+// Two workflows declare `edited` today — pr-title.yml and
+// dependabot-pr-title.yml — and neither carries a `branches:` filter, so
+// neither is in scope. issue-priority.yml declares it on an `issues:` trigger,
+// which is a different event's activity type entirely.
+//
+// Scope is any declared filter, not just a narrow one. Narrowness is recorded
+// in the tables above, which a commit can edit in the same breath as the
+// workflow it describes; a `branches:` key is read straight off the YAML, where
+// it cannot be. A `["**"]` workflow gaining `edited` strands nothing — it
+// already ran on the stacked PR — but reading every filter keeps the rule one a
+// reader can apply without first deciding which table an entry belongs to.
+func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
+	filteredTriggers := 0
+	for _, name := range workflowFiles(t) {
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
+		for _, trigger := range pullRequestTriggers {
+			config, ok := triggers[trigger]
+			if !ok {
+				continue
+			}
+			branches, declared := pullRequestBranchFilter(t, name, trigger, config)
+			if !declared {
+				continue
+			}
+			filteredTriggers++
+
+			types, hasTypes := pullRequestActivityTypes(t, name, trigger, config)
+			if !hasTypes || !slices.Contains(types, editedActivityType) {
+				continue
+			}
+			t.Errorf("%s %s declares branches %v and types %v; %q makes it re-run when a "+
+				"stacked PR is retargeted onto main, which the doc comment on this test says "+
+				"no filtered workflow does. Drop %q, or rewrite that comment and the stall it "+
+				"describes", name, trigger, branches, types,
+				editedActivityType, editedActivityType)
+		}
+	}
+
+	// Couple the scan to a nonzero result, on the same reasoning as
+	// TestEveryPullRequestWorkflowRecordsItsBranchFilter's count check: with no
+	// filtered trigger found there is nothing to contradict, and this would
+	// pass vacuously whether the tree had genuinely widened or the scan had
+	// stopped matching. Only the total is read, so counting one workflow twice
+	// when it filters both its triggers costs nothing. The nine specs pin
+	// `["**"]` explicitly, so the tree cannot reach zero without
+	// requiredWorkflowSpecs changing too.
+	if filteredTriggers == 0 {
+		t.Errorf("no pull-request workflow declares a branches filter, so this test asserted nothing")
+	}
+}
+
 // TestOtherPullRequestWorkflowsRecordTheirBranchFilter does the same for the
 // workflows that own no aggregate. Two of them deliberately stay on main and
 // the rest are already unfiltered; recording both kinds is what makes either a
@@ -1039,6 +1118,82 @@ func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any
 	default:
 		t.Fatalf("%s %s.branches has unexpected type %T", path, trigger, raw)
 		return nil, false
+	}
+}
+
+// pullRequestActivityTypes reads the `types` filter off a parsed pull-request
+// trigger, reporting whether one is declared at all. Like pullRequestBranchFilter
+// it accepts both YAML spellings of a single entry, a bare scalar and a
+// sequence, so `types: edited` and `types: [edited]` are the same decision.
+//
+// An undeclared filter is the load-bearing case rather than an edge one: it
+// means the workflow takes GitHub's three defaults, which exclude
+// editedActivityType. Callers reach this only after pullRequestBranchFilter has
+// accepted the same value, so a trigger config of any other shape has already
+// failed there and the type assertion below cannot swallow one silently.
+func pullRequestActivityTypes(t *testing.T, path, trigger string, pullRequest any) (types []string, declared bool) {
+	t.Helper()
+
+	config, ok := pullRequest.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	raw, ok := config["types"]
+	if !ok {
+		return nil, false
+	}
+
+	switch typed := raw.(type) {
+	case string:
+		return []string{typed}, true
+	case []any:
+		for _, value := range typed {
+			activity, ok := value.(string)
+			if !ok {
+				t.Fatalf("%s %s.types contains non-string value %T", path, trigger, value)
+			}
+			types = append(types, activity)
+		}
+		return types, true
+	default:
+		t.Fatalf("%s %s.types has unexpected type %T", path, trigger, raw)
+		return nil, false
+	}
+}
+
+// TestPullRequestActivityTypes keeps the negative tree assertion above from
+// passing only because its detector stopped recognizing an explicit filter.
+// None of today's branch-filtered workflows declares `types:`, so the live
+// scan exercises only the absent case unless these YAML-decoded shapes are
+// pinned independently.
+func TestPullRequestActivityTypes(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       map[string]any
+		want         []string
+		wantDeclared bool
+	}{
+		{name: "absent", config: map[string]any{}},
+		{name: "scalar", config: map[string]any{"types": "edited"}, want: []string{"edited"}, wantDeclared: true},
+		{
+			name:         "sequence",
+			config:       map[string]any{"types": []any{"opened", "edited"}},
+			want:         []string{"opened", "edited"},
+			wantDeclared: true,
+		},
+		{name: "empty sequence", config: map[string]any{"types": []any{}}, wantDeclared: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, declared := pullRequestActivityTypes(t, "example.yml", "pull_request", test.config)
+			if declared != test.wantDeclared {
+				t.Errorf("declared = %t, want %t", declared, test.wantDeclared)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Errorf("types = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
