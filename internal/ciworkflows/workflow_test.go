@@ -916,9 +916,11 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
 			"that never runs it is not reading green over a gate it skipped — the honest-signal " +
 			"argument that widened the app workflows does not apply. The code is still analyzed " +
-			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
-			"main, and the analysis runs then. Against that second look sits a two-language " +
-			"analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
+			"before it reaches main: deleting a merged base branch retargets the PRs stacked on it " +
+			"onto main, and the analysis runs on the next push rather than on the retarget itself " +
+			"(TestBranchFilteredWorkflowsExcludeEditedActivityType) — and strict status checks " +
+			"require that push before the merge anyway. Against that second look sits a " +
+			"two-language analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
 			"re-anchors pre-existing alerts onto that PR, where they block merge until a human " +
 			"resolves each conversation.",
 	},
@@ -927,9 +929,9 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 		branches: []string{"main"},
 		why: "Deliberately narrow, on the same reasoning as codeql.yml: no required context, " +
 			"and a stacked PR's dependency delta is reviewed again inside the combined diff once " +
-			"it retargets to main. Cheaper to widen than CodeQL, so this is the entry to revisit " +
-			"first — the cost is not runtime but noise, since `comment-summary-in-pr: always` " +
-			"would post a summary onto every stacked PR.",
+			"the merged base is deleted and it retargets to main. Cheaper to widen than CodeQL, " +
+			"so this is the entry to revisit first — the cost is not runtime but noise, since " +
+			"`comment-summary-in-pr: always` would post a summary onto every stacked PR.",
 	},
 	{
 		path: "secrets-scan.yml",
@@ -999,9 +1001,9 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 		why: "Already unfiltered, and on `pull_request_target` rather than `pull_request` because it " +
 			"holds ANTHROPIC_API_KEY and so must load its definition from the default branch. Its " +
 			"`claude-review` context became required in #1185, which is what pulled that trigger into " +
-			"scope here: narrowing it would leave every stacked PR waiting forever on a required check " +
-			"that never registers, the failure this package already caught once on 2026-08-14. Its `types` " +
-			"reaches the same failure by the sibling spelling, so the list is pinned exactly: it carries the " +
+			"scope here: narrowing it would take a merge-gating check off every stacked PR, which would " +
+			"then read green having skipped it — see TestAppWorkflowsRunOnStackedPRs. Its `types` reaches " +
+			"the pending sibling on PRs targeting main, so the list is pinned exactly: it carries the " +
 			"full default three plus `ready_for_review`, and dropping any of the three would deregister " +
 			"`claude-review`. Pinning it exactly also holds the other end, which the premise test cannot — " +
 			"`converted_to_draft` must stay absent, or converting a reviewed PR to draft retriggers the job " +
@@ -1017,6 +1019,21 @@ var otherPullRequestWorkflows = []pullRequestTriggerSpec{
 // the PR rather than reported as skipped. The PR then reads fully green having
 // run none of them, and because branch protection guards only main, nothing
 // stops it merging into its base on that showing.
+//
+// Absent is not pending, and the two are easy to swap. Pending — "Expected —
+// Waiting for status to be reported", the 2026-08-14 shape — needs main's
+// protection to be judging the PR at all, so it is what a required context
+// nothing reports does to a PR targeting main, which then blocks until an admin
+// override lands it. Nothing protects the base of a stacked PR, so there is no
+// required context there to wait on. Both failures are silent, and while the PR
+// is stacked it is this one that merges. Deleting the merged base retargets the
+// PR onto main and puts it under main's protection, which is exactly when the
+// other shape appears — the second half, pinned below by
+// TestBranchFilteredWorkflowsExcludeEditedActivityType.
+//
+// CONTRIBUTING.md's required-contexts section is the wording to match, and the
+// entries and messages elsewhere in this file defer to this paragraph rather
+// than restating the mechanism (#1194).
 //
 // The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
 // discord.yml (#1179) — and each time a one-line revert would have undone it
@@ -1050,6 +1067,11 @@ func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 // does. It is not among the three types a workflow gets when it declares no
 // `types:` of its own — opened, synchronize, reopened — so a workflow taking
 // the defaults never sees one.
+//
+// TODO(upstream-contract): this relies on GitHub continuing to emit `edited`
+// when deleting a base branch retargets its open PRs. The test below pins only
+// this repository's subscription half; it cannot detect drift in GitHub's event
+// contract.
 const editedActivityType = "edited"
 
 // TestBranchFilteredWorkflowsExcludeEditedActivityType pins the tree fact that
@@ -1058,12 +1080,12 @@ const editedActivityType = "edited"
 // TestAppWorkflowsRunOnStackedPRs above covers the first half: a workflow
 // filtered to `branches: [main]` is never registered on a PR stacked on a
 // feature branch, so its checks are absent rather than skipped and the PR reads
-// green having run none of them. Merging that base looks like the backstop, and
-// is not. GitHub retargets the stacked PR onto main, where the required
-// contexts do apply — but the retarget arrives as activity type `edited`, which
-// the defaults exclude, so it re-runs nothing. The check that never registered
-// finally has a merge box to hold, and the PR sits at "Expected — Waiting for
-// status to be reported" until the next push.
+// green having run none of them. Merging and then deleting that base looks like
+// the backstop, and is not. The deletion retargets the stacked PR onto main,
+// where the required contexts do apply — but the retarget arrives as activity
+// type `edited`, which the defaults exclude, so it re-runs nothing. The check
+// that never registered finally has a merge box to hold, and the PR sits at
+// "Expected — Waiting for status to be reported" until the next push.
 //
 // That second phase holds only while no branch-filtered workflow asks for
 // `edited`. One that did would re-run on the retarget and report, and the stall
@@ -1186,8 +1208,9 @@ func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 // #1185 made claude-code-review.yml's `claude-review` a required context —
 // the exact condition this comment previously named as the one that would
 // force the widening. GitHub honors `branches:` on `pull_request_target`
-// identically, so that workflow narrowing to [main] would now leave every
-// stacked PR waiting on a required check that never registers.
+// identically, so that workflow narrowing to [main] would now take a
+// merge-gating check off every stacked PR, which would read green having
+// skipped it.
 func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	recorded := make(map[string]bool, len(requiredWorkflowSpecs)+len(otherPullRequestWorkflows))
 	for i := range requiredWorkflowSpecs {
@@ -1260,7 +1283,7 @@ func TestPullRequestWorkflowsRecordWhetherTheyGateMerges(t *testing.T) {
 			}
 			if got {
 				t.Errorf("%s reports a required context but is recorded as producing none; "+
-					"a narrow filter would leave every stacked PR waiting on it", spec.path)
+					"a narrow filter would let every stacked PR read green having skipped it", spec.path)
 				return
 			}
 			t.Errorf("%s is recorded as producing a required context but reports none; "+
@@ -1292,10 +1315,10 @@ func reportsRequiredContext(path string, reported workflowContexts, required []s
 // because neither produces a required context: a stacked PR that never runs
 // them is not reading green over a gate that blocks its merge, which is the
 // whole argument that widened the app workflows. Were either to become
-// required, the reasoning would be void — an unregistered required check
-// leaves the PR sitting on "Expected — Waiting for status to be reported"
-// forever, the same silent shape as the 2026-08-14 typo. This turns that
-// premise into something CI checks.
+// required, the reasoning would be void — the stacked PR would be reading green
+// over exactly such a gate, absent rather than pending on it, the failure
+// TestAppWorkflowsRunOnStackedPRs describes. This turns that premise into
+// something CI checks.
 //
 // It reads both tables, because the premise is about the pairing of a narrow
 // filter with a required context and neither table has a monopoly on either
@@ -1323,7 +1346,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 		for _, file := range reported.direct[context] {
 			if narrow[file] {
 				t.Errorf("%s is recorded as deliberately narrow but reports required context %q; "+
-					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+					"a stacked PR skips it and reads green over that gate rather than pending on it, so its entry needs revisiting", file, context)
 			}
 		}
 		// Reusable-workflow calls report as "<caller job> / <inner job>".
@@ -1334,7 +1357,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 		for _, file := range reported.reusable[caller] {
 			if narrow[file] {
 				t.Errorf("%s is recorded as deliberately narrow but its caller job reports required context %q; "+
-					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+					"a stacked PR skips it and reads green over that gate rather than pending on it, so its entry needs revisiting", file, context)
 			}
 		}
 	}
