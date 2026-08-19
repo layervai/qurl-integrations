@@ -15,8 +15,16 @@
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
  *   positively recognizes as non-production — loopback, or a hostname named in
- *   the comma-separated LOADTEST_TARGET_OK env var. Every other host is
+ *   the comma-separated LOADTEST_TARGET_HOSTS env var. Every other host is
  *   refused. See the "Target safety guard" section below.
+ *
+ *   Two override strengths: LOADTEST_ALLOW_PRODUCTION=1 clears a target the
+ *   guard merely failed to RECOGNIZE, but only the typed --allow-production
+ *   flag clears a host known to be production. See isTargetAuthorized.
+ *
+ *   Only loopback is recognized without being named, so a run against a real
+ *   sandbox needs LOADTEST_TARGET_HOSTS set. Note that 0.0.0.0 is NOT loopback
+ *   (it is the unspecified address); name it explicitly if you bind there.
  */
 
 const fs = require('fs');
@@ -98,32 +106,35 @@ const { parseIPv4Octets, ipv4LocalScope, ipv6LocalScope } = require('../src/util
 // connector.js's DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS), so a
 // domain-wide rule would misfile staging as production.
 const PROD_HOSTS = new Set(['api.layerv.ai', 'get.qurl.link']);
-// Matched as apex-or-subdomain: every resolved qURL site is a `*.qurl.site`
-// host. The non-prod tunnel suffixes `.qurl.site.layerv.xyz` /
-// `.qurl.site.layerv.ai` end in `.layerv.xyz` / `.layerv.ai` and so do NOT
-// match this rule.
-const PROD_DOMAINS = ['qurl.site'];
+// Matched as apex-or-subdomain. Every resolved qURL site is a `*.qurl.site`
+// host, and minted links render as `https://qurl.link/#at_...`, so both
+// domains are production wholesale — including a regional or replacement
+// connector like `get-eu.qurl.link`, which is exactly the case an exact-host
+// pin would miss. Unlike `layerv.ai`, neither domain has a non-production
+// tenant: the non-prod tunnel spellings are `.qurl.site.layerv.xyz` /
+// `.qurl.site.layerv.ai` and `qurl.link.layerv.xyz`, all of which end in
+// `.layerv.xyz` / `.layerv.ai` and so do NOT match this rule.
+const PROD_DOMAINS = ['qurl.site', 'qurl.link'];
 
 // Verdicts that may proceed without --allow-production.
 const SAFE_VERDICTS = new Set(['loopback', 'allowlisted']);
 const VERDICT_LABEL = {
   loopback: 'ok — loopback',
-  allowlisted: 'ok — named in LOADTEST_TARGET_OK',
+  allowlisted: 'ok — named in LOADTEST_TARGET_HOSTS',
   production: 'REFUSED — production',
   unrecognized: 'REFUSED — not a recognized non-production host',
   unparseable: 'REFUSED — not a parseable URL',
 };
 
 /**
- * Lowercase, and drop one trailing root dot. `api.layerv.ai.` is the same host
+ * Lowercase, and drop trailing root dots. `api.layerv.ai.` is the same host
  * as `api.layerv.ai` to DNS but a different string, so without this the
  * fully-qualified spelling misses the production check on both sides of the
  * guard — and on the allowlist side that is a fail-OPEN, since the entry would
  * be stored as an ordinary grant instead of being rejected as production.
  */
 function normalizeHost(host) {
-  const lowered = String(host).toLowerCase();
-  return lowered.endsWith('.') ? lowered.slice(0, -1) : lowered;
+  return String(host).toLowerCase().replace(/\.+$/, '');
 }
 
 /** Normalized hostname of a target URL, or null when it won't parse. */
@@ -169,7 +180,7 @@ function isProductionHost(host) {
 }
 
 /**
- * Parse LOADTEST_TARGET_OK — comma-separated hostnames the operator is
+ * Parse LOADTEST_TARGET_HOSTS — comma-separated hostnames the operator is
  * explicitly naming as the intended targets. Real sandbox/staging hostnames
  * are infra-owned and must not be committed to this public repo (the same
  * reason config.js takes DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS from the
@@ -189,16 +200,33 @@ function parseTargetAllowlist(raw) {
       // Covers `https://host`, `host/path` and `host:9808` alike. Bracketed
       // IPv6 is rejected by the same rule and needs no entry — loopback is
       // recognized without one.
-      errors.push(`LOADTEST_TARGET_OK entry '${entry}' must be a bare hostname — no scheme, path, or port.`);
+      errors.push(`LOADTEST_TARGET_HOSTS entry '${entry}' must be a bare hostname — no scheme, path, or port.`);
+    } else if (/^\d+$/.test(entry)) {
+      // `LOADTEST_TARGET_HOSTS=1` reads like a boolean and would otherwise be
+      // stored as the entry '1', which can never match: `new URL('http://1')`
+      // canonicalizes the host to 0.0.0.1, an address, never a name. Sound to
+      // reject — an all-digit label never survives canonicalization as a name.
+      errors.push(`LOADTEST_TARGET_HOSTS entry '${entry}' must be a bare hostname — this variable names the hosts to allow, it is not an on/off switch.`);
     } else if (entry.includes('*')) {
-      errors.push(`LOADTEST_TARGET_OK entry '${entry}' must be a bare hostname — wildcards are not matched.`);
-    } else if (isProductionHost(entry)) {
-      // Production is not grantable through the environment: env vars get
-      // copied between environments and pasted into .env.loadtest files, a
-      // typed command-line flag does not.
-      errors.push(`LOADTEST_TARGET_OK entry '${entry}' is a production host — pass --allow-production on the command line if that is really the intent.`);
+      errors.push(`LOADTEST_TARGET_HOSTS entry '${entry}' must be a bare hostname — wildcards are not matched.`);
     } else {
-      hosts.add(entry);
+      // Normalize through the SAME parser a target goes through, so an entry
+      // and a target spell the same host identically. Without this the two
+      // sides can disagree — `api.layerv.ai..` normalizes to something
+      // isProductionHost does not recognize, and a fullwidth or otherwise
+      // IDNA-mapped entry is stored in a form no target can ever match, which
+      // is the quietly-inert grant this function exists to prevent.
+      const host = targetHost(`https://${entry}`);
+      if (host === null || host === '' || host.split('.').includes('')) {
+        errors.push(`LOADTEST_TARGET_HOSTS entry '${entry}' is not a parseable hostname.`);
+      } else if (isProductionHost(host)) {
+        // Production is not grantable through the environment: env vars get
+        // copied between environments and pasted into .env.loadtest files, a
+        // typed command-line flag does not.
+        errors.push(`LOADTEST_TARGET_HOSTS entry '${entry}' is a production host — pass --allow-production on the command line if that is really the intent.`);
+      } else {
+        hosts.add(host);
+      }
     }
   }
   return { hosts, errors };
@@ -223,6 +251,25 @@ function classifyTargets({ qurlEndpoint, connectorUrl, allowedHosts }) {
 }
 
 const isRefusedTarget = (target) => !SAFE_VERDICTS.has(target.verdict);
+
+/**
+ * Which override authorizes a refused target. The two strengths are
+ * deliberately asymmetric.
+ *
+ * A target the guard merely fails to RECOGNIZE — an unnamed sandbox, a value
+ * that will not parse — can be waved through from the environment. A host
+ * known to be PRODUCTION needs the typed command-line flag, because
+ * `.env.loadtest` is spliced into process.env at the top of this file: an
+ * env-only override would let a gitignored file sitting in a working copy
+ * disable this guard permanently and silently, which is the same vector
+ * parseTargetAllowlist refuses for LOADTEST_TARGET_HOSTS. Refusing it there
+ * and allowing it here would leave the small hole shut and the large one open.
+ */
+function isTargetAuthorized(target, { allowProdFlag, allowProdEnv }) {
+  if (!isRefusedTarget(target)) return true;
+  if (target.verdict === 'production') return allowProdFlag;
+  return allowProdFlag || allowProdEnv;
+}
 
 async function runRound(roundNum) {
   const roundStart = performance.now();
@@ -289,8 +336,9 @@ async function main() {
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
   // Refuse any target not positively recognized as non-production. See the
   // "Target safety guard" section above for why this is an allowlist.
-  const allowProd = process.argv.includes('--allow-production') || process.env.LOADTEST_ALLOW_PRODUCTION === '1';
-  const { hosts: allowedHosts, errors: allowlistErrors } = parseTargetAllowlist(process.env.LOADTEST_TARGET_OK);
+  const allowProdFlag = process.argv.includes('--allow-production');
+  const allowProdEnv = process.env.LOADTEST_ALLOW_PRODUCTION === '1';
+  const { hosts: allowedHosts, errors: allowlistErrors } = parseTargetAllowlist(process.env.LOADTEST_TARGET_HOSTS);
   // A malformed entry is reported even under --allow-production: it means the
   // operator believes they granted a host they did not, which is worth knowing
   // before the next run relies on it.
@@ -304,21 +352,31 @@ async function main() {
     allowedHosts,
   });
   const refused = targets.filter(isRefusedTarget);
-  if (refused.length > 0 && !allowProd) {
+  const blocked = refused.filter((t) => !isTargetAuthorized(t, { allowProdFlag, allowProdEnv }));
+  if (blocked.length > 0) {
     console.error('FATAL: refusing to load test a target that is not a recognized sandbox.');
     for (const t of targets) {
       console.error(`  ${t.name.padEnd(14)} = ${t.rawUrl}  [${VERDICT_LABEL[t.verdict]}]`);
     }
     console.error('This run mints thousands of resources; a target has to be recognized as');
-    console.error('non-production before it gets that volume. Point QURL_ENDPOINT/CONNECTOR_URL');
-    console.error('at a sandbox, name the intended host(s) in LOADTEST_TARGET_OK (comma-separated');
-    console.error('hostnames), or pass --allow-production.');
+    console.error('non-production before it gets that volume.');
+    // The verdict table prints whole URLs, but the variable takes hostnames —
+    // hand back the parsed host so the operator does not have to extract it.
+    const nameable = [...new Set(blocked.filter((t) => t.verdict === 'unrecognized').map((t) => t.host))];
+    if (nameable.length > 0) {
+      console.error(`If that is the intended sandbox: LOADTEST_TARGET_HOSTS=${nameable.join(',')}`);
+    }
+    if (blocked.some((t) => t.verdict === 'production')) {
+      // Named separately because LOADTEST_ALLOW_PRODUCTION will NOT clear a
+      // production verdict — see isTargetAuthorized.
+      console.error('To load test production anyway, pass --allow-production on the command line.');
+    }
     process.exit(1);
   }
   if (refused.length > 0) {
     // Worded for either override — the flag and LOADTEST_ALLOW_PRODUCTION=1
     // both land here, so naming only the flag would misreport the env path.
-    const named = refused.map((t) => `${t.name}=${t.host || t.rawUrl}`).join(', ');
+    const named = refused.map((t) => `${t.name}=${t.host || t.rawUrl} (${t.verdict})`).join(', ');
     console.warn(`WARNING: target guard overridden — running against ${named}`);
   }
 
@@ -391,6 +449,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isTargetAuthorized,
   normalizeHost,
   targetHost,
   isLoopbackHost,

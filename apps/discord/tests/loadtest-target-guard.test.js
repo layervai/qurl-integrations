@@ -24,6 +24,7 @@ const {
   classifyTargets,
   isRefusedTarget,
   normalizeHost,
+  isTargetAuthorized,
 } = require('../scripts/loadtest-standalone');
 
 const NO_ALLOWLIST = new Set();
@@ -46,13 +47,16 @@ describe('loadtest target guard — production spellings that the old denylist m
     ['uppercase host', 'https://API.LayerV.AI'],
     ['a resolved qURL site', 'https://abc123.qurl.site'],
     ['the qurl.site apex', 'https://qurl.site'],
+    ['the qurl.link apex', 'https://qurl.link'],
+    ['a regional connector host', 'https://get-eu.qurl.link'],
+    ['doubled trailing dots', 'https://api.layerv.ai../v1'],
     ['embedded credentials', 'https://user:pass@api.layerv.ai'],
     ['a fully-qualified trailing dot', 'https://api.layerv.ai./'],
   ])('refuses production via %s', (_label, url) => {
     expect(verdictFor(url)).toBe('production');
   });
 
-  it('rejects a trailing-dot production host in LOADTEST_TARGET_OK', () => {
+  it('rejects a trailing-dot production host in LOADTEST_TARGET_HOSTS', () => {
     // Fail-open guard on the guard: `api.layerv.ai.` is the same host to DNS,
     // so if it were stored verbatim it would be an ordinary allowlist grant
     // that silently outranks nothing — and then permit production.
@@ -62,12 +66,13 @@ describe('loadtest target guard — production spellings that the old denylist m
     expect(hosts.size).toBe(0);
   });
 
-  it('normalizes host case and the root dot', () => {
+  it('normalizes host case and every root dot', () => {
     expect(normalizeHost('API.LayerV.AI.')).toBe('api.layerv.ai');
+    expect(normalizeHost('api.layerv.ai...')).toBe('api.layerv.ai');
     expect(normalizeHost('sandbox.example')).toBe('sandbox.example');
   });
 
-  it('refuses production even when the host is named in LOADTEST_TARGET_OK', () => {
+  it('refuses production even when the host is named in LOADTEST_TARGET_HOSTS', () => {
     // Production must not be grantable from the environment — env vars get
     // copied between environments and pasted into .env.loadtest files.
     const allowed = new Set(['api.layerv.ai']);
@@ -122,7 +127,7 @@ describe('loadtest target guard — hosts that may proceed', () => {
     expect(verdictFor(url)).toBe('loopback');
   });
 
-  it('permits a host the operator named in LOADTEST_TARGET_OK', () => {
+  it('permits a host the operator named in LOADTEST_TARGET_HOSTS', () => {
     const { hosts, errors } = parseTargetAllowlist('sandbox.example.internal');
     expect(errors).toEqual([]);
     expect(verdictFor('https://sandbox.example.internal', hosts)).toBe('allowlisted');
@@ -141,6 +146,18 @@ describe('loadtest target guard — hosts that may proceed', () => {
     expect(verdictFor('https://api.sandbox.example.internal', hosts)).toBe('unrecognized');
   });
 
+  it.each([
+    ['a qurl.site tunnel host', 'sbx.qurl.site.layerv.ai'],
+    ['a qurl.link tunnel host', 'qurl.link.layerv.xyz'],
+  ])('does not misfile %s as production', (_label, host) => {
+    // The non-prod tunnel spellings end in .layerv.ai / .layerv.xyz, so
+    // widening PROD_DOMAINS to qurl.link must not swallow them.
+    expect(isProductionHost(host)).toBe(false);
+    const { hosts, errors } = parseTargetAllowlist(host);
+    expect(errors).toEqual([]);
+    expect(verdictFor(`https://${host}`, hosts)).toBe('allowlisted');
+  });
+
   it('permits a non-prod tunnel host without misfiling it as production', () => {
     // `.qurl.site.layerv.ai` is connector.js's NON-prod tunnel suffix. It must
     // not collide with the `qurl.site` production domain rule — it is merely
@@ -152,7 +169,7 @@ describe('loadtest target guard — hosts that may proceed', () => {
   });
 });
 
-describe('loadtest target guard — LOADTEST_TARGET_OK parsing', () => {
+describe('loadtest target guard — LOADTEST_TARGET_HOSTS parsing', () => {
   it('splits, trims, lowercases, and drops empties', () => {
     const { hosts, errors } = parseTargetAllowlist('  A.example , ,b.example,\n c.example ,');
     expect(errors).toEqual([]);
@@ -184,6 +201,20 @@ describe('loadtest target guard — LOADTEST_TARGET_OK parsing', () => {
     expect(hosts.size).toBe(0);
   });
 
+  it.each([
+    ['1', '1'],
+    ['0', '0'],
+    ['12345', '12345'],
+  ])('rejects the boolean-looking value %s', (_label, entry) => {
+    // The name takes hostnames, but reads enough like a switch that someone
+    // will try `=1`. Stored verbatim it is a grant that can never match:
+    // `new URL('http://1')` canonicalizes the host to the ADDRESS 0.0.0.1.
+    const { hosts, errors } = parseTargetAllowlist(entry);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('not an on/off switch');
+    expect(hosts.size).toBe(0);
+  });
+
   it('rejects a wildcard entry rather than silently not matching it', () => {
     const { hosts, errors } = parseTargetAllowlist('*.example');
     expect(errors).toHaveLength(1);
@@ -195,11 +226,36 @@ describe('loadtest target guard — LOADTEST_TARGET_OK parsing', () => {
     ['the prod API host', 'api.layerv.ai'],
     ['the prod connector host', 'get.qurl.link'],
     ['a prod qURL site', 'abc123.qurl.site'],
+    ['the qurl.link apex', 'qurl.link'],
+    ['a regional connector', 'get-eu.qurl.link'],
+    ['a prod host with doubled trailing dots', 'api.layerv.ai..'],
   ])('rejects %s and points at the command-line flag', (_label, entry) => {
     const { hosts, errors } = parseTargetAllowlist(entry);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('--allow-production');
     expect(hosts.size).toBe(0);
+  });
+
+  it.each([
+    ['a leading empty label', '.sandbox.example'],
+    ['a doubled inner dot', 'sandbox..example'],
+    ['a space', 'sandbox example'],
+  ])('rejects an entry with %s as unparseable', (_label, entry) => {
+    const { hosts, errors } = parseTargetAllowlist(entry);
+    expect(errors).toHaveLength(1);
+    expect(hosts.size).toBe(0);
+    expect(errors[0]).toMatch(/not a parseable hostname|bare hostname/);
+  });
+
+  it('normalizes an entry the same way a target URL is normalized', () => {
+    // A fullwidth 's' is IDNA-mapped to ASCII by the URL parser on the TARGET
+    // side. Storing the entry verbatim would make it a grant no target could
+    // ever match — inert, and the operator would see a refusal for a host they
+    // believe they named.
+    const { hosts, errors } = parseTargetAllowlist('\uFF53andbox.example.internal');
+    expect(errors).toEqual([]);
+    expect([...hosts]).toEqual(['sandbox.example.internal']);
+    expect(verdictFor('https://sandbox.example.internal', hosts)).toBe('allowlisted');
   });
 
   it('keeps the valid entries alongside a rejected one', () => {
@@ -253,5 +309,76 @@ describe('loadtest target guard — both targets are judged', () => {
     });
     expect(endpoint.rawUrl).toBe('https://api.layerv.ai:8443/v1');
     expect(endpoint.host).toBe('api.layerv.ai');
+  });
+});
+
+describe('loadtest target guard — override strength is asymmetric', () => {
+  const FLAG_ONLY = { allowProdFlag: true, allowProdEnv: false };
+  const ENV_ONLY = { allowProdFlag: false, allowProdEnv: true };
+  const NEITHER = { allowProdFlag: false, allowProdEnv: false };
+  const target = (verdict) => ({ name: 'QURL_ENDPOINT', rawUrl: 'x', host: 'h', verdict });
+
+  it('lets the env var clear a merely unrecognized target', () => {
+    // An unnamed sandbox is a recognition failure, not a known-dangerous
+    // target, so the cheaper override is enough.
+    expect(isTargetAuthorized(target('unrecognized'), ENV_ONLY)).toBe(true);
+    expect(isTargetAuthorized(target('unparseable'), ENV_ONLY)).toBe(true);
+  });
+
+  it('does NOT let the env var clear a production target', () => {
+    // The load-bearing one. `.env.loadtest` is spliced into process.env when
+    // the script runs, so an env-only override would let a gitignored file in
+    // a working copy silently disable this guard for every future run — the
+    // same vector parseTargetAllowlist refuses for LOADTEST_TARGET_HOSTS.
+    expect(isTargetAuthorized(target('production'), ENV_ONLY)).toBe(false);
+  });
+
+  it('lets the typed flag clear anything', () => {
+    expect(isTargetAuthorized(target('production'), FLAG_ONLY)).toBe(true);
+    expect(isTargetAuthorized(target('unrecognized'), FLAG_ONLY)).toBe(true);
+  });
+
+  it('authorizes safe verdicts with no override at all', () => {
+    expect(isTargetAuthorized(target('loopback'), NEITHER)).toBe(true);
+    expect(isTargetAuthorized(target('allowlisted'), NEITHER)).toBe(true);
+  });
+
+  it('refuses every unsafe verdict and no safe one', () => {
+    // Direct assertion on the predicate itself, rather than only through
+    // classifyTargets — a verdict added to neither set would slip past.
+    expect(['loopback', 'allowlisted'].map((v) => isRefusedTarget(target(v)))).toEqual([false, false]);
+    expect(['production', 'unrecognized', 'unparseable'].map((v) => isRefusedTarget(target(v))))
+      .toEqual([true, true, true]);
+  });
+});
+
+describe('loadtest target guard — the mirrored production hostnames are real', () => {
+  // PROD_HOSTS mirrors src/config.js's NODE_ENV=production fallbacks (the
+  // TODO(upstream-contract) marker says so). A comment cannot notice drift;
+  // this can. If config.js moves a production endpoint and this list is not
+  // moved with it, the guard silently stops recognizing production and this
+  // test fails instead.
+  const loadProdConfig = () => {
+    const saved = { ...process.env };
+    jest.resetModules();
+    process.env.NODE_ENV = 'production';
+    delete process.env.QURL_ENDPOINT;
+    delete process.env.CONNECTOR_URL;
+    try {
+      return require('../src/config');
+    } finally {
+      process.env = saved;
+      jest.resetModules();
+    }
+  };
+
+  it('classifies both of config.js production fallbacks as production', () => {
+    const prodConfig = loadProdConfig();
+    const targets = classifyTargets({
+      qurlEndpoint: prodConfig.QURL_ENDPOINT,
+      connectorUrl: prodConfig.CONNECTOR_URL,
+      allowedHosts: NO_ALLOWLIST,
+    });
+    expect(targets.map((t) => t.verdict)).toEqual(['production', 'production']);
   });
 });
