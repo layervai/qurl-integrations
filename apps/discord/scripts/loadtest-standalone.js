@@ -62,19 +62,10 @@ const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink } = require('../src/qurl');
 
-// TODO(upstream-contract): max tokens the qURL API allows per resource;
-// draining the pool means a new resource (re-upload) is needed for a fresh
-// one. The cap is qurl-service's, not ours, and nothing here fails loudly if
-// it moves — a smaller cap silently reintroduces the quota_exceeded batches
-// this constant was added to remove, a larger one leaves the test issuing
-// more uploads than a real send does. Both read as a valid measurement.
-//
-// Local copy of TOKENS_PER_RESOURCE in ../src/commands.js — that module does
-// not export it, and requiring a ~9500-line command surface (plus its
-// discord.js deps) into a standalone script to read one integer is a bad
-// trade. commands.js is the authoritative mirror; if the cap moves it moves
-// there first and this copy follows.
-const TOKENS_PER_RESOURCE = 10;
+// The same pool depth the send pipeline batches against — imported, not
+// copied, so a change to the cap reaches this script instead of silently
+// leaving it issuing a different number of uploads than a real send.
+const { TOKENS_PER_RESOURCE } = require('../src/constants');
 
 const args = process.argv.slice(2);
 function getArg(name, defaultVal) {
@@ -88,7 +79,7 @@ const hasFlag = (name) => args.includes(`--${name}`);
 // in three directions here: a non-numeric value gives NaN, a negative one is
 // returned intact, and with no radix '0x64' reads as 100 while '1e9'
 // truncates to 1. NaN and negatives converge on the worst outcome — every
-// loop a round runs is bounded by COUNT, the file leg's `i += 10` batches and
+// loop a round runs is bounded by COUNT, the file leg's batch plan and
 // the location leg's `i++` alike, so none of them enter. The run then holds
 // the target for its whole DURATION_S window issuing zero requests and prints
 // "Total links minted: 0" as though that were a measurement.
@@ -476,7 +467,9 @@ function targetGuardReport({ targets, allowlistErrors = [], allowProdFlag, allow
  *
  * @param {number} count — links to mint across the whole plan.
  * @param {number} [tokensPerResource] — pool depth; defaults to TOKENS_PER_RESOURCE.
- * @returns {Array<{size: number, reupload: boolean}>} — empty when count < 1.
+ * @returns {Array<{size: number, reupload: boolean}>} — empty when count <= 0.
+ *   Fractional counts are not gated here (0.5 plans one batch of 0.5); the
+ *   CLI can't produce one, since parsePositiveInt admits only whole numbers.
  */
 function planMintBatches(count, tokensPerResource = TOKENS_PER_RESOURCE) {
   const batches = [];
@@ -523,14 +516,12 @@ async function runRound(roundNum) {
     // leaving it off sends the same single `file` part, under the same
     // filename and content type, that the hand-rolled form did. What is new
     // is the timeout and the two response checks.
-    // Deliberately NOT wrapped: a failed initial upload throws out of
-    // runRound, main reports the round as FAILED and it never reaches
-    // allResults. The re-upload leg below does the opposite, charging its
-    // batch and continuing. The asymmetry is the point — a failed re-upload
-    // leaves the earlier batches' links already minted and the round still
-    // worth reporting, whereas a failed initial upload leaves nothing to mint
-    // against at all, so there is no partial round to salvage. Don't
-    // "harmonize" these.
+    //
+    // Deliberately NOT wrapped, unlike the re-upload leg below: a failure here
+    // leaves nothing to mint against at all, so there is no partial round to
+    // salvage — it throws out of runRound, main reports the round FAILED and
+    // it never reaches allResults. The leg below states its own opposite
+    // policy and why. Don't "harmonize" the two.
     //
     // Hoisted: the re-upload leg below registers each fresh resource under
     // the same filename, so a round's resources are one named series.
@@ -546,10 +537,10 @@ async function runRound(roundNum) {
     // Mint a pool at a time, re-uploading once each pool drains — the shape a
     // real send takes through mintLinksInBatches (../src/commands.js).
     //
-    // The re-upload leg is what makes this leg generate real load. Reusing one
+    // The re-upload leg is what makes this leg generate real load: reusing one
     // resource_id for every batch spends the initial pool on batch 1 and takes
-    // `quota_exceeded` for the rest, so a --count 100 round reported ok=10
-    // fail=90 and issued 1 upload where a real 100-recipient send issues 10.
+    // `quota_exceeded` for the rest. tests/loadtest-mint-batches.test.js has
+    // the full regression narrative and the numbers.
     const expiresAt = expiryToISO('24h');
     let currentResourceId = uploadResult.resource_id;
     for (const batch of planMintBatches(COUNT)) {

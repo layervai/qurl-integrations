@@ -24,30 +24,38 @@
 
 const { planMintBatches, TOKENS_PER_RESOURCE } = require('../scripts/loadtest-standalone');
 
-// Independent re-implementation of mintLinksInBatches' loop, carrying the
-// `tokensUsed` state the real batcher tracks. planMintBatches collapses the
-// guard to `i > 0`; this keeps both halves so the equivalence is tested rather
-// than assumed. Deliberately NOT importing the batcher — requiring commands.js
-// is what the local constant exists to avoid.
+// Transcription of mintLinksInBatches' loop, kept statement-for-statement:
+// the `tokensUsed = 0` reset on re-upload and the `tokensUsed += batchSize`
+// accumulation are written the way commands.js writes them, not collapsed,
+// so this is an oracle rather than a third copy of planMintBatches' shortcut.
+// planMintBatches reduces the guard to `i > 0`; keeping both halves here is
+// what makes the equivalence tested instead of assumed.
+//
+// Deliberately NOT importing the batcher: require('../src/commands') throws
+// at module load in a bare process (it pulls in ./store, which demands
+// DDB_TABLE_PREFIX), so no test can drive the real loop directly from here.
 function batcherShape(recipientCount, tokensPerResource) {
   const shape = [];
   let tokensUsed = 0;
   for (let i = 0; i < recipientCount; i += tokensPerResource) {
-    const reupload = tokensUsed >= tokensPerResource && i > 0;
-    const size = Math.min(tokensPerResource, recipientCount - i);
-    shape.push({ size, reupload });
-    tokensUsed = size;
+    let reupload = false;
+    if (tokensUsed >= tokensPerResource && i > 0) {
+      reupload = true;
+      tokensUsed = 0;
+    }
+    const batchSize = Math.min(tokensPerResource, recipientCount - i);
+    shape.push({ size: batchSize, reupload });
+    tokensUsed += batchSize;
   }
   return shape;
 }
 
 describe('planMintBatches — pool depth', () => {
-  test('TOKENS_PER_RESOURCE matches the cap commands.js enforces', () => {
-    // Local copy of src/commands.js's TOKENS_PER_RESOURCE (not exported
-    // there). If that constant moves, this is the test that fails.
-    expect(TOKENS_PER_RESOURCE).toBe(10);
-  });
-
+  // No "does the script's copy still match commands.js?" test here on purpose:
+  // both now read src/constants.js, so there is no second copy to drift. The
+  // assertion that would have gone here could only have compared the shared
+  // constant against a hard-coded 10 — green whatever qurl-service's real cap
+  // turns out to be, which is worse than no test at all.
   test('defaults to TOKENS_PER_RESOURCE when no pool depth is passed', () => {
     expect(planMintBatches(25)).toEqual(planMintBatches(25, TOKENS_PER_RESOURCE));
   });
@@ -108,7 +116,9 @@ describe('planMintBatches — equivalence with mintLinksInBatches', () => {
   // The two guards collapse only because a short batch can appear last and
   // nowhere else. Re-run the sweep at other pool depths so the equivalence is
   // shown to be structural, not a coincidence of the number 10.
-  test.each([1, 2, 3, 7, 10, 50])('pool depth %i keeps the shapes equal', (depth) => {
+  // Depth 10 is deliberately absent: the sweep above already runs it, and
+  // repeating it here would be the one depth that proves nothing.
+  test.each([1, 2, 3, 7, 50])('pool depth %i keeps the shapes equal', (depth) => {
     for (const count of counts) {
       expect(planMintBatches(count, depth)).toEqual(batcherShape(count, depth));
     }

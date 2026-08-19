@@ -8,7 +8,7 @@
  * is what groups these two otherwise unrelated halves into one file.
  *
  *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
- *     round runs — the file leg's `i += 10` batches and the location leg's
+ *     round runs — the file leg's batch plan and the location leg's
  *     `i++` alike — so the script holds the target for its full duration
  *     issuing no requests and reports "Total links minted: 0".
  *   - The upload call. Hand-rolled, it had no timeout (a stalled connector
@@ -223,11 +223,9 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // Fails closed if a call disappears or a third one appears unreviewed.
     //
     // Two, reviewed: the round's initial upload, and the re-upload leg that
-    // runs each time a resource's TOKENS_PER_RESOURCE pool drains. The second
-    // is what makes this script reproduce a real send's load — without it
-    // every batch after the first minted against a spent pool and came back
-    // quota_exceeded, so --count 100 reported ok=10 fail=90 off 1 upload where
-    // a real 100-recipient send issues 10.
+    // runs each time a resource's TOKENS_PER_RESOURCE pool drains. Dropping
+    // the second is the regression tests/loadtest-mint-batches.test.js
+    // documents — every later batch mints against a spent pool.
     //
     // Counted rather than located because both calls are the same call: same
     // callee, same three arguments, same buffer and filename. A check that

@@ -27,6 +27,7 @@ const {
   RESOURCE_TYPES,
   DM_STATUS,
   MAX_FILE_SIZE,
+  TOKENS_PER_RESOURCE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
@@ -61,10 +62,6 @@ const {
   decodePlaceIdSentinel,
   PLACE_ID_SHAPE_RE,
 } = require('./places');
-
-// Max tokens the QURL API allows per resource. When exceeded, a new
-// resource must be created (re-upload) to get a fresh token pool.
-const TOKENS_PER_RESOURCE = 10;
 
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
