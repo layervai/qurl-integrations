@@ -27,13 +27,14 @@ const (
 // workspace-state table and CMK are fixed: neither varies by environment, and
 // no rail looks at them.
 func wiringArgs(policiesTable, mappingsTable, endpoint string, extra ...string) []string {
-	args := []string{
+	args := make([]string, 0, 10+len(extra))
+	args = append(args,
 		"-channel-policies-table", policiesTable,
 		"-workspace-mappings-table", mappingsTable,
 		"-workspace-state-table", stateTableName,
 		"-kms-key-arn", testKMSKeyARN,
 		"-qurl-endpoint", endpoint,
-	}
+	)
 	return append(args, extra...)
 }
 

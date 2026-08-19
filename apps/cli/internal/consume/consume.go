@@ -6,26 +6,22 @@
 // no --file is refused outright — the CLI never launches a browser nobody
 // can see (§16.2).
 //
-// Phase-1 downloads fetch the verified resolved link directly over HTTP(S).
-// The SDK's programmatic opener (qurl.EnterPortal) was studied first and
-// deliberately not used: opening a qv2 link that way requires deployment
-// trust configuration — issuer keys plus a relay allowlist or cell catalog —
-// and qurl-go v0.5.3 ships its embedded deployment.json empty ({"issuers":
-// [], "cells": [], "relay_allowlist": []}), with no LayerV-published
-// deployment file to point QURL_DEPLOYMENT at. Every EnterPortal call would
-// therefore refuse (ErrNotConfigured wrapping ErrNoDeployment) before
-// reaching the network, for every link, on every machine. When the SDK
-// ships real deployment trust material, Downloader.fetch is the seam to
-// revisit. Until then the browser path — which carries the full link,
-// fragment included — is the primary qv2 consumption surface, and --file
-// serves the resolved URL's bytes as delivered.
+// Downloads split by link shape (NeedsAccessGrant). A qv2 link carries its
+// credential in the URL fragment, which HTTP clients never transmit — a
+// plain GET of it can only ever fetch the in-browser page that consumes the
+// fragment, never the content — so those links are opened through the SDK's
+// programmatic opener first (AccessOpener over qurl.EnterPortalWith) and the
+// Downloader fetches the granted content URL it returns. A link without an
+// in-link credential serves its bytes to a plain GET and is fetched as
+// delivered. The browser path carries the full link, fragment included,
+// because the in-browser page is exactly what a browser needs.
 //
 // Nothing here talks to the qURL API and nothing here carries the API
 // credential: the download client is a plain HTTP client, so the bearer key
 // can never leak to the link host. Every link this package acts on has
 // already passed the CLI's CRID verification (cmd.verifyResolved), and the
 // re-resolve a mid-download retry performs goes through the same verifying
-// closure.
+// closure — the platform access request included.
 package consume
 
 import "errors"
@@ -115,7 +111,13 @@ func CustomerMessages() []string {
 		MsgFileExists,
 		MsgLinkExpired,
 		MsgLinkFetch,
+		MsgUnopenableLink,
 		msgForceRemedy,
 		msgDirectoryDest,
+		MsgAccessNotConfigured,
+		MsgAccessSettingsMismatch,
+		MsgLinkVerification,
+		MsgAccessDenied,
+		MsgAccessBusy,
 	}
 }

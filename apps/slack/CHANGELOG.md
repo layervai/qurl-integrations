@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.2.0...slack-v0.3.0) (2026-08-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **slack:** keep the Slack bot token on `/qurl uninstall` ([#1133](https://github.com/layervai/qurl-integrations/issues/1133))
+
+### Bug Fixes
+
+* **shared:** stop sending undeclared fields on the qURL mint bodies ([#1144](https://github.com/layervai/qurl-integrations/issues/1144)) ([4c32536](https://github.com/layervai/qurl-integrations/commit/4c32536cb4e586f0d5c4989236a4bec1671916df))
+* **slack:** keep the Slack bot token on `/qurl uninstall` ([#1133](https://github.com/layervai/qurl-integrations/issues/1133)) ([2f2fba9](https://github.com/layervai/qurl-integrations/commit/2f2fba909be77dac31219dc5663b6b43300c8ed7))
+* **slack:** let --rotate replace a key on rows with no stored key_id ([#1119](https://github.com/layervai/qurl-integrations/issues/1119)) ([2a73d4e](https://github.com/layervai/qurl-integrations/commit/2a73d4e78a6d757f6ed79062c8961062cf956956))
+
 ## [0.2.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.1.0...slack-v0.2.0) (2026-08-18)
 
 

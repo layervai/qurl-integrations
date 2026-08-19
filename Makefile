@@ -18,7 +18,7 @@ fmt:
 # and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
 # drifts: newer golangci-lint versions flag issues the pinned config is clean
 # on.
-GOLANGCI_LINT_VERSION := v2.10.1
+GOLANGCI_LINT_VERSION := v2.12.2
 
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./...

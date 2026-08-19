@@ -51,6 +51,12 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
+	// enterPortal asks the qURL platform for direct access to an
+	// already-verified link and returns the granted content URL for
+	// download; production wiring is consume.AccessOpener over the SDK
+	// opener. Tests always inject (the harness refuses by default), so no
+	// test ever sends a real access request.
+	enterPortal func(ctx context.Context, link string) (string, error)
 
 	// Connector seams. openConnectorRuntime walks the agent enroll/open
 	// ladder (production: agent.Open) and newConnectorKnocker builds the
@@ -133,6 +139,12 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		// injected environment the rest of the CLI uses.
 		launcher := &consume.Launcher{LookupEnv: opts.lookupEnv, GOOS: runtime.GOOS}
 		opts.openBrowser = launcher.Open
+	}
+	if opts.enterPortal == nil {
+		// Same pattern as the launcher: deployment settings
+		// (QURL_DEPLOYMENT) resolve through the injected environment.
+		opener := &consume.AccessOpener{LookupEnv: opts.lookupEnv}
+		opts.enterPortal = opener.Open
 	}
 	if opts.openConnectorRuntime == nil {
 		opts.openConnectorRuntime = agent.Open

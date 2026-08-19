@@ -123,6 +123,25 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		resolved = result
 		return result.QURL, nil
 	}
+	// fetchURL is mint plus the download-only step: a link whose credential
+	// rides in the URL fragment never serves its content to a plain GET
+	// (HTTP clients don't transmit fragments — only the in-browser page
+	// could consume it), so those links go through the platform access flow
+	// and the granted content URL is what gets fetched. The browser action
+	// keeps the full link: the in-browser page is exactly what a browser
+	// needs. The mid-download retry re-runs all of this, fresh access
+	// request included.
+	fetchURL := func(ctx context.Context) (string, error) {
+		link, err := mint(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !consume.NeedsAccessGrant(link) {
+			// No in-link credential: the URL itself serves the bytes.
+			return link, nil
+		}
+		return opts.enterPortal(ctx, link)
+	}
 
 	switch action {
 	case consume.ActionOpenBrowser:
@@ -131,11 +150,11 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 		return openInBrowser(ctx, opts, printer, resolved)
 	case consume.ActionStreamStdout:
-		downloader := &consume.Downloader{Mint: mint}
+		downloader := &consume.Downloader{Mint: fetchURL}
 		_, err := downloader.StreamTo(ctx, opts.streams.Out)
 		return err
 	case consume.ActionSaveFile:
-		downloader := &consume.Downloader{Mint: mint}
+		downloader := &consume.Downloader{Mint: fetchURL}
 		n, err := downloader.SaveTo(ctx, flags.file, flags.force)
 		if err != nil {
 			return err

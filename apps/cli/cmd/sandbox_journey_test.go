@@ -3,12 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/layervai/qurl-go/crid"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -26,14 +30,25 @@ import (
 // the nightly extended pass through the workflow-level cli-sandbox-e2e
 // concurrency group, because there is exactly one sandbox tenancy.
 //
-// Credential contract (both required before this suite runs anything):
+// Credential contract (all four required before this suite runs anything):
 //
 //	QURL_API_KEY  — a sandbox API key holding the qurl:read, qurl:write, and
 //	    qurl:resolve scopes. Read through the CLI's hermetic mode: with the
 //	    variable set, the credential store is bypassed entirely and nothing
 //	    on disk is read or written.
 //	QURL_ENDPOINT — the sandbox qURL API base URL (a repository secret:
-//	the sandbox hostname is deliberately not public).
+//	    the sandbox hostname is deliberately not public).
+//	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
+//	    "<kid>=<standard-base64 P-256 SPKI DER>" (a repository variable,
+//	    mirrored from the same-named qurl-connector variable).
+//	QURL_SANDBOX_QV2_RELAY_URL — the sandbox's platform access URL (a
+//	    repository variable, same provenance).
+//
+// The last two become a QURL_DEPLOYMENT settings file for the download
+// step: `get --file` opens fragment-credential links through the platform
+// access flow, which needs the deployment's trust settings. Their values —
+// like every minted link — never reach the log: repository variables are
+// not masked, and CI logs are public.
 //
 // Quota safety: each run publishes exactly ONE throwaway resource and always
 // reclaims it. The happy path ends in delete + idempotent re-delete, and a
@@ -57,36 +72,91 @@ const journeyTimeout = 4 * time.Minute
 const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
 
 // sandboxJourneyEnv reads the suite's env contract from the real process
-// environment and skips loudly — naming both variables — when it is not
-// fully provisioned. The returned map is the ONLY environment the CLI
-// invocations see, which is what keeps hermetic mode airtight.
+// environment and skips loudly — naming every missing variable — when it
+// is not fully provisioned. The returned map is the ONLY environment the
+// CLI invocations see, which is what keeps hermetic mode airtight: the
+// deployment settings the download step needs enter it as QURL_DEPLOYMENT,
+// built by journeyDeploymentFile below, never read from the process.
 func sandboxJourneyEnv(t *testing.T) map[string]string {
 	t.Helper()
 	key := strings.TrimSpace(os.Getenv("QURL_API_KEY"))
 	endpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
-	if key == "" || endpoint == "" {
-		missing := []string{}
-		if key == "" {
-			missing = append(missing, "QURL_API_KEY")
+	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
+	relayURL := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
+	missing := []string{}
+	for name, value := range map[string]string{
+		"QURL_API_KEY":                key,
+		"QURL_ENDPOINT":               endpoint,
+		"QURL_SANDBOX_QV2_ISSUER_KEY": issuerKey,
+		"QURL_SANDBOX_QV2_RELAY_URL":  relayURL,
+	} {
+		if value == "" {
+			missing = append(missing, name)
 		}
-		if endpoint == "" {
-			missing = append(missing, "QURL_ENDPOINT")
-		}
-		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
-			"Sandbox credentials are not provisioned yet; arm this by setting QURL_API_KEY "+
-			"(a sandbox key with the qurl:read, qurl:write, and qurl:resolve scopes) and "+
-			"QURL_ENDPOINT (the sandbox qURL API base URL — a repository secret).", missing)
 	}
-	return map[string]string{"QURL_API_KEY": key, "QURL_ENDPOINT": endpoint}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
+			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:read, qurl:write, "+
+			"and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
+			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
+			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
+			"settings are built from.", missing)
+	}
+	return map[string]string{
+		"QURL_API_KEY":    key,
+		"QURL_ENDPOINT":   endpoint,
+		"QURL_DEPLOYMENT": journeyDeploymentFile(t, issuerKey, relayURL),
+	}
+}
+
+// journeyDeploymentFile converts the two sandbox repository variables into
+// the SDK's deployment settings file and returns its path. Failures name
+// the offending variable but NEVER its value: CI logs are public, and the
+// values identify the sandbox.
+func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
+	t.Helper()
+	kid, keyStd, ok := strings.Cut(issuerKey, "=")
+	if !ok || strings.TrimSpace(kid) == "" || strings.TrimSpace(keyStd) == "" {
+		t.Fatal("QURL_SANDBOX_QV2_ISSUER_KEY must be of the form <kid>=<standard-base64 key>; refusing to print the malformed value (CI logs are public)")
+	}
+	der, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyStd))
+	if err != nil {
+		t.Fatal("QURL_SANDBOX_QV2_ISSUER_KEY's key part is not valid standard base64; refusing to print the malformed value (CI logs are public)")
+	}
+	relay, err := url.Parse(relayURL)
+	if err != nil || relay.Scheme != "https" || relay.Host == "" {
+		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be an https URL; refusing to print the malformed value (CI logs are public)")
+	}
+	doc := map[string]any{
+		"issuers": []map[string]string{{
+			"kid": strings.TrimSpace(kid),
+			// The SDK's settings files carry keys base64url-encoded.
+			"spki_der_b64": base64.RawURLEncoding.EncodeToString(der),
+		}},
+		"cells":           []any{},
+		"relay_allowlist": []string{relay.Host},
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal deployment settings: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write deployment settings: %v", err)
+	}
+	return path
 }
 
 // runSandboxCLI invokes the real command tree against the live sandbox:
 // injected environment only (hermetic credential mode), non-TTY streams (the
-// piped contracts are what scripts see), and the production sleep path so
-// the transport's bounded 429 retries wait like they would in the field.
+// piped contracts are what scripts see), the production sleep path so the
+// transport's bounded 429 retries wait like they would in the field, and the
+// production access opener so `get --file` exercises the real platform
+// access flow the injected QURL_DEPLOYMENT settings configure.
 func runSandboxCLI(ctx context.Context, t *testing.T, cliEnv map[string]string, args ...string) *runResult {
 	t.Helper()
-	return runCLI(t, &runOpts{args: args, env: cliEnv, ctx: ctx, realSleep: true})
+	return runCLI(t, &runOpts{args: args, env: cliEnv, ctx: ctx, realSleep: true, realOpener: true})
 }
 
 // journeyPublishDoc mirrors the publish `-o json` document (output/shapes.go).
@@ -119,7 +189,9 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	// Publish one throwaway resource. The target is unique per run (the
 	// query string keeps example.com serving its stable 200 page) so
 	// serialized runs never adopt each other's resources even if the service
-	// dedupes an already-published target.
+	// dedupes an already-published target. The download step's content
+	// assertion leans on the same stability: this page's body is known to
+	// carry journeyTargetMarker.
 	target := "https://example.com/?qurl-cli-sandbox-e2e=" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", journeyDescription)
 	if res.code != 0 {
@@ -173,17 +245,29 @@ const (
 
 // assertListFindsCRID walks `qurl list -o json` page by page under the
 // documented pagination contract — continue exactly while has_more, via
-// next_cursor — and requires the published CRID to appear exactly once
-// across the whole listing (a page overlap or a dropped row is a pagination
-// bug even when the row is eventually found).
+// next_cursor — and requires the published CRID to appear exactly once in
+// what it walks (a page overlap or a dropped row is a pagination bug even
+// when the row is eventually found).
+//
+// The shared tenancy accumulates rows from every sandbox surface (bots,
+// suites), so the whole listing can legitimately outgrow any fixed page
+// budget — it first crossed listMaxPages*listPageLimit rows on 2026-08-19,
+// turning the old walk-everything Fatal into a permanent red. The walk
+// therefore stops at the budget and asserts over the window it scanned.
+// That window is sufficient because the row under test was published
+// moments ago and the platform lists newest first.
+//
+// TODO(upstream-contract): created_at descending is qurl-service's pinned
+// default sort for the resource listing (handlers/server.go, "default:
+// created_at:desc"). If that default ever changes, this window argument
+// breaks loudly — seen stays 0 — and the walk needs an explicit sort or a
+// different presence strategy.
 func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
 	t.Helper()
 	seen := 0
 	cursor := ""
+	pages := 0
 	for page := 1; ; page++ {
-		if page > listMaxPages {
-			t.Fatalf("list pagination did not terminate within %d pages of %d; refusing to walk further", listMaxPages, listPageLimit)
-		}
 		args := []string{"-o", "json", "list", "--limit", strconv.Itoa(listPageLimit)}
 		if cursor != "" {
 			args = append(args, "--cursor", cursor)
@@ -201,22 +285,28 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 				seen++
 			}
 		}
+		pages = page
 		if !doc.HasMore {
 			break
 		}
 		if doc.NextCursor == "" {
 			t.Fatalf("list page %d reports has_more with no next_cursor; pagination cannot continue", page)
 		}
+		if page == listMaxPages {
+			t.Logf("list still reports more rows after %d pages of %d; asserting over the newest-first window walked so far", listMaxPages, listPageLimit)
+			break
+		}
 		cursor = doc.NextCursor
 	}
 	if seen != 1 {
-		t.Fatalf("published CRID appeared %d times across the paginated listing, want exactly once", seen)
+		t.Fatalf("published CRID appeared %d times across %d newest-first list pages, want exactly once", seen, pages)
 	}
 }
 
 // assertResolveJourney resolves the CRID and holds the piped contract: with
 // stdout not a terminal the command emits the bare link and nothing else, so
-// `curl "$(qurl resolve <CRID>)"` composes. Exit 0 here IS the verification
+// `link="$(qurl resolve <CRID>)"` captures it cleanly (the link opens in a
+// browser — downloading is get's job). Exit 0 here IS the verification
 // evidence — the CLI discards any answer that fails CRID verification before
 // printing (exit 12), so a printed link is a verified link. It also holds
 // the environment-guard case: the sandbox is the test environment, so its
@@ -246,9 +336,25 @@ func assertResolveJourney(ctx context.Context, t *testing.T, cliEnv map[string]s
 	return link
 }
 
-// assertGetDownloadsBytes pulls real bytes through a freshly minted link
-// with `get --file` and requires the atomic-download contract: payload in
-// the destination file, nothing on stdout, no .part left behind.
+// journeyTargetMarker is the distinctive body text of the published target
+// (example.com's stable page). The download assertion requires it, so the
+// test can only pass when the actual target content was fetched — never
+// when some other document (the in-browser verification page above all)
+// was saved in its place.
+const journeyTargetMarker = "Example Domain"
+
+// assertGetDownloadsBytes pulls the published target's content through
+// `get --file` and requires it to BE that content: the bytes must carry
+// the target page's known marker and must not be the platform's in-browser
+// verification page. It also holds the atomic-download contract: payload
+// in the destination file, nothing on stdout, no .part left behind.
+//
+// The two content assertions are the regression guard for the defect where
+// `get --file` saved the in-browser page (which a plain GET of a
+// fragment-credential link always yields) and reported success. A size
+// check alone passed on that page; content identity cannot. On failure,
+// nothing about the payload is logged beyond sizes and booleans — the
+// in-browser page embeds deployment hostnames, and CI logs are public.
 func assertGetDownloadsBytes(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
 	t.Helper()
 	dest := filepath.Join(t.TempDir(), "journey-payload")
@@ -260,17 +366,24 @@ func assertGetDownloadsBytes(ctx context.Context, t *testing.T, cliEnv map[strin
 	if !strings.Contains(res.stderr.String(), "Saved to") {
 		t.Errorf("get --file stderr = %q, want the saved-to confirmation", res.stderr.String())
 	}
-	info, err := os.Stat(dest)
+	// #nosec G304 -- dest is this test's own t.TempDir path.
+	payload, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatalf("downloaded file missing: %v", err)
 	}
-	if info.Size() == 0 {
-		t.Fatalf("get --file wrote zero bytes; the minted link served no payload")
+	if !bytes.Contains(payload, []byte(journeyTargetMarker)) {
+		t.Errorf("downloaded %d bytes do not contain the published target's %q marker; "+
+			"get saved something other than the target content (payload deliberately not logged)",
+			len(payload), journeyTargetMarker)
+	}
+	if bytes.Contains(payload, []byte(apitest.InterstitialTitle)) {
+		t.Errorf("downloaded %d bytes carry the in-browser verification page's title; "+
+			"get saved the page a browser needs instead of the target content", len(payload))
 	}
 	if _, err := os.Stat(dest + ".part"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("atomic download left %s.part behind (stat err: %v)", dest, err)
 	}
-	t.Logf("downloaded %d bytes through the minted link", info.Size())
+	t.Logf("downloaded %d bytes of verified target content", len(payload))
 }
 
 // assertDeleteJourney deletes the resource, proves the re-delete is the
@@ -323,7 +436,7 @@ func assertDeleteJourney(ctx context.Context, t *testing.T, cliEnv map[string]st
 func reclaimSandboxResource(t *testing.T, cliEnv map[string]string, id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	res := runCLI(t, &runOpts{args: []string{"delete", id, "--yes"}, env: cliEnv, ctx: ctx, realSleep: true})
+	res := runCLI(t, &runOpts{args: []string{"delete", id, "--yes"}, env: cliEnv, ctx: ctx, realSleep: true, realOpener: true})
 	if res.code != 0 {
 		t.Errorf("cleanup: delete %s exit = %d — the throwaway resource may be leaked on the sandbox tenancy\nstderr: %s",
 			id, res.code, res.stderr.String())
