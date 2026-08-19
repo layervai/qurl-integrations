@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.0...discord-v0.2.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **shared:** stop sending undeclared fields on the qURL mint bodies ([#1144](https://github.com/layervai/qurl-integrations/issues/1144)) ([4c32536](https://github.com/layervai/qurl-integrations/commit/4c32536cb4e586f0d5c4989236a4bec1671916df))
+
 ## [0.2.0](https://github.com/layervai/qurl-integrations/compare/discord-v0.1.0...discord-v0.2.0) (2026-08-18)
 
 
