@@ -40,9 +40,13 @@
  *     - --file must name a REGULAR file. A pipe, process substitution or
  *       /dev/stdin is refused: the file is re-read once per round, so a pipe
  *       would upload real bytes on round one and nothing afterwards.
- *     - a MISSPELLED flag is still ignored silently, and so is `=` on a
- *       boolean flag (`--location=true` leaves the location leg off). Both
- *       are recorded as known gaps at readFlag below.
+ *     - a flag that takes NO value (--location, --allow-production) is
+ *       written on its own. `--location=true` is refused rather than
+ *       interpreted — omitting the flag is already how it is turned off, so
+ *       there is no `=false` left for it to mean. See readBooleanFlag below.
+ *     - a MISSPELLED flag is still ignored silently, and so is a value handed
+ *       to a boolean flag positionally (`--location false` leaves the leg
+ *       ON). Both are recorded as one known gap at readFlag below.
  *
  *   Hand-rolled rather than node:util parseArgs, which covers these shapes
  *   but throws on the first bad flag — forfeiting "name every bad flag in one
@@ -182,8 +186,8 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
   return { value: next };
 }
 
-// Two gaps in the same fault class are deliberately left open here, recorded
-// so they are deferrals rather than oversights.
+// One gap in the same fault class is deliberately left open here, recorded so
+// it is a deferral rather than an oversight.
 //
 // UNKNOWN FLAGS. readFlag is pull-based — it scans argv for one named flag —
 // so nothing can see a token that matched nothing. `--fil /tmp/payload.bin`
@@ -191,20 +195,122 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
 // full window uploading the generated 1MB payload, from a one-character typo:
 // the same outcome the header above calls the worst available one. Closing it
 // needs a push-based pass that tokenizes argv once against a flag spec and
-// reports what went unconsumed, which also subsumes the boolean case below.
-// That is a larger change than routing the value-taking flags through one
-// reader, and it is not what this one does.
+// reports what went unconsumed. That is a larger change than routing the
+// value-taking flags through one reader, and it is not what this one does.
 //
-// BOOLEAN FLAGS are not routed through readFlag: they take no value, so it
-// has nothing to read for them. That leaves `--location=true` and
-// `--allow-production=true` unrecognized and therefore silently off — the
-// boolean leg of the same hole. Refusing them means first deciding what
-// `--location=false` ought to mean, so it stays a separate change rather than
-// a quiet side effect of this one.
-// Takes argv like every other reader here, so the suite can reach it. It was
-// the one flag reader closing over the module's `args`, which is why
-// --location had no coverage at all.
-const hasFlag = (argv, name) => argv.includes(`--${name}`);
+// It also subsumes the positional case named at readBooleanFlag below
+// (`--location false` leaving the leg ON), so the two are one change and not
+// two. The BOOLEAN `=` gap this note used to record alongside it — where
+// `--location=true` read as absent — is closed there.
+
+// Boolean flags are not routed through readFlag: they take no value, so it has
+// nothing to read for them. They shared the defect anyway. The `hasFlag` this
+// replaces tested argv for the bare token with `includes`, so `--location=true`
+// was not recognized as the flag at all and read as ABSENT — the location leg
+// off while the command line said to turn it on, the same "did something real,
+// just not what was asked for" as the value-taking flags above.
+// `--allow-production=1` failed identically; that one fails closed, since the
+// guard then refuses the target, but it is no less silent about why.
+//
+// The `=` spelling is REFUSED rather than interpreted. What `--location=false`
+// ought to mean was the open question that kept this out of the change that
+// introduced readFlag, and refusing is the answer because it is the only one
+// with no silent tail:
+//
+//   - Interpreting a vocabulary — true/false/1/0 — has to stop somewhere, and
+//     every spelling past that edge falls back into the hole being closed.
+//     `--location=yes`, or the mistyped `--location=flase`, would read as OFF
+//     again — the original fault, now with a value sitting in the operator's
+//     shell history to suggest it was honoured.
+//   - Refusing has no edge: every `=` spelling of THIS flag name is refused
+//     identically, and the message names the form that works. It also cannot
+//     turn a leg ON that was meant to be off, nor off that was meant to be on,
+//     because the run does not start at all.
+//   - There is nothing for `--location=false` to express that omitting the
+//     flag does not already express. These are leg switches, not settings.
+//
+// What this does NOT close, stated plainly because the `=` fix invites the
+// assumption that it does. There is no unknown-argument pass in this script,
+// so a token that is neither a recognized flag nor a recognized flag's value
+// is ignored whatever it says:
+//
+//   --location true    leg ON, `true` ignored — the operator got what they
+//                      asked for, so nothing to report.
+//   --location false   leg ON, `false` ignored. The operator asked for OFF and
+//                      got ON, silently. Same fault class as the one closed
+//                      here, and a likelier spelling than `--location=false`
+//                      for anyone carrying a `--flag value` habit over.
+//   --locatoin         reads as absent, leg OFF, nothing said — as does
+//                      `--cont 5` for the numeric flags.
+//   --LOCATION=true    reads as absent. The match is case-sensitive on both
+//                      halves, deliberately, so a shift-key slip lands here.
+//
+// Closing those means an unknown-argument pass over the whole command line —
+// one rule covering all four — which is a larger change than this one and does
+// not belong inside it. Named here so the next person finds a decision rather
+// than an oversight.
+function readBooleanFlag(argv, flag) {
+  const token = `--${flag}`;
+  const inlinePrefix = `${token}=`;
+  // ANY occurrence refuses, not merely the last one. A value-taking flag can
+  // fall back on "last wins" when it is repeated; there is no such rule to
+  // reach for here, so `--location --location=false` has no reading that is
+  // not a guess. The FIRST such occurrence is the one reported — which of them
+  // is echoed does not change the verdict, and picking one keeps the message
+  // deterministic.
+  const offending = argv.find((arg) => arg.startsWith(inlinePrefix));
+  if (offending !== undefined) {
+    // Echo the value, as parsePositiveInt and parseTargetAllowlist do. Without
+    // it, a wrapper emitting `--location=$WITH_LOCATION` with the variable
+    // unset produces `--location=`, whose message would otherwise be
+    // byte-identical to `--location=false` — hiding the actual fault, which is
+    // the unset variable and not the value the operator chose.
+    const value = offending.slice(inlinePrefix.length);
+    return { error: `${token} takes no value, got ${JSON.stringify(value)} — pass ${token} on its own to turn it on, or omit it to leave it off` };
+  }
+  return { value: argv.includes(token) };
+}
+
+// Resolve the boolean flags from an argv array. Pure and argv-taking,
+// following resolveGuardInputs and the resolvers below, so the suite covers
+// the wiring and not merely the reader — the constant it feeds is read by
+// runRound, which no test can reach.
+//
+// Collected rather than thrown for the same reason as the others: this runs at
+// module load, which the suite reaches through require(), so the exit belongs
+// in main() alongside every other fatal.
+function resolveBooleanArgs(argv) {
+  const errors = [];
+  const read = (flag) => {
+    const { value, error } = readBooleanFlag(argv, flag);
+    if (error) errors.push(error);
+    // A refused flag reads as OFF, never on. main() exits on `errors` before
+    // any of this is used, so which value it is should not matter — but the
+    // one a reader finds here should still be the fail-closed one.
+    return value === true;
+  };
+  const includeLocation = read('location');
+  // --allow-production's VALUE belongs to resolveGuardInputs, which owns every
+  // input the guard reads. Only its SHAPE is checked here, for two reasons.
+  //
+  // The weaker one: it puts a malformed boolean in the same single pass as a
+  // malformed --file. main() gates on argErrors, THEN on QURL_API_KEY, and
+  // only then reaches the guard — so a bad --file plus a bad
+  // --allow-production would otherwise cost an operator without an API key
+  // exported three runs to see three messages.
+  //
+  // The decisive one: resolveGuardInputs's `errors` is not a general bucket.
+  // It arrives entirely by spread from parseTargetAllowlist, is destructured
+  // as `allowlistErrors`, and main() documents it as meaning specifically
+  // "the operator believes they granted a host they did not". A flag-shape
+  // error riding in that array would make that comment false and give the
+  // array two meanings.
+  //
+  // Called for its error side effect only; the boolean it returns is the
+  // guard's to read, not ours.
+  read('allow-production');
+  return { includeLocation, errors };
+}
 
 // Flags that carry no value. Named so a valued spelling can be rejected
 // rather than read as absence — see valuedBooleanFlags.
@@ -409,7 +515,8 @@ function checkUploadFile(filePath) {
 function resolveArgErrors(argv, check = checkUploadFile) {
   const { errors: numericErrors } = resolveNumericArgs(argv);
   const { filePath, errors: fileErrors } = resolveFileArg(argv);
-  const errors = [...numericErrors, ...fileErrors];
+  const { errors: booleanErrors } = resolveBooleanArgs(argv);
+  const errors = [...numericErrors, ...fileErrors, ...booleanErrors];
   // Guarded on filePath rather than run unconditionally: null means either no
   // --file was given or its shape already failed above, and statting that
   // would add a second message naming a path the operator never typed.
@@ -430,7 +537,7 @@ const {
   count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
 const { filePath: FILE_PATH } = resolveFileArg(args);
-const INCLUDE_LOCATION = hasFlag(args, 'location');
+const { includeLocation: INCLUDE_LOCATION } = resolveBooleanArgs(args);
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
 // The auto-generated payload is byte-identical on every round — `Buffer.alloc`
@@ -699,11 +806,27 @@ function isTargetAuthorized(target, { allowProdFlag, allowProdEnv }) {
  */
 function resolveGuardInputs(env, argv) {
   return {
-    // Through hasFlag like --location, rather than an inline includes: the
-    // two boolean flags reading argv two different ways is the residual of
-    // the split this change removes, and this is the one that gates a
-    // production-target override.
-    allowProdFlag: hasFlag(argv, 'allow-production'),
+    // Through the shared boolean reader like --location, rather than an
+    // inline includes: the two boolean flags reading argv two different ways
+    // was the residual of a split #1174 removed, and this is the one that
+    // gates a production-target override.
+    //
+    // `.value === true` is what carries that forward now that the reader can
+    // refuse. On the refused path it returns `{ error }` with no `value`, so
+    // `--allow-production=1` reads as ABSENT here — fail-closed, the guard
+    // refusing the target rather than clearing it. The operator still gets a
+    // message, because resolveBooleanArgs checks the same flag's SHAPE and
+    // main() exits on that before ever reaching the guard. The error this
+    // call would have produced is dropped on purpose: reporting it twice is
+    // worse than reporting it once, and this is the value read, not the
+    // report.
+    //
+    // Note this scans the whole process.argv while resolveBooleanArgs scans
+    // args (process.argv.slice(2)). They cannot disagree about this token:
+    // the two extra entries are the node binary and the RESOLVED ABSOLUTE
+    // script path, and neither an equality against `--allow-production` nor a
+    // `--allow-production=` prefix can match an absolute path.
+    allowProdFlag: readBooleanFlag(argv, 'allow-production').value === true,
     allowProdEnv: env.LOADTEST_ALLOW_PRODUCTION === '1',
     ...parseTargetAllowlist(env.LOADTEST_TARGET_HOSTS),
   };
@@ -1403,7 +1526,8 @@ module.exports = {
   DEFAULT_MAX_FAIL_RATE_PCT,
   // CLI argument validation
   readFlag,
-  hasFlag,
+  readBooleanFlag,
+  resolveBooleanArgs,
   parsePositiveInt,
   resolveNumericArgs,
   resolveFileArg,
