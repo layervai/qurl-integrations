@@ -258,7 +258,15 @@ describe('runRound accounting — latency figures', () => {
     // rather than wrapped around the loop, so none of that reaches it —
     // wrapping the loop would report ~80ms of upload time as mint latency.
     expect(r.reuploadMs).toBeGreaterThanOrEqual(70);
-    expect(r.mintMs).toBeLessThan(35);
+    // Compared against reuploadMs rather than a fixed millisecond bound. mint
+    // is a resolved mock, so the correct figure is ~0 while the regression's
+    // is ~reuploadMs — the two are separated by the whole re-upload, and
+    // saying so scales the margin with the machine instead of betting a
+    // contended runner never stalls past a hard-coded threshold. Fake timers
+    // would remove wall-clock entirely, but this test's subject IS elapsed
+    // time, and advancing timers across the awaits it measures is its own
+    // source of hangs.
+    expect(r.mintMs).toBeLessThan(r.reuploadMs / 2);
   });
 
   it('accumulates reuploadMs over failed attempts too', async () => {
