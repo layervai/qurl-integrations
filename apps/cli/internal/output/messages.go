@@ -133,6 +133,13 @@ const (
 
 	hintConnectorRetryBudget = "Hint: check this machine's outbound network access, then run `qurl connector run` again. If the problem persists, the next start will ask to refresh this Connector's platform assignment (--refresh-mode auto approves it once)."
 
+	// msgConnectorProxyNotServing renders supervisor.ErrProxyNotServing. A
+	// Login succeeded, but NewProxy did not, so the route and its CRID must not
+	// be presented as a successful local publish.
+	msgConnectorProxyNotServing = "The qURL platform accepted this Connector, but its route did not start, so nothing was published."
+
+	hintConnectorProxyNotServing = "Hint: run the command again. If the route is still rejected or times out, contact LayerV support."
+
 	// msgConnectorHubConfig renders hub.ErrConfig. The detail block names the
 	// exact variable; this headline places the problem.
 	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
@@ -264,6 +271,8 @@ func CustomerMessages() []string {
 		hintConnectorRefreshExhausted,
 		msgConnectorRetryBudget,
 		hintConnectorRetryBudget,
+		msgConnectorProxyNotServing,
+		hintConnectorProxyNotServing,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
 		msgConnectorTokenConsumed,

@@ -259,7 +259,7 @@ func (p *connectorProducer) handle(w http.ResponseWriter, r *http.Request) {
 // the SDK-facing lazy provider mints an exact Connector-bound token through
 // the authenticated management client, the device client resolves the same
 // stable ID, the real FRP client logs in, publish emits one CRID only after
-// admission, and real HTTP bytes cross the generated route.
+// its proxy reaches FRP's running phase, and real HTTP bytes cross the route.
 func TestPublishLocalHermeticJourney(t *testing.T) {
 	if testing.Short() {
 		t.Skip("hermetic local publish journey is the slowest cmd test")
@@ -333,6 +333,11 @@ func TestPublishLocalHermeticJourney(t *testing.T) {
 	}()
 
 	pollCmdVhost(t, vhostPort, row.ConnectorRoutingID+".hermetic.test", echoBody, 30*time.Second, done)
+	// The HTTP round-trip and StatusExporter observe the same running proxy,
+	// but the latter is a 25 ms polling API. Give the customer-output path a
+	// few poll turns before simulating an immediate Ctrl-C; cancellation is
+	// deliberately allowed to win if it arrives before readiness is observed.
+	time.Sleep(5 * 25 * time.Millisecond)
 	cancel()
 	var res *runResult
 	select {
@@ -344,7 +349,7 @@ func TestPublishLocalHermeticJourney(t *testing.T) {
 		t.Fatalf("exit = %d, want 130; stderr: %s", res.code, res.stderr.String())
 	}
 	if got := res.stdout.String(); got != exampleCRID+"\n" {
-		t.Fatalf("quiet stdout = %q, want one CRID after admission", got)
+		t.Fatalf("quiet stdout = %q, want one CRID after the route reached running", got)
 	}
 	if providerCalls != 1 {
 		t.Fatalf("lazy enrollment provider calls = %d, want 1", providerCalls)
@@ -362,6 +367,75 @@ func TestPublishLocalHermeticJourney(t *testing.T) {
 	}
 	if len(recorder.snapshot()) == 0 {
 		t.Fatal("server observed no NewProxy for local publish")
+	}
+}
+
+// TestPublishLocalRejectsBeforePrinting proves that an authenticated FRP
+// Login is not enough to call a local publish serving: the real server can
+// still reject its subsequent NewProxy registration. That refusal must stop
+// the command promptly and leave stdout empty, because the CRID is the
+// machine-readable success result.
+func TestPublishLocalRejectsBeforePrinting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hermetic rejected-proxy journey is one of the slowest cmd tests")
+	}
+	skipWithoutPinnedState(t)
+	connectorTestEnv(t)
+	t.Setenv(replica.EnvReplicaID, "replica-rejected")
+
+	row := mintConnectorRow(t, "rejected-local")
+	row.CRID = exampleCRID
+	producer := newConnectorProducer(t, row)
+	recorder := newRejectingCmdProxyRecorder(t)
+	frpsPort := reserveCmdTCPPort(t)
+	vhostPort := reserveCmdTCPPort(t)
+	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+
+	knocker := &cmdCycleKnocker{resourceHost: "localhost:" + strconv.Itoa(frpsPort)}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan *runResult, 1)
+	go func() {
+		done <- runCLI(t, &runOpts{
+			ctx: ctx,
+			args: []string{
+				"--endpoint", producer.URL, "--quiet", "publish",
+				"http://127.0.0.1:3000", "--id", row.Slug,
+			},
+			env:           map[string]string{},
+			configDir:     t.TempDir(),
+			syncStreams:   true,
+			connectorOpen: fakeConnectorOpen(t, producer.URL),
+			newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
+				knocker.resourceID = knockResourceID
+				return knocker, nil
+			},
+			connectorTune: func(cfg *supervisor.Config) {
+				cfg.MinBackoff = 5 * time.Millisecond
+				cfg.MaxBackoff = 25 * time.Millisecond
+				cfg.MinKnockInterval = time.Millisecond
+			},
+		})
+	}()
+
+	var res *runResult
+	select {
+	case res = <-done:
+	case <-time.After(3 * time.Second):
+		cancel()
+		res = <-done
+		t.Fatalf("rejected NewProxy did not fail within the bounded readiness policy; stdout=%q stderr=%q", res.stdout.String(), res.stderr.String())
+	}
+	if res.code != 11 {
+		t.Fatalf("exit = %d, want 11 (unavailable); stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	combined := res.stdout.String() + res.stderr.String()
+	if strings.Contains(combined, exampleCRID) || strings.Contains(combined, `"status":"serving"`) || strings.Contains(combined, "status=serving") {
+		t.Fatalf("rejected NewProxy printed a success identity/status:\n%s", combined)
+	}
+	if len(recorder.snapshot()) == 0 {
+		t.Fatal("server never observed the rejected NewProxy")
 	}
 }
 
@@ -510,6 +584,7 @@ func (k *cmdCycleKnocker) stats() (begun, ended []string, closed bool) {
 // admission (the supervisor suite's server-side evidence pattern).
 type cmdProxyRecorder struct {
 	server *httptest.Server
+	reject bool
 
 	mu           sync.Mutex
 	observations []struct{ runID, proxyName string }
@@ -518,6 +593,14 @@ type cmdProxyRecorder struct {
 func newCmdProxyRecorder(t *testing.T) *cmdProxyRecorder {
 	t.Helper()
 	recorder := &cmdProxyRecorder{}
+	recorder.server = httptest.NewServer(http.HandlerFunc(recorder.handle))
+	t.Cleanup(recorder.server.Close)
+	return recorder
+}
+
+func newRejectingCmdProxyRecorder(t *testing.T) *cmdProxyRecorder {
+	t.Helper()
+	recorder := &cmdProxyRecorder{reject: true}
 	recorder.server = httptest.NewServer(http.HandlerFunc(recorder.handle))
 	t.Cleanup(recorder.server.Close)
 	return recorder
@@ -543,7 +626,11 @@ func (p *cmdProxyRecorder) handle(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{"reject": false, "unchange": true}); err != nil {
+	response := map[string]any{"reject": p.reject, "unchange": true}
+	if p.reject {
+		response["reject_reason"] = "hermetic route policy rejection"
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

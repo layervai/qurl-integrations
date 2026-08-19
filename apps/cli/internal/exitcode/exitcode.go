@@ -295,6 +295,10 @@ func connectorSentinelCode(err error) (int, bool) {
 		// before this, so an exhaustion whose final cause was the user's own
 		// interrupt still exits 130.
 		return Unavailable, true
+	case errors.Is(err, supervisor.ErrProxyNotServing):
+		// The platform admitted the session but never installed its route:
+		// this serving surface is unavailable, not successfully published.
+		return Unavailable, true
 
 	// qurl-go's enrollment/assignment taxonomy. It is tested after the CLI's
 	// own lifecycle sentinels above so the CLI's reading wins wherever both

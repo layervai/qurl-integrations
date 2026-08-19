@@ -149,19 +149,25 @@ func localEnrollmentIdempotencyKey(agentID, connectorID string) (string, error) 
 	return "qurl-cli-local-publish-" + hex.EncodeToString(digest[:]), nil
 }
 
+// TODO(upstream-contract): Keep this local fail-fast check in lockstep with
+// qurl-service's Connector slug grammar and qurl-go's validateConnectorSlug.
 func validateConnectorID(id string) error {
 	if len(id) < 3 || len(id) > 64 || id[0] < 'a' || id[0] > 'z' {
-		return exitcode.UsageError(fmt.Errorf("invalid Connector ID %q: use 3-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number", id))
+		return invalidConnectorID(id)
 	}
 	for i := 1; i < len(id)-1; i++ {
 		c := id[i]
 		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
-			return exitcode.UsageError(fmt.Errorf("invalid Connector ID %q: use 3-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number", id))
+			return invalidConnectorID(id)
 		}
 	}
 	last := id[len(id)-1]
 	if (last < 'a' || last > 'z') && (last < '0' || last > '9') {
-		return exitcode.UsageError(fmt.Errorf("invalid Connector ID %q: use 3-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number", id))
+		return invalidConnectorID(id)
 	}
 	return nil
+}
+
+func invalidConnectorID(id string) error {
+	return exitcode.UsageError(fmt.Errorf("invalid Connector ID %q: use 3-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number", id))
 }

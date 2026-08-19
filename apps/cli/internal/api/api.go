@@ -80,9 +80,11 @@ type Published struct {
 	Status     string
 	CreatedAt  *time.Time
 	ExpiresAt  *time.Time
-	// FoundExisting reports that the service returned an already-published
-	// resource instead of minting a new one.
-	FoundExisting bool
+	// FoundExisting reports whether the service returned an already-published
+	// resource instead of minting a new one. Nil means provenance is unknown,
+	// as can happen when local enrollment reconciles an uncertain create by
+	// reading the resource back.
+	FoundExisting *bool
 }
 
 // DeleteResult reports a completed (idempotent) delete.

@@ -24,21 +24,23 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "publish <target-url>",
-		Short: "Publish a URL as a protected resource and get its CRID",
+		Short: "Publish a URL or local app and get its CRID",
 		Long: `Publish a URL as a qURL protected resource.
 
 For a remote URL, the service registers the target and returns its CRID — the
 resource's permanent, verifiable ID. Share the CRID anywhere; it contains no
 secrets. Anyone authorized can later turn it into a short-lived access link
-with "qurl resolve".
+with "qurl resolve". Remote targets are validated locally before credentials
+or network access: they must use http or https, include a host and valid port,
+and contain no embedded credentials.
 
 For a loopback HTTP origin such as http://127.0.0.1:3000, publish starts a
-Connector, prints its CRID after the platform accepts the tunnel, and keeps
-serving in the foreground until Ctrl-C. The first run uses your login to mint
-a Connector-bound one-shot enrollment credential in memory; later runs reuse
-the device identity saved on this machine. Use --id to choose a stable
-Connector ID, or omit it for a stable opaque ID derived for this machine and
-origin. ` + "`qurl connector run`" + ` remains the advanced surface for custom
+Connector, prints its CRID after the platform accepts and starts its route,
+and keeps serving in the foreground until Ctrl-C. The first run uses your
+login to mint a Connector-bound one-shot enrollment credential in memory;
+later runs reuse the device identity saved on this machine. Use --id to choose
+a stable Connector ID, or omit it for a stable opaque ID derived for this
+machine and origin. ` + "`qurl connector run`" + ` remains the advanced surface for custom
 state directories, refresh policy, and manually issued enrollment tokens.
 
 Publishing the same URL again does not create a duplicate: while the URL
@@ -170,18 +172,17 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 			cfg.EnrollmentTokenProvider = provider
 		},
 		resolveID: resolveID,
-		onAuthenticated: func(resolved *agent.ResolvedResource) error {
+		onServing: func(resolved *agent.ResolvedResource) error {
 			resource := resolved.Resource
 			if strings.TrimSpace(resource.CRID) == "" {
 				printer.Warnf("%s", msgNoCRIDReturned)
 			}
-			foundExisting := resolved.FoundExisting != nil && *resolved.FoundExisting
 			return printer.Publish(&qurlapi.Published{
 				CRID:          resource.CRID,
 				ResourceID:    resource.ResourceID,
 				TargetURL:     target.original,
 				Status:        "serving",
-				FoundExisting: foundExisting,
+				FoundExisting: resolved.FoundExisting,
 			})
 		},
 	})

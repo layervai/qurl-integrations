@@ -19,6 +19,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -209,6 +210,64 @@ func TestQuietProjections(t *testing.T) {
 	}
 }
 
+// TestPublishFoundExistingTriState pins the local reconciliation boundary:
+// unknown provenance must never be rendered as a confirmed fresh publish.
+// Known service answers remain explicit for scripts in both directions.
+func TestPublishFoundExistingTriState(t *testing.T) {
+	t.Parallel()
+	knownFalse := false
+	knownTrue := true
+	for _, tc := range []struct {
+		name          string
+		foundExisting *bool
+		wantJSON      string
+		wantNote      bool
+	}{
+		{name: "unknown is omitted", foundExisting: nil},
+		{name: "known fresh is explicit", foundExisting: &knownFalse, wantJSON: `"found_existing": false`},
+		{name: "known existing is explicit", foundExisting: &knownTrue, wantJSON: `"found_existing": true`, wantNote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errBuf bytes.Buffer
+			p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+			if err := p.Publish(&qurlapi.Published{
+				CRID:          "thecrid",
+				ResourceID:    "rid",
+				TargetURL:     "http://127.0.0.1:3000",
+				FoundExisting: tc.foundExisting,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantJSON == "" {
+				if strings.Contains(out.String(), `"found_existing"`) {
+					t.Fatalf("unknown provenance claimed a boolean outcome: %s", out.String())
+				}
+			} else if !strings.Contains(out.String(), tc.wantJSON) {
+				t.Fatalf("JSON = %s, want %s", out.String(), tc.wantJSON)
+			}
+			if got := strings.Contains(errBuf.String(), msgAlreadyPublished); got != tc.wantNote {
+				t.Fatalf("already-published note = %t, want %t; stderr=%q", got, tc.wantNote, errBuf.String())
+			}
+		})
+	}
+
+	for _, quiet := range []bool{false, true} {
+		var out, errBuf bytes.Buffer
+		p := newTestPrinter(&out, &errBuf, FormatText, quiet, false, false)
+		if err := p.Publish(&qurlapi.Published{
+			CRID:          "thecrid",
+			TargetURL:     "http://127.0.0.1:3000",
+			FoundExisting: nil,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "Already published") || strings.Contains(out.String(), msgPublishFoundExisting) || errBuf.Len() != 0 {
+			t.Fatalf("unknown provenance made an existing/fresh claim: stdout=%q stderr=%q", out.String(), errBuf.String())
+		}
+	}
+}
+
 // TestRedactionGrepProof plants a credential in every input a formatter or
 // error rendering touches on the diagnostic surfaces and asserts the secret
 // never reaches the rendered bytes.
@@ -393,6 +452,19 @@ func TestConnectorAssignmentOrdering(t *testing.T) {
 	})
 }
 
+func TestConnectorProxyNotServingRendering(t *testing.T) {
+	wrapped := fmt.Errorf("serve local Connector: %w: untrusted server detail", supervisor.ErrProxyNotServing)
+	var buf bytes.Buffer
+	RenderError(&buf, wrapped, false)
+	got := buf.String()
+	if !strings.Contains(got, msgConnectorProxyNotServing) || !strings.Contains(got, hintConnectorProxyNotServing) {
+		t.Fatalf("readiness rendering missing customer guidance:\n%s", got)
+	}
+	if strings.Contains(got, "untrusted server detail") {
+		t.Fatalf("readiness rendering leaked technical/server detail:\n%s", got)
+	}
+}
+
 // TestConnectorRequestRejectedDropsSDKRemedy is the regression guard for the
 // reported defect: the 52109 rendering must not put the SDK's own sentence —
 // which names a Go option and prescribes the wrong fix — in front of a
@@ -471,6 +543,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
 		msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid,
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
+		msgConnectorProxyNotServing, hintConnectorProxyNotServing,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {

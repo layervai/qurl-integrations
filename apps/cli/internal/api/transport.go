@@ -16,8 +16,8 @@ const (
 	// maxAttempts bounds the transient retry loop: one initial attempt plus
 	// two retries.
 	maxAttempts = 3
-	// maxRetryAfter caps how long a Retry-After header can make the CLI
-	// wait per retry; anything longer surfaces the 429 instead of hanging.
+	// maxRetryAfter caps each Retry-After wait before the CLI retries a
+	// replayable transient 429 or idempotent 503 response.
 	maxRetryAfter = 15 * time.Second
 	// drainLimit bounds how much of a discarded retry response is read for
 	// connection reuse.

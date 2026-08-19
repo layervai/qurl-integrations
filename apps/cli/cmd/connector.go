@@ -251,10 +251,13 @@ type connectorServeInputs struct {
 
 	configureAgent func(*agent.Config)
 	resolveID      func(*agent.Runtime) (string, error)
-	// onAuthenticated switches the output contract from connector-run's
-	// pre-start stderr note to publish's one stdout result after an accepted
-	// FRP Login. The callback runs on the command goroutine, never FRP's hook.
-	onAuthenticated func(*agent.ResolvedResource) error
+	// onServing switches the output contract from connector-run's pre-start
+	// stderr note to publish's one stdout result after every FRP proxy is
+	// running. Its presence also opts the supervisor into bounded exact-proxy
+	// readiness until the first serving cycle; later reconnects and a nil value
+	// preserve the advanced connector path's reconnect behavior. The callback
+	// runs on the command goroutine, never the readiness monitor goroutine.
+	onServing func(*agent.ResolvedResource) error
 }
 
 type openedConnector struct {
@@ -372,17 +375,17 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 
 	var ready chan struct{}
 	var readyOnce sync.Once
-	var onAuthenticatedReady func()
-	if in.onAuthenticated != nil {
+	var onProxyReady func()
+	if in.onServing != nil {
 		ready = make(chan struct{})
-		onAuthenticatedReady = func() { readyOnce.Do(func() { close(ready) }) }
+		onProxyReady = func() { readyOnce.Do(func() { close(ready) }) }
 	}
 	factory, err := supervisor.NewFRPRunnerFactory(&supervisor.FRPFactoryConfig{
-		Knocker:              knocker,
-		ResourceID:           knockResourceID,
-		Proxies:              proxies,
-		Logger:               logger,
-		OnAuthenticatedReady: onAuthenticatedReady,
+		Knocker:      knocker,
+		ResourceID:   knockResourceID,
+		Proxies:      proxies,
+		Logger:       logger,
+		OnProxyReady: onProxyReady,
 	})
 	if err != nil {
 		return err
@@ -407,7 +410,7 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 	// read-by-ID leg and the ensure leg alike — so the serve note can hand it
 	// to the customer with no extra lookup and no extra request.
 	serveTarget := net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort))
-	if in.onAuthenticated == nil {
+	if in.onServing == nil {
 		printer.ConnectorServing(resource.Slug, serveTarget, resource.CRID)
 	}
 	// The same identity as a structured event, because the note above is prose
@@ -417,22 +420,18 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 	// collects, unlike a resolved link. It is omitted rather than logged empty
 	// when the platform returned none, so a consumer can treat presence as
 	// meaning.
-	servingAttrs := []any{
-		"event", "connector_starting",
-		"connector_id", resource.Slug,
-		"target", serveTarget,
-	}
-	if resource.CRID != "" {
-		servingAttrs = append(servingAttrs, "crid", resource.CRID)
-	}
+	// Advanced connector run has always announced its identity before the
+	// serve loop. Local publish is stricter: until proxy readiness, even its
+	// operator log must not leak a success-looking CRID ahead of stdout.
+	servingAttrs := connectorStartingAttrs(resource.Slug, serveTarget, resource.CRID, in.onServing == nil)
 	logger.InfoContext(ctx, "connector: starting to serve local app", servingAttrs...)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}
-	if in.onAuthenticated != nil {
+	if in.onServing != nil {
 		select {
 		case <-ready:
-			if err := in.onAuthenticated(resolved); err != nil {
+			if err := in.onServing(resolved); err != nil {
 				stopCtx, cancel := context.WithTimeout(context.Background(), supervisor.StopWait)
 				defer cancel()
 				return errors.Join(err, sup.Stop(stopCtx))
@@ -444,6 +443,18 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 		}
 	}
 	return waitForConnector(ctx, sup, printer)
+}
+
+func connectorStartingAttrs(connectorID, target, crid string, includeCRID bool) []any {
+	attrs := []any{
+		"event", "connector_starting",
+		"connector_id", connectorID,
+		"target", target,
+	}
+	if includeCRID && crid != "" {
+		attrs = append(attrs, "crid", crid)
+	}
+	return attrs
 }
 
 func waitForConnector(ctx context.Context, sup *supervisor.Supervisor, printer interface{ Notef(string, ...any) }) error {

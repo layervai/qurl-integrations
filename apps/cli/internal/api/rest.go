@@ -87,6 +87,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
 		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
+	foundExisting := env.Meta.FoundExisting
 	return &Published{
 		CRID:          env.Data.CRID,
 		ResourceID:    env.Data.ResourceID,
@@ -94,7 +95,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		Status:        env.Data.Status,
 		CreatedAt:     env.Data.CreatedAt,
 		ExpiresAt:     env.Data.ExpiresAt,
-		FoundExisting: env.Meta.FoundExisting,
+		FoundExisting: &foundExisting,
 	}, nil
 }
 

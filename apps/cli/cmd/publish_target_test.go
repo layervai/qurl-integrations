@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func TestClassifyPublishTarget(t *testing.T) {
@@ -102,8 +105,17 @@ func TestValidateConnectorID(t *testing.T) {
 		}
 	}
 	for _, invalid := range []string{"", "ab", "A-b", "1ab", "ab-", "a_b", "a" + strings.Repeat("b", 64)} {
-		if err := validateConnectorID(invalid); err == nil {
+		err := validateConnectorID(invalid)
+		if err == nil {
 			t.Errorf("validateConnectorID(%q) succeeded", invalid)
+			continue
+		}
+		want := fmt.Sprintf("invalid Connector ID %q: use 3-64 lowercase letters, numbers, or hyphens; start with a letter and end with a letter or number", invalid)
+		if err.Error() != want {
+			t.Errorf("validateConnectorID(%q) = %q, want %q", invalid, err, want)
+		}
+		if got := exitcode.FromError(err); got != exitcode.Usage {
+			t.Errorf("validateConnectorID(%q) exit code = %d, want %d", invalid, got, exitcode.Usage)
 		}
 	}
 }

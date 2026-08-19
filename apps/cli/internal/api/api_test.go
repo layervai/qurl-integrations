@@ -53,8 +53,8 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	if res.TargetURL != "https://example.com/data" {
 		t.Errorf("target = %q", res.TargetURL)
 	}
-	if res.FoundExisting {
-		t.Error("fresh publish must not report found_existing")
+	if res.FoundExisting == nil || *res.FoundExisting {
+		t.Errorf("fresh publish FoundExisting = %v, want known false", res.FoundExisting)
 	}
 
 	srv.SetPublishFoundExisting(true)
@@ -62,8 +62,8 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.FoundExisting {
-		t.Error("meta.found_existing must surface")
+	if res.FoundExisting == nil || !*res.FoundExisting {
+		t.Errorf("replayed publish FoundExisting = %v, want known true", res.FoundExisting)
 	}
 }
 

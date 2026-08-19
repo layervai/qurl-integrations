@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	frpclient "github.com/fatedier/frp/client"
@@ -27,12 +28,19 @@ type FRPFactoryConfig struct {
 	Proxies []v1.ProxyConfigurer
 	// Logger receives runner and refresher events; nil uses slog.Default().
 	Logger *slog.Logger
-	// OnAuthenticatedReady is called after a tunnel Login is authenticated
-	// and its accepted RunID exactly matches the current native cycle RunID.
-	// It is optional and must return immediately; use a nonblocking channel
-	// send to hand work off, and guard it with sync.Once when the caller only
-	// needs the first ready signal across supervised reconnect cycles.
-	OnAuthenticatedReady func()
+	// OnProxyReady is called after a tunnel Login is authenticated, its
+	// accepted RunID exactly matches the current native cycle RunID, and every
+	// configured proxy reaches FRP's running phase. Supplying it opts the
+	// runner into exact-proxy readiness observation on every supervised cycle,
+	// with terminal enforcement until the first cycle becomes ready; nil
+	// preserves the advanced connector command's admission, reconnect, and
+	// logging behavior. The callback must return immediately; use a nonblocking
+	// channel send to hand work off, and guard it with sync.Once when the caller
+	// only needs the first ready signal across supervised reconnect cycles.
+	OnProxyReady func()
+	// ProxyReadyTimeout bounds the accepted-Login to running-proxy gap; zero
+	// uses the package default. Test-only injection.
+	ProxyReadyTimeout time.Duration
 	// RedialKnockGate overrides the redial refresher's debounce; zero means
 	// the package default. Test-only injection.
 	RedialKnockGate time.Duration
@@ -69,11 +77,19 @@ func NewFRPRunnerFactory(cfg *FRPFactoryConfig) (RunnerFactory, error) {
 	for _, proxy := range config.Proxies {
 		proxy.Complete()
 	}
+	proxyNames := make([]string, 0, len(config.Proxies))
+	for _, proxy := range config.Proxies {
+		proxyNames = append(proxyNames, proxy.GetBaseConfig().Name)
+	}
 	cfgSource := source.NewConfigSource()
 	if err := cfgSource.ReplaceAll(config.Proxies, nil); err != nil {
 		return nil, fmt.Errorf("qURL Connector supervisor: load proxy configs: %w", err)
 	}
 	aggregator := source.NewAggregator(cfgSource)
+	// A local publish's CRID is emitted after the first serving cycle. Keep
+	// that evidence across fresh runners so a later reconnect cannot surface
+	// the initial-only "nothing was published" terminal error after success.
+	var proxyReadyEver atomic.Bool
 
 	return func(cycleCommon *v1.ClientCommonConfig) (FRPRunner, error) {
 		// The cycle RunID must exist before the service is built: the fork
@@ -85,10 +101,16 @@ func NewFRPRunnerFactory(cfg *FRPFactoryConfig) (RunnerFactory, error) {
 			return nil, fmt.Errorf("native cycle RunID unavailable for tunnel login: %w", err)
 		}
 		runner := &cycleRunner{
-			resourceID:           config.ResourceID,
-			cycleRunID:           runID,
-			logger:               config.Logger,
-			onAuthenticatedReady: config.OnAuthenticatedReady,
+			resourceID:   config.ResourceID,
+			cycleRunID:   runID,
+			logger:       config.Logger,
+			onProxyReady: config.OnProxyReady,
+		}
+		if config.OnProxyReady != nil {
+			runner.proxyNames = append([]string(nil), proxyNames...)
+			runner.readyTimeout = config.ProxyReadyTimeout
+			runner.loginAccepted = make(chan struct{})
+			runner.proxyReadyEver = &proxyReadyEver
 		}
 		refresher := &redialKnockRefresher{
 			knocker:        config.Knocker,
@@ -116,6 +138,9 @@ func NewFRPRunnerFactory(cfg *FRPFactoryConfig) (RunnerFactory, error) {
 			return nil, err
 		}
 		runner.svc = svc
+		if config.OnProxyReady != nil {
+			runner.statusExporter = svc.StatusExporter()
+		}
 		return runner, nil
 	}, nil
 }

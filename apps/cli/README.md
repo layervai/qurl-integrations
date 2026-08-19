@@ -132,10 +132,17 @@ CRID aimed at a non-production endpoint warns and proceeds.
 `qurl publish <target-url>` has two deliberate modes:
 
 - A remote HTTP(S) URL is registered as a protected resource. The command
-  prints its CRID and exits, preserving the original publish behavior.
+  prints its CRID and exits, preserving the original publish behavior. Remote
+  targets are now validated locally before credentials or network access:
+  they must use HTTP(S), include a host and valid port, and contain no embedded
+  credentials.
 - A loopback HTTP origin such as `http://127.0.0.1:3000` starts an outbound
-  Connector, prints its CRID after the platform authenticates the tunnel, and
-  keeps serving until Ctrl-C or SIGTERM. The machine opens no inbound port.
+  Connector, prints its CRID only after every configured FRP proxy reports its
+  exact running phase, and keeps serving until Ctrl-C or SIGTERM. A rejected,
+  closed, or 30-second-stalled initial proxy registration exits without
+  printing a success CRID. After that first success, later supervised cycles
+  retain the Connector's normal reconnect behavior instead of contradicting
+  the already-printed result. The machine opens no inbound port.
 
 The generated local Connector ID is stable for the native device identity and
 normalized origin, so restarting the same origin reuses the same resource and
@@ -162,9 +169,12 @@ them for a local publish is an error rather than a silently ignored request.
 Publishing the same URL again does not create a duplicate: while the URL
 has an active resource, the service returns that existing resource and
 its CRID. Text mode says so in its output, `--quiet` notes it on stderr,
-and JSON output always carries `found_existing` (`true` exactly in this
-case). Delete the resource first to publish the same URL as a new
-resource with a fresh CRID.
+and JSON output carries `found_existing: true`. Confirmed fresh outcomes carry
+`found_existing: false`. If local enrollment reconciles an uncertain create by
+reading the resource back, provenance remains unknown: the JSON field and
+already-published claim are omitted instead of incorrectly calling it fresh.
+Delete the resource first to publish the same URL as a new resource with a
+fresh CRID.
 
 ### qurl resolve
 
@@ -306,8 +316,11 @@ verifies each caller and grants access before any request is forwarded.
 
 The Connector ID is the same identity the standalone qurl-connector
 configures as `QURL_CONNECTOR_ID` (YAML `id:`), so one setting covers a
-machine that moves between the two tools. The names v1.1.0 briefly
-shipped still work, deprecated: `--slug` as a hidden alias of `--id`
+machine that moves between the two tools. It must be 3–64 lowercase letters,
+numbers, or hyphens, start with a letter, and end with a letter or number;
+`connector run` validates this platform-owned grammar before opening state or
+making a network request. The names v1.1.0 briefly shipped still work,
+deprecated: `--slug` as a hidden alias of `--id`
 (passing both with different values is refused), and
 `QURL_CONNECTOR_SLUG` / `connector_slug` at lower precedence than their
 `id`-named counterparts. All three will be removed in the next major
@@ -339,11 +352,13 @@ level=INFO msg="connector: starting to serve local app" event=connector_starting
 ```
 
 `event=connector_starting` is the stable name; it fires as the serve loop
-starts, not once traffic flows (`event=proxy_allow` marks a served
-session). `crid` is omitted entirely rather than logged empty when the
-platform returned none, so its presence is meaningful. A CRID is base32
-over `[a-z2-7]`, so the value never needs quoting and always renders as a
-bare `crid=<value>`.
+starts, not once traffic flows. On this advanced surface, `event=proxy_allow`
+preserves its admission-level meaning after an authenticated Login; `connector
+run` does not opt into local publish's terminal 30-second exact-proxy readiness
+gate, so FRP retains its existing registration and reconnect behavior. `crid`
+is omitted entirely rather than logged empty when the platform returned none,
+so its presence is meaningful. A CRID is base32 over `[a-z2-7]`, so the value
+never needs quoting and always renders as a bare `crid=<value>`.
 
 If the platform stays unreachable long enough, the command exits with
 code 11 instead of retrying forever. The next start may then need its

@@ -13,6 +13,8 @@ import (
 )
 
 const (
+	// TODO(upstream-contract): These values mirror qurl-service's Connector
+	// enrollment request contract, including its maximum 24-hour lifetime.
 	connectorEnrollmentKind     = "enrollment_token"
 	connectorEnrollmentTarget   = "connector"
 	connectorEnrollmentStatus   = "active"
@@ -126,6 +128,8 @@ func validateConnectorEnrollmentOptions(opts MintConnectorEnrollmentTokenOptions
 }
 
 func validateConnectorEnrollmentResponse(data *connectorEnrollmentData, connectorID string, now time.Time) error {
+	// TODO(upstream-contract): Keep these response-envelope checks in lockstep
+	// with qurl-service's Connector enrollment response contract.
 	invalid := func(detail string) error {
 		return fmt.Errorf("%w: connector enrollment response %s", qurl.ErrInvalidAPIResponse, detail)
 	}

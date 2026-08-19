@@ -430,6 +430,13 @@ func (s *Supervisor) serve(ctx context.Context) error {
 				// sentinel so recovery is uniform.
 				return outcome.runErr
 			}
+			if errors.Is(outcome.runErr, ErrProxyNotServing) {
+				// Login succeeded but the configured route did not. This is
+				// explicit readiness evidence, not a knock-health failure, and
+				// retrying the same rejected registration would let local
+				// publish wait forever without a truthful result.
+				return outcome.runErr
+			}
 			if err := s.reconcileKnockBudget(ctx, outcome); err != nil {
 				return err
 			}

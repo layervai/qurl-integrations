@@ -41,6 +41,11 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
 	}
+	if errors.Is(err, supervisor.ErrProxyNotServing) {
+		// The underlying FRP rejection reason is server-controlled and already
+		// present in structured logs; keep terminal output fixed and bounded.
+		return []string{head + " " + msgConnectorProxyNotServing, "", "  " + p.dim(hintConnectorProxyNotServing)}
+	}
 	if lines, ok := connectorErrorLines(p, head, err); ok {
 		return lines
 	}
@@ -84,7 +89,6 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
 	case supervisor.IsTooManyKnockFailures(err):
 		headline, hint = msgConnectorRetryBudget, hintConnectorRetryBudget
-
 	// qurl-go's assignment taxonomy comes last so the CLI's own lifecycle
 	// reading always wins: agent.ErrRefreshAlreadyAttempted, for one, is
 	// joined with the warm-open cause and therefore also matches
