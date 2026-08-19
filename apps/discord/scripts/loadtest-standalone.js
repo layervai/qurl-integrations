@@ -478,8 +478,18 @@ function installSignalHandlers() {
 // delete some, and `--reclaim --ledger x` would take the next flag as the
 // path, find no such file, and report a clean exit.
 function parseReclaimArg(argv) {
-  const index = argv.indexOf('--reclaim');
+  // Both spellings are recognized. The rest of the file only supports
+  // space-separated flags, but --reclaim is the one where not recognizing a
+  // form is catastrophic rather than merely confusing: an unmatched
+  // `--reclaim=/path` would report no request at all and fall straight
+  // through to a full load test, which is the same "meant to delete, minted
+  // thousands instead" outcome the empty-value guard exists to prevent.
+  const index = argv.findIndex(a => a === '--reclaim' || a.startsWith('--reclaim='));
   if (index === -1) return { requested: false, path: null };
+  const token = argv[index];
+  if (token.startsWith('--reclaim=')) {
+    return { requested: true, path: token.slice('--reclaim='.length) || null };
+  }
   const value = argv[index + 1];
   if (!value || value.startsWith('--')) return { requested: true, path: null };
   return { requested: true, path: value };
@@ -970,7 +980,9 @@ async function main() {
   // The minted counts above and the sweep's count below measure different
   // things — recipient links versus the parent resources that own them — so
   // say so, or the two numbers look like a leak of the difference.
-  const parents = [...new Set(readLedger(LEDGER_PATH) || [])].length;
+  // quiet: reclaim reads the ledger again below, and a torn line reported by
+  // both reads looks like two torn lines.
+  const parents = [...new Set(readLedger(LEDGER_PATH, true) || [])].length;
   const minted = allResults.reduce((s, r) => s + r.fileLinks + r.locLinks, 0);
   console.log(`Reclaimable parents: ${parents} (covering ${minted} minted qURLs)`);
   console.log(`Ledger: ${LEDGER_PATH}`);

@@ -165,6 +165,18 @@ describe('parseReclaimArg', () => {
     expect(parseReclaimArg(['--reclaim', '/tmp/x.jsonl']))
       .toEqual({ requested: true, path: '/tmp/x.jsonl' });
   });
+
+  it('recognizes the --reclaim=PATH form rather than starting a load test', () => {
+    // An unmatched equals form reports no request at all and falls through to
+    // the run loop — the same "meant to delete, minted thousands instead"
+    // outcome the empty-value guard exists to prevent.
+    expect(parseReclaimArg(['--reclaim=/tmp/x.jsonl']))
+      .toEqual({ requested: true, path: '/tmp/x.jsonl' });
+  });
+
+  it('rejects an empty --reclaim= value', () => {
+    expect(parseReclaimArg(['--reclaim='])).toEqual({ requested: true, path: null });
+  });
 });
 
 describe('reclaim', () => {
