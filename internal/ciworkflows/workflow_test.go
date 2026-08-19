@@ -731,6 +731,18 @@ func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branch
 	if !ok {
 		t.Fatalf("%s pull_request trigger has unexpected type %T", path, pullRequest)
 	}
+
+	// `branches-ignore` is the one spelling these tables cannot express, and it
+	// fails open rather than loudly: GitHub rejects it alongside `branches`, so
+	// a workflow using it declares no `branches` key, which reads below as full
+	// reach — while `branches-ignore: ["justin/**"]` would take the workflow off
+	// exactly the stacked PRs this suite exists to keep it on. Refuse it here
+	// instead, so adding one forces the decision into the table.
+	if _, ok := config["branches-ignore"]; ok {
+		t.Fatalf("%s pull_request declares branches-ignore, which these tables cannot record; "+
+			"extend pullRequestBranchSpec to express it before using it", path)
+	}
+
 	raw, ok := config["branches"]
 	if !ok {
 		return nil, false
