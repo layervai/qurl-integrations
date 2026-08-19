@@ -483,8 +483,16 @@ func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 		t.Fatalf("%s has no %q job, but %q is a required context", claudeCodeReviewWorkflow, claudeReviewContext, claudeReviewContext)
 	}
 	if _, ok := parseWorkflowTriggers(t, claudeCodeReviewWorkflow, workflow.On)[mergeGroupTrigger]; ok {
-		t.Errorf("%s declares %s, so %q can report on a merge group.\nThe merge-group rationale documented on this test assumes it cannot; recheck that before trusting it.",
-			claudeCodeReviewWorkflow, mergeGroupTrigger, claudeReviewContext)
+		// Deliberately unconditional on posture, which means flipping the
+		// marker to `queued` fails here AND in the agreement check above, with
+		// the two messages appearing to ask for opposite things. They are not
+		// in conflict: the one above says every required-context workflow must
+		// declare the trigger, and this one says claude-review cannot honor
+		// that until it is restructured. Restructure first — the note on the
+		// posture constants is the order to do it in — rather than satisfying
+		// either message on its own.
+		t.Errorf("%s declares %s, so %q can report on a merge group.\nThe merge-group rationale documented on this test assumes it cannot; recheck that before trusting it.\nIf you are flipping the merge-queue posture, this failure is expected and pairs with the agreement check above; restructure %q first.",
+			claudeCodeReviewWorkflow, mergeGroupTrigger, claudeReviewContext, claudeReviewContext)
 	}
 }
 
