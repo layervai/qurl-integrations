@@ -649,15 +649,26 @@ const formatPct = (rate, digits = 1) => `${(rate * 100).toFixed(digits)}%`;
  * confirm what was applied, so `--max-fail-rate 0.05` reading back as `0.1%`
  * would defeat the only thing it is there for.
  *
+ * Widened against the value's own canonical rendering rather than against
+ * `pct` directly, because the percentage does not survive the round trip
+ * through a fraction: `0.23 / 100 * 100` is 0.22999999999999998, not 0.23, for
+ * about a tenth of the two-decimal thresholds in range. Comparing to `pct`
+ * exactly finds no width that matches and falls through to the bound, so
+ * `--max-fail-rate 0.23` echoed as `0.230000%` — accurate, but not the value
+ * as it was typed, which is the one thing this line owes the operator. Twelve
+ * significant digits is far finer than the six-decimal display bound and far
+ * coarser than where the noise sits.
+ *
  * Bounded at six decimals of a percent. Past that a value is shown at six
  * decimals, except where that would render a real threshold as `0.000000%` —
  * no threshold at all to read — which is reported as below the bound instead.
  */
 function formatThresholdPct(rate) {
   const pct = rate * 100;
+  const canonical = Number(pct.toPrecision(12));
   for (let digits = 1; digits <= 6; digits++) {
     const text = pct.toFixed(digits);
-    if (Number(text) === pct) return `${text}%`;
+    if (Number(text) === canonical) return `${text}%`;
   }
   const text = pct.toFixed(6);
   return Number(text) === 0 && pct > 0 ? '<0.000001%' : `${text}%`;

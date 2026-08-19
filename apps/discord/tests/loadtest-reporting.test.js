@@ -325,6 +325,31 @@ describe('formatThresholdPct — the echo shows the threshold that was set', () 
   it('shows a value that just needs more digits at the bound, not below it', () => {
     expect(formatThresholdPct(0.333333333333)).toBe('33.333333%');
   });
+
+  // A percentage does not survive the round trip through a fraction:
+  // `0.23 / 100 * 100` is 0.22999999999999998. Comparing the widened text
+  // against that finds no width that matches, so these echoed as `0.230000%`
+  // — accurate, but not the value as it was typed, which is the one thing
+  // this line owes the operator.
+  it.each([['0.23', 0.0023, '0.23%'], ['0.45', 0.0045, '0.45%'], ['0.85', 0.0085, '0.85%']])(
+    'echoes %s%% as typed despite the float round trip',
+    (_label, rate, expected) => {
+      expect(formatThresholdPct(rate)).toBe(expected);
+    },
+  );
+
+  // The sweep the three cases above were found by. Every threshold an
+  // operator can type in hundredths renders as typed — no trailing-zero
+  // padding, and none mistaken for below the display bound.
+  it('renders every hundredth from 0.01% to 100.00% as typed', () => {
+    const wrong = [];
+    for (let i = 1; i <= 10000; i++) {
+      const pct = i / 100;
+      const text = formatThresholdPct(pct / 100);
+      if (text !== `${pct.toFixed(String(pct).split('.')[1]?.length || 1)}%`) wrong.push([pct, text]);
+    }
+    expect(wrong).toEqual([]);
+  });
 });
 
 describe('parseMaxFailRate — a malformed threshold fails closed', () => {
