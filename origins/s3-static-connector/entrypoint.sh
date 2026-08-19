@@ -90,31 +90,44 @@ probe_signer() {
 
 preflight_line=""
 preflight_rc=0
+preflight_status=""
+preflight_backoff=""
 preflight_deadline=$((SECONDS + 15))
 while :; do
   preflight_rc=0
   preflight_line="$(probe_signer)" || preflight_rc=$?
-  [ "$preflight_rc" -eq 0 ] && break
-  preflight_line=""
-  # Only "signer not listening yet" is worth retrying; the read timeout below
-  # already bounds a signer that accepts the connection and then stalls.
-  if [ "$preflight_rc" -ne 2 ] ||
+  [ "$preflight_rc" -eq 0 ] || preflight_line=""
+  preflight_status="${preflight_line#* }"
+  preflight_status="${preflight_status%% *}"
+  # A status line with no reason phrase ends at the code with the CR still
+  # attached; strip it so a real rejection cannot fail open to "no response".
+  preflight_status="${preflight_status%$'\r'}"
+  case "$preflight_status" in
+    [0-9][0-9][0-9]) ;;
+    *) preflight_status="" ;;
+  esac
+  # Two outcomes earn another attempt while the deadline holds. Exit 2 is the
+  # signer not listening yet; the read timeout above already bounds one that
+  # accepts the connection and then stalls. The fatal class earns it because
+  # credential acquisition fails as a 403 — IMDS throttled in a host boot
+  # storm, an STS/web-identity hiccup, IAM or bucket-policy propagation, a
+  # session token mid-refresh — and the rendered installs run this under
+  # `restart: on-failure:5`, so exiting on the first one spends the whole
+  # restart budget on a condition that clears itself. Genuinely wrong
+  # bucket/region/IAM still fails closed, one deadline later.
+  preflight_backoff=""
+  case "$preflight_status" in
+    "") if [ "$preflight_rc" -eq 2 ]; then preflight_backoff=0.5; fi ;;
+    304|404|429) ;;
+    3??|4??) preflight_backoff=5 ;;
+  esac
+  if [ -z "$preflight_backoff" ] ||
     ! kill -0 "$envoy_pid" 2>/dev/null ||
     [ "$SECONDS" -ge "$preflight_deadline" ]; then
     break
   fi
-  sleep 0.5
+  sleep "$preflight_backoff"
 done
-
-preflight_status="${preflight_line#* }"
-preflight_status="${preflight_status%% *}"
-# A status line with no reason phrase ends at the code with the CR still
-# attached; strip it so a real rejection cannot fail open to "no response".
-preflight_status="${preflight_status%$'\r'}"
-case "$preflight_status" in
-  [0-9][0-9][0-9]) ;;
-  *) preflight_status="" ;;
-esac
 
 # S3_BUCKET, S3_PREFIX, and INDEX_DOCUMENT are already restricted by render.sh
 # to characters that need no JSON escaping, so these values interpolate as-is.

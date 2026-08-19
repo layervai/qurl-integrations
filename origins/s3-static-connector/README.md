@@ -176,6 +176,15 @@ viewer `404`, so serving would send the operator toward the object key instead.
 No-response, `429`, and `5xx` outcomes can resolve on their own; failing on those
 would spend the orchestrator's restart budget on a transient S3 blip.
 
+The fatal class is retried on a 5s backoff until a 15s deadline (shared with the
+wait for the signer to bind) before the verdict is logged, because credential
+acquisition also surfaces there as a `403`: IMDS throttled during a host boot
+storm, an STS/web-identity hiccup, IAM or bucket-policy propagation, or a session
+token mid-refresh. Those clear on their own, and the rendered installs run the
+origin under `restart: on-failure:5`, so exiting on the first probe would leave
+the origin down after five boots. A genuinely wrong bucket, region, or IAM policy
+still fails closed — just one deadline later.
+
 The preflight covers startup only. A request that S3 rejects with `400` or `403`
 later is caught at runtime by the `s3_request_rejected` log line — see
 [Logging](#logging).

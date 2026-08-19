@@ -516,7 +516,9 @@ else
       -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
       -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
       "$IMG" >/dev/null
-    for _ in $(seq 1 40); do
+    # The reject class is retried to a 15s deadline before the verdict, so this
+    # has to outlast a full retry budget plus container start.
+    for _ in $(seq 1 90); do
       docker_logs_contain "$ORIGIN" '"msg":"preflight_' && break
       sleep 0.5
     done
