@@ -173,7 +173,17 @@ describe('runRound accounting — a re-upload fails', () => {
     expect(mockMintLinks.mock.calls.map((c) => c[0])).toEqual(['res-1', 'res-3']);
   });
 
-  it('logs the first re-upload failure only', async () => {
+  it('reports every distinct re-upload failure, weighted by attempts', async () => {
+    // Was "logs the first re-upload failure only". That dedup is the defect
+    // this PR removes from the mint leg — a round mixing a systemic fault with
+    // transient ones reported whichever landed first and hid the other, which
+    // is the exact pair an operator is trying to tell apart — and the
+    // re-upload leg fails the same way for the same reasons. Both legs now
+    // tally by MESSAGE.
+    //
+    // Distinct messages, so this is two lines. Two failures with the SAME
+    // message would be one line reading `x2`, which is the point of weighting
+    // rather than counting lines.
     const { runRound } = loadWithCount(30);
     mockReUploadBuffer
       .mockResolvedValueOnce(upload('res-1'))
@@ -186,8 +196,10 @@ describe('runRound accounting — a re-upload fails', () => {
     expect(r.reuploadFail).toBe(2);
     expect(r.fileFail).toBe(20);
     const logged = console.error.mock.calls.map((c) => String(c[0]));
-    expect(logged.filter((m) => m.includes('re-upload error'))).toHaveLength(1);
-    expect(logged[0]).toContain('first blip');
+    expect(logged.filter((m) => m.includes('re-upload error'))).toEqual([
+      '  File re-upload error x1: first blip',
+      '  File re-upload error x1: second blip',
+    ]);
   });
 });
 
