@@ -520,8 +520,8 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 			"that never runs it is not reading green over a gate it skipped — the honest-signal " +
 			"argument that widened the app workflows does not apply. The code is still analyzed " +
 			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
-			"main, and the analysis runs on the next push — the retarget alone fires only " +
-			"`edited`, which the default activity types exclude, and strict status checks " +
+			"main, and the analysis runs on the next push rather than on the retarget itself " +
+			"(TestBranchFilteredWorkflowsExcludeEditedActivityType) — and strict status checks " +
 			"require that push before the merge anyway. Against that second look sits a " +
 			"two-language analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
 			"re-anchors pre-existing alerts onto that PR, where they block merge until a human " +
@@ -612,9 +612,12 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 // nothing reports does to a PR targeting main, which then blocks until an admin
 // override lands it. Nothing protects the base of a stacked PR, so there is no
 // required context there to wait on. Both failures are silent, and while the PR
-// is stacked it is this one that merges — a later phase, once the base merges
-// and GitHub retargets the PR onto main, is a separate question this test does
-// not reach. CONTRIBUTING.md's required-contexts section is the wording to match,
+// is stacked it is this one that merges. The retarget that follows a base merge
+// does put the PR under main's protection, which is exactly when the other
+// shape appears — the second half, pinned by
+// TestBranchFilteredWorkflowsExcludeEditedActivityType below.
+//
+// CONTRIBUTING.md's required-contexts section is the wording to match,
 // and the entries and messages elsewhere in this file defer to this paragraph
 // rather than restating the mechanism (#1194).
 //
