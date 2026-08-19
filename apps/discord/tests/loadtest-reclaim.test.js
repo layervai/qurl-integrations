@@ -31,7 +31,7 @@ const config = require('../src/config');
 const {
   LEDGER_PATH,
   readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
-  reclaimOnce, resetReclaimStateForTests,
+  reclaimOnce, resetReclaimStateForTests, resolveLedgerArg,
 } = require('../scripts/loadtest-standalone');
 
 let created = [];
@@ -191,6 +191,45 @@ describe('recordResource', () => {
     // exists to prevent.
     const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     expect(after).toBe(before);
+  });
+});
+
+describe('resolveLedgerArg', () => {
+  const FALLBACK = '/tmp/generated-default.jsonl';
+
+  it('falls back when the flag is absent', () => {
+    expect(resolveLedgerArg(['--count', '10'], FALLBACK))
+      .toEqual({ ledgerPath: FALLBACK, errors: [] });
+  });
+
+  it('reads the separated form', () => {
+    expect(resolveLedgerArg(['--ledger', '/tmp/x.jsonl'], FALLBACK))
+      .toEqual({ ledgerPath: '/tmp/x.jsonl', errors: [] });
+  });
+
+  it('reads the inline form, which the removed reader silently ignored', () => {
+    // `--ledger=/tmp/x` read as absent under the old indexOf-based getArg, so
+    // the run recorded to a generated path instead — and the ledger is the one
+    // file an operator has to be able to find afterwards.
+    expect(resolveLedgerArg(['--ledger=/tmp/x.jsonl'], FALLBACK))
+      .toEqual({ ledgerPath: '/tmp/x.jsonl', errors: [] });
+  });
+
+  it('reports a flag given no value, keeping the fallback', () => {
+    const { ledgerPath, errors } = resolveLedgerArg(['--ledger'], FALLBACK);
+    expect(ledgerPath).toBe(FALLBACK);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('reports the next argument being a flag rather than consuming it', () => {
+    const { errors } = resolveLedgerArg(['--ledger', '--location'], FALLBACK);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('reports a whitespace-only path rather than writing to it', () => {
+    const { ledgerPath, errors } = resolveLedgerArg(['--ledger', '   '], FALLBACK);
+    expect(ledgerPath).toBe(FALLBACK);
+    expect(errors[0]).toContain('--ledger must name a file');
   });
 });
 
