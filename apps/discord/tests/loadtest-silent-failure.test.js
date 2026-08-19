@@ -7,10 +7,10 @@
  * succeeded, and the two hours it wasted are only noticed afterwards — which
  * is what groups these two otherwise unrelated halves into one file.
  *
- *   - Numeric flags. `--count abc` and `--count -5` both make
- *     `for (let i = 0; i < COUNT; i += 10)` skip entirely, so the script
- *     holds the target for its full duration issuing no requests and reports
- *     "Total links minted: 0".
+ *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
+ *     round runs — the file leg's `i += 10` batches and the location leg's
+ *     `i++` alike — so the script holds the target for its full duration
+ *     issuing no requests and reports "Total links minted: 0".
  *   - The upload call. Hand-rolled, it had no timeout (a stalled connector
  *     hangs the round forever) and no response-shape checks (a 200 with no
  *     resource_id blamed the mint leg for an upload fault).
@@ -166,11 +166,16 @@ describe('loadtest numeric flags — resolving them from argv', () => {
 });
 
 describe('loadtest script — static checks on call sites no test can reach', () => {
-  const ast = parser.parse(
-    fs.readFileSync(path.join(__dirname, '..', 'scripts', 'loadtest-standalone.js'), 'utf8'),
-    { sourceType: 'unambiguous' },
-  );
+  const parseFile = (...segments) =>
+    parser.parse(fs.readFileSync(path.join(__dirname, '..', ...segments), 'utf8'), {
+      sourceType: 'unambiguous',
+    });
 
+  const ast = parseFile('scripts', 'loadtest-standalone.js');
+
+  // Matches a member expression on its property name too, so `client.fetch()`
+  // counts as a fetch. Wider than strictly needed, in the direction these
+  // checks want to err.
   const calleeName = (node) => {
     const callee = node.callee;
     if (callee.type === 'Identifier') return callee.name;
@@ -217,6 +222,30 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   it('uploads through reUploadBuffer', () => {
     // Fails closed if the call disappears or a second one appears unreviewed.
     expect(callsNamed('reUploadBuffer')).toHaveLength(1);
+  });
+
+  it('passes the first three parameters positionally and omits the last two', () => {
+    // The call site is positional, so a reorder in connector.js would change
+    // what this script uploads with nothing here to notice. Read from the
+    // real signature rather than hard-coded, so a rename surfaces as a
+    // failure instead of leaving this asserting a stale contract.
+    //
+    // The list is pinned whole, not just its first three: omitting the last
+    // two is only safe because of what those two specifically are — apiKey
+    // falls back to config.QURL_API_KEY, and appendViewerTtl drops
+    // viewerTtlSeconds unless it is positive-finite. A sixth parameter, or a
+    // different one in fourth place, needs that reasoning done again.
+    let params = null;
+    traverse(parseFile('src', 'connector.js'), {
+      FunctionDeclaration(p) {
+        if (p.node.id?.name !== 'reUploadBuffer') return;
+        params = p.node.params.map(param => param.name);
+      },
+    });
+    expect(params).toEqual([
+      'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds',
+    ]);
+    expect(callsNamed('reUploadBuffer')[0].arguments).toHaveLength(3);
   });
 
   it('imports reUploadBuffer from the connector client', () => {

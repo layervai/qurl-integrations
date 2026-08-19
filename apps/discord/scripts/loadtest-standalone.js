@@ -66,10 +66,11 @@ const hasFlag = (name) => args.includes(`--${name}`);
 // Numeric flags are validated, not merely parsed. `parseInt` fails silently
 // in three directions here: a non-numeric value gives NaN, a negative one is
 // returned intact, and with no radix '0x64' reads as 100 while '1e9'
-// truncates to 1. NaN and negatives converge on the worst outcome — the batch
-// loop `for (let i = 0; i < COUNT; i += 10)` never enters, so the run holds
-// the target for its whole DURATION_S window issuing zero requests and then
-// prints "Total links minted: 0" as though that were a measurement.
+// truncates to 1. NaN and negatives converge on the worst outcome — every
+// loop a round runs is bounded by COUNT, the file leg's `i += 10` batches and
+// the location leg's `i++` alike, so none of them enter. The run then holds
+// the target for its whole DURATION_S window issuing zero requests and prints
+// "Total links minted: 0" as though that were a measurement.
 //
 // The value is the next argv token verbatim, so a flag typed without its
 // value ('--count --location') arrives here as '--location' — while also
