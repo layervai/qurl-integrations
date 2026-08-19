@@ -44,9 +44,13 @@
  *       written on its own. `--location=true` is refused rather than
  *       interpreted — omitting the flag is already how it is turned off, so
  *       there is no `=false` left for it to mean. See readBooleanFlag below.
- *     - a MISSPELLED flag is still ignored silently, and so is a value handed
- *       to a boolean flag positionally (`--location false` leaves the leg
- *       ON). Both are recorded as one known gap at readFlag below.
+ *     - there are NO positional arguments. Every token has to be a flag this
+ *       script declares or the value of one, so a misspelling (`--locatoin`),
+ *       a single-dash spelling (`-count 5`), a case slip (`--LOCATION=true`)
+ *       and a value handed to a boolean flag positionally (`--location false`)
+ *       are all refused rather than ignored. See resolveUnknownArgs below.
+ *     - `--` is NOT honoured. With no positionals for it to separate it has
+ *       nothing to do here, so it is refused like any other stray token.
  *
  *   Hand-rolled rather than node:util parseArgs, which covers these shapes
  *   but throws on the first bad flag — forfeiting "name every bad flag in one
@@ -109,6 +113,78 @@ const { createOneTimeLink } = require('../src/qurl');
 const { TOKENS_PER_RESOURCE } = require('../src/constants');
 
 const args = process.argv.slice(2);
+
+// ---------------------------------------------------------------------------
+// The flag table
+//
+// Every flag this script accepts, whether it takes a value, and what it falls
+// back to. One table, read by everything below, so there is a single answer to
+// "what does a valid command line look like" rather than one answer per reader.
+//
+// That single answer is what makes an unknown-argument pass possible at all.
+// The readers below are PULL-based — each scans argv for one named flag — so
+// none of them can see a token that matched nothing, which is why `--locatoin`,
+// `-count 5` and `--LOCATION=true` all read as "flag absent" and ran the full
+// window on the defaults. resolveUnknownArgs is the push-based counterpart,
+// and it can only exist once something knows which tokens are flags and which
+// of them consume the token after them.
+//
+// This is a single source and not a second list, which is the whole risk in
+// introducing it. Both directions of drift are closed:
+//
+//   - a flag read without a row here throws out of flagSpec, at module load,
+//     because the resolvers run there. It cannot ship as a flag the readers
+//     honour and the unknown pass refuses.
+//   - a row here that no reader consults would be accepted and then ignored —
+//     the exact defect this table exists to remove, reintroduced by an entry.
+//     The suite's 'wires every flag in the table to a reader' case is what
+//     covers that direction, since no throw can.
+//
+// The numeric defaults are spelled as strings to look like the argv they stand
+// in for; parsePositiveInt opens with String(raw), so a numeric literal would
+// behave identically. `defaultLabel` is what a missing-value message calls the
+// default — see readFlag. Only --file needs one, because its default is not a
+// path at all and would otherwise print as the literal "null".
+//
+// Frozen, rows included, because it is exported. "Single source of truth" is
+// the claim this whole section rests on, and an export hands every importer a
+// live reference to mutate it through — a suite that edited a row would leak
+// that edit into every later test in its file, since jest shares one module
+// instance across them. Freezing makes the invariant hold at runtime instead
+// of by convention.
+const FLAGS = [
+  { name: 'count', takesValue: true, defaultValue: '100' },
+  { name: 'duration', takesValue: true, defaultValue: '7200' },
+  { name: 'interval', takesValue: true, defaultValue: '60' },
+  { name: 'file', takesValue: true, defaultValue: null, defaultLabel: 'an auto-generated 1MB test file' },
+  { name: 'max-fail-rate', takesValue: true, defaultValue: '10' },
+  { name: 'location', takesValue: false },
+  { name: 'allow-production', takesValue: false },
+].map((spec) => Object.freeze(spec));
+Object.freeze(FLAGS);
+
+const FLAG_BY_NAME = new Map(FLAGS.map((spec) => [spec.name, spec]));
+
+// Rendered once, for the messages that have no better hint to offer than the
+// list of flags that do exist.
+const ACCEPTED_FLAGS = FLAGS.map((spec) => `--${spec.name}`).join(', ');
+
+/**
+ * The declared spec for a flag, asserting the arity its reader assumes.
+ *
+ * Throws rather than collecting, unlike everything else in this section: both
+ * failures are WIRING bugs and not operator mistakes, so there is no command
+ * line to report them against. They fire at module load — the resolvers run
+ * there — so neither can reach a run.
+ */
+function flagSpec(name, takesValue) {
+  const spec = FLAG_BY_NAME.get(name);
+  if (spec === undefined) throw new Error(`--${name} is read but not declared in FLAGS`);
+  if (spec.takesValue !== takesValue) {
+    throw new Error(`--${name} is declared ${spec.takesValue ? 'value-taking' : 'valueless'} in FLAGS but read as the opposite`);
+  }
+  return spec;
+}
 
 // ---------------------------------------------------------------------------
 // CLI flag reading
@@ -186,22 +262,11 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
   return { value: next };
 }
 
-// One gap in the same fault class is deliberately left open here, recorded so
-// it is a deferral rather than an oversight.
-//
-// UNKNOWN FLAGS. readFlag is pull-based — it scans argv for one named flag —
-// so nothing can see a token that matched nothing. `--fil /tmp/payload.bin`
-// and `-file /tmp/payload.bin` both read as "no --file given" and run the
-// full window uploading the generated 1MB payload, from a one-character typo:
-// the same outcome the header above calls the worst available one. Closing it
-// needs a push-based pass that tokenizes argv once against a flag spec and
-// reports what went unconsumed. That is a larger change than routing the
-// value-taking flags through one reader, and it is not what this one does.
-//
-// It also subsumes the positional case named at readBooleanFlag below
-// (`--location false` leaving the leg ON), so the two are one change and not
-// two. The BOOLEAN `=` gap this note used to record alongside it — where
-// `--location=true` read as absent — is closed there.
+// The UNKNOWN FLAGS gap this note used to record is closed, by
+// resolveUnknownArgs below. Nothing changed here to close it: readFlag is
+// still pull-based, still scans argv for one named flag, and still cannot see
+// a token that matched nothing. A second, push-based pass over the whole
+// command line is what can, which is why that is where it lives.
 
 // Boolean flags are not routed through readFlag: they take no value, so it has
 // nothing to read for them. They shared the defect anyway. The `hasFlag` this
@@ -229,26 +294,12 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
 //   - There is nothing for `--location=false` to express that omitting the
 //     flag does not already express. These are leg switches, not settings.
 //
-// What this does NOT close, stated plainly because the `=` fix invites the
-// assumption that it does. There is no unknown-argument pass in this script,
-// so a token that is neither a recognized flag nor a recognized flag's value
-// is ignored whatever it says:
-//
-//   --location true    leg ON, `true` ignored — the operator got what they
-//                      asked for, so nothing to report.
-//   --location false   leg ON, `false` ignored. The operator asked for OFF and
-//                      got ON, silently. Same fault class as the one closed
-//                      here, and a likelier spelling than `--location=false`
-//                      for anyone carrying a `--flag value` habit over.
-//   --locatoin         reads as absent, leg OFF, nothing said — as does
-//                      `--cont 5` for the numeric flags.
-//   --LOCATION=true    reads as absent. The match is case-sensitive on both
-//                      halves, deliberately, so a shift-key slip lands here.
-//
-// Closing those means an unknown-argument pass over the whole command line —
-// one rule covering all four — which is a larger change than this one and does
-// not belong inside it. Named here so the next person finds a decision rather
-// than an oversight.
+// A POSITIONAL value is deliberately still not this reader's to refuse, and
+// `--location false` still returns ON from here. That is not the gap it used
+// to be: `false` is a token nothing consumed, which resolveUnknownArgs refuses
+// under its one rule, so the run stops. Adding a fifth special case here would
+// only mean two readers reporting the same argument twice — and this one
+// cannot see enough of the command line to be the right place for it anyway.
 function readBooleanFlag(argv, flag) {
   const token = `--${flag}`;
   const inlinePrefix = `${token}=`;
@@ -282,6 +333,11 @@ function readBooleanFlag(argv, flag) {
 function resolveBooleanArgs(argv) {
   const errors = [];
   const read = (flag) => {
+    // Consulted for the assertion alone — a boolean flag has no default and
+    // nothing else to look up. It is what stops a flag from being honoured
+    // here while the table declares it value-taking, which would have
+    // resolveUnknownArgs swallow the token after it as a value.
+    flagSpec(flag, false);
     const { value, error } = readBooleanFlag(argv, flag);
     if (error) errors.push(error);
     // A refused flag reads as OFF, never on. main() exits on `errors` before
@@ -310,33 +366,6 @@ function resolveBooleanArgs(argv) {
   // guard's to read, not ours.
   read('allow-production');
   return { includeLocation, errors };
-}
-
-// Flags that carry no value. Named so a valued spelling can be rejected
-// rather than read as absence — see valuedBooleanFlags.
-const BOOLEAN_FLAGS = ['location', 'allow-production'];
-
-/**
- * Boolean flags written with a value: `--location=true`.
- *
- * hasFlag matches the bare token, so a valued spelling reads as the flag being
- * ABSENT — and for `--location` that silently inverts what the run measures,
- * since the file leg runs whenever location does not. It became worth
- * rejecting once readFlag started accepting `--count=20`: an operator who has
- * learned that `=` works has every reason to try it here, and this is the only
- * place it would quietly mean the opposite of what they typed.
- *
- * readFlag's own comment records the same gap from the other side, and says
- * why it stops short of fixing it: refusing `--location=true` means first
- * deciding what `--location=false` should mean. This answers only the first
- * half — the value is refused, not interpreted.
- *
- * `--allow-production=1` fails closed on its own — the guard refuses and says
- * which flag to pass — so this is about saying so at once rather than after
- * the target table.
- */
-function valuedBooleanFlags(argv, names = BOOLEAN_FLAGS) {
-  return names.filter((name) => argv.some((a) => a.startsWith(`--${name}=`)));
 }
 
 // Numeric flags are validated, not merely parsed. `parseInt` fails silently
@@ -390,16 +419,16 @@ function parsePositiveInt(flag, raw) {
 // it held the target for the default 7200 seconds, so an operator who asked
 // for a minute got two hours.
 //
-// The defaults are ROUTED THROUGH parsePositiveInt rather than returned
-// beside it, so a default that the validator would reject cannot ship, and
-// there is no "was this token typed or defaulted?" branch between readFlag
-// and the parse. They are spelled as strings only to look like the argv they
-// stand in for — parsePositiveInt opens with String(raw), so a numeric
-// default would behave identically. The routing is what matters here, not
-// the quoting.
+// The defaults come from FLAGS above and are ROUTED THROUGH parsePositiveInt
+// rather than returned beside it, so a default that the validator would reject
+// cannot ship, and there is no "was this token typed or defaulted?" branch
+// between readFlag and the parse. A fourth numeric flag read here without a
+// row in that table throws out of flagSpec at module load, rather than being
+// honoured here and refused as unknown two functions down.
 function resolveNumericArgs(argv) {
   const errors = [];
-  const read = (flag, defaultValue) => {
+  const read = (flag) => {
+    const { defaultValue } = flagSpec(flag, true);
     const { value: raw, error: shapeError } = readFlag(argv, flag, defaultValue);
     if (shapeError) {
       errors.push(shapeError);
@@ -416,7 +445,7 @@ function resolveNumericArgs(argv) {
   // reaches through require(), so the exit belongs in main() alongside every
   // other fatal. Collecting also names every bad flag in one pass instead of
   // one per re-run.
-  return { count: read('count', '100'), durationS: read('duration', '7200'), intervalS: read('interval', '60'), errors };
+  return { count: read('count'), durationS: read('duration'), intervalS: read('interval'), errors };
 }
 
 // Resolve --file from argv. Null means "none given, generate one", which is
@@ -429,12 +458,23 @@ function resolveNumericArgs(argv) {
 // against real files.
 function resolveFileArg(argv) {
   const errors = [];
-  const { value, error } = readFlag(argv, 'file', null, 'an auto-generated 1MB test file');
+  const { defaultValue, defaultLabel } = flagSpec('file', true);
+  const { value, error } = readFlag(argv, 'file', defaultValue, defaultLabel);
   if (error) {
     errors.push(error);
     return { filePath: null, errors };
   }
-  if (value === null) return { filePath: null, errors };
+  // Compared against the table's default rather than a repeated `null`: that
+  // table owns what "no --file given" resolves to, and this is the one reading
+  // of this flag that may fall back to the generated payload.
+  //
+  // Sound only because that default is a SENTINEL no operator can type. It is
+  // readFlag's "flag absent" return, not a value, so `null` here cannot have
+  // come from argv. A future flag given a real string default must not copy
+  // this line — an operator passing that exact string would be misread as
+  // having passed nothing, which is the silent-default bug this file exists to
+  // remove, arriving from the one direction the table made easier.
+  if (value === defaultValue) return { filePath: null, errors };
   // Whitespace is checked but NOT stripped: a filename may legitimately carry
   // a leading or trailing space, so trimming would resolve a real path to a
   // different one. A value that is ONLY whitespace is a mistyped flag rather
@@ -447,6 +487,149 @@ function resolveFileArg(argv) {
     return { filePath: null, errors };
   }
   return { filePath: value, errors };
+}
+
+/**
+ * The flag a token names, or null for one that names none. Both spellings
+ * resolve to the same spec, so `--file` and `--file=/tmp/x` are one flag
+ * rather than a flag and an unknown token — matching readFlag, which accepts
+ * both. Splitting on the first `=` only, so `--file=/tmp/run=3.bin` still
+ * names --file.
+ */
+function tokenSpec(token) {
+  if (!token.startsWith('--')) return null;
+  return FLAG_BY_NAME.get(token.slice(2).split('=', 1)[0]) ?? null;
+}
+
+/**
+ * Whether readFlag would consume this token as the previous flag's value.
+ *
+ * Deliberately readFlag's rule and not an approximation of it: an undefined
+ * token is a flag left as the final one, and a token beginning with `--` is
+ * refused there as a flag-shaped value rather than taken as one. If the two
+ * ever disagree, a token gets either consumed here AND reported unknown, or
+ * claimed by neither.
+ */
+const isValueToken = (token) => token !== undefined && !token.startsWith('--');
+
+/**
+ * The flag an unrecognized token was probably meant to be, or null.
+ *
+ * One normalization — drop leading dashes, drop any `=value`, lowercase —
+ * covers three separate slips: `-count`, the single-dash spelling that Go's
+ * `flag` package accepts and that this repo's Go apps (apps/cli, apps/slack)
+ * make a live habit; `--LOCATION`, a shift-key slip past a match that is
+ * case-sensitive on purpose; and `---count`. A genuine misspelling like
+ * `--locatoin` matches nothing and gets the flag list instead, which is what
+ * an edit-distance search would be for — more machinery than these three
+ * shapes need.
+ */
+function suggestFlag(token) {
+  const bare = token.replace(/^-+/, '').split('=', 1)[0].toLowerCase();
+  if (bare === '') return null;
+  // Lowercasing the declared name too cannot change the answer today — every
+  // flag above is already lowercase — so this is a forward guard rather than a
+  // live one, and no test can distinguish it. It is what would keep the case
+  // slip working for a `--dryRun`-style name, which is the whole point of the
+  // suggestion.
+  const spec = FLAGS.find((s) => s.name.toLowerCase() === bare);
+  return spec === undefined ? null : `--${spec.name}`;
+}
+
+/**
+ * Refuse every token the flag table does not account for.
+ *
+ * The push-based counterpart to the pull-based readers above, and the last
+ * member of the fault class they close. Each of those scans argv for the one
+ * flag it was asked about, so a token that matched NOTHING was seen by none of
+ * them and ignored whatever it said: `--locatoin` and `-count 5` read as
+ * "flag absent" and ran the full unattended window on the defaults, and
+ * `--location false` turned the leg ON while the operator was asking for it
+ * off. One-character slips, all silent, all producing a real run that nobody
+ * asked for.
+ *
+ * One rule closes them: this script accepts NO positional arguments, so every
+ * token is either a flag it declares, or the value immediately following a
+ * declared value-taking flag. Everything else is an error.
+ *
+ * `--` is not honoured, decided rather than overlooked. It separates flags
+ * from positionals, and there are no positionals here for it to protect — so
+ * honouring it would mean either every token after it is refused anyway, or
+ * readFlag and readBooleanFlag learning about it too, since both scan the
+ * whole argv and would otherwise keep reading flags this pass had written off.
+ * That is a change to every reader in aid of a separator with nothing to
+ * separate. Refusing it says the one thing an operator who typed it has wrong.
+ *
+ * Pure and argv-taking like the resolvers above, and collecting rather than
+ * throwing, so main() reports these in the same single pass as everything else.
+ */
+function resolveUnknownArgs(argv) {
+  const errors = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const spec = tokenSpec(arg);
+    if (spec !== null) {
+      // Skip what this flag consumes, on exactly readFlag's terms: the inline
+      // spelling carries its own value, and the separated one reaches past a
+      // token only when readFlag would have taken it.
+      if (spec.takesValue && !arg.startsWith(`--${spec.name}=`) && isValueToken(argv[i + 1])) i += 1;
+      continue;
+    }
+    errors.push(unknownArgError(arg, argv[i - 1]));
+    // An unrecognized FLAG swallows a following value token, so `--cont 5`
+    // costs one message and not two. Its arity is unknowable — that is what
+    // makes it unrecognized — but reporting `5` as a stray positional would
+    // name something the operator never meant as one, and send them looking
+    // for a second mistake they did not make. Same reasoning as
+    // resolveArgErrors below declining to stat a --file whose shape already
+    // failed. Nothing is hidden by it: the run stops on the flag either way.
+    //
+    // Two tokens are excluded, both because their arity is NOT in fact
+    // unknowable, so there is no guess to justify dropping a real stray:
+    //
+    //   - `--`, which is a separator and never carries a value;
+    //   - an inline spelling, `--cont=5`, which has already been given its
+    //     value and so cannot take a separated one as well. Same reasoning as
+    //     the recognized branch above, and the same rule, so a misspelling
+    //     hides no more than the flag it was meant to be would have.
+    if (arg.startsWith('-') && arg !== '--' && !arg.includes('=') && isValueToken(argv[i + 1])) i += 1;
+  }
+  return { errors };
+}
+
+/**
+ * The message for one token nothing consumed. Split out so the loop above
+ * stays a statement of the rule and this stays a statement of the diagnosis.
+ */
+function unknownArgError(token, previous) {
+  if (token === '--') {
+    return '-- has nothing to separate here — this script takes no positional arguments, so every argument is a flag';
+  }
+  if (token.startsWith('-')) {
+    const suggestion = suggestFlag(token);
+    if (suggestion !== null) {
+      return `${token} is not a flag this script accepts — did you mean ${suggestion}? (flag names are case-sensitive, and take two dashes)`;
+    }
+    return `${token} is not a flag this script accepts — accepted flags are ${ACCEPTED_FLAGS}`;
+  }
+  // A stray token straight after a valueless flag is almost never a stray
+  // token: it is the `--flag value` habit meeting a flag that takes none, and
+  // `--location false` is the one reading in this whole class where the
+  // operator got the OPPOSITE of what they typed. Naming the flag turns a
+  // generic "no positionals here" into the actual correction. Echoes the value
+  // and offers the same recovery as readBooleanFlag's `=` refusal, because
+  // from the operator's seat the two are one mistake spelled two ways.
+  // Matched against the BARE token, not just the flag it names. After
+  // `--location=x` the inline value is already refused by its own reader, and
+  // saying "after --location" there names a token the operator did not type
+  // while repeating a message they have already been given. The habit this
+  // clause diagnoses is `--flag value`, which is the bare spelling by
+  // definition; anything else falls through to the plain positional message.
+  const before = previous === undefined ? null : tokenSpec(previous);
+  if (before !== null && !before.takesValue && previous === `--${before.name}`) {
+    return `unexpected argument ${JSON.stringify(token)} after --${before.name} — --${before.name} takes no value; pass it on its own to turn it on, or omit it to leave it off`;
+  }
+  return `unexpected argument ${JSON.stringify(token)} — this script takes no positional arguments; accepted flags are ${ACCEPTED_FLAGS}`;
 }
 
 // Prove the upload file is readable BEFORE the run starts.
@@ -516,7 +699,13 @@ function resolveArgErrors(argv, check = checkUploadFile) {
   const { errors: numericErrors } = resolveNumericArgs(argv);
   const { filePath, errors: fileErrors } = resolveFileArg(argv);
   const { errors: booleanErrors } = resolveBooleanArgs(argv);
-  const errors = [...numericErrors, ...fileErrors, ...booleanErrors];
+  const { errors: unknownErrors } = resolveUnknownArgs(argv);
+  // Unknown arguments report LAST among the argv faults. The three resolvers
+  // above each diagnose a flag the operator did get right the name of, which
+  // is the more specific answer; this one is the catch-all for what none of
+  // them claimed. The readability check stays after all of them, being the
+  // only one that looks past argv.
+  const errors = [...numericErrors, ...fileErrors, ...booleanErrors, ...unknownErrors];
   // Guarded on filePath rather than run unconditionally: null means either no
   // --file was given or its shape already failed above, and statting that
   // would add a second message naming a path the operator never typed.
@@ -985,7 +1174,13 @@ function errorTallyLines(tally, label, limit = ERROR_TALLY_LIMIT) {
 // the systemic breakage this threshold exists to catch — which shows up at or
 // near 100%, not at 15%. Tunable per run with --max-fail-rate; 100 disables
 // the check, since the comparison is strict.
-const DEFAULT_MAX_FAIL_RATE_PCT = 10;
+//
+// Read from FLAGS rather than declared here, so this flag's default lives
+// where every other flag's does. It is exported and compared as a NUMBER,
+// while the table holds the string readFlag would have handed back — hence
+// the conversion. The rationale above is the reason for the value; the table
+// is where the value is.
+const DEFAULT_MAX_FAIL_RATE_PCT = Number(flagSpec('max-fail-rate', true).defaultValue);
 
 /**
  * Parse --max-fail-rate, as a percentage.
@@ -1397,17 +1592,6 @@ async function main() {
     process.exit(1);
   }
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
-  // A value on a flag that takes none means the flag was not read at all —
-  // `--location=true` runs the file leg, the opposite of what was typed.
-  const valued = valuedBooleanFlags(args);
-  if (valued.length > 0) {
-    const names = valued.map((n) => `--${n}`).join(', ');
-    const clause = valued.length === 1
-      ? 'takes no value — pass it on its own.'
-      : 'take no value — pass them on their own.';
-    console.error(`FATAL: ${names} ${clause}`);
-    process.exit(1);
-  }
   // The threshold is resolved up here with the other preflight checks: read
   // only at the summary, a mistyped one would surface as a green exit code two
   // hours after the run it was meant to judge.
@@ -1420,7 +1604,7 @@ async function main() {
   // blank BEFORE Number, which would read whitespace as the strictest possible
   // threshold rather than an error.
   const { value: maxFailRateRaw, error: maxFailRateShapeError } =
-    readFlag(args, 'max-fail-rate', String(DEFAULT_MAX_FAIL_RATE_PCT));
+    readFlag(args, 'max-fail-rate', flagSpec('max-fail-rate', true).defaultValue);
   if (maxFailRateShapeError) { console.error(`FATAL: ${maxFailRateShapeError}`); process.exit(1); }
   const { rate: maxFailRate, error: maxFailRateError } = parseMaxFailRate(maxFailRateRaw);
   if (maxFailRateError) { console.error(`FATAL: ${maxFailRateError}`); process.exit(1); }
@@ -1513,8 +1697,6 @@ if (require.main === module) {
 module.exports = {
   // Reporting decisions, exported for tests/loadtest-reporting.test.js — see
   // the "Run reporting" section for why they are pure rather than inline.
-  valuedBooleanFlags,
-  BOOLEAN_FLAGS,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
@@ -1525,12 +1707,15 @@ module.exports = {
   ERROR_TALLY_LIMIT,
   DEFAULT_MAX_FAIL_RATE_PCT,
   // CLI argument validation
+  FLAGS,
+  flagSpec,
   readFlag,
   readBooleanFlag,
   resolveBooleanArgs,
   parsePositiveInt,
   resolveNumericArgs,
   resolveFileArg,
+  resolveUnknownArgs,
   checkUploadFile,
   resolveArgErrors,
   // The payload a run without --file uploads
