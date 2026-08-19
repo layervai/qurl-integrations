@@ -135,35 +135,42 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 // and the dial target one stamp leaves behind always come from a single ACK,
 // never interleaved from two.
 //
-// The lock does NOT make that stamp safe to READ concurrently, and nothing on
-// this side can. refresh unlocks on return — before the dial it precedes — and
-// the pinned fork then reads ServerAddr, ServerPort and Transport.* in
-// realConnect (client/connector.go) and Metadatas in buildLoginMsg
-// (client/control_session.go), none of it synchronized. Writes serialize
-// against writes; the fork's reads of them are unguarded.
+// The lock does NOT make that stamp safe to READ. It is released when refresh
+// returns, before the dial it precedes, and the fork then reads ServerAddr,
+// ServerPort and Transport.* unsynchronized — in realConnect, in Open's QUIC
+// branch, and Metadatas in buildLoginMsg. Writes serialize against writes; the
+// fork's reads of them are unguarded. Holding the lock across the dial would
+// cover the connector's reads but not buildLoginMsg's, which runs inside Dial
+// after Connect returns, outside any lock this package can hold.
 //
-// That is latent rather than live, because production never refreshes
-// concurrently. Everything reaching the connector has been completed, and
-// completion defaults TCPMux on (see the WATCHDOG COUPLING note on Connect),
-// so physicalDialInOpen puts the refresh on the Open seam — and the fork calls
-// Open from exactly one place: controlSessionDialer.Dial, driven serially by
-// loopLoginUntilSuccess. Every read of a stamped field therefore happens later
-// on the same goroutine that wrote it. The concurrent dials the fork does have
-// are the work connections — registerMsgHandlers wraps handleReqWorkConn in
-// msg.AsyncHandler, one goroutine per ReqWorkConn — and on this seam each one
-// reaches only knockingConnector.Connect, which refreshes nothing and touches
-// nothing in the shared config but Transport.Protocol and Transport.TCPMux,
-// fields no refresh writes
-// (TestApplyKnockResultStampsOnlyTheDialTargetAndToken).
+// That is latent rather than live. Production runs a completed config, so the
+// refresh sits on the Open seam (see the WATCHDOG COUPLING note on Connect),
+// and the fork calls Open from exactly one place — controlSessionDialer.Dial,
+// driven serially by loopLoginUntilSuccess. Every read of a stamped field
+// therefore happens later on the goroutine that wrote it. The concurrent dials
+// the fork does have are the work connections, one goroutine per ReqWorkConn
+// through msg.AsyncHandler, and on this seam each reaches only
+// knockingConnector.Connect — which refreshes nothing and reads nothing a
+// refresh writes (TestRefreshStampsOnlyTheDialTargetAndToken).
 //
-// On the unmuxed seam those AsyncHandler goroutines refresh concurrently, and
-// -race reports real write/read races on ServerAddr and ServerPort against
-// realConnect. The fix there is not a per-refresh copy of the config, however
-// the in-place stamp reads: buildLoginMsg takes Metadatas off the
-// control-session dialer's own pointer to this same struct, which the
-// ConnectorCreator seam cannot substitute, so the token has to be stamped in
-// place or the Login never carries it. Making that seam safe needs fork-side
-// changes — and noteRedialLocked revisited first, per the same note.
+// On the unmuxed seam those goroutines refresh concurrently, and a -race
+// harness driving the real fork connector there reports write/read races on
+// ServerAddr and ServerPort against realConnect. Reaching for a per-dial copy
+// of the config does not settle it — see refresh for what the stamp has to
+// land on. Making that seam safe needs fork-side changes, and noteRedialLocked
+// revisited first per the same WATCHDOG COUPLING note.
+//
+// TODO(upstream-contract): the goroutine topology above mirrors
+// github.com/layervai/frp v0.70.0-layerv.4 — client/control_session.go (Dial
+// is the only connector.Open call site, and buildLoginMsg reads Metadatas off
+// the same pointer the ConnectorCreator is handed), client/service.go (Run's
+// first-login loop returns before `go keepControllerWorking()`, so Dial never
+// overlaps itself) and client/control.go (registerMsgHandlers wraps
+// handleReqWorkConn in msg.AsyncHandler, which is `go f(m)`). Nothing local
+// fails if any of that drifts: no test drives two concurrent refreshes against
+// the real fork, and TestRefreshStampsOnlyTheDialTargetAndToken pins only this
+// side's write set. A second Open call site upstream would make this race live
+// with every test here still green.
 type redialKnockRefresher struct {
 	knocker    knock.Knocker
 	resourceID string
@@ -286,11 +293,15 @@ func (r *redialKnockRefresher) settled() time.Duration {
 }
 
 // refresh performs one gated knock and restamps common in place. In place is
-// required rather than incidental: the fork's buildLoginMsg reads Metadatas
-// off the control-session dialer's own pointer to this struct, so a token
-// stamped on a copy would never reach the Login. The stamp is unsynchronized
-// once this returns — see the type's doc comment for what that costs and why
-// the completed production config does not pay it.
+// required rather than incidental, and a copy is not the escape it looks like:
+// the fork's buildLoginMsg reads Metadatas off the control-session dialer's own
+// pointer to this struct, so a DEEP copy would carry the token nowhere, while a
+// shallow one aliases the same map — landing the token, but leaving that write
+// on the shared map regardless. The dial target is the separable half: those
+// are value fields, so a copy really would take ServerAddr and ServerPort out
+// of the shared struct. The map write, and the Login read racing it, stay. The
+// stamp is unsynchronized once this returns — see the type's doc comment for
+// what that costs and why the completed production config does not pay it.
 func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCommonConfig, reason string) error {
 	if r == nil || r.knocker == nil {
 		return nil

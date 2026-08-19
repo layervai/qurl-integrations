@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -383,71 +386,120 @@ func TestApplyKnockResultContract(t *testing.T) {
 	}
 }
 
-// TestApplyKnockResultStampsOnlyTheDialTargetAndToken pins the refresher's
-// write set — ServerAddr, ServerPort and the one knock-token metadata entry —
-// against the config production actually runs.
+// TestRefreshStampsOnlyTheDialTargetAndToken pins the refresher's write set —
+// ServerAddr, ServerPort and the one knock-token metadata entry — against the
+// config production actually runs.
 //
-// It is load-bearing for the concurrency argument in the redialKnockRefresher
-// doc comment, not tidiness. The fork reads the stamped config without
-// synchronization, and what keeps that harmless on the Open seam is that the
-// one path FRP does drive concurrently — knockingConnector.Connect, reached
-// once per ReqWorkConn through msg.AsyncHandler — touches nothing in that
-// config but Transport.Protocol and Transport.TCPMux, via physicalDialInOpen.
-// Let a refresh start restamping any Transport field and those reads become a
-// live data race in production rather than the latent one the unmuxed seam
-// already has. Comparing marshaled JSON rather than the struct is deliberate:
-// it dereferences the *bool transport knobs, so a write THROUGH one of those
-// pointers fails here instead of comparing equal to itself.
-func TestApplyKnockResultStampsOnlyTheDialTargetAndToken(t *testing.T) {
+// It is load-bearing for the concurrency argument on redialKnockRefresher, not
+// tidiness. The fork reads the stamped config without synchronization, and what
+// keeps that harmless on the Open seam is that the one path FRP drives
+// concurrently — knockingConnector.Connect, reached once per ReqWorkConn
+// through msg.AsyncHandler — touches nothing in that config but
+// Transport.Protocol and Transport.TCPMux, via physicalDialInOpen. Let a
+// refresh start restamping a Transport field and those reads become a live data
+// race in production rather than the latent one the unmuxed seam already has.
+//
+// It drives refresh rather than applyKnockResult alone because refresh is free
+// to write common outside that helper, and nothing else in the package would
+// notice: a `common.Transport.Protocol = "websocket"` stitched into refresh
+// beside its success log passes every other test here.
+//
+// Two techniques, because neither covers the field alone. The marshaled-JSON
+// compare catches any write that CHANGES a value, including one made through
+// the *bool transport knobs — a shallow struct copy would share those pointers
+// and compare each to itself. The pointer-identity checks catch a knob
+// repointed at an equal value, which a value snapshot cannot see. Neither
+// catches a value-preserving write through an existing pointer (`*Enable =
+// true` where it is already true); that is still an unsynchronized write, and
+// it is the acknowledged floor of this technique rather than a claim of total
+// coverage.
+func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
 	t.Parallel()
-	cfg, err := frpgen.Generate(&frpgen.Route{
-		Slug:               "reports",
-		ResourceID:         testResource,
-		ConnectorRoutingID: routingID("write-set"),
-		LocalIP:            "127.0.0.1",
-		LocalPort:          8080,
-	}, &frpgen.Options{ReplicaDiscriminator: "abc123", ClientVersion: "test"})
-	if err != nil {
-		t.Fatalf("generate the production client config: %v", err)
-	}
-	common, _ := cfg.FRPClientConfig()
-	if err := common.Complete(); err != nil {
-		t.Fatalf("complete the production common config: %v", err)
-	}
-	if len(common.Metadatas) == 0 {
-		// The restore below deletes one key; if the generated config carried
-		// no Metadatas at all, applyKnockResult would leave an empty map
-		// where a nil one was and the comparison would fail on {} vs null
-		// rather than on a real extra write.
-		t.Fatal("test premise broken: the production config carries no Metadatas to stamp into")
+	common := productionCommon(t, "write-set")
+	clk := newManualClock()
+	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("stamped.example:7443")}}
+	r := newTestRefresher(knocker, time.Hour, clk.now)
+
+	// A real knock, not the supervisor's first-cycle handoff: the generated
+	// config carries MetaClientVersion but no token, so refresh takes the
+	// knocking path and actually stamps.
+	if commonKnockToken(common) != "" {
+		t.Fatal("test premise broken: the generated config already carries a knock token, so refresh would hand off instead of stamping")
 	}
 	beforeAddr, beforePort := common.ServerAddr, common.ServerPort
+	beforeToken, hadToken := common.Metadatas[frpgen.MetaQURLKnockToken]
+	beforeMux, beforeTLS, beforeExit := common.Transport.TCPMux, common.Transport.TLS.Enable, common.LoginFailExit
 	before, err := json.Marshal(common)
 	if err != nil {
 		t.Fatalf("marshal the pre-stamp config: %v", err)
 	}
 
-	if _, err := applyKnockResult(common, testResource, healthyKnockResp("stamped.example:7443").result); err != nil {
-		t.Fatalf("applyKnockResult: %v", err)
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := knocker.calls.Load(); got != 1 {
+		t.Fatalf("knocks = %d, want exactly 1 (the stamp under test)", got)
 	}
 	if common.ServerAddr != "stamped.example" || common.ServerPort != 7443 {
 		t.Fatalf("dial target = %s:%d, want the ACK's stamped.example:7443", common.ServerAddr, common.ServerPort)
 	}
-	if common.Metadatas[frpgen.MetaQURLKnockToken] == "" {
-		t.Fatal("knock token not stamped")
+	if got := common.Metadatas[frpgen.MetaQURLKnockToken]; got != "ac-token" {
+		t.Fatalf("knock token = %q, want the ACK's ac-token", got)
+	}
+	if common.Transport.TCPMux != beforeMux || common.Transport.TLS.Enable != beforeTLS || common.LoginFailExit != beforeExit {
+		t.Fatal("refresh repointed one of the *bool knobs; the fork reads TCPMux from the work-connection goroutines, so replacing the pointer is an unsynchronized write even when the value is unchanged")
 	}
 
 	// Undo exactly the three sanctioned writes. Anything else the stamp
 	// touched survives into the comparison below.
 	common.ServerAddr, common.ServerPort = beforeAddr, beforePort
-	delete(common.Metadatas, frpgen.MetaQURLKnockToken)
+	if hadToken {
+		common.Metadatas[frpgen.MetaQURLKnockToken] = beforeToken
+	} else {
+		delete(common.Metadatas, frpgen.MetaQURLKnockToken)
+	}
 	after, err := json.Marshal(common)
 	if err != nil {
 		t.Fatalf("marshal the post-stamp config: %v", err)
 	}
 	if !bytes.Equal(before, after) {
-		t.Fatalf("applyKnockResult wrote outside its dial-target-and-token set; the fork reads this config unsynchronized from the work-connection goroutines\nbefore: %s\nafter:  %s", before, after)
+		t.Fatalf("refresh wrote outside its dial-target-and-token set; the fork reads this config unsynchronized from the work-connection goroutines\n%s", jsonFieldDiff(t, before, after))
 	}
+}
+
+// jsonFieldDiff reports the top-level config keys that differ between two
+// marshaled snapshots. The raw blobs run to hundreds of bytes on one line, so
+// dumping both leaves the reader to spot a few changed characters by eye.
+func jsonFieldDiff(t *testing.T, before, after []byte) string {
+	t.Helper()
+	var b, a map[string]any
+	if err := json.Unmarshal(before, &b); err != nil {
+		return fmt.Sprintf("before: %s\nafter:  %s", before, after)
+	}
+	if err := json.Unmarshal(after, &a); err != nil {
+		return fmt.Sprintf("before: %s\nafter:  %s", before, after)
+	}
+	keys := make([]string, 0, len(b)+len(a))
+	for k := range b {
+		keys = append(keys, k)
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	var diffs []string
+	for _, k := range keys {
+		bv, av := fmt.Sprintf("%v", b[k]), fmt.Sprintf("%v", a[k])
+		if bv != av {
+			diffs = append(diffs, fmt.Sprintf("  %s: %s -> %s", k, bv, av))
+		}
+	}
+	if len(diffs) == 0 {
+		return "(no top-level key differs; the change is nested inside an equal-printing value)"
+	}
+	return strings.Join(diffs, "\n")
 }
 
 // TestPhysicalDialInOpen pins which connector method owns the physical dial

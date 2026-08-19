@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
+
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/frpgen"
 )
 
@@ -15,6 +17,30 @@ func routingID(seed string) string {
 	digest := sha256.Sum256([]byte(seed))
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
 	return "c-" + strings.ToLower(enc.EncodeToString(digest[:]))
+}
+
+// productionCommon builds the completed common config the command actually
+// runs: frpgen's output put through ClientCommonConfig.Complete, which is what
+// every path into the FRP service does before the connector sees it. Shared by
+// the tests that reason about production's shape, so the two cannot drift into
+// asserting against different configs. seed varies the routing identity only.
+func productionCommon(t *testing.T, seed string) *v1.ClientCommonConfig {
+	t.Helper()
+	cfg, err := frpgen.Generate(&frpgen.Route{
+		Slug:               "reports",
+		ResourceID:         testResource,
+		ConnectorRoutingID: routingID(seed),
+		LocalIP:            "127.0.0.1",
+		LocalPort:          8080,
+	}, &frpgen.Options{ReplicaDiscriminator: "abc123", ClientVersion: "test"})
+	if err != nil {
+		t.Fatalf("generate the production client config: %v", err)
+	}
+	common, _ := cfg.FRPClientConfig()
+	if err := common.Complete(); err != nil {
+		t.Fatalf("complete the production common config: %v", err)
+	}
+	return common
 }
 
 // TestProductionConfigKeepsTheWatchdogOnTheOpenSeam pins the invariant the
@@ -31,20 +57,7 @@ func routingID(seed string) string {
 // production.
 func TestProductionConfigKeepsTheWatchdogOnTheOpenSeam(t *testing.T) {
 	t.Parallel()
-	cfg, err := frpgen.Generate(&frpgen.Route{
-		Slug:               "reports",
-		ResourceID:         testResource,
-		ConnectorRoutingID: routingID("watchdog-seam"),
-		LocalIP:            "127.0.0.1",
-		LocalPort:          8080,
-	}, &frpgen.Options{ReplicaDiscriminator: "abc123", ClientVersion: "test"})
-	if err != nil {
-		t.Fatalf("generate the production client config: %v", err)
-	}
-	common, _ := cfg.FRPClientConfig()
-	if err := common.Complete(); err != nil {
-		t.Fatalf("complete the production common config: %v", err)
-	}
+	common := productionCommon(t, "watchdog-seam")
 	if !physicalDialInOpen(common) {
 		t.Fatalf("the generated config puts the physical dial on Connect, not Open: the reconnect watchdog would count one dial per work connection and restart healthy cycles. TCPMux = %v", common.Transport.TCPMux)
 	}
