@@ -277,6 +277,71 @@ func TestOpenRegistrationStallEnrichment(t *testing.T) {
 	}
 }
 
+// TestOpenPreservesAssignmentSentinels drives the REAL Open registration
+// ladder and proves every enrollment/assignment sentinel survives Open's own
+// error handling to reach the caller — which is what output.RenderError and
+// exitcode.FromError both match on. Two distinct wrappings are exercised: the
+// bare return for an authenticated denial, and the registrationStalledError
+// enrichment that the recovery family gets. A rendering that only worked on
+// an unwrapped sentinel would be dead code on this path.
+func TestOpenPreservesAssignmentSentinels(t *testing.T) {
+	lifecycleEnv(t)
+	// The text qurl-go really returns alongside 52109 — SDK-caller vocabulary
+	// naming a Go option, which is precisely what must not survive as the
+	// customer headline (see output.TestConnectorRequestRejectedDropsSDKRemedy).
+	const sdk52109 = "qurl: native Hub assignment request rejected (52109); " +
+		"correct WithAgentRuntimeIdentity or the Hub request contract before retrying"
+
+	tests := []struct {
+		name         string
+		cause        error
+		wantEnriched bool
+	}{
+		{name: "bootstrap consumed", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentBootstrapConsumed)},
+		{name: "key rejected", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentKeyRejected)},
+		{name: "request rejected", cause: fmt.Errorf("%s: %w", sdk52109, qurl.ErrAssignmentRequestRejected)},
+		{name: "registration disabled", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentRegistrationDisabled)},
+		{name: "identity rejected", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentIdentityRejected)},
+		{name: "quota exceeded", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentQuotaExceeded)},
+		{name: "rate limited", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentRateLimited)},
+		{name: "invalid response", cause: fmt.Errorf("assignment: %w", qurl.ErrAssignmentInvalidResponse)},
+		// The recovery family is additionally wrapped by the CLI's own
+		// registrationStalledError, so errors.Is must survive two layers.
+		{name: "unavailable is enriched", cause: qurl.ErrAssignmentUnavailable, wantEnriched: true},
+		{name: "recovery required is enriched", cause: qurl.ErrAssignmentRecoveryRequired, wantEnriched: true},
+		{name: "reassignment required is enriched", cause: qurl.ErrAssignmentReassignmentRequired, wantEnriched: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := &seamCalls{}
+			installSeams(t, calls,
+				func(context.Context, string, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+					return nil, nil, tt.cause
+				},
+				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+					return nil, nil, qurl.ErrAgentStateNotFound
+				}, nil)
+
+			cfg := testConfig()
+			cfg.EnrollmentToken = testEnrollmentToken
+			_, err := Open(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Open succeeded, want the registration failure")
+			}
+			if !errors.Is(err, tt.cause) {
+				t.Fatalf("Open = %v, want the qurl-go sentinel preserved through Open's wrapping", err)
+			}
+			var stalled *registrationStalledError
+			if got := errors.As(err, &stalled); got != tt.wantEnriched {
+				t.Fatalf("stall enrichment = %v on %v, want %v", got, err, tt.wantEnriched)
+			}
+			if calls.register != 1 {
+				t.Fatalf("register seam calls = %d, want 1", calls.register)
+			}
+		})
+	}
+}
+
 func TestOpenOperatorCancelStaysBare(t *testing.T) {
 	lifecycleEnv(t)
 	calls := &seamCalls{}
