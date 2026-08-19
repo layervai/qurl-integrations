@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/layervai/qurl-integrations/compare/v1.2.0...v1.3.0) (2026-08-19)
+
+
+### Features
+
+* **cli:** print the Connector's CRID when it starts serving ([#1160](https://github.com/layervai/qurl-integrations/issues/1160)) ([383dc63](https://github.com/layervai/qurl-integrations/commit/383dc638c5eee313bfe2a976ae04eb5ac5759246))
+
 ## [1.2.0](https://github.com/layervai/qurl-integrations/compare/v1.1.0...v1.2.0) (2026-08-19)
 
 
