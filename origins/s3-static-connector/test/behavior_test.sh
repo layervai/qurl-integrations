@@ -503,7 +503,7 @@ if [ "$waive_request_preflight_contract" = "true" ]; then
   fi
 else
   # 16. Startup request preflight. A deterministic 3xx/4xx response other than
-  # 304, 404, or 429 means S3 rejected the signed request, but status alone does
+  # 304, 404, or 429 means S3 rejected the request, but status alone does
   # not distinguish credentials from IAM, region, endpoint, or other request
   # configuration. nginx masks the rejection to a viewer 404, so the origin
   # refuses to serve until the operator fixes it.

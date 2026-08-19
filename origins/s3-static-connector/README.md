@@ -226,7 +226,7 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 | S3 request rejected with `403` | 404 | `Not Found` | access log `upstream_status:403` **plus** an `s3_request_rejected` line; inspect credentials, IAM, region, endpoint, and request configuration |
 | Other expected non-throttle S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`) | 404 | `Not Found` | access log preserves the exact `upstream_status`; `400` also emits `s3_request_rejected` without assigning a cause |
 | S3 throttle (`429`) | 502 | `Bad Gateway` | access log `upstream_status:429` |
-| Upstream 5xx / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
+| Upstream 5xx / Envoy down | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
 | Method other than GET/HEAD | 405 | (nginx default) | access log only |
 
 S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
@@ -344,7 +344,7 @@ intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
   [AWS credentials](#aws-credentials).
 - IMDSv2 from inside a container requires **hop-limit 2** on the host. Hosts
   with no instance role must supply credentials explicitly; the origin refuses
-  to start when S3 rejects the signed startup request.
+  to start when S3 rejects the startup request.
 - Passing `AWS_REGION` explicitly is the deployment path. The image does not
   probe IMDS for region discovery; `AWS_DEFAULT_REGION` is copied into
   `AWS_REGION` only when `AWS_REGION` is unset.

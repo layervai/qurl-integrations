@@ -127,7 +127,7 @@ preflight_log() {
 
 case "$preflight_status" in
   2??|304)
-    preflight_log preflight_ok "Signed S3 request succeeded."
+    preflight_log preflight_ok "S3 request succeeded."
     ;;
   404)
     preflight_log preflight_object_missing "S3 returned 404 for the requested index object. It may not be synced yet; this status does not prove which identity or permissions handled the request. Serving anyway." >&2
@@ -138,8 +138,8 @@ case "$preflight_status" in
   3??|4??)
     # Status alone cannot distinguish credentials from IAM, wrong region,
     # endpoint, or other request configuration. It does establish that S3
-    # rejected the signed probe, which nginx would otherwise mask to a viewer 404.
-    preflight_log preflight_request_rejected "S3 rejected the signed request. $preflight_remediation" >&2
+    # rejected the probe, which nginx would otherwise mask to a viewer 404.
+    preflight_log preflight_request_rejected "S3 rejected the request. $preflight_remediation" >&2
     term
     wait_children
     exit 1

@@ -21,7 +21,7 @@ static_resources:
           stat_prefix: s3_origin
           codec_type: AUTO
           # A credential that expires or loses access after startup makes S3
-          # reject every signed request, and nginx masks that to a viewer 404 by
+          # reject every upstream request, and nginx masks that to a viewer 404 by
           # design — so the only operator-side trace is an `upstream_status`
           # field on an otherwise ordinary-looking 404 access line. Emit one
           # explicit request-rejected line instead. Status alone cannot assign

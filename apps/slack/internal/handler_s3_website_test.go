@@ -1973,14 +1973,15 @@ func TestS3WebsiteStaticAWSCredentialGateShell(t *testing.T) {
 		env        []string
 		wantOK     bool
 		wantOutput string
+		wantExact  bool
 	}{
-		{name: "ambient variables ignored by default", env: []string{"AWS_ACCESS_KEY_ID=ambient"}, wantOK: true},
+		{name: "ambient variables ignored by default", env: []string{"AWS_ACCESS_KEY_ID=ambient"}, wantOK: true, wantExact: true},
 		{name: "invalid opt-in rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=yes"}, wantOutput: "must be true or false"},
 		{name: "enabled without credentials rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true"}, wantOutput: "requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"},
 		{name: "access key alone rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key"}, wantOutput: "must both be set"},
 		{name: "session token alone rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_SESSION_TOKEN=token"}, wantOutput: "AWS_SESSION_TOKEN requires"},
-		{name: "long-lived pair accepted", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key", "AWS_SECRET_ACCESS_KEY=secret"}, wantOK: true, wantOutput: "pair"},
-		{name: "temporary trio accepted", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key", "AWS_SECRET_ACCESS_KEY=secret", "AWS_SESSION_TOKEN=token"}, wantOK: true, wantOutput: "trio"},
+		{name: "long-lived pair accepted", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key", "AWS_SECRET_ACCESS_KEY=secret"}, wantOK: true, wantOutput: "pair", wantExact: true},
+		{name: "temporary trio accepted", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key", "AWS_SECRET_ACCESS_KEY=secret", "AWS_SESSION_TOKEN=token"}, wantOK: true, wantOutput: "trio", wantExact: true},
 	}
 
 	baseEnv := make([]string, 0, len(os.Environ()))
@@ -2028,7 +2029,10 @@ func TestS3WebsiteStaticAWSCredentialGateShell(t *testing.T) {
 				case "trio":
 					wantOutput = renderer.trio
 				}
-				if !strings.Contains(string(output), wantOutput) {
+				if tc.wantExact && string(output) != wantOutput {
+					t.Fatalf("gate output = %q, want exact %q", output, wantOutput)
+				}
+				if !tc.wantExact && !strings.Contains(string(output), wantOutput) {
 					t.Fatalf("gate output = %q, want substring %q", output, wantOutput)
 				}
 			})
