@@ -1,16 +1,19 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,6 +101,29 @@ func (k *hermeticCycleKnocker) stats() (knocks int, begun, ended []string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.knocks, append([]string(nil), k.begun...), append([]string(nil), k.ended...)
+}
+
+// hermeticLogSink is a concurrency-safe slog destination. The package's other
+// log assertions write into a bare bytes.Buffer because they drive the
+// refresher inline on the test goroutine; here the supervisor runs in its own
+// goroutine and FRP's dial path logs from more, so an unguarded buffer is a
+// race the -race build would fail on.
+type hermeticLogSink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *hermeticLogSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+// countEvent returns how many records carried the given event field.
+func (s *hermeticLogSink) countEvent(event string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.Count(s.buf.String(), `"event":"`+event+`"`)
 }
 
 // hermeticNewProxyObservation is one server-side NewProxy admission: the
@@ -282,11 +308,15 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 		},
 		RemotePort: remotePort,
 	}}
+	// The cycle runner's logger, not discarded: login_success is the only
+	// externally visible trace of the fork's OnFirstLoginSuccess dispatch, and
+	// the assertion after shutdown counts it.
+	sink := &hermeticLogSink{}
 	factory, err := NewFRPRunnerFactory(FRPFactoryConfig{
 		Knocker:         knocker,
 		ResourceID:      testResource,
 		Proxies:         proxies,
-		Logger:          discardLogger(),
+		Logger:          slog.New(slog.NewJSONHandler(sink, nil)),
 		RedialKnockGate: time.Millisecond,
 	})
 	if err != nil {
@@ -371,5 +401,20 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 	}
 	if got := sup.Cycles(); got != 0 {
 		t.Fatalf("completed supervisor cycles = %d, want 0 (recovery stayed inside the first, still-running cycle)", got)
+	}
+
+	// The fork's OnFirstLoginSuccess is documented to run at most once per
+	// Service, and cycleRunner.admitted plus every session event that reads it
+	// are built on that. Everything above establishes the premise this needs
+	// and nothing else could: two NewProxy admissions prove the client logged
+	// in at least twice, and zero completed supervisor cycles prove both
+	// logins happened inside ONE Service. So a second dispatch would show up
+	// here as a second login_success, which runner.go emits only from inside
+	// the hook.
+	//
+	// Read from the sink only after the supervisor goroutine has exited, which
+	// the receive above established.
+	if got := sink.countEvent("login_success"); got != 1 {
+		t.Fatalf("login_success events = %d, want exactly 1: the fork re-logged in at least once inside this one Service, so more than one means its sync.Once no longer guards OnFirstLoginSuccess and the admitted latch is no longer per-cycle", got)
 	}
 }

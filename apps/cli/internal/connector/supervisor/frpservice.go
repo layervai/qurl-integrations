@@ -87,7 +87,10 @@ func NewFRPRunnerFactory(cfg FRPFactoryConfig) (RunnerFactory, error) {
 			// The fork calls this synchronously once the server has accepted
 			// and authenticated the Login and before any proxy registration:
 			// the only evidence-based admission signal, and the runner's
-			// RunID verification point.
+			// RunID verification point. This is the second copy of that
+			// contract; the TODO(upstream-contract) on
+			// cycleRunner.onFirstLoginSuccess is the one carrying the fork
+			// call sites, so a bump must re-read it and then fix this too.
 			OnFirstLoginSuccess:    runner.onFirstLoginSuccess,
 			ConfigSourceAggregator: aggregator,
 			UnsafeFeatures:         &security.UnsafeFeatures{},

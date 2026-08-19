@@ -59,35 +59,41 @@ const (
 	// outer one does not tick during a sustained storm, because the inner
 	// loop it calls only returns once a Login succeeds or the context ends.
 	//
-	// TODO(upstream-contract): the second and third mirror
-	// github.com/layervai/frp v0.70.0-layerv.4, and neither has a config
-	// seam — both are literals inside the fork:
+	// TODO(upstream-contract): failingDialLoginReadBudget and
+	// failingDialBackoffCeiling mirror github.com/layervai/frp
+	// v0.70.0-layerv.4 — named, not numbered, because the third constant in
+	// this block is NOT a fork mirror. Neither has a config seam; both are
+	// literals inside the fork:
 	//
-	//   - client/control_session.go's
+	//   - failingDialLoginReadBudget — client/control_session.go's
 	//     `conn.SetReadDeadline(time.Now().Add(10 * time.Second))`, which
 	//     exchangeLogin arms right after writing the Login msg and disarms on
 	//     return, so it bounds the login response reads (the v2 ServerHello
 	//     frame, then the LoginResp) rather than the whole dial.
-	//   - client/service.go's `svr.loopLoginUntilSuccess(20*time.Second,
-	//     false)` in keepControllerWorking, whose maxInterval becomes
-	//     MaxDuration on the wait.FastBackoffOptions that paces the dials
-	//     inside that loop. 20s is a true ceiling and not a pre-jitter base:
-	//     pkg/util/wait/backoff.go applies Jitter first and clamps second.
-	//     Read that clamp as this manager's rather than the file's — the same
-	//     file has a fast-retry return that skips it, and this manager escapes
-	//     that only by leaving FastRetryCount zero, so a fork bump that sets
-	//     FastRetryCount on THIS literal would make the ceiling untrue while
-	//     every value here still read as verified. Only the FIRST login is
-	//     paced differently — Run passes 10s — and it is not this storm.
+	//   - failingDialBackoffCeiling — client/service.go's
+	//     `svr.loopLoginUntilSuccess(20*time.Second, false)` in
+	//     keepControllerWorking, whose maxInterval becomes MaxDuration on the
+	//     wait.FastBackoffOptions pacing the dials inside that loop. It is a
+	//     true ceiling and not a pre-jitter base: pkg/util/wait/backoff.go
+	//     applies Jitter first and clamps second. Its fast-retry branch does
+	//     return early and skip that clamp, but only ever with a
+	//     FastRetryDelay-sized value — SHORTER, which an upper bound
+	//     tolerates. What would invalidate this one is a larger MaxDuration,
+	//     a FastRetryDelay above it, or a wait outside this manager. The
+	//     first login is paced separately (Run passes 10s) and here never
+	//     backs off at all: the LoginFailExit forceLoginFailExit sets makes
+	//     the fork cancel on its first failed dial instead.
 	//
 	// reconnectStallWindow's marker below quotes this same call for its OTHER
 	// hard-coded argument. One fork edit can invalidate both; update the pair.
 	//
-	// Nothing local fails if either drifts: the only guard over them,
-	// TestWatchdogWindowOutlivesATunnelServerReplacement, checks their SUM
-	// against reconnectSettledGap and never any one of them against the fork,
-	// so a value that silently doubled upstream would still pass. On a fork
-	// bump re-read both call sites and update the values here in lockstep.
+	// Nothing local fails if either drifts, and the one test that names them
+	// is weaker than it looks: TestWatchdogWindowOutlivesATunnelServerReplacement
+	// compares reconnectSettledGap against a multiple of failingDialPeriod,
+	// but reconnectSettledGap is DEFINED as 3x that period — both sides move
+	// together, so no value of these three can fail it. It guards that
+	// multiplier, not these delays. On a fork bump re-read both call sites
+	// and update the values here in lockstep.
 	failingDialConnectBudget   = 10 * time.Second
 	failingDialLoginReadBudget = 10 * time.Second
 	failingDialBackoffCeiling  = 20 * time.Second

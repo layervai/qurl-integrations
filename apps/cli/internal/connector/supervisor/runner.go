@@ -80,6 +80,15 @@ type cycleRunner struct {
 // is what keeps the admitted latch above a per-cycle signal. If a fork bump
 // moves the dispatch after registration, drops the Once, or stops honoring
 // the error, update this in lockstep.
+//
+// Two things the hook therefore does NOT give, both load-bearing here. A
+// cancellation observed between Login acceptance and the dispatch skips it
+// outright — the fork returns on `svr.ctx.Err()` before assigning the RunID —
+// so admitted stays false for a session the server really did admit, and the
+// proxy_allow event that reads it is not emitted for that cycle. And
+// `svr.runID` is reassigned on EVERY login while the Once fires only on the
+// first, so a server handing back a different RunID on an internal reconnect
+// would be adopted without this check running again.
 func (r *cycleRunner) onFirstLoginSuccess(runID string) error {
 	if err := qurl.ValidateCycleRunID(runID); err != nil {
 		return fmt.Errorf("tunnel server accepted Login with a noncanonical RunID: %w", err)
