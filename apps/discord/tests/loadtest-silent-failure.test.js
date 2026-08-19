@@ -44,7 +44,7 @@ const traverseModule = require('@babel/traverse');
 const traverse = traverseModule.default || traverseModule;
 
 const {
-  readFlag, parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
+  readFlag, hasFlag, parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
   resolveArgErrors,
 } = require('../scripts/loadtest-standalone');
 
@@ -192,10 +192,11 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--count']).errors[0]).toContain('was given no value');
   });
 
-  // The case getArg cannot express: `--count` as the final token has no value
-  // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
-  // the same 100 as not passing the flag at all. Silently running the default
-  // is exactly the "did nothing you asked for, reported success" shape.
+  // The case the old getArg could not express: `--count` as the final token
+  // has no value after it, and `args[idx + 1] || defaultVal` collapsed that
+  // onto the same 100 as not passing the flag at all. Silently running the
+  // default is exactly the "did nothing you asked for, reported success"
+  // shape. readFlag separates the two; this holds them apart.
   it('refuses a flag left without a value', () => {
     const { count, errors } = resolveNumericArgs(['--count']);
     expect(count).toBeNaN();
@@ -218,7 +219,10 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     // count they typed correctly instead of the value they omitted.
     const { count, errors } = resolveNumericArgs(['--count', '--location']);
     expect(count).toBeNaN();
-    expect(errors[0]).toBe('--count was given no value — the next argument is the flag --location');
+    expect(errors[0]).toBe(
+      '--count was given no value — the next argument is the flag --location '
+      + '(omit it to use the default of 100)',
+    );
   });
 
   it('names every bad flag in one pass', () => {
@@ -276,8 +280,9 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
   it('refuses a value that is itself a flag', () => {
     // Positional consumption is what made this silent: the next flag became
     // the value AND stopped being a flag, so two things changed at once.
-    expect(readFlag(['--file', '--count', '5'], 'file', null)).toEqual({
-      error: '--file was given no value — the next argument is the flag --count',
+    expect(readFlag(['--file', '--count', '5'], 'file', null, 'a generated file')).toEqual({
+      error: '--file was given no value — the next argument is the flag --count '
+        + '(omit it to use the default of a generated file)',
     });
   });
 
@@ -332,7 +337,8 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
   it('reports the last occurrence being malformed even when an earlier one was fine', () => {
     // Last-wins has to apply to the refusal too. Falling back to the earlier
     // good value would run the command the operator had already replaced.
-    expect(readFlag(['--file', 'a', '--file'], 'file', null).error).toContain('given no value');
+    expect(readFlag(['--file', 'a', '--file'], 'file', null, 'a generated file').error)
+      .toContain('given no value');
   });
 
   it('does not match a longer flag that starts with the same letters', () => {
@@ -340,6 +346,27 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
     // keeps `--filename` out of it is that prefix carrying the `=`.
     expect(readFlag(['--filename', 'x'], 'file', null)).toEqual({ value: null });
     expect(readFlag(['--file-count', '3'], 'file', null)).toEqual({ value: null });
+  });
+});
+
+describe('loadtest boolean flags — the half of the hole left open on purpose', () => {
+  it('recognizes a boolean flag anywhere in argv', () => {
+    expect(hasFlag(['--location'], 'location')).toBe(true);
+    expect(hasFlag(['--count', '5', '--location'], 'location')).toBe(true);
+    expect(hasFlag(['--count', '5'], 'location')).toBe(false);
+  });
+
+  it('does not match a longer flag that starts with the same letters', () => {
+    expect(hasFlag(['--locations'], 'location')).toBe(false);
+  });
+
+  // Pins the DEFERRAL, not an endorsement. `--location=true` reads as absent,
+  // so the location leg stays off — the boolean leg of the unknown-flag hole
+  // recorded at hasFlag in the script. Held here so that closing it is a
+  // deliberate change with a failing test to update, rather than something
+  // that drifts either way unnoticed.
+  it('does not yet recognize the equals form (known gap)', () => {
+    expect(hasFlag(['--location=true'], 'location')).toBe(false);
   });
 });
 

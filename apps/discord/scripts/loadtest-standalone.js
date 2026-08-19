@@ -19,6 +19,21 @@
  *   back to the default — see readFlag below for why that fallback was the
  *   more dangerous answer.
  *
+ *   Consequences worth knowing before you type them:
+ *     - a path that genuinely begins with `--` needs the inline form,
+ *       `--file=--weird.bin`; the separated form reads it as a flag.
+ *     - --file must name a REGULAR file. A pipe, process substitution or
+ *       /dev/stdin is refused: the file is re-read once per round, so a pipe
+ *       would upload real bytes on round one and nothing afterwards.
+ *     - a MISSPELLED flag is still ignored silently, and so is `=` on a
+ *       boolean flag (`--location=true` leaves the location leg off). Both
+ *       are recorded as known gaps at readFlag below.
+ *
+ *   Hand-rolled rather than node:util parseArgs, which covers these shapes
+ *   but throws on the first bad flag — forfeiting "name every bad flag in one
+ *   pass" — and rejects `--count -5` as an ambiguous option rather than as
+ *   the bad count it is.
+ *
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
  *   positively recognizes as non-production — loopback, or a hostname named in
@@ -102,9 +117,14 @@ const args = process.argv.slice(2);
 // cover it: the constants it feeds are read by loops inside runRound, which
 // no test can reach.
 //
-// `defaultLabel` is what the missing-value message calls the default — the
+// `defaultLabel` is what the missing-value messages call the default — the
 // value itself for the numeric flags, prose for --file, whose default is not
-// a path at all.
+// a path at all. A flag whose defaultValue is not worth printing must pass
+// one: without it the fallback is String(defaultValue), which renders null as
+// the literal "null". Both call sites do; a fourth flag has to as well.
+//
+// argv is assumed to hold strings, which is what process.argv gives. The
+// function is exported for its own tests, not as a general-purpose parser.
 function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue)) {
   const token = `--${flag}`;
   const inlinePrefix = `${token}=`;
@@ -124,18 +144,40 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
     return { error: `${token} was given no value (omit it to use the default of ${defaultLabel})` };
   }
   if (next.startsWith('--')) {
-    return { error: `${token} was given no value — the next argument is the flag ${next}` };
+    // Carries the same recovery hint as the branch above: from the operator's
+    // seat these are one mistake — they forgot the value — so telling them
+    // how to get the default in one case and not the other is arbitrary.
+    return {
+      error: `${token} was given no value — the next argument is the flag ${next} `
+        + `(omit it to use the default of ${defaultLabel})`,
+    };
   }
   return { value: next };
 }
 
-// Boolean flags are deliberately NOT routed through readFlag: they take no
-// value, so it has nothing to read for them. That leaves `--location=true`
-// unrecognized and therefore silently off, which is the same class of fault
-// as the ones above — but refusing it means first deciding what
+// Two gaps in the same fault class are deliberately left open here, recorded
+// so they are deferrals rather than oversights.
+//
+// UNKNOWN FLAGS. readFlag is pull-based — it scans argv for one named flag —
+// so nothing can see a token that matched nothing. `--fil /tmp/payload.bin`
+// and `-file /tmp/payload.bin` both read as "no --file given" and run the
+// full window uploading the generated 1MB payload, from a one-character typo:
+// the same outcome the header above calls the worst available one. Closing it
+// needs a push-based pass that tokenizes argv once against a flag spec and
+// reports what went unconsumed, which also subsumes the boolean case below.
+// That is a larger change than routing the value-taking flags through one
+// reader, and it is not what this one does.
+//
+// BOOLEAN FLAGS are not routed through readFlag: they take no value, so it
+// has nothing to read for them. That leaves `--location=true` and
+// `--allow-production=true` unrecognized and therefore silently off — the
+// boolean leg of the same hole. Refusing them means first deciding what
 // `--location=false` ought to mean, so it stays a separate change rather than
 // a quiet side effect of this one.
-const hasFlag = (name) => args.includes(`--${name}`);
+// Takes argv like every other reader here, so the suite can reach it. It was
+// the one flag reader closing over the module's `args`, which is why
+// --location had no coverage at all.
+const hasFlag = (argv, name) => argv.includes(`--${name}`);
 
 // Numeric flags are validated, not merely parsed. `parseInt` fails silently
 // in three directions here: a non-numeric value gives NaN, a negative one is
@@ -175,7 +217,7 @@ function parsePositiveInt(flag, raw) {
 }
 
 // Resolve all three numeric flags from an argv array. Pure and taking argv as
-// a parameter, following resolveGuardInputs above, so the suite covers the
+// a parameter, following resolveGuardInputs below, so the suite covers the
 // wiring and not merely the parser: the constants below are the actual
 // regression surface, and a call site quietly reverted to `parseInt` would
 // leave a green parsePositiveInt behind it.
@@ -184,11 +226,13 @@ function parsePositiveInt(flag, raw) {
 // command line the same way --file does; what stays here is the part that is
 // specific to a number.
 //
-// The defaults are written as STRINGS so that an absent flag returns through
-// parsePositiveInt exactly as a typed one does. That is not a formality: it
-// is what stops a default from being a value the validator would have
-// refused, and it removes the "was this token typed or defaulted?" branch
-// that would otherwise sit between readFlag and the parse.
+// The defaults are ROUTED THROUGH parsePositiveInt rather than returned
+// beside it, so a default that the validator would reject cannot ship, and
+// there is no "was this token typed or defaulted?" branch between readFlag
+// and the parse. They are spelled as strings only to look like the argv they
+// stand in for — parsePositiveInt opens with String(raw), so a numeric
+// default would behave identically. The routing is what matters here, not
+// the quoting.
 function resolveNumericArgs(argv) {
   const errors = [];
   const read = (flag, defaultValue) => {
@@ -322,7 +366,7 @@ const {
   count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
 const { filePath: FILE_PATH } = resolveFileArg(args);
-const INCLUDE_LOCATION = hasFlag('location');
+const INCLUDE_LOCATION = hasFlag(args, 'location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
 async function generateTestFile() {
@@ -801,6 +845,7 @@ if (require.main === module) {
 module.exports = {
   // CLI argument validation
   readFlag,
+  hasFlag,
   parsePositiveInt,
   resolveNumericArgs,
   resolveFileArg,
