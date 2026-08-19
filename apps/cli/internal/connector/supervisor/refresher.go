@@ -433,15 +433,18 @@ func (c *knockingConnector) Open() error {
 // Connect refreshes the knock first on transports whose physical dial happens
 // here, then dials through the underlying connector.
 //
-// WATCHDOG COUPLING: this branch is reached only when TCPMux is explicitly
-// disabled, and in that mode FRP dials once per WORK connection rather than
-// once per control redial. The reconnect watchdog counts every refresh as one
-// control redial, so under sustained traffic it would accumulate a storm on a
-// perfectly healthy tunnel and eventually force a false cycle restart. The
-// generated config never disables TCPMux — frpgen models no such field, so it
-// stays at FRP's default of on — and TestProductionConfigKeepsTheWatchdogOnTheOpenSeam
-// pins that. Anything that starts setting TCPMux=false must revisit
-// noteRedialLocked before it does.
+// WATCHDOG COUPLING: this branch is reached whenever TCPMux is off — set to
+// false, or left unset by a caller that skipped ClientCommonConfig.Complete,
+// which the fork treats identically (see physicalDialInOpen). In that mode
+// FRP dials once per WORK connection rather than once per control redial. The
+// reconnect watchdog counts every refresh as one control redial, so under
+// sustained traffic it would accumulate a storm on a perfectly healthy tunnel
+// and eventually force a false cycle restart. The generated config never
+// disables TCPMux — frpgen models no such field, so it stays at FRP's default
+// of on — and the command Complete()s before New, so production always takes
+// the Open seam; TestProductionConfigKeepsTheWatchdogOnTheOpenSeam pins that
+// end to end. Anything that starts setting TCPMux=false, or hands New a
+// config it never completed, must revisit noteRedialLocked before it does.
 func (c *knockingConnector) Connect() (net.Conn, error) {
 	if !physicalDialInOpen(c.common) {
 		if err := c.refresher.refresh(c.ctx, c.common, "connect"); err != nil {
@@ -470,9 +473,29 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 }
 
 // physicalDialInOpen reports whether the pinned FRP fork performs the
-// physical connector dial from Open (QUIC, nil TCPMux, or TCPMux-enabled TCP)
-// or from Connect (TCPMux explicitly disabled). Revisit on an FRP connector
-// contract change.
+// physical connector dial from Open (QUIC or TCPMux-enabled TCP) or from
+// Connect (TCPMux off, whether explicitly false or left unset). Revisit on an
+// FRP connector contract change.
+//
+// Unset is NOT "default on" at this seam. The fork's Open guards its TCP path
+// on `if !lo.FromPtr(c.cfg.Transport.TCPMux) { return nil }`, and lo.FromPtr
+// yields the zero value for a nil pointer — so a nil TCPMux returns from Open
+// having dialed nothing, leaving Connect to fall through to realConnect
+// exactly as an explicit false does. The expression below is that lo.FromPtr
+// written out — samber/lo is an indirect dependency here and nothing else in
+// this module imports it, so the semantics are copied rather than the call.
+// TestForkDialsFromConnectWithoutTCPMux pins the fork half against the real
+// connector.
+//
+// TCPMux only becomes true by way of ClientCommonConfig.Complete, which the
+// connector command runs before New. A caller that skips it arrives here with
+// a nil pointer, and answering "Open" for that config would attach BOTH the
+// redial re-knock and the reconnect watchdog to a method that never dials
+// while the method that does goes unguarded.
+//
+// A nil common keeps answering Open: the fork would nil-panic before dialing
+// either way, so no real dial is at stake, and Open is where refresh's own
+// nil-common check reports errNilCommonConfig and fails the cycle closed.
 func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return true
@@ -480,8 +503,5 @@ func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if strings.EqualFold(common.Transport.Protocol, "quic") {
 		return true
 	}
-	if common.Transport.TCPMux == nil {
-		return true
-	}
-	return *common.Transport.TCPMux
+	return common.Transport.TCPMux != nil && *common.Transport.TCPMux
 }

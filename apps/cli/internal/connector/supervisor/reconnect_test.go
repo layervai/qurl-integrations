@@ -479,8 +479,16 @@ func TestWatchdogReachesTheProductionConnectorSeam(t *testing.T) {
 	clk := newManualClock()
 	r, rec := newWatchdogRefresher(clk.now, discardLogger(), 90*time.Second, 45*time.Second)
 	common := handedOffCommon()
-	// TCPMux defaults on, so the physical dial — and therefore the refresh —
-	// happens in Open. Guarded by TestPhysicalDialInOpen.
+	// TCPMux on puts the physical dial — and therefore the refresh — in Open.
+	// Set explicitly rather than left to a default: handedOffCommon is not
+	// Complete()d, and an unset TCPMux is the UNMUXED transport to the fork,
+	// which dials from Connect (see physicalDialInOpen and
+	// TestForkDialsFromConnectWithoutTCPMux). Production reaches this same
+	// branch because the command Complete()s first, which is pinned by
+	// TestProductionConfigKeepsTheWatchdogOnTheOpenSeam and
+	// TestForkTCPMuxCompletionDefault; this test isolates the wrapper.
+	muxOn := true
+	common.Transport.TCPMux = &muxOn
 	if !physicalDialInOpen(common) {
 		t.Fatal("test premise broken: this common config does not dial in Open")
 	}

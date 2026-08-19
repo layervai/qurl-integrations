@@ -125,6 +125,16 @@ type Config struct {
 	// Common is the FRP client common config, already Complete()d by the
 	// caller. The supervisor treats it as READ-ONLY and overlays a per-cycle
 	// copy with each knock's token and dial target.
+	//
+	// Complete()ing it is the caller's contract, and New cannot check it —
+	// v1.ClientCommonConfig carries no "completed" bit, and the fields it
+	// fills are indistinguishable from ones a caller set by hand. The
+	// connector command satisfies it (cmd/connector.go calls common.Complete
+	// before New); anything else must too. The load-bearing field is
+	// Transport.TCPMux, which Complete defaults to true: left nil it selects
+	// the Connect dial seam (see physicalDialInOpen), which moves the redial
+	// re-knock and puts the reconnect watchdog on a per-work-connection
+	// counter it is not sized for.
 	Common *v1.ClientCommonConfig
 
 	// Knocker performs the per-cycle NHP knock. Required. When it also
