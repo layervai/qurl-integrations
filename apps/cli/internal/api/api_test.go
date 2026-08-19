@@ -261,7 +261,11 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 			t.Errorf("status param = %q", got)
 		}
 		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{
-			{"resource_id": "r1", "crid": "c1", "target_url": "https://a.example", "status": "active"},
+			{
+				"resource_id": "r1", "crid": "c1", "target_url": "https://a.example",
+				"type": "url", "status": "active",
+				"description": "nightly export", "tags": []string{"ops", "nightly"},
+			},
 			{"resource_id": "r2", "target_url": "https://b.example", "status": "revoked"},
 		}, map[string]any{"next_cursor": "cur2", "has_more": true})
 	})
@@ -276,6 +280,17 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	}
 	if page.Items[1].CRID != "" || page.Items[1].ResourceID != "r2" {
 		t.Errorf("row without crid must survive projection: %+v", page.Items[1])
+	}
+	// The publish-time metadata is what a sweeper recognizes a row by, so it
+	// has to survive the projection rather than being dropped on the floor.
+	if got := page.Items[0]; got.Type != "url" || got.Description != "nightly export" ||
+		!slices.Equal(got.Tags, []string{"ops", "nightly"}) {
+		t.Errorf("row metadata lost in projection: %+v", got)
+	}
+	// A row that carries none of it projects to zero values, never to
+	// synthesized ones — an empty description is not a description.
+	if got := page.Items[1]; got.Type != "" || got.Description != "" || got.Tags != nil {
+		t.Errorf("row without metadata gained some: %+v", got)
 	}
 }
 
