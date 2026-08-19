@@ -610,9 +610,21 @@ describe('loadtest preflight — the composition main() used to hold inline', ()
     expect(seen).toBe('untouched');
   });
 
-  it('reports every fault in one pass, in command-line order', () => {
-    const errors = resolveArgErrors(['--count', 'abc', '--file', '/x'], () => 'file is bad');
-    expect(errors).toEqual([expect.stringContaining('--count'), 'file is bad']);
+  it('reports every fault in one pass, numeric flags before the file flag', () => {
+    // The order is numeric-then-file, NOT argv order — the concatenation is
+    // fixed and the readability error is appended last. Pinned with --file
+    // typed FIRST, because the obvious argv-order reading of this list is
+    // wrong and only that case can tell the two apart. Cosmetic either way:
+    // every message is fatal and they print together, so the operator fixes
+    // them in one edit.
+    expect(resolveArgErrors(['--file', '', '--count', 'abc'], () => null)).toEqual([
+      expect.stringContaining('--count'),
+      expect.stringContaining('--file'),
+    ]);
+    expect(resolveArgErrors(['--count', 'abc', '--file', '/x'], () => 'file is bad')).toEqual([
+      expect.stringContaining('--count'),
+      'file is bad',
+    ]);
   });
 
   it('defaults to the real readability check', () => {
