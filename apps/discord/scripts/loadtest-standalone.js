@@ -233,9 +233,19 @@ function pruneLedger(ledgerPath, remainingIds) {
 async function reclaim(ledgerPath) {
   stopping = true;
 
-  if (readLedger(ledgerPath) === null) {
+  const initial = readLedger(ledgerPath);
+  if (initial === null) {
     console.error(`Reclaim: no ledger file at ${ledgerPath} — nothing was reclaimed.`);
     return { missing: true, revoked: 0, failed: 0 };
+  }
+
+  // A ledger with content but no readable ids is corruption, not cleanliness.
+  // Recovery mode exists because something already went wrong, so this must
+  // not read as an all-clear the way a genuinely empty ledger does.
+  const populatedLines = fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(l => l.trim()).length;
+  if (initial.length === 0 && populatedLines > 0) {
+    console.error(`Reclaim: ${ledgerPath} holds ${populatedLines} line(s) but no readable resource ids — treating as corrupt, not clean.`);
+    return { missing: false, revoked: 0, failed: 0, unreadable: true };
   }
 
   // Always say which tenancy is about to be deleted from — this is a bulk
@@ -245,7 +255,12 @@ async function reclaim(ledgerPath) {
   // Every recorded endpoint must be the current one, not merely include it:
   // deletes are issued per id with no per-id host, so a ledger mixing two
   // tenancies would otherwise pass and then delete the other one's resources.
-  const foreign = [...ledgerEndpoints(ledgerPath)].filter(e => e !== config.QURL_ENDPOINT);
+  // Compared with a trailing slash trimmed: QURL_ENDPOINT is not normalized
+  // in config.js, so the same tenancy spelled with and without one would
+  // otherwise refuse a legitimate recovery sweep mid-incident.
+  const sameHost = (value) => String(value).replace(/\/+$/, '');
+  const current = sameHost(config.QURL_ENDPOINT);
+  const foreign = [...ledgerEndpoints(ledgerPath)].filter(e => sameHost(e) !== current);
   if (foreign.length > 0) {
     console.error(`Reclaim: this ledger records resources on ${foreign.join(', ')}, not ${config.QURL_ENDPOINT}.`);
     console.error('Refusing to delete against a different tenancy. Set QURL_ENDPOINT to match and re-run.');
@@ -280,7 +295,12 @@ async function reclaim(ledgerPath) {
         // An already-gone resource is the successful end state for a reclaim.
         // callQurl collapses API errors to a status-only string, so matching
         // the status is all that is available.
-        if (/\(404\)/.test(e.message)) {
+        //
+        // TODO(upstream-contract): 404 and 410 are the statuses qurl-service
+        // uses for a resource that no longer exists. If it adopts another,
+        // nothing here fails loudly — a re-run would simply sweep the same
+        // ids forever, reporting them as failures.
+        if (/\((404|410)\)/.test(e.message)) {
           revoked++;
           outstanding.delete(id);
         } else {
@@ -474,11 +494,13 @@ async function main() {
       process.exit(1);
     }
     activeLedgerPath = reclaimOnly;
-    const { missing, failed, refused } = await reclaimOnce(reclaimOnly);
+    const {
+      missing, failed, refused, unreadable,
+    } = await reclaimOnce(reclaimOnly);
     // A missing ledger is a failure in recovery mode, not "nothing to do":
     // the operator is here because something already went wrong, and a
     // cheerful exit 0 on a mistyped path is how live resources get abandoned.
-    process.exit(missing || refused || failed > 0 ? 1 : 0);
+    process.exit(missing || refused || unreadable || failed > 0 ? 1 : 0);
   }
 
   preflightLedger();

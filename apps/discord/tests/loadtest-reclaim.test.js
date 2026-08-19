@@ -215,6 +215,29 @@ describe('reclaim', () => {
     expect(deleteLink).toHaveBeenCalledWith('r_1');
   });
 
+  it('counts a 410 as already-gone, the same as a 404', async () => {
+    const ledger = tempLedger(line('r_1'));
+    deleteLink.mockRejectedValue(new Error('qURL API DELETE /qurls/r_1 failed (410)'));
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+  });
+
+  it('accepts an endpoint differing only by a trailing slash', async () => {
+    const ledger = tempLedger(line('r_1', { endpoint: `${config.QURL_ENDPOINT}/` }));
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(deleteLink).toHaveBeenCalledWith('r_1');
+  });
+
+  it('treats a ledger with content but no readable ids as corrupt, not clean', async () => {
+    // Recovery mode exists because something already went wrong; reporting a
+    // corrupt ledger as an all-clear is how live resources get abandoned.
+    const ledger = tempLedger('{"resource_id":"r_1\n{"resou\n');
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ unreadable: true });
+    expect(deleteLink).not.toHaveBeenCalled();
+  });
+
   it('refuses an entry that records no endpoint at all', async () => {
     // Missing provenance must read as foreign, not as absence of evidence —
     // otherwise the guard passes trivially on the ledger most likely to have
