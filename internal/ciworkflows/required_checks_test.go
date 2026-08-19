@@ -371,12 +371,19 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 // Flipping to `required` is still not a matter of adding the trigger back
 // everywhere. `claude-review` comes from claudeCodeReviewWorkflow, which is
 // `pull_request_target`-only by design — it holds ANTHROPIC_API_KEY and so must
-// load from the trusted default branch — and its job `if:` plus three of its
-// five steps read `github.event.pull_request`: the head and base SHAs the
-// review is pinned to, the number it publishes against, the draft and fork
-// guards. A merge group carries no pull request, so that context cannot report
-// on the event at all until the workflow is restructured. No offline check can
-// verify that for you, which is why the tail of this test pins the mechanism.
+// load from the trusted default branch — and its steps read
+// `github.event.pull_request` throughout: the head and base SHAs the review is
+// pinned to, the number it publishes against, the draft and fork guards. A
+// merge group carries no pull request, so that context cannot report on the
+// event at all until the workflow is restructured. No offline check can verify
+// that for you, which is why the tail of this test pins the mechanism.
+//
+// Said of the STEPS, not the job. The job's `if:` used to carry the draft and
+// fork guards; #1188 moved them into the eligibility step because
+// `claude-review` is a required context and GitHub scores a *skipped* required
+// check as satisfied, so a job-level gate that withheld the job could not be
+// told apart from a completed review. The blocker is unchanged by that — it
+// was never the job gate — which is why the tail below pins the trigger.
 func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 	t.Parallel()
 
