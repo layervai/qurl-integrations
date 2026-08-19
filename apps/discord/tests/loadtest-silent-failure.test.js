@@ -2019,6 +2019,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // than pinning the bare specifier: a move to `require('node:fs')` is the
     // same modernization that put rmSync in DELETE_PRIMITIVES, and it should
     // not fail here as a missing-list error that says nothing about prefixes.
+    //
+    // It does still assume the script keeps a plain `fs` require. Moving
+    // wholesale to `fs/promises` would fail this as `readsFs: false`, which
+    // says nothing about subprocesses and reads as a broken test rather than
+    // the sentinel it is. That is the price of proving the list got built at
+    // all; if it ever fires, widen the specifier, do not drop the guard.
     expect({ readsFs: required.some((mod) => /^(?:node:)?fs$/.test(mod)) })
       .toEqual({ readsFs: true });
     expect(required.filter((mod) => /^(?:node:)?child_process$/.test(mod))).toEqual([]);
