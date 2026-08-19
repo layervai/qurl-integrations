@@ -307,7 +307,7 @@ const internalErrorEnvelope = `{"error":"internal"}`
 // envelope — the 400/401/404/405/413 replies on the non-Slack surfaces. It is
 // deliberately not one of the respField* Slack slash-command response keys
 // further down. internalErrorEnvelope above spells the same key literally
-// because it is pre-marshalled for the path where marshalling itself failed.
+// because it is pre-marshaled for the path where marshaling itself failed.
 const errEnvelopeKey = "error"
 
 // Config carries the runtime wiring for [NewHandler]. Every field is
