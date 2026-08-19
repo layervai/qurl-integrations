@@ -141,11 +141,27 @@ const FILE_PATH = getArg('file', null);
 const INCLUDE_LOCATION = hasFlag('location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
-async function generateTestFile() {
-  const tmpPath = path.join('/tmp', `loadtest-${Date.now()}.bin`);
-  const buf = Buffer.alloc(1024 * 1024, 'A'); // 1MB
-  fs.writeFileSync(tmpPath, buf);
-  return tmpPath;
+// The auto-generated payload is byte-identical on every round — `Buffer.alloc`
+// fills a fixed length with a fixed byte — and the upload filename comes from
+// `loadtest-round<n>.bin` at the call site, never from the path. So the
+// round-trip through the filesystem this replaced bought nothing: it wrote a
+// fresh 1MB file into /tmp every round, read it straight back into a buffer,
+// and never removed it. Over a default 2h run at a 60s interval that is ~120
+// files and ~120MB left behind, on the one code path here designed to be
+// started and walked away from — a plausible way to fill the filesystem
+// during exactly the long soak this script exists to run.
+//
+// Allocated once and reused, so the footprint is 1MB per process rather than
+// 1MB per round, and there is no cleanup to get wrong: no unlink to skip on a
+// throw, nothing left behind on SIGINT, and no /tmp write at all. A
+// caller-supplied --file is still read from disk each round in runRound —
+// that is the only case with a path to read.
+let generatedPayload = null;
+function generateTestPayload() {
+  if (generatedPayload === null) {
+    generatedPayload = Buffer.alloc(1024 * 1024, 'A'); // 1MB
+  }
+  return generatedPayload;
 }
 
 // Reuse the shared parser — it has the overflow protection that this
@@ -442,8 +458,7 @@ async function runRound(roundNum) {
 
   // File pipeline
   if (FILE_PATH || !INCLUDE_LOCATION) {
-    const filePath = FILE_PATH || await generateTestFile();
-    const fileBuffer = fs.readFileSync(filePath);
+    const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
     // Upload through the bot's own connector client rather than a hand-rolled
     // fetch. The copy this replaced put the same multipart body on the wire
