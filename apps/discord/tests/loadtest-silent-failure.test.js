@@ -123,6 +123,37 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
+  // The spelling indexOf cannot see. `--count=200` is not the token `--count`,
+  // so it read as the flag being ABSENT and quietly ran the default — the same
+  // silent fallback the tests below refuse for a dropped value, reached by
+  // typing the value the other way round. `--duration=60` is the one that
+  // hurts: a run the operator sized at a minute held the target for the
+  // default two hours and reported nothing wrong.
+  it.each([
+    ['count', 'count', 200],
+    ['duration', 'durationS', 60],
+    ['interval', 'intervalS', 30],
+  ])('reads --%s=value as well as the space-separated form', (flag, key, value) => {
+    const resolved = resolveNumericArgs([`--${flag}=${value}`]);
+    expect(resolved[key]).toBe(value);
+    expect(resolved.errors).toEqual([]);
+  });
+
+  it('does not let a longer flag match the one it starts with', () => {
+    // '--counter=9' starts with '--count', and would set count if the equals
+    // form were matched on the flag name rather than on the name plus '='.
+    expect(resolveNumericArgs(['--counter=9'])).toEqual({
+      count: 100, durationS: 7200, intervalS: 60, errors: [],
+    });
+  });
+
+  it('takes the space-separated value when a flag is given both ways', () => {
+    // Pinned in both argv orders: reading the equals form must not change what
+    // an argv that already had a usable space-separated value resolved to.
+    expect(resolveNumericArgs(['--count=200', '--count', '7']).count).toBe(7);
+    expect(resolveNumericArgs(['--count', '7', '--count=200']).count).toBe(7);
+  });
+
   // The case getArg cannot express: `--count` as the final token has no value
   // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
   // the same 100 as not passing the flag at all. Silently running the default
@@ -137,6 +168,23 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     const { count, errors } = resolveNumericArgs(['--count', '']);
     expect(count).toBeNaN();
     expect(errors[0]).toContain('got ""');
+  });
+
+  it('refuses the equals form with the value left off', () => {
+    // '--count=' and a trailing '--count' are the same dropped value, so they
+    // report the same way. Distinct from `--count ''` just above, which is a
+    // value that was passed and is unusable rather than one that went missing.
+    const { count, errors } = resolveNumericArgs(['--count=']);
+    expect(count).toBeNaN();
+    expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
+  });
+
+  it('validates an equals-form value through the same parser', () => {
+    // Otherwise the new spelling would be a way around parsePositiveInt rather
+    // than a second way into it.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--duration=0']).errors[0]).toContain('greater than zero');
+    expect(resolveNumericArgs(['--interval=-1']).errors[0]).toContain('got "-1"');
   });
 
   it('refuses the following flag when the value was forgotten', () => {

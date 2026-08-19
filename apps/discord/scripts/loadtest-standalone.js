@@ -98,6 +98,33 @@ function parsePositiveInt(flag, raw) {
   return { value };
 }
 
+/**
+ * One numeric flag's raw value from argv, in either spelling: `--flag value`
+ * or `--flag=value`.
+ *
+ * Three-way on purpose, which is why it returns a pair rather than a string.
+ * `{ present: false }` is the flag not being passed; a present flag with an
+ * undefined `raw` is one whose value was dropped. Collapsing those two is the
+ * silent default resolveNumericArgs exists to refuse, and a lone string
+ * return cannot carry the difference.
+ *
+ * The space form wins if both are somehow given, so what a doubled flag
+ * resolves to is what it already resolved to before the equals form was read
+ * at all.
+ */
+function readFlagToken(argv, flag) {
+  const token = `--${flag}`;
+  const idx = argv.indexOf(token);
+  if (idx !== -1) return { present: true, raw: argv[idx + 1] };
+  const inline = argv.find((a) => a.startsWith(`${token}=`));
+  if (inline === undefined) return { present: false };
+  const raw = inline.slice(token.length + 1);
+  // `--count=` carries nothing after the equals. That is the same dropped
+  // value as a trailing `--count`, so it takes the same path rather than
+  // reaching parsePositiveInt as '' and being reported as a bad number.
+  return { present: true, raw: raw === '' ? undefined : raw };
+}
+
 // Resolve all three numeric flags from an argv array. Pure and taking argv as
 // a parameter, following resolveGuardInputs above, so the suite covers the
 // wiring and not merely the parser: the constants below are the actual
@@ -110,12 +137,17 @@ function parsePositiveInt(flag, raw) {
 // final token, and `--count ""`, both run 100 recipients while the operator
 // believes they asked for something else. Separating those is the whole point
 // of the flag being present.
+//
+// Both spellings, because `--count=200` is not `--count` to indexOf: it read
+// as the flag being ABSENT and ran the default of 100 with nothing said,
+// which is that same silent fallback arrived at from the other direction.
+// `--duration=60` is the one that hurts — it held the target for the default
+// 7200 seconds, so an operator who asked for a minute got two hours.
 function resolveNumericArgs(argv) {
   const errors = [];
   const read = (flag, defaultValue) => {
-    const idx = argv.indexOf(`--${flag}`);
-    if (idx === -1) return defaultValue;
-    const raw = argv[idx + 1];
+    const { present, raw } = readFlagToken(argv, flag);
+    if (!present) return defaultValue;
     if (raw === undefined) {
       errors.push(`--${flag} was given no value (omit it to use the default of ${defaultValue})`);
       return NaN;
