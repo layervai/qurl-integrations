@@ -9,6 +9,14 @@
  *   --interval S   Seconds between rounds (default: 60)
  *   --file PATH    Local file to upload (default: generates a 1MB test file)
  *   --location     Include a location link in each round
+ *   --ledger PATH  Where to record created resources (default: /tmp/loadtest-ledger-<ts>.jsonl)
+ *   --reclaim PATH Revoke everything in a previous run's ledger, then exit
+ *
+ * Every resource this script creates is revoked before it exits, including on
+ * Ctrl-C. If the process is killed hard enough to skip that (SIGKILL, a dead
+ * laptop), the ledger file is the recovery path:
+ *
+ *   node scripts/loadtest-standalone.js --reclaim /tmp/loadtest-ledger-<ts>.jsonl
  */
 
 const fs = require('fs');
@@ -27,7 +35,7 @@ if (fs.existsSync(envFile)) {
 
 const config = require('../src/config');
 const { mintLinks } = require('../src/connector');
-const { createOneTimeLink } = require('../src/qurl');
+const { createOneTimeLink, deleteLink } = require('../src/qurl');
 
 const args = process.argv.slice(2);
 function getArg(name, defaultVal) {
@@ -43,6 +51,92 @@ const INTERVAL_S = parseInt(getArg('interval', '60'));
 const FILE_PATH = getArg('file', null);
 const INCLUDE_LOCATION = hasFlag('location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
+
+const LEDGER_PATH = getArg('ledger', path.join('/tmp', `loadtest-ledger-${Date.now()}.jsonl`));
+
+// Every resource is appended to the ledger the moment it exists, before any
+// further work. Holding the ids only in memory would not survive how these
+// runs actually end — a two-hour soak gets Ctrl-C'd — and an unrecorded
+// resource is unreclaimable in practice: qurl-service's list endpoint takes
+// no filter, so there is no way to find it again by label or target.
+//
+// Recipient links from mintLinks are deliberately not recorded individually:
+// deleting the parent file resource reclaims every qURL minted against it.
+function recordResource(resourceId, kind) {
+  if (!resourceId) return;
+  try {
+    fs.appendFileSync(LEDGER_PATH, `${JSON.stringify({ resource_id: resourceId, kind })}\n`);
+  } catch (e) {
+    // A ledger we cannot write is a leak we cannot reclaim. Stop now rather
+    // than mint thousands of resources with no way to find them afterwards.
+    console.error(`FATAL: cannot write reclaim ledger ${LEDGER_PATH} — ${e.message}`);
+    process.exit(1);
+  }
+}
+
+function readLedger(ledgerPath) {
+  if (!fs.existsSync(ledgerPath)) return [];
+  const ids = [];
+  for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const { resource_id: id } = JSON.parse(trimmed);
+      if (id) ids.push(id);
+    } catch {
+      // A torn final line is what a hard kill mid-append looks like. Skip it
+      // and reclaim the rest instead of abandoning the whole ledger.
+      console.error(`  Skipping unparseable ledger line: ${trimmed.slice(0, 80)}`);
+    }
+  }
+  return ids;
+}
+
+// Revoke everything recorded in the ledger. Safe to run twice: revoking an
+// already-revoked resource succeeds, so --reclaim can be re-run after a
+// partial sweep.
+async function reclaim(ledgerPath) {
+  const ids = [...new Set(readLedger(ledgerPath))];
+  if (ids.length === 0) {
+    console.log('Reclaim: nothing recorded.');
+    return 0;
+  }
+  console.log(`Reclaim: revoking ${ids.length} resource(s) from ${ledgerPath}...`);
+  let revoked = 0;
+  let failed = 0;
+  // Serial with a short gap. The sandbox tenancy is shared and rate-limited
+  // per account, and a burst of hundreds of deletes is exactly what trips it.
+  for (const id of ids) {
+    try {
+      await deleteLink(id);
+      revoked++;
+    } catch (e) {
+      failed++;
+      if (failed === 1) console.error(`  Reclaim error: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, 50));
+  }
+  console.log(`Reclaim: ${revoked} revoked, ${failed} failed.`);
+  if (failed > 0) {
+    console.error(`Reclaim: ${failed} resource(s) still on the tenancy — re-run with --reclaim ${ledgerPath}`);
+  }
+  return failed;
+}
+
+// A second Ctrl-C must not start a competing sweep over the same ledger.
+let reclaiming = false;
+async function reclaimAndExit(signal) {
+  if (reclaiming) return;
+  reclaiming = true;
+  console.log(`\nReceived ${signal} — reclaiming what this run created...`);
+  let failed = 1;
+  try {
+    failed = await reclaim(LEDGER_PATH);
+  } catch (e) {
+    console.error(`Reclaim failed: ${e.message}`);
+  }
+  process.exit(failed > 0 ? 1 : 0);
+}
 
 async function generateTestFile() {
   const tmpPath = path.join('/tmp', `loadtest-${Date.now()}.bin`);
@@ -78,6 +172,9 @@ async function runRound(roundNum) {
     });
     if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
     const uploadResult = await uploadResp.json();
+    // Recorded before minting against it: the mints below are what make this
+    // resource expensive to leave behind.
+    recordResource(uploadResult.resource_id, 'upload');
     results.uploadMs = performance.now() - uploadStart;
 
     // Mint links in batches of 10
@@ -101,7 +198,8 @@ async function runRound(roundNum) {
     const locStart = performance.now();
     for (let i = 0; i < COUNT; i++) {
       try {
-        await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
+        const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
+        recordResource(loc.resource_id, 'location');
         results.locLinks++;
       } catch (e) {
         if (results.locFail === 0) console.error(`  Location mint error: ${e.message}`);
@@ -118,6 +216,16 @@ async function runRound(roundNum) {
 async function main() {
   // Preflight checks
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
+
+  // Recovery mode for a previous run that was killed before it could reclaim.
+  // Runs before the endpoint guard below: revoking resources that already
+  // exist is always the safe direction, wherever they were created.
+  const reclaimOnly = getArg('reclaim', null);
+  if (reclaimOnly) {
+    const failed = await reclaim(reclaimOnly);
+    process.exit(failed > 0 ? 1 : 0);
+  }
+
   // Hard-block loadtest runs against production URLs unless the caller
   // explicitly opts in. Accidentally firing 12,000 mint operations at prod
   // from a dev laptop is not a great outcome.
@@ -136,6 +244,7 @@ async function main() {
   console.log('Running smoke test...');
   try {
     const r = await createOneTimeLink('https://example.com', '24h', 'smoke test');
+    recordResource(r.resource_id, 'smoke');
     console.log(`Smoke test OK: ${r.resource_id}`);
   } catch (e) {
     console.error(`FATAL: Smoke test failed — ${e.message}`);
@@ -144,7 +253,11 @@ async function main() {
 
   console.log(`Load test: ${COUNT} recipients/round, ${DURATION_S}s duration, ${INTERVAL_S}s interval`);
   console.log(`File: ${FILE_PATH || 'auto-generated 1MB'}, Location: ${INCLUDE_LOCATION}`);
+  console.log(`Ledger: ${LEDGER_PATH}`);
   console.log('---');
+
+  process.on('SIGINT', () => { reclaimAndExit('SIGINT'); });
+  process.on('SIGTERM', () => { reclaimAndExit('SIGTERM'); });
 
   const startTime = Date.now();
   const endTime = startTime + DURATION_S * 1000;
@@ -192,6 +305,19 @@ async function main() {
       console.log(`Avg upload: ${avgUpload.toFixed(0)}ms, avg mint: ${avgMint.toFixed(0)}ms`);
     }
   }
+
+  const failed = await reclaim(LEDGER_PATH);
+  if (failed > 0) process.exitCode = 1;
 }
 
-main().catch(e => { console.error('Fatal:', e); process.exit(1); });
+main().catch(async (e) => {
+  console.error('Fatal:', e);
+  // The run may already have created resources before falling over. Reclaim
+  // them rather than leave them on a shared tenancy.
+  try {
+    await reclaim(LEDGER_PATH);
+  } catch (reclaimError) {
+    console.error('Reclaim failed:', reclaimError.message);
+  }
+  process.exit(1);
+});
