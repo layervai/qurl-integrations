@@ -620,7 +620,11 @@ function isTargetAuthorized(target, { allowProdFlag, allowProdEnv }) {
  */
 function resolveGuardInputs(env, argv) {
   return {
-    allowProdFlag: argv.includes('--allow-production'),
+    // Through hasFlag like --location, rather than an inline includes: the
+    // two boolean flags reading argv two different ways is the residual of
+    // the split this change removes, and this is the one that gates a
+    // production-target override.
+    allowProdFlag: hasFlag(argv, 'allow-production'),
     allowProdEnv: env.LOADTEST_ALLOW_PRODUCTION === '1',
     ...parseTargetAllowlist(env.LOADTEST_TARGET_HOSTS),
   };

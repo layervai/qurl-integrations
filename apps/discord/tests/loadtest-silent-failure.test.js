@@ -45,7 +45,7 @@ const traverse = traverseModule.default || traverseModule;
 
 const {
   readFlag, hasFlag, parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
-  resolveArgErrors,
+  resolveArgErrors, resolveGuardInputs,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -405,6 +405,19 @@ describe('loadtest boolean flags — the half of the hole left open on purpose',
   // that drifts either way unnoticed.
   it('does not yet recognize the equals form (known gap)', () => {
     expect(hasFlag(['--location=true'], 'location')).toBe(false);
+    // The same gap on the target-safety override. This one fails SAFE — an
+    // unrecognized --allow-production=true leaves the guard refusing rather
+    // than granting — which is why it is tolerable to defer, and worth
+    // remembering when the equals form is eventually closed.
+    expect(hasFlag(['--allow-production=true'], 'allow-production')).toBe(false);
+  });
+
+  it('reads --allow-production through the same reader as --location', () => {
+    // resolveGuardInputs takes the UNSLICED process.argv, so this is pinned
+    // in that shape too.
+    const { allowProdFlag } = resolveGuardInputs({}, ['node', 'script.js', '--allow-production']);
+    expect(allowProdFlag).toBe(true);
+    expect(resolveGuardInputs({}, ['node', 'script.js']).allowProdFlag).toBe(false);
   });
 });
 
