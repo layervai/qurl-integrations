@@ -171,6 +171,9 @@ render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTE
 render plaintext-s3-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=false S3_ENDPOINT_ADDR=stub S3_ENDPOINT_PORT=9000 ALLOW_PLAINTEXT_S3=true
 grep -q 'match_typed_subject_alt_names:' "$TMP/default/envoy.yaml"
 grep -q 'exact: example-bucket.s3.us-east-1.amazonaws.com' "$TMP/default/envoy.yaml"
+# The auth-failure access log is the only runtime signal that separates a
+# rejected credential from a missing object once nginx has masked both to 404.
+grep -q 'msg: s3_auth_failed' "$TMP/default/envoy.yaml"
 if grep -q 'match_typed_subject_alt_names:' "$TMP/plaintext-s3-allowed/envoy.yaml"; then
   echo "MISMATCH: plaintext S3 render included TLS SAN validation" >&2
   exit 1

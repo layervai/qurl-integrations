@@ -349,27 +349,35 @@ func TestPreparedS3WebsiteInstallMessageOmitsGenericResourceDescription(t *testi
 	}
 }
 
-func TestKubernetesS3WebsiteInstallMessageFitsBlockDeliveryAtMaxSlug(t *testing.T) {
+// TestS3WebsiteInstallMessagesFitBlockDeliveryAtMaxSlug covers every environment,
+// not just the longest one, because the guidance prose is where these messages
+// grow. A prose run over slackSectionTextMaxBytes silently drops the whole
+// message to the plain-text fallback, so growth has to fail here instead.
+func TestS3WebsiteInstallMessagesFitBlockDeliveryAtMaxSlug(t *testing.T) {
 	h := NewHandler(Config{
 		TunnelImage:   testTunnelImageRef,
 		S3OriginImage: defaultS3StaticConnectorImage,
 	})
-	args := testS3WebsiteArgs(tunnelEnvKubernetes)
-	args.Slug = "a" + strings.Repeat("b", 62) + "c"
+	for _, env := range []tunnelInstallEnvironment{
+		tunnelEnvDocker, tunnelEnvCompose, tunnelEnvECSFargate, tunnelEnvKubernetes,
+	} {
+		args := testS3WebsiteArgs(env)
+		args.Slug = "a" + strings.Repeat("b", 62) + "c"
 
-	prepared, err := h.prepareS3WebsiteInstallMessage(args)
-	if err != nil {
-		t.Fatalf("prepareS3WebsiteInstallMessage: %v", err)
-	}
-	msg, err := prepared.render(args, &client.APIKey{APIKey: testTunnelModalKey}, "", defaultS3WebsiteDescription, fixedNow)
-	if err != nil {
-		t.Fatalf("render max-slug Kubernetes message: %v", err)
-	}
-	if len(msg) > 40_000 {
-		t.Fatalf("max-slug Kubernetes message length = %d, exceeds Slack text ceiling", len(msg))
-	}
-	if _, ok := installMessageBlocks(msg); !ok {
-		t.Fatal("max-slug Kubernetes message unexpectedly requires plain-text fallback")
+		prepared, err := h.prepareS3WebsiteInstallMessage(args)
+		if err != nil {
+			t.Fatalf("prepareS3WebsiteInstallMessage(%s): %v", env, err)
+		}
+		msg, err := prepared.render(args, &client.APIKey{APIKey: testTunnelModalKey}, "", defaultS3WebsiteDescription, fixedNow)
+		if err != nil {
+			t.Fatalf("render max-slug %s message: %v", env, err)
+		}
+		if len(msg) > 40_000 {
+			t.Fatalf("max-slug %s message length = %d, exceeds Slack text ceiling", env, len(msg))
+		}
+		if _, ok := installMessageBlocks(msg); !ok {
+			t.Fatalf("max-slug %s message unexpectedly requires plain-text fallback; a prose run likely exceeds %d bytes", env, slackSectionTextMaxBytes)
+		}
 	}
 }
 
@@ -1307,8 +1315,9 @@ func TestRenderDockerS3WebsiteInstructionsMentionsOriginAutoRestart(t *testing.T
 		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
 	}
 	for _, want := range []string{
-		"Docker auto-restarts it after a crash",
-		"recreate or restart the qURL Connector container",
+		"crash-restart, or Docker daemon restart moves the origin into a new namespace",
+		"Container state is not a valid health check here",
+		"sudo readlink /proc/$(docker inspect -f '{{.State.Pid}}' qurl-s3-origin-" + testTunnelSlug + ")/ns/net",
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
 		`AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"`,
@@ -1456,11 +1465,17 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if !strings.Contains(got, "QURL_API_URL_YAML="+shellSingleQuote(quotedAPIURL)) {
 		t.Fatalf("Compose instructions missing shell-quoted API URL assignment:\n%s", got)
 	}
-	if !strings.Contains(got, "After a Docker daemon restart, verify both services are running") {
-		t.Fatalf("Compose instructions missing daemon-restart recovery note:\n%s", got)
-	}
-	if !strings.Contains(got, "Docker auto-restarts the S3 origin service after a crash") {
-		t.Fatalf("Compose instructions missing origin auto-restart recovery note:\n%s", got)
+	// The stranded-sidecar recovery must name a command that actually relinks
+	// both containers; "check that both are running" is the false-green advice
+	// this replaced, because both report running while the qURL is dead.
+	for _, want := range []string{
+		"Container state is not a valid health check here",
+		"up -d --force-recreate`, which recreates both services",
+		"ps -q qurl-s3-origin-" + testTunnelSlug + ")\")/ns/net",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Compose instructions missing stranded-namespace recovery note %q:\n%s", want, got)
+		}
 	}
 	assertNoS3SecretLeaks(t, got)
 }
@@ -1825,6 +1840,77 @@ func ecsEnvMap(vars []ecsEnvironmentVar) map[string]string {
 		env[item.Name] = item.Value
 	}
 	return env
+}
+
+// s3WebsiteAWSCredentialEnv is the credential set the origin's AWS provider
+// chain reads when no instance/task role exists.
+var s3WebsiteAWSCredentialEnv = []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+
+// TestS3WebsiteInstallForwardsAWSCredentialsByNameOnly is the guardrail on the
+// only supported way to run the origin off EC2. Docker and Compose must carry
+// each credential variable by NAME so the operator's own shell or .env supplies
+// the value; a rendered `NAME=` or `NAME: <value>` would mean a secret had been
+// collected by Slack and pasted into an install snippet, which is never allowed
+// — not in these two renderers and not in the role-based ones either.
+func TestS3WebsiteInstallForwardsAWSCredentialsByNameOnly(t *testing.T) {
+	t.Parallel()
+	renderers := map[tunnelInstallEnvironment]func(*s3WebsiteInstallArgs, string, string) (string, error){
+		tunnelEnvDocker:     renderDockerS3WebsiteInstructions,
+		tunnelEnvCompose:    renderDockerComposeS3WebsiteInstructions,
+		tunnelEnvECSFargate: renderECSS3WebsiteInstructions,
+		tunnelEnvKubernetes: renderKubernetesS3WebsiteInstructions,
+	}
+	for env, render := range renderers {
+		got, err := render(testS3WebsiteArgs(env), testTunnelImageRef, defaultS3StaticConnectorImage)
+		if err != nil {
+			t.Fatalf("render %s instructions: %v", env, err)
+		}
+		for _, name := range s3WebsiteAWSCredentialEnv {
+			for _, assigned := range []string{name + "=", name + ": ", `"name": "` + name + `"`} {
+				if strings.Contains(got, assigned) {
+					t.Fatalf("%s instructions bind a value to %s via %q; credentials must never pass through Slack:\n%s", env, name, assigned, got)
+				}
+			}
+		}
+	}
+
+	// Docker forwards with a bare `-e NAME`, which passes the value straight
+	// from the operator's shell without ever placing it in the command line.
+	docker, err := renderDockerS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvDocker), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
+	}
+	for _, name := range s3WebsiteAWSCredentialEnv {
+		if !strings.Contains(docker, "  -e "+name+" \\\n") {
+			t.Fatalf("Docker instructions do not forward %s to the origin:\n%s", name, docker)
+		}
+	}
+
+	// Compose forwards with a valueless key, which resolves from the shell or
+	// .env at `up` time and stays unset in the container when unset on the host.
+	compose, err := renderDockerComposeS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvCompose), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerComposeS3WebsiteInstructions: %v", err)
+	}
+	body := extractS3TestBlock(t, compose, "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n", "\nQURL_COMPOSE_YAML_EOF")
+	var parsed struct {
+		Services map[string]struct {
+			Environment map[string]*string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("Compose fragment did not parse: %v\n%s", err, body)
+	}
+	origin := parsed.Services["qurl-s3-origin-"+testTunnelSlug].Environment
+	for _, name := range s3WebsiteAWSCredentialEnv {
+		value, ok := origin[name]
+		if !ok {
+			t.Fatalf("Compose origin service does not forward %s:\n%s", name, body)
+		}
+		if value != nil {
+			t.Fatalf("Compose origin %s = %q, want a valueless passthrough key", name, *value)
+		}
+	}
 }
 
 func assertNoS3SecretLeaks(t *testing.T, got string) {

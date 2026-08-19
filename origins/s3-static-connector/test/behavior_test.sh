@@ -466,6 +466,79 @@ for child in envoy nginx; do
   fi
 done
 
+# 16. Startup credential preflight. A rejected signature never self-heals and
+# nginx masks it to a viewer 404, so the origin must refuse to serve rather than
+# look healthy while 404ing every request. Everything else stays a warning that
+# still serves. The stub keys off the request path, so S3_PREFIX selects which
+# upstream status the preflight HEAD of <prefix>/index.html receives.
+origin_running() {
+  docker inspect -f '{{.State.Running}}' "$ORIGIN" 2>/dev/null || echo false
+}
+preflight_case() {
+  docker rm -f "$ORIGIN" >/dev/null 2>&1
+  docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
+    -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 -e S3_PREFIX="$1" \
+    -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
+    -e ALLOW_PLAINTEXT_S3=true \
+    -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
+    -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+    "$IMG" >/dev/null
+  for _ in $(seq 1 40); do
+    docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_' && break
+    sleep 0.5
+  done
+  # A fatal verdict tears the container down right after logging it; settle
+  # before the caller inspects container state.
+  for _ in $(seq 1 20); do
+    docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_auth_failed"' || break
+    [ "$(origin_running)" = "false" ] && break
+    sleep 0.5
+  done
+}
+
+for prefix in forbidden badrequest; do
+  preflight_case "$prefix"
+  expect_eq "preflight refuses to serve on upstream $prefix" "$(origin_running)" "false"
+  expect_eq "preflight exits non-zero on upstream $prefix" \
+    "$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN")" "1"
+  if docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_auth_failed"'; then
+    ok "preflight names the credential failure for upstream $prefix"
+  else
+    no "preflight names the credential failure for upstream $prefix"
+  fi
+done
+
+# An object that has not been synced yet is not a credential failure: keep
+# serving so a deploy that starts the origin before the sync still recovers.
+preflight_case not-synced-yet
+expect_eq "preflight serves when only the index object is missing" "$(origin_running)" "true"
+if docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_object_missing"'; then
+  ok "preflight distinguishes a missing object from a rejected credential"
+else
+  no "preflight distinguishes a missing object from a rejected credential"
+fi
+
+# 17. Runtime credential failures stay masked to a viewer 404 but must be
+# greppable as themselves, so an expired credential is not misread as a bad key.
+# The origin above still serves under S3_PREFIX=not-synced-yet, so the stub sees
+# /not-synced-yet/forbidden.json (403) and /not-synced-yet/definitely-missing/
+# index.html (404) — an auth failure and a real miss, both masked to a 404.
+base="$(origin_base_url)"
+for _ in $(seq 1 40); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" != "000" ] && break
+  sleep 0.5
+done
+expect_eq "runtime auth failure still returns viewer 404" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$base/forbidden.json")" 404
+curl -s -o /dev/null "$base/definitely-missing"
+auth_lines=0
+for _ in $(seq 1 10); do
+  auth_lines="$(docker logs "$ORIGIN" 2>&1 | grep -c '"msg":"s3_auth_failed"')"
+  [ "$auth_lines" = "1" ] && break
+  sleep 0.5
+done
+expect_eq "runtime auth failure logged once, missing key logs none" "$auth_lines" 1
+
 echo "-------------------------------------------"
 echo "behavior: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

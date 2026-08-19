@@ -29,6 +29,11 @@ const (
 	s3WebsiteUnexpectedFailureNotice = "S3 website qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received an enrollment-token DM from this attempt, discard it and run `/qurl-admin protect` again."
 	s3WebsiteECSLogGroup             = "/ecs/qurl-s3-website"
 	s3WebsiteOriginContainerName     = "s3-static-origin"
+	// TODO(upstream-contract): mirrors the startup credential preflight in
+	// origins/s3-static-connector/entrypoint.sh. The origin masks an S3 auth
+	// failure as a viewer 404 on purpose, so every environment's instructions
+	// must say where the real cause is logged instead.
+	s3WebsitePreflightNotice = "If the origin cannot authenticate to the bucket it exits at startup with a preflight_auth_failed log line naming the credential and IAM fix, rather than starting up and returning 404 for every request."
 )
 
 // S3OriginImageDigestRequired is the shared operator-facing remediation for
@@ -771,6 +776,12 @@ if docker ps -a --format '{{.Names}}' | grep -Fxq "$ORIGIN_CONTAINER"; then
   docker rm -f "$ORIGIN_CONTAINER" >/dev/null
 fi
 
+# Only EC2, ECS, and EKS hand the origin AWS credentials automatically. On a
+# laptop, an on-prem box, or a PaaS host, export AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY (plus AWS_SESSION_TOKEN for temporary credentials) from
+# your own secret store in THIS shell first. The bare -e flags below forward
+# whichever of them are set, without putting a secret value in the command line;
+# any that are unset are simply not passed, so an instance role still wins.
 docker run -d \
   --name "$ORIGIN_CONTAINER" \
   --user 65532:65532 \
@@ -782,6 +793,9 @@ docker run -d \
   -e S3_PREFIX="$S3_PREFIX" \
   -e INDEX_DOCUMENT="$INDEX_DOCUMENT" \
   -e CACHE_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
+  -e AWS_ACCESS_KEY_ID \
+  -e AWS_SECRET_ACCESS_KEY \
+  -e AWS_SESSION_TOKEN \
   %s
 
 docker run -d \
@@ -808,8 +822,13 @@ docker run -d \
 	if err != nil {
 		return "", err
 	}
-	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the enrollment token so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart the qURL Connector container too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running; if the Connector exhausted retries before the origin namespace existed, rerun this block to recreate both containers.", nil
+	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. A host with no instance role — a laptop, an on-prem box, or a PaaS runtime — has nothing to inherit, so export AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN for temporary credentials in that shell first; the block forwards whichever are set to the S3 origin, and no credential value is ever sent through Slack. " + s3WebsitePreflightNotice + " No static AWS key is needed in the generated qURL Connector setup. The block prompts for the enrollment token so the secret does not land in shell history."
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the enrollment-token file.\n\n" + renderS3WebsiteSharedNamespaceNotice(
+		"docker inspect -f '{{.State.Pid}}' qurl-s3-origin-"+args.Slug,
+		"docker inspect -f '{{.State.Pid}}' qurl-connector-"+args.Slug,
+		"re-running this whole block, which removes and recreates both containers",
+		"`docker restart qurl-connector-"+args.Slug+"` recovers only when the origin container was restarted in place; after the origin was recreated it fails with `No such container` and leaves the qURL Connector exited",
+	), nil
 }
 
 func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -880,6 +899,16 @@ services:
       S3_PREFIX: %s
       INDEX_DOCUMENT: %s
       CACHE_CONNECTOR_ID: %s
+      # Only EC2, ECS, and EKS hand the origin AWS credentials automatically.
+      # On a laptop, an on-prem box, or a PaaS host, put AWS_ACCESS_KEY_ID and
+      # AWS_SECRET_ACCESS_KEY (plus AWS_SESSION_TOKEN for temporary
+      # credentials) in this project's .env or your shell, from your own secret
+      # store. Valueless keys forward whichever are set without writing a
+      # secret into this file; any that are unset stay unset, so an instance
+      # role still wins.
+      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:
+      AWS_SESSION_TOKEN:
   %s:
     image: %s
     user: "65532:65532"
@@ -916,8 +945,36 @@ docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), re
 	if err != nil {
 		return "", err
 	}
-	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the enrollment-token file. If you recreate, rename, or Docker auto-restarts the S3 origin service after a crash, recreate or restart the qURL Connector service too because it shares the origin service network namespace. After a Docker daemon restart, verify both services are running; if the Connector exhausted retries before the origin namespace existed, rerun this block to recreate both services.", nil
+	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. A host with no instance role — a laptop, an on-prem box, or a PaaS runtime — has nothing to inherit, so put AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN for temporary credentials in this project's .env file or your shell; Compose forwards whichever are set to the S3 origin, and no credential value is ever sent through Slack. " + s3WebsitePreflightNotice + " It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history."
+	composeFile := "qurl-s3-website-" + args.Slug + ".compose.yaml"
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f " + composeFile + " logs -f " + connectorServiceName + "`; after the qURL Connector connects, delete the enrollment-token file.\n\n" + renderS3WebsiteSharedNamespaceNotice(
+		"docker inspect -f '{{.State.Pid}}' \"$(docker compose -f "+composeFile+" ps -q "+originServiceName+")\"",
+		"docker inspect -f '{{.State.Pid}}' \"$(docker compose -f "+composeFile+" ps -q "+connectorServiceName+")\"",
+		"running `docker compose -f "+composeFile+" up -d --force-recreate`, which recreates both services",
+		"`docker compose -f "+composeFile+" restart "+connectorServiceName+"` recovers only when the origin container was restarted in place; after the origin service was recreated it fails with `No such container` and leaves the qURL Connector exited",
+	), nil
+}
+
+// renderS3WebsiteSharedNamespaceNotice states the one sharp edge of the
+// single-network-namespace topology the Docker and Compose renderers emit.
+// Docker pins `--network container:`/`network_mode: service:` to the origin's
+// namespace at first start, so any later origin restart or recreate moves the
+// origin into a fresh namespace and leaves the qURL Connector holding the dead
+// one. The Connector process never exits, so `--restart` never fires and both
+// containers keep reporting a running state while viewers get a connection
+// reset — which makes "are both containers up?" exactly the wrong check.
+// Comparing the two network-namespace inodes is the check that detects it.
+// Only these two environments are exposed: ECS marks both containers essential
+// so the task is replaced as a unit, and a Kubernetes pod's sandbox namespace
+// is owned by the pod rather than by either container.
+func renderS3WebsiteSharedNamespaceNotice(originPIDCommand, connectorPIDCommand, recovery, restartCaveat string) string {
+	return "The qURL Connector runs inside the S3 origin's network namespace, and Docker pins that namespace at first start. " +
+		"Any origin restart, recreate, crash-restart, or Docker daemon restart moves the origin into a new namespace and strands the qURL Connector in the old one: " +
+		"neither container exits, so the restart policy never fires and both keep reporting a running state while viewers get a connection reset. " +
+		"Container state is not a valid health check here. Compare the two network namespaces on the Docker host instead:\n\n" +
+		"`sudo readlink /proc/$(" + originPIDCommand + ")/ns/net /proc/$(" + connectorPIDCommand + ")/ns/net`\n\n" +
+		"Two identical lines mean the link is live; two different lines mean the qURL Connector is stranded and the qURL is dead. Recover by " + recovery + " — " + restartCaveat + ". " +
+		"ECS and Kubernetes are not exposed to this: ECS marks both containers essential so the whole task is replaced, and a Kubernetes pod's sandbox namespace outlives a container restart."
 }
 
 func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -945,6 +1002,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"Both containers are essential, so a failure of either one restarts the whole task.",
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
 		"The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
+		s3WebsitePreflightNotice,
 		"Configure the qurl-agent-state, qurl-audit, and qurl-config EFS access points with POSIX UID/GID `65532:65532`, matching the qURL Connector image user; use root-directory modes 0700, 0750, and 0755 respectively, and make qurl-proxy.yaml mode 0644.",
 		"The qurl-audit volume preserves rotated audit records while the Connector uses a read-only root filesystem.",
 		"Both generated containers drop every Linux capability.",
@@ -1106,6 +1164,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then deploy the S3 origin and qURL Connector containers in the same pod so `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "` reaches the private S3 origin.",
 		"The pod identity or node role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
+		s3WebsitePreflightNotice,
 		"The Connector uses separate state and audit PVCs. qurl-go rejects group-writable identity state, so do not add pod-level `fsGroup`; the permissions init container enforces owner-only state modes before each start.",
 		"Your admission policy must permit the two root init containers: volume permissions uses CHOWN, DAC_OVERRIDE, and FOWNER, while the one-time bootstrap copy uses CHOWN only. The long-running Connector remains nonroot, read-only-root, seccomp-confined, and capability-free.",
 		"The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.",
