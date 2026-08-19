@@ -661,7 +661,7 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 		}
 		seen++
 		if !recorded[name] {
-			t.Errorf("%s runs on pull_request but records no intended branches filter", name)
+			t.Errorf("%s runs on a pull-request trigger but records no intended branches filter", name)
 		}
 	}
 
@@ -670,7 +670,7 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	// and so an entry for a workflow that no longer runs on pull_request is
 	// caught rather than left to rot.
 	if want := len(recorded); seen != want {
-		t.Errorf("found %d workflows running on pull_request, want %d (one per recorded entry)", seen, want)
+		t.Errorf("found %d workflows running on a pull-request trigger, want %d (one per recorded entry)", seen, want)
 	}
 }
 
