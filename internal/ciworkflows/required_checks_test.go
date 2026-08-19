@@ -200,7 +200,7 @@ func TestRequiredContextJobsCannotConcludeSkipped(t *testing.T) {
 type requiredContextJob struct {
 	workflow string
 	id       string
-	job      githubJob
+	job      *githubJob
 }
 
 // jobDisplayName reports the name a job's check renders under: the job's
@@ -223,7 +223,7 @@ func workflowJobsByDisplayName(t *testing.T) map[string][]requiredContextJob {
 	byDisplayName := map[string][]requiredContextJob{}
 	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
-			display := jobDisplayName(id, &job)
+			display := jobDisplayName(id, job)
 			byDisplayName[display] = append(byDisplayName[display], requiredContextJob{workflow: name, id: id, job: job})
 		}
 	}
@@ -639,7 +639,7 @@ func workflowReportedContexts(t *testing.T) workflowContexts {
 	found := workflowContexts{direct: map[string][]string{}, reusable: map[string][]string{}}
 	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
-			display := jobDisplayName(id, &job)
+			display := jobDisplayName(id, job)
 			if strings.TrimSpace(job.Uses) != "" {
 				found.reusable[display] = append(found.reusable[display], name)
 				continue
