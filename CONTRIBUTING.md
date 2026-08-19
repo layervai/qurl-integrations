@@ -288,6 +288,13 @@ Verify with `gh pr checks <open-PR> --required`, which prints `no required
 checks reported` when a context matches nothing — the cheapest way to catch a
 typo.
 
+Send that set as `checks`, not as the deprecated `contexts`. Every context on
+`main` today is pinned to `app_id` 15368, GitHub Actions; the `contexts` form
+carries no app, so a round-trip through it unpins all of them and leaves each
+satisfiable by any GitHub App with `checks: write`. A `GET` still populates
+both fields, so read `checks` to see the pinning — `contexts` looks identical
+either way.
+
 PRs opened by release-please carry no checks at all, because GitHub does not
 fire workflows for events created by `GITHUB_TOKEN` — the same recursion
 guard `release-please.yml` documents for tag pushes. Those PRs need an admin
