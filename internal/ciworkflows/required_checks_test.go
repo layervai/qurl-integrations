@@ -100,6 +100,114 @@ func TestDocumentedRequiredContextsResolveToWorkflowJobs(t *testing.T) {
 	}
 }
 
+// TestRequiredContextJobsCannotConcludeSkipped generalizes what #1188 fixed in
+// one workflow into a rule over all of them.
+//
+// GitHub scores a skipped required check as SATISFIED. A job producing a
+// required context must therefore be unable to conclude `skipped`, or the
+// context stops gating at exactly the moment its own condition says the work
+// should not run. That is the shape `claude-review` shipped with: its
+// job-level `if:` withheld the review from bot-authored, draft and fork pull
+// requests, and each of those showed a green, empty `claude-review`.
+//
+// The repo states this rule in prose in six places — the four age-check shims'
+// "no outer `if:`" comments, workflow-contract.yml, and now
+// claude-code-review.yml — and enforced it in exactly one narrow place:
+// TestRequiredWorkflowsNeedAllQualityGates, which inspects only jobs *keyed*
+// `required`. claude-review is keyed `claude-review`, so nothing scanned it,
+// and the next required context whose job is not keyed `required` inherits the
+// same blind spot. This closes it for every documented context at once.
+//
+// Two shapes always reach a real conclusion:
+//
+//   - `if: always()`, which runs whatever upstream did; or
+//   - no `if:` and no `needs:`, which has nothing that could skip it.
+//
+// A job with `needs:` and no `if:` inherits `success()` and is skipped whenever
+// an upstream job is skipped or fails, so it does not qualify.
+func TestRequiredContextJobsCannotConcludeSkipped(t *testing.T) {
+	t.Parallel()
+
+	byDisplayName := workflowJobsByDisplayName(t)
+
+	checked := 0
+	for _, wanted := range documentedRequiredContexts(t) {
+		located := byDisplayName[wanted]
+		if len(located) == 0 {
+			// "<caller> / <inner>" reports under the caller job, whose own
+			// `if:` decides whether the reusable workflow runs at all.
+			if caller, _, isPrefixed := strings.Cut(wanted, contextSeparator); isPrefixed {
+				located = byDisplayName[caller]
+			}
+		}
+		// Resolution failures belong to
+		// TestDocumentedRequiredContextsResolveToWorkflowJobs; reporting them
+		// here too would double-count one defect.
+		for i := range located {
+			found := &located[i]
+			checked++
+
+			condition := strings.TrimSpace(found.job.If)
+			switch {
+			case condition == "always()":
+			case condition == "" && found.job.Needs == nil:
+			case condition == "":
+				t.Errorf("required context %q is produced by %s job %q, which has needs but no if: — it inherits success() and reports `skipped` whenever a need is skipped or fails, and GitHub scores a skipped required check as satisfied; use if: always() and move the conditions into the steps",
+					wanted, found.workflow, found.id)
+			default:
+				t.Errorf("required context %q is produced by %s job %q, whose if: %q can withhold the job — a withheld job reports `skipped`, which GitHub scores as a satisfied required check, so the context stops gating exactly when the condition says the work should not run; use if: always() and move the condition into the steps",
+					wanted, found.workflow, found.id, condition)
+			}
+		}
+	}
+
+	// The scan resolving nothing would make every assertion above vacuous —
+	// the same guard workflowReportedContexts carries.
+	if checked == 0 {
+		t.Fatal("no documented required context resolved to a job; this assertion matched nothing and would pass on any workflow tree")
+	}
+}
+
+// requiredContextJob is one job that reports a documented required context,
+// kept with the file and id so a failure names where to go.
+type requiredContextJob struct {
+	workflow string
+	id       string
+	job      githubJob
+}
+
+// workflowJobsByDisplayName indexes every job in .github/workflows under the
+// name its check renders as: the job's `name:` when it sets one, its job id
+// otherwise. It keeps the job itself, which workflowReportedContexts discards.
+func workflowJobsByDisplayName(t *testing.T) map[string][]requiredContextJob {
+	t.Helper()
+
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	byDisplayName := map[string][]requiredContextJob{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		for id, job := range readWorkflow(t, name).Jobs {
+			display := job.Name
+			if display == "" {
+				display = id
+			}
+			byDisplayName[display] = append(byDisplayName[display], requiredContextJob{workflow: name, id: id, job: job})
+		}
+	}
+	if len(byDisplayName) == 0 {
+		t.Fatal("no jobs found in .github/workflows; the scan matched nothing")
+	}
+	return byDisplayName
+}
+
 // TestReusableCallerJobsCoverTheirDocumentedContexts closes the hole that a
 // shared caller name opens. All four age-check workflows key their calling job
 // `age-check`, so any one of them satisfies a lookup for that prefix and three
