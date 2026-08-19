@@ -3,8 +3,9 @@
 # gates in needs, and ships a verifier script that fails on a skipped or red
 # gate. They also record every pull-request workflow's intended `branches:`
 # filter, so one recorded as deliberately narrow fails the moment it reports
-# a required context, and narrowing one that already gates merges means
-# editing that record rather than quietly editing a trigger (#1183, #1185).
+# a required context, and narrowing one that already gates merges takes a
+# matching edit to `requiredWorkflowSpecs`, which only review catches
+# (#1183, #1185).
 #
 # Unfiltered on purpose, in both dimensions. These tests read every file in
 # .github/workflows, so any workflow edit can break them. They used to live
@@ -41,8 +42,9 @@ jobs:
   # requiredWorkflowSpecs entry for it.
   contract:
     # Branch protection requires this check by name, which is safe only
-    # because the job has no `changes` detector and no paths filter — it
-    # reports on every PR rather than skipping the ones it does not apply to.
+    # because the job has no `changes` detector, no paths filter and no
+    # branches filter — it reports on every PR rather than skipping the ones
+    # it does not apply to.
     name: Workflow Contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
