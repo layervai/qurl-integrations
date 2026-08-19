@@ -184,6 +184,12 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
   });
 
+  it('refuses an explicitly empty value rather than defaulting', () => {
+    const { count, errors } = resolveNumericArgs(['--count', '']);
+    expect(count).toBeNaN();
+    expect(errors[0]).toContain('got ""');
+  });
+
   it('refuses the equals form with the value left off', () => {
     // '--count=' and a trailing '--count' are the same dropped value, so they
     // report the same way. Distinct from `--count ''` just above, which is a
