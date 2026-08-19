@@ -117,23 +117,25 @@ func TestRevokeResource_Success(t *testing.T) {
 	}
 }
 
-// TestRevokeResource_SuccessCarriesTeardownNote fences the teardown story:
-// revoke is control-plane only, so a successful reply must tell the admin the
-// containers are still running — including the S3 origin, which for a static
-// site holds live read credentials for the private bucket. Without this the
-// admin has no signal at all that anything survives the revoke.
-func TestRevokeResource_SuccessCarriesTeardownNote(t *testing.T) {
+// TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote fences the
+// teardown story without assuming Docker: the reply must condition Connector
+// cleanup on one having been installed and reserve the S3-origin instruction
+// for the S3 static-site flow.
+func TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote(t *testing.T) {
 	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNoContent, "")
 	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
-	if !strings.Contains(msg, revokeTeardownNote) {
-		t.Errorf("success message = %q, want the teardown note %q", msg, revokeTeardownNote)
-	}
-	// The two containers an install can leave behind. Named explicitly so a
-	// future copy edit can't quietly drop the S3 origin half.
-	for _, want := range []string{"qURL Connector", "S3 origin"} {
+	for _, want := range []string{
+		"customer-hosted workloads",
+		"If you installed a qURL Connector for this resource",
+		"For an S3 static site",
+		"S3 origin workload",
+	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("success message = %q, want it to name %q", msg, want)
+			t.Errorf("success message = %q, want workload-neutral teardown contract %q", msg, want)
 		}
+	}
+	if strings.Contains(msg, "if this was a static site") {
+		t.Errorf("success message = %q, must not claim every static site has an S3 origin", msg)
 	}
 }
 
