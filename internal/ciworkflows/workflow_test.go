@@ -614,12 +614,12 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 // required context there to wait on. Both failures are silent, and while the PR
 // is stacked it is this one that merges. The retarget that follows a base merge
 // does put the PR under main's protection, which is exactly when the other
-// shape appears — the second half, pinned by
-// TestBranchFilteredWorkflowsExcludeEditedActivityType below.
+// shape appears — the second half, pinned below by
+// TestBranchFilteredWorkflowsExcludeEditedActivityType.
 //
-// CONTRIBUTING.md's required-contexts section is the wording to match,
-// and the entries and messages elsewhere in this file defer to this paragraph
-// rather than restating the mechanism (#1194).
+// CONTRIBUTING.md's required-contexts section is the wording to match, and the
+// entries and messages elsewhere in this file defer to this paragraph rather
+// than restating the mechanism (#1194).
 //
 // The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
 // discord.yml (#1179) — and each time a one-line revert would have undone it
