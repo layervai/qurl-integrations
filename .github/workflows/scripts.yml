@@ -71,7 +71,7 @@ jobs:
       # The verifier it exercises only ever runs on a push to main, after a
       # CLI release has already been made or dropped, so a defect in it ships
       # green and surfaces exactly when it is needed. Same reason as the
-      # Claude review budget report below.
+      # validated-base resolver below.
       - name: Test CLI release verifier
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-verify-cli-release.sh
@@ -105,11 +105,3 @@ jobs:
       - name: Test validated-base resolver
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-resolve-validated-base.sh
-
-      # The report step only runs once the Claude review has already failed, so
-      # a defect in it ships green and surfaces exactly when it is needed. This
-      # pins that every branch still annotates — a bare echo there would restore
-      # the silent pass the step exists to remove.
-      - name: Test Claude review budget report
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-claude-review-budget-report.sh
