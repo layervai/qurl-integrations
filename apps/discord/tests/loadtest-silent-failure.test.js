@@ -709,10 +709,24 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // Scoping a call count to one function's source range is how these checks
   // avoid measuring a same-named call somewhere else in the file — see the
   // preflight-ordering test below for the case that first needed it.
+  //
+  // Matched across node shapes for the same reason the reUploadBuffer-params
+  // test below is: these checks exist to fail on a behavior change, not on a
+  // refactor that preserves it. Rewriting `async function runRound()` as
+  // `const runRound = async () => {}` would otherwise return null here and
+  // fail at the not-toBeNull guard — loudly rather than silently, but still
+  // for the wrong reason.
   const findFunction = (name) => {
     let found = null;
     traverse(ast, {
       FunctionDeclaration(p) { if (p.node.id?.name === name) found = p.node; },
+      VariableDeclarator(p) {
+        if (p.node.id.type !== 'Identifier' || p.node.id.name !== name) return;
+        const init = p.node.init;
+        if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+          found = init;
+        }
+      },
     });
     return found;
   };
@@ -862,9 +876,21 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // round-scoped temp file was itself the second-most-obvious way to hand
     // runRound some bytes. This script reads a payload and posts it; it has
     // no business writing anywhere.
-    expect(callsNamed('writeFileSync')).toHaveLength(0);
-    expect(callsNamed('writeFile')).toHaveLength(0);
-    expect(callsNamed('createWriteStream')).toHaveLength(0);
+    //
+    // Every fs primitive that can put bytes on disk, not just the
+    // writeFileSync a straight revert of #1177 would use: appendFileSync and
+    // an openSync/writeSync pair reintroduce the same file while leaving a
+    // narrower ban green, and copyFileSync does it without ever naming the
+    // bytes. openSync is banned outright rather than by mode — this script
+    // opens no descriptors at all, for reading or writing, so there is no
+    // legitimate call to distinguish it from.
+    for (const primitive of [
+      'writeFileSync', 'writeFile', 'createWriteStream',
+      'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
+    ]) {
+      expect({ primitive, calls: callsNamed(primitive).length })
+        .toEqual({ primitive, calls: 0 });
+    }
     // And nothing to unlink, which is the other half of why no cleanup path
     // was added here — an unlink would mean the litter is back and merely
     // swept, leaving a run that is killed mid-window still littering.
@@ -882,6 +908,17 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // re-read), while the generated payload must NOT be — allocating it in
     // the round leaves 'hands back one buffer' green, since that test calls
     // the memoized helper directly and never sees who else allocates.
+    //
+    // The generateTestPayload count pins a call LOCATION, which is more
+    // coupling than the other two need, and it is kept deliberately: it is
+    // the only check that fails when the round stops sourcing its payload
+    // from the memoized helper at all (`: Buffer.from(…)` in place of the
+    // call). The alloc and readFileSync counts are both unmoved by that, and
+    // the runtime tests never see it — they exercise the helper directly, not
+    // its caller. The cost is that hoisting the payload into main() and
+    // passing the buffer in would fail here despite preserving every stated
+    // property; that refactor is deliberate work, and failing loudly on it is
+    // the cheaper side of the trade.
     const runRound = findFunction('runRound');
     expect(runRound).not.toBeNull();
     const inRunRound = (name) => callsNamed(name)
