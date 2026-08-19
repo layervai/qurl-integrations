@@ -1133,6 +1133,42 @@ func pullRequestActivityTypes(t *testing.T, path, trigger string, pullRequest an
 	}
 }
 
+// TestPullRequestActivityTypes keeps the negative tree assertion above from
+// passing only because its detector stopped recognizing an explicit filter.
+// None of today's branch-filtered workflows declares `types:`, so the live
+// scan exercises only the absent case unless these YAML-decoded shapes are
+// pinned independently.
+func TestPullRequestActivityTypes(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       map[string]any
+		want         []string
+		wantDeclared bool
+	}{
+		{name: "absent", config: map[string]any{}},
+		{name: "scalar", config: map[string]any{"types": "edited"}, want: []string{"edited"}, wantDeclared: true},
+		{
+			name:         "sequence",
+			config:       map[string]any{"types": []any{"opened", "edited"}},
+			want:         []string{"opened", "edited"},
+			wantDeclared: true,
+		},
+		{name: "empty sequence", config: map[string]any{"types": []any{}}, wantDeclared: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, declared := pullRequestActivityTypes(t, "example.yml", "pull_request", test.config)
+			if declared != test.wantDeclared {
+				t.Errorf("declared = %t, want %t", declared, test.wantDeclared)
+			}
+			if !slices.Equal(got, test.want) {
+				t.Errorf("types = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 // TestRequiredWorkflowSpecsCoverEveryAggregate keeps requiredWorkflowSpecs
 // honest. The table above is maintained by hand, and nothing else notices when
 // a workflow grows a required aggregate without a matching entry — the new
