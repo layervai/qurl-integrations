@@ -123,81 +123,82 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
-  // Per flag, not one case standing in for three. An indexOf on the bare token
-  // does not match `--count=200` at all, so all three read as ABSENT and ran
-  // their defaults silently — the same fallback this resolver was added to
-  // remove, reached from the other direction. Asserted one flag at a time
-  // because the cheapest way to break this again is to special-case a single
-  // one: a resolver that reads two flags through readArg and the third through
-  // an inline indexOf still passes any assertion that only spells out --count.
+  // The spelling indexOf cannot see. `--count=200` is not the token `--count`,
+  // so it read as the flag being ABSENT and quietly ran the default — the same
+  // silent fallback the tests below refuse for a dropped value, reached by
+  // typing the value the other way round. `--duration=60` is the one that
+  // hurts: a run the operator sized at a minute held the target for the
+  // default two hours and reported nothing wrong.
   it.each([
-    ['--count=200', 'count', 200],
-    ['--duration=60', 'durationS', 60],
-    ['--interval=30', 'intervalS', 30],
-  ])('reads %s in the equals form', (token, key, expected) => {
-    const resolved = resolveNumericArgs([token]);
-    expect(resolved[key]).toBe(expected);
+    ['count', 'count', 200],
+    ['duration', 'durationS', 60],
+    ['interval', 'intervalS', 30],
+  ])('reads --%s=value as well as the space-separated form', (flag, key, value) => {
+    const resolved = resolveNumericArgs([`--${flag}=${value}`]);
+    expect(resolved[key]).toBe(value);
     expect(resolved.errors).toEqual([]);
   });
 
-  it('reads all three in the equals form at once', () => {
-    // --duration is the one that hurts: falling back to 7200 held the target
-    // for two hours after the operator sized the run at a minute.
-    expect(resolveNumericArgs(['--count=200', '--duration=60', '--interval=30']))
-      .toEqual({ count: 200, durationS: 60, intervalS: 30, errors: [] });
+  it('does not let a longer flag match the one it starts with', () => {
+    // '--counter=9' starts with '--count', and would set count if the equals
+    // form were matched on the flag name rather than on the name plus '='.
+    expect(resolveNumericArgs(['--counter=9'])).toEqual({
+      count: 100, durationS: 7200, intervalS: 60, errors: [],
+    });
   });
 
-  it('validates an equals-form value rather than trusting it', () => {
-    // The new spelling is a second way INTO parsePositiveInt, not a way around
-    // it — otherwise `--count=abc` would empty every loop a round runs while
-    // `--count abc` was refused.
-    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
-    expect(resolveNumericArgs(['--count=0']).errors[0]).toContain('greater than zero');
-    expect(resolveNumericArgs(['--count=-5']).errors[0]).toContain('got "-5"');
+  it('takes the space-separated value when a flag is given both ways', () => {
+    // Pinned in both argv orders: reading the equals form must not change what
+    // an argv that already had a usable space-separated value resolved to.
+    expect(resolveNumericArgs(['--count=200', '--count', '7']).count).toBe(7);
+    expect(resolveNumericArgs(['--count', '7', '--count=200']).count).toBe(7);
   });
 
-  it('matches the flag name and not a prefix of it', () => {
-    // `--counter=9` starts with `--count`, so a startsWith on the bare name
-    // would set count from a flag this resolver does not own.
-    expect(resolveNumericArgs(['--counter=9']).count).toBe(100);
+  it('lets the bare token win even when that makes the run fail', () => {
+    // It is the space-form TOKEN that wins, not a usable value. `--count`
+    // followed by `--count=200` consumes the next argv entry as its raw value
+    // and fails the parse on it rather than reaching past it to the 200.
+    // Pinned because readFlagToken's doc comment now states this, and a
+    // reordering of the two lookups would make that comment quietly false
+    // with nothing else here failing.
+    const { count, errors } = resolveNumericArgs(['--count', '--count=200']);
+    expect(count).toBeNaN();
+    expect(errors).toEqual(['--count must be a positive whole number, got "--count=200"']);
   });
 
-  // The case readArg cannot express on its own: `--count` as the final token
-  // has no value after it, and readArg's `argv[idx + 1] || defaultVal`
-  // collapses that onto the same 100 as not passing the flag at all. Silently
-  // running the default is exactly the "did nothing you asked for, reported
-  // success" shape. argValueMissing is what splits it back out.
+  it('splits on the first equals and leaves the rest to the parser', () => {
+    // `--count==200` is a value of '=200', not an empty value and not 200.
+    // Deciding what counts as malformed belongs to parsePositiveInt, so the
+    // token splitter must hand the whole remainder over untouched.
+    expect(resolveNumericArgs(['--count==200']).errors[0]).toContain('got "=200"');
+    expect(resolveNumericArgs(['--count=2=0']).errors[0]).toContain('got "2=0"');
+  });
+
+  // The case getArg cannot express: `--count` as the final token has no value
+  // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
+  // the same 100 as not passing the flag at all. Silently running the default
+  // is exactly the "did nothing you asked for, reported success" shape.
   it('refuses a flag left without a value', () => {
     const { count, errors } = resolveNumericArgs(['--count']);
     expect(count).toBeNaN();
     expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
   });
 
-  it.each([
-    ['an explicitly empty value', ['--count', '']],
-    ['an empty equals form', ['--count=']],
-  ])('refuses %s rather than defaulting', (_label, argv) => {
-    // One message for all three spellings, `--count` trailing included: they
-    // are one mistake — the value was dropped, usually by a wrapper expanding
-    // an unset variable — and the fix for each is the same. Reporting `--count=`
-    // as a badly typed number would describe a value the operator never typed.
-    const { count, errors } = resolveNumericArgs(argv);
+  it('refuses the equals form with the value left off', () => {
+    // '--count=' and a trailing '--count' are the same dropped value, so they
+    // report the same way. Distinct from `--count ''` just above, which is a
+    // value that was passed and is unusable rather than one that went missing.
+    const { count, errors } = resolveNumericArgs(['--count=']);
     expect(count).toBeNaN();
     expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
   });
 
-  it.each([
-    ['the space form is written first', ['--count', '5', '--count=9']],
-    ['the equals form is written first', ['--count=9', '--count', '5']],
-  ])('resolves the space form when both spellings are given and %s', (_label, argv) => {
-    // Not a stance on which spelling should win — it is that argValueMissing
-    // and readArg must pick the SAME occurrence. Both check the space form
-    // first; change the precedence in one alone and this argv reads as
-    // present-with-a-value to the guard and as empty to the reader, which is
-    // the silent default all over again.
-    expect(resolveNumericArgs(argv)).toEqual({
-      count: 5, durationS: 7200, intervalS: 60, errors: [],
-    });
+  it('validates an equals-form value through the same parser', () => {
+    // Otherwise the new spelling would be a way around parsePositiveInt rather
+    // than a second way into it.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--duration=0']).errors[0]).toContain('greater than zero');
+    expect(resolveNumericArgs(['--interval=-1']).errors[0]).toContain('got "-1"');
   });
 
   it('refuses the following flag when the value was forgotten', () => {

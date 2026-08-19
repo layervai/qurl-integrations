@@ -78,12 +78,11 @@ const args = process.argv.slice(2);
  * saying which threshold was actually applied. The summary now echoes the
  * threshold for the same reason.
  *
- * The numeric flags looked like the tolerable case — their values appear in
- * the very next line of output — but they read through this too, via
- * resolveNumericArgs. Fixing only the flag that forced the issue would have
- * left `--file=X` working while `--duration=60` silently ran the default 7200,
- * and a rule that holds for some flags is one an operator cannot rely on for
- * any of them.
+ * Serves --file and --max-fail-rate. The three numeric flags accept both
+ * spellings too, but read through readFlagToken below rather than through
+ * here — they need to tell a flag that was never passed from one whose value
+ * was dropped, and this returns a lone string that cannot carry the
+ * difference. See readFlagToken for how the two ended up side by side.
  *
  * Takes argv as an argument rather than closing over the module's, so the flag
  * SPELLINGS are pinnable by a test — the same seam resolveGuardInputs exists
@@ -107,10 +106,10 @@ const getArg = (name, defaultVal) => readArg(args, name, defaultVal);
  * would otherwise run at the strict default while the operator believed they
  * had set something else.
  *
- * resolveNumericArgs rejects on this too, and gets a second thing from it:
- * asking it FIRST is what lets an undefined coming back from readArg mean the
- * flag was absent rather than present-and-empty. So no value-taking flag
- * tolerates the silent fallback now.
+ * Paired with readArg rather than folded into it because readArg has to keep
+ * returning a usable value for every caller; this is the separate question of
+ * whether the operator actually supplied one. The numeric flags reach the
+ * same refusal without it, through readFlagToken's present/absent split.
  */
 function argValueMissing(argv, name) {
   const flag = `--${name}`;
@@ -178,42 +177,72 @@ function parsePositiveInt(flag, raw) {
   return { value };
 }
 
+/**
+ * One numeric flag's raw value from argv, in either spelling: `--flag value`
+ * or `--flag=value`.
+ *
+ * Three-way on purpose, which is why it returns a pair rather than a string.
+ * `{ present: false }` is the flag not being passed; a present flag with an
+ * undefined `raw` is one whose value was dropped. Collapsing those two is the
+ * silent default resolveNumericArgs exists to refuse, and a lone string
+ * return cannot carry the difference.
+ *
+ * The space form wins if both are somehow given, so what a doubled flag
+ * resolves to is what it already resolved to before the equals form was read
+ * at all. It is the space-form TOKEN that wins, not a usable value: bare
+ * `--count` followed by `--count=200` still consumes the next token as its
+ * raw value and fails the parse on it, rather than reaching past it.
+ *
+ * Scoped to the three numeric flags. `--file` and `--max-fail-rate` read both
+ * spellings as well, but through readArg above — this arrived on main in
+ * #1175 while readArg was arriving here, and the two met in this merge. So no
+ * flag ignores `=` any more; what differs is only what each reader can say
+ * about a MISSING value. readArg collapses absent and dropped onto the
+ * default, which is why --max-fail-rate needs argValueMissing beside it to
+ * refuse the dropped case, while this one carries the distinction in its own
+ * return. Two readers doing one job is redundancy, not a gap; #1174 replaces
+ * both with a single parser and is the right place to collapse them.
+ */
+function readFlagToken(argv, flag) {
+  const token = `--${flag}`;
+  const idx = argv.indexOf(token);
+  if (idx !== -1) return { present: true, raw: argv[idx + 1] };
+  const inline = argv.find((a) => a.startsWith(`${token}=`));
+  if (inline === undefined) return { present: false };
+  const raw = inline.slice(token.length + 1);
+  // `--count=` carries nothing after the equals. That is the same dropped
+  // value as a trailing `--count`, so it takes the same path rather than
+  // reaching parsePositiveInt as '' and being reported as a bad number.
+  return { present: true, raw: raw === '' ? undefined : raw };
+}
+
 // Resolve all three numeric flags from an argv array. Pure and taking argv as
 // a parameter, following resolveGuardInputs above, so the suite covers the
 // wiring and not merely the parser: the constants below are the actual
 // regression surface, and a call site quietly reverted to `parseInt` would
 // leave a green parsePositiveInt behind it.
 //
-// Both spellings, `--count 200` and `--count=200`, through the same readArg
-// every other flag is read by. An indexOf on the bare token does not match
-// `--count=200` at all, so the equals form read as the flag being ABSENT and
-// ran the default with nothing in the log saying so — this resolver's own
-// silent fallback, reached from the other direction. `--duration=60` is the
-// one that hurts: it held the target for the default 7200 seconds after the
-// operator sized the run at a minute.
+// Reads argv directly rather than through getArg, which cannot express the
+// case that matters here. getArg collapses "flag absent" and "flag present
+// with nothing usable after it" onto the same default — so `--count` as the
+// final token, and `--count ""`, both run 100 recipients while the operator
+// believes they asked for something else. Separating those is the whole point
+// of the flag being present.
 //
-// readArg alone cannot express the case that matters here. It collapses "flag
-// absent" and "flag present with nothing usable after it" onto the same
-// default, so `--count` as the final token, `--count ""` and `--count=` would
-// all run 100 recipients while the operator believes they asked for something
-// else. argValueMissing — the predicate --max-fail-rate already rejects on —
-// splits that second case off first, which is what leaves an undefined from
-// readArg meaning the flag was not passed at all. Both helpers read the space
-// form before the equals form, so they always resolve the same occurrence; a
-// precedence change in one alone would put the silent default back.
+// Both spellings, because `--count=200` is not `--count` to indexOf: it read
+// as the flag being ABSENT and ran the default of 100 with nothing said,
+// which is that same silent fallback arrived at from the other direction.
+// `--duration=60` is the one that hurts — it held the target for the default
+// 7200 seconds, so an operator who asked for a minute got two hours.
 function resolveNumericArgs(argv) {
   const errors = [];
   const read = (flag, defaultValue) => {
-    // One message for all three no-value spellings: they are one mistake, and
-    // the fix for each is the same. It also keeps `--count=` from reaching
-    // parsePositiveInt as an empty string, which would report a dropped value
-    // as a badly typed number.
-    if (argValueMissing(argv, flag)) {
+    const { present, raw } = readFlagToken(argv, flag);
+    if (!present) return defaultValue;
+    if (raw === undefined) {
       errors.push(`--${flag} was given no value (omit it to use the default of ${defaultValue})`);
       return NaN;
     }
-    const raw = readArg(argv, flag, undefined);
-    if (raw === undefined) return defaultValue;
     const { value, error } = parsePositiveInt(flag, raw);
     if (error) {
       errors.push(error);
