@@ -475,7 +475,12 @@ type pullRequestBranchSpec struct {
 	// by omission rather than by a filter. The two are kept distinct so this
 	// table pins the spelling each workflow actually uses.
 	branches []string
-	why      string
+	// producesRequiredContext records whether any job here reports a context
+	// main's protection requires. It is what decides whether a narrow filter is
+	// survivable, so it is verified against the tree by
+	// TestPullRequestWorkflowsRecordWhetherTheyGateMerges rather than trusted.
+	producesRequiredContext bool
+	why                     string
 }
 
 // otherPullRequestWorkflows covers every remaining workflow with a
@@ -514,24 +519,29 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		why:  "Already unfiltered. It gates the repo-wide scripts, including the extension lockstep and i18n parity checks, which a stacked PR can break exactly as a main-targeting one can.",
 	},
 	{
-		path: "workflow-contract.yml",
-		why:  "Already unfiltered, and must stay that way — it is what runs this package. A branches filter here would take the whole CI contract off stacked PRs, this test included.",
+		path:                    "workflow-contract.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and must stay that way — it is what runs this package. A branches filter here would take the whole CI contract off stacked PRs, this test included.",
 	},
 	{
-		path: "dependency-age-check-actions.yml",
-		why:  "Already unfiltered, and produces a required context.",
+		path:                    "dependency-age-check-actions.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
 	},
 	{
-		path: "dependency-age-check-docker.yml",
-		why:  "Already unfiltered, and produces a required context.",
+		path:                    "dependency-age-check-docker.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
 	},
 	{
-		path: "dependency-age-check-go.yml",
-		why:  "Already unfiltered, and produces a required context.",
+		path:                    "dependency-age-check-go.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
 	},
 	{
-		path: "dependency-age-check-pip.yml",
-		why:  "Already unfiltered, and produces a required context.",
+		path:                    "dependency-age-check-pip.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
 	},
 	{
 		path: "pr-title.yml",
@@ -546,7 +556,8 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		why:  "Already unfiltered, and narrowed by `paths` rather than by base branch.",
 	},
 	{
-		path: "claude-code-review.yml",
+		path:                    "claude-code-review.yml",
+		producesRequiredContext: true,
 		why: "Already unfiltered, and on `pull_request_target` rather than `pull_request` because it " +
 			"holds ANTHROPIC_API_KEY and so must load its definition from the default branch. Its " +
 			"`claude-review` context became required in #1185, which is what pulled that trigger into " +
@@ -663,6 +674,61 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	}
 }
 
+// TestPullRequestWorkflowsRecordWhetherTheyGateMerges checks each recorded
+// producesRequiredContext against the tree, in both directions.
+//
+// The narrow entries' premise is already enforced below, but the converse was
+// only prose: "produces a required context" was a claim no test read, free to
+// rot. That is not hypothetical here — claude-code-review.yml's entry was
+// written saying it produced none, and #1185 falsified it the same day.
+//
+// The check is exact for a job reporting under its own name and deliberately
+// coarse for one reporting through a reusable call, where a context is
+// "<caller job> / <inner job>" and the caller name is all that is visible
+// here. The four dependency-age-check-*.yml workflows all name their caller
+// `age-check`, so any one of the four `age-check / *` contexts marks all four
+// as gating. It therefore catches a workflow gaining a required context, and a
+// recorded claim that has become wholly false, but not the narrower case of
+// one such workflow losing its own context while its siblings keep theirs.
+// Pinning that needs the inner job names, which live in the called workflow —
+// TestReusableCallerJobsCoverTheirDocumentedContexts is where that belongs.
+func TestPullRequestWorkflowsRecordWhetherTheyGateMerges(t *testing.T) {
+	reported := workflowReportedContexts(t)
+	required := documentedRequiredContexts(t)
+
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		t.Run(strings.TrimSuffix(spec.path, ".yml"), func(t *testing.T) {
+			got := reportsRequiredContext(spec.path, reported, required)
+			if got == spec.producesRequiredContext {
+				return
+			}
+			if got {
+				t.Errorf("%s reports a required context but is recorded as producing none; "+
+					"a narrow filter would leave every stacked PR waiting on it", spec.path)
+				return
+			}
+			t.Errorf("%s is recorded as producing a required context but reports none; "+
+				"its why is now stale", spec.path)
+		})
+	}
+}
+
+// reportsRequiredContext reports whether any job in the workflow produces a
+// context main's protection requires. Reusable-workflow calls report as
+// "<caller job> / <inner job>", so a caller matches on the prefix.
+func reportsRequiredContext(path string, reported workflowContexts, required []string) bool {
+	for _, context := range required {
+		if slices.Contains(reported.direct[context], path) {
+			return true
+		}
+		if caller, _, ok := strings.Cut(context, contextSeparator); ok && slices.Contains(reported.reusable[caller], path) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestNarrowPullRequestWorkflowsProduceNoRequiredContext enforces the premise
 // the deliberately-narrow entries rest on, rather than leaving it to a comment
 // nobody rereads.
@@ -764,11 +830,13 @@ func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any
 	}
 
 	// `branches-ignore` is the one spelling these tables cannot express, and it
-	// fails open rather than loudly: GitHub rejects it alongside `branches`, so
-	// a workflow using it declares no `branches` key, which reads below as full
-	// reach — while `branches-ignore: ["justin/**"]` would take the workflow off
-	// exactly the stacked PRs this suite exists to keep it on. Refuse it here
-	// instead, so adding one forces the decision into the table.
+	// fails open rather than loudly: a workflow using it declares no `branches`
+	// key, which reads below as full reach — while `branches-ignore:
+	// ["justin/**"]` would take the workflow off exactly the stacked PRs this
+	// suite exists to keep it on. Refuse it here instead, so adding one forces
+	// the decision into the table. Checked before `branches` and independently
+	// of it: GitHub rejects the two together, but this should not be the thing
+	// that assumes so.
 	if _, ok := config["branches-ignore"]; ok {
 		t.Fatalf("%s %s declares branches-ignore, which these tables cannot record; "+
 			"extend pullRequestBranchSpec to express it before using it", path, trigger)
