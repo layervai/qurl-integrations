@@ -71,13 +71,19 @@ const args = process.argv.slice(2);
  * Read `--name value` or `--name=value` from an argv array.
  *
  * Both spellings, because only the space form used to be matched and the
- * equals form fell through to the default SILENTLY. That is tolerable for
- * --count, whose effect is visible in the very next line of output, and much
- * less so for --max-fail-rate, which decides the exit code: an operator who
- * typed `--max-fail-rate=100` to waive the check would have run at the strict
+ * equals form fell through to the default SILENTLY. --max-fail-rate is what
+ * forced it, since that flag decides the exit code: an operator who typed
+ * `--max-fail-rate=100` to waive the check would have run at the strict
  * default and been failed by it two hours later, with nothing in the log
  * saying which threshold was actually applied. The summary now echoes the
  * threshold for the same reason.
+ *
+ * The numeric flags looked like the tolerable case — their values appear in
+ * the very next line of output — but they read through this too, via
+ * resolveNumericArgs. Fixing only the flag that forced the issue would have
+ * left `--file=X` working while `--duration=60` silently ran the default 7200,
+ * and a rule that holds for some flags is one an operator cannot rely on for
+ * any of them.
  *
  * Takes argv as an argument rather than closing over the module's, so the flag
  * SPELLINGS are pinnable by a test — the same seam resolveGuardInputs exists
@@ -96,11 +102,15 @@ const getArg = (name, defaultVal) => readArg(args, name, defaultVal);
 /**
  * True when `--name` is present but carries no value — as the final token, or
  * as `--name=`. readArg hands back the default for both, which is the same
- * silent fallback the equals form used to have, and it is only tolerable for a
- * flag whose value shows up in the next line of output. A flag that decides
- * the exit code has to reject it: `--max-fail-rate` with the value fat-fingered
- * off would otherwise run at the strict default while the operator believed
- * they had set something else.
+ * silent fallback the equals form used to have. A flag that decides the exit
+ * code has to reject it: `--max-fail-rate` with the value fat-fingered off
+ * would otherwise run at the strict default while the operator believed they
+ * had set something else.
+ *
+ * resolveNumericArgs rejects on this too, and gets a second thing from it:
+ * asking it FIRST is what lets an undefined coming back from readArg mean the
+ * flag was absent rather than present-and-empty. So no value-taking flag
+ * tolerates the silent fallback now.
  */
 function argValueMissing(argv, name) {
   const flag = `--${name}`;
