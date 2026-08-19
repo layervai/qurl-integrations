@@ -58,6 +58,11 @@ type requiredWorkflowSpec struct {
 	// same gates as one targeting main. It is read per spec rather than
 	// assumed, so one that later earns a narrower filter records that decision
 	// here; see TestAppWorkflowsRunOnStackedPRs.
+	//
+	// Recording a narrower filter here does not by itself authorize one. Every
+	// spec's requiredName is a documented required context, so
+	// TestNarrowPullRequestWorkflowsProduceNoRequiredContext rejects any value
+	// short of "**" until that context stops gating merges.
 	pullRequestBranches []string
 }
 
@@ -597,6 +602,12 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 // value off each spec rather than asserting "**" across the board, so that a
 // workflow which later earns a narrower filter records that decision here
 // instead of being quietly blessed by a blanket assertion.
+//
+// That makes this test alone insufficient, since a commit narrowing the
+// workflow can edit the spec beside it in the same breath and satisfy the
+// comparison. TestNarrowPullRequestWorkflowsProduceNoRequiredContext is the
+// half that cannot be edited into agreement: it weighs the recorded filter
+// against the contexts CONTRIBUTING.md documents as required.
 func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 	for i := range requiredWorkflowSpecs {
 		spec := &requiredWorkflowSpecs[i]
@@ -747,13 +758,28 @@ func reportsRequiredContext(path string, reported workflowContexts, required []s
 // leaves the PR sitting on "Expected — Waiting for status to be reported"
 // forever, the same silent shape as the 2026-08-14 typo. This turns that
 // premise into something CI checks.
+//
+// It reads both tables, because the premise is about the pairing of a narrow
+// filter with a required context and neither table has a monopoly on either
+// half. Restricting it to otherPullRequestWorkflows left the nine app
+// workflows resting on TestAppWorkflowsRunOnStackedPRs alone, which compares
+// each workflow against the intent recorded beside it — and a commit is free
+// to edit both. Narrowing slack.yml to `[main]` and editing its spec's
+// pullRequestBranches to match passed the whole package clean, with
+// `slack / required` still listed as required in CONTRIBUTING.md. Widened,
+// that second edit is what trips this test: the narrowing is now judged
+// against the documented gate rather than against its own paperwork.
 func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	narrow := map[string]bool{}
 	for i := range otherPullRequestWorkflows {
 		spec := &otherPullRequestWorkflows[i]
-		// A nil filter reaches every base branch already, and one naming "**"
-		// is not narrow. Anything else keeps the workflow off stacked PRs.
-		if spec.branches != nil && !slices.Contains(spec.branches, "**") {
+		if isNarrowBranchFilter(spec.branches) {
+			narrow[spec.path] = true
+		}
+	}
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		if isNarrowBranchFilter(spec.pullRequestBranches) {
 			narrow[spec.path] = true
 		}
 	}
@@ -781,6 +807,20 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 			}
 		}
 	}
+}
+
+// isNarrowBranchFilter reports whether a recorded `branches:` filter keeps a
+// workflow off a PR stacked on a feature branch. A nil filter is absent from
+// the workflow and so reaches every base branch already, and one naming "**"
+// reaches them explicitly; anything else names the bases it runs on and skips
+// the rest.
+//
+// The two tables spell an absent filter differently — pullRequestBranchSpec
+// leaves branches nil on purpose, while an empty pullRequestBranches means an
+// app workflow's intent was never recorded, which TestAppWorkflowsRunOnStackedPRs
+// fails on by name. Neither is narrow, so both are safe to read through here.
+func isNarrowBranchFilter(branches []string) bool {
+	return branches != nil && !slices.Contains(branches, "**")
 }
 
 // assertPullRequestBranches compares a workflow's declared pull-request
