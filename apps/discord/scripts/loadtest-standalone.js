@@ -429,8 +429,8 @@ async function runRound(roundNum) {
     //   - no `resource_id` check, so a 200 carrying no id fed `undefined`
     //     into mintLinks and every batch threw `Invalid resource ID format:
     //     undefined` — reporting 100% MINT failure for what was an upload
-    //     fault. That is the same misdirected blame that #1168 addresses in
-    //     the mint call just below.
+    //     fault. That is the same misdirected blame #1168 removed from the
+    //     mint call just below.
     //
     // reUploadBuffer despite the name: the "re-" only distinguishes it from
     // the sibling that first downloads from Discord CDN, and registering an

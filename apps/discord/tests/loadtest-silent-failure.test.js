@@ -1,10 +1,11 @@
 /**
- * Tests for the CLI-argument handling in scripts/loadtest-standalone.js.
+ * Tests for the two ways scripts/loadtest-standalone.js could run its whole
+ * unattended window and produce nothing while looking like it worked.
  *
- * Both halves guard the same failure mode, which is the one this script is
- * worst at showing: doing nothing, successfully. A run that mints zero links
- * and exits 0 looks from the outside exactly like a run that worked, and the
- * two-hour window it wasted is only noticed afterwards.
+ * That failure mode is the one this script is worst at showing. A run that
+ * mints zero links and exits 0 is outwardly indistinguishable from a run that
+ * succeeded, and the two hours it wasted are only noticed afterwards — which
+ * is what groups these two otherwise unrelated halves into one file.
  *
  *   - Numeric flags. `--count abc` and `--count -5` both make
  *     `for (let i = 0; i < COUNT; i += 10)` skip entirely, so the script
@@ -19,7 +20,10 @@
  * `require.main === module`, and scripts/ sits outside collectCoverageFrom,
  * so neither jest nor the coverage gate can see it. eslint extends only
  * eslint:recommended, so it cannot see it either. Parsing the source is what
- * is left — same approach as tests/ddb-reserved-words-static.test.js.
+ * is left — same approach as tests/ddb-reserved-words-static.test.js, and the
+ * sibling of the mintLinks call-shape check #1168 added to
+ * tests/loadtest-target-guard.test.js. The two stay in separate files because
+ * that one's scaffolding is scoped inside its own describe.
  */
 
 const fs = require('fs');
