@@ -585,8 +585,14 @@ function unknownArgError(token, previous) {
   // generic "no positionals here" into the actual correction. Echoes the value
   // and offers the same recovery as readBooleanFlag's `=` refusal, because
   // from the operator's seat the two are one mistake spelled two ways.
+  // Matched against the BARE token, not just the flag it names. After
+  // `--location=x` the inline value is already refused by its own reader, and
+  // saying "after --location" there names a token the operator did not type
+  // while repeating a message they have already been given. The habit this
+  // clause diagnoses is `--flag value`, which is the bare spelling by
+  // definition; anything else falls through to the plain positional message.
   const before = previous === undefined ? null : tokenSpec(previous);
-  if (before !== null && !before.takesValue) {
+  if (before !== null && !before.takesValue && previous === `--${before.name}`) {
     return `unexpected argument ${JSON.stringify(token)} after --${before.name} — --${before.name} takes no value; pass it on its own to turn it on, or omit it to leave it off`;
   }
   return `unexpected argument ${JSON.stringify(token)} — this script takes no positional arguments; accepted flags are ${ACCEPTED_FLAGS}`;

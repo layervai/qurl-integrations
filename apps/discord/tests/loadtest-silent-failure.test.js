@@ -661,6 +661,13 @@ describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
       expect.stringContaining('this script takes no positional arguments'),
     ]);
     expect(errorsFor(['--file=/tmp/x', 'stray'])[0]).not.toContain('--file takes no value');
+    // And only after the BARE token. `--location=x` is already refused by
+    // readBooleanFlag, so attributing `stray` to it would name a token the
+    // operator did not type and repeat a message they have already been given.
+    expect(errorsFor(['--location=x', 'stray'])).toEqual([
+      expect.stringContaining('this script takes no positional arguments'),
+    ]);
+    expect(errorsFor(['--location=x', 'stray'])[0]).not.toContain('after --location');
   });
 
   it('suggests the flag a near miss was meant to be', () => {
