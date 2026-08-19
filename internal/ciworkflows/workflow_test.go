@@ -164,8 +164,9 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 }
 
 type githubWorkflow struct {
-	On   any                  `yaml:"on"`
-	Jobs map[string]githubJob `yaml:"jobs"`
+	On          any                  `yaml:"on"`
+	Permissions any                  `yaml:"permissions"`
+	Jobs        map[string]githubJob `yaml:"jobs"`
 }
 
 type githubJob struct {
@@ -187,6 +188,11 @@ type step struct {
 	Run   string `yaml:"run"`
 	Shell string `yaml:"shell"`
 	Uses  string `yaml:"uses"`
+	// With carries an action step's inputs. Values are strings, bools and
+	// numbers, so it is read as `any` per key and asserted only where an input
+	// is load-bearing — a checkout's ref and credential persistence, a review's
+	// tool deny-list.
+	With map[string]any `yaml:"with"`
 	// ContinueOnError accepts a bool or an expression, so it is read as `any`
 	// and asserted absent rather than compared: either spelling would turn a
 	// failing guard into a green one.
@@ -777,7 +783,7 @@ func requiredVerifierScript(t *testing.T, spec *requiredWorkflowSpec, workflow g
 func runVerifierScriptWithEnv(t *testing.T, script string, env map[string]string) (string, error) {
 	t.Helper()
 
-	scriptPath := filepath.Join(t.TempDir(), "verify-required-ci-result.sh")
+	scriptPath := filepath.Join(t.TempDir(), "workflow-step.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		t.Fatalf("write verifier script: %v", err)
 	}

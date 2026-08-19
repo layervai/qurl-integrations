@@ -167,12 +167,28 @@ required on 2026-08-19, after #1173 merged three minutes before its review
 posted. That review is the long pole — roughly four minutes against a minute or
 less for every other context — so the merge box turns green while it is still
 running, and a review landing afterwards lands on a closed PR nobody rereads.
-The job's own `if:` withholds the review from bot-authored, draft, and fork
-PRs, which report `skipped`, and GitHub scores a skipped required check as
-satisfied. This context therefore gates the *timing* of a review that runs, not
-the *existence* of one: returning a PR to draft satisfies it empty. Release PRs
-are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run at
-all, so it already reports none of these contexts and merges by admin override.
+That job runs `if: always()` and decides inside itself, for the same reason the
+per-app aggregates above do: a job-level `if:` that withholds the review
+reports `skipped`, GitHub scores a skipped required check as satisfied, and
+withholding a review would then also satisfy the context meant to gate on it.
+Its first step classifies the PR and its last step refuses to finish green
+unless the run either published a review or declared why it withheld one, so a
+pass with nothing behind it fails instead of going quietly green.
+
+Bot-authored and fork PRs cannot receive this secrets-bearing review and still
+pass without one. That exemption is deliberate, and it is now annotated on the
+check and written to the run summary rather than left as an unexplained skip —
+a green `claude-review` on one of those PRs means the changes are unreviewed by
+Claude, and says so. Drafts are exempt too but cannot merge on it: GitHub
+blocks merging a draft, and marking one ready retriggers the workflow. Release
+PRs are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run
+at all, so it already reports none of these contexts and merges by admin
+override.
+
+`internal/ciworkflows` pins that shape and executes both of those steps
+directly. It has to: the workflow runs on `pull_request_target`, so a PR
+editing it is checked by the default branch's copy of the file, and its own
+green `claude-review` is never evidence about the edit.
 
 The full required set is the block below — those nine aggregates plus
 `Workflow Contract`, `Validate GitHub Actions pins`, `claude-review`, and the

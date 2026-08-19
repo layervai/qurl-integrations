@@ -18,13 +18,26 @@ concurrency:
 
 jobs:
   claude-review:
-    # Bot-authored and fork PRs cannot receive this secrets-bearing terminal
-    # review. Drafts wait until the author declares the candidate ready.
-    if: |
-      github.event.pull_request.user.type != 'Bot' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.base.repo.full_name == github.repository
+    # This job must reach a conclusion on every pull request, including the ones
+    # it deliberately does not review. `claude-review` is a required context and
+    # GitHub scores a *skipped* required check as satisfied, so the bot, draft
+    # and fork conditions cannot live here: a job-level `if:` that withholds the
+    # review also silently satisfies the gate it was supposed to feed, and the
+    # check then gates the timing of a review that runs rather than the
+    # existence of one. That is the same trap the `<app> / required` aggregates
+    # avoid by pairing `if: always()` with their conditions moved inside; see
+    # the note at internal/ciworkflows/workflow_test.go's `if: always()`
+    # assertion.
+    #
+    # Those conditions are now the eligibility step below, and the conclusion
+    # gate at the end of this job refuses to finish green on any path that
+    # neither published a review nor declared why one was withheld.
+    #
+    # Running unconditionally does not widen what this job trusts. On the
+    # withheld paths nothing is checked out and no secret-bearing step runs:
+    # the eligibility step reads fixed `github.event` scalars through `env:` and
+    # compares them in bash, and every later step already chains off its outcome.
+    if: always()
     runs-on: ubuntu-latest
     # A kill at this cap surfaces as a `cancelled` check rather than an explicit
     # timeout, so a lost review reads like an infra blip or a passing one. On
@@ -60,8 +73,66 @@ jobs:
       issues: read
 
     steps:
+      - name: Resolve Claude review eligibility
+        id: eligibility
+        # The conditions this job used to carry as its own `if:`. As a step they
+        # produce an auditable verdict instead of an invisible skip, and they
+        # can be executed directly by internal/ciworkflows rather than only
+        # read.
+        #
+        # Every value arrives through `env:`, never interpolated into the
+        # script: `head.repo.full_name` is attacker-chosen on a fork PR. The
+        # outputs are drawn from a fixed vocabulary for the same reason —
+        # nothing read from the event reaches GITHUB_OUTPUT.
+        env:
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Fail closed on a payload this step cannot classify. An exemption is
+          # a pass, so an unreadable pull request must not become one — and it
+          # must not become a review either, since the steps below would then
+          # act on fields that are not there.
+          if [[ "${IS_DRAFT}" != "true" && "${IS_DRAFT}" != "false" ]] ||
+             [[ -z "${AUTHOR_TYPE}" || -z "${HEAD_REPO}" || -z "${BASE_REPO}" || -z "${REPO}" ]]; then
+            echo "::error title=Claude review eligibility is undecidable::This run could not read the pull request author, draft state, or repositories, so it can neither review this pull request nor declare it exempt."
+            exit 1
+          fi
+
+          # Ordered most-fundamental first, so the reason reported for a draft
+          # fork PR from a bot is the one that would outlast the others.
+          exemption=""
+          if [[ "${AUTHOR_TYPE}" == "Bot" ]]; then
+            exemption="bot"
+            detail="A bot-authored pull request cannot receive this secrets-bearing review."
+          elif [[ "${HEAD_REPO}" != "${REPO}" || "${BASE_REPO}" != "${REPO}" ]]; then
+            exemption="fork"
+            detail="A pull request that is not wholly within this repository cannot receive this secrets-bearing review."
+          elif [[ "${IS_DRAFT}" == "true" ]]; then
+            exemption="draft"
+            detail="The terminal review is spent when the author marks the candidate ready for review, which retriggers this workflow."
+          fi
+
+          if [[ -n "${exemption}" ]]; then
+            echo "Claude review withheld (${exemption}): ${detail}"
+            {
+              echo "eligible=false"
+              echo "exemption=${exemption}"
+              echo "exemption_detail=${detail}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "Claude review is required for this pull request."
+          echo "eligible=true" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout trusted default branch history
         id: checkout
+        if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Agent mode reads the PR only through GitHub MCP. Keep PR-authored
@@ -268,6 +339,7 @@ jobs:
           fi
 
       - name: Publish and verify terminal Claude review
+        id: publish_review
         if: success() && steps.claude-review.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -451,3 +523,53 @@ jobs:
             echo "::error::Claude review did not publish the run-specific pull request comment."
             exit 1
           fi
+
+      - name: Require a completed review or a declared exemption
+        # The conclusion gate, and the reason a skip can no longer read as a
+        # pass. `claude-review` is a required context, so every green here is
+        # merge authority: this step spends it only on a review this run
+        # published, or on an exemption this run declared out loud. Any other
+        # way of arriving green — a step whose `if:` stops matching after a
+        # later edit, a publish step that never ran — is an empty pass, and
+        # empty passes fail here instead.
+        #
+        # `if: success()` confines this to the otherwise-green path, which is
+        # the only path it has anything to add. A review that failed has already
+        # reddened the job and been annotated by the step above; a second red
+        # step there would bury that annotation. A cancelled run — which
+        # `concurrency` produces on every superseded push — is likewise not this
+        # step's to report, for the reason recorded on the job cap above.
+        #
+        # It stays last on purpose: `success()` and the outcomes it reads only
+        # cover steps that precede it.
+        if: success()
+        env:
+          ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
+          EXEMPTION: ${{ steps.eligibility.outputs.exemption }}
+          EXEMPTION_DETAIL: ${{ steps.eligibility.outputs.exemption_detail }}
+          PUBLISHED: ${{ steps.publish_review.outcome }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${ELIGIBLE}" == "true" && "${PUBLISHED}" == "success" ]]; then
+            echo "Claude reviewed this pull request and published the review."
+            exit 0
+          fi
+
+          # Both halves are required: `eligible=false` without a reason is a
+          # defect in the step above, not an exemption, and passing on it would
+          # reopen the hole from the other side.
+          if [[ "${ELIGIBLE}" == "false" && -n "${EXEMPTION}" && -n "${EXEMPTION_DETAIL}" ]]; then
+            echo "::notice title=Claude review intentionally withheld (${EXEMPTION})::${EXEMPTION_DETAIL} This check passes without a review; nothing in this run read the pull request's changes."
+            {
+              echo "### Claude review withheld: ${EXEMPTION}"
+              echo
+              echo "${EXEMPTION_DETAIL}"
+              echo
+              echo "This required check passed **without a review**. Treat the changes as unreviewed by Claude."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          echo "::error title=Claude review check has no basis::This job finished without publishing a review and without declaring an exemption, so there is nothing for this required check to attest. Do not treat it as a completed review; inspect the step outcomes in this run."
+          exit 1
