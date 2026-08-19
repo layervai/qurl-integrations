@@ -219,7 +219,7 @@ func TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm(t *testing.T) {
 		t.Fatalf("reconnect_retrying emitted %d time(s) across one storm, want exactly 1\nlog:\n%s", got, buf.String())
 	}
 	notice := buf.String()
-	for _, want := range []string{"lost the tunnel connection", "consumers will time out", "gives_up_after_seconds"} {
+	for _, want := range []string{"keeps dropping", "consumers will time out", "gives_up_after_seconds", "retrying_seconds"} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("operator notice is missing %q; it must say what happened, its consequence, and that the wait is bounded\nlog:\n%s", want, notice)
 		}
@@ -229,6 +229,14 @@ func TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm(t *testing.T) {
 	for _, forbidden := range []string{"previous session", "already online", "network fault", "platform released"} {
 		if strings.Contains(notice, forbidden) {
 			t.Errorf("operator notice asserts the unverifiable cause %q; the transport errors underneath carry no server reason\nlog:\n%s", forbidden, notice)
+		}
+	}
+	// Nor may it claim the tunnel never came back: a flap inside the settled
+	// gap is counted as one storm, so "cannot re-establish" would be false
+	// for that shape. See TestWatchdogFlapInsideTheGapIsNotCalledUnrecovered.
+	for _, overclaim := range []string{"cannot re-establish", "could not re-establish", "until it recovers"} {
+		if strings.Contains(notice, overclaim) {
+			t.Errorf("operator notice claims non-recovery (%q), which is false for a tunnel flapping inside the settled gap\nlog:\n%s", overclaim, notice)
 		}
 	}
 	// A single dial is an ordinary reconnect and must stay silent.
@@ -270,5 +278,49 @@ func TestWatchdogWindowOutlivesATunnelServerReplacement(t *testing.T) {
 	if reconnectSettledGap >= reconnectStallWindow {
 		t.Errorf("reconnectSettledGap = %s must stay below reconnectStallWindow = %s, or no storm can ever reach the window",
 			reconnectSettledGap, reconnectStallWindow)
+	}
+}
+
+// TestWatchdogFlapInsideTheGapIsNotCalledUnrecovered covers the shape the
+// watchdog cannot distinguish: a tunnel that re-establishes, serves briefly
+// and drops again on an interval SHORTER than the settled gap. Every gap is
+// short, so the dials accumulate as one storm and the cycle is eventually
+// restarted — which is the right recovery for a tunnel that cannot hold 45s.
+//
+// What must NOT happen is the operator being told the tunnel never came back,
+// because in this shape it did, repeatedly. This pins the wording against
+// that specific falsehood; the notice may only say it is not staying up.
+func TestWatchdogFlapInsideTheGapIsNotCalledUnrecovered(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	var buf bytes.Buffer
+	r, rec := newWatchdogRefresher(clk.now, slog.New(slog.NewJSONHandler(&buf, nil)), 90*time.Second, 45*time.Second)
+	common := handedOffCommon()
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	// Reconnects every 35s: below the 45s settled gap, so never "settled",
+	// but the tunnel really is serving between dials.
+	var last error
+	for i := 0; i < 6; i++ {
+		clk.advance(35 * time.Second)
+		if last = r.refresh(context.Background(), common, "open"); last != nil {
+			break
+		}
+	}
+	if !errors.Is(last, errReconnectStalled) {
+		t.Fatalf("a sub-gap flap never reached the stall window (err = %v); it must still be bounded", last)
+	}
+	if len(rec.errs) != 1 {
+		t.Fatalf("requestRestart called %d time(s), want 1", len(rec.errs))
+	}
+	notice := buf.String()
+	if !strings.Contains(notice, "keeps dropping") {
+		t.Errorf("flap notice should say the tunnel is not staying up\nlog:\n%s", notice)
+	}
+	for _, overclaim := range []string{"cannot re-establish", "could not re-establish", "until it recovers"} {
+		if strings.Contains(notice, overclaim) {
+			t.Errorf("flap notice claims non-recovery (%q) but the tunnel re-established between every dial\nlog:\n%s", overclaim, notice)
+		}
 	}
 }

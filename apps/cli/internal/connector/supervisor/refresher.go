@@ -69,6 +69,16 @@ const (
 	// long means one of the redials succeeded and the tunnel served again.
 	// It must stay above the reconnect loop's 20s backoff ceiling, or a
 	// still-failing storm would look settled between two attempts.
+	//
+	// The inference is one-directional, and the wording of both operator
+	// lines depends on that: a long gap proves the tunnel served, but a
+	// short one does NOT prove it did not. A connection that re-establishes,
+	// serves briefly and drops again inside this window is counted as one
+	// unbroken storm, which is why neither line claims the tunnel failed to
+	// come back — only that it is not staying up. Treating a sub-gap flap as
+	// a storm is deliberate: a tunnel that cannot hold 45s is not serving
+	// usefully, and the recovery (end the cycle, re-knock, take a fresh dial
+	// target) is the right answer for it too.
 	reconnectSettledGap = 45 * time.Second
 
 	// reconnectStallNoticeAfter is how many dials into a storm the operator
@@ -152,7 +162,7 @@ func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time
 
 	elapsed := t.Sub(r.stormStartedAt)
 	if elapsed >= r.stall() {
-		r.log().WarnContext(ctx, "connector: the tunnel was admitted and then could not re-establish; restarting the connection cycle",
+		r.log().WarnContext(ctx, "connector: the tunnel connection kept dropping for too long; restarting the connection cycle",
 			"event", "reconnect_stalled",
 			"resource_id", r.resourceID,
 			"stalled_seconds", elapsed.Seconds(),
@@ -173,11 +183,16 @@ func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time
 		// Deliberately states the observation and NOT a cause. The dial
 		// failures underneath are multiplexer transport errors with no
 		// server-supplied reason, so naming one — a held previous session, a
-		// network fault — would be a guess printed as fact.
-		r.log().WarnContext(ctx, "connector: lost the tunnel connection after it was admitted and cannot re-establish it yet; still retrying, and consumers will time out until it recovers",
+		// network fault — would be a guess printed as fact. It also avoids
+		// claiming the tunnel never came back: see reconnectSettledGap, a
+		// flap inside the gap reads as one storm.
+		r.log().WarnContext(ctx, "connector: the tunnel connection keeps dropping and is not staying up; still retrying, and consumers will time out while it is down",
 			"event", "reconnect_retrying",
 			"resource_id", r.resourceID,
-			"stalled_seconds", elapsed.Seconds(),
+			// Not stalled_seconds: at this point it is still retrying, and
+			// the tunnel may even be coming back between dials. The stall
+			// line below is the one that has stalled.
+			"retrying_seconds", elapsed.Seconds(),
 			"dial_attempts", r.stormDials,
 			"gives_up_after_seconds", r.stall().Seconds())
 	}

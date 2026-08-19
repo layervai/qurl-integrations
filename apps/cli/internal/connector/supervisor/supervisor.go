@@ -502,17 +502,19 @@ func (s *Supervisor) forceLoginFailExit(ctx context.Context, cycleCommon *v1.Cli
 // them. Increment rule: a cycle that knocked cleanly and still could not hold
 // a tunnel counts against the SAME budget, so every "the knock works but the
 // tunnel does not" shape reaches the orchestrator-restart recovery instead of
-// looping forever. Three shapes qualify, most-specific first:
+// looping forever. Two shapes qualify, most-specific first:
 //
 //   - a token-rejected Login — the server refused the knock token;
-//   - a duplicate-session refusal — this Connector's previous session is
-//     still registered, so the new Login cannot take over yet;
-//   - a stalled post-admission reconnect — the tunnel was admitted, lost its
-//     connection, and the watchdog took the cycle back.
+//   - a stalled post-admission reconnect — the tunnel was admitted, kept
+//     dropping, and the watchdog took the cycle back.
 //
-// Before this reconciliation covered the last two, either one reset the budget
-// on every cycle, so a Connector that could knock but never serve retried
-// forever without ever reaching the budget exit or its customer message.
+// Deliberately only those two. A duplicate-session refusal would be a third,
+// but the tunnel server can only raise one when the Login carries a ClientID
+// and this CLI never sets one, so classifying it here would be dead code.
+//
+// Before this reconciliation covered the stall, it reset the budget on every
+// cycle, so a Connector that could knock but never serve retried forever
+// without ever reaching the budget exit or its customer message.
 func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutcome) error {
 	if !outcome.tokenStamped {
 		return nil
@@ -525,8 +527,8 @@ func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutc
 			"a token-rejected login")
 	case errors.Is(outcome.runErr, errReconnectStalled):
 		return s.recordUnhealthyLogin(ctx, outcome.runErr,
-			"reconnect_stalled",
-			"connector: the tunnel was admitted and then could not re-establish; re-knocking on the next cycle",
+			"reconnect_stall_counted",
+			"connector: the tunnel connection kept dropping; re-knocking on the next cycle",
 			"a stalled reconnect")
 	}
 	s.consecutiveUnhealthyKnocks = 0

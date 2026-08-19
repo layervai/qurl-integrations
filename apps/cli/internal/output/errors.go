@@ -144,7 +144,6 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 }
 
 // apiErrorLines is the RFC 7807 anatomy: headline with status, detail
-
 // paragraph, sorted invalid fields, one hint, request id.
 func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 	headline := apiErr.Title
