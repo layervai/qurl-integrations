@@ -52,6 +52,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-release-please-sync.sh
 
+      # The verifier it exercises only ever runs on a push to main, after a
+      # CLI release has already been made or dropped, so a defect in it ships
+      # green and surfaces exactly when it is needed. Same reason as the
+      # Claude review budget report below.
+      - name: Test CLI release verifier
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-verify-cli-release.sh
+
       - name: Check Chrome/Edge extension lockstep
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-extension-lockstep.sh

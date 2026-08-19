@@ -81,6 +81,13 @@ repos:
         pass_filenames: false
         files: '^scripts/(resolve|test-resolve)-validated-base\.sh$'
 
+      - id: cli-release-verifier
+        name: CLI release verifier tests
+        entry: scripts/test-verify-cli-release.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(verify-cli-release|test-verify-cli-release)\.sh$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w
