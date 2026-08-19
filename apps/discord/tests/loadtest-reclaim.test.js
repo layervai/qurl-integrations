@@ -35,6 +35,7 @@ const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
+  preflightLedger,
   readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
   reclaimOnce, resetReclaimStateForTests, resolveLedgerArg, resolveReclaimArg,
 } = require('../scripts/loadtest-standalone');
@@ -44,6 +45,22 @@ let created = [];
 function tempLedger(contents) {
   const p = path.join(os.tmpdir(), `loadtest-ledger-test-${process.pid}-${created.length}.jsonl`);
   fs.writeFileSync(p, contents);
+  created.push(p);
+  return p;
+}
+
+// The same place, but absent when handed over — matching the `absent` naming
+// the readLedger cases use, and naming the precondition rather than the end
+// state, since the probe does go on to create it. Deliberately not created
+// here: that creation is the thing under test, and a file this helper had
+// already written would carry this process's umask rather than the mode the
+// probe asks for. Registered for the same cleanup, since the probe leaves it
+// behind. Its own `-absent-` infix, matching the readLedger case that already
+// spells a nonexistent path that way, keeps it out of tempLedger's namespace:
+// that helper suffixes with `created.length`, so sharing the prefix would let
+// a future numerically-named call here alias a fixture.
+function absentLedgerPath(name) {
+  const p = path.join(os.tmpdir(), `loadtest-ledger-absent-${process.pid}-${name}.jsonl`);
   created.push(p);
   return p;
 }
@@ -72,6 +89,73 @@ afterEach(() => {
   jest.restoreAllMocks();
   for (const p of created) fs.rmSync(p, { force: true });
   created = [];
+});
+
+describe('preflightLedger', () => {
+  // Mode bits do not map cleanly on Windows, so the two 0600 cases are
+  // Unix-only — the same guard, for the same reason, as the sibling
+  // tests/gateway-resume-spike.test.js.
+  const isUnix = process.platform !== 'win32';
+
+  it('creates the ledger rather than only probing for it', () => {
+    const ledger = absentLedgerPath('preflight-create');
+    preflightLedger(ledger);
+    expect(fs.existsSync(ledger)).toBe(true);
+  });
+
+  (isUnix ? it : it.skip)('creates it owner-only', () => {
+    // Opening is how this probe proves the path writable — a stat cannot —
+    // and opening with 'a' CREATES the ledger, so the mode it lands at is a
+    // lasting property of a real file. That file sits at a predictable path
+    // under a world-writable /tmp and holds live resource ids: the threat
+    // model the script's own comment inherits from gateway-resume-spike.js,
+    // whose 0600 is pinned twice while this one was pinned nowhere.
+    //
+    // Under umask 0, so this pins the MODE ARGUMENT rather than the runner.
+    // Dropping that argument leaves 0666 & ~umask, which on a host at umask
+    // 077 masks back down to exactly 0600 — the mutant would survive there
+    // while this stayed green, which is the failure a mode assertion is most
+    // likely to have. At umask 0 it lands 0666 and dies everywhere. Jest runs
+    // one test file at a time per worker and the cases within a file
+    // serially, so the window this widens is the try block.
+    //
+    // Both halves of that describe jest's default child-process runner. The
+    // setter is process-wide, so under a thread worker it does not widen a
+    // window at all — it throws ERR_WORKER_UNSUPPORTED_OPERATION, failing
+    // this case rather than skipping it, which is the direction a runner
+    // switch should fail in.
+    const ledger = absentLedgerPath('preflight-mode');
+    const priorUmask = process.umask(0o000);
+    try {
+      preflightLedger(ledger);
+    } finally {
+      process.umask(priorUmask);
+    }
+    expect(fs.statSync(ledger).mode & 0o777).toBe(0o600);
+  });
+
+  (isUnix ? it : it.skip)('leaves the mode of a ledger that already exists alone', () => {
+    // openSync applies its mode on CREATION only, so a second run against the
+    // same path does not re-permission it. Pinned rather than fixed: by then
+    // the file is one the operator named with --ledger, and the chmod that
+    // gateway-resume-spike.js does after its own write would silently narrow
+    // it. This is what makes that a decision rather than an oversight — and
+    // what stops the next reader from "finishing" the mirror of that file.
+    const ledger = tempLedger('');
+    fs.chmodSync(ledger, 0o644);
+    preflightLedger(ledger);
+    expect(fs.statSync(ledger).mode & 0o777).toBe(0o644);
+  });
+
+  it('appends rather than truncates, so a resumed run keeps what is outstanding', () => {
+    // 'a' vs 'w' is one character, and both prove the path writable. 'w'
+    // empties the ledger of a run being resumed under the same --ledger path,
+    // and the loss is silent in the worst direction: the sweep that follows
+    // reports nothing outstanding for resources that are still live.
+    const ledger = tempLedger(line('r_kept'));
+    preflightLedger(ledger);
+    expect(readLedger(ledger)).toEqual(['r_kept']);
+  });
 });
 
 describe('readLedger', () => {
