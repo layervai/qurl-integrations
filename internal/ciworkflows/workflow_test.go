@@ -517,7 +517,7 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 	{
 		path:                    "scripts.yml",
 		producesRequiredContext: true,
-		why: "Already unfiltered, and required since 2026-08-19. It gates the repo-wide scripts, including " +
+		why: "Already unfiltered, and produces a required context. It gates the repo-wide scripts, including " +
 			"the extension lockstep and i18n parity checks, which a stacked PR can break exactly as a " +
 			"main-targeting one can — and now blocks the merge rather than annotating it. Its single job " +
 			"sets no `if:`, so it cannot report `skipped`; the step-level guards there decide which steps " +
