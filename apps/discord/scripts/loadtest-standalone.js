@@ -119,12 +119,17 @@ async function trackCreate(fn) {
 // deleting the parent file resource revokes every qURL minted against it
 // (shared/client/client.go documents the cascade).
 function recordResource(resourceId, kind) {
-  if (!resourceId) {
+  // Shape-checked against deleteLink's own accepted form, not merely tested
+  // for truthiness. A malformed id would be recorded happily and then fail
+  // every sweep with "Invalid resource ID format" — a message matching
+  // neither 404 nor 410 — so it would be retried forever instead of ever
+  // being reported as the unreclaimable resource it is. The upload path
+  // hand-rolls its fetch and does not validate the response shape the way
+  // connector.js does, so this is where that shows up.
+  if (!resourceId || typeof resourceId !== 'string' || !/^[\w-]+$/.test(resourceId)) {
     // Loud, not silent: a created-but-unrecorded resource makes the closing
-    // "N revoked" a lie by omission, and this is the only place that can
-    // notice. The upload path hand-rolls its fetch and does not validate the
-    // response shape the way connector.js does.
-    console.error(`WARNING: ${kind} response carried no resource_id — that resource cannot be reclaimed.`);
+    // "N revoked" a lie by omission, and this is the only place that notices.
+    console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
     return;
   }
   try {
@@ -666,5 +671,5 @@ if (require.main === module) {
 // in-flight-wait branch of the drain is otherwise unreachable from a test,
 // and it is the branch the sweep-vs-run-loop fix turns on.
 module.exports = {
-  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate,
+  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
 };

@@ -29,7 +29,7 @@ jest.mock('../src/qurl', () => ({
 const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
 const {
-  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate,
+  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
 } = require('../scripts/loadtest-standalone');
 
 let created = [];
@@ -125,6 +125,23 @@ describe('pruneLedger', () => {
     expect(JSON.parse(fs.readFileSync(ledger, 'utf8').trim())).toEqual({
       resource_id: 'r_1', kind: 'location', endpoint: 'https://sandbox.example',
     });
+  });
+});
+
+describe('recordResource', () => {
+  // A malformed id would otherwise be recorded, then fail every sweep with
+  // "Invalid resource ID format" — a message matching neither 404 nor 410 —
+  // so it would be retried forever instead of reported as unreclaimable.
+  it.each([
+    ['missing', undefined],
+    ['empty', ''],
+    ['non-string', 12345],
+    ['malformed', 'not a valid id!'],
+  ])('warns and records nothing for a %s resource_id', (_label, value) => {
+    recordResource(value, 'upload');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('carried no usable resource_id'),
+    );
   });
 });
 
