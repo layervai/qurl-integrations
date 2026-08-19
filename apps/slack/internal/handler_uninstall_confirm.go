@@ -109,25 +109,34 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 	responseURL := payload.ResponseURL
 	teamID, userID := payload.Team.ID, payload.User.ID
 	purgeIDs, droppedIDs := uninstallPurgeIDsForClick(action.Value, teamID, payload.Enterprise.ID)
-	if len(droppedIDs) > 0 {
-		// Loud on purpose: the teardown is about to report success while leaving
-		// these partitions intact. Ids are Slack team/enterprise identifiers, not
-		// secrets, and they are what an operator needs to finish the cleanup.
-		log.Warn("uninstall confirm: dropped purge partitions not authenticated by this click",
-			"dropped_workspace_ids", droppedIDs,
-			"cleanup_action_required", true,
-		)
-	}
 
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
+		// Refusals use postResponse, so the card survives and the caller can hand
+		// the click to someone authorized. Only a teardown that actually ran
+		// consumes it below.
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
+		}
+		reply := h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs)
+		if len(droppedIDs) > 0 {
+			// Only meaningful once a teardown has actually run — emitting this on
+			// the ack path would raise cleanup_action_required for refused clicks
+			// and for a saturated pool, where nothing was purged at all. Ids are
+			// Slack team/enterprise identifiers, not secrets, and are what an
+			// operator needs to finish the job.
+			log.Warn("uninstall confirm: dropped purge partitions not authenticated by this click",
+				"dropped_workspace_ids", droppedIDs,
+				"cleanup_action_required", true,
+			)
+			// The admin is the one who would otherwise be surprised later, so say
+			// it here too rather than only in the operator log.
+			reply += "\n\n:warning: Some organization-level data for this install could not be verified from this click and was left in place. Contact your qURL operator to finish clearing it."
 		}
 		// replace_original consumes the confirmation card. Leaving it in place
 		// would let a second click re-run the gate against the roster this
 		// teardown just purged, telling the admin who ran it that they are not
 		// an admin.
-		_ = h.replaceOriginalResponse(log, responseURL, h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs))
+		_ = h.replaceOriginalResponse(log, responseURL, reply)
 	}) {
 		log.Warn("async pool saturated — dropping uninstall confirmation click")
 		h.Go(func() { _ = h.postResponse(log, responseURL, ackBusy) })

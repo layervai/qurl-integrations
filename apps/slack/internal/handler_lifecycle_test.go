@@ -973,3 +973,100 @@ func TestUninstallPurgeIDsForClickRejectsForeignPartitions(t *testing.T) {
 		t.Fatalf("dropped = %v, want the enterprise partition reported", dropped)
 	}
 }
+
+// TestUninstallConfirmDroppedPartitionStillTearsDownSurvivingIDs covers the path
+// the pure-function test cannot: an Enterprise Grid org install whose CLICK
+// payload omits the enterprise object. The teardown must still complete on the
+// partition the click IS authenticated for, and the admin must be told that
+// something was left behind rather than reading a clean success.
+func TestUninstallConfirmDroppedPartitionStillTearsDownSurvivingIDs(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandler(t)
+	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+
+	// Slash runs as a Grid org install, so the card records team + enterprise.
+	value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{
+		enterpriseID:        testEnterpriseID,
+		isEnterpriseInstall: slackFormBoolTrue,
+	})
+	if !ok {
+		t.Fatalf("bare verb did not render a confirm button; got %q", value)
+	}
+	if !strings.Contains(value, testEnterpriseID) {
+		t.Fatalf("card value = %q, want it to carry the enterprise partition", value)
+	}
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	// …but the click arrives WITHOUT the enterprise object.
+	body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", testAdminUserID, testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("click ack = %d, want 200", w.Code)
+	}
+	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+	h.Wait()
+
+	// The authenticated partition is still torn down — under-purge, not no-purge.
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1: the surviving partition must still be disconnected", provider.deleteCalls)
+	}
+	if !strings.Contains(got, "disconnected from this workspace") {
+		t.Fatalf("reply = %q, want the disconnect confirmation", got)
+	}
+	// …and the admin is told that something was left behind.
+	if !strings.Contains(got, "could not be verified from this click") {
+		t.Fatalf("reply = %q, want the left-behind-data caveat", got)
+	}
+}
+
+// TestUninstallConfirmRefusedClickReportsNoCleanup pins finding #1's fix: a
+// refused click must not raise the operator's cleanup signal, because no
+// teardown ran and there is nothing to clean up.
+func TestUninstallConfirmRefusedClickReportsNoCleanup(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandler(t)
+	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+
+	value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{
+		enterpriseID:        testEnterpriseID,
+		isEnterpriseInstall: slackFormBoolTrue,
+	})
+	if !ok {
+		t.Fatalf("bare verb did not render a confirm button; got %q", value)
+	}
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	// A non-admin replays the card, and the click also drops the enterprise id.
+	body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", "USTRANGER000", testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("click ack = %d, want 200", w.Code)
+	}
+	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+	h.Wait()
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0 for a refused click", provider.deleteCalls)
+	}
+	if !strings.Contains(got, "can disconnect it") {
+		t.Fatalf("reply = %q, want the admin-or-owner refusal", got)
+	}
+	// No teardown ran, so the admin must NOT be told data was left behind.
+	if strings.Contains(got, "could not be verified from this click") {
+		t.Fatalf("refused click leaked the left-behind-data caveat: %q", got)
+	}
+}
