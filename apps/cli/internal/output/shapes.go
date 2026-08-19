@@ -240,7 +240,7 @@ func (p *Printer) resolveDetail(res *qurlapi.Resolved) string {
 // writes nothing to stdout — zero rows means zero data lines.
 //
 // The text table carries no description/type/tags column, deliberately. At
-// its truncation caps the five existing columns already run ~90 characters
+// its truncation caps the five existing columns already run 93 characters
 // wide — past an 80-column terminal — and it middle-ellipsizes the CRID and
 // truncates the target to get even there, so a sixth column of unbounded
 // width would have to come out of those two. The consumer that needs this

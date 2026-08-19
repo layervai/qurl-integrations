@@ -467,9 +467,12 @@ func TestJSONProjectionIsRepoOwned(t *testing.T) {
 
 // TestListJSONCarriesRowMetadata pins the one projection that exposes a
 // row's publish-time metadata. Absent fields must stay absent rather than
-// render as empty values: the service omits description and tags on
-// connector-owned rows, so a consumer distinguishing "no label" from "label
-// not visible here" needs the key itself to be missing.
+// render as empty values. The line this draws is "a real label is present"
+// versus "no visible label" — it deliberately does not separate unset from
+// redacted (the service omits description and tags on connector-owned rows,
+// and both cases arrive here as the zero value, so both drop the key). What
+// it buys is that the document never asserts `"description": ""` as though
+// the server had said so.
 func TestListJSONCarriesRowMetadata(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
