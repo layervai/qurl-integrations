@@ -507,14 +507,19 @@ else
   origin_running() {
     docker inspect -f '{{.State.Running}}' "$ORIGIN" 2>/dev/null || echo false
   }
+  # $1 is S3_PREFIX; pass "unsigned" as $2 to run with an empty AWS provider
+  # chain, which is how a credential failure actually reaches S3.
   preflight_case() {
+    preflight_credentials="-e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test"
+    if [ "${2:-}" = "unsigned" ]; then preflight_credentials=""; fi
     docker rm -f "$ORIGIN" >/dev/null 2>&1
+    # shellcheck disable=SC2086 # deliberate word split of the -e flag list
     docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
       -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 -e S3_PREFIX="$1" \
       -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
       -e ALLOW_PLAINTEXT_S3=true \
       -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
-      -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+      $preflight_credentials \
       "$IMG" >/dev/null
     # The reject class is retried to a 15s deadline before the verdict, so this
     # has to outlast a full retry budget plus container start.
@@ -543,6 +548,31 @@ else
     expect_origin_log "preflight rejection covers region and request config for upstream $prefix" \
       'AWS_REGION, bucket/endpoint, and signed-request configuration'
   done
+
+  # The headline defect: with nothing in the AWS provider chain Envoy forwards
+  # the S3 hop with no Authorization header at all, S3 answers 403, and nginx
+  # would mask that to a viewer 404 on every request forever.
+  stub_mark="$(stub_log_mark)"
+  preflight_case "" unsigned
+  expect_eq "preflight refuses to serve with an empty credential chain" "$(origin_running)" "false"
+  expect_eq "preflight exits non-zero with an empty credential chain" \
+    "$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN")" "1"
+  expect_origin_log "preflight names the rejected request with no credentials" \
+    '"msg":"preflight_request_rejected"'
+  unsigned_probes="$(stub_get_count_since "$stub_mark" 'authorization absent ')"
+  if [ "$unsigned_probes" -ge 1 ]; then
+    ok "unsigned preflight reaches S3 with no Authorization header"
+  else
+    no "unsigned preflight reaches S3 with no Authorization header"
+  fi
+  # Credential acquisition fails transiently often enough — IMDS throttled in a
+  # host boot storm, an STS hiccup, IAM propagation — that one probe would spend
+  # the whole `restart: on-failure:5` budget on a condition that clears itself.
+  if [ "$unsigned_probes" -ge 2 ]; then
+    ok "preflight retries the rejected request before failing closed"
+  else
+    no "preflight retries the rejected request before failing closed (probes $unsigned_probes)"
+  fi
 
   for prefix in throttle boom; do
     preflight_case "$prefix"
