@@ -892,9 +892,9 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		branches: []string{"main"},
 		why: "Deliberately narrow, on the same reasoning as codeql.yml: no required context, " +
 			"and a stacked PR's dependency delta is reviewed again inside the combined diff once " +
-			"the merged base is deleted and it retargets to main. Cheaper to widen than CodeQL, so " +
-			"this is the entry to revisit " +
-			"first — the cost is not runtime but noise, since `comment-summary-in-pr: always` " +
+			"the merged base is deleted and it retargets to main. Cheaper to widen than CodeQL, " +
+			"so this is the entry to revisit first — the cost is not runtime but noise, since " +
+			"`comment-summary-in-pr: always` " +
 			"would post a summary onto every stacked PR.",
 	},
 	{
@@ -1014,6 +1014,11 @@ func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 // does. It is not among the three types a workflow gets when it declares no
 // `types:` of its own — opened, synchronize, reopened — so a workflow taking
 // the defaults never sees one.
+//
+// TODO(upstream-contract): this relies on GitHub continuing to emit `edited`
+// when deleting a base branch retargets its open PRs. The test below pins only
+// this repository's subscription half; it cannot detect drift in GitHub's event
+// contract.
 const editedActivityType = "edited"
 
 // TestBranchFilteredWorkflowsExcludeEditedActivityType pins the tree fact that
