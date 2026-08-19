@@ -87,13 +87,17 @@ const args = process.argv.slice(2);
  * Takes argv as an argument rather than closing over the module's, so the flag
  * SPELLINGS are pinnable by a test — the same seam resolveGuardInputs exists
  * for, and for the same reason: nothing else here can catch a renamed flag.
+ *
+ * Delegates to readFlagToken (declared below, and hoisted) rather than scanning
+ * argv itself. #1175 arrived at the same two-spelling lookup from the
+ * numeric-flag side, and merging the two is what made a single source of it
+ * worth having: which occurrence of a doubled flag wins is a decision three
+ * readers would each have had to make identically, and the silent default
+ * comes straight back if any one of them drifts.
  */
 function readArg(argv, name, defaultVal) {
-  const flag = `--${name}`;
-  const idx = argv.indexOf(flag);
-  if (idx !== -1) return argv[idx + 1] || defaultVal;
-  const inline = argv.find((a) => a.startsWith(`${flag}=`));
-  return inline === undefined ? defaultVal : inline.slice(flag.length + 1) || defaultVal;
+  const { present, raw } = readFlagToken(argv, name);
+  return present && raw ? raw : defaultVal;
 }
 
 const getArg = (name, defaultVal) => readArg(args, name, defaultVal);
@@ -112,11 +116,8 @@ const getArg = (name, defaultVal) => readArg(args, name, defaultVal);
  * same refusal without it, through readFlagToken's present/absent split.
  */
 function argValueMissing(argv, name) {
-  const flag = `--${name}`;
-  const idx = argv.indexOf(flag);
-  if (idx !== -1) return !argv[idx + 1];
-  const inline = argv.find((a) => a.startsWith(`${flag}=`));
-  return inline !== undefined && inline.slice(flag.length + 1) === '';
+  const { present, raw } = readFlagToken(argv, name);
+  return present && !raw;
 }
 const hasFlag = (name) => args.includes(`--${name}`);
 
@@ -944,9 +945,8 @@ async function main() {
     process.exit(1);
   }
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
-  // Parsed up here with the other preflight checks: a mistyped threshold that
-  // was only read at the summary would surface as a green exit code two hours
-  // after the run it was meant to judge.
+  // A value on a flag that takes none means the flag was not read at all —
+  // `--location=true` runs the file leg, the opposite of what was typed.
   const valued = valuedBooleanFlags(args);
   if (valued.length > 0) {
     const names = valued.map((n) => `--${n}`).join(', ');
@@ -956,6 +956,9 @@ async function main() {
     console.error(`FATAL: ${names} ${clause}`);
     process.exit(1);
   }
+  // The threshold is resolved up here with the other preflight checks: read
+  // only at the summary, a mistyped one would surface as a green exit code two
+  // hours after the run it was meant to judge.
   if (argValueMissing(args, 'max-fail-rate')) {
     console.error('FATAL: --max-fail-rate needs a percentage, e.g. --max-fail-rate 10.');
     process.exit(1);
