@@ -169,6 +169,11 @@ jobs:
       # merge and publish; behavior_test.sh rejects a malformed or mismatched
       # waiver. The pin-rotation PR must remove this line.
       S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
+      # Same situation for the credential preflight this PR adds: the pinned
+      # immutable origin predates it. Waive only that exact digest so the
+      # producer fix can publish; behavior_test.sh rejects a malformed or
+      # mismatched waiver. The pin-rotation PR must remove this line too.
+      S3_ORIGIN_CREDENTIAL_PREFLIGHT_WAIVER_IMAGE: "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
