@@ -121,12 +121,13 @@ That pattern is itself under test. `internal/ciworkflows` reads every file in
 `.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
 spec, leaves a quality gate out of `required.needs`, ships a verifier that treats a skipped gate
 as a pass, or makes the contract check conditional. It also records every pull-request workflow's
-intended `branches:` filter, so one that gates merges cannot narrow to `main` and one already
-narrow cannot quietly start gating. That is the paths-filter trap one dimension over: a workflow
-filtered off PRs stacked on a feature branch never registers its checks at all, so a required
-context there waits forever rather than failing (#1183). Its check — `Workflow Contract` — is
-unfiltered and reports on every PR and merge group, because a check behind a paths filter cannot
-police the paths filters (#1081).
+intended `branches:` filter, so one recorded as deliberately narrow fails the moment it reports a
+required context, and narrowing one that already gates merges means editing that record rather
+than quietly editing a trigger. This is the paths filter's trap inverted: a workflow filtered off
+PRs stacked on a feature branch never registers its checks at all, and protection guards only
+`main`, so the stacked PR reads green having run none of them (#1183, #1185). The package's own
+check — `Workflow Contract` — is unfiltered and reports on every PR and merge group, because a
+check behind a paths filter cannot police the paths filters (#1081).
 
 ## License
 
