@@ -37,6 +37,55 @@ const (
 	// requests a cycle restart carrying ErrTooManyKnockFailures.
 	redialKnockMaxFailures = 5
 
+	// The three delays that can separate two consecutive dials in a storm
+	// that is still FAILING. Every one is a real, checked value, not an
+	// estimate: the watchdog's whole correctness rests on the settled gap
+	// being longer than their sum, so they are named rather than folded
+	// into a magic number.
+	//
+	//   - failingDialConnectBudget: transport.dialServerTimeout, which
+	//     frpgen sets to defaultDialTimeoutSeconds.
+	//   - failingDialLoginReadBudget: the pinned fork's Login response read
+	//     deadline, hard-coded in client/control_session.go.
+	//   - failingDialBackoffCeiling: the post-admission reconnect loop's
+	//     backoff cap (keepControllerWorking passes 20s as maxInterval).
+	//
+	// A single failing attempt can burn the first two in sequence — a TCP
+	// connect that succeeds slowly, then a server that never answers the
+	// Login — before the loop waits out the third.
+	failingDialConnectBudget   = 10 * time.Second
+	failingDialLoginReadBudget = 10 * time.Second
+	failingDialBackoffCeiling  = 20 * time.Second
+
+	// failingDialPeriod is how far apart two dials of a still-failing storm
+	// can be, before the per-dial re-knock's own round trip is added.
+	failingDialPeriod = failingDialConnectBudget + failingDialLoginReadBudget + failingDialBackoffCeiling
+
+	// reconnectSettledGap is the quiet period that ends a redial storm. The
+	// FRP client does not dial while a control session is up, so a gap this
+	// long means one of the redials succeeded and the tunnel served again.
+	//
+	// It MUST stay comfortably above failingDialPeriod. This is the
+	// watchdog's fail-open edge: if a failing storm's own dial spacing can
+	// reach the gap, every dial looks like a fresh start, the storm never
+	// accumulates, and the watchdog silently never fires — leaving exactly
+	// the unbounded loop this file exists to bound. 3x failingDialPeriod
+	// leaves room for the re-knock round trip and for a slower server
+	// without ever needing this constant re-tuned alongside them.
+	//
+	// The inference is one-directional, and the wording of both operator
+	// lines depends on that: a long gap proves the tunnel served, but a
+	// short one does NOT prove it did not. A connection that re-establishes,
+	// serves briefly and drops again inside this window is counted as one
+	// unbroken storm, which is why neither line claims the tunnel failed to
+	// come back — only that it is not staying up. Treating a sub-gap flap as
+	// a storm is deliberate and is an accepted trade: such a tunnel is not
+	// serving usefully, the recovery (end the cycle, re-knock, take a fresh
+	// dial target) suits it too, and sustained flapping does eventually
+	// spend the knock budget and exit. The window below is sized so that
+	// takes tens of minutes, not seconds.
+	reconnectSettledGap = 3 * failingDialPeriod
+
 	// reconnectStallWindow bounds how long the FRP client may sit in its own
 	// post-admission reconnect loop before this package takes the cycle back.
 	//
@@ -48,44 +97,24 @@ const (
 	// and every operator-facing message are unreachable for the rest of the
 	// run. Without this watchdog a Connector in that state loops in silence.
 	//
-	// Sized from the measured cause. The tunnel-server fleet is an ASG that
-	// rolls instances with an instance refresh; a replacement measured 80,
-	// 83 and 80 seconds from launch to serving across the three replacements
-	// of one 2026-08-18 sandbox roll. A Connector whose server is taken out
-	// of service therefore has to outlast roughly that long, and the FRP
-	// reconnect loop backs off up to 20s between attempts — so 90s covers
-	// one replacement with room for a retry inside the same cycle.
+	// Sized to outlast the measured cause with margin. The tunnel-server
+	// fleet is an ASG that rolls instances with an instance refresh; a
+	// replacement measured 80, 83 and 80 seconds from launch to serving
+	// across the three replacements of one 2026-08-18 sandbox roll. It must
+	// also stay above reconnectSettledGap, or a storm that keeps resetting
+	// could never reach it.
 	//
 	// Overrunning it is cheap and sometimes better: the cycle ends, the
-	// supervisor re-knocks, and the ACK returns a fresh dial target — which
-	// is exactly what a Connector still pointed at a terminated instance
-	// needs. Five such cycles reach the knock budget at roughly eight
-	// minutes, comfortably past a full fleet roll (three replacements about
-	// 3.5 minutes apart in that same observation).
-	reconnectStallWindow = 90 * time.Second
-
-	// reconnectSettledGap is the quiet period that ends a redial storm. The
-	// FRP client does not dial while a control session is up, so a gap this
-	// long means one of the redials succeeded and the tunnel served again.
-	// It must stay above the reconnect loop's 20s backoff ceiling, or a
-	// still-failing storm would look settled between two attempts.
-	//
-	// The inference is one-directional, and the wording of both operator
-	// lines depends on that: a long gap proves the tunnel served, but a
-	// short one does NOT prove it did not. A connection that re-establishes,
-	// serves briefly and drops again inside this window is counted as one
-	// unbroken storm, which is why neither line claims the tunnel failed to
-	// come back — only that it is not staying up. Treating a sub-gap flap as
-	// a storm is deliberate: a tunnel that cannot hold 45s is not serving
-	// usefully, and the recovery (end the cycle, re-knock, take a fresh dial
-	// target) is the right answer for it too.
-	reconnectSettledGap = 45 * time.Second
+	// supervisor re-knocks, and the ACK returns a fresh dial target. The
+	// operator is told long before that, at reconnectStallNoticeAfter dials.
+	reconnectStallWindow = 2 * reconnectSettledGap
 
 	// reconnectStallNoticeAfter is how many dials into a storm the operator
-	// notice fires. Two means the tunnel dropped and at least one redial has
-	// already failed — past a single ordinary reconnect, which is routine and
-	// self-healing, and not worth a warning.
-	reconnectStallNoticeAfter = 2
+	// notice fires. Three means the tunnel dropped and TWO redials have
+	// already failed. Two would fire while only one had failed, and the dial
+	// about to run might well succeed — a routine two-attempt reconnect
+	// would then be announced as a tunnel that "keeps dropping".
+	reconnectStallNoticeAfter = 3
 )
 
 // reasonReconnectStalled is the classification bucket for a cycle the
@@ -163,7 +192,7 @@ func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time
 	elapsed := t.Sub(r.stormStartedAt)
 	if elapsed >= r.stall() {
 		r.log().WarnContext(ctx, "connector: the tunnel connection kept dropping for too long; restarting the connection cycle",
-			"event", "reconnect_stalled",
+			"event", reasonReconnectStalled,
 			"resource_id", r.resourceID,
 			"stalled_seconds", elapsed.Seconds(),
 			"dial_attempts", r.stormDials)

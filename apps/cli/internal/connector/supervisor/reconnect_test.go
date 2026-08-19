@@ -106,10 +106,9 @@ func TestWatchdogRestartsStalledCycle(t *testing.T) {
 		t.Fatalf("restart cause = %v, want errReconnectStalled", rec.errs[0])
 	}
 	// The supervisor buckets the cycle by this sentinel, so it must survive
-	// the wrapping the watchdog adds.
-	if got := classifyRunError(rec.errs[0]); got != reasonReconnectStalled {
-		t.Fatalf("classifyRunError(restart cause) = %q, want %q", got, reasonReconnectStalled)
-	}
+	// the wrapping the watchdog adds. Asserted through the path production
+	// actually uses — reconcileKnockBudget's errors.Is — rather than through
+	// classifyRunError, which never sees a restart cause (see loginerror.go).
 }
 
 // TestWatchdogCountsDialsInsideTheKnockGate is the regression guard on the
@@ -257,23 +256,33 @@ func TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm(t *testing.T) {
 }
 
 // TestWatchdogWindowOutlivesATunnelServerReplacement is the sizing guard,
-// anchored to the measured cause rather than to a guess. The tunnel-server
-// fleet rolls via ASG instance refresh; the three replacements of one
-// 2026-08-18 sandbox roll took 80s, 83s and 80s from launch to serving. A
-// window at or below that would give up while the replacement was still
-// coming up, turning a wait that resolves itself into a cycle restart.
+// anchored to measured values rather than to guesses. Two independent bounds
+// have to hold at once, and they push in opposite directions.
 func TestWatchdogWindowOutlivesATunnelServerReplacement(t *testing.T) {
 	t.Parallel()
-	// Slowest observed launch-to-serving of a replacement instance.
+	// Slowest observed launch-to-serving of a replacement instance during
+	// the 2026-08-18 sandbox fleet roll.
 	const serverReplacementObserved = 83 * time.Second
-	const reconnectBackoffCeiling = 20 * time.Second
 	if reconnectStallWindow <= serverReplacementObserved {
 		t.Errorf("reconnectStallWindow = %s, want more than the %s a tunnel-server replacement took to start serving",
 			reconnectStallWindow, serverReplacementObserved)
 	}
-	if reconnectSettledGap <= reconnectBackoffCeiling {
-		t.Errorf("reconnectSettledGap = %s, want more than the %s reconnect backoff ceiling, or a still-failing storm looks settled between two attempts",
-			reconnectSettledGap, reconnectBackoffCeiling)
+	// The fail-open edge. If a still-failing storm's own dial spacing can
+	// reach the settled gap, every dial resets the storm, nothing ever
+	// accumulates, and the watchdog silently never fires — the exact
+	// unbounded loop this package exists to bound. failingDialPeriod is the
+	// sum of the three checked delays between two failing dials.
+	// Requires a real margin, not merely "greater than". failingDialPeriod
+	// counts only the three delays inside FRP; each dial also pays the
+	// refresher's own re-knock round trip, which is a network call with no
+	// compile-time bound. A gap set just above failingDialPeriod (45s was the
+	// original value) would be inside that unbounded remainder and the
+	// watchdog would fail open on a merely slow admission controller.
+	const settledGapSafetyFactor = 2
+	if reconnectSettledGap < settledGapSafetyFactor*failingDialPeriod {
+		t.Errorf("reconnectSettledGap = %s, want at least %dx failingDialPeriod = %s (connect %s + login read %s + backoff ceiling %s, plus an unbounded re-knock round trip); too close to it and a failing storm resets on every dial, so the watchdog silently never fires",
+			reconnectSettledGap, settledGapSafetyFactor, settledGapSafetyFactor*failingDialPeriod,
+			failingDialConnectBudget, failingDialLoginReadBudget, failingDialBackoffCeiling)
 	}
 	if reconnectSettledGap >= reconnectStallWindow {
 		t.Errorf("reconnectSettledGap = %s must stay below reconnectStallWindow = %s, or no storm can ever reach the window",

@@ -328,7 +328,7 @@ window, and then starts a fresh connection cycle rather than retrying
 invisibly:
 
 ```
-level=WARN msg="connector: the tunnel connection keeps dropping and is not staying up; still retrying, and consumers will time out while it is down" event=reconnect_retrying dial_attempts=2 retrying_seconds=12.3 gives_up_after_seconds=90
+level=WARN msg="connector: the tunnel connection keeps dropping and is not staying up; still retrying, and consumers will time out while it is down" event=reconnect_retrying dial_attempts=3 retrying_seconds=48.2 gives_up_after_seconds=240
 ```
 
 The message states the observation and not a cause: at that layer the

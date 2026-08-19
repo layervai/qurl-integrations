@@ -67,15 +67,26 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	serve := func(label string, budget time.Duration) *runResult {
+	// stopWhenAdmitted lets the first start end as soon as it has proved
+	// admission instead of burning its whole budget: the run only has to
+	// reach login_success, and waiting out the rest adds nothing but
+	// wall-clock to an already slow tagged suite.
+	serve := func(label string, budget time.Duration, stopWhenAdmitted bool) *runResult {
 		t.Helper()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		res := &runResult{}
 		go func() {
-			time.Sleep(budget)
+			deadline := time.Now().Add(budget)
+			for time.Now().Before(deadline) {
+				if stopWhenAdmitted && strings.Contains(res.stderr.String(), "login_success") {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
 			cancel()
 		}()
-		res := runCLI(t, &runOpts{
+		res = runCLI(t, &runOpts{
 			ctx: ctx,
 			args: []string{
 				"--endpoint", os.Getenv("QURL_CLI_SANDBOX_ENDPOINT"), "connector", "run",
@@ -93,15 +104,18 @@ func TestSandboxConnectorRestartIsBoundedAndExplained(t *testing.T) {
 
 	// First start: reach a real admission, then stop. This is the state the
 	// report starts from — a Connector that served and was then stopped.
-	first := serve("first start", 45*time.Second)
+	first := serve("first start", 90*time.Second, true)
 	if !strings.Contains(first.stderr.String(), "login_success") {
 		t.Fatalf("first start never reached tunnel admission in 45s; the sandbox is not in a testable state\nstderr: %s", first.stderr.String())
 	}
 
-	// Second start, immediately: the reported defect. Give it more than the
-	// watchdog's window so a stalled reconnect has room to be reported AND
-	// acted on inside this run.
-	second := serve("immediate restart", 150*time.Second)
+	// Second start, immediately: the reported defect. Budgeted past the
+	// watchdog's own window so a stalled reconnect has room to be reported
+	// AND acted on inside this run, rather than only being cut off by the
+	// harness. Deliberately not derived from the constant: this is the live
+	// suite's own budget, and it should fail loudly if the window is retuned
+	// past it rather than silently stretch.
+	second := serve("immediate restart", 300*time.Second, false)
 	stderr := second.stderr.String()
 
 	// Outcome 1 — it served. Nothing more to prove.

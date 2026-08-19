@@ -64,10 +64,18 @@ const reasonDialError = "dial_error"
 //  2. ErrTooManyKnockFailures — a knock budget exhausted;
 //  3. typed net.Error — transport-layer failure, a stable stdlib surface
 //     that survives FRP wording changes;
-//  4. a stalled post-admission reconnect — this package's own watchdog;
-//  5. the FRP client's own Login-stage phrasing, then dial-error substrings —
+//  4. the FRP client's own Login-stage phrasing, then dial-error substrings —
 //     the fallback for wraps that lost the typed identity;
-//  6. everything else — frp_runtime_error.
+//  5. everything else — frp_runtime_error.
+//
+// Deliberately absent: errReconnectStalled. A stalled cycle always exits
+// through cycleRunner's restartErr, and BOTH call sites here are unreachable
+// on that path — emitSessionEvents only classifies inside its !healthy branch
+// (restartErr != nil makes the cycle healthy), and teardownCause returns
+// "connector_restart" for a restart before it ever classifies. A branch for it
+// would be dead code with a test that looked like coverage. The stall is
+// reported directly instead, as event=reconnect_stalled from the watchdog and
+// event=reconnect_stall_counted from the budget.
 func classifyRunError(err error) string {
 	if err == nil {
 		return ""
@@ -77,9 +85,6 @@ func classifyRunError(err error) string {
 	}
 	if errors.Is(err, ErrTooManyKnockFailures) {
 		return "too_many_knock_failures"
-	}
-	if errors.Is(err, errReconnectStalled) {
-		return reasonReconnectStalled
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
