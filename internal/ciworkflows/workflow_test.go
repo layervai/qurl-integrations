@@ -1374,9 +1374,12 @@ func readWorkflow(t *testing.T, name string) githubWorkflow {
 		t.Fatalf("parse %s workflow: %v", name, err)
 	}
 	// A job key with no body decodes to a nil entry rather than to a zero job.
-	// Named here so it reports as the malformed workflow it is, at the file
-	// that carries it, rather than as a nil dereference in whichever assertion
-	// reached it first.
+	// (`job: {}` does not — that is a non-nil zero struct; only a true null
+	// trips this.) Named here so it reports as the malformed workflow it is, at
+	// the file that carries it, rather than as a nil dereference in whichever
+	// assertion reached it first. Every githubWorkflow in this package comes
+	// from here, so this is also what lets a Jobs lookup anywhere below take
+	// its *githubJob as non-nil without re-checking.
 	for id, job := range workflow.Jobs {
 		if job == nil {
 			t.Fatalf("%s job %q has an empty body", name, id)
