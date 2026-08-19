@@ -543,6 +543,12 @@ async function runRound(roundNum) {
     // the full regression narrative and the numbers.
     const expiresAt = expiryToISO('24h');
     let currentResourceId = uploadResult.resource_id;
+    // Own flag rather than reusing fileFail as the "have we logged yet?"
+    // signal: a failed re-upload charges fileFail too, so keying the mint log
+    // off it would swallow the first mint error on any round where a
+    // re-upload failed first — losing exactly the diagnostic that explains
+    // what went wrong on the round most in need of one.
+    let mintErrorLogged = false;
     for (const batch of planMintBatches(COUNT)) {
       if (batch.reupload) {
         const reStart = performance.now();
@@ -571,7 +577,10 @@ async function runRound(roundNum) {
         await mintLinks(currentResourceId, { expiresAt, n: batch.size });
         results.fileLinks += batch.size;
       } catch (e) {
-        if (results.fileFail === 0) console.error(`  File mint error: ${e.message}`);
+        if (!mintErrorLogged) {
+          console.error(`  File mint error: ${e.message}`);
+          mintErrorLogged = true;
+        }
         results.fileFail += batch.size;
       }
       // Accumulated per batch rather than wrapped around the loop, so
