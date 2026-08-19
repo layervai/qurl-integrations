@@ -9,17 +9,31 @@
  *   --interval S   Seconds between rounds (default: 60)
  *   --file PATH    Local file to upload (default: generates a 1MB test file)
  *   --location     Include a location link in each round
- *   --ledger PATH  Where to record created resources (default: /tmp/loadtest-ledger-<ts>.jsonl)
+ *   --ledger PATH  Where to record created resources (default: <tmpdir>/loadtest-ledger-<ts>.jsonl)
  *   --reclaim PATH Revoke everything in a previous run's ledger, then exit
  *
- * Every resource this script creates is revoked before it exits, including on
- * Ctrl-C. If the process is killed hard enough to skip that (SIGKILL, a dead
- * laptop), the ledger file is the recovery path:
+ * Every resource this script creates is recorded to the ledger before it is
+ * used, and revoked before the script exits — on the normal path, on a thrown
+ * error, and on Ctrl-C, which stops the run rather than racing it. Minted
+ * links are therefore dead once a run ends; don't expect to open one after
+ * the summary prints.
  *
- *   node scripts/loadtest-standalone.js --reclaim /tmp/loadtest-ledger-<ts>.jsonl
+ * If the process is killed hard enough to skip all of that (SIGKILL, a dead
+ * laptop), the ledger is the recovery path:
+ *
+ *   node scripts/loadtest-standalone.js --reclaim <tmpdir>/loadtest-ledger-<ts>.jsonl
+ *
+ * Reclaim resolves its target host from the ambient QURL_ENDPOINT, so each
+ * ledger line records the endpoint it was written against and a sweep refuses
+ * to run against a different one. Re-running --reclaim is safe: revoked ids
+ * are pruned from the ledger and an already-gone resource counts as reclaimed.
+ *
+ * One window this cannot close: if a create succeeds server-side but the
+ * response is lost, the resource exists and its id never reached the ledger.
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // Load env from .env.loadtest (so user doesn't need to pass env vars on CLI)
@@ -52,90 +66,264 @@ const FILE_PATH = getArg('file', null);
 const INCLUDE_LOCATION = hasFlag('location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
-const LEDGER_PATH = getArg('ledger', path.join('/tmp', `loadtest-ledger-${Date.now()}.jsonl`));
+// Default under os.tmpdir() and created 0600, following the rationale
+// gateway-resume-spike.js records in this same directory: a predictable path
+// in a world-writable /tmp can be pre-created as a symlink, and appendFileSync
+// follows symlinks. The contents are only resource ids, but the write
+// primitive is real.
+const LEDGER_PATH = getArg('ledger', path.join(os.tmpdir(), `loadtest-ledger-${Date.now()}.jsonl`));
 
-// Every resource is appended to the ledger the moment it exists, before any
-// further work. Holding the ids only in memory would not survive how these
-// runs actually end — a two-hour soak gets Ctrl-C'd — and an unrecorded
-// resource is unreclaimable in practice: qurl-service's list endpoint takes
-// no filter, so there is no way to find it again by label or target.
-//
-// Recipient links from mintLinks are deliberately not recorded individually:
-// deleting the parent file resource reclaims every qURL minted against it.
-function recordResource(resourceId, kind) {
-  if (!resourceId) return;
+// Prove the ledger is writable BEFORE anything creates a resource. Discovering
+// an unwritable ledger after the first mint orphans that resource: its id was
+// never recorded and, once the process stops, nothing knows it exists.
+function preflightLedger() {
   try {
-    fs.appendFileSync(LEDGER_PATH, `${JSON.stringify({ resource_id: resourceId, kind })}\n`);
+    fs.closeSync(fs.openSync(LEDGER_PATH, 'a', 0o600));
   } catch (e) {
-    // A ledger we cannot write is a leak we cannot reclaim. Stop now rather
-    // than mint thousands of resources with no way to find them afterwards.
-    console.error(`FATAL: cannot write reclaim ledger ${LEDGER_PATH} — ${e.message}`);
+    console.error(`FATAL: reclaim ledger ${LEDGER_PATH} is not writable — ${e.message}`);
+    console.error('Refusing to create resources that could not be recorded. Pass --ledger PATH.');
     process.exit(1);
   }
 }
 
+// Set as soon as a sweep begins. The run loop and the per-recipient loops
+// check it: a sweep snapshots the ledger and then yields at every await, so
+// without this the loop keeps minting ids the snapshot can never see and the
+// script exits having reclaimed only part of what it made.
+let stopping = false;
+
+// Every resource is appended to the ledger the moment it exists, before any
+// further work. Holding the ids only in memory would not survive how these
+// runs actually end — a two-hour soak gets Ctrl-C'd. Recovering an unrecorded
+// resource means finding it by description or target through the listing's
+// free-text search, which is imprecise and would collaterally revoke another
+// run's resources; the ledger is exact.
+//
+// Recipient links from mintLinks are deliberately not recorded individually:
+// deleting the parent file resource revokes every qURL minted against it
+// (shared/client/client.go documents the cascade).
+function recordResource(resourceId, kind) {
+  if (!resourceId) {
+    // Loud, not silent: a created-but-unrecorded resource makes the closing
+    // "N revoked" a lie by omission, and this is the only place that can
+    // notice. The upload path hand-rolls its fetch and does not validate the
+    // response shape the way connector.js does.
+    console.error(`WARNING: ${kind} response carried no resource_id — that resource cannot be reclaimed.`);
+    return;
+  }
+  try {
+    fs.appendFileSync(
+      LEDGER_PATH,
+      // The endpoint travels with the id: --reclaim resolves its target from
+      // ambient config, so without provenance a ledger handed to an operator
+      // in the wrong shell issues bulk deletes against the wrong tenancy.
+      `${JSON.stringify({ resource_id: resourceId, kind, endpoint: config.QURL_ENDPOINT })}\n`,
+    );
+  } catch (e) {
+    // A ledger we cannot write is a leak we cannot reclaim, so stop minting.
+    // Deliberately NOT process.exit: everything recorded before this point is
+    // still on disk and still reclaimable, and exiting here would skip the
+    // sweep that reclaims it — giving up hardest exactly where giving up
+    // leaks most.
+    console.error(`FATAL: cannot write reclaim ledger ${LEDGER_PATH} — ${e.message}`);
+    console.error('Stopping the run; reclaiming what was recorded before the failure.');
+    stopping = true;
+  }
+}
+
+// Returns an array of ids, or null when the ledger file does not exist.
+// Null and [] mean opposite things in recovery mode — "your path is wrong,
+// nothing was swept" versus "nothing is outstanding" — and collapsing them
+// is how an operator walks away believing they are clean.
 function readLedger(ledgerPath) {
-  if (!fs.existsSync(ledgerPath)) return [];
+  // statSync rather than existsSync: existsSync is true for a directory, and
+  // readFileSync would then throw EISDIR out of the sweep.
+  let stat;
+  try {
+    stat = fs.statSync(ledgerPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) return null;
   const ids = [];
-  for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+  fs.readFileSync(ledgerPath, 'utf8').split('\n').forEach((line, index) => {
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) return;
     try {
       const { resource_id: id } = JSON.parse(trimmed);
       if (id) ids.push(id);
     } catch {
-      // A torn final line is what a hard kill mid-append looks like. Skip it
-      // and reclaim the rest instead of abandoning the whole ledger.
-      console.error(`  Skipping unparseable ledger line: ${trimmed.slice(0, 80)}`);
+      // A torn final line is what a hard kill mid-append looks like: skip it
+      // and reclaim the rest rather than abandon the whole ledger. Report
+      // position and size only, never content — --reclaim takes an arbitrary
+      // operator-supplied path, and one aimed at .env.loadtest would echo the
+      // API key into the scrollback.
+      console.error(`  Skipping unparseable ledger line ${index + 1} (${Buffer.byteLength(trimmed)} bytes)`);
     }
-  }
+  });
   return ids;
 }
 
-// Revoke everything recorded in the ledger. Safe to run twice: revoking an
-// already-revoked resource succeeds, so --reclaim can be re-run after a
-// partial sweep.
-async function reclaim(ledgerPath) {
-  const ids = [...new Set(readLedger(ledgerPath))];
-  if (ids.length === 0) {
-    console.log('Reclaim: nothing recorded.');
-    return 0;
-  }
-  console.log(`Reclaim: revoking ${ids.length} resource(s) from ${ledgerPath}...`);
-  let revoked = 0;
-  let failed = 0;
-  // Serial with a short gap. The sandbox tenancy is shared and rate-limited
-  // per account, and a burst of hundreds of deletes is exactly what trips it.
-  for (const id of ids) {
+// Endpoints recorded in a ledger, so a sweep can refuse to delete against a
+// tenancy other than the one the resources were created on.
+function ledgerEndpoints(ledgerPath) {
+  const endpoints = new Set();
+  if (!fs.existsSync(ledgerPath)) return endpoints;
+  for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
     try {
-      await deleteLink(id);
-      revoked++;
-    } catch (e) {
-      failed++;
-      if (failed === 1) console.error(`  Reclaim error: ${e.message}`);
+      const { endpoint } = JSON.parse(trimmed);
+      if (endpoint) endpoints.add(endpoint);
+    } catch { /* torn line — readLedger already reports it */ }
+  }
+  return endpoints;
+}
+
+// Rewrite the ledger with only what is still outstanding, so a re-run sweeps
+// the remainder instead of re-revoking everything. Truncated rather than
+// deleted on a clean sweep: an empty ledger reads as "nothing outstanding",
+// while a missing one is indistinguishable from a mistyped path.
+function pruneLedger(ledgerPath, remainingIds) {
+  try {
+    const kept = [...remainingIds].map(id => `${JSON.stringify({ resource_id: id })}\n`).join('');
+    fs.writeFileSync(ledgerPath, kept);
+  } catch (e) {
+    console.error(`  Could not prune ledger ${ledgerPath} — ${e.message}`);
+  }
+}
+
+// Revoke everything recorded in the ledger. Returns { missing, revoked, failed }.
+// Safe to re-run: successfully revoked ids are pruned, and an already-gone
+// resource counts as revoked rather than failed.
+async function reclaim(ledgerPath) {
+  stopping = true;
+
+  if (readLedger(ledgerPath) === null) {
+    console.error(`Reclaim: no ledger file at ${ledgerPath} — nothing was reclaimed.`);
+    return { missing: true, revoked: 0, failed: 0 };
+  }
+
+  // Always say which tenancy is about to be deleted from — this is a bulk
+  // delete whose target list comes from a file and whose target host comes
+  // from ambient config, and those two can disagree.
+  console.log(`Reclaim: target endpoint ${config.QURL_ENDPOINT}`);
+  const recorded = ledgerEndpoints(ledgerPath);
+  if (recorded.size > 0 && !recorded.has(config.QURL_ENDPOINT)) {
+    console.error(`Reclaim: this ledger records resources on ${[...recorded].join(', ')}, not ${config.QURL_ENDPOINT}.`);
+    console.error('Refusing to delete against a different tenancy. Set QURL_ENDPOINT to match and re-run.');
+    return { missing: false, revoked: 0, failed: 0, refused: true };
+  }
+
+  const swept = new Set();
+  const outstanding = new Set();
+  const causes = new Map();
+  let revoked = 0;
+
+  // Drain rather than sweep once. An in-flight round can append after the
+  // snapshot is taken, so keep passing until a pass finds nothing new.
+  for (;;) {
+    const pending = [...new Set(readLedger(ledgerPath) || [])].filter(id => !swept.has(id));
+    if (pending.length === 0) break;
+    const seconds = Math.round(pending.length * 0.25);
+    console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (~${seconds}s)...`);
+    let done = 0;
+    // Serial with a short gap. The tenancy is shared and rate-limited per
+    // account, and a burst of hundreds of deletes is what trips it.
+    for (const id of pending) {
+      swept.add(id);
+      try {
+        await deleteLink(id);
+        revoked++;
+        outstanding.delete(id);
+      } catch (e) {
+        // An already-gone resource is the successful end state for a reclaim.
+        // callQurl collapses API errors to a status-only string, so matching
+        // the status is all that is available.
+        if (/\(404\)/.test(e.message)) {
+          revoked++;
+          outstanding.delete(id);
+        } else {
+          outstanding.add(id);
+          causes.set(e.message, (causes.get(e.message) || 0) + 1);
+        }
+      }
+      done++;
+      // Without a heartbeat a 12,000-id sweep looks wedged for ten minutes
+      // after the summary has printed, and the operator reaches for kill -9 —
+      // the exact hard kill this whole mechanism exists to survive.
+      if (done % 250 === 0) console.log(`  ...${done}/${pending.length}`);
+      await new Promise(r => setTimeout(r, 50));
     }
-    await new Promise(r => setTimeout(r, 50));
+  }
+
+  pruneLedger(ledgerPath, outstanding);
+
+  const failed = outstanding.size;
+  if (swept.size === 0) {
+    console.log(`Reclaim: nothing outstanding in ${ledgerPath}.`);
+    return { missing: false, revoked: 0, failed: 0 };
   }
   console.log(`Reclaim: ${revoked} revoked, ${failed} failed.`);
+  // A tally rather than one sampled message: 401 (key rotated mid-soak), 429
+  // (rate limited) and the rest demand different responses, and one sample
+  // only identifies the cause if the run failed uniformly.
+  for (const [message, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) {
+    console.error(`  ${n}x ${message}`);
+  }
   if (failed > 0) {
     console.error(`Reclaim: ${failed} resource(s) still on the tenancy — re-run with --reclaim ${ledgerPath}`);
   }
-  return failed;
+  return { missing: false, revoked, failed };
 }
 
-// A second Ctrl-C must not start a competing sweep over the same ledger.
-let reclaiming = false;
+// Every reclaim path goes through here: the normal end of a run, a thrown
+// error, and both signals. The promise is memoized rather than guarded by a
+// boolean so a Ctrl-C arriving *during* the end-of-run sweep waits for the
+// sweep already in flight instead of either starting a competing one or
+// exiting out from under it — both of which strand the resources the sweep
+// had not reached yet.
+let reclaimInFlight = null;
+function reclaimOnce(ledgerPath) {
+  if (!reclaimInFlight) reclaimInFlight = reclaim(ledgerPath);
+  return reclaimInFlight;
+}
+
+// Which ledger a signal should sweep: this run's own, or the one named by
+// --reclaim while that recovery mode is running.
+let activeLedgerPath = LEDGER_PATH;
+
+// Exit codes follow the convention gateway-resume-spike.js documents, so a
+// wrapper can tell user-cancel from external termination: 130 for SIGINT,
+// 143 for SIGTERM. An interrupted soak is never a success, even when its
+// sweep succeeds.
+const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
+
+let signalled = false;
 async function reclaimAndExit(signal) {
-  if (reclaiming) return;
-  reclaiming = true;
-  console.log(`\nReceived ${signal} — reclaiming what this run created...`);
-  let failed = 1;
+  if (signalled) {
+    // The first signal starts a sweep that can run for minutes. Swallowing
+    // every later one leaves no way out but kill -9 — the hard kill this
+    // mechanism exists to survive — so the second one is an immediate abort.
+    console.error(`\nSecond ${signal} — aborting without finishing the sweep.`);
+    console.error(`Resources already created are still recorded; re-run with --reclaim ${activeLedgerPath}`);
+    process.exit(SIGNAL_EXIT_CODES[signal] || 1);
+  }
+  signalled = true;
+  console.log(`\nReceived ${signal} — stopping the run and reclaiming what it created...`);
   try {
-    failed = await reclaim(LEDGER_PATH);
+    await reclaimOnce(activeLedgerPath);
   } catch (e) {
     console.error(`Reclaim failed: ${e.message}`);
   }
-  process.exit(failed > 0 ? 1 : 0);
+  process.exit(SIGNAL_EXIT_CODES[signal] || 1);
+}
+
+// Registered before anything can create a resource — including the preflight
+// smoke link, which is minted well before the run loop starts.
+function installSignalHandlers() {
+  process.on('SIGINT', () => { reclaimAndExit('SIGINT'); });
+  process.on('SIGTERM', () => { reclaimAndExit('SIGTERM'); });
 }
 
 async function generateTestFile() {
@@ -154,7 +342,7 @@ async function runRound(roundNum) {
   const results = { fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0, uploadMs: 0, mintMs: 0, locMs: 0 };
 
   // File pipeline
-  if (FILE_PATH || !INCLUDE_LOCATION) {
+  if (!stopping && (FILE_PATH || !INCLUDE_LOCATION)) {
     const filePath = FILE_PATH || await generateTestFile();
     const fileBuffer = fs.readFileSync(filePath);
     const blob = new Blob([fileBuffer], { type: 'application/octet-stream' });
@@ -172,15 +360,15 @@ async function runRound(roundNum) {
     });
     if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
     const uploadResult = await uploadResp.json();
-    // Recorded before minting against it: the mints below are what make this
-    // resource expensive to leave behind.
+    // Recorded before anything is minted against it. Reclaiming this parent
+    // is what reclaims the recipient links, so it has to be on disk first.
     recordResource(uploadResult.resource_id, 'upload');
     results.uploadMs = performance.now() - uploadStart;
 
     // Mint links in batches of 10
     const mintStart = performance.now();
     const expiresAt = expiryToISO('24h');
-    for (let i = 0; i < COUNT; i += 10) {
+    for (let i = 0; i < COUNT && !stopping; i += 10) {
       const batchSize = Math.min(10, COUNT - i);
       try {
         await mintLinks(uploadResult.resource_id, expiresAt, batchSize);
@@ -194,9 +382,9 @@ async function runRound(roundNum) {
   }
 
   // Location pipeline
-  if (INCLUDE_LOCATION) {
+  if (!stopping && INCLUDE_LOCATION) {
     const locStart = performance.now();
-    for (let i = 0; i < COUNT; i++) {
+    for (let i = 0; i < COUNT && !stopping; i++) {
       try {
         const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
         recordResource(loc.resource_id, 'location');
@@ -217,14 +405,30 @@ async function main() {
   // Preflight checks
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
 
+  installSignalHandlers();
+
   // Recovery mode for a previous run that was killed before it could reclaim.
   // Runs before the endpoint guard below: revoking resources that already
   // exist is always the safe direction, wherever they were created.
   const reclaimOnly = getArg('reclaim', null);
-  if (reclaimOnly) {
-    const failed = await reclaim(reclaimOnly);
-    process.exit(failed > 0 ? 1 : 0);
+  if (hasFlag('reclaim')) {
+    // Validated rather than defaulted. `--reclaim` with no value would fall
+    // through to a FULL LOAD TEST — minting thousands of resources when the
+    // operator asked to delete some — and `--reclaim --ledger x` would take
+    // the next flag as the path, find no such file, and report a clean exit.
+    if (!reclaimOnly || reclaimOnly.startsWith('--')) {
+      console.error('FATAL: --reclaim needs a ledger path, e.g. --reclaim /tmp/loadtest-ledger-<ts>.jsonl');
+      process.exit(1);
+    }
+    activeLedgerPath = reclaimOnly;
+    const { missing, failed, refused } = await reclaimOnce(reclaimOnly);
+    // A missing ledger is a failure in recovery mode, not "nothing to do":
+    // the operator is here because something already went wrong, and a
+    // cheerful exit 0 on a mistyped path is how live resources get abandoned.
+    process.exit(missing || refused || failed > 0 ? 1 : 0);
   }
+
+  preflightLedger();
 
   // Hard-block loadtest runs against production URLs unless the caller
   // explicitly opts in. Accidentally firing 12,000 mint operations at prod
@@ -256,15 +460,14 @@ async function main() {
   console.log(`Ledger: ${LEDGER_PATH}`);
   console.log('---');
 
-  process.on('SIGINT', () => { reclaimAndExit('SIGINT'); });
-  process.on('SIGTERM', () => { reclaimAndExit('SIGTERM'); });
-
   const startTime = Date.now();
   const endTime = startTime + DURATION_S * 1000;
   let round = 0;
   const allResults = [];
 
-  while (Date.now() < endTime) {
+  // `stopping` ends the loop as well as the clock: a sweep triggered by a
+  // signal must not race rounds that keep appending ids behind it.
+  while (Date.now() < endTime && !stopping) {
     round++;
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`[${elapsed}s] Round ${round} starting...`);
@@ -284,7 +487,7 @@ async function main() {
 
     // Wait for next round
     const remaining = endTime - Date.now();
-    if (remaining > INTERVAL_S * 1000) {
+    if (remaining > INTERVAL_S * 1000 && !stopping) {
       await new Promise(r => setTimeout(r, INTERVAL_S * 1000));
     } else {
       break;
@@ -306,18 +509,35 @@ async function main() {
     }
   }
 
-  const failed = await reclaim(LEDGER_PATH);
+  // The minted counts above and the sweep's count below measure different
+  // things — recipient links versus the parent resources that own them — so
+  // say so, or the two numbers look like a leak of the difference.
+  const parents = [...new Set(readLedger(LEDGER_PATH) || [])].length;
+  const minted = allResults.reduce((s, r) => s + r.fileLinks + r.locLinks, 0);
+  console.log(`Reclaimable parents: ${parents} (covering ${minted} minted qURLs)`);
+  console.log(`Ledger: ${LEDGER_PATH}`);
+
+  const { failed } = await reclaimOnce(LEDGER_PATH);
+  // exitCode rather than exit: console output to a pipe is async in Node, and
+  // process.exit here can truncate the one record of what the sweep did.
   if (failed > 0) process.exitCode = 1;
 }
 
-main().catch(async (e) => {
-  console.error('Fatal:', e);
-  // The run may already have created resources before falling over. Reclaim
-  // them rather than leave them on a shared tenancy.
-  try {
-    await reclaim(LEDGER_PATH);
-  } catch (reclaimError) {
-    console.error('Reclaim failed:', reclaimError.message);
-  }
-  process.exit(1);
-});
+// Guarded so the suite can require this file for its pure helpers without
+// launching a load test — the shape gateway-resume-spike.js established.
+if (require.main === module) {
+  main().catch(async (e) => {
+    console.error('Fatal:', e);
+    // The run may already have created resources before falling over. Reclaim
+    // them rather than leave them on a shared tenancy.
+    try {
+      await reclaimOnce(activeLedgerPath);
+    } catch (reclaimError) {
+      console.error('Reclaim failed:', reclaimError.message);
+    }
+    process.exit(1);
+  });
+}
+
+// Exported so the suite covers them without live API traffic.
+module.exports = { readLedger, pruneLedger, ledgerEndpoints, reclaim };
