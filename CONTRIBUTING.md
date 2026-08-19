@@ -161,6 +161,30 @@ context. It is separate from the existing
 `age-check / Check GitHub Actions pin ages` context, even though both contexts
 are produced by the same workflow file.
 
+Every PR is likewise gated by `Lint and test scripts`, the single job in
+`.github/workflows/scripts.yml`, which became required on 2026-08-19. It is the
+only pre-merge enforcement of `scripts/check-extension-lockstep.sh` — the 26
+files Chrome and Edge share, among them the multipart header-injection
+sanitizers, the HTTPS-only link normalization, and the optional-host-permission
+grant and revoke paths — as well as of `scripts/check-i18n-parity.sh`, the
+release-please config/manifest pairing, and `install.sh`'s tag-selection policy.
+CLAUDE.md describes all four as CI-enforced and no other workflow re-checks any
+of them, so while this context was advisory the drift it detects annotated a PR
+without blocking its merge. It could also sit red on `main` unnoticed, and did:
+2026-08-13 at `0caf00d4`, fixed the same day by #1052.
+
+It earns the requirement on the three properties `workflow-contract.yml`'s
+header cites for its own context. It is unfiltered on `pull_request`, so it
+reports on every PR rather than going missing on a stacked one; it is
+secret-free on a read-only token, so requiring it adds no privileged surface;
+and it runs in about eight seconds against a five-minute cap. It also carries no
+job-level `if:`, so unlike `claude-review` above it cannot report `skipped` and
+cannot be satisfied empty — the step-level `!cancelled()` guards change which
+steps run, never whether the job reports. Requiring it removes an asymmetry that
+had begun to distort where guards get written: #1191 put a new Chrome/Edge
+workflow lockstep guard in `internal/ciworkflows/` rather than in `scripts/`
+precisely because only the Go test rode a required check.
+
 Every human-authored, non-draft PR is also gated by `claude-review`, the
 terminal Claude pass in `.github/workflows/claude-code-review.yml`. It became
 required on 2026-08-19, after #1173 merged three minutes before its review
@@ -175,13 +199,13 @@ are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run at
 all, so it already reports none of these contexts and merges by admin override.
 
 The full required set is the block below — those nine aggregates plus
-`Workflow Contract`, `Validate GitHub Actions pins`, `claude-review`, and the
-four `age-check / *` contexts, sixteen in all. That block is the
-machine-readable source of truth: `internal/ciworkflows` parses it, so a
-context added, removed, or respelled belongs there first. **Required contexts
-match case-sensitively**, and a context that matches no job does not fail open:
-it pins the merge box at "Expected — Waiting for status to be reported" until
-an admin overrides it.
+`Workflow Contract`, `Validate GitHub Actions pins`, `Lint and test scripts`,
+`claude-review`, and the four `age-check / *` contexts, seventeen in all. That
+block is the machine-readable source of truth: `internal/ciworkflows` parses it,
+so a context added, removed, or respelled belongs there first. **Required
+contexts match case-sensitively**, and a context that matches no job does not
+fail open: it pins the merge box at "Expected — Waiting for status to be
+reported" until an admin overrides it.
 
 <!-- BEGIN required-contexts -->
 
@@ -197,6 +221,7 @@ e2e / required
 shared / required
 Workflow Contract
 Validate GitHub Actions pins
+Lint and test scripts
 claude-review
 age-check / Check GitHub Actions pin ages
 age-check / check-docker-age
