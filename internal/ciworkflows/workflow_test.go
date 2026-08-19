@@ -777,7 +777,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	}
 }
 
-// assertPullRequestBranches compares a workflow's declared pull_request
+// assertPullRequestBranches compares a workflow's declared pull-request
 // branches filter against the intended one. A nil want means the workflow must
 // declare no filter at all.
 func assertPullRequestBranches(t *testing.T, path string, want []string) {
@@ -808,7 +808,7 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	}
 }
 
-// pullRequestBranchFilter reads the `branches` filter off a parsed pull_request
+// pullRequestBranchFilter reads the `branches` filter off a parsed pull-request
 // trigger, reporting whether one is declared at all. It accepts both YAML
 // spellings of a single filter — a bare scalar and a sequence — so `main` and
 // `[main]` are not treated as different decisions.
