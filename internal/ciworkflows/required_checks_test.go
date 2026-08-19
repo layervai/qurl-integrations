@@ -368,17 +368,18 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 // either.
 //
 // Flipping to `required` is still not a matter of adding the trigger back
-// everywhere. `claude-review` comes from claudeCodeReviewWorkflow, which is
-// `pull_request_target`-only by design — it holds ANTHROPIC_API_KEY and so must
-// load from the trusted default branch. That trigger, not the job gate, is
-// the property: a merge group never starts the workflow at all, so the context cannot report
-// for a queue entry. It is what the tail of this test pins.
+// everywhere: `claude-review` cannot report for a queue entry until
+// claudeCodeReviewWorkflow is restructured, and no offline check can verify
+// that restructuring for you.
 //
-// Restructuring is more than adding the trigger. The job's steps read
-// `github.event.pull_request` throughout — the head and base SHAs the review
-// is pinned to, the number it publishes against, the draft and fork guards —
-// and a merge group carries none of it. No offline check can verify that half
-// for you.
+// Which property carries that — and which one only ever looked like it did —
+// is stated at the tail of this test, on the assertion that pins it, and for
+// contributors in CONTRIBUTING.md's "Merge-result checks" section. It is
+// deliberately not restated a third time here. This paragraph used to carry
+// its own copy: #1187 wrote it, #1188 invalidated it by moving the gate it
+// described, #1208 repointed the assertion past it, and #1204 corrected it by
+// hand — a restatement with no assertion under it, which is what this package
+// removes rather than maintains.
 func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 	t.Parallel()
 
