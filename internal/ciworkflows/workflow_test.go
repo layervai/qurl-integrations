@@ -753,9 +753,9 @@ const editedActivityType = "edited"
 //
 // Two workflows declare `edited` today — pr-title.yml and
 // dependabot-pr-title.yml — and neither carries a `branches:` filter, so
-// neither is in scope. That they exist at all is what the second count guard
-// below reads: the scan has to find `edited` somewhere in the tree, or it is no
-// longer looking at `types:`. issue-priority.yml declares it on an `issues:`
+// neither is in scope. The second guard below pins that exact set: if the scan
+// stops reading `types:` or this account changes, the test fails rather than
+// leaving stale prose behind. issue-priority.yml declares it on an `issues:`
 // trigger, which is a different event's activity type entirely.
 //
 // Scope is any declared filter, not just a narrow one. Narrowness is recorded
@@ -765,7 +765,8 @@ const editedActivityType = "edited"
 // already ran on the stacked PR — but reading every filter keeps the rule one a
 // reader can apply without first deciding which table an entry belongs to.
 func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
-	filteredTriggers, editedTriggers := 0, 0
+	filteredTriggers := 0
+	editedWorkflows := map[string]bool{}
 	for _, name := range workflowFiles(t) {
 		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
 		for _, trigger := range pullRequestTriggers {
@@ -780,12 +781,12 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 
 			// Read `types` on every trigger rather than only the filtered ones
 			// this can fire on. The workflows asking for `edited` are exactly the
-			// unfiltered ones, so counting across the whole scan is what gives
+			// unfiltered ones, so recording them across the whole scan is what gives
 			// this read an observation of its own — see the second guard below.
 			types, hasTypes := pullRequestFilter(t, name, trigger, config, typesFilterKey)
 			asksForEdited := hasTypes && slices.Contains(types, editedActivityType)
 			if asksForEdited {
-				editedTriggers++
+				editedWorkflows[name] = true
 			}
 			if !filtered || !asksForEdited {
 				continue
@@ -826,13 +827,15 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 	// The `types` read gets no floor from a table: no branch-filtered workflow
 	// declares `types:` today, so within the subset this test fires on there is
 	// nothing for that read to observe and a miswired key would sit unnoticed
-	// behind the count above. The whole-tree total is the observation instead,
-	// which doubles as the pin on the two workflows the doc comment names — a
-	// claim that was prose no test read.
-	if editedTriggers == 0 {
-		t.Errorf("no pull-request workflow asks for %q, though the doc comment above names two; "+
-			"either the scan is reading something other than %q, or that comment and the "+
-			"retarget stall it describes need rewriting", editedActivityType, typesFilterKey.name)
+	// behind the count above. The exact whole-tree set is the observation
+	// instead, and pins both identities in the doc comment rather than merely
+	// proving that some workflow somewhere still asks for `edited`.
+	wantEditedWorkflows := map[string]bool{"dependabot-pr-title.yml": true, "pr-title.yml": true}
+	if !maps.Equal(editedWorkflows, wantEditedWorkflows) {
+		t.Errorf("pull-request workflows asking for %q = %v, want %v; either the scan is "+
+			"reading something other than %q, or the doc comment and retarget stall it "+
+			"describes need rewriting", editedActivityType, editedWorkflows,
+			wantEditedWorkflows, typesFilterKey.name)
 	}
 }
 
