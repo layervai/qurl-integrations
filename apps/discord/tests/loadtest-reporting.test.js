@@ -254,35 +254,74 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
     expect(valuedBooleanFlags(argv)).toEqual([]);
   });
 
-  // Guards the pairing for real, by reading the script's own hasFlag call
-  // sites rather than restating the constant: a boolean flag added to the
+  // Guards the pairing for real, by reading the script's own boolean-reader
+  // call sites rather than restating the constant: a boolean flag added to the
   // parser but not to BOOLEAN_FLAGS gets no rejection, which is the
   // silent-absence trap all over again. Parsed statically because the calls
   // sit at module scope in a file whose main() a suite cannot run — the same
   // approach as tests/ddb-reserved-words-static.test.js.
-  it('covers every flag hasFlag reads', () => {
+  //
+  // Two call shapes, because #1176 put an indirection between the flag names
+  // and the reader. resolveGuardInputs still names its flag literally
+  // (`readBooleanFlag(argv, 'allow-production')`), but resolveBooleanArgs
+  // funnels its own through a local `read` helper, so the readBooleanFlag call
+  // inside it carries that helper's PARAMETER — an Identifier, not a literal.
+  // Collecting only direct literals would have found one flag; collecting
+  // `read`'s arguments as well is what keeps every name covered.
+  //
+  // `read` is scoped to resolveBooleanArgs by source range rather than matched
+  // by name: resolveNumericArgs has a local helper of exactly the same name,
+  // and picking its `read('count', '100')` up here would demand that a NUMERIC
+  // flag appear in BOOLEAN_FLAGS.
+  it('covers every flag the boolean readers read', () => {
     const source = fs.readFileSync(
       path.join(__dirname, '..', 'scripts', 'loadtest-standalone.js'), 'utf8',
     );
+    const ast = parser.parse(source, { sourceType: 'script' });
+    let resolveBoolean = null;
+    traverse(ast, {
+      FunctionDeclaration(p) {
+        if (p.node.id?.name === 'resolveBooleanArgs') resolveBoolean = p.node;
+      },
+    });
+    expect(resolveBoolean).not.toBeNull();
+    const inResolveBoolean = (node) =>
+      node.start >= resolveBoolean.start && node.end <= resolveBoolean.end;
+
     const names = [];
-    traverse(parser.parse(source, { sourceType: 'script' }), {
+    traverse(ast, {
       CallExpression({ node }) {
-        if (node.callee.type !== 'Identifier' || node.callee.name !== 'hasFlag') return;
-        // The NAME is the second argument: #1174 made hasFlag take argv first,
-        // like every other reader here, so the flag moved along one. Reading
-        // argument 0 now yields the `args`/`argv` identifier, which is what
-        // the StringLiteral assertion below caught when that merge landed.
-        const arg = node.arguments[1];
+        if (node.callee.type !== 'Identifier') return;
+        let arg;
+        if (node.callee.name === 'readBooleanFlag') {
+          // The NAME is the second argument: #1174 made these readers take
+          // argv first, like every other reader here, so the flag moved along
+          // one. Reading argument 0 yields the `args`/`argv` identifier, which
+          // is what the StringLiteral assertion below caught when that landed.
+          arg = node.arguments[1];
+          // The one call site that legitimately passes a variable is the one
+          // inside resolveBooleanArgs' `read` helper; its names are collected
+          // from `read`'s own call sites just below, so skipping it here drops
+          // nothing.
+          if (arg && arg.type === 'Identifier' && inResolveBoolean(node)) return;
+        } else if (node.callee.name === 'read' && inResolveBoolean(node)) {
+          arg = node.arguments[0];
+        } else {
+          return;
+        }
         // A computed argument would silently contribute nothing, so fail
         // rather than let the check quietly stop covering that call.
         expect(arg && arg.type).toBe('StringLiteral');
         names.push(arg.value);
       },
     });
+    // Fails closed on a rename: this is what caught #1176 replacing hasFlag
+    // with readBooleanFlag, which left the old traversal matching nothing and
+    // the whole check passing over an empty set.
     expect(names.length).toBeGreaterThan(0);
     // Still a subset rather than an equality, but for a weaker reason than it
-    // used to be. Both boolean flags now reach hasFlag — #1174 moved
-    // --allow-production onto it inside resolveGuardInputs — so the two sets
+    // used to be. Both boolean flags now reach a boolean reader — #1174 moved
+    // --allow-production onto one inside resolveGuardInputs — so the two sets
     // happen to coincide today. Pinning equality would then fail the moment a
     // value-less flag is added that some other reader owns, which is a design
     // choice this check has no business forcing.
@@ -290,7 +329,8 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
   });
 
   // resolveGuardInputs is the reader for --allow-production. It went through
-  // hasFlag in #1174, so the traversal above does now see it — but the
+  // the shared boolean reader in #1174, so the traversal above does now see it
+  // — but the
   // traversal only proves the flag is SPELLED somewhere, and this proves the
   // guard actually honours it. Those are different failures.
   it('covers --allow-production, which resolveGuardInputs reads off argv', () => {
