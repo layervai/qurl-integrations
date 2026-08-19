@@ -40,7 +40,8 @@ const {
  */
 const round = (over = {}) => ({
   fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
-  uploadMs: 0, mintMs: 0, locMs: 0, totalMs: 0, partial: false, ...over,
+  uploadMs: 0, mintMs: 0, locMs: 0, totalMs: 0,
+  partial: false, mintPartial: false, ...over,
 });
 
 const report = (over = {}) => runReport({
@@ -165,11 +166,11 @@ describe('runReport — a truncated round counts in totals, not in averages', ()
     expect(lineStartingWith(lines, 'Avg round time')).toBe('Avg round time: n/a — every round was cut short');
   });
 
-  it('excludes the cut-short round from avg mint/round', () => {
+  it('excludes a round whose mint leg was cut short from avg mint/round', () => {
     const { lines } = report({
       allResults: [
         round({ fileLinks: 100, uploadMs: 200, mintMs: 4_000, totalMs: 10_000 }),
-        round({ fileLinks: 7, uploadMs: 200, mintMs: 280, totalMs: 700, partial: true }),
+        round({ fileLinks: 7, uploadMs: 200, mintMs: 280, totalMs: 700, partial: true, mintPartial: true }),
       ],
       roundsAttempted: 2,
     });
@@ -178,12 +179,51 @@ describe('runReport — a truncated round counts in totals, not in averages', ()
     expect(lineStartingWith(lines, 'Avg upload:')).toBe('Avg upload: 200ms, avg mint/round: 4000ms');
   });
 
+  it('keeps the mint sample when only the location leg was cut short', () => {
+    // The case a single whole-round flag got wrong. On a both-legs run
+    // (--file with --location) the terminal round typically finishes its mint
+    // plan in full and is then cut at the location boundary. Its totalMs is
+    // genuinely short — so it leaves Avg round time — but its mintMs is a
+    // complete, COUNT-wide sample and belongs in the mint average.
+    const { lines } = report({
+      allResults: [
+        round({ fileLinks: 100, locLinks: 100, uploadMs: 200, mintMs: 4_000, totalMs: 10_000 }),
+        round({
+          fileLinks: 100, locLinks: 12, uploadMs: 200, mintMs: 4_100, totalMs: 6_000,
+          partial: true, mintPartial: false,
+        }),
+      ],
+      roundsAttempted: 2,
+    });
+    // Both mint samples counted: (4000 + 4100) / 2.
+    expect(lineStartingWith(lines, 'Avg upload:')).toBe('Avg upload: 200ms, avg mint/round: 4050ms');
+    // ...while the round-time average still excludes it, since the ROUND was
+    // short even though the mint leg was not.
+    expect(lineStartingWith(lines, 'Avg round time')).toBe('Avg round time: 10.0s');
+  });
+
+  it('reports the mint average from a lone round cut only in its location leg', () => {
+    // The extreme the whole-round flag turned into a false negative: a
+    // --duration permitting one round would report the mint average as absent
+    // having just measured a full COUNT-wide one.
+    const { lines } = report({
+      allResults: [round({
+        fileLinks: 100, locLinks: 3, uploadMs: 200, mintMs: 4_000, totalMs: 6_000,
+        partial: true, mintPartial: false,
+      })],
+      roundsAttempted: 1,
+    });
+    expect(lineStartingWith(lines, 'Avg upload:')).toBe('Avg upload: 200ms, avg mint/round: 4000ms');
+  });
+
   it('blames the truncation, not a failure, when every minting round was cut short', () => {
     // The note that would otherwise be reached here is 'no mint was attempted'
     // — plainly false, since this round minted 7. The other, 'all N mint
     // attempt(s) failed', blames a failure for what was the clock.
     const { lines } = report({
-      allResults: [round({ fileLinks: 7, uploadMs: 200, mintMs: 280, totalMs: 700, partial: true })],
+      allResults: [round({
+        fileLinks: 7, uploadMs: 200, mintMs: 280, totalMs: 700, partial: true, mintPartial: true,
+      })],
       roundsAttempted: 1,
     });
     expect(lineStartingWith(lines, 'Avg upload:'))
@@ -261,6 +301,45 @@ describe('loadtest duration bound — static checks on loops no test can reach',
     expect(shouldStopCallsIn('runRound')).toBe(4);
   });
 
+  /** Every `results.<field> = true` assignment inside the named function. */
+  const truthAssignmentsIn = (fnName, field) => {
+    let count = 0;
+    traverse(ast, {
+      FunctionDeclaration(p) {
+        if (p.node.id?.name !== fnName) return;
+        p.traverse({
+          AssignmentExpression(a) {
+            const { left, right } = a.node;
+            if (left.type !== 'MemberExpression') return;
+            if (left.object.type !== 'Identifier' || left.object.name !== 'results') return;
+            if (left.property.type !== 'Identifier' || left.property.name !== field) return;
+            if (right.type === 'BooleanLiteral' && right.value === true) count++;
+          },
+        });
+      },
+    });
+    return count;
+  };
+
+  it('marks the round partial at every one of its four stop points', () => {
+    // Pairs with the shouldStop() count above: consulting the predicate and
+    // recording that it fired are separate edits, and dropping the second
+    // leaves the bound working while the summary reports a truncated round as
+    // though it were complete — averages and all.
+    expect(truthAssignmentsIn('runRound', 'partial')).toBe(4);
+  });
+
+  it('marks the mint leg partial at both of its stop points, and only those', () => {
+    // The file leg's two: skipped entirely, and cut mid-plan. NOT the location
+    // leg's, which is the whole point of the flag being per-leg.
+    //
+    // This is a static guard because the assignment lives in runRound, which
+    // no test can reach — dropping it from the batch loop leaves every
+    // behavioural test above green while a mint-truncated round silently
+    // rejoins the mint average, which is the exact skew this PR removes.
+    expect(truthAssignmentsIn('runRound', 'mintPartial')).toBe(2);
+  });
+
   it('consults the predicate in main rather than comparing the clock inline', () => {
     // The round loop and the inter-round sleep. A `Date.now() < endTime`
     // rewritten inline here would drop the signal half of the predicate and
@@ -272,10 +351,15 @@ describe('loadtest duration bound — static checks on loops no test can reach',
     // Every loop reads the predicate, not the flag. A `&& !stopping` added
     // back to a loop header is a second, competing condition that a deadline
     // would not reach — exactly the shape this change removed.
+    //
+    // Matched on the IDENTIFIER, not on `!stopping`: the negated spelling is
+    // only the form the old code happened to use, and a bare `if (stopping)`
+    // reintroduces the same competing condition while reading as untouched by
+    // a check that looks for the `!`.
     const runRoundSource = source.slice(
       source.indexOf('async function runRound'),
       source.indexOf('async function main'),
     );
-    expect(runRoundSource).not.toContain('!stopping');
+    expect(runRoundSource).not.toMatch(/\bstopping\b/);
   });
 });

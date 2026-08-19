@@ -99,6 +99,12 @@
  *   in less time; averaging it in reports a round time and a mint latency
  *   that no complete round ever took.
  *
+ *   Truncation is tracked per LEG as well as per round, because the two can
+ *   differ: a round that completes its whole mint plan and is then cut in the
+ *   location leg has a shortened total but a complete mint sample. It leaves
+ *   the round-time average and stays in the mint average. On a both-legs run
+ *   that is the usual shape of the final round.
+ *
  *   The same predicate carries a signal (see Reclaim below), so Ctrl-C and an
  *   expired clock stop the loops by one path rather than two conditions that
  *   can disagree.
@@ -1957,11 +1963,14 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       // Residual limit, inherent to timing the batch loop as a whole rather
       // than each attempt: this is time per ROUND, not per qURL, and a
       // partially-failing round still blends its own failures into its mintMs.
-      // Excludes truncated rounds for the same reason as Avg round time: a
-      // round cut off mid-plan minted fewer links in less time, and mintMs is
-      // a per-ROUND figure, so it drags the mean toward however far the last
-      // round happened to get before the deadline.
-      const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0 && !r.partial);
+      // Excludes rounds whose MINT LEG was cut off — not every truncated
+      // round. mintMs is a per-ROUND figure, so a round stopped mid-plan
+      // minted fewer links in less time and drags the mean toward however far
+      // it got. But a round that finished its mint plan and was then cut in
+      // the location leg has a complete sample, and on a both-legs run that is
+      // the usual shape of the final round: excluding it threw away good data
+      // on nearly every such soak. Hence mintPartial rather than partial.
+      const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0 && !r.mintPartial);
       // Nothing minted has two causes and they are not the same news: every
       // attempt failed, or nothing was ever attempted. Reporting the second as
       // "all 0 mint attempt(s) failed" states a failure that did not happen.
@@ -1977,7 +1986,7 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       // and "all N failed" blames a failure for what was a truncation. It is
       // checked first because both other notes can also be true at the same
       // time, and this is the one that explains why the average is missing.
-      const truncatedMinters = fileRounds.some((r) => r.fileLinks > 0 && r.partial);
+      const truncatedMinters = fileRounds.some((r) => r.fileLinks > 0 && r.mintPartial);
       const noMintNote = truncatedMinters
         ? 'n/a — every round that minted was cut short'
         : fileFail > 0
@@ -2086,10 +2095,22 @@ async function runRound(roundNum) {
     fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
     uploadMs: 0, mintMs: 0, locMs: 0,
     reuploads: 0, reuploadFail: 0, reuploadMs: 0,
-    // True when the round stopped before doing everything it planned. Present
-    // and false rather than absent, so a round object's shape does not depend
-    // on how it ended and runReport's filters need no `|| false`.
+    // True when the round stopped before doing everything it planned —
+    // anywhere. Present and false rather than absent, so a round object's
+    // shape does not depend on how it ended and runReport's filters need no
+    // `|| false`.
     partial: false,
+    // True only when the FILE leg specifically was cut short. Separate from
+    // `partial` because the two answer different questions and a round can
+    // have one without the other: on a both-legs run (--file with --location)
+    // the terminal round typically finishes its mint plan in full and is then
+    // cut at the location boundary. Its totalMs is genuinely truncated — so it
+    // must leave `Avg round time` — while its mintMs is a complete, COUNT-wide
+    // sample that `avg mint/round` should keep. Keying the mint average off
+    // the whole-round flag discarded exactly that sample, on essentially every
+    // both-legs soak, and with a one-round duration reported the average as
+    // absent after having measured it.
+    mintPartial: false,
   };
 
   // Keyed by message and flushed once per leg below, so a round that mixes a
@@ -2109,7 +2130,7 @@ async function runRound(roundNum) {
   // summary entirely.
   const wantsFile = FILE_PATH || !INCLUDE_LOCATION;
   const stopBeforeFile = shouldStop();
-  if (wantsFile && stopBeforeFile) results.partial = true;
+  if (wantsFile && stopBeforeFile) { results.partial = true; results.mintPartial = true; }
   if (wantsFile && !stopBeforeFile) {
     const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
@@ -2193,7 +2214,7 @@ async function runRound(roundNum) {
       // its full COUNT however long that took, so `--count 20000 --duration 60`
       // issued every one of its batches — hours of traffic — before the clock
       // was consulted again between rounds.
-      if (shouldStop()) { results.partial = true; break; }
+      if (shouldStop()) { results.partial = true; results.mintPartial = true; break; }
       if (batch.reupload) {
         const reStart = performance.now();
         let re = null;
