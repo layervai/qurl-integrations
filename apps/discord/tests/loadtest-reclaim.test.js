@@ -313,10 +313,17 @@ describe('parseReclaimArg', () => {
 });
 
 describe('resolveReclaimArg', () => {
-  it('refuses a bare --reclaim, carrying the shape parseReclaimArg read', () => {
-    // The refusal is the whole job: a declared flag whose reader reports
-    // nothing is accepted by resolveUnknownArgs and then ignored, which here
-    // means a full load test runs where the operator asked to delete.
+  it('forwards the mode parseReclaimArg read, adding only the refusal', () => {
+    // Scoped deliberately: the refusal itself is already the flag-table
+    // wiring check's job in tests/loadtest-silent-failure.test.js, which
+    // drives this same argv and asserts on the errors array alone — delete
+    // the push at the call site and that check fails first.
+    //
+    // What is pinned HERE is the shape around it. resolveReclaimArg
+    // re-exports the mode decision rather than forming a second opinion on
+    // it: main() reads the mode from parseReclaimArg directly and
+    // resolveArgErrors takes only the errors, so a divergence here would be
+    // one that nothing reads and nothing contradicts.
     expect(resolveReclaimArg(['--reclaim'])).toEqual({
       requested: true, path: null, errors: [expect.stringContaining('--reclaim')],
     });
@@ -325,23 +332,45 @@ describe('resolveReclaimArg', () => {
   it('points at the temp directory rather than a hard-coded /tmp', () => {
     // The path this message tells the operator to type has to be the one the
     // run actually wrote to, and DEFAULT_LEDGER_PATH is built from
-    // os.tmpdir() — so a literal /tmp sends a Windows operator to a directory
-    // that does not exist, and this message is read by someone who has
-    // already lost the run and is trying to find thousands of live resources.
-    // The header docs spell the same default `<tmpdir>` twice; this is the
-    // third mention and the only one that was ever out of step with them.
+    // os.tmpdir() — which is /tmp on neither platform that runs this. macOS
+    // resolves it per-user to /var/folders/.../T at 0700, Windows to %TEMP%.
+    // The macOS case is the common one and the sharper one: /tmp there is a
+    // symlink to the world-writable 1777 directory whose symlink hazard is
+    // the whole reason the ledger is created 0600, a few lines above
+    // DEFAULT_LEDGER_PATH. So the old text sent every operator to a
+    // directory the ledger had never been written to — and it is read by
+    // someone who has already lost a run and is trying to find thousands of
+    // live resources.
+    //
+    // The header docs spell the same default `<tmpdir>` twice; this was the
+    // third mention and the only one ever out of step with them.
     const [message] = resolveReclaimArg(['--reclaim']).errors;
     expect(message).toContain('--reclaim <tmpdir>/loadtest-ledger-');
     expect(message).not.toContain('/tmp/');
   });
 
   it('stays silent on the paths that are not a refusal', () => {
-    // Both directions, because an always-erroring resolver still satisfies
-    // the wiring check in tests/loadtest-silent-failure.test.js: a run given
-    // a good ledger path, and a run that never asked to reclaim at all,
-    // would each abort on an error naming a flag the operator got right.
-    expect(resolveReclaimArg(['--reclaim', '/tmp/x.jsonl']).errors).toEqual([]);
-    expect(resolveReclaimArg(['--count', '10']).errors).toEqual([]);
+    // The first case is the one that closes a real gap: nothing else in this
+    // suite drives a VALID --reclaim PATH through this resolver, so without
+    // it the `&& !reclaimPath` conjunct is unpinned and `if (requested)`
+    // survives. The second case is the run that never asked to reclaim at
+    // all, which an always-erroring resolver would abort.
+    //
+    // Both asserted as the whole shape rather than just the silence, and
+    // both are needed for it: the refusal case above fixes `path` at null
+    // and `requested` at true, so this is the only place either field is
+    // pinned carrying anything else. Drop the shape here and `path` can stop
+    // propagating, or `requested` can hard-code true, with nothing failing —
+    // the two survive the whole 405-test loadtest battery otherwise.
+    //
+    // The /tmp literals here are opaque tokens, not guidance — this resolver
+    // reads argv and never opens the path, and the parseReclaimArg cases
+    // above use the same fixture. The refusal message is the only string in
+    // this file an operator is ever told to copy.
+    expect(resolveReclaimArg(['--reclaim', '/tmp/x.jsonl']))
+      .toEqual({ requested: true, path: '/tmp/x.jsonl', errors: [] });
+    expect(resolveReclaimArg(['--count', '10']))
+      .toEqual({ requested: false, path: null, errors: [] });
   });
 });
 
