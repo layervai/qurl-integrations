@@ -814,6 +814,39 @@ func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
 		}
 	})
 
+	// The prose note above is written for a person; an unattended runner reads
+	// the structured events instead. Both must carry the identity, or headless
+	// operators are left scraping wording that is free to change.
+	t.Run("the structured event carries it for unattended runners", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, exampleCRID).stderr.String()
+
+		var serving string
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.Contains(line, "event=connector_serving") {
+				serving = line
+				break
+			}
+		}
+		if serving == "" {
+			t.Fatalf("no connector_serving event was logged:\n%s", stderr)
+		}
+		for _, want := range []string{"crid=" + exampleCRID, "connector_id=cmd-id"} {
+			if !strings.Contains(serving, want) {
+				t.Errorf("serving event missing %q:\n%s", want, serving)
+			}
+		}
+	})
+
+	t.Run("the structured event omits an absent CRID rather than logging it empty", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, "").stderr.String()
+
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.Contains(line, "event=connector_serving") && strings.Contains(line, "crid=") {
+				t.Errorf("an absent CRID was logged anyway, so presence stops meaning anything:\n%s", line)
+			}
+		}
+	})
+
 	t.Run("no CRID leaves the note exactly as it was", func(t *testing.T) {
 		stderr := connectorServeAttempt(t, "").stderr.String()
 
