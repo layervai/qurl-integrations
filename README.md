@@ -126,8 +126,8 @@ required context, and narrowing one that already gates merges takes an edit to t
 only review catches. This is the paths filter's trap inverted: a workflow filtered off PRs stacked
 on a feature branch never registers its checks at all, and protection guards only `main`, so the
 stacked PR reads green having run none of them (#1183, #1185). The package's own check —
-`Workflow Contract` — is unfiltered and reports on every PR and merge group, because a check
-behind a paths filter cannot police the paths filters (#1081).
+`Workflow Contract` — is unfiltered and reports on every PR, because a check behind a paths filter
+cannot police the paths filters (#1081).
 
 ## License
 
