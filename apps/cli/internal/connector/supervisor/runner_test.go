@@ -309,6 +309,11 @@ func (wrappedTimeoutErr) Temporary() bool { return false }
 // the process lacks CAP_NET_ADMIN for SO_RCVBUFFORCE. The knob has to be set
 // here rather than with t.Setenv, which panics in a test that calls
 // t.Parallel.
+//
+// Setting it before m.Run is early enough only because quic-go reads it on
+// the connection-setup path (wrapConn, under a sync.Once) rather than in an
+// init, so a bump that moved the read into package init would un-silence the
+// line. Cosmetic either way: it is a log line, never a failure.
 func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.DiscardHandler))
 	// Errors are impossible on a literal key/value and there is nothing to
