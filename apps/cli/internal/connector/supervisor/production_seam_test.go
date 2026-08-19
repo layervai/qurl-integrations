@@ -23,7 +23,9 @@ func routingID(seed string) string {
 // runs: frpgen's output put through ClientCommonConfig.Complete, which is what
 // every path into the FRP service does before the connector sees it. Shared by
 // the tests that reason about production's shape, so the two cannot drift into
-// asserting against different configs. seed varies the routing identity only.
+// asserting against different configs. seed only feeds the routing identity,
+// which frpgen puts on the proxy rather than the common config, so callers
+// passing different seeds still get identical configs back.
 func productionCommon(t *testing.T, seed string) *v1.ClientCommonConfig {
 	t.Helper()
 	cfg, err := frpgen.Generate(&frpgen.Route{

@@ -5,9 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -391,13 +388,12 @@ func TestApplyKnockResultContract(t *testing.T) {
 // config production actually runs.
 //
 // It is load-bearing for the concurrency argument on redialKnockRefresher, not
-// tidiness. The fork reads the stamped config without synchronization, and what
-// keeps that harmless on the Open seam is that the one path FRP drives
-// concurrently — knockingConnector.Connect, reached once per ReqWorkConn
-// through msg.AsyncHandler — touches nothing in that config but
-// Transport.Protocol and Transport.TCPMux, via physicalDialInOpen. Let a
-// refresh start restamping a Transport field and those reads become a live data
-// race in production rather than the latent one the unmuxed seam already has.
+// tidiness. The fork reads the stamped config without synchronization from
+// several of its own goroutines, and what keeps that harmless is that none of
+// them reads a field a refresh writes. Let a refresh start restamping a
+// Transport field — physicalDialInOpen reads two of those once per ReqWorkConn,
+// realConnect and heartbeatWorker read more — and those reads become a live
+// data race in production rather than the latent one the unmuxed seam has.
 //
 // It drives refresh rather than applyKnockResult alone because refresh is free
 // to write common outside that helper, and nothing else in the package would
@@ -406,13 +402,12 @@ func TestApplyKnockResultContract(t *testing.T) {
 //
 // Two techniques, because neither covers the field alone. The marshaled-JSON
 // compare catches any write that CHANGES a value, including one made through
-// the *bool transport knobs — a shallow struct copy would share those pointers
-// and compare each to itself. The pointer-identity checks catch a knob
-// repointed at an equal value, which a value snapshot cannot see. Neither
-// catches a value-preserving write through an existing pointer (`*Enable =
-// true` where it is already true); that is still an unsynchronized write, and
-// it is the acknowledged floor of this technique rather than a claim of total
-// coverage.
+// the *bool knobs — a shallow struct copy would share those pointers and
+// compare each to itself. The pointer-identity checks catch a knob repointed at
+// an equal value, which a value snapshot cannot see. Neither catches a
+// value-preserving write through an existing pointer (`*Enable = true` where it
+// is already true); that is still an unsynchronized write, and it is the
+// acknowledged floor of this technique rather than a claim of total coverage.
 func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
 	t.Parallel()
 	common := productionCommon(t, "write-set")
@@ -420,16 +415,23 @@ func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
 	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("stamped.example:7443")}}
 	r := newTestRefresher(knocker, time.Hour, clk.now)
 
-	// A real knock, not the supervisor's first-cycle handoff: the generated
-	// config carries MetaClientVersion but no token, so refresh takes the
-	// knocking path and actually stamps.
-	if commonKnockToken(common) != "" {
+	// Presence, not value: this both keeps refresh off the first-cycle handoff
+	// path so it really stamps, and proves the key is absent so the restore
+	// below can simply delete it.
+	if _, ok := common.Metadatas[frpgen.MetaQURLKnockToken]; ok {
 		t.Fatal("test premise broken: the generated config already carries a knock token, so refresh would hand off instead of stamping")
 	}
 	beforeAddr, beforePort := common.ServerAddr, common.ServerPort
-	beforeToken, hadToken := common.Metadatas[frpgen.MetaQURLKnockToken]
-	beforeMux, beforeTLS, beforeExit := common.Transport.TCPMux, common.Transport.TLS.Enable, common.LoginFailExit
-	before, err := json.Marshal(common)
+	// Every *bool the fork reads off this config. Complete() populates all
+	// four, and realConnect dereferences TLS.DisableCustomTLSFirstByte the same
+	// way it does the rest, so a knob repointed at an equal value is an
+	// unsynchronized write that the value snapshot below cannot see.
+	beforeMux, beforeExit := common.Transport.TCPMux, common.LoginFailExit
+	beforeTLS, beforeFirstByte := common.Transport.TLS.Enable, common.Transport.TLS.DisableCustomTLSFirstByte
+	// Indented on purpose: this renders only on a failure that should never
+	// happen, and one field per line is what makes the offending field obvious
+	// without a diff helper. MarshalIndent is as deterministic as Marshal.
+	before, err := json.MarshalIndent(common, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal the pre-stamp config: %v", err)
 	}
@@ -446,60 +448,31 @@ func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
 	if got := common.Metadatas[frpgen.MetaQURLKnockToken]; got != "ac-token" {
 		t.Fatalf("knock token = %q, want the ACK's ac-token", got)
 	}
-	if common.Transport.TCPMux != beforeMux || common.Transport.TLS.Enable != beforeTLS || common.LoginFailExit != beforeExit {
-		t.Fatal("refresh repointed one of the *bool knobs; the fork reads TCPMux from the work-connection goroutines, so replacing the pointer is an unsynchronized write even when the value is unchanged")
+	for _, knob := range []struct {
+		name          string
+		before, after *bool
+	}{
+		{"Transport.TCPMux", beforeMux, common.Transport.TCPMux},
+		{"Transport.TLS.Enable", beforeTLS, common.Transport.TLS.Enable},
+		{"Transport.TLS.DisableCustomTLSFirstByte", beforeFirstByte, common.Transport.TLS.DisableCustomTLSFirstByte},
+		{"LoginFailExit", beforeExit, common.LoginFailExit},
+	} {
+		if knob.before != knob.after {
+			t.Errorf("refresh repointed %s; the fork dereferences it from its own goroutines, so replacing the pointer is an unsynchronized write even when the value is unchanged", knob.name)
+		}
 	}
 
 	// Undo exactly the three sanctioned writes. Anything else the stamp
 	// touched survives into the comparison below.
 	common.ServerAddr, common.ServerPort = beforeAddr, beforePort
-	if hadToken {
-		common.Metadatas[frpgen.MetaQURLKnockToken] = beforeToken
-	} else {
-		delete(common.Metadatas, frpgen.MetaQURLKnockToken)
-	}
-	after, err := json.Marshal(common)
+	delete(common.Metadatas, frpgen.MetaQURLKnockToken)
+	after, err := json.MarshalIndent(common, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal the post-stamp config: %v", err)
 	}
 	if !bytes.Equal(before, after) {
-		t.Fatalf("refresh wrote outside its dial-target-and-token set; the fork reads this config unsynchronized from the work-connection goroutines\n%s", jsonFieldDiff(t, before, after))
+		t.Fatalf("refresh wrote outside its dial-target-and-token set; the fork reads this config unsynchronized from its own goroutines\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-}
-
-// jsonFieldDiff reports the top-level config keys that differ between two
-// marshaled snapshots. The raw blobs run to hundreds of bytes on one line, so
-// dumping both leaves the reader to spot a few changed characters by eye.
-func jsonFieldDiff(t *testing.T, before, after []byte) string {
-	t.Helper()
-	var b, a map[string]any
-	if err := json.Unmarshal(before, &b); err != nil {
-		return fmt.Sprintf("before: %s\nafter:  %s", before, after)
-	}
-	if err := json.Unmarshal(after, &a); err != nil {
-		return fmt.Sprintf("before: %s\nafter:  %s", before, after)
-	}
-	keys := make([]string, 0, len(b)+len(a))
-	for k := range b {
-		keys = append(keys, k)
-	}
-	for k := range a {
-		if _, ok := b[k]; !ok {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	var diffs []string
-	for _, k := range keys {
-		bv, av := fmt.Sprintf("%v", b[k]), fmt.Sprintf("%v", a[k])
-		if bv != av {
-			diffs = append(diffs, fmt.Sprintf("  %s: %s -> %s", k, bv, av))
-		}
-	}
-	if len(diffs) == 0 {
-		return "(no top-level key differs; the change is nested inside an equal-printing value)"
-	}
-	return strings.Join(diffs, "\n")
 }
 
 // TestPhysicalDialInOpen pins which connector method owns the physical dial

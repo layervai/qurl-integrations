@@ -136,12 +136,17 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 // never interleaved from two.
 //
 // The lock does NOT make that stamp safe to READ. It is released when refresh
-// returns, before the dial it precedes, and the fork then reads ServerAddr,
-// ServerPort and Transport.* unsynchronized — in realConnect, in Open's QUIC
-// branch, and Metadatas in buildLoginMsg. Writes serialize against writes; the
-// fork's reads of them are unguarded. Holding the lock across the dial would
-// cover the connector's reads but not buildLoginMsg's, which runs inside Dial
-// after Connect returns, outside any lock this package can hold.
+// returns, before the dial it precedes, and the fork then reads the stamped
+// fields unsynchronized: ServerAddr and ServerPort in realConnect and in Open's
+// QUIC branch, and Metadatas in buildLoginMsg — whose map contents are actually
+// walked a frame later, when exchangeLogin marshals the Login. Transport.* has
+// more readers still, several of them concurrent (heartbeatWorker, the proxy
+// manager, physicalDialInOpen), which is why the write-set pin below matters
+// beyond the two fields named here. Writes serialize against writes; the fork's
+// reads of them are unguarded. Holding the lock across the dial would cover the
+// connector's reads but not buildLoginMsg's, which runs inside Dial after
+// Connect returns — past anything this package can lock across the Connector
+// seam.
 //
 // That is latent rather than live. Production runs a completed config, so the
 // refresh sits on the Open seam (see the WATCHDOG COUPLING note on Connect),
@@ -149,16 +154,19 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 // driven serially by loopLoginUntilSuccess. Every read of a stamped field
 // therefore happens later on the goroutine that wrote it. The concurrent dials
 // the fork does have are the work connections, one goroutine per ReqWorkConn
-// through msg.AsyncHandler, and on this seam each reaches only
-// knockingConnector.Connect — which refreshes nothing and reads nothing a
+// through msg.AsyncHandler, and on this seam each dials through
+// knockingConnector.Connect — which refreshes nothing, and reads nothing a
 // refresh writes (TestRefreshStampsOnlyTheDialTargetAndToken).
 //
 // On the unmuxed seam those goroutines refresh concurrently, and a -race
 // harness driving the real fork connector there reports write/read races on
-// ServerAddr and ServerPort against realConnect. Reaching for a per-dial copy
-// of the config does not settle it — see refresh for what the stamp has to
-// land on. Making that seam safe needs fork-side changes, and noteRedialLocked
-// revisited first per the same WATCHDOG COUPLING note.
+// ServerAddr and ServerPort against realConnect. A config copy does settle
+// those two — they are value fields — but only at per-CONNECT granularity: the
+// ConnectorCreator runs once per Dial and every work connection dials through
+// that one connector, so a copy taken there just puts the same shared struct
+// behind a new pointer. What no copy settles is the token; see refresh for the
+// map it has to land on. Making that seam safe needs fork-side changes, and
+// noteRedialLocked revisited first per the same WATCHDOG COUPLING note.
 //
 // TODO(upstream-contract): the goroutine topology above mirrors
 // github.com/layervai/frp v0.70.0-layerv.4 — client/control_session.go (Dial
@@ -295,13 +303,17 @@ func (r *redialKnockRefresher) settled() time.Duration {
 // refresh performs one gated knock and restamps common in place. In place is
 // required rather than incidental, and a copy is not the escape it looks like:
 // the fork's buildLoginMsg reads Metadatas off the control-session dialer's own
-// pointer to this struct, so a DEEP copy would carry the token nowhere, while a
-// shallow one aliases the same map — landing the token, but leaving that write
-// on the shared map regardless. The dial target is the separable half: those
-// are value fields, so a copy really would take ServerAddr and ServerPort out
-// of the shared struct. The map write, and the Login read racing it, stay. The
-// stamp is unsynchronized once this returns — see the type's doc comment for
-// what that costs and why the completed production config does not pay it.
+// pointer to this struct, so a DEEP copy would carry the token nowhere. A
+// shallow one lands it only by aliasing that same map — and loses it outright
+// when the shared map is nil, since the branch below then allocates a fresh one
+// on the copy. Either way the write stays on the shared map, and so does the
+// Login read racing it. The dial target is the separable half: ServerAddr and
+// ServerPort are value fields, so a copy does take them out of the shared
+// struct — but only a per-CONNECT copy helps, since the fork's connector
+// captures one config pointer per Dial and every work connection dials through
+// it. The stamp is unsynchronized once this returns — see the type's doc
+// comment for what that costs and why the completed production config does not
+// pay it.
 func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCommonConfig, reason string) error {
 	if r == nil || r.knocker == nil {
 		return nil
