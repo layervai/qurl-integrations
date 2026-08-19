@@ -326,7 +326,10 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 		return err
 	}
 
-	printer.Notef(msgConnectorServing, resource.Slug, net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort)))
+	// The resource resolved above already carries its own CRID — on the
+	// read-by-ID leg and the ensure leg alike — so the serve note can hand it
+	// to the customer with no extra lookup and no extra request.
+	printer.ConnectorServing(resource.Slug, net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort)), resource.CRID)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}
