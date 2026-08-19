@@ -41,12 +41,30 @@ func IsTokenLoginError(err error) bool {
 // knock token rejected", "knock_invalid: knock-token validation unavailable",
 // "knock_invalid: knock token expired").
 //
-// CROSS-REPO PIN: this set is bound to the checked-in contract snapshot
-// (qrts_knock_token_login_wire_contract.json in this package) by
-// TestQRTSKnockTokenLoginContract. Change needle, JSON, and the server side
-// together. History: a pre-contract needle set once pinned strings the server
-// never emitted, so the classifier silently never fired on a real reject —
-// the exact drift the contract turns into a test failure.
+// TODO(upstream-contract): mirrors qurl-service's knock-token Login reject
+// path — the knock_invalid wire tag it prefixes every knock-token denial
+// with. TestQRTSKnockTokenLoginContract binds this set to the checked-in
+// snapshot (qrts_knock_token_login_wire_contract.json in this package), so
+// needle and JSON cannot drift apart; change needle, JSON, and the server
+// side together.
+//
+// That guard does not cover the half this marker is for, which is why the
+// marker is here and not just the pin. It compares two files in this
+// package: rename the tag upstream and the needle and the snapshot still
+// agree, the suite stays green, and the classifier silently stops firing.
+// The snapshot is compared against the producer's own copy only when
+// QRTS_KNOCK_TOKEN_LOGIN_CONTRACT points at it, and nothing in this repo
+// sets that variable — it is a hook for a cross-repo workflow, so on this
+// repo's CI the producer side goes unchecked.
+//
+// TestForkEmitsTheLoginFailurePrefixThisPackageMatches closes a different
+// half — each snapshot wire text really does reach this matcher through a
+// real frps and frpc — but it rejects with the snapshot's own strings, so it
+// cannot tell you the server still emits them either.
+//
+// History: a pre-contract needle set once pinned strings the server never
+// emitted, so the classifier silently never fired on a real reject — the
+// exact drift this becomes a test failure for once both sides are compared.
 var tokenErrorNeedles = []string{
 	"knock_invalid", // server-owned wire tag; prefixes every knock-token Login denial
 }
@@ -76,6 +94,38 @@ const reasonDialError = "dial_error"
 // would be dead code with a test that looked like coverage. The stall is
 // reported directly instead, as event=reconnect_stalled from the watchdog and
 // event=reconnect_stall_counted from the budget.
+//
+// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// client/service.go — Run's `fmt.Errorf("login to the server failed: %v. With
+// loginFailExit enabled, no additional retries will be attempted", ...)`, the
+// fork's only construction of the text the login_failed case below matches.
+// It is upstream prose, not a wire value: nothing in this module makes it
+// fail to compile, so a reword there silently rebuckets every Login-stage
+// failure as frp_runtime_error — no compile error, no test failure, just
+// dashboards that stop separating "the tunnel server refused us" from "the
+// tunnel ran and broke". Change the case below, contract_test.go's
+// frpLoginWrap, and this version together on a fork bump.
+//
+// Two properties of that wrap are worth keeping in view, because both widen
+// what the case is responsible for:
+//
+//   - The supervisor forces LoginFailExit true on every per-cycle config
+//     clone (forceLoginFailExit, pinned by TestKnockForcesLoginFailExit), so
+//     this is the fork's live exit for a cycle whose Login never succeeded —
+//     not a corner reachable only under unusual config.
+//   - The wrap is a fresh fmt.Errorf with %v, not %w. Nothing inside it is
+//     retrievable with errors.Is, so a caller cancellation that races the
+//     login loop reaches this switch rather than the context_canceled branch
+//     above, arriving as "login to the server failed: <nil>" (the fork leaves
+//     the cause empty when the cancel was not its own, and says "loginFailExit
+//     enabled" either way). Both call sites classify it: emitSessionEvents
+//     through its !healthy branch, teardownCause because its errors.Is guard
+//     does not match.
+//
+// TestForkEmitsTheLoginFailurePrefixThisPackageMatches and
+// TestForkLoginWrapOutranksTheDialSubstrings drive the real fork to a real
+// failed Login and assert the prefix and the ordering, so a reword reddens a
+// test rather than only contradicting this comment.
 func classifyRunError(err error) string {
 	if err == nil {
 		return ""
