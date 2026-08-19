@@ -1008,6 +1008,21 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(preflight).not.toBeNull();
     expect(smokeTest).not.toBeNull();
     expect(preflight).toBeLessThan(smokeTest);
+
+    // And before the target guard, which two comments now lean on: the one at
+    // resolveGuardInputs saying a malformed `--allow-production=1` is refused
+    // "before main() reaches the guard at all", and the one at
+    // resolveBooleanArgs explaining why the shape check lives there rather
+    // than in the guard's own error list. Both are claims about main()'s
+    // ORDER, and nothing pinned that order — reversing these two would leave
+    // every unit test green and both comments quietly false, which in this
+    // file is the costliest kind of defect.
+    //
+    // Behaviour survives the reversal (the guard's read is fail-closed on a
+    // refused flag either way), so this pins the comments, not a bug.
+    const guard = firstInMain('resolveGuardInputs');
+    expect(guard).not.toBeNull();
+    expect(preflight).toBeLessThan(guard);
   });
 
   it('uploads through reUploadBuffer, twice and only twice', () => {
