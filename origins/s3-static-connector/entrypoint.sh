@@ -108,6 +108,9 @@ done
 
 preflight_status="${preflight_line#* }"
 preflight_status="${preflight_status%% *}"
+# A status line with no reason phrase ends at the code with the CR still
+# attached; strip it so a real rejection cannot fail open to "no response".
+preflight_status="${preflight_status%$'\r'}"
 case "$preflight_status" in
   [0-9][0-9][0-9]) ;;
   *) preflight_status="" ;;
