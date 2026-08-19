@@ -51,7 +51,7 @@ func TestGenerateManagedSingleRoute(t *testing.T) {
 		t.Errorf("Protocol = %q, want kcp", cfg.Common.Protocol)
 	}
 	if cfg.Common.LoginFailExit {
-		t.Error("LoginFailExit = true, want Generate's false default; forcing fail-fast initial Login is the supervisor's per-cycle job, not Generate's")
+		t.Error("LoginFailExit = true, want Generate's false default before the supervisor's per-cycle override")
 	}
 	if cfg.Common.DialServerKeepaliveSeconds != 60 || cfg.Common.DialServerTimeoutSeconds != 10 {
 		t.Errorf("transport tuning = keepalive %d, timeout %d; want defaults 60/10", cfg.Common.DialServerKeepaliveSeconds, cfg.Common.DialServerTimeoutSeconds)

@@ -98,26 +98,17 @@ type Options struct {
 	KeepaliveSeconds int
 	// DialTimeoutSeconds is the server connection timeout; 0 defaults to 10.
 	DialTimeoutSeconds int
-	// LoginFailExit controls whether the client exits on a failed INITIAL
-	// login, and only that. It does not govern reconnects: once a cycle's
-	// first Login has succeeded the fork retries internally forever whatever
-	// this says, and bounding that loop is the supervisor watchdog's job
-	// (see supervisor.reconnectStallWindow), not this field's.
+	// LoginFailExit controls whether the client exits after a failed initial
+	// Login. It does not govern post-admission reconnects: the pinned fork
+	// retries those internally, and the supervisor's watchdog bounds that loop.
 	//
 	// TODO(upstream-contract): mirrors github.com/layervai/frp
-	// v0.70.0-layerv.4 client/service.go, which reads this field at exactly
-	// one behavioral site — Run passing it as loopLoginUntilSuccess's
-	// firstLoginExit for the first login — while keepControllerWorking's
-	// post-admission reconnect loop passes firstLoginExit=false hard-coded.
-	// If a fork bump moves either, update this and reconnectStallWindow's
-	// doc comment in lockstep.
+	// v0.70.0-layerv.4 client/service.go: Run passes this field to the initial
+	// Login loop, while keepControllerWorking passes false to its reconnect loop.
 	//
-	// The default false — retry the initial login in-process with FRP's own
-	// backoff — is therefore the standalone-config value, NOT what
-	// knock-then-login operation wants: that retry loop does not know the
-	// admission open-time that admitted the cycle, so the supervisor
-	// overrides this to true on every cycle (forceLoginFailExit) and an
-	// initial-login failure returns to it for a fresh knock instead.
+	// Its zero value is false. The supervisor forces it true for every
+	// knock-then-login cycle so a failed initial Login returns for a fresh knock
+	// instead of retrying without knowing that cycle's admission open-time.
 	LoginFailExit bool
 }
 
