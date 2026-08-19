@@ -513,7 +513,7 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 			"argument that widened the app workflows does not apply. The code is still analyzed " +
 			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
 			"main, and the analysis runs on the next push — the retarget alone fires only " +
-			"`edited`, which this workflow's default activity types exclude, and strict status " +
+			"`edited`, which the default activity types exclude, and strict status " +
 			"checks require that push before the merge anyway. Against that second look sits " +
 			"a two-language analysis matrix (30-minute timeout) on every stacked PR, and " +
 			"every PR run re-anchors pre-existing alerts onto that PR, where they block " +
@@ -985,6 +985,15 @@ func pullRequestActivityTypes(t *testing.T, path, trigger string, pullRequest an
 			types = append(types, activityType)
 		}
 		return types, true
+	case nil:
+		// A bare `types:` with no value unmarshals to nil. Named separately
+		// from the default below for the same reason parseWorkflowTriggers
+		// names a bare `on:`: it is the one malformed shape a human writes,
+		// and "unexpected type <nil>" describes it poorly. Still fatal rather
+		// than read as the defaults — an empty key is a mistake, not a
+		// decision, and `types: []` is the spelling that means no types.
+		t.Fatalf("%s %s declares an empty `types:`, so nothing can ever trigger it", path, trigger)
+		return nil, false
 	default:
 		t.Fatalf("%s %s.types has unexpected type %T", path, trigger, raw)
 		return nil, false
