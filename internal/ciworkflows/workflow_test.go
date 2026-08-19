@@ -512,10 +512,12 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 			"that never runs it is not reading green over a gate it skipped — the honest-signal " +
 			"argument that widened the app workflows does not apply. The code is still analyzed " +
 			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
-			"main, and the analysis runs then. Against that second look sits a two-language " +
-			"analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
-			"re-anchors pre-existing alerts onto that PR, where they block merge until a human " +
-			"resolves each conversation.",
+			"main, and the analysis runs on the next push — the retarget alone fires only " +
+			"`edited`, which this workflow's default activity types exclude, and strict status " +
+			"checks require that push before the merge anyway. Against that second look sits " +
+			"a two-language analysis matrix (30-minute timeout) on every stacked PR, and " +
+			"every PR run re-anchors pre-existing alerts onto that PR, where they block " +
+			"merge until a human resolves each conversation.",
 	},
 	{
 		path:     "dependency-review.yml",
@@ -577,8 +579,9 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 		why: "Already unfiltered, and on `pull_request_target` rather than `pull_request` because it " +
 			"holds ANTHROPIC_API_KEY and so must load its definition from the default branch. Its " +
 			"`claude-review` context became required in #1185, which is what pulled that trigger into " +
-			"scope here: narrowing it would leave every stacked PR waiting forever on a required check " +
-			"that never registers, the failure this package already caught once on 2026-08-14.",
+			"scope here: narrowing it would drop that gate from every stacked PR, which would then read " +
+			"green having never run it, and would strand the PR on an unreported required context " +
+			"once a retarget put it back under main's protection.",
 	},
 }
 
@@ -587,9 +590,21 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 //
 // A workflow filtered to `branches: [main]` does not merely skip a PR stacked on
 // a feature branch — GitHub never registers it, so its checks are absent from
-// the PR rather than reported as skipped. The PR then reads fully green having
-// run none of them, and because branch protection guards only main, nothing
-// stops it merging into its base on that showing.
+// the PR rather than reported as skipped. The two states are distinguishable on
+// any stacked PR here: a job that runs and skips still posts a check reading
+// "skipping", while a filtered-off workflow posts nothing at all. The PR then
+// reads fully green having run none of them, and because branch protection
+// guards only main, nothing stops it merging into its base on that showing.
+//
+// Merging that base is not a backstop. GitHub retargets the stacked PR onto
+// main, where the required contexts do apply — but a base change arrives as
+// `pull_request` activity type `edited`, which is not one of the three default
+// types, and every workflow carrying a `branches:` filter here takes those
+// defaults. So the retarget re-runs none of them, and the check that never
+// registered finally has a merge box to hold: the PR sits at waitingForStatus
+// until the next push re-triggers it. That stall is the same defect surfacing
+// late rather than a second one — the coverage was already lost, silently, one
+// merge earlier.
 //
 // The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
 // discord.yml (#1179) — and each time a one-line revert would have undone it
@@ -637,8 +652,9 @@ func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
 // #1185 made claude-code-review.yml's `claude-review` a required context —
 // the exact condition this comment previously named as the one that would
 // force the widening. GitHub honors `branches:` on `pull_request_target`
-// identically, so that workflow narrowing to [main] would now leave every
-// stacked PR waiting on a required check that never registers.
+// identically, so that workflow narrowing to [main] would now take a required
+// context off every stacked PR — the silent-green failure
+// TestAppWorkflowsRunOnStackedPRs describes.
 func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	recorded := make(map[string]bool, len(requiredWorkflowSpecs)+len(otherPullRequestWorkflows))
 	for i := range requiredWorkflowSpecs {
@@ -711,7 +727,7 @@ func TestPullRequestWorkflowsRecordWhetherTheyGateMerges(t *testing.T) {
 			}
 			if got {
 				t.Errorf("%s reports a required context but is recorded as producing none; "+
-					"a narrow filter would leave every stacked PR waiting on it", spec.path)
+					"a narrow filter would take it off every stacked PR, which would read green without it", spec.path)
 				return
 			}
 			t.Errorf("%s is recorded as producing a required context but reports none; "+
@@ -743,10 +759,10 @@ func reportsRequiredContext(path string, reported workflowContexts, required []s
 // because neither produces a required context: a stacked PR that never runs
 // them is not reading green over a gate that blocks its merge, which is the
 // whole argument that widened the app workflows. Were either to become
-// required, the reasoning would be void — an unregistered required check
-// leaves the PR sitting on "Expected — Waiting for status to be reported"
-// forever, the same silent shape as the 2026-08-14 typo. This turns that
-// premise into something CI checks.
+// required, the reasoning would be void — the stacked PR would read green over
+// a gate it never ran, and would then stall on that unreported context once a
+// retarget put it under main's protection. This turns that premise into
+// something CI checks.
 func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	narrow := map[string]bool{}
 	for i := range otherPullRequestWorkflows {
@@ -766,7 +782,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 		for _, file := range reported.direct[context] {
 			if narrow[file] {
 				t.Errorf("%s is recorded as deliberately narrow but reports required context %q; "+
-					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+					"a required check that never registers leaves every stacked PR reading green over it, so its entry needs revisiting", file, context)
 			}
 		}
 		// Reusable-workflow calls report as "<caller job> / <inner job>".
@@ -777,7 +793,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 		for _, file := range reported.reusable[caller] {
 			if narrow[file] {
 				t.Errorf("%s is recorded as deliberately narrow but its caller job reports required context %q; "+
-					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+					"a required check that never registers leaves every stacked PR reading green over it, so its entry needs revisiting", file, context)
 			}
 		}
 	}
