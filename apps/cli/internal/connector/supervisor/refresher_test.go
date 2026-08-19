@@ -416,8 +416,12 @@ func TestPhysicalDialInOpen(t *testing.T) {
 			t.Fatalf("%s: physicalDialInOpen = %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	// An unset TCPMux and an explicit false are the same transport to the
-	// fork; a future edit that special-cases one must justify the other.
+	// A backstop against a future edit to the TABLE, not to the predicate:
+	// the two rows above already pin both values, so this can only fire once
+	// one of them is deleted or relaxed. That is worth keeping — the unset row
+	// is exactly the one that was wrong before, so losing it again should not
+	// be silent — but it is not what guards the predicate. The empirical guard
+	// is TestForkDialsFromConnectWithoutTCPMux.
 	if physicalDialInOpen(muxNil) != physicalDialInOpen(muxFalse) {
 		t.Fatal("unset and explicitly-disabled TCPMux disagree, but the fork treats them identically")
 	}

@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,18 @@ import (
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/policy/security"
 )
+
+// The two waits below fail in OPPOSITE directions, which is what should
+// govern anyone retuning them under CI pressure:
+//
+//   - forkDialAcceptWait too short = a false FAILURE. A slow runner misses a
+//     dial that did happen and reddens the build. Keep it generous.
+//   - forkDialQuietWait too short = a false PASS. A dial that should not have
+//     happened arrives after the window and goes unseen, silently weakening
+//     the assertion rather than breaking anything.
+//
+// So shrink the first only with evidence, and lengthen the second freely —
+// the only cost of a longer quiet window is wall-clock.
 
 // forkDialAcceptWait bounds how long a dial-detecting assertion waits. The
 // listener is on loopback and the dial is a bare TCP connect, so a real dial
@@ -296,5 +310,79 @@ func TestForkServiceCompletesTheCommonConfigInPlace(t *testing.T) {
 	}
 	if !physicalDialInOpen(common) {
 		t.Fatal("a config completed by NewService must dial from Open")
+	}
+}
+
+// connectSeamBase stands in for the FRP connector on the unmuxed path, where
+// Open establishes nothing and Connect is what dials.
+//
+// Connect counts its calls and returns an error rather than a conn: the test
+// below drives it with a FAILING refresh, so the wrapper must reject before
+// ever delegating. Returning an error makes a regression that delegates
+// anyway fail loudly here instead of surfacing as a nil conn somewhere
+// downstream, and connectCalls pins the same thing directly.
+type connectSeamBase struct{ connectCalls int }
+
+func (c *connectSeamBase) Open() error { return nil }
+func (c *connectSeamBase) Connect() (net.Conn, error) {
+	c.connectCalls++
+	return nil, errors.New("connectSeamBase.Connect called: the wrapper delegated the dial even though the refresh failed")
+}
+func (c *connectSeamBase) Close() error { return nil }
+
+// TestKnockingConnectorRefreshesOnTheConnectSeam covers the branch an unset or
+// disabled TCPMux selects, which had no test at all: the refresh call inside
+// knockingConnector.Connect and its error return were 0%-covered, so deleting
+// the refresh outright, mislabeling its reason, or swallowing its error each
+// left the whole package green. Every other test in this file and in
+// reconnect_test.go drives the Open seam.
+//
+// The seam is unreachable in production (see the WATCHDOG COUPLING note on
+// Connect), which is exactly why it needs a test rather than why it does not:
+// nothing else would notice it rotting.
+//
+// A failing knocker pins all three behaviors at once. The wrapped error text
+// carries the reason string, so one assertion covers "the refresh ran", "it
+// ran as the connect seam", and "its failure reaches FRP instead of being
+// swallowed".
+func TestKnockingConnectorRefreshesOnTheConnectSeam(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	knocker := &fakeKnocker{script: []knockResp{{err: errors.New("boom")}}}
+	r := newTestRefresher(knocker, time.Hour, clk.now)
+
+	// No stamped token, so the first refresh is a real knock rather than the
+	// supervisor's first-cycle handoff.
+	common := commonForTest()
+	if physicalDialInOpen(common) {
+		t.Fatal("premise broken: an unset TCPMux must select the Connect seam")
+	}
+	base := &connectSeamBase{}
+	conn := &knockingConnector{base: base, ctx: t.Context(), common: common, refresher: r}
+
+	// Open owns no dial here, so it must not spend a knock.
+	if err := conn.Open(); err != nil {
+		t.Fatalf("Open on the Connect seam: %v", err)
+	}
+	if got := knocker.calls.Load(); got != 0 {
+		t.Fatalf("Open knocked %d time(s) on the Connect seam; the refresh belongs to Connect", got)
+	}
+
+	got, err := conn.Connect()
+	if err == nil {
+		t.Fatal("Connect swallowed the refresh failure; FRP must see the dial fail")
+	}
+	if got != nil {
+		t.Fatal("Connect returned a conn alongside the refresh error")
+	}
+	if base.connectCalls != 0 {
+		t.Fatal("Connect delegated to the base connector after the refresh failed: the dial must not happen")
+	}
+	if want := "redial connect knock failed"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("Connect error = %q, want it to contain %q (the reason string is operator-facing: "+
+			"it is logged as \"reason\" and interpolated into the budget exit detail)", err, want)
+	}
+	if knocker.calls.Load() != 1 {
+		t.Fatalf("Connect knocked %d time(s), want exactly 1", knocker.calls.Load())
 	}
 }
