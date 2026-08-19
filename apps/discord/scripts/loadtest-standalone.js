@@ -763,6 +763,11 @@ async function main() {
       // Uploads per round is the headline number for whether this test
       // reproduces a real send's load: one initial upload plus one re-upload
       // per drained pool, i.e. ceil(COUNT / TOKENS_PER_RESOURCE) in total.
+      //
+      // Counts only rounds that got that far. A failed INITIAL upload throws
+      // the round out before it reaches allResults, so unlike reupFail= those
+      // failures are invisible here — they are already reported as `Round N
+      // FAILED` above, and a round with no resource has nothing to tally.
       const reuploads = allResults.reduce((s, r) => s + r.reuploads, 0);
       const reuploadFail = allResults.reduce((s, r) => s + r.reuploadFail, 0);
       const reuploadMs = allResults.reduce((s, r) => s + r.reuploadMs, 0);
