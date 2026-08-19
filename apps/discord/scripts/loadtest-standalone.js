@@ -99,6 +99,13 @@ const { parseIPv4Octets, ipv4LocalScope, ipv6LocalScope } = require('../src/util
 // took the full load. Matching is on the parsed hostname now, so `/`- and
 // port-suffixed spellings of a production host no longer slip past, and an
 // unrecognized host fails CLOSED.
+//
+// Boundary worth stating: production is recognized by NAME. A public IP that
+// fronts production reads as `unrecognized`, not `production`, so the weaker
+// env override would clear it. That is deliberate — the accident this guard
+// exists to stop is NODE_ENV=production falling back to the hostnames below on
+// a dev laptop, whereas pointing the load test at a bare production IP is not
+// something anyone does by slipping.
 
 // TODO(upstream-contract): production hostnames, mirrored from src/config.js's
 // NODE_ENV=production fallbacks for QURL_ENDPOINT / CONNECTOR_URL and from
@@ -109,6 +116,9 @@ const { parseIPv4Octets, ipv4LocalScope, ipv6LocalScope } = require('../src/util
 // domain: `api.staging.layerv.ai` is a legitimate non-production endpoint (see
 // connector.js's DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS), so a
 // domain-wide rule would misfile staging as production.
+// `get.qurl.link` is also matched by the `qurl.link` domain rule below; it is
+// pinned here as a literal because this set mirrors config.js's production
+// fallbacks verbatim, and the drift test asserts against exactly those.
 const PROD_HOSTS = new Set(['api.layerv.ai', 'get.qurl.link']);
 // Matched as apex-or-subdomain. Every resolved qURL site is a `*.qurl.site`
 // host, and minted links render as `https://qurl.link/#at_...`, so both
