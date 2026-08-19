@@ -218,7 +218,7 @@ func run() error {
 	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
 	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
 	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil)
-	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
+	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "")
 
 	postFeedback := buildPostFeedback(userAgent)
 
@@ -1679,7 +1679,7 @@ func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
 		return nil
 	default:
 		if !strings.EqualFold(host, slackIncomingWebhookHost) {
-			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost) // #nosec G706 -- host is operator-set; slog's JSON handler escapes control bytes in attribute values.
+			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost)
 		}
 		slog.Info("feedback delivery wired via Slack incoming webhook")
 		return newFeedbackWebhookPoster(feedbackWebhookURL, userAgent, nil)

@@ -319,8 +319,6 @@ func (s *Server) handleDownload(w http.ResponseWriter) {
 		payload = []byte(DefaultDownloadPayload)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	// #nosec G705 -- the mock link host echoes the test's own payload bytes
-	// as an octet-stream download; no browser or HTML context exists here.
 	if _, err := w.Write(payload); err != nil {
 		s.t.Errorf("write download payload: %v", err)
 	}
