@@ -1273,6 +1273,23 @@ function reclaimOnce(ledgerPath) {
 // which also means a suite cannot exercise a second, independent sweep without
 // clearing it. No production path calls this; it exists so the memoization and
 // its rejection-clearing can be pinned rather than resting on a transcript.
+/**
+ * Test-only seam for the run deadline. main() is the only production setter,
+ * and it is unreachable from a suite (behind `require.main === module`), so
+ * without this the deadline half of shouldStop() could not be exercised
+ * against runRound at all — leaving the truncation behaviour pinned only by
+ * counting call sites, which cannot show that a truncated round reports
+ * itself correctly.
+ *
+ * Takes an absolute epoch-ms deadline so a test can express both "already
+ * expired" and "expires partway through a leg" (by calling it again from
+ * inside a connector mock) without touching Date.now, which expiryToISO and
+ * the ledger also read.
+ */
+function setRunDeadlineForTests(deadline) {
+  runDeadline = deadline;
+}
+
 function resetReclaimStateForTests() {
   reclaimInFlight = null;
   stopping = false;
@@ -1904,6 +1921,10 @@ function formatRatePair(rate, threshold) {
  */
 function runReport({ allResults, roundsAttempted, maxFailRate }) {
   const sum = (pick) => allResults.reduce((total, r) => total + pick(r), 0);
+  // Takes its array, unlike `sum` above which closes over allResults — so the
+  // filtered subsets below average through the same helper rather than each
+  // spelling out its own reduce and divisor.
+  const mean = (rounds, pick) => rounds.reduce((total, r) => total + pick(r), 0) / rounds.length;
   const fileLinks = sum((r) => r.fileLinks);
   const fileFail = sum((r) => r.fileFail);
   const minted = fileLinks + sum((r) => r.locLinks);
@@ -1915,7 +1936,9 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   // time. It stays in every TOTAL below — it really did mint what it minted —
   // but it is excluded from the per-round AVERAGES, which would otherwise
   // report a figure no complete round ever took. Kept as two arrays rather
-  // than a count so the averages can filter on the same basis they exclude on.
+  // than a count so the two read as one partition: what the totals cover and
+  // what the averages cover, visible together rather than one derived from the
+  // other by arithmetic.
   const partialRounds = allResults.filter((r) => r.partial);
   const fullRounds = allResults.filter((r) => !r.partial);
 
@@ -1928,8 +1951,15 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   // summary that then reports the truncated round as though it were a full one
   // trades an unbounded run for a quietly wrong measurement.
   if (partialRounds.length > 0) {
+    // Deliberately does NOT name the reason. `stopping` has a second setter
+    // besides the signal — an unwritable ledger stops the run from inside
+    // recordResource — so "at --duration or on a signal" was false for a case
+    // that already exists, and would go stale again for the next reason added.
+    // shouldStopNow exists to collapse those reasons; re-enumerating them here
+    // reinstates the coupling it removes. Whichever path fired has already
+    // logged itself immediately above.
     lines.push(`Rounds cut short: ${partialRounds.length}`
-      + ' (stopped mid-round at --duration or on a signal;'
+      + ' (stopped before the round finished its plan;'
       + ' counted in totals, excluded from per-round averages)');
   }
   lines.push(`Total links minted: ${minted}`);
@@ -1951,13 +1981,12 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
     // With every round truncated there is no such figure to report — say so
     // rather than print the truncated mean under a label that denies it.
     lines.push(fullRounds.length > 0
-      ? `Avg round time: ${(fullRounds.reduce((t, r) => t + r.totalMs, 0) / fullRounds.length / 1000).toFixed(1)}s`
+      ? `Avg round time: ${(mean(fullRounds, (r) => r.totalMs) / 1000).toFixed(1)}s`
       : 'Avg round time: n/a — every round was cut short');
     // Rounds that ran the file leg — every entry has completed it, since a
     // round throwing inside the leg never reaches allResults.
     const fileRounds = allResults.filter((r) => r.uploadMs > 0);
     if (fileRounds.length > 0) {
-      const mean = (rounds, pick) => rounds.reduce((total, r) => total + pick(r), 0) / rounds.length;
       // Every one of these rounds uploaded successfully, so the upload average
       // is over all of them however their mints then went.
       const avgUpload = mean(fileRounds, (r) => r.uploadMs).toFixed(0);
@@ -2137,15 +2166,17 @@ async function runRound(roundNum) {
 
   // File pipeline
   //
-  // Sampled ONCE and reused for both branches below. Calling shouldStop()
-  // twice would let the deadline fall between the two calls, which skips the
-  // leg by the second call while the first has already decided not to mark the
-  // round partial — the one combination that loses the truncation from the
-  // summary entirely.
+  // One shouldStop() call feeding both branches, as if/else rather than two
+  // ifs over a sampled boolean: two calls could let the deadline fall between
+  // them, skipping the leg by the second while the first has already decided
+  // not to mark the round partial — the one combination that loses the
+  // truncation from the summary entirely. As if/else that is unrepresentable
+  // rather than warned against.
   const wantsFile = FILE_PATH || !INCLUDE_LOCATION;
-  const stopBeforeFile = shouldStop();
-  if (wantsFile && stopBeforeFile) { results.partial = true; results.mintPartial = true; }
-  if (wantsFile && !stopBeforeFile) {
+  if (wantsFile && shouldStop()) {
+    results.partial = true;
+    results.mintPartial = true;
+  } else if (wantsFile) {
     const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
     // Upload through the bot's own connector client rather than a hand-rolled
@@ -2283,10 +2314,10 @@ async function runRound(roundNum) {
 
   // Location pipeline
   //
-  // Sampled once for the same reason as the file leg above.
-  const stopBeforeLocation = shouldStop();
-  if (INCLUDE_LOCATION && stopBeforeLocation) results.partial = true;
-  if (INCLUDE_LOCATION && !stopBeforeLocation) {
+  // One call, two branches, for the same reason as the file leg above.
+  if (INCLUDE_LOCATION && shouldStop()) {
+    results.partial = true;
+  } else if (INCLUDE_LOCATION) {
     const locStart = performance.now();
     // Guard inside the body rather than in the header, so both legs stop the
     // same way and the partial flag is set at the point of truncation instead
@@ -2408,11 +2439,15 @@ async function main() {
   console.log('---');
 
   const startTime = Date.now();
-  const endTime = startTime + DURATION_S * 1000;
-  // Published to module scope so runRound's loops bound themselves by it too.
-  // Before this the deadline was consulted only BETWEEN rounds, so a single
-  // round ran to completion however far past --duration that took.
-  runDeadline = endTime;
+  // Module scope so runRound's loops bound themselves by it too. Before this
+  // the deadline was consulted only BETWEEN rounds, so a single round ran to
+  // completion however far past --duration that took.
+  //
+  // Kept as the single spelling of the deadline rather than mirrored into a
+  // local: an edit that adjusted one and not the other — a grace period, an
+  // --extend flag — would desync the inter-round sleep from the predicate
+  // every loop consults, silently.
+  runDeadline = startTime + DURATION_S * 1000;
   let round = 0;
   const allResults = [];
 
@@ -2448,7 +2483,7 @@ async function main() {
     // asks shouldStop() only for the signal — but it asks through the same
     // predicate as everything else, so a future third reason to stop reaches
     // the inter-round sleep without a separate edit here.
-    const remaining = endTime - Date.now();
+    const remaining = runDeadline - Date.now();
     if (remaining > INTERVAL_S * 1000 && !shouldStop()) {
       await new Promise(r => setTimeout(r, INTERVAL_S * 1000));
     } else {
@@ -2526,6 +2561,7 @@ module.exports = {
   reclaim,
   reclaimOnce,
   resetReclaimStateForTests,
+  setRunDeadlineForTests,
   parseReclaimArg,
   trackCreate,
   recordResource,

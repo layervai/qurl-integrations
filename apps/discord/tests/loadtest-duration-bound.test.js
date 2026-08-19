@@ -9,13 +9,25 @@
  * per-request timeouts bound each CALL, not the round: 30s for a mint batch,
  * and up to three attempts of 30s for a location create.
  *
- * These tests are the only signal on it. runRound() and main() cannot be
- * called from a suite (they run the load test), and scripts/ sits outside this
- * app's jest `collectCoverageFrom`, so the loops themselves are unenforced.
- * The rule is therefore a pure function (shouldStopNow) and the reporting is a
- * pure function (runReport), matching how targetGuardReport and
- * parsePositiveInt are covered — with a static check below for the one thing
- * neither can reach: that the loops actually consult the predicate.
+ * This file covers the stop RULE (shouldStopNow) and the reporting POLICY
+ * (runReport, roundReportLine) as pure functions, matching how
+ * targetGuardReport and parsePositiveInt are covered. scripts/ sits outside
+ * this app's jest `collectCoverageFrom`, so anything left inline is
+ * unenforced, and pure functions are how this file has always answered that.
+ *
+ * What is NOT here: the round itself being bounded mid-flight. `runRound` is
+ * exported and IS reachable — tests/loadtest-round-accounting.test.js drives
+ * it against a stubbed connector, and its "runRound truncation" describe
+ * proves the four stop points end to end, including that a round cut in the
+ * location leg keeps a complete mint sample. `main()` is genuinely
+ * unreachable, behind `require.main === module`.
+ *
+ * The static checks at the bottom are therefore a second line rather than the
+ * only one: they name the exact site that went missing, where a behavioural
+ * failure reports a wrong count and leaves you to find which guard was
+ * dropped. They also catch the one thing no behavioural test can — a
+ * `!stopping` reintroduced alongside the predicate, which behaves identically
+ * until the day the deadline is the only reason to stop.
  *
  * Requiring the script does NOT run the load test: its CLI entry point is
  * behind `require.main === module`.
@@ -266,32 +278,56 @@ describe('roundReportLine — a cut-short round says so on its own line', () => 
   });
 });
 
-describe('loadtest duration bound — static checks on loops no test can reach', () => {
-  // runRound's loops are the entire point of this change and are unreachable
-  // from a suite. shouldStopNow being correct proves nothing about them
-  // consulting it, so the call sites are pinned structurally — the same reason
-  // loadtest-silent-failure.test.js pins `callsNamed('readFlag')`.
+describe('loadtest duration bound — static checks that name the dropped site', () => {
+  // These pin the call sites structurally, the same way
+  // loadtest-silent-failure.test.js pins `callsNamed('readFlag')`. The
+  // behavioural proof lives in loadtest-round-accounting.test.js; these say
+  // WHICH guard went missing rather than that some count is wrong.
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'scripts', 'loadtest-standalone.js'),
     'utf8',
   );
   const ast = parser.parse(source, { sourceType: 'unambiguous' });
 
-  /** Every `shouldStop()` call inside the named function declaration. */
-  const shouldStopCallsIn = (fnName) => {
+  /**
+   * Count nodes of `nodeType` satisfying `matches` inside the named function.
+   *
+   * Matches the same three declaration shapes as `findFunction` in
+   * loadtest-silent-failure.test.js, deliberately: a function that cannot be
+   * FOUND contributes zero of everything, so a `const runRound = async () =>`
+   * rewrite would make the zero-expecting checks below pass vacuously — a
+   * green that reads as coverage and is its absence.
+   */
+  const countIn = (fnName, nodeType, matches) => {
     let count = 0;
+    let found = false;
+    const tally = (path) => {
+      found = true;
+      path.traverse({ [nodeType](c) { if (matches(c.node)) count++; } });
+    };
     traverse(ast, {
       FunctionDeclaration(p) {
-        if (p.node.id?.name !== fnName) return;
-        p.traverse({
-          CallExpression(c) {
-            if (c.node.callee.type === 'Identifier' && c.node.callee.name === 'shouldStop') count++;
-          },
-        });
+        if (p.node.id?.name === fnName) tally(p);
+      },
+      VariableDeclarator(p) {
+        if (p.node.id.type !== 'Identifier' || p.node.id.name !== fnName) return;
+        const init = p.node.init;
+        if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+          tally(p.get('init'));
+        }
       },
     });
+    // A name that matches nothing is a rename, not a zero. Fail loudly here
+    // rather than let every count below read as satisfied.
+    expect({ fnName, found }).toEqual({ fnName, found: true });
     return count;
   };
+
+  const shouldStopCallsIn = (fnName) => countIn(
+    fnName,
+    'CallExpression',
+    (n) => n.callee.type === 'Identifier' && n.callee.name === 'shouldStop',
+  );
 
   it('consults the predicate at all four stop points inside runRound', () => {
     // Both leg entries and both per-recipient loops. Dropping any one of them
@@ -302,24 +338,13 @@ describe('loadtest duration bound — static checks on loops no test can reach',
   });
 
   /** Every `results.<field> = true` assignment inside the named function. */
-  const truthAssignmentsIn = (fnName, field) => {
-    let count = 0;
-    traverse(ast, {
-      FunctionDeclaration(p) {
-        if (p.node.id?.name !== fnName) return;
-        p.traverse({
-          AssignmentExpression(a) {
-            const { left, right } = a.node;
-            if (left.type !== 'MemberExpression') return;
-            if (left.object.type !== 'Identifier' || left.object.name !== 'results') return;
-            if (left.property.type !== 'Identifier' || left.property.name !== field) return;
-            if (right.type === 'BooleanLiteral' && right.value === true) count++;
-          },
-        });
-      },
-    });
-    return count;
-  };
+  const truthAssignmentsIn = (fnName, field) => countIn(fnName, 'AssignmentExpression', (n) => {
+    const { left, right } = n;
+    if (left.type !== 'MemberExpression') return false;
+    if (left.object.type !== 'Identifier' || left.object.name !== 'results') return false;
+    if (left.property.type !== 'Identifier' || left.property.name !== field) return false;
+    return right.type === 'BooleanLiteral' && right.value === true;
+  });
 
   it('marks the round partial at every one of its four stop points', () => {
     // Pairs with the shouldStop() count above: consulting the predicate and
@@ -363,15 +388,6 @@ describe('loadtest duration bound — static checks on loops no test can reach',
     // reading the flag — and a text scan makes the prose load-bearing: a doc
     // comment that merely mentions stopping would fail a test whose subject
     // is code, with no regression behind it.
-    let references = 0;
-    traverse(ast, {
-      FunctionDeclaration(p) {
-        if (p.node.id?.name !== 'runRound') return;
-        p.traverse({
-          Identifier(i) { if (i.node.name === 'stopping') references++; },
-        });
-      },
-    });
-    expect(references).toBe(0);
+    expect(countIn('runRound', 'Identifier', (n) => n.name === 'stopping')).toBe(0);
   });
 });
