@@ -140,9 +140,10 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 // fields unsynchronized: ServerAddr and ServerPort in realConnect and in Open's
 // QUIC branch, and Metadatas in buildLoginMsg — whose map contents are actually
 // walked a frame later, when exchangeLogin marshals the Login. Transport.* has
-// more readers still, several of them concurrent (heartbeatWorker, the proxy
-// manager, physicalDialInOpen), which is why the write-set pin below matters
-// beyond the two fields named here. Writes serialize against writes; the fork's
+// more readers still, several of them concurrent: the fork's own heartbeatWorker
+// and proxy manager, plus physicalDialInOpen — ours, but called on the
+// work-connection goroutines all the same. That is why the write-set pin
+// matters beyond the two fields named here. Writes serialize against writes; the fork's
 // reads of them are unguarded. Holding the lock across the dial would cover the
 // connector's reads but not buildLoginMsg's, which runs inside Dial after
 // Connect returns — past anything this package can lock across the Connector
