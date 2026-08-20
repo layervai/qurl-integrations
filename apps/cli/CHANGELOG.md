@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/layervai/qurl-integrations/compare/v1.6.0...v1.6.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **cli:** recover orphaned assignment refresh state ([#1236](https://github.com/layervai/qurl-integrations/issues/1236)) ([1ae4e5e](https://github.com/layervai/qurl-integrations/commit/1ae4e5e9e0434fcc137b75ee608716020b5eac3a))
+
 ## [1.6.0](https://github.com/layervai/qurl-integrations/compare/v1.5.0...v1.6.0) (2026-08-20)
 
 
