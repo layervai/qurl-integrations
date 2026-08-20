@@ -93,7 +93,7 @@ func TestOpenRefusesNonWebSchemes(t *testing.T) {
 	}
 	ok := false
 	l := &Launcher{GOOS: "darwin", Run: func(context.Context, []string) error { ok = true; return nil }}
-	if err := l.Open(context.Background(), "https://qurl.link/#qv2.x"); err != nil || !ok {
+	if err := l.Open(context.Background(), "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"); err != nil || !ok {
 		t.Errorf("https link must launch: err=%v launched=%t", err, ok)
 	}
 }

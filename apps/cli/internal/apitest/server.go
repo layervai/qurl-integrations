@@ -49,7 +49,7 @@ const DownloadPath = "/file"
 const DefaultDownloadPayload = "qURL mock file payload\n"
 
 // PortalPath is the mock's in-browser page route. A resolve answer of the
-// form srv.URL + PortalPath + "#qv2.…" mimics a real fragment-credential
+// form srv.URL + PortalPath + "#qv2t1.…" mimics a real fragment-credential
 // link: the fragment stays client-side, so any plain HTTP GET of the link
 // lands here and receives the page — never the content bytes. Tests use it
 // to prove the CLI fetches granted content instead of this page.
@@ -331,7 +331,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	qurlLink := s.resolveQURL
 	s.mu.Unlock()
 	if qurlLink == "" {
-		qurlLink = "https://qurl.link/#qv2.test.link"
+		qurlLink = "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"qurl":               qurlLink,
