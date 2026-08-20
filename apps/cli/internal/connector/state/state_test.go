@@ -130,7 +130,12 @@ func isWindows(t *testing.T) bool {
 // where qurl-go's pinned local agent state is unsupported (Windows today).
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := Open(t.TempDir())
+	return openTestStoreAt(t, t.TempDir())
+}
+
+func openTestStoreAt(t *testing.T, dir string) *Store {
+	t.Helper()
+	store, err := Open(dir)
 	if err != nil {
 		if errors.Is(err, qurl.ErrAgentStateContinuity) && strings.Contains(err.Error(), "unsupported on this platform") {
 			t.Skipf("qurl-go pinned agent state unsupported here: %v", err)

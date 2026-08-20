@@ -411,6 +411,11 @@ listening on localhost and the Connector connects outward — your machine
 never opens a listening port to the internet — while the platform
 verifies each caller and grants access before any request is forwarded.
 
+`connector run` currently requires macOS or Linux. The Windows release can
+still use management commands such as `qurl get`, `qurl list`, and `qurl
+delete`, but it fails closed before creating a local Connector identity; the
+pinned native identity store does not yet claim Windows filesystem semantics.
+
 | Flag | Description |
 |------|-------------|
 | `--id` | Which Connector to run: its ID in qURL — the route name your app serves under (or `connector_id` in your profile) |
@@ -435,6 +440,23 @@ token from the qURL console, supplied **only** via `QURL_CONNECTOR_TOKEN`
 or `QURL_CONNECTOR_TOKEN_FILE` — there is deliberately no token flag,
 because arguments leak into shell history and process lists. The token is
 used once and never stored; later starts reuse the saved identity.
+
+After enrollment, Connector resource setup and continuity checks stay on the
+same native NHP path as admission: the CLI sends an authenticated encrypted
+UDP request directly to its assigned LayerV cell, then knocks that cell for
+the tunnel session. It does not call `api.layerv.ai` for those runtime steps
+and does not fall back through a Hub, relay, or another cell. A logged-in
+`qurl publish` may call the HTTPS API once to mint the one-time enrollment
+token when the machine has no saved identity; explicit management commands
+such as `qurl list` and `qurl delete` continue to use HTTPS.
+
+The state directory also stores the authenticated Connector binding and an
+exact pending request nonce in an owner-only file. The request is saved before
+it is sent, so a restart after a lost UDP response safely replays the same
+logical operation. On later starts the saved public resource identity is sent
+as a continuity assertion; the CLI refuses an unexpected replacement instead
+of silently adopting it. Do not copy one state directory into multiple active
+Connector instances.
 
 Every start prints the Connector's CRID, so the identity a consumer needs
 is on screen rather than something to go look up:

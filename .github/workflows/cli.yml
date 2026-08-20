@@ -81,6 +81,7 @@ jobs:
               - '.golangci.yml'
               - '.goreleaser.yml'
               - '.github/workflows/cli.yml'
+              - '.github/workflows/cli-connector-resource-proof.yml'
 
   lint:
     name: cli / lint

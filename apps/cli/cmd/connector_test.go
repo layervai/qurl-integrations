@@ -160,8 +160,8 @@ func mintConnectorRow(t *testing.T, slug string) connectorResourceRow {
 	}
 }
 
-// connectorProducer mocks the producer's Connector-resource routes for the
-// command's ensure path and counts every request for zero-network proofs.
+// connectorProducer mocks the management API used only by local publish's
+// pre-enrollment token mint and counts every request for runtime HTTP traps.
 type connectorProducer struct {
 	*httptest.Server
 	mu                    sync.Mutex
@@ -257,8 +257,8 @@ func (p *connectorProducer) handle(w http.ResponseWriter, r *http.Request) {
 
 // TestPublishLocalHermeticJourney exercises the complete command composition:
 // the SDK-facing lazy provider mints an exact Connector-bound token through
-// the authenticated management client, the device client resolves the same
-// stable ID, the real FRP client logs in, publish emits one CRID only after
+// the authenticated management client, the assigned-cell result selects the
+// same stable ID without HTTP, the real FRP client logs in, publish emits one CRID only after
 // its proxy reaches FRP's running phase, and real HTTP bytes cross the route.
 func TestPublishLocalHermeticJourney(t *testing.T) {
 	if testing.Short() {
@@ -310,16 +310,18 @@ func TestPublishLocalHermeticJourney(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan *runResult, 1)
+	proxyReady := make(chan struct{})
 	go func() {
 		done <- runCLI(t, &runOpts{
 			ctx: ctx,
 			args: []string{
 				"--endpoint", producer.URL, "--quiet", "publish", echo.URL,
 			},
-			env:           map[string]string{"QURL_API_KEY": testAPIKey},
-			configDir:     t.TempDir(),
-			syncStreams:   true,
-			connectorOpen: open,
+			env:              map[string]string{"QURL_API_KEY": testAPIKey},
+			configDir:        t.TempDir(),
+			syncStreams:      true,
+			connectorOpen:    open,
+			connectorResolve: fakeConnectorResolve(t, producer),
 			newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
 				knocker.resourceID = knockResourceID
 				return knocker, nil
@@ -329,9 +331,11 @@ func TestPublishLocalHermeticJourney(t *testing.T) {
 				cfg.MaxBackoff = 25 * time.Millisecond
 				cfg.MinKnockInterval = time.Millisecond
 			},
+			connectorReady: func() { close(proxyReady) },
 		})
 	}()
 
+	waitCmdProxyReady(t, proxyReady, done)
 	pollCmdVhost(t, vhostPort, row.ConnectorRoutingID+".hermetic.test", echoBody, 30*time.Second, done)
 	// The HTTP round-trip and StatusExporter observe the same running proxy,
 	// but the latter is a 25 ms polling API. Give the customer-output path a
@@ -359,8 +363,8 @@ func TestPublishLocalHermeticJourney(t *testing.T) {
 		t.Errorf("enrollment observation id=%q auth=%q idempotency=%q", connectorID, authorization, idempotency)
 	}
 	log := producer.requestLog()
-	if len(log) < 2 || log[0] != "POST /v1/api-keys" || log[1] != "GET /v1/resources" {
-		t.Errorf("API order = %v, want enrollment before device resource read", log)
+	if len(log) != 1 || log[0] != "POST /v1/api-keys" {
+		t.Errorf("API calls = %v, want only the sanctioned pre-enrollment token mint and no runtime resource HTTP", log)
 	}
 	if strings.Contains(res.stdout.String()+res.stderr.String(), "lv_test_localpublishenrollmenttoken") {
 		t.Fatal("one-shot enrollment token leaked into command output")
@@ -402,10 +406,11 @@ func TestPublishLocalRejectsBeforePrinting(t *testing.T) {
 				"--endpoint", producer.URL, "--quiet", "publish",
 				"http://127.0.0.1:3000", "--id", row.Slug,
 			},
-			env:           map[string]string{},
-			configDir:     t.TempDir(),
-			syncStreams:   true,
-			connectorOpen: fakeConnectorOpen(t, producer.URL),
+			env:              map[string]string{},
+			configDir:        t.TempDir(),
+			syncStreams:      true,
+			connectorOpen:    fakeConnectorOpen(t, producer.URL),
+			connectorResolve: fakeConnectorResolve(t, producer),
 			newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
 				knocker.resourceID = knockResourceID
 				return knocker, nil
@@ -459,9 +464,10 @@ func TestPublishLocalWarmOpenNeedsNoLoginAndEmitsNothingBeforeAdmission(t *testi
 	}
 
 	res := runCLI(t, &runOpts{
-		args:          []string{"--endpoint", producer.URL, "publish", "http://127.0.0.1:3000", "--id", "warm-local"},
-		env:           map[string]string{},
-		connectorOpen: open,
+		args:             []string{"--endpoint", producer.URL, "publish", "http://127.0.0.1:3000", "--id", "warm-local"},
+		env:              map[string]string{},
+		connectorOpen:    open,
+		connectorResolve: fakeConnectorResolve(t, producer),
 		newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
 			knocker.resourceID = knockResourceID
 			return knocker, nil
@@ -480,8 +486,8 @@ func TestPublishLocalWarmOpenNeedsNoLoginAndEmitsNothingBeforeAdmission(t *testi
 	if opens != 1 {
 		t.Fatalf("warm runtime opens = %d, want 1", opens)
 	}
-	if log := producer.requestLog(); len(log) != 1 || log[0] != "GET /v1/resources" {
-		t.Fatalf("warm API calls = %v, want device resource read only and no enrollment mint", log)
+	if log := producer.requestLog(); len(log) != 0 {
+		t.Fatalf("warm API calls = %v, want zero HTTP for resource setup and admission", log)
 	}
 }
 
@@ -510,7 +516,33 @@ func fakeConnectorOpen(t *testing.T, producerURL string) func(context.Context, *
 			_ = store.Close()
 			return nil, err
 		}
-		return &agent.Runtime{Client: client, Store: store, AgentID: "agent-cmd-test"}, nil
+		return &agent.Runtime{Client: client, Binding: &qurl.AgentRuntimeBinding{}, Store: store, AgentID: "agent-cmd-test"}, nil
+	}
+}
+
+// fakeConnectorResolve models the authenticated assigned-cell LRT at the
+// command seam without sending HTTP. The agent package separately tests the
+// durable request and native SDK orchestration; command tests use this seam to
+// prove serving never falls back to the management API.
+func fakeConnectorResolve(t *testing.T, producer *connectorProducer) func(context.Context, *agent.Runtime, string) (*agent.ResolvedResource, error) {
+	t.Helper()
+	return func(_ context.Context, _ *agent.Runtime, connectorID string) (*agent.ResolvedResource, error) {
+		producer.mu.Lock()
+		defer producer.mu.Unlock()
+		for _, row := range producer.rows {
+			if row.Slug != connectorID {
+				continue
+			}
+			found := true
+			return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
+				ResourceID:         row.ResourceID,
+				CRID:               row.CRID,
+				ConnectorRoutingID: row.ConnectorRoutingID,
+				KnockResourceID:    row.KnockResourceID,
+				Slug:               row.Slug,
+			}, FoundExisting: &found}, nil
+		}
+		return nil, fmt.Errorf("assigned cell has no Connector resource for %q", connectorID)
 	}
 }
 
@@ -721,6 +753,23 @@ func pollCmdVhost(t *testing.T, vhostPort int, hostHeader, wantBody string, guar
 	t.Fatalf("round-trip through the command-built tunnel never returned the echo body: %v", lastErr)
 }
 
+// waitCmdProxyReady waits for the command's FRP status exporter to observe
+// ProxyPhaseRunning. Besides matching the customer-visible readiness
+// boundary, this synchronizes with the fork's status write before the test
+// opens a work connection; starting traffic while NewProxy is still being
+// committed would exercise a known race in the pinned FRP fork rather than
+// the Connector command.
+func waitCmdProxyReady(t *testing.T, ready <-chan struct{}, done <-chan *runResult) {
+	t.Helper()
+	select {
+	case <-ready:
+	case res := <-done:
+		t.Fatalf("connector run exited before proxy readiness: code=%d\nstdout: %s\nstderr: %s", res.code, res.stdout.String(), res.stderr.String())
+	case <-time.After(30 * time.Second):
+		t.Fatal("connector proxy never reached the running phase")
+	}
+}
+
 // TestConnectorRunHermeticServeAndGracefulStop is the command-level serve
 // proof: `qurl connector run` resolves the slug against the producer,
 // generates the managed route, knocks (loopback), logs into the in-process
@@ -766,6 +815,7 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan *runResult, 1)
+	proxyReady := make(chan struct{})
 	go func() {
 		done <- runCLI(t, &runOpts{
 			ctx: ctx,
@@ -774,10 +824,11 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 				"--id", "cmd-slug", "--target", ":" + echoURL.Port(),
 				"--state-dir", stateDir,
 			},
-			env:           map[string]string{},
-			configDir:     configDir,
-			syncStreams:   true,
-			connectorOpen: fakeConnectorOpen(t, producer.URL),
+			env:              map[string]string{},
+			configDir:        configDir,
+			syncStreams:      true,
+			connectorOpen:    fakeConnectorOpen(t, producer.URL),
+			connectorResolve: fakeConnectorResolve(t, producer),
 			newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
 				knockerMu.Lock()
 				gotKnockResourceID = knockResourceID
@@ -790,11 +841,13 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 				cfg.MaxBackoff = 25 * time.Millisecond
 				cfg.MinKnockInterval = time.Millisecond
 			},
+			connectorReady: func() { close(proxyReady) },
 		})
 	}()
 
 	// Request through the tunnel: the vhost route is the routing identity the
 	// producer issued, never the slug.
+	waitCmdProxyReady(t, proxyReady, done)
 	pollCmdVhost(t, vhostPort, row.ConnectorRoutingID+".hermetic.test", echoBody, 30*time.Second, done)
 
 	// Simulated INT/TERM → graceful stop.
@@ -850,8 +903,8 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 			t.Errorf("NewProxy[%d] RunID = %q, want the presented cycle RunID %q", i, observation.runID, begun[0])
 		}
 	}
-	if producer.requestCount() == 0 {
-		t.Error("the slug was never resolved against the producer")
+	if producer.requestCount() != 0 {
+		t.Errorf("runtime management API requests = %v, want zero; resource setup and admission are native NHP", producer.requestLog())
 	}
 }
 
@@ -995,8 +1048,9 @@ func TestConnectorRunBudgetExhaustionIsUnavailable(t *testing.T) {
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", producer.URL, "connector", "run",
 			"--id", "cmd-slug", "--target", ":8080", "--state-dir", stateDir},
-		env:           map[string]string{},
-		connectorOpen: fakeConnectorOpen(t, producer.URL),
+		env:              map[string]string{},
+		connectorOpen:    fakeConnectorOpen(t, producer.URL),
+		connectorResolve: fakeConnectorResolve(t, producer),
 		newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
 			knocker.resourceID = knockResourceID
 			return knocker, nil
@@ -1031,6 +1085,9 @@ func TestConnectorRunBudgetExhaustionIsUnavailable(t *testing.T) {
 	if _, _, closed := knocker.stats(); !closed {
 		t.Error("the command never Closed the knocker after the budget exit")
 	}
+	if calls := producer.requestLog(); len(calls) != 0 {
+		t.Fatalf("runtime HTTP trap observed %v, want zero API calls across resource setup and knock retries", calls)
+	}
 }
 
 // connectorServeAttempt drives `qurl connector run` exactly as far as the
@@ -1054,9 +1111,10 @@ func connectorServeAttempt(t *testing.T, crid string, globalArgs ...string) *run
 	args = append(args, "connector", "run", "--id", row.Slug, "--target", ":8080", "--state-dir", t.TempDir())
 
 	res := runCLI(t, &runOpts{
-		args:          args,
-		env:           map[string]string{},
-		connectorOpen: fakeConnectorOpen(t, producer.URL),
+		args:             args,
+		env:              map[string]string{},
+		connectorOpen:    fakeConnectorOpen(t, producer.URL),
+		connectorResolve: fakeConnectorResolve(t, producer),
 		newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
 			knocker.resourceID = knockResourceID
 			return knocker, nil
@@ -1112,15 +1170,20 @@ func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
 	t.Run("the structured event carries it for unattended runners", func(t *testing.T) {
 		stderr := connectorServeAttempt(t, exampleCRID).stderr.String()
 
-		var starting string
+		var starting, resolved string
 		for _, line := range strings.Split(stderr, "\n") {
 			if strings.Contains(line, "event=connector_starting") {
 				starting = line
-				break
+			}
+			if strings.Contains(line, "event=connector_resource_resolved") {
+				resolved = line
 			}
 		}
 		if starting == "" {
 			t.Fatalf("no connector_starting event was logged:\n%s", stderr)
+		}
+		if resolved == "" {
+			t.Fatalf("no connector_resource_resolved event was logged:\n%s", stderr)
 		}
 		// Unquoted `crid=<value>` is the shape a consumer parses. slog's
 		// TextHandler quotes a value containing a space, '=', '"' or a
@@ -1129,6 +1192,11 @@ func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
 		for _, want := range []string{"crid=" + exampleCRID, "connector_id=cmd-id"} {
 			if !strings.Contains(starting, want) {
 				t.Errorf("connector_starting event missing %q:\n%s", want, starting)
+			}
+		}
+		for _, want := range []string{"connector_id=cmd-id", "found_existing=true"} {
+			if !strings.Contains(resolved, want) {
+				t.Errorf("connector_resource_resolved event missing %q:\n%s", want, resolved)
 			}
 		}
 	})
