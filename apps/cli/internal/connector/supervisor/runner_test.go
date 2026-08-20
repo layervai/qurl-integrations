@@ -9,10 +9,12 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	frpproxy "github.com/fatedier/frp/client/proxy"
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
@@ -38,6 +40,31 @@ func (s *fakeService) Run(ctx context.Context) error {
 }
 
 func (s *fakeService) GracefulClose(time.Duration) { s.closed.Store(true) }
+
+type fakeProxyStatusExporter struct {
+	mu     sync.RWMutex
+	status map[string]*frpproxy.WorkingStatus
+}
+
+func (e *fakeProxyStatusExporter) GetProxyStatus(name string) (*frpproxy.WorkingStatus, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	status, ok := e.status[name]
+	if !ok || status == nil {
+		return nil, ok
+	}
+	statusCopy := *status
+	return &statusCopy, true
+}
+
+func (e *fakeProxyStatusExporter) set(name, phase string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.status == nil {
+		e.status = make(map[string]*frpproxy.WorkingStatus)
+	}
+	e.status[name] = &frpproxy.WorkingStatus{Name: name, Phase: phase}
+}
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
@@ -65,6 +92,7 @@ func TestRunnerCancelsCycleContextAfterOrdinaryReturn(t *testing.T) {
 	got := svc.runCtx.Load()
 	if got == nil {
 		t.Fatal("service never ran")
+		return
 	}
 	if (*got).Err() == nil {
 		t.Fatal("cycle context still live after Run returned; cycle-scoped goroutines could leak")
@@ -160,6 +188,383 @@ func TestOnFirstLoginSuccessBindsRunID(t *testing.T) {
 	}
 }
 
+// TestOnFirstLoginSuccessSignalsAdmissionButNotServing pins the seam that
+// motivated the readiness monitor: exact Login acceptance wakes the monitor,
+// but cannot itself fire the customer-visible proxy-ready callback.
+func TestOnFirstLoginSuccessSignalsAdmissionButNotServing(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	var notifications atomic.Int32
+	r := &cycleRunner{
+		resourceID:    testResource,
+		cycleRunID:    runID,
+		logger:        discardLogger(),
+		loginAccepted: make(chan struct{}),
+		onProxyReady:  func() { notifications.Add(1) },
+	}
+
+	if err := r.onFirstLoginSuccess(testCycleRunID(t)); err == nil {
+		t.Fatal("mismatched RunID admitted")
+	}
+	if err := r.onFirstLoginSuccess("not-a-run-id"); err == nil {
+		t.Fatal("noncanonical RunID admitted")
+	}
+	if got := notifications.Load(); got != 0 {
+		t.Fatalf("readiness notifications after refused Logins = %d, want 0", got)
+	}
+
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatalf("exact RunID admission: %v", err)
+	}
+	select {
+	case <-r.loginAccepted:
+	default:
+		t.Fatal("exact Login did not wake the readiness monitor")
+	}
+	if got := notifications.Load(); got != 0 {
+		t.Fatalf("proxy-ready notifications at Login admission = %d, want 0", got)
+	}
+}
+
+// TestProxyReadyWaitsForRunningPhase proves the monitor emits nothing for an
+// admitted-but-waiting route and fires only after StatusExporter reports the
+// exact configured proxy as running.
+func TestProxyReadyWaitsForRunningPhase(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	exporter := &fakeProxyStatusExporter{}
+	exporter.set("route-a", frpproxy.ProxyPhaseWaitStart)
+	ready := make(chan struct{}, 1)
+	r := &cycleRunner{
+		resourceID:     testResource,
+		cycleRunID:     runID,
+		logger:         discardLogger(),
+		proxyNames:     []string{"route-a"},
+		statusExporter: exporter,
+		readyTimeout:   time.Second,
+		loginAccepted:  make(chan struct{}),
+		onProxyReady:   func() { ready <- struct{}{} },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		r.monitorProxyReadiness(ctx)
+		close(done)
+	}()
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ready:
+		t.Fatal("proxy-ready fired while the route was still waiting for NewProxy")
+	case <-time.After(3 * proxyReadyPollInterval):
+	}
+	exporter.set("route-a", frpproxy.ProxyPhaseRunning)
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("proxy-ready did not fire after the route became running")
+	}
+	<-done
+	if !r.serving.Load() {
+		t.Fatal("serving evidence was not latched before the callback")
+	}
+}
+
+// TestProxyReadyCallbackCanBeOnceGuardedAcrossRunners models the supervisor's
+// reconnect shape: each fresh cycle can observe a running proxy, while a
+// command can reduce those observations to one customer-visible result.
+func TestProxyReadyCallbackCanBeOnceGuardedAcrossRunners(t *testing.T) {
+	t.Parallel()
+	var once sync.Once
+	var notifications atomic.Int32
+	callback := func() {
+		once.Do(func() { notifications.Add(1) })
+	}
+
+	for range 2 {
+		runID := testCycleRunID(t)
+		exporter := &fakeProxyStatusExporter{}
+		exporter.set("route-a", frpproxy.ProxyPhaseRunning)
+		r := &cycleRunner{
+			resourceID:     testResource,
+			cycleRunID:     runID,
+			logger:         discardLogger(),
+			proxyNames:     []string{"route-a"},
+			statusExporter: exporter,
+			readyTimeout:   time.Second,
+			loginAccepted:  make(chan struct{}),
+			onProxyReady:   callback,
+		}
+		if err := r.onFirstLoginSuccess(runID); err != nil {
+			t.Fatalf("admit reconnect cycle: %v", err)
+		}
+		r.monitorProxyReadiness(context.Background())
+	}
+
+	if got := notifications.Load(); got != 1 {
+		t.Fatalf("once-guarded readiness notifications = %d, want 1", got)
+	}
+}
+
+func TestProxyRegistrationRejectionCancelsRun(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	exporter := &fakeProxyStatusExporter{}
+	exporter.set("route-a", frpproxy.ProxyPhaseStartErr)
+	svc := &fakeService{block: true}
+	var notifications atomic.Int32
+	r := &cycleRunner{
+		svc:            svc,
+		resourceID:     testResource,
+		cycleRunID:     runID,
+		logger:         discardLogger(),
+		proxyNames:     []string{"route-a"},
+		statusExporter: exporter,
+		readyTimeout:   time.Second,
+		loginAccepted:  make(chan struct{}),
+		onProxyReady:   func() { notifications.Add(1) },
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Run(context.Background()) }()
+	waitForServiceStart(t, svc)
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProxyNotServing) {
+			t.Fatalf("Run = %v, want ErrProxyNotServing", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("explicit NewProxy rejection did not stop the cycle promptly")
+	}
+	if got := notifications.Load(); got != 0 {
+		t.Fatalf("proxy-ready notifications after rejection = %d, want 0", got)
+	}
+}
+
+func TestProxyReadinessTimeoutCancelsRun(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	exporter := &fakeProxyStatusExporter{}
+	exporter.set("route-a", frpproxy.ProxyPhaseWaitStart)
+	svc := &fakeService{block: true}
+	r := &cycleRunner{
+		svc:            svc,
+		resourceID:     testResource,
+		cycleRunID:     runID,
+		logger:         discardLogger(),
+		proxyNames:     []string{"route-a"},
+		statusExporter: exporter,
+		readyTimeout:   50 * time.Millisecond,
+		loginAccepted:  make(chan struct{}),
+		onProxyReady:   func() {},
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Run(context.Background()) }()
+	waitForServiceStart(t, svc)
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrProxyNotServing) {
+			t.Fatalf("Run = %v, want bounded ErrProxyNotServing", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing NewProxy response exceeded the readiness deadline")
+	}
+}
+
+// TestAdvancedRunnerWithoutProxyReadyPreservesAdmissionReconnectAndLogs is a
+// compatibility regression for qurl connector run. Even if readiness state is
+// present, a nil callback must not opt that advanced surface into local
+// publish's terminal ProxyPhaseRunning gate. Admission remains proxy_allow
+// evidence, and the established redial restart cause wins unchanged.
+func TestAdvancedRunnerWithoutProxyReadyPreservesAdmissionReconnectAndLogs(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	exporter := &fakeProxyStatusExporter{}
+	exporter.set("route-a", frpproxy.ProxyPhaseStartErr)
+	svc := &fakeService{block: true}
+	var buf bytes.Buffer
+	r := &cycleRunner{
+		svc:            svc,
+		resourceID:     testResource,
+		cycleRunID:     runID,
+		logger:         slog.New(slog.NewJSONHandler(&buf, nil)),
+		proxyNames:     []string{"route-a"},
+		statusExporter: exporter,
+		readyTimeout:   time.Millisecond,
+		loginAccepted:  make(chan struct{}),
+		// onProxyReady deliberately remains nil: this is the advanced path.
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Run(context.Background()) }()
+	waitForServiceStart(t, svc)
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("advanced runner stopped under local-publish readiness policy: %v", err)
+	case <-time.After(4 * proxyReadyPollInterval):
+	}
+
+	restartCause := fmt.Errorf("%w: redial refresh budget", ErrTooManyKnockFailures)
+	r.requestRestart(restartCause)
+	if err := <-done; !errors.Is(err, ErrTooManyKnockFailures) {
+		t.Fatalf("Run = %v, want the advanced path's restart cause", err)
+	}
+
+	var events []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line != "" {
+			events = append(events, jsonField(t, line, `"event":"`))
+		}
+	}
+	wantEvents := []string{"login_success", "proxy_allow", "teardown"}
+	if fmt.Sprint(events) != fmt.Sprint(wantEvents) {
+		t.Fatalf("events = %v, want %v\nlog:\n%s", events, wantEvents, buf.String())
+	}
+}
+
+// TestProxyFailureAfterPriorServingPreservesReconnectBehavior proves the
+// terminal gate is initial-only across fresh supervised runners. Once local
+// publish has emitted a serving result, a later NewProxy rejection must not
+// terminate with the contradictory "nothing was published" error.
+func TestProxyFailureAfterPriorServingPreservesReconnectBehavior(t *testing.T) {
+	t.Parallel()
+	var readyEver atomic.Bool
+	var notifications atomic.Int32
+
+	firstRunID := testCycleRunID(t)
+	firstExporter := &fakeProxyStatusExporter{}
+	firstExporter.set("route-a", frpproxy.ProxyPhaseRunning)
+	first := &cycleRunner{
+		resourceID:     testResource,
+		cycleRunID:     firstRunID,
+		logger:         discardLogger(),
+		proxyNames:     []string{"route-a"},
+		statusExporter: firstExporter,
+		readyTimeout:   time.Second,
+		loginAccepted:  make(chan struct{}),
+		proxyReadyEver: &readyEver,
+		onProxyReady:   func() { notifications.Add(1) },
+	}
+	if err := first.onFirstLoginSuccess(firstRunID); err != nil {
+		t.Fatal(err)
+	}
+	first.monitorProxyReadiness(context.Background())
+	if !readyEver.Load() || notifications.Load() != 1 {
+		t.Fatalf("first serving cycle did not latch shared readiness: ready=%t callbacks=%d", readyEver.Load(), notifications.Load())
+	}
+
+	secondRunID := testCycleRunID(t)
+	secondExporter := &fakeProxyStatusExporter{}
+	secondExporter.set("route-a", frpproxy.ProxyPhaseStartErr)
+	svc := &fakeService{block: true}
+	second := &cycleRunner{
+		svc:            svc,
+		resourceID:     testResource,
+		cycleRunID:     secondRunID,
+		logger:         discardLogger(),
+		proxyNames:     []string{"route-a"},
+		statusExporter: secondExporter,
+		readyTimeout:   time.Millisecond,
+		loginAccepted:  make(chan struct{}),
+		proxyReadyEver: &readyEver,
+		onProxyReady:   func() { notifications.Add(1) },
+	}
+	done := make(chan error, 1)
+	go func() { done <- second.Run(context.Background()) }()
+	waitForServiceStart(t, svc)
+	if err := second.onFirstLoginSuccess(secondRunID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("post-success proxy rejection terminated the reconnect: %v", err)
+	case <-time.After(4 * proxyReadyPollInterval):
+	}
+	if got := notifications.Load(); got != 1 {
+		t.Fatalf("proxy-ready callbacks = %d, want only the serving cycle", got)
+	}
+
+	restartCause := fmt.Errorf("%w: redial refresh budget", ErrTooManyKnockFailures)
+	second.requestRestart(restartCause)
+	if err := <-done; !errors.Is(err, ErrTooManyKnockFailures) {
+		t.Fatalf("Run = %v, want normal reconnect restart cause", err)
+	}
+}
+
+func TestProxyReadinessTreatsClosedAsTerminalBeforeReady(t *testing.T) {
+	t.Parallel()
+	exporter := &fakeProxyStatusExporter{}
+	exporter.set("route-a", frpproxy.ProxyPhaseClosed)
+	r := &cycleRunner{
+		proxyNames:     []string{"route-a"},
+		statusExporter: exporter,
+	}
+	ready, err := r.proxyReadiness()
+	if ready || !errors.Is(err, ErrProxyNotServing) {
+		t.Fatalf("proxyReadiness = (%v, %v), want terminal ErrProxyNotServing", ready, err)
+	}
+}
+
+func TestProxyReadinessCancellationDoesNotLeakOrNotify(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	exporter := &fakeProxyStatusExporter{}
+	exporter.set("route-a", frpproxy.ProxyPhaseWaitStart)
+	svc := &fakeService{block: true}
+	var notifications atomic.Int32
+	r := &cycleRunner{
+		svc:            svc,
+		resourceID:     testResource,
+		cycleRunID:     runID,
+		logger:         discardLogger(),
+		proxyNames:     []string{"route-a"},
+		statusExporter: exporter,
+		readyTimeout:   time.Second,
+		loginAccepted:  make(chan struct{}),
+		onProxyReady:   func() { notifications.Add(1) },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitForServiceStart(t, svc)
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not join its readiness monitor after cancellation")
+	}
+	if got := notifications.Load(); got != 0 {
+		t.Fatalf("proxy-ready notifications after cancellation = %d, want 0", got)
+	}
+}
+
+func waitForServiceStart(t *testing.T, svc *fakeService) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for svc.runCtx.Load() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("service never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestOnFirstLoginSuccessMismatchLogsNeitherValue: the accepted RunID is
 // server-controlled input and the presented one is the finding's context —
 // the refusal must not echo either.
@@ -186,6 +591,8 @@ func TestEmitSessionEventsDecisionTable(t *testing.T) {
 	cases := []struct {
 		name        string
 		admitted    bool
+		serving     bool
+		strictReady bool
 		duration    time.Duration
 		runErr      error
 		restartErr  error
@@ -205,20 +612,29 @@ func TestEmitSessionEventsDecisionTable(t *testing.T) {
 			wantEvents: []string{"teardown"}, wantReasons: []string{"pre_login_cancel"},
 		},
 		{
-			name: "healthy admitted clean cycle", admitted: true, duration: 10 * time.Second,
+			name: "strict healthy serving clean cycle", admitted: true, serving: true, strictReady: true, duration: 10 * time.Second,
 			wantEvents: []string{"proxy_allow", "teardown"}, wantReasons: []string{"", ""},
 		},
 		{
-			name: "healthy unadmitted cycle has no proxy_allow", duration: 10 * time.Second,
+			name: "strict admitted but nonserving cycle has no proxy_allow", admitted: true, strictReady: true, duration: 10 * time.Second,
 			wantEvents: []string{"teardown"}, wantReasons: []string{""},
 		},
 		{
-			name: "restart request is error teardown regardless of duration", admitted: true,
+			name: "advanced admitted cycle preserves proxy_allow", admitted: true, duration: 10 * time.Second,
+			wantEvents: []string{"proxy_allow", "teardown"}, wantReasons: []string{"", ""},
+		},
+		{
+			name: "restart request is error teardown regardless of duration", admitted: true, serving: true, strictReady: true,
 			duration: 50 * time.Millisecond, restartErr: restart,
 			wantEvents: []string{"proxy_allow", "teardown"}, wantReasons: []string{"", "connector_restart"},
 		},
 		{
-			name: "healthy errored cycle buckets the cause", admitted: true, duration: 10 * time.Second, runErr: dialErr,
+			name: "proxy readiness failure never claims proxy_allow", admitted: true, strictReady: true, duration: 50 * time.Millisecond,
+			restartErr: ErrProxyNotServing,
+			wantEvents: []string{"teardown"}, wantReasons: []string{"proxy_not_serving"},
+		},
+		{
+			name: "healthy errored cycle buckets the cause", admitted: true, serving: true, strictReady: true, duration: 10 * time.Second, runErr: dialErr,
 			wantEvents: []string{"proxy_allow", "teardown"}, wantReasons: []string{"", "dial_error"},
 		},
 	}
@@ -227,7 +643,11 @@ func TestEmitSessionEventsDecisionTable(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&buf, nil))
 			r := &cycleRunner{resourceID: testResource, cycleRunID: "run-1", logger: logger}
+			if tc.strictReady {
+				r.onProxyReady = func() {}
+			}
 			r.admitted.Store(tc.admitted)
+			r.serving.Store(tc.serving)
 			r.emitSessionEvents(context.Background(), tc.duration, tc.runErr, tc.restartErr)
 
 			var events, reasons []string

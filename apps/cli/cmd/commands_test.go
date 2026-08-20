@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func TestLoginRejectsImplausibleKey(t *testing.T) {
@@ -34,6 +37,163 @@ func TestVersionOutputShape(t *testing.T) {
 	// The Homebrew formula asserts on this line's shape; keep it stable.
 	if !strings.HasPrefix(res.stdout.String(), "qurl version test (") {
 		t.Errorf("version output = %q, want the qurl version prefix", res.stdout.String())
+	}
+}
+
+// TestHelpLeadsWithTheOneCommandLocalJourney protects the first-run UX. The
+// command reference can stay precise without making a new user read Connector
+// internals before seeing the ordinary localhost path.
+func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
+	root := runCLI(t, &runOpts{args: []string{"--help"}})
+	if root.code != 0 {
+		t.Fatalf("root help exit = %d, stderr: %s", root.code, root.stderr.String())
+	}
+	rootHelp := root.stdout.String()
+	local := strings.Index(rootHelp, "qurl publish http://127.0.0.1:3000")
+	remote := strings.Index(rootHelp, "qurl publish https://api.example.com/reports")
+	if local < 0 || remote < 0 || local >= remote {
+		t.Errorf("root help must show local publish before remote publish:\n%s", rootHelp)
+	}
+	for _, want := range []string{"shareable resource ID", "no access by itself", "qurl get"} {
+		if !strings.Contains(rootHelp, want) {
+			t.Errorf("root help missing %q:\n%s", want, rootHelp)
+		}
+	}
+
+	publish := runCLI(t, &runOpts{args: []string{"publish", "--help"}})
+	if publish.code != 0 {
+		t.Fatalf("publish help exit = %d, stderr: %s", publish.code, publish.stderr.String())
+	}
+	publishHelp := publish.stdout.String()
+	local = strings.Index(publishHelp, "qurl publish http://127.0.0.1:3000")
+	remote = strings.Index(publishHelp, "qurl publish https://api.example.com/reports")
+	if local < 0 || remote < 0 || local >= remote {
+		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
+	}
+	for _, want := range []string{"keeps serving until Ctrl-C", "qurl get <CRID>", "identifies the resource but grants no access"} {
+		if !strings.Contains(publishHelp, want) {
+			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
+		}
+	}
+	for _, jargon := range []string{"FRP", "proxy registration", "one-shot enrollment", "native device identity"} {
+		if strings.Contains(publishHelp, jargon) {
+			t.Errorf("publish help exposes implementation jargon %q:\n%s", jargon, publishHelp)
+		}
+	}
+}
+
+// TestREADMECarriesACompleteLocalQuickstart keeps the README's opening path
+// runnable: where to get a key, how to sign in, what to run, what success
+// looks like, and how to stop or open the result.
+func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
+	readme := readCLIREADME(t)
+	const firstJourney = "```bash\nqurl publish http://127.0.0.1:3000\n```"
+	if firstFence := strings.Index(readme, "```bash"); firstFence < 0 || firstFence != strings.Index(readme, firstJourney) {
+		t.Fatal("CLI README must lead with the one-command localhost journey")
+	}
+	quickstartAt := strings.Index(readme, "## Publish localhost in 60 seconds")
+	if quickstartAt < 0 {
+		t.Fatal("CLI README has no 60-second localhost quickstart")
+	}
+	readme = readme[quickstartAt:]
+	wantInOrder := []string{
+		"## Publish localhost in 60 seconds",
+		"brew install layervai/tap/qurl",
+		"qurl version",
+		"1.6.0 or newer",
+		"https://layerv.ai/qurl/dashboard/keys/",
+		"qurl login",
+		"python3 -m http.server 3000 --bind 127.0.0.1",
+		"qurl publish http://127.0.0.1:3000",
+		"Status:  serving",
+		"Press Ctrl-C",
+		"qurl get <CRID>",
+	}
+	previous := -1
+	for _, want := range wantInOrder {
+		at := strings.Index(readme, want)
+		if at < 0 {
+			t.Fatalf("CLI README quickstart missing %q", want)
+		}
+		if at <= previous {
+			t.Fatalf("CLI README quickstart has %q out of order", want)
+		}
+		previous = at
+	}
+	if !strings.Contains(readme, "only HTTPS URLs are allowed") || !strings.Contains(readme, "brew upgrade qurl") {
+		t.Fatal("CLI README must explain how a pre-1.6.0 install recovers from the legacy HTTPS-only error")
+	}
+}
+
+// TestREADMEQuickstartOutputMatchesPrinter keeps the walkthrough honest: its
+// success block is the production plain-text formatter's exact byte stream,
+// not a hand-maintained approximation that can drift from the CLI.
+func TestREADMEQuickstartOutputMatchesPrinter(t *testing.T) {
+	readme := readCLIREADME(t)
+
+	var stdout, stderr bytes.Buffer
+	printer := output.New(&output.Streams{
+		In:  strings.NewReader(""),
+		Out: &stdout,
+		Err: &stderr,
+	}, output.FormatText, false, false, false, nil)
+	if err := printer.Publish(&qurlapi.Published{
+		CRID:      "<CRID>",
+		TargetURL: "http://127.0.0.1:3000",
+		Status:    "serving",
+	}); err != nil {
+		t.Fatalf("render documented publish result: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("documented publish result wrote stderr: %q", stderr.String())
+	}
+	want := "```text\n" + stdout.String() + "```"
+	if !strings.Contains(readme, want) {
+		t.Fatalf("CLI README output is not the production formatter's exact output:\n%s", stdout.String())
+	}
+}
+
+// readCLIREADME makes repository checkout line endings irrelevant to semantic
+// documentation assertions. GitHub's Windows runners can materialize Markdown
+// with CRLF even though the formatter intentionally emits LF.
+func readCLIREADME(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../README.md")
+	if err != nil {
+		t.Fatalf("read CLI README: %v", err)
+	}
+	return normalizeDocumentationNewlines(string(raw))
+}
+
+func normalizeDocumentationNewlines(document string) string {
+	return strings.ReplaceAll(document, "\r\n", "\n")
+}
+
+func TestNormalizeDocumentationNewlines(t *testing.T) {
+	const windows = "```bash\r\nqurl publish http://127.0.0.1:3000\r\n```\r\n"
+	const portable = "```bash\nqurl publish http://127.0.0.1:3000\n```\n"
+	if got := normalizeDocumentationNewlines(windows); got != portable {
+		t.Fatalf("normalize Windows documentation newlines: got %q, want %q", got, portable)
+	}
+}
+
+func TestLocalPublishRefreshRecoveryStaysActionable(t *testing.T) {
+	publish := runCLI(t, &runOpts{args: []string{"publish", "--help"}})
+	if publish.code != 0 {
+		t.Fatalf("publish help exit = %d, stderr: %s", publish.code, publish.stderr.String())
+	}
+	publishHelp := publish.stdout.String()
+	if !strings.Contains(publishHelp, "--refresh-mode") || !strings.Contains(publishHelp, "manual, auto, or disabled") {
+		t.Fatalf("publish help does not expose the one-start assignment-refresh approval:\n%s", publishHelp)
+	}
+	readme := readCLIREADME(t)
+	for _, want := range []string{
+		"Update to qURL CLI 1.6.1 or newer",
+		"rerun the same publish command once with `--refresh-mode auto`",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("CLI README does not carry the shipped local-publish refresh remedy %q", want)
+		}
 	}
 }
 

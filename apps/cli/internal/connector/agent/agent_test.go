@@ -62,7 +62,7 @@ func installSeams(
 	t *testing.T,
 	calls *seamCalls,
 	register func(ctx context.Context, credential string, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error),
-	open func(ctx context.Context, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error),
+	open func(ctx context.Context, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error),
 	refresh func(ctx context.Context, h qurl.HubBootstrap, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeRefreshOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error),
 ) {
 	t.Helper()
@@ -77,7 +77,7 @@ func installSeams(
 		}
 		return register(ctx, credential, store, opts...)
 	}
-	openRegisteredAgentRuntime = func(ctx context.Context, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+	openRegisteredAgentRuntime = func(ctx context.Context, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 		calls.open++
 		if open == nil {
 			t.Fatal("unexpected openRegisteredAgentRuntime call")
@@ -131,6 +131,13 @@ func armMarker(t *testing.T, dir, reason string, attempted bool) {
 	}
 }
 
+func seedAgentStateEntry(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, state.AgentStateFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readMarker(t *testing.T, dir string) (state.RefreshMarker, bool) {
 	t.Helper()
 	store, err := state.Open(dir)
@@ -149,7 +156,7 @@ func TestOpenWarmOpenSuccess(t *testing.T) {
 	lifecycleEnv(t)
 	calls := &seamCalls{}
 	wantClient, wantBinding := fakeRuntimePair(t, "agent-a")
-	installSeams(t, calls, nil, func(_ context.Context, store qurl.AgentStateStore, _ ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+	installSeams(t, calls, nil, func(_ context.Context, store qurl.AgentStateStore, _ ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 		if _, ok := store.(*qurl.FileAgentStateStore); !ok {
 			t.Errorf("warm open received %T, want the concrete file store handoff", store)
 		}
@@ -186,7 +193,7 @@ func TestOpenFirstRegistrationRequiresToken(t *testing.T) {
 			t.Error("registerAgentRuntime must not be called without an enrollment credential")
 			return nil, nil, errors.New("unreachable")
 		},
-		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 			return nil, nil, fmt.Errorf("no persisted state: %w", qurl.ErrAgentStateNotFound)
 		}, nil)
 
@@ -222,7 +229,7 @@ func TestOpenRegistersWithTokenAndMetadata(t *testing.T) {
 			}
 			return wantClient, wantBinding, nil
 		},
-		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 			return nil, nil, qurl.ErrAgentStateNotFound
 		}, nil)
 
@@ -235,6 +242,47 @@ func TestOpenRegistersWithTokenAndMetadata(t *testing.T) {
 	defer func() { _ = runtime.Close() }()
 	if runtime.AgentID != "agent-a" || calls.register != 1 {
 		t.Fatalf("runtime agent = %q, register calls = %d", runtime.AgentID, calls.register)
+	}
+}
+
+func TestOpenLazyProviderOverridesLegacyTokenSources(t *testing.T) {
+	lifecycleEnv(t)
+	t.Setenv(state.EnvAgentID, "agent-a")
+	// A provider-backed local publish must not even inspect the legacy token
+	// path. Making that path invalid turns precedence into an observable rule.
+	t.Setenv(EnvEnrollmentTokenFile, filepath.Join(t.TempDir(), "missing-token"))
+	t.Setenv(EnvEnrollmentToken, "legacy-token-must-not-win")
+
+	calls := &seamCalls{}
+	wantClient, wantBinding := fakeRuntimePair(t, "agent-a")
+	installSeams(t, calls,
+		func(_ context.Context, credential string, _ qurl.AgentStateStore, opts ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+			if credential != "" {
+				t.Errorf("eager credential = %q, want empty when a lazy provider is configured", credential)
+			}
+			// Hub, metadata, key-kind policy, resource-client origin, configured
+			// identity, and the provider are all distinct closed SDK options.
+			if len(opts) != 6 {
+				t.Errorf("registration options = %d, want 6 including the provider", len(opts))
+			}
+			return wantClient, wantBinding, nil
+		},
+		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+			return nil, nil, qurl.ErrAgentStateNotFound
+		}, nil)
+
+	cfg := testConfig()
+	cfg.EnrollmentTokenProvider = func(context.Context, EnrollmentTokenRequest) (string, error) {
+		t.Fatal("CLI orchestration invoked the lazy provider outside qurl-go's setup lock")
+		return "", nil
+	}
+	runtime, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runtime.Close() }()
+	if calls.open != 1 || calls.register != 1 {
+		t.Fatalf("seam calls = %+v, want one offline probe and one provider-backed registration", calls)
 	}
 }
 
@@ -257,7 +305,7 @@ func TestOpenRegistrationStallEnrichment(t *testing.T) {
 				func(context.Context, string, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 					return nil, nil, tt.cause
 				},
-				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 					return nil, nil, qurl.ErrAgentStateNotFound
 				}, nil)
 			cfg := testConfig()
@@ -318,7 +366,7 @@ func TestOpenPreservesAssignmentSentinels(t *testing.T) {
 				func(context.Context, string, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 					return nil, nil, tt.cause
 				},
-				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 					return nil, nil, qurl.ErrAgentStateNotFound
 				}, nil)
 
@@ -351,7 +399,7 @@ func TestOpenOperatorCancelStaysBare(t *testing.T) {
 			cancel() // the operator interrupts while registration is in flight
 			return nil, nil, context.Canceled
 		},
-		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 			return nil, nil, qurl.ErrAgentStateNotFound
 		}, nil)
 	cfg := testConfig()
@@ -370,13 +418,13 @@ func TestOpenLeaseExpiredArmsMarkerAndManualGateHolds(t *testing.T) {
 	dir := lifecycleEnv(t)
 	calls := &seamCalls{}
 	installSeams(t, calls, nil,
-		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 			return nil, nil, fmt.Errorf("warm open: %w", qurl.ErrAssignmentLeaseExpired)
 		}, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if !errors.Is(err, ErrRefreshApprovalRequired) || !strings.Contains(err.Error(), EnvRefreshMode) {
-		t.Fatalf("Open under manual mode = %v, want ErrRefreshApprovalRequired naming %s", err, EnvRefreshMode)
+	if !errors.Is(err, ErrRefreshApprovalRequired) || !strings.Contains(err.Error(), "refresh mode auto") {
+		t.Fatalf("Open under manual mode = %v, want ErrRefreshApprovalRequired naming the one-start auto approval", err)
 	}
 	marker, present := readMarker(t, dir)
 	if !present || marker.Attempted || marker.Reason != "assigned NHP cell lease expired" {
@@ -390,6 +438,7 @@ func TestOpenLeaseExpiredArmsMarkerAndManualGateHolds(t *testing.T) {
 func TestOpenRefreshDisabledFailsClosed(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", false)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "disabled")
 	calls := &seamCalls{}
 	installSeams(t, calls, nil, nil, nil)
@@ -406,6 +455,7 @@ func TestOpenRefreshDisabledFailsClosed(t *testing.T) {
 func TestOpenRefreshModeFlagOverridesEnv(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", false)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "auto")
 	calls := &seamCalls{}
 	installSeams(t, calls, nil, nil, nil)
@@ -424,6 +474,7 @@ func TestOpenRefreshModeFlagOverridesEnv(t *testing.T) {
 func TestOpenRefreshAutoConsumesEpisodeOnce(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", false)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "auto")
 	calls := &seamCalls{}
 	wantClient, wantBinding := fakeRuntimePair(t, "agent-a")
@@ -463,11 +514,12 @@ func TestOpenRefreshAutoConsumesEpisodeOnce(t *testing.T) {
 func TestOpenAttemptedMarkerBlocksSecondRefresh(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", true)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "auto")
 	calls := &seamCalls{}
 	warmErr := errors.New("still failing after the consumed refresh")
 	installSeams(t, calls, nil,
-		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 			return nil, nil, warmErr
 		}, nil)
 
@@ -480,6 +532,38 @@ func TestOpenAttemptedMarkerBlocksSecondRefresh(t *testing.T) {
 	}
 }
 
+func TestOpenOrphanRefreshMarkerClearsAndRegisters(t *testing.T) {
+	for _, attempted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attempted_%v", attempted), func(t *testing.T) {
+			dir := lifecycleEnv(t)
+			armMarker(t, dir, "stale failure from a removed identity", attempted)
+			calls := &seamCalls{}
+			wantClient, wantBinding := fakeRuntimePair(t, "agent-new")
+			installSeams(t, calls,
+				func(context.Context, string, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+					return wantClient, wantBinding, nil
+				},
+				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+					return nil, nil, qurl.ErrAgentStateNotFound
+				}, nil)
+
+			cfg := testConfig()
+			cfg.EnrollmentToken = testEnrollmentToken
+			runtime, err := Open(context.Background(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = runtime.Close() }()
+			if calls.open != 1 || calls.register != 1 || calls.refresh != 0 {
+				t.Fatalf("seam calls = %+v, want warm-open probe then fresh registration", calls)
+			}
+			if _, present := readMarker(t, dir); present {
+				t.Fatal("orphaned refresh marker survived first registration")
+			}
+		})
+	}
+}
+
 func TestOpenCorruptMarkerIsClearedFailSafe(t *testing.T) {
 	dir := lifecycleEnv(t)
 	if err := os.WriteFile(filepath.Join(dir, state.RefreshMarkerFile), []byte("{torn"), 0o644); err != nil { //nolint:gosec // G306: non-secret marker fixture.
@@ -487,7 +571,7 @@ func TestOpenCorruptMarkerIsClearedFailSafe(t *testing.T) {
 	}
 	calls := &seamCalls{}
 	wantClient, wantBinding := fakeRuntimePair(t, "agent-a")
-	installSeams(t, calls, nil, func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+	installSeams(t, calls, nil, func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 		return wantClient, wantBinding, nil
 	}, nil)
 
@@ -506,7 +590,7 @@ func TestOpenConfiguredAgentIdentityConflictFailsClosed(t *testing.T) {
 	t.Setenv(state.EnvAgentID, "agent-configured")
 	calls := &seamCalls{}
 	client, binding := fakeRuntimePair(t, "agent-persisted")
-	installSeams(t, calls, nil, func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+	installSeams(t, calls, nil, func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 		return client, binding, nil
 	}, nil)
 
@@ -520,7 +604,7 @@ func TestOpenIncompleteRuntimeFailsClosed(t *testing.T) {
 	lifecycleEnv(t)
 	calls := &seamCalls{}
 	_, binding := fakeRuntimePair(t, "agent-a")
-	installSeams(t, calls, nil, func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+	installSeams(t, calls, nil, func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 		return nil, binding, nil // nil client with a live binding
 	}, nil)
 

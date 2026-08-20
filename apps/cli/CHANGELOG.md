@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.6.1](https://github.com/layervai/qurl-integrations/compare/v1.6.0...v1.6.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **cli:** recover orphaned assignment refresh state ([#1236](https://github.com/layervai/qurl-integrations/issues/1236)) ([1ae4e5e](https://github.com/layervai/qurl-integrations/commit/1ae4e5e9e0434fcc137b75ee608716020b5eac3a))
+
+## [1.6.0](https://github.com/layervai/qurl-integrations/compare/v1.5.0...v1.6.0) (2026-08-20)
+
+
+### Features
+
+* **cli:** publish local apps with one command ([#1192](https://github.com/layervai/qurl-integrations/issues/1192)) ([46ec229](https://github.com/layervai/qurl-integrations/commit/46ec229b200f2afc089b449367ab404acacf2351))
+
+
+### Bug Fixes
+
+* **cli:** attach the redial guards to the method that actually dials ([#1186](https://github.com/layervai/qurl-integrations/issues/1186)) ([f961226](https://github.com/layervai/qurl-integrations/commit/f9612261f85cf983832af6b332f58f8928f49f7d))
+* **cli:** bound and explain a Connector tunnel that cannot stay up ([#1172](https://github.com/layervai/qurl-integrations/issues/1172)) ([6b6a5b0](https://github.com/layervai/qurl-integrations/commit/6b6a5b0356e1fbbb2881af3c7a186c3e4b31b595))
+* **cli:** match the fork's QUIC casing in TLSEnabled, and mark three mirrors ([#1226](https://github.com/layervai/qurl-integrations/issues/1226)) ([e050a82](https://github.com/layervai/qurl-integrations/commit/e050a828cf7b61e013f78f12bf5d8a8c2f0c664b))
+
 ## [1.5.0](https://github.com/layervai/qurl-integrations/compare/v1.4.0...v1.5.0) (2026-08-19)
 
 

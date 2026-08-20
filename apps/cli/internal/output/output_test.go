@@ -2,8 +2,11 @@ package output
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -13,8 +16,10 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -205,6 +210,64 @@ func TestQuietProjections(t *testing.T) {
 	}
 }
 
+// TestPublishFoundExistingTriState pins the local reconciliation boundary:
+// unknown provenance must never be rendered as a confirmed fresh publish.
+// Known service answers remain explicit for scripts in both directions.
+func TestPublishFoundExistingTriState(t *testing.T) {
+	t.Parallel()
+	knownFalse := false
+	knownTrue := true
+	for _, tc := range []struct {
+		name          string
+		foundExisting *bool
+		wantJSON      string
+		wantNote      bool
+	}{
+		{name: "unknown is omitted", foundExisting: nil},
+		{name: "known fresh is explicit", foundExisting: &knownFalse, wantJSON: `"found_existing": false`},
+		{name: "known existing is explicit", foundExisting: &knownTrue, wantJSON: `"found_existing": true`, wantNote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errBuf bytes.Buffer
+			p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+			if err := p.Publish(&qurlapi.Published{
+				CRID:          "thecrid",
+				ResourceID:    "rid",
+				TargetURL:     "http://127.0.0.1:3000",
+				FoundExisting: tc.foundExisting,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantJSON == "" {
+				if strings.Contains(out.String(), `"found_existing"`) {
+					t.Fatalf("unknown provenance claimed a boolean outcome: %s", out.String())
+				}
+			} else if !strings.Contains(out.String(), tc.wantJSON) {
+				t.Fatalf("JSON = %s, want %s", out.String(), tc.wantJSON)
+			}
+			if got := strings.Contains(errBuf.String(), msgAlreadyPublished); got != tc.wantNote {
+				t.Fatalf("already-published note = %t, want %t; stderr=%q", got, tc.wantNote, errBuf.String())
+			}
+		})
+	}
+
+	for _, quiet := range []bool{false, true} {
+		var out, errBuf bytes.Buffer
+		p := newTestPrinter(&out, &errBuf, FormatText, quiet, false, false)
+		if err := p.Publish(&qurlapi.Published{
+			CRID:          "thecrid",
+			TargetURL:     "http://127.0.0.1:3000",
+			FoundExisting: nil,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "Already published") || strings.Contains(out.String(), msgPublishFoundExisting) || errBuf.Len() != 0 {
+			t.Fatalf("unknown provenance made an existing/fresh claim: stdout=%q stderr=%q", out.String(), errBuf.String())
+		}
+	}
+}
+
 // TestRedactionGrepProof plants a credential in every input a formatter or
 // error rendering touches on the diagnostic surfaces and asserts the secret
 // never reaches the rendered bytes.
@@ -267,6 +330,38 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	// Fields render sorted.
 	if strings.Index(rendered, "alias:") > strings.Index(rendered, "target_url:") {
 		t.Errorf("invalid fields not sorted:\n%s", rendered)
+	}
+}
+
+func TestRenderConnectorEnrollmentScopeRemedy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
+	}))
+	t.Cleanup(srv.Close)
+	client, err := qurlapi.New(&qurlapi.Config{
+		BaseURL: srv.URL,
+		APIKey:  "lv_test_logincredential123456789",
+		Version: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.MintConnectorEnrollmentToken(context.Background(), qurlapi.MintConnectorEnrollmentTokenOptions{
+		ConnectorID:    "local-scope-test",
+		IdempotencyKey: "0123456789abcdef0123456789abcdef",
+	})
+	if err == nil {
+		t.Fatal("mint unexpectedly succeeded")
+	}
+
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("bootstrap local Connector: %w", err), false)
+	got := buf.String()
+	if !strings.Contains(got, "qurl:agent") || !strings.Contains(got, "one-shot Connector enrollment credential") {
+		t.Errorf("operation-specific remedy missing:\n%s", got)
+	}
+	if strings.Contains(got, hintScope) {
+		t.Errorf("generic resource-scope remedy won over enrollment remedy:\n%s", got)
 	}
 }
 
@@ -357,6 +452,19 @@ func TestConnectorAssignmentOrdering(t *testing.T) {
 	})
 }
 
+func TestConnectorProxyNotServingRendering(t *testing.T) {
+	wrapped := fmt.Errorf("serve local Connector: %w: untrusted server detail", supervisor.ErrProxyNotServing)
+	var buf bytes.Buffer
+	RenderError(&buf, wrapped, false)
+	got := buf.String()
+	if !strings.Contains(got, msgConnectorProxyNotServing) || !strings.Contains(got, hintConnectorProxyNotServing) {
+		t.Fatalf("readiness rendering missing customer guidance:\n%s", got)
+	}
+	if strings.Contains(got, "untrusted server detail") {
+		t.Fatalf("readiness rendering leaked technical/server detail:\n%s", got)
+	}
+}
+
 // TestConnectorRequestRejectedDropsSDKRemedy is the regression guard for the
 // reported defect: the 52109 rendering must not put the SDK's own sentence —
 // which names a Go option and prescribes the wrong fix — in front of a
@@ -435,6 +543,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
 		msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid,
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
+		msgConnectorProxyNotServing, hintConnectorProxyNotServing,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {

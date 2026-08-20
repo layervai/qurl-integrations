@@ -190,6 +190,25 @@ func (p *hermeticProxyRecorder) snapshot() []hermeticNewProxyObservation {
 	return out
 }
 
+// The pinned fork's server constructor writes the package-global
+// vhost.NotFoundPagePath, so every in-package constructor must come through
+// this helper. Only construction is serialized; the server tests remain
+// parallel once their independent Service instances exist.
+var forkServerConstructionMu sync.Mutex
+
+func startForkServer(t *testing.T, cfg *v1.ServerConfig, kind string, bindPort int) *frpserver.Service {
+	t.Helper()
+	forkServerConstructionMu.Lock()
+	svc, err := frpserver.NewService(cfg)
+	forkServerConstructionMu.Unlock()
+	if err != nil {
+		t.Fatalf("construct %s on 127.0.0.1:%d: %v", kind, bindPort, err)
+	}
+	go svc.Run(context.Background())
+	t.Cleanup(func() { _ = svc.Close() })
+	return svc
+}
+
 // startHermeticFRPS runs the FRP fork's real server on the given loopback
 // port, wired to the NewProxy recorder plugin. NewService binds the listener
 // synchronously; Close stops it (idempotent against Run's own shutdown).
@@ -209,13 +228,7 @@ func startHermeticFRPS(t *testing.T, bindPort int, pluginURL string) *frpserver.
 	if err := cfg.Complete(); err != nil {
 		t.Fatalf("complete hermetic server config: %v", err)
 	}
-	svc, err := frpserver.NewService(cfg)
-	if err != nil {
-		t.Fatalf("construct hermetic server on 127.0.0.1:%d: %v", bindPort, err)
-	}
-	go svc.Run(context.Background())
-	t.Cleanup(func() { _ = svc.Close() })
-	return svc
+	return startForkServer(t, cfg, "hermetic server", bindPort)
 }
 
 // pollHermeticHTTPBody polls the tunneled endpoint until the echo body
@@ -292,6 +305,7 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 
 	recorder := newHermeticProxyRecorder(t)
 	firstFRPS := startHermeticFRPS(t, frpsPort, recorder.server.URL)
+	proxyReady := make(chan struct{}, 1)
 
 	knocker := &hermeticCycleKnocker{resourceHost: resourceHost}
 	common := &v1.ClientCommonConfig{}
@@ -314,12 +328,18 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 	// externally visible trace of the fork's OnFirstLoginSuccess dispatch, and
 	// the assertion after shutdown counts it.
 	sink := &hermeticLogSink{}
-	factory, err := NewFRPRunnerFactory(FRPFactoryConfig{
+	factory, err := NewFRPRunnerFactory(&FRPFactoryConfig{
 		Knocker:         knocker,
 		ResourceID:      testResource,
 		Proxies:         proxies,
 		Logger:          slog.New(slog.NewJSONHandler(sink, nil)),
 		RedialKnockGate: time.Millisecond,
+		OnProxyReady: func() {
+			select {
+			case proxyReady <- struct{}{}:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("build FRP runner factory: %v", err)
@@ -344,6 +364,15 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 	go func() { supervisorResult <- sup.Run(supCtx) }()
 
 	// Leg 1: knock → Login under the native RunID → registration → bytes.
+	select {
+	case <-proxyReady:
+		// The production readiness monitor observed the configured proxy in
+		// FRP's running phase after authenticated Login and registration.
+	case err := <-supervisorResult:
+		t.Fatalf("supervisor exited before proxy readiness: %v", err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("proxy readiness callback did not fire")
+	}
 	pollHermeticHTTPBody(t, proxyEndpoint, echoBody, "first tunnel server", 15*time.Second, supervisorResult)
 	knocksAfterFirstLeg, begun, _ := knocker.stats()
 	if len(begun) != 1 {

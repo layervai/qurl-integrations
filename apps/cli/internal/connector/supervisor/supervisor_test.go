@@ -740,6 +740,37 @@ func TestRunnerErrTooManyKnockFailuresPropagates(t *testing.T) {
 	}
 }
 
+// TestRunnerErrProxyNotServingPropagates pins the post-Login readiness exit:
+// an explicit registration failure is terminal immediately, is not retried,
+// and does not arm the unrelated knock-refresh episode.
+func TestRunnerErrProxyNotServingPropagates(t *testing.T) {
+	t.Parallel()
+	failure := fmt.Errorf("%w: route rejected", ErrProxyNotServing)
+	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("h.example:1")}}
+	log := &runnerLog{}
+	marker := &fakeMarker{}
+	cfg := testConfig(knocker, makeFactory(log, []error{failure}))
+	cfg.Marker = marker
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(context.Background()) }()
+	waitForRunners(t, log, 1)
+	close(log.snapshot()[0].done)
+	if runErr := <-done; !errors.Is(runErr, ErrProxyNotServing) {
+		t.Fatalf("Run = %v, want the propagated readiness sentinel", runErr)
+	}
+	if got := len(log.snapshot()); got != 1 {
+		t.Fatalf("runner cycles = %d, want no retry after explicit registration failure", got)
+	}
+	armed, _ := marker.snapshot()
+	if len(armed) != 0 {
+		t.Fatalf("armed episodes = %v, want none for proxy readiness failure", armed)
+	}
+}
+
 // TestBackoffResetsAfterHealthyRun proves a long-running cycle resets the
 // escalated backoff: after rapid failures push backoff toward the cap, a
 // healthy-length run must bring the next reconnect back to the floor.

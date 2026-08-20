@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.3](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.2...discord-v0.2.3) (2026-08-20)
+
+
+### Bug Fixes
+
+* **discord:** bound a load-test round by --duration, not just the gaps between ([#1200](https://github.com/layervai/qurl-integrations/issues/1200)) ([dad9b40](https://github.com/layervai/qurl-integrations/commit/dad9b40615e3066ff52b169fad382d79b3eec5f6))
+* **discord:** give the load test its re-upload leg ([#1173](https://github.com/layervai/qurl-integrations/issues/1173)) ([a68c5dd](https://github.com/layervai/qurl-integrations/commit/a68c5ddaf1d70e7b72e2b83f8a8d109fc8039268))
+* **discord:** make load-test resources reclaimable ([#1161](https://github.com/layervai/qurl-integrations/issues/1161)) ([178757e](https://github.com/layervai/qurl-integrations/commit/178757e8a3cc5c184e1d5210d64ce83056025b49))
+* **discord:** point the reclaim refusal at &lt;tmpdir&gt;, not /tmp ([#1202](https://github.com/layervai/qurl-integrations/issues/1202)) ([c935657](https://github.com/layervai/qurl-integrations/commit/c935657a4f3d96c87cd23df1a92d596e1c230b03))
+* **discord:** read every load-test flag through one argv parser ([#1174](https://github.com/layervai/qurl-integrations/issues/1174)) ([a6090fa](https://github.com/layervai/qurl-integrations/commit/a6090fae6fc1af238e11c6e72898f46e0ab1e576))
+* **discord:** read the load test's numeric flags in either spelling ([#1175](https://github.com/layervai/qurl-integrations/issues/1175)) ([c7f0cde](https://github.com/layervai/qurl-integrations/commit/c7f0cdedd94d75e6272386ee24ac1f1d44ba375f))
+* **discord:** refuse a value on the load test's boolean flags ([#1176](https://github.com/layervai/qurl-integrations/issues/1176)) ([1dab544](https://github.com/layervai/qurl-integrations/commit/1dab5449c8e04eb7cd74ead462361d7b5675ffb2))
+* **discord:** refuse a whitespace-only --reclaim path at preflight ([#1205](https://github.com/layervai/qurl-integrations/issues/1205)) ([1b3522b](https://github.com/layervai/qurl-integrations/commit/1b3522b881a6b64d8c131308eae44ccad7e69c63))
+* **discord:** refuse the load test's unknown arguments ([#1182](https://github.com/layervai/qurl-integrations/issues/1182)) ([8ca645a](https://github.com/layervai/qurl-integrations/commit/8ca645a8df12cce7410ea45adbc6917a2a67efe1))
+* **discord:** repoint the boolean-flag static check at its reader ([#1184](https://github.com/layervai/qurl-integrations/issues/1184)) ([9412bc0](https://github.com/layervai/qurl-integrations/commit/9412bc0a5346bcc3d1f6712a54fee8accb453cff))
+* **discord:** report load-test failures instead of hiding them ([#1170](https://github.com/layervai/qurl-integrations/issues/1170)) ([0a3da23](https://github.com/layervai/qurl-integrations/commit/0a3da23af57f02883d9aa662a7611368b38fec25))
+* **discord:** stop the load test leaking a 1MB temp file per round ([#1177](https://github.com/layervai/qurl-integrations/issues/1177)) ([c90a447](https://github.com/layervai/qurl-integrations/commit/c90a447900a5168e76de4067dd86c576a5478e02))
+
 ## [0.2.2](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.1...discord-v0.2.2) (2026-08-19)
 
 

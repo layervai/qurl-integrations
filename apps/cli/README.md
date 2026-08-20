@@ -1,21 +1,106 @@
 # qURL CLI
 
-Publish URLs as protected resources and turn their **CRIDs** back into
-working access links — from your terminal or a script.
-
-A **qURL™** resource is a protected target with a permanent, verifiable ID:
-its CRID. Publish once, share the CRID anywhere (it contains no secrets),
-and anyone authorized can resolve it into a short-lived access link when
-they need one. Links expire on their own; the CRID does not.
+Publish an app running on your machine with one command:
 
 ```bash
-# Publish a URL and get its CRID
-qurl publish https://api.example.com/reports
-
-# Open what a CRID points to in your browser, or download it
-qurl get <CRID>
-qurl get <CRID> --file report.pdf
+qurl publish http://127.0.0.1:3000
 ```
+
+qURL™ gives the app a permanent **CRID** you can safely paste into chat,
+documentation, or an agent prompt. A CRID identifies the protected resource;
+it does not grant access. Authorized users turn it into a short-lived access
+link only when they need one.
+
+[Publish localhost in 60 seconds](#publish-localhost-in-60-seconds) ·
+[Command reference](#commands) · [Scripting](#scripting-contract)
+
+## Publish localhost in 60 seconds
+
+### 1. Install the CLI
+
+On macOS or Linux with Homebrew:
+
+```bash
+brew install layervai/tap/qurl
+qurl version
+```
+
+Local publishing requires qURL CLI 1.6.0 or newer. If the version is older,
+update the tap and upgrade the CLI before continuing:
+
+```bash
+brew update
+brew upgrade qurl
+```
+
+Using another package format? See [Install](#install).
+
+### 2. Sign in
+
+[Create or copy an API key in the qURL dashboard](https://layerv.ai/qurl/dashboard/keys/).
+Select `qurl:agent` to publish the local app and `qurl:resolve` to open it in
+step 4. Then run:
+
+```bash
+qurl login
+```
+
+Paste the key at the hidden prompt. The CLI validates it before saving it in a
+secure credential store (your OS keyring when one is available).
+
+### 3. Start your app, then publish it
+
+Keep your app running in one terminal. If you only want to try the flow, start
+Python's built-in web server:
+
+```bash
+python3 -m http.server 3000 --bind 127.0.0.1
+```
+
+In a second terminal:
+
+```bash
+qurl publish http://127.0.0.1:3000
+```
+
+When the route is ready, qURL prints:
+
+```text
+Published
+
+  Target:  http://127.0.0.1:3000
+  Status:  serving
+
+CRID: <CRID>
+```
+
+Leave that terminal open while you want the app available. Press Ctrl-C to
+stop serving it. Running the same command later reuses the same CRID.
+
+### 4. Open or share it
+
+The CRID is safe to share. An authorized user can open the app with:
+
+```bash
+qurl get <CRID>
+```
+
+Your app still listens only on your machine. The CLI connects outward to qURL;
+you do not need public DNS, a public IP, or custom Connector configuration.
+
+Publishing a remote URL instead? `qurl publish https://api.example.com/reports`
+prints its CRID and exits immediately.
+
+### If the first run fails
+
+| What you see | What to do |
+|--------------|------------|
+| `only HTTPS URLs are allowed` | You have qURL CLI 1.5.0 or older. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 1.6.0 or newer. |
+| No API key is configured | Run `qurl login` |
+| The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
+| The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
+| `This Connector needs its qURL platform assignment refreshed` | Update to qURL CLI 1.6.1 or newer. If the message remains because a saved assignment genuinely needs a refresh, review why the previous connection stopped, then rerun the same publish command once with `--refresh-mode auto`. |
+| The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
 
 ## Install
 
@@ -46,10 +131,20 @@ qurl version
 
 ## Authentication
 
-Every command talks to the qURL API with an API key (`lv_live_…` for
-production, `lv_test_…` for test). There is deliberately no `--api-key`
-flag — command-line arguments leak into shell history and process lists.
-The CLI looks for the key in this order:
+Commands that contact qURL use an API key (`lv_live_…` for production,
+`lv_test_…` for test). Create one in the
+[qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the scopes for
+the commands you plan to use:
+
+| What you want to do | Scope |
+|---------------------|-------|
+| Publish a local app | `qurl:agent` |
+| Publish or delete a remote URL | `qurl:write` |
+| Resolve or open a CRID | `qurl:resolve` |
+| List resources | `qurl:read` |
+
+There is deliberately no `--api-key` flag — command-line arguments leak into
+shell history and process lists. The CLI looks for the key in this order:
 
 1. `QURL_API_KEY` environment variable — recommended for scripts and CI.
    When set, nothing on disk is read or written.
@@ -61,11 +156,17 @@ The CLI looks for the key in this order:
    that file, never the keyring — so on keyring machines, give them the
    key via `QURL_API_KEY` rather than expecting them to see `qurl login`'s.
 
-`qurl login` checks the key against the qURL service before storing it, so
-a mistyped key fails loudly instead of breaking every later command.
-`qurl logout` removes the stored key from every place it may sit, and
-`qurl whoami` shows which account and key identity the configured
+`qurl login` checks the key before storing it, so a mistyped key fails
+immediately. `qurl logout` removes the stored key from every place it may sit,
+and `qurl whoami` shows which account and key identity the configured
 credential maps to.
+
+The first local publish needs a login key with `qurl:agent`. The CLI uses that
+authority only to mint a Connector-bound, one-shot enrollment credential; it
+keeps the credential in memory and the native enrollment exchanges it for a
+restricted device identity. A warm start reuses that device identity and does
+not read the login key or mint another enrollment credential. Remote publish,
+resolve, and list continue to work with their existing narrower scopes.
 
 ## Configuration
 
@@ -80,7 +181,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
-| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | — (required by `connector run`) |
+| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish`; required by `connector run` |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -97,7 +198,7 @@ would travel unencrypted; loopback endpoints are exempt.
 
 | Command | Description |
 |---------|-------------|
-| `qurl publish <target-url>` | Publish a URL as a protected resource and get its CRID |
+| `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
@@ -119,22 +220,65 @@ CRID aimed at a non-production endpoint warns and proceeds.
 
 ### qurl publish
 
-`qurl publish <target-url>` registers the target and prints its CRID —
-last and alone on its line in text mode, so it is the easiest thing to
-select and copy; `--quiet` prints only the CRID.
+`qurl publish` handles both local apps and remote URLs:
+
+| Target | What happens |
+|--------|--------------|
+| `http://127.0.0.1:3000` | qURL serves the local app and keeps running until Ctrl-C |
+| `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
+
+#### Local apps
+
+```bash
+qurl publish http://127.0.0.1:3000
+```
+
+The CRID appears only after the route is ready. If the initial route is
+rejected or does not become ready within 30 seconds, the command exits without
+printing a success CRID. Once serving, temporary connection failures use the
+Connector's normal reconnect behavior.
+
+Restarting the same app on the same machine reuses its resource and CRID. Use
+`--id` only when you want to choose the Connector ID yourself.
+
+Local publishing accepts `http://localhost:<port>` and IPv4 or IPv6 loopback
+addresses. It intentionally rejects HTTPS, paths, queries, fragments,
+credentials, wildcard listeners, and localhost subdomains. These restrictions
+keep the one-command path unambiguous; use the advanced
+[`qurl connector run`](#qurl-connector-run) command when you need custom state
+or enrollment settings.
+
+Local publish is a long-running command, so do not wrap it in command
+substitution: the shell would wait until you stop serving. When a process
+supervisor needs only the CRID, use `--quiet` and read the first stdout line.
+
+#### Remote URLs
+
+```bash
+qurl publish https://api.example.com/reports
+```
+
+Remote targets must use HTTP or HTTPS, include a host and valid port, and must
+not contain embedded credentials. The CLI validates them before reading your
+credential or making a network request.
 
 | Flag | Description |
 |------|-------------|
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
+| `--id <id>` | Connector ID for a local publish; local-only |
 
-Publishing the same URL again does not create a duplicate: while the URL
-has an active resource, the service returns that existing resource and
-its CRID. Text mode says so in its output, `--quiet` notes it on stderr,
-and JSON output always carries `found_existing` (`true` exactly in this
-case). Delete the resource first to publish the same URL as a new
-resource with a fresh CRID.
+Description, tags, and alias apply only to remote resources. `--id` applies
+only to a local publish. Mixing those options fails loudly instead of being
+silently ignored.
+
+In either mode, the CRID is last and alone on its line; `--quiet` prints only
+the CRID. Publishing the same target again does not create a duplicate while
+its resource is active: the existing CRID is returned and the output says so.
+JSON reports a known outcome as `found_existing: true` or `false`; if recovery
+cannot prove which happened, it omits the field rather than guessing. Delete
+the resource first if you intentionally want a new CRID.
 
 ### qurl resolve
 
@@ -260,7 +404,8 @@ already-deleted resource succeeds idempotently and says so (JSON sets
 
 ### qurl connector run
 
-`qurl connector run --id <id> --target <host:port>` serves an app
+`qurl connector run --id <id> --target <host:port>` is the advanced and
+backward-compatible local serving surface. It serves an app
 running on your machine through the qURL platform. Your app keeps
 listening on localhost and the Connector connects outward — your machine
 never opens a listening port to the internet — while the platform
@@ -275,8 +420,11 @@ verifies each caller and grants access before any request is forwarded.
 
 The Connector ID is the same identity the standalone qurl-connector
 configures as `QURL_CONNECTOR_ID` (YAML `id:`), so one setting covers a
-machine that moves between the two tools. The names v1.1.0 briefly
-shipped still work, deprecated: `--slug` as a hidden alias of `--id`
+machine that moves between the two tools. It must be 3–64 lowercase letters,
+numbers, or hyphens, start with a letter, and end with a letter or number;
+`connector run` validates this platform-owned grammar before opening state or
+making a network request. The names v1.1.0 briefly shipped still work,
+deprecated: `--slug` as a hidden alias of `--id`
 (passing both with different values is refused), and
 `QURL_CONNECTOR_SLUG` / `connector_slug` at lower precedence than their
 `id`-named counterparts. All three will be removed in the next major
@@ -308,11 +456,13 @@ level=INFO msg="connector: starting to serve local app" event=connector_starting
 ```
 
 `event=connector_starting` is the stable name; it fires as the serve loop
-starts, not once traffic flows (`event=proxy_allow` marks a served
-session). `crid` is omitted entirely rather than logged empty when the
-platform returned none, so its presence is meaningful. A CRID is base32
-over `[a-z2-7]`, so the value never needs quoting and always renders as a
-bare `crid=<value>`.
+starts, not once traffic flows. On this advanced surface, `event=proxy_allow`
+preserves its admission-level meaning after an authenticated Login; `connector
+run` does not opt into local publish's terminal 30-second exact-proxy readiness
+gate, so FRP retains its existing registration and reconnect behavior. `crid`
+is omitted entirely rather than logged empty when the platform returned none,
+so its presence is meaningful. A CRID is base32 over `[a-z2-7]`, so the value
+never needs quoting and always renders as a bare `crid=<value>`.
 
 If the platform stays unreachable long enough, the command exits with
 code 11 instead of retrying forever. The next start may then need its

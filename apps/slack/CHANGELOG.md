@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.3.0...slack-v0.3.1) (2026-08-20)
+
+
+### Features
+
+* **cli:** publish local apps with one command ([#1192](https://github.com/layervai/qurl-integrations/issues/1192)) ([46ec229](https://github.com/layervai/qurl-integrations/commit/46ec229b200f2afc089b449367ab404acacf2351))
+
+
+### Bug Fixes
+
+* **slack:** tell the admin what to shut down after a revoke ([#1229](https://github.com/layervai/qurl-integrations/issues/1229)) ([653a40e](https://github.com/layervai/qurl-integrations/commit/653a40ef9192474e97b08330925ac88bf7143be6))
+
 ## [0.3.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.2.0...slack-v0.3.0) (2026-08-19)
 
 

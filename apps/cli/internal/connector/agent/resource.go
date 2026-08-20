@@ -28,12 +28,31 @@ const EnvKnockResourceID = "LAYERV_KNOCK_RESOURCE_ID"
 // When that reconcile still finds nothing, the uncertainty is surfaced to the
 // operator rather than retried: a second blind ensure could double-provision.
 func ResolveResource(ctx context.Context, client *qurl.Client, slug string) (*qurl.ConnectorResource, error) {
+	result, err := ResolveResourceWithResult(ctx, client, slug)
+	if err != nil {
+		return nil, err
+	}
+	return result.Resource, nil
+}
+
+// ResolvedResource carries the selected Connector resource plus the strongest
+// available provenance for publish-style output. FoundExisting is nil only
+// when a failed ensure was reconciled by a read: the resource exists, but the
+// client cannot truthfully say whether this invocation created it.
+type ResolvedResource struct {
+	Resource      *qurl.ConnectorResource
+	FoundExisting *bool
+}
+
+// ResolveResourceWithResult is ResolveResource with creation provenance.
+func ResolveResourceWithResult(ctx context.Context, client *qurl.Client, slug string) (*ResolvedResource, error) {
 	if client == nil {
 		return nil, errors.New("registered device resource client is nil")
 	}
 	resource, err := client.GetConnectorResourceBySlug(ctx, slug)
 	if err == nil {
-		return resource, nil
+		found := true
+		return &ResolvedResource{Resource: resource, FoundExisting: &found}, nil
 	}
 	if errors.Is(err, qurl.ErrAgentStateContinuity) {
 		return nil, fmt.Errorf("connector %q: state continuity lost while reading by slug: %w", slug, err)
@@ -47,7 +66,8 @@ func ResolveResource(ctx context.Context, client *qurl.Client, slug string) (*qu
 		if result == nil || result.Resource == nil {
 			return nil, fmt.Errorf("connector %q: qURL API returned no resource after ensure", slug)
 		}
-		return result.Resource, nil
+		found := result.FoundExisting
+		return &ResolvedResource{Resource: result.Resource, FoundExisting: &found}, nil
 	}
 	if errors.Is(ensureErr, qurl.ErrAgentStateContinuity) {
 		return nil, fmt.Errorf("connector %q: state continuity lost during ensure: %w", slug, ensureErr)
@@ -57,7 +77,7 @@ func ResolveResource(ctx context.Context, client *qurl.Client, slug string) (*qu
 	}
 	resource, err = client.GetConnectorResourceBySlug(ctx, slug)
 	if err == nil {
-		return resource, nil
+		return &ResolvedResource{Resource: resource}, nil
 	}
 	if errors.Is(err, qurl.ErrConnectorResourceNotFound) {
 		return nil, fmt.Errorf("connector %q: ensure outcome is uncertain and no active resource is visible by slug; not retrying automatically (a second ensure could double-provision): %w", slug, ensureErr)

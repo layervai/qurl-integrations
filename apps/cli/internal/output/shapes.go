@@ -19,11 +19,10 @@ type publishJSON struct {
 	Status     string     `json:"status,omitempty"`
 	CreatedAt  *time.Time `json:"created_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
-	// FoundExisting mirrors the text-mode already-published note for
-	// scripts. Always emitted — explicit false on a fresh publish — so
-	// scripts can rely on the key being present, including against
-	// platform versions that do not send the flag yet.
-	FoundExisting bool `json:"found_existing"`
+	// FoundExisting mirrors the text-mode already-published note for scripts.
+	// Known remote and local outcomes emit true or false; an uncertain local
+	// reconciliation omits the field rather than claiming a fresh publish.
+	FoundExisting *bool `json:"found_existing,omitempty"`
 }
 
 type resolveJSON struct {
@@ -90,7 +89,7 @@ const (
 // while --quiet and JSON keep their stdout documents unchanged and note the
 // replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
-	if res.FoundExisting && (p.format == FormatJSON || p.quiet) {
+	if foundExisting(res) && (p.format == FormatJSON || p.quiet) {
 		p.Notef(msgAlreadyPublished)
 	}
 	switch {
@@ -121,7 +120,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 // raw field.
 func (p *Printer) publishText(res *qurlapi.Published) error {
 	headline := "Published"
-	if res.FoundExisting {
+	if foundExisting(res) {
 		headline = "Already published"
 	}
 	ew := &errWriter{w: p.out}
@@ -153,13 +152,17 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	// one actually follows. The combination is unreachable in practice —
 	// found_existing is newer than CRID minting — but the wording is
 	// unconditional, so the guard keeps it from ever contradicting itself.
-	if res.FoundExisting && res.CRID != "" {
+	if foundExisting(res) && res.CRID != "" {
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
 	if res.CRID != "" {
 		ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	}
 	return ew.flush(nil)
+}
+
+func foundExisting(res *qurlapi.Published) bool {
+	return res.FoundExisting != nil && *res.FoundExisting
 }
 
 // ConnectorServing announces a Connector serve loop. The Connector resolved
