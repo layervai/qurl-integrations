@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/layervai/qurl-integrations/compare/v1.6.1...v1.6.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* **cli:** route qv2t1 links through secure opener ([#1238](https://github.com/layervai/qurl-integrations/issues/1238)) ([e24091e](https://github.com/layervai/qurl-integrations/commit/e24091e076b543b2b6dcb7ec56e36dc8d5b3ac30))
+
 ## [1.6.1](https://github.com/layervai/qurl-integrations/compare/v1.6.0...v1.6.1) (2026-08-20)
 
 
