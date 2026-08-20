@@ -25,6 +25,11 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
+const (
+	httpURLScheme  = "http"
+	httpsURLScheme = "https"
+)
+
 // globalOpts carries flag values, injected process context, and the settings
 // resolved from the flag > env > profile > default precedence chain.
 type globalOpts struct {
@@ -159,18 +164,18 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 	cmd := &cobra.Command{
 		Use:   "qurl",
 		Short: "Publish, resolve, and manage qURL resources by CRID",
-		Long: `The qURL CLI publishes URLs as protected resources and turns their CRIDs
-back into working access links.
+		Long: `Publish a local app or remote URL as a protected qURL resource, then use
+its CRID to open it when access is authorized.
 
-A CRID is a resource's permanent, verifiable ID. Publish once, share the
-CRID anywhere, and anyone authorized can resolve it into a short-lived
-access link when they need one.
+A CRID is a permanent, shareable resource ID — it contains no secret and grants
+no access by itself. Authorized users turn it into a short-lived access link
+with "qurl get" or "qurl resolve".
 
 Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 ` + "`qurl login`" + ` to store a key on this machine.`,
-		Example: "  qurl publish https://api.example.com/reports\n" +
-			"  qurl resolve " + exampleCRID + "\n" +
-			"  qurl list",
+		Example: "  qurl publish http://127.0.0.1:3000\n" +
+			"  qurl get " + exampleCRID + "\n" +
+			"  qurl publish https://api.example.com/reports",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -272,7 +277,7 @@ func (o *globalOpts) printer() *output.Printer {
 // Location elsewhere; this closes the sibling misconfiguration.
 func insecureEndpointWarning(endpoint string) string {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" {
+	if err != nil || u.Scheme != httpURLScheme {
 		return ""
 	}
 	host := u.Hostname()

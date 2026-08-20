@@ -346,12 +346,11 @@ jobs:
       # expected), and the suite inside arms on its env contract. -v keeps a
       # suite-level skip visible in the log instead of silent green.
       #
-      # The Connector smoke (sandbox_connector_test.go) is deliberately NOT
-      # armed here: beyond an endpoint it needs QURL_CLI_SANDBOX_CONNECTOR,
-      # a slug, the Hub triple, and an enrolled state dir or a one-shot
-      # enrollment token — one-shots burn on first use, so a repo secret
-      # cannot carry one. It stays gated on its own variables and skips
-      # loudly; the journey suite does not require it.
+      # The Connector smokes are deliberately NOT armed here: beyond an
+      # endpoint they need explicit arming and credentials. In particular, the
+      # local-publish smoke enrolls a native device, so a one-off proof must
+      # also supply its JWT cleanup credential instead of leaking one durable
+      # device/assignment per hosted-runner invocation.
       - name: Run sandbox e2e suite
         env:
           QURL_API_KEY: ${{ secrets.QURL_SANDBOX_API_KEY }}

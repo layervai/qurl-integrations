@@ -46,6 +46,14 @@ type Config struct {
 	// identity.
 	EnrollmentToken string
 
+	// EnrollmentTokenProvider lazily supplies a one-shot credential for a
+	// first registration. It takes precedence over the legacy environment/file
+	// enrollment surface, allowing `qurl publish` to mint an exact Connector-
+	// bound token from the logged-in credential without exposing it in argv,
+	// environment, or durable state. `qurl connector run` leaves this nil and
+	// retains its existing explicit token behavior.
+	EnrollmentTokenProvider EnrollmentTokenProvider
+
 	// StateDir overrides state-directory resolution (flag-first). Empty
 	// falls through to the state package's env/XDG chain.
 	StateDir string
@@ -67,6 +75,14 @@ type Config struct {
 	// Logger receives orchestration events; nil uses slog.Default().
 	Logger *slog.Logger
 }
+
+// EnrollmentTokenRequest is the non-secret durable identity context supplied
+// to a lazy enrollment token provider.
+type EnrollmentTokenRequest = qurl.AgentEnrollmentCredentialRequest
+
+// EnrollmentTokenProvider lazily mints a one-shot enrollment credential from
+// inside qurl-go's serialized native lifecycle setup.
+type EnrollmentTokenProvider = qurl.AgentEnrollmentCredentialProvider
 
 // Runtime is the opened Connector runtime: the registered device's resource
 // client, its native runtime binding, and the owning state store. The caller
@@ -111,16 +127,18 @@ func (r *Runtime) Close() error {
 // Test-only injection seams for qurl-go's native UDP lifecycle entry points.
 // Production must keep these bound to the package functions.
 //
-// The register/open compatibility pair is used deliberately instead of the
-// newer combined qurl.ConnectAgentRuntime: ConnectAgentRuntime renews an
-// expired lease inside the SDK on every start and has no offline-open mode,
-// which would bypass this package's operator-gated refresh ladder (manual by
-// default, one refresh per failure episode). The pair is documented as
-// remaining for compatibility and behaves identically to the combined call's
-// two halves.
+// Warm open uses ConnectAgentRuntime's offline option before the enrolling
+// call. That preserves this package's operator-gated refresh ladder (manual by
+// default, one refresh per failure episode) while allowing the SDK to invoke a
+// lazy enrollment provider inside its setup lock on first registration.
 var (
-	registerAgentRuntime       = qurl.RegisterAgentRuntime       //nolint:staticcheck // SA1019: the split call keeps enrollment spending explicit; see the seam comment above.
-	openRegisteredAgentRuntime = qurl.OpenRegisteredAgentRuntime //nolint:staticcheck // SA1019: the offline warm open only exists on this call; see the seam comment above.
+	registerAgentRuntime = func(ctx context.Context, credential string, store qurl.AgentStateStore, opts ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+		if credential != "" {
+			opts = append(opts, qurl.WithAgentRuntimeEnrollmentCredential(credential))
+		}
+		return qurl.ConnectAgentRuntime(ctx, store, opts...)
+	}
+	openRegisteredAgentRuntime = qurl.ConnectAgentRuntime
 	refreshAgentRuntime        = qurl.RefreshAgentRuntime
 )
 
@@ -169,12 +187,14 @@ var (
 // Open opens the Connector runtime: it resolves the state directory and Hub
 // bootstrap, then follows the lifecycle ladder —
 //
-//  1. an armed, unattempted refresh marker forces the operator-gated
-//     assignment refresh path;
-//  2. otherwise the persisted identity is warm-opened offline, so an expired
+//  1. an armed refresh marker is first correlated with a persisted identity;
+//     an orphan marker is cleared because there is no assignment to refresh;
+//  2. a real armed, unattempted marker forces the operator-gated assignment
+//     refresh path;
+//  3. otherwise the persisted identity is warm-opened offline, so an expired
 //     assignment lease surfaces as a refresh request here instead of the SDK
 //     silently renewing behind the operator's refresh-mode gate;
-//  3. with no persisted state, first-time registration spends the one-shot
+//  4. with no persisted state, first-time registration spends the one-shot
 //     enrollment token.
 //
 // On success the caller owns the returned Runtime and must Close it.
@@ -213,6 +233,10 @@ func Open(ctx context.Context, cfg *Config) (_ *Runtime, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("load assignment refresh marker: %w", err)
 	}
+	marker, markerPresent, err = clearOrphanedRefreshMarker(ctx, logger, store, marker, markerPresent)
+	if err != nil {
+		return nil, err
+	}
 	if markerPresent && !marker.Attempted {
 		return refreshRuntime(ctx, logger, store, hubBootstrap, dir, agentID, marker, mode, clientOpts)
 	}
@@ -221,11 +245,10 @@ func Open(ctx context.Context, cfg *Config) (_ *Runtime, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("validate state before native warm open: %w", err)
 	}
-	// OpenRegisteredAgentRuntime takes a closed option set, so options that
-	// mean nothing to a warm open are rejected by the compiler.
-	// AgentResourceClientOption embeds it, so converting is all that is
-	// needed here.
-	openOpts := make([]qurl.AgentRuntimeOpenOption, 0, len(clientOpts)+1)
+	// ConnectAgentRuntime with the closed offline-open option is the warm-open
+	// probe. It cannot enroll or renew, so the CLI's operator-gated refresh
+	// ladder below remains authoritative.
+	openOpts := make([]qurl.AgentRuntimeRegistrationOption, 0, len(clientOpts)+1)
 	for _, option := range clientOpts {
 		openOpts = append(openOpts, option)
 	}
@@ -264,6 +287,39 @@ func Open(ctx context.Context, cfg *Config) (_ *Runtime, retErr error) {
 	return registerRuntime(ctx, logger, cfg, store, hubBootstrap, agentID, clientOpts, openErr)
 }
 
+// clearOrphanedRefreshMarker correlates the non-secret episode breadcrumb
+// with the credential state it is supposed to refresh. True agent-state
+// absence means there is no platform assignment to refresh, so retaining the
+// marker would wedge an otherwise valid first enrollment behind an impossible
+// operator approval. Any present entry remains fail-closed under qurl-go's
+// normal validation.
+func clearOrphanedRefreshMarker(
+	ctx context.Context,
+	logger *slog.Logger,
+	store *state.Store,
+	marker state.RefreshMarker,
+	present bool,
+) (state.RefreshMarker, bool, error) {
+	if !present {
+		return marker, false, nil
+	}
+	statePresent, err := store.AgentStatePresent()
+	if err != nil {
+		return state.RefreshMarker{}, false, fmt.Errorf("correlate assignment refresh marker with Connector identity: %w", err)
+	}
+	if statePresent {
+		return marker, true, nil
+	}
+	logger.WarnContext(ctx, "connector: orphaned assignment-refresh marker; clearing it before first registration",
+		"event", "assignment_refresh_marker_orphaned",
+		"reason", marker.Reason,
+		"attempted", marker.Attempted)
+	if err := store.ClearRefreshMarker(); err != nil {
+		return state.RefreshMarker{}, false, fmt.Errorf("clear orphaned assignment refresh marker: %w", err)
+	}
+	return state.RefreshMarker{}, false, nil
+}
+
 // registerRuntime performs the first-time native registration, spending the
 // one-shot enrollment credential.
 func registerRuntime(
@@ -276,11 +332,15 @@ func registerRuntime(
 	clientOpts []qurl.AgentResourceClientOption,
 	openErr error,
 ) (*Runtime, error) {
-	credential, err := resolveEnrollmentToken(cfg.EnrollmentToken)
-	if err != nil {
-		return nil, err
+	var credential string
+	var err error
+	if cfg.EnrollmentTokenProvider == nil {
+		credential, err = resolveEnrollmentToken(cfg.EnrollmentToken)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if credential == "" && errors.Is(openErr, qurl.ErrAgentStateNotFound) {
+	if credential == "" && cfg.EnrollmentTokenProvider == nil && errors.Is(openErr, qurl.ErrAgentStateNotFound) {
 		// No stored identity and no token: refuse BEFORE the SDK is invoked.
 		// This is the zero-network token-required path — an empty credential
 		// can never register, and qurl-go would spend a bounded native
@@ -297,6 +357,9 @@ func registerRuntime(
 	}
 	if agentID != "" {
 		registerOpts = append(registerOpts, qurl.WithAgentRuntimeIdentity(agentID))
+	}
+	if cfg.EnrollmentTokenProvider != nil {
+		registerOpts = append(registerOpts, qurl.WithAgentRuntimeEnrollmentCredentialProvider(cfg.EnrollmentTokenProvider))
 	}
 	stateStore, err := store.Handoff()
 	if err != nil {
@@ -320,7 +383,7 @@ func registerRuntime(
 		// budget/abort surfacing — the same silent stall as a deadline or
 		// no-reply — so it is enriched too. An authenticated denial keeps
 		// its own specific message.
-		if ctx.Err() == nil && credential != "" &&
+		if ctx.Err() == nil && (credential != "" || cfg.EnrollmentTokenProvider != nil) &&
 			(isSilentRegistrationStall(err) || errors.Is(err, context.Canceled)) {
 			return nil, &registrationStalledError{cause: err}
 		}
@@ -353,7 +416,7 @@ func refreshRuntime(
 	case RefreshModeDisabled:
 		return nil, fmt.Errorf("%w (%s); deliberately clear and reprovision %s or set %s=manual|auto", ErrRefreshDisabled, marker.Reason, stateDir, EnvRefreshMode)
 	case RefreshModeManual:
-		return nil, fmt.Errorf("%w (%s): inspect the failure, then run exactly one start with %s=auto and restore manual after a healthy connection; an orchestrator restart is not approval", ErrRefreshApprovalRequired, marker.Reason, EnvRefreshMode)
+		return nil, fmt.Errorf("%w (%s): inspect the failure, then approve exactly one start with refresh mode auto; an orchestrator restart is not approval", ErrRefreshApprovalRequired, marker.Reason)
 	case RefreshModeAuto:
 	default:
 		return nil, fmt.Errorf("unsupported registration refresh mode %q", mode)

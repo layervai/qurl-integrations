@@ -38,8 +38,8 @@ var commentWrap = regexp.MustCompile(`\n\s*//\s*`)
 // the version is prose: nothing couples it to go.mod, and the edit that most
 // needs the markers re-read is exactly the one with no automation on it.
 // Dependabot proposes bumps to the require line and does not rewrite replace
-// targets, so bumping the fork is a hand edit, and a hand edit that leaves
-// four comments confidently citing a version that is no longer compiled.
+// targets, so bumping the fork is a hand edit, and a hand edit can leave the
+// markers confidently citing a version that is no longer compiled.
 //
 // This does NOT check that the claims are still true — nothing local can, and
 // that is why the markers exist. It checks the cheaper half: that the version
@@ -47,10 +47,10 @@ var commentWrap = regexp.MustCompile(`\n\s*//\s*`)
 // failure is the prompt to re-verify each claim against the new fork before
 // updating the string.
 //
-// Expect four sites, not the three a plain grep reports: one marker wraps
-// between the module path and the version, so only the commentWrap pass below
-// sees it. Do not "correct" that count from grep output — mutate the wrapped
-// marker's version instead and watch this test name the file.
+// Expect one more site than a plain grep reports: one marker wraps between the
+// module path and the version, so only the commentWrap pass below sees it. Do
+// not infer the total from grep output — mutate the wrapped marker's version
+// instead and watch this test name the file.
 func TestForkContractMarkersNameThePinnedForkVersion(t *testing.T) {
 	t.Parallel()
 

@@ -1196,6 +1196,7 @@ func TestParseS3WebsiteInstallModalArgsDefaultsDirectoryIndex(t *testing.T) {
 	}
 	if args == nil {
 		t.Fatal("args = nil, want parsed args")
+		return
 	}
 	if args.IndexDocument != defaultS3WebsiteIndexDocument {
 		t.Fatalf("IndexDocument = %q, want %q", args.IndexDocument, defaultS3WebsiteIndexDocument)

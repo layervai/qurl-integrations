@@ -83,6 +83,8 @@ var cliSentinels = map[string]struct {
 	// The knock-budget exit: the platform's access-granting path stayed
 	// unusable across the whole retry budget — the Unavailable row.
 	"supervisor.ErrTooManyKnockFailures": {supervisor.ErrTooManyKnockFailures, Unavailable},
+	// Authenticated Login without a running route is still not serving.
+	"supervisor.ErrProxyNotServing": {supervisor.ErrProxyNotServing, Unavailable},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can

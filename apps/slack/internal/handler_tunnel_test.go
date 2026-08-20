@@ -1900,6 +1900,7 @@ func TestTunnelInstallAgentAuditFromMetadataTruncatesReason(t *testing.T) {
 	}
 	if audit == nil {
 		t.Fatal("audit = nil, want protect-connector audit")
+		return
 	}
 	if audit.target != testTunnelSlug {
 		t.Fatalf("target = %q, want submitted slug %q", audit.target, testTunnelSlug)

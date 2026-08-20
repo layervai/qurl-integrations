@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	frpproxy "github.com/fatedier/frp/client/proxy"
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
@@ -21,6 +22,28 @@ import (
 // events below gate on it.
 const loginHealthyAfter = 2 * time.Second
 
+const (
+	// proxyReadyTimeout bounds the gap between an accepted Login and the
+	// configured routes reaching FRP's running state. The fork itself waits
+	// 20 seconds for each NewProxy response; ten seconds of scheduling margin
+	// lets that response window finish without allowing a local publish to
+	// wait forever while still having emitted no success result.
+	proxyReadyTimeout = 30 * time.Second
+	// StatusExporter is a snapshot API rather than an event stream. A short
+	// poll keeps interactive startup responsive without creating meaningful
+	// load: every lookup is an in-process read lock over a tiny route map.
+	proxyReadyPollInterval = 25 * time.Millisecond
+)
+
+// ErrProxyNotServing means FRP authenticated the Connector session but one
+// or more configured routes never reached ProxyPhaseRunning. It is terminal
+// only when the caller opts into exact-proxy readiness with OnProxyReady and
+// no prior supervised cycle has served: a rejected or stalled initial
+// registration must not let local publish print a CRID for a route that never
+// became usable. The advanced connector command and post-success reconnects
+// retain their established FRP behavior.
+var ErrProxyNotServing = errors.New("qURL Connector supervisor: tunnel route did not become ready")
+
 // serviceRunner is the slice of the FRP client service the cycle runner
 // wraps; tests substitute fakes.
 type serviceRunner interface {
@@ -28,11 +51,19 @@ type serviceRunner interface {
 	GracefulClose(d time.Duration)
 }
 
+// proxyStatusExporter is the stable slice of the pinned FRP fork used to
+// distinguish accepted Login from accepted-and-running proxy registration.
+type proxyStatusExporter interface {
+	GetProxyStatus(name string) (*frpproxy.WorkingStatus, bool)
+}
+
 // cycleRunner wraps one cycle's FRP client service with the Connector's
 // session semantics: the caller-owned cycle RunID is bound to the Login and
 // verified on admission, an in-run restart request (from the redial knock
 // refresher's budget) cancels the service and surfaces its cause, and the
-// cycle's outcome is emitted as one set of structured session events.
+// cycle's outcome is emitted as one set of structured session events. When
+// onProxyReady is nonnil, the runner additionally enforces bounded exact-proxy
+// readiness for the local-publish surface.
 type cycleRunner struct {
 	svc serviceRunner
 
@@ -45,11 +76,20 @@ type cycleRunner struct {
 	// cannot keep the session.
 	cycleRunID string
 
-	// admitted latches when the FRP fork's OnFirstLoginSuccess hook fires —
-	// the runner's only evidence-based "the server admitted us" signal.
+	// admitted latches when the FRP fork's OnFirstLoginSuccess hook fires.
+	// serving latches only after every configured proxy reaches the fork's
+	// ProxyPhaseRunning status; Login admission alone precedes NewProxy.
 	admitted atomic.Bool
+	serving  atomic.Bool
 
-	logger *slog.Logger
+	logger            *slog.Logger
+	proxyNames        []string
+	statusExporter    proxyStatusExporter
+	readyTimeout      time.Duration
+	loginAccepted     chan struct{}
+	loginAcceptedOnce sync.Once
+	proxyReadyEver    *atomic.Bool
+	onProxyReady      func()
 
 	cancelMu sync.Mutex
 	cancel   context.CancelFunc
@@ -104,6 +144,12 @@ func (r *cycleRunner) onFirstLoginSuccess(runID string) error {
 		"resource_id", r.resourceID,
 		"run_id", runID,
 	)
+	// Wake the readiness monitor only after exact RunID validation and the
+	// admission latch. The hook is synchronous and precedes control/proxy
+	// creation, so it must never announce serving itself.
+	if r.loginAccepted != nil {
+		r.loginAcceptedOnce.Do(func() { close(r.loginAccepted) })
+	}
 	return nil
 }
 
@@ -117,21 +163,137 @@ func (r *cycleRunner) Run(ctx context.Context) error {
 	r.cancelMu.Lock()
 	r.cancel = cancel
 	r.cancelMu.Unlock()
+	var readinessDone chan struct{}
+	if r.onProxyReady != nil {
+		readinessDone = make(chan struct{})
+		go func() {
+			defer close(readinessDone)
+			r.monitorProxyReadiness(runCtx)
+		}()
+	}
 
 	start := time.Now()
 	err := r.svc.Run(runCtx)
 	runDuration := time.Since(start)
+	// Join an opted-in monitor before reading its restart cause. This both
+	// closes the race where a final StartErr arrives with Run's return and
+	// proves no readiness goroutine can leak beyond its cycle.
+	cancel()
+	if readinessDone != nil {
+		<-readinessDone
+	}
 
 	r.cancelMu.Lock()
 	r.cancel = nil
 	restartErr := r.err
 	r.cancelMu.Unlock()
+	// A user cancellation concurrent with the final readiness snapshot owns
+	// the outcome. Otherwise a proxy closing as part of that cancellation can
+	// be misreported as a platform-side registration failure.
+	if ctx.Err() != nil && errors.Is(restartErr, ErrProxyNotServing) {
+		restartErr = nil
+	}
 
 	r.emitSessionEvents(ctx, runDuration, err, restartErr)
 	if restartErr != nil {
 		return restartErr
 	}
 	return err
+}
+
+// monitorProxyReadiness implements the OnProxyReady opt-in: it waits for
+// authenticated Login, then requires every configured route to reach FRP's
+// running phase. An explicit NewProxy reject fails immediately; an absent
+// response is bounded by readyTimeout. Both paths cancel the service through
+// requestRestart so Run owns all teardown.
+func (r *cycleRunner) monitorProxyReadiness(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-r.loginAccepted:
+	}
+
+	timeout := r.readyTimeout
+	if timeout <= 0 {
+		timeout = proxyReadyTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(proxyReadyPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		ready, err := r.proxyReadiness()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			r.requestInitialReadinessFailure(err)
+			return
+		}
+		if ready {
+			r.serving.Store(true)
+			if r.proxyReadyEver != nil {
+				r.proxyReadyEver.Store(true)
+			}
+			r.log().Info("connector: tunnel routes running",
+				"event", "proxy_ready",
+				"resource_id", r.resourceID,
+				"run_id", r.cycleRunID,
+			)
+			if r.onProxyReady != nil {
+				r.onProxyReady()
+			}
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			r.requestInitialReadinessFailure(fmt.Errorf("%w: routes did not reach running within %s", ErrProxyNotServing, timeout))
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// requestInitialReadinessFailure makes readiness terminal only until local
+// publish has emitted its first serving result. A later supervised reconnect
+// must not claim that nothing was published or become less resilient than the
+// advanced path; the underlying FRP lifecycle owns that cycle instead.
+func (r *cycleRunner) requestInitialReadinessFailure(err error) {
+	if r.proxyReadyEver != nil && r.proxyReadyEver.Load() {
+		return
+	}
+	r.requestRestart(err)
+}
+
+func (r *cycleRunner) proxyReadiness() (bool, error) {
+	if r.statusExporter == nil || len(r.proxyNames) == 0 {
+		return false, fmt.Errorf("%w: readiness status is unavailable", ErrProxyNotServing)
+	}
+	for _, name := range r.proxyNames {
+		status, ok := r.statusExporter.GetProxyStatus(name)
+		if !ok || status == nil {
+			return false, nil
+		}
+		switch status.Phase {
+		case frpproxy.ProxyPhaseRunning:
+			continue
+		case frpproxy.ProxyPhaseStartErr, frpproxy.ProxyPhaseClosed:
+			// The server-controlled reason is already present in FRP's own
+			// logs. Keep the returned error fixed and bounded so it cannot
+			// become untrusted customer-facing output.
+			return false, fmt.Errorf("%w: route %q entered terminal phase %q", ErrProxyNotServing, name, status.Phase)
+		default:
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // GracefulClose cancels any in-flight run and closes the wrapped service.
@@ -167,12 +329,14 @@ func (r *cycleRunner) requestRestart(err error) {
 //
 //   - token-rejected Login → login_deny only (no session to tear down);
 //   - restart requested (any duration) → the session existed: proxy_allow if
-//     admitted, plus an error teardown carrying the restart cause;
+//     its routes reached running under the strict readiness opt-in, or its
+//     Login was admitted on the legacy advanced path, plus an error teardown;
 //   - short cycle with an error → login_error only (Login never completed);
 //   - short cycle, no error → teardown(pre_login_cancel): the caller
 //     canceled before Login completed, recorded so triage is never blind;
-//   - long cycle → proxy_allow (only with admission evidence) + teardown,
-//     bucketed clean or errored.
+//   - long cycle → proxy_allow (running-proxy evidence under the strict
+//     readiness opt-in, Login admission otherwise) + teardown, bucketed clean
+//     or errored.
 //
 // login_success is deliberately NOT emitted here: onFirstLoginSuccess already
 // emitted it from admission evidence, strictly before any proxy could start.
@@ -211,7 +375,7 @@ func (r *cycleRunner) emitSessionEvents(ctx context.Context, runDuration time.Du
 		)
 		return
 	}
-	if r.admitted.Load() {
+	if r.proxyAllowEvidence() {
 		r.log().Info("connector: tunnel session served",
 			"event", "proxy_allow",
 			"resource_id", r.resourceID,
@@ -236,11 +400,23 @@ func (r *cycleRunner) emitSessionEvents(ctx context.Context, runDuration time.Du
 	r.log().Info("connector: tunnel session ended", attrs...)
 }
 
+// proxyAllowEvidence keeps the advanced connector command's historical
+// admission-based event semantics while requiring stronger running-proxy
+// evidence for callers that opt into customer-visible readiness.
+func (r *cycleRunner) proxyAllowEvidence() bool {
+	if r.onProxyReady != nil {
+		return r.serving.Load()
+	}
+	return r.admitted.Load()
+}
+
 // teardownCause buckets a healthy cycle's exit for the teardown event. A
 // clean exit keeps an empty reason so dashboards split graceful from errored
 // on one axis; caller cancellation is tagged without being an error.
 func (r *cycleRunner) teardownCause(ctx context.Context, runErr, restartErr error) (reason, errText string) {
 	switch {
+	case errors.Is(restartErr, ErrProxyNotServing):
+		return "proxy_not_serving", restartErr.Error()
 	case restartErr != nil:
 		return "connector_restart", restartErr.Error()
 	case runErr != nil && !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded):
