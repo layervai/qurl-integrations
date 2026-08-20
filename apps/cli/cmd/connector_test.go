@@ -164,9 +164,12 @@ func mintConnectorRow(t *testing.T, slug string) connectorResourceRow {
 // command's ensure path and counts every request for zero-network proofs.
 type connectorProducer struct {
 	*httptest.Server
-	mu       sync.Mutex
-	requests []string
-	rows     []connectorResourceRow
+	mu                    sync.Mutex
+	requests              []string
+	rows                  []connectorResourceRow
+	enrollmentConnectorID string
+	enrollmentAuth        string
+	enrollmentIdempotency string
 }
 
 func newConnectorProducer(t *testing.T, rows ...connectorResourceRow) *connectorProducer {
@@ -183,6 +186,18 @@ func (p *connectorProducer) requestCount() int {
 	return len(p.requests)
 }
 
+func (p *connectorProducer) requestLog() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.requests...)
+}
+
+func (p *connectorProducer) enrollmentObservation() (connectorID, authorization, idempotency string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.enrollmentConnectorID, p.enrollmentAuth, p.enrollmentIdempotency
+}
+
 func (p *connectorProducer) handle(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.requests = append(p.requests, r.Method+" "+r.URL.Path)
@@ -195,6 +210,37 @@ func (p *connectorProducer) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(body)
 	}
 	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/api-keys":
+		var body struct {
+			Kind      string `json:"kind"`
+			Name      string `json:"name"`
+			Target    string `json:"target"`
+			ExpiresIn string `json:"expires_in"`
+			Claims    []struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+			} `json:"claims"`
+			Scopes []string `json:"scopes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Kind != "enrollment_token" ||
+			body.Target != "connector" || body.ExpiresIn != "24h" || len(body.Claims) != 1 ||
+			body.Claims[0].Type != "connector" || body.Claims[0].ID == "" || len(body.Scopes) != 0 {
+			writeJSON(http.StatusBadRequest, map[string]any{"code": "invalid_input", "title": "Invalid enrollment request"})
+			return
+		}
+		p.mu.Lock()
+		p.enrollmentConnectorID = body.Claims[0].ID
+		p.enrollmentAuth = r.Header.Get("Authorization")
+		p.enrollmentIdempotency = r.Header.Get("Idempotency-Key")
+		p.mu.Unlock()
+		writeJSON(http.StatusCreated, map[string]any{
+			"data": map[string]any{
+				"api_key": "lv_test_localpublishenrollmenttoken123456789",
+				"key_id":  "key_local_publish", "kind": "enrollment_token",
+				"target": "connector", "claims": body.Claims, "status": "active",
+				"expires_at": time.Now().Add(24 * time.Hour).UTC(),
+			},
+		})
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
 		slug := r.URL.Query().Get("slug")
 		matches := []connectorResourceRow{}
@@ -206,6 +252,236 @@ func (p *connectorProducer) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(http.StatusOK, map[string]any{"data": matches})
 	default:
 		writeJSON(http.StatusNotFound, map[string]any{"code": "not_found", "title": "Not Found", "detail": "no such route in the mock producer"})
+	}
+}
+
+// TestPublishLocalHermeticJourney exercises the complete command composition:
+// the SDK-facing lazy provider mints an exact Connector-bound token through
+// the authenticated management client, the device client resolves the same
+// stable ID, the real FRP client logs in, publish emits one CRID only after
+// its proxy reaches FRP's running phase, and real HTTP bytes cross the route.
+func TestPublishLocalHermeticJourney(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hermetic local publish journey is the slowest cmd test")
+	}
+	skipWithoutPinnedState(t)
+	connectorTestEnv(t)
+	t.Setenv(replica.EnvReplicaID, "replica-local")
+
+	const echoBody = "local-publish-roundtrip"
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, echoBody)
+	}))
+	t.Cleanup(echo.Close)
+	echoURL, err := url.Parse(echo.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := "http://" + net.JoinHostPort("127.0.0.1", echoURL.Port())
+	wantID, err := generatedLocalConnectorID("agent-cmd-test", canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := mintConnectorRow(t, wantID)
+	row.CRID = exampleCRID
+	producer := newConnectorProducer(t, row)
+	recorder := newCmdProxyRecorder(t)
+	frpsPort := reserveCmdTCPPort(t)
+	vhostPort := reserveCmdTCPPort(t)
+	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+
+	knocker := &cmdCycleKnocker{resourceHost: "localhost:" + strconv.Itoa(frpsPort)}
+	providerCalls := 0
+	open := func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error) {
+		if cfg.EnrollmentTokenProvider == nil {
+			return nil, errors.New("local publish did not install the lazy enrollment provider")
+		}
+		providerCalls++
+		token, err := cfg.EnrollmentTokenProvider(ctx, agent.EnrollmentTokenRequest{AgentID: "agent-cmd-test"})
+		if err != nil {
+			return nil, err
+		}
+		if token != "lv_test_localpublishenrollmenttoken123456789" {
+			return nil, fmt.Errorf("provider token = %q", token)
+		}
+		return fakeConnectorOpen(t, producer.URL)(ctx, cfg)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan *runResult, 1)
+	go func() {
+		done <- runCLI(t, &runOpts{
+			ctx: ctx,
+			args: []string{
+				"--endpoint", producer.URL, "--quiet", "publish", echo.URL,
+			},
+			env:           map[string]string{"QURL_API_KEY": testAPIKey},
+			configDir:     t.TempDir(),
+			syncStreams:   true,
+			connectorOpen: open,
+			newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
+				knocker.resourceID = knockResourceID
+				return knocker, nil
+			},
+			connectorTune: func(cfg *supervisor.Config) {
+				cfg.MinBackoff = 5 * time.Millisecond
+				cfg.MaxBackoff = 25 * time.Millisecond
+				cfg.MinKnockInterval = time.Millisecond
+			},
+		})
+	}()
+
+	pollCmdVhost(t, vhostPort, row.ConnectorRoutingID+".hermetic.test", echoBody, 30*time.Second, done)
+	// The HTTP round-trip and StatusExporter observe the same running proxy,
+	// but the latter is a 25 ms polling API. Give the customer-output path a
+	// few poll turns before simulating an immediate Ctrl-C; cancellation is
+	// deliberately allowed to win if it arrives before readiness is observed.
+	time.Sleep(5 * 25 * time.Millisecond)
+	cancel()
+	var res *runResult
+	select {
+	case res = <-done:
+	case <-time.After(supervisor.StopWait + 10*time.Second):
+		t.Fatal("local publish did not stop after cancellation")
+	}
+	if res.code != 130 {
+		t.Fatalf("exit = %d, want 130; stderr: %s", res.code, res.stderr.String())
+	}
+	if got := res.stdout.String(); got != exampleCRID+"\n" {
+		t.Fatalf("quiet stdout = %q, want one CRID after the route reached running", got)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("lazy enrollment provider calls = %d, want 1", providerCalls)
+	}
+	connectorID, authorization, idempotency := producer.enrollmentObservation()
+	if connectorID != wantID || authorization != "Bearer "+testAPIKey || len(idempotency) < 32 {
+		t.Errorf("enrollment observation id=%q auth=%q idempotency=%q", connectorID, authorization, idempotency)
+	}
+	log := producer.requestLog()
+	if len(log) < 2 || log[0] != "POST /v1/api-keys" || log[1] != "GET /v1/resources" {
+		t.Errorf("API order = %v, want enrollment before device resource read", log)
+	}
+	if strings.Contains(res.stdout.String()+res.stderr.String(), "lv_test_localpublishenrollmenttoken") {
+		t.Fatal("one-shot enrollment token leaked into command output")
+	}
+	if len(recorder.snapshot()) == 0 {
+		t.Fatal("server observed no NewProxy for local publish")
+	}
+}
+
+// TestPublishLocalRejectsBeforePrinting proves that an authenticated FRP
+// Login is not enough to call a local publish serving: the real server can
+// still reject its subsequent NewProxy registration. That refusal must stop
+// the command promptly and leave stdout empty, because the CRID is the
+// machine-readable success result.
+func TestPublishLocalRejectsBeforePrinting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hermetic rejected-proxy journey is one of the slowest cmd tests")
+	}
+	skipWithoutPinnedState(t)
+	connectorTestEnv(t)
+	t.Setenv(replica.EnvReplicaID, "replica-rejected")
+
+	row := mintConnectorRow(t, "rejected-local")
+	row.CRID = exampleCRID
+	producer := newConnectorProducer(t, row)
+	recorder := newRejectingCmdProxyRecorder(t)
+	frpsPort := reserveCmdTCPPort(t)
+	vhostPort := reserveCmdTCPPort(t)
+	startCmdFRPS(t, frpsPort, vhostPort, "hermetic.test", recorder.server.URL)
+
+	knocker := &cmdCycleKnocker{resourceHost: "localhost:" + strconv.Itoa(frpsPort)}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan *runResult, 1)
+	go func() {
+		done <- runCLI(t, &runOpts{
+			ctx: ctx,
+			args: []string{
+				"--endpoint", producer.URL, "--quiet", "publish",
+				"http://127.0.0.1:3000", "--id", row.Slug,
+			},
+			env:           map[string]string{},
+			configDir:     t.TempDir(),
+			syncStreams:   true,
+			connectorOpen: fakeConnectorOpen(t, producer.URL),
+			newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
+				knocker.resourceID = knockResourceID
+				return knocker, nil
+			},
+			connectorTune: func(cfg *supervisor.Config) {
+				cfg.MinBackoff = 5 * time.Millisecond
+				cfg.MaxBackoff = 25 * time.Millisecond
+				cfg.MinKnockInterval = time.Millisecond
+			},
+		})
+	}()
+
+	var res *runResult
+	select {
+	case res = <-done:
+	case <-time.After(3 * time.Second):
+		cancel()
+		res = <-done
+		t.Fatalf("rejected NewProxy did not fail within the bounded readiness policy; stdout=%q stderr=%q", res.stdout.String(), res.stderr.String())
+	}
+	if res.code != 11 {
+		t.Fatalf("exit = %d, want 11 (unavailable); stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	combined := res.stdout.String() + res.stderr.String()
+	if strings.Contains(combined, exampleCRID) || strings.Contains(combined, `"status":"serving"`) || strings.Contains(combined, "status=serving") {
+		t.Fatalf("rejected NewProxy printed a success identity/status:\n%s", combined)
+	}
+	if len(recorder.snapshot()) == 0 {
+		t.Fatal("server never observed the rejected NewProxy")
+	}
+}
+
+func TestPublishLocalWarmOpenNeedsNoLoginAndEmitsNothingBeforeAdmission(t *testing.T) {
+	skipWithoutPinnedState(t)
+	connectorTestEnv(t)
+
+	row := mintConnectorRow(t, "warm-local")
+	row.CRID = exampleCRID
+	producer := newConnectorProducer(t, row)
+	knocker := &cmdCycleKnocker{knockErr: errors.New("assigned endpoint unreachable")}
+	opens := 0
+	open := func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error) {
+		opens++
+		if cfg.EnrollmentTokenProvider == nil {
+			return nil, errors.New("local publish omitted its recovery provider")
+		}
+		// Model qurl-go's completed-state fast path: the provider exists but is
+		// deliberately not invoked, so no login credential is needed.
+		return fakeConnectorOpen(t, producer.URL)(ctx, cfg)
+	}
+
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", producer.URL, "publish", "http://127.0.0.1:3000", "--id", "warm-local"},
+		env:           map[string]string{},
+		connectorOpen: open,
+		newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
+			knocker.resourceID = knockResourceID
+			return knocker, nil
+		},
+		connectorTune: func(cfg *supervisor.Config) {
+			cfg.MinBackoff = time.Millisecond
+			cfg.MaxBackoff = 2 * time.Millisecond
+			cfg.MinKnockInterval = time.Millisecond
+			cfg.MaxConsecutiveKnockFailures = 2
+		},
+	})
+	if res.code != 11 {
+		t.Fatalf("exit = %d, want 11; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if opens != 1 {
+		t.Fatalf("warm runtime opens = %d, want 1", opens)
+	}
+	if log := producer.requestLog(); len(log) != 1 || log[0] != "GET /v1/resources" {
+		t.Fatalf("warm API calls = %v, want device resource read only and no enrollment mint", log)
 	}
 }
 
@@ -308,6 +584,7 @@ func (k *cmdCycleKnocker) stats() (begun, ended []string, closed bool) {
 // admission (the supervisor suite's server-side evidence pattern).
 type cmdProxyRecorder struct {
 	server *httptest.Server
+	reject bool
 
 	mu           sync.Mutex
 	observations []struct{ runID, proxyName string }
@@ -316,6 +593,14 @@ type cmdProxyRecorder struct {
 func newCmdProxyRecorder(t *testing.T) *cmdProxyRecorder {
 	t.Helper()
 	recorder := &cmdProxyRecorder{}
+	recorder.server = httptest.NewServer(http.HandlerFunc(recorder.handle))
+	t.Cleanup(recorder.server.Close)
+	return recorder
+}
+
+func newRejectingCmdProxyRecorder(t *testing.T) *cmdProxyRecorder {
+	t.Helper()
+	recorder := &cmdProxyRecorder{reject: true}
 	recorder.server = httptest.NewServer(http.HandlerFunc(recorder.handle))
 	t.Cleanup(recorder.server.Close)
 	return recorder
@@ -341,7 +626,11 @@ func (p *cmdProxyRecorder) handle(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{"reject": false, "unchange": true}); err != nil {
+	response := map[string]any{"reject": p.reject, "unchange": true}
+	if p.reject {
+		response["reject_reason"] = "hermetic route policy rejection"
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

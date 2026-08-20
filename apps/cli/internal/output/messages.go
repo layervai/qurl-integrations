@@ -29,7 +29,8 @@ const (
 	hintRetired = "Hint: this resource was permanently retired and will never resolve again. Publish the target again to get a new CRID."
 
 	// hintScope covers a key that authenticates but cannot resolve.
-	hintScope = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access."
+	hintScope                    = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access."
+	hintConnectorEnrollmentScope = "Hint: log in with an API key that includes qurl:agent. The CLI uses it only to mint a one-shot Connector enrollment credential."
 
 	// hintFrozen is the account-standing message for 403 account_frozen: the
 	// key is fine, the account is paused — a materially different situation
@@ -131,6 +132,13 @@ const (
 	msgConnectorRetryBudget = "The qURL platform kept refusing or not answering this Connector's connection attempts, so it stopped rather than retry forever."
 
 	hintConnectorRetryBudget = "Hint: check this machine's outbound network access, then run `qurl connector run` again. If the problem persists, the next start will ask to refresh this Connector's platform assignment (--refresh-mode auto approves it once)."
+
+	// msgConnectorProxyNotServing renders supervisor.ErrProxyNotServing. A
+	// Login succeeded, but NewProxy did not, so the route and its CRID must not
+	// be presented as a successful local publish.
+	msgConnectorProxyNotServing = "The qURL platform accepted this Connector, but its route did not start, so nothing was published."
+
+	hintConnectorProxyNotServing = "Hint: run the command again. If the route is still rejected or times out, contact LayerV support."
 
 	// msgConnectorHubConfig renders hub.ErrConfig. The detail block names the
 	// exact variable; this headline places the problem.
@@ -263,6 +271,8 @@ func CustomerMessages() []string {
 		hintConnectorRefreshExhausted,
 		msgConnectorRetryBudget,
 		hintConnectorRetryBudget,
+		msgConnectorProxyNotServing,
+		hintConnectorProxyNotServing,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
 		msgConnectorTokenConsumed,

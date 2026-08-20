@@ -292,6 +292,7 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 
 	recorder := newHermeticProxyRecorder(t)
 	firstFRPS := startHermeticFRPS(t, frpsPort, recorder.server.URL)
+	proxyReady := make(chan struct{}, 1)
 
 	knocker := &hermeticCycleKnocker{resourceHost: resourceHost}
 	common := &v1.ClientCommonConfig{}
@@ -314,12 +315,18 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 	// externally visible trace of the fork's OnFirstLoginSuccess dispatch, and
 	// the assertion after shutdown counts it.
 	sink := &hermeticLogSink{}
-	factory, err := NewFRPRunnerFactory(FRPFactoryConfig{
+	factory, err := NewFRPRunnerFactory(&FRPFactoryConfig{
 		Knocker:         knocker,
 		ResourceID:      testResource,
 		Proxies:         proxies,
 		Logger:          slog.New(slog.NewJSONHandler(sink, nil)),
 		RedialKnockGate: time.Millisecond,
+		OnProxyReady: func() {
+			select {
+			case proxyReady <- struct{}{}:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("build FRP runner factory: %v", err)
@@ -344,6 +351,15 @@ func TestHermeticTunnelRoundTripAndRedialReKnock(t *testing.T) {
 	go func() { supervisorResult <- sup.Run(supCtx) }()
 
 	// Leg 1: knock → Login under the native RunID → registration → bytes.
+	select {
+	case <-proxyReady:
+		// The production readiness monitor observed the configured proxy in
+		// FRP's running phase after authenticated Login and registration.
+	case err := <-supervisorResult:
+		t.Fatalf("supervisor exited before proxy readiness: %v", err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("proxy readiness callback did not fire")
+	}
 	pollHermeticHTTPBody(t, proxyEndpoint, echoBody, "first tunnel server", 15*time.Second, supervisorResult)
 	knocksAfterFirstLeg, begun, _ := knocker.stats()
 	if len(begun) != 1 {

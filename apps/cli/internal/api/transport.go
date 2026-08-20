@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	// maxAttempts bounds the 429 retry loop: one initial attempt plus two
-	// retries.
+	// maxAttempts bounds the transient retry loop: one initial attempt plus
+	// two retries.
 	maxAttempts = 3
-	// maxRetryAfter caps how long a Retry-After header can make the CLI
-	// wait per retry; anything longer surfaces the 429 instead of hanging.
+	// maxRetryAfter caps each Retry-After wait before the CLI retries a
+	// replayable transient 429 or idempotent 503 response.
 	maxRetryAfter = 15 * time.Second
 	// drainLimit bounds how much of a discarded retry response is read for
 	// connection reuse.
@@ -25,7 +25,11 @@ const (
 )
 
 // transport decorates every request — SDK-issued and direct alike — with the
-// CLI's headers and bounded 429 retry. It implements qurl.HTTPDoer.
+// CLI's headers and bounded transient retry. A 429 is retryable for any
+// replayable request. A 503 is retryable only when the caller supplied an
+// Idempotency-Key, which proves a replay cannot duplicate the mutation; dark
+// deployment 503s on ordinary calls remain single-shot. It implements
+// qurl.HTTPDoer.
 type transport struct {
 	next         *http.Client
 	userAgent    string
@@ -61,8 +65,8 @@ func newTransport(cfg *Config) *transport {
 	}
 }
 
-// Do sends req with the CLI headers set, retrying bounded times on 429. The
-// X-Request-Id stays constant across retries of one logical request so the
+// Do sends req with the CLI headers set, retrying bounded transient responses.
+// The X-Request-Id stays constant across retries of one logical request so the
 // service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
 	req.Header.Set("User-Agent", t.userAgent)
@@ -74,7 +78,7 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode != http.StatusTooManyRequests || attempt >= maxAttempts {
+		if !retryableResponse(req, resp) || attempt >= maxAttempts {
 			t.verbosef("< HTTP %d", resp.StatusCode)
 			return resp, nil
 		}
@@ -85,7 +89,7 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 		}
 		wait := retryDelay(resp, attempt)
 		discardResponse(resp)
-		t.verbosef("< HTTP 429, retrying in %s", wait)
+		t.verbosef("< HTTP %d, retrying in %s", resp.StatusCode, wait)
 		if err := t.backoff(req.Context(), wait); err != nil {
 			return nil, err
 		}
@@ -97,6 +101,13 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 			req.Body = body
 		}
 	}
+}
+
+func retryableResponse(req *http.Request, resp *http.Response) bool {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	return resp.StatusCode == http.StatusServiceUnavailable && strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
 }
 
 // backoff waits out one retry delay, context-aware: cancellation during the

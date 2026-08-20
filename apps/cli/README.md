@@ -9,7 +9,10 @@ and anyone authorized can resolve it into a short-lived access link when
 they need one. Links expire on their own; the CRID does not.
 
 ```bash
-# Publish a URL and get its CRID
+# Publish a local app and keep serving it in the foreground
+qurl publish http://127.0.0.1:3000
+
+# Publish a remote URL and get its CRID
 qurl publish https://api.example.com/reports
 
 # Open what a CRID points to in your browser, or download it
@@ -67,6 +70,13 @@ a mistyped key fails loudly instead of breaking every later command.
 `qurl whoami` shows which account and key identity the configured
 credential maps to.
 
+The first local publish needs a login key with `qurl:agent`. The CLI uses that
+authority only to mint a Connector-bound, one-shot enrollment credential; it
+keeps the credential in memory and the native enrollment exchanges it for a
+restricted device identity. A warm start reuses that device identity and does
+not read the login key or mint another enrollment credential. Remote publish,
+resolve, and list continue to work with their existing narrower scopes.
+
 ## Configuration
 
 Every setting resolves through the same precedence chain:
@@ -80,7 +90,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
-| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | — (required by `connector run`) |
+| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish`; required by `connector run` |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -97,7 +107,7 @@ would travel unencrypted; loopback endpoints are exempt.
 
 | Command | Description |
 |---------|-------------|
-| `qurl publish <target-url>` | Publish a URL as a protected resource and get its CRID |
+| `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
 | `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
@@ -119,22 +129,52 @@ CRID aimed at a non-production endpoint warns and proceeds.
 
 ### qurl publish
 
-`qurl publish <target-url>` registers the target and prints its CRID —
-last and alone on its line in text mode, so it is the easiest thing to
-select and copy; `--quiet` prints only the CRID.
+`qurl publish <target-url>` has two deliberate modes:
+
+- A remote HTTP(S) URL is registered as a protected resource. The command
+  prints its CRID and exits, preserving the original publish behavior. Remote
+  targets are now validated locally before credentials or network access:
+  they must use HTTP(S), include a host and valid port, and contain no embedded
+  credentials.
+- A loopback HTTP origin such as `http://127.0.0.1:3000` starts an outbound
+  Connector, prints its CRID only after every configured FRP proxy reports its
+  exact running phase, and keeps serving until Ctrl-C or SIGTERM. A rejected,
+  closed, or 30-second-stalled initial proxy registration exits without
+  printing a success CRID. After that first success, later supervised cycles
+  retain the Connector's normal reconnect behavior instead of contradicting
+  the already-printed result. The machine opens no inbound port.
+
+The generated local Connector ID is stable for the native device identity and
+normalized origin, so restarting the same origin reuses the same resource and
+CRID. Use `--id` to choose it explicitly. `localhost` normalizes to
+`127.0.0.1`; IPv4 and IPv6 loopback literals are supported. Local HTTPS,
+paths, queries, fragments, credentials, wildcard listeners, and ambiguous
+localhost subdomains are rejected before state or network access.
+
+In either mode, the CRID is last and alone on its line in text mode, so it is
+easy to select and copy; `--quiet` prints only the CRID. Local publish remains
+foregrounded after that output, so command substitution and processors such as
+`jq` wait until the Connector stops.
 
 | Flag | Description |
 |------|-------------|
 | `--description <text>` | Human-readable description stored with the resource |
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
+| `--id <id>` | Connector ID for a local publish; local-only |
+
+Description, tags, and alias apply only to remote resources. Supplying any of
+them for a local publish is an error rather than a silently ignored request.
 
 Publishing the same URL again does not create a duplicate: while the URL
 has an active resource, the service returns that existing resource and
 its CRID. Text mode says so in its output, `--quiet` notes it on stderr,
-and JSON output always carries `found_existing` (`true` exactly in this
-case). Delete the resource first to publish the same URL as a new
-resource with a fresh CRID.
+and JSON output carries `found_existing: true`. Confirmed fresh outcomes carry
+`found_existing: false`. If local enrollment reconciles an uncertain create by
+reading the resource back, provenance remains unknown: the JSON field and
+already-published claim are omitted instead of incorrectly calling it fresh.
+Delete the resource first to publish the same URL as a new resource with a
+fresh CRID.
 
 ### qurl resolve
 
@@ -260,7 +300,8 @@ already-deleted resource succeeds idempotently and says so (JSON sets
 
 ### qurl connector run
 
-`qurl connector run --id <id> --target <host:port>` serves an app
+`qurl connector run --id <id> --target <host:port>` is the advanced and
+backward-compatible local serving surface. It serves an app
 running on your machine through the qURL platform. Your app keeps
 listening on localhost and the Connector connects outward — your machine
 never opens a listening port to the internet — while the platform
@@ -275,8 +316,11 @@ verifies each caller and grants access before any request is forwarded.
 
 The Connector ID is the same identity the standalone qurl-connector
 configures as `QURL_CONNECTOR_ID` (YAML `id:`), so one setting covers a
-machine that moves between the two tools. The names v1.1.0 briefly
-shipped still work, deprecated: `--slug` as a hidden alias of `--id`
+machine that moves between the two tools. It must be 3–64 lowercase letters,
+numbers, or hyphens, start with a letter, and end with a letter or number;
+`connector run` validates this platform-owned grammar before opening state or
+making a network request. The names v1.1.0 briefly shipped still work,
+deprecated: `--slug` as a hidden alias of `--id`
 (passing both with different values is refused), and
 `QURL_CONNECTOR_SLUG` / `connector_slug` at lower precedence than their
 `id`-named counterparts. All three will be removed in the next major
@@ -308,11 +352,13 @@ level=INFO msg="connector: starting to serve local app" event=connector_starting
 ```
 
 `event=connector_starting` is the stable name; it fires as the serve loop
-starts, not once traffic flows (`event=proxy_allow` marks a served
-session). `crid` is omitted entirely rather than logged empty when the
-platform returned none, so its presence is meaningful. A CRID is base32
-over `[a-z2-7]`, so the value never needs quoting and always renders as a
-bare `crid=<value>`.
+starts, not once traffic flows. On this advanced surface, `event=proxy_allow`
+preserves its admission-level meaning after an authenticated Login; `connector
+run` does not opt into local publish's terminal 30-second exact-proxy readiness
+gate, so FRP retains its existing registration and reconnect behavior. `crid`
+is omitted entirely rather than logged empty when the platform returned none,
+so its presence is meaningful. A CRID is base32 over `[a-z2-7]`, so the value
+never needs quoting and always renders as a bare `crid=<value>`.
 
 If the platform stays unreachable long enough, the command exits with
 code 11 instead of retrying forever. The next start may then need its

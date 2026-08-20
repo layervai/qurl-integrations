@@ -205,6 +205,7 @@ func TestRefresherBudgetRequestsRestartWithSentinel(t *testing.T) {
 	got := restartErr.Load()
 	if got == nil {
 		t.Fatal("budget exhaustion never requested a restart")
+		return
 	}
 	if !errors.Is(*got, ErrTooManyKnockFailures) || !errors.Is(*got, boom) {
 		t.Fatalf("restart cause = %v, want the sentinel wrapping the last knock error", *got)

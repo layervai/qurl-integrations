@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	goliblog "github.com/fatedier/golib/log"
 	"github.com/spf13/cobra"
@@ -232,30 +233,101 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 		return err
 	}
 
+	return serveConnector(ctx, opts, &connectorServeInputs{
+		id:          in.id,
+		localIP:     in.localIP,
+		localPort:   in.localPort,
+		stateDir:    flags.stateDir,
+		refreshMode: in.refreshMode,
+	})
+}
+
+type connectorServeInputs struct {
+	id          string
+	localIP     string
+	localPort   int
+	stateDir    string
+	refreshMode string
+
+	configureAgent func(*agent.Config)
+	resolveID      func(*agent.Runtime) (string, error)
+	// onServing switches the output contract from connector-run's pre-start
+	// stderr note to publish's one stdout result after every FRP proxy is
+	// running. Its presence also opts the supervisor into bounded exact-proxy
+	// readiness until the first serving cycle; later reconnects and a nil value
+	// preserve the advanced connector path's reconnect behavior. The callback
+	// runs on the command goroutine, never the readiness monitor goroutine.
+	onServing func(*agent.ResolvedResource) error
+}
+
+type openedConnector struct {
+	runtime          *agent.Runtime
+	resolvedResource *agent.ResolvedResource
+	knockResourceID  string
+}
+
+func openConnectorForServe(ctx context.Context, opts *globalOpts, in *connectorServeInputs, logger *slog.Logger) (_ *openedConnector, retErr error) {
+	agentCfg := &agent.Config{
+		APIBaseURL:  opts.resolvedEndpoint,
+		StateDir:    in.stateDir,
+		RefreshMode: in.refreshMode,
+		Version:     opts.version,
+		Logger:      logger,
+	}
+	if in.configureAgent != nil {
+		in.configureAgent(agentCfg)
+	}
+	rt, err := opts.openConnectorRuntime(ctx, agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			_ = rt.Close()
+		}
+	}()
+
+	id := in.id
+	if in.resolveID != nil {
+		id, err = in.resolveID(rt)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := validateConnectorID(id); err != nil {
+		return nil, err
+	}
+	resolved, err := agent.ResolveResourceWithResult(ctx, rt.Client, id)
+	if err != nil {
+		return nil, err
+	}
+	knockResourceID, err := agent.KnockResourceID(resolved.Resource)
+	if err != nil {
+		return nil, err
+	}
+	return &openedConnector{
+		runtime:          rt,
+		resolvedResource: resolved,
+		knockResourceID:  knockResourceID,
+	}, nil
+}
+
+// serveConnector is the shared local-serving engine behind both the advanced
+// `connector run` surface and the zero-configuration local `publish` path.
+func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInputs) error {
 	logger := connectorLogger(opts)
 	opts.redirectFRPLogs()
 	printer := opts.printer()
 
-	rt, err := opts.openConnectorRuntime(ctx, &agent.Config{
-		APIBaseURL:  opts.resolvedEndpoint,
-		StateDir:    flags.stateDir,
-		RefreshMode: in.refreshMode,
-		Version:     opts.version,
-		Logger:      logger,
-	})
+	opened, err := openConnectorForServe(ctx, opts, in, logger)
 	if err != nil {
 		return err
 	}
+	rt := opened.runtime
 	defer func() { _ = rt.Close() }()
-
-	resource, err := agent.ResolveResource(ctx, rt.Client, in.id)
-	if err != nil {
-		return err
-	}
-	knockResourceID, err := agent.KnockResourceID(resource)
-	if err != nil {
-		return err
-	}
+	resolved := opened.resolvedResource
+	resource := resolved.Resource
+	knockResourceID := opened.knockResourceID
 
 	// Boot-time replica salt. The Warnings()/meta.Warning surfacing below is
 	// load-bearing, not decorative: the resolver deliberately degrades to a
@@ -301,11 +373,19 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	}
 	defer knocker.Close()
 
-	factory, err := supervisor.NewFRPRunnerFactory(supervisor.FRPFactoryConfig{
-		Knocker:    knocker,
-		ResourceID: knockResourceID,
-		Proxies:    proxies,
-		Logger:     logger,
+	var ready chan struct{}
+	var readyOnce sync.Once
+	var onProxyReady func()
+	if in.onServing != nil {
+		ready = make(chan struct{})
+		onProxyReady = func() { readyOnce.Do(func() { close(ready) }) }
+	}
+	factory, err := supervisor.NewFRPRunnerFactory(&supervisor.FRPFactoryConfig{
+		Knocker:      knocker,
+		ResourceID:   knockResourceID,
+		Proxies:      proxies,
+		Logger:       logger,
+		OnProxyReady: onProxyReady,
 	})
 	if err != nil {
 		return err
@@ -330,7 +410,9 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	// read-by-ID leg and the ensure leg alike — so the serve note can hand it
 	// to the customer with no extra lookup and no extra request.
 	serveTarget := net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort))
-	printer.ConnectorServing(resource.Slug, serveTarget, resource.CRID)
+	if in.onServing == nil {
+		printer.ConnectorServing(resource.Slug, serveTarget, resource.CRID)
+	}
 	// The same identity as a structured event, because the note above is prose
 	// written for a person: an unattended runner would have to scrape it, and
 	// the wording is free to change. A CRID is a public identifier — it names
@@ -338,36 +420,66 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	// collects, unlike a resolved link. It is omitted rather than logged empty
 	// when the platform returned none, so a consumer can treat presence as
 	// meaning.
-	servingAttrs := []any{
-		"event", "connector_starting",
-		"connector_id", resource.Slug,
-		"target", serveTarget,
-	}
-	if resource.CRID != "" {
-		servingAttrs = append(servingAttrs, "crid", resource.CRID)
-	}
+	// Advanced connector run has always announced its identity before the
+	// serve loop. Local publish is stricter: until proxy readiness, even its
+	// operator log must not leak a success-looking CRID ahead of stdout.
+	servingAttrs := connectorStartingAttrs(resource.Slug, serveTarget, resource.CRID, in.onServing == nil)
 	logger.InfoContext(ctx, "connector: starting to serve local app", servingAttrs...)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}
+	if in.onServing != nil {
+		select {
+		case <-ready:
+			if err := in.onServing(resolved); err != nil {
+				stopCtx, cancel := context.WithTimeout(context.Background(), supervisor.StopWait)
+				defer cancel()
+				return errors.Join(err, sup.Stop(stopCtx))
+			}
+		case <-ctx.Done():
+			return stopConnectorAfterInterrupt(ctx, sup, printer)
+		case <-sup.Done():
+			return sup.Err()
+		}
+	}
+	return waitForConnector(ctx, sup, printer)
+}
+
+func connectorStartingAttrs(connectorID, target, crid string, includeCRID bool) []any {
+	attrs := []any{
+		"event", "connector_starting",
+		"connector_id", connectorID,
+		"target", target,
+	}
+	if includeCRID && crid != "" {
+		attrs = append(attrs, "crid", crid)
+	}
+	return attrs
+}
+
+func waitForConnector(ctx context.Context, sup *supervisor.Supervisor, printer interface{ Notef(string, ...any) }) error {
 	select {
 	case <-ctx.Done():
-		// INT/TERM: graceful stop bounded by the supervisor's own teardown
-		// deadline, then the Interrupted exit (130) with a quiet note — the
-		// signal path deliberately renders no error anatomy.
-		stopCtx, cancel := context.WithTimeout(context.Background(), supervisor.StopWait)
-		defer cancel()
-		if err := sup.Stop(stopCtx); err != nil {
-			return err
-		}
-		printer.Notef(msgConnectorStopped)
-		return ctx.Err()
+		return stopConnectorAfterInterrupt(ctx, sup, printer)
 	case <-sup.Done():
 		// Autonomous exit: the serve loop decided to stop (budget exhaustion
 		// or a fatal wiring error). The error carries its own exit code
 		// through the exitcode contract.
 		return sup.Err()
 	}
+}
+
+func stopConnectorAfterInterrupt(ctx context.Context, sup *supervisor.Supervisor, printer interface{ Notef(string, ...any) }) error {
+	// INT/TERM: graceful stop bounded by the supervisor's own teardown
+	// deadline, then the Interrupted exit (130) with a quiet note — the signal
+	// path deliberately renders no error anatomy.
+	stopCtx, cancel := context.WithTimeout(context.Background(), supervisor.StopWait)
+	defer cancel()
+	if err := sup.Stop(stopCtx); err != nil {
+		return err
+	}
+	printer.Notef(msgConnectorStopped)
+	return ctx.Err()
 }
 
 // parseConnectorTarget parses --target as host:port, with the ":port"

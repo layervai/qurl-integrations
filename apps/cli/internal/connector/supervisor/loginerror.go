@@ -62,11 +62,12 @@ const reasonDialError = "dial_error"
 //
 //  1. context cancellation — the caller asked to stop;
 //  2. ErrTooManyKnockFailures — a knock budget exhausted;
-//  3. typed net.Error — transport-layer failure, a stable stdlib surface
+//  3. ErrProxyNotServing — authenticated but route registration failed;
+//  4. typed net.Error — transport-layer failure, a stable stdlib surface
 //     that survives FRP wording changes;
-//  4. the FRP client's own Login-stage phrasing, then dial-error substrings —
+//  5. the FRP client's own Login-stage phrasing, then dial-error substrings —
 //     the fallback for wraps that lost the typed identity;
-//  5. everything else — frp_runtime_error.
+//  6. everything else — frp_runtime_error.
 //
 // Deliberately absent: errReconnectStalled. A stalled cycle always exits
 // through cycleRunner's restartErr, and BOTH call sites here are unreachable
@@ -85,6 +86,9 @@ func classifyRunError(err error) string {
 	}
 	if errors.Is(err, ErrTooManyKnockFailures) {
 		return "too_many_knock_failures"
+	}
+	if errors.Is(err, ErrProxyNotServing) {
+		return "proxy_not_serving"
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
