@@ -25,31 +25,23 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "publish <target-url>",
 		Short: "Publish a URL or local app and get its CRID",
-		Long: `Publish a URL as a qURL protected resource.
+		Long: `Publish a local app or remote URL and get its CRID.
 
-For a remote URL, the service registers the target and returns its CRID — the
-resource's permanent, verifiable ID. Share the CRID anywhere; it contains no
-secrets. Anyone authorized can later turn it into a short-lived access link
-with "qurl resolve". Remote targets are validated locally before credentials
-or network access: they must use http or https, include a host and valid port,
-and contain no embedded credentials.
+For a local app, pass its loopback HTTP address:
 
-For a loopback HTTP origin such as http://127.0.0.1:3000, publish starts a
-Connector, prints its CRID after the platform accepts and starts its route,
-and keeps serving in the foreground until Ctrl-C. The first run uses your
-login to mint a Connector-bound one-shot enrollment credential in memory;
-later runs reuse the device identity saved on this machine. Use --id to choose
-a stable Connector ID, or omit it for a stable opaque ID derived for this
-machine and origin. ` + "`qurl connector run`" + ` remains the advanced surface for custom
-state directories, refresh policy, and manually issued enrollment tokens.
+  qurl publish http://127.0.0.1:3000
 
-Publishing the same URL again does not create a duplicate: while the URL
-already has an active resource, publish returns that existing resource
-and its CRID, and the output says so when it happens. Delete the resource
-first to publish the same URL as a new resource with a fresh CRID. The
-CRID is printed last so it is the easiest thing to select and copy, and
---quiet prints only the CRID. A local publish remains foregrounded, so command
-substitution and processors such as jq wait until the Connector stops.`,
+qURL prints the CRID when the route is ready, then keeps serving until Ctrl-C.
+Running the same command later reuses the same resource and CRID. Use --id only
+when you want to choose the Connector ID yourself.
+
+For a remote URL, qURL registers it, prints the CRID, and exits:
+
+  qurl publish https://api.example.com/reports
+
+A CRID is safe to share: it identifies the resource but grants no access.
+Authorized users open it with "qurl get <CRID>". The --quiet flag prints only
+the CRID. Use "qurl connector run" for advanced Connector configuration.`,
 		Example: `  qurl publish http://127.0.0.1:3000
   qurl publish http://localhost:8080 --id local-dashboard
   qurl publish https://api.example.com/reports
