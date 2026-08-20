@@ -20,6 +20,8 @@ import (
 
 func TestNeedsAccessGrant(t *testing.T) {
 	t.Parallel()
+	// This matrix guards the public qurl-go credential-link classifier contract
+	// that the CLI relies on for secure-opener routing.
 	cases := map[string]struct {
 		link string
 		want bool
