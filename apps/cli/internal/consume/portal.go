@@ -28,12 +28,17 @@ import (
 // NeedsAccessGrant reports whether link carries an in-link credential and so
 // must be opened through the platform access flow. A link without one (a
 // direct or pre-signed URL) serves its bytes to a plain GET, so the
-// downloader fetches it as delivered. Classification belongs to qurl-go so
-// every consumer follows the same transport versions and fail-closed shape
-// rule: malformed declared credential links still take the access flow, where
-// verification rejects them, instead of falling through to an ordinary GET.
+// downloader fetches it as delivered. Current-transport classification belongs
+// to qurl-go so every consumer follows the same versions and fail-closed shape
+// rule. The retired qv2 prefix is also routed here as a safety tombstone: the
+// opener still rejects it, but the CLI must never plain-GET a fragment-bearing
+// portal link and silently save verifier HTML.
 func NeedsAccessGrant(link string) bool {
-	return qurl.IsCredentialLink(link)
+	if qurl.IsCredentialLink(link) {
+		return true
+	}
+	_, fragment, ok := strings.Cut(link, "#")
+	return ok && strings.HasPrefix(fragment, "qv2.")
 }
 
 // Fixed customer-facing messages for the access flow, registered with the

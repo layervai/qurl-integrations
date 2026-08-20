@@ -20,8 +20,8 @@ import (
 
 func TestNeedsAccessGrant(t *testing.T) {
 	t.Parallel()
-	// This matrix guards the public qurl-go credential-link classifier contract
-	// that the CLI relies on for secure-opener routing.
+	// This matrix guards both the public qurl-go classifier contract and the
+	// CLI-only retired-transport tombstone used for secure-opener routing.
 	cases := map[string]struct {
 		link string
 		want bool
@@ -33,13 +33,17 @@ func TestNeedsAccessGrant(t *testing.T) {
 		"query before credential fragment":     {"https://qurl.link/?download=1#qv2t1.1.1.1.AQ.AQ.AQ", true},
 		"malformed declared credential":        {"https://qurl.link/#qv2t1.not-valid", true},
 		"credential before second hash":        {"https://qurl.link/#qv2t1.not-valid#section", true},
-		"retired qv2 transport":                {"https://qurl.link/#qv2.claims.secret.sig", false},
+		"retired qv2 transport":                {"https://qurl.link/#qv2.claims.secret.sig", true},
+		"retired qv2 on direct host":           {"https://downloads.example/file.bin#qv2.claims.secret.sig", true},
 		"plain direct URL":                     {"https://example.com/file.bin", false},
 		"page anchor":                          {"https://example.com/doc#section-2", false},
 		"bare qv2t1 anchor without separator":  {"https://qurl.link/#qv2t1", false},
 		"credential text in query":             {"https://qurl.link/?f=qv2t1.1.1.1.AQ.AQ.AQ", false},
 		"credential text in path":              {"https://qurl.link/qv2t1.1.1.1.AQ.AQ.AQ", false},
+		"retired credential text in query":     {"https://qurl.link/?f=qv2.claims.secret.sig", false},
+		"retired credential text in path":      {"https://qurl.link/qv2.claims.secret.sig", false},
 		"credential after other fragment text": {"https://qurl.link/#section#qv2t1.1.1.1.AQ.AQ.AQ", false},
+		"retired after other fragment text":    {"https://qurl.link/#section#qv2.claims.secret.sig", false},
 		"encoded separator":                    {"https://qurl.link/#qv2t1%2E1%2E1%2E1", false},
 		"unparseable":                          {"\x00https://qurl.link/#qv2t1.not-valid", false},
 		"empty":                                {"", false},

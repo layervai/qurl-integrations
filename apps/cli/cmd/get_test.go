@@ -511,6 +511,36 @@ func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
 	mustNeverFetchPortalPage(t, srv)
 }
 
+// TestGetRetiredQv2LinkFailsThroughAccessFlow pins the retired transport as a
+// fail-closed tombstone. It is not accepted for compatibility, but it must
+// still reach the opener and be discarded instead of plain-GETting the portal
+// page and saving verifier HTML as if it were content.
+func TestGetRetiredQv2LinkFailsThroughAccessFlow(t *testing.T) {
+	srv := apitest.NewServer(t)
+	link := srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
+	srv.SetResolveQURL(link)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var opened []string
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortal: func(_ context.Context, got string) (string, error) {
+			opened = append(opened, got)
+			return "", consume.ErrLinkVerification
+		},
+	})
+	if res.code != 12 {
+		t.Fatalf("exit = %d, want 12 (verification failed); stderr: %s", res.code, res.stderr.String())
+	}
+	if len(opened) != 1 || opened[0] != link {
+		t.Fatalf("access opener saw %q, want exactly the retired link once", opened)
+	}
+	mustEmptyStdout(t, res)
+	mustNotExistCmd(t, dest)
+	mustNotExistCmd(t, dest+".part")
+	mustNeverFetchPortalPage(t, srv)
+}
+
 // TestGetDirectLinkDownloadsWithoutAccessRequest pins the split: a resolved
 // link with no in-link credential serves its bytes to a plain GET, so the
 // access opener is never consulted.
