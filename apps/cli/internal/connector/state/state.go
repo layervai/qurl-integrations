@@ -197,6 +197,34 @@ func (s *Store) Handoff() (qurl.AgentStateStore, error) {
 	return s.file, nil
 }
 
+// AgentStatePresent reports whether the pinned state directory contains an
+// agent-state entry. It deliberately answers only the narrow existence
+// question needed to distinguish a real assignment-refresh episode from an
+// orphaned non-secret marker. Any entry type (including a corrupt file or a
+// symlink) counts as present so qurl-go remains authoritative for validating
+// the credential state and fails closed on anything other than true absence.
+func (s *Store) AgentStatePresent() (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, err
+	}
+	_, err := os.Lstat(filepath.Join(s.dir, AgentStateFile))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect Connector agent state: %w", err)
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ValidateContinuity proves qurl-go still resolves the configured state path
 // to its retained directory capability.
 func (s *Store) ValidateContinuity() error {

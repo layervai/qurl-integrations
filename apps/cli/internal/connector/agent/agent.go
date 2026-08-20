@@ -187,12 +187,14 @@ var (
 // Open opens the Connector runtime: it resolves the state directory and Hub
 // bootstrap, then follows the lifecycle ladder —
 //
-//  1. an armed, unattempted refresh marker forces the operator-gated
-//     assignment refresh path;
-//  2. otherwise the persisted identity is warm-opened offline, so an expired
+//  1. an armed refresh marker is first correlated with a persisted identity;
+//     an orphan marker is cleared because there is no assignment to refresh;
+//  2. a real armed, unattempted marker forces the operator-gated assignment
+//     refresh path;
+//  3. otherwise the persisted identity is warm-opened offline, so an expired
 //     assignment lease surfaces as a refresh request here instead of the SDK
 //     silently renewing behind the operator's refresh-mode gate;
-//  3. with no persisted state, first-time registration spends the one-shot
+//  4. with no persisted state, first-time registration spends the one-shot
 //     enrollment token.
 //
 // On success the caller owns the returned Runtime and must Close it.
@@ -230,6 +232,10 @@ func Open(ctx context.Context, cfg *Config) (_ *Runtime, retErr error) {
 	marker, markerPresent, err := loadRefreshMarkerFailSafe(ctx, logger, store)
 	if err != nil {
 		return nil, fmt.Errorf("load assignment refresh marker: %w", err)
+	}
+	marker, markerPresent, err = clearOrphanedRefreshMarker(ctx, logger, store, marker, markerPresent)
+	if err != nil {
+		return nil, err
 	}
 	if markerPresent && !marker.Attempted {
 		return refreshRuntime(ctx, logger, store, hubBootstrap, dir, agentID, marker, mode, clientOpts)
@@ -279,6 +285,39 @@ func Open(ctx context.Context, cfg *Config) (_ *Runtime, retErr error) {
 	}
 
 	return registerRuntime(ctx, logger, cfg, store, hubBootstrap, agentID, clientOpts, openErr)
+}
+
+// clearOrphanedRefreshMarker correlates the non-secret episode breadcrumb
+// with the credential state it is supposed to refresh. True agent-state
+// absence means there is no platform assignment to refresh, so retaining the
+// marker would wedge an otherwise valid first enrollment behind an impossible
+// operator approval. Any present entry remains fail-closed under qurl-go's
+// normal validation.
+func clearOrphanedRefreshMarker(
+	ctx context.Context,
+	logger *slog.Logger,
+	store *state.Store,
+	marker state.RefreshMarker,
+	present bool,
+) (state.RefreshMarker, bool, error) {
+	if !present {
+		return marker, false, nil
+	}
+	statePresent, err := store.AgentStatePresent()
+	if err != nil {
+		return state.RefreshMarker{}, false, fmt.Errorf("correlate assignment refresh marker with Connector identity: %w", err)
+	}
+	if statePresent {
+		return marker, true, nil
+	}
+	logger.WarnContext(ctx, "connector: orphaned assignment-refresh marker; clearing it before first registration",
+		"event", "assignment_refresh_marker_orphaned",
+		"reason", marker.Reason,
+		"attempted", marker.Attempted)
+	if err := store.ClearRefreshMarker(); err != nil {
+		return state.RefreshMarker{}, false, fmt.Errorf("clear orphaned assignment refresh marker: %w", err)
+	}
+	return state.RefreshMarker{}, false, nil
 }
 
 // registerRuntime performs the first-time native registration, spending the
@@ -377,7 +416,7 @@ func refreshRuntime(
 	case RefreshModeDisabled:
 		return nil, fmt.Errorf("%w (%s); deliberately clear and reprovision %s or set %s=manual|auto", ErrRefreshDisabled, marker.Reason, stateDir, EnvRefreshMode)
 	case RefreshModeManual:
-		return nil, fmt.Errorf("%w (%s): inspect the failure, then run exactly one start with %s=auto and restore manual after a healthy connection; an orchestrator restart is not approval", ErrRefreshApprovalRequired, marker.Reason, EnvRefreshMode)
+		return nil, fmt.Errorf("%w (%s): inspect the failure, then approve exactly one start with refresh mode auto; an orchestrator restart is not approval", ErrRefreshApprovalRequired, marker.Reason)
 	case RefreshModeAuto:
 	default:
 		return nil, fmt.Errorf("unsupported registration refresh mode %q", mode)

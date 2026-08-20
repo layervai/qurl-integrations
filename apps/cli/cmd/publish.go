@@ -20,6 +20,7 @@ func publishCmd(opts *globalOpts) *cobra.Command {
 		tags        []string
 		alias       string
 		connectorID string
+		refreshMode string
 	)
 
 	cmd := &cobra.Command{
@@ -58,10 +59,17 @@ the CRID. Use "qurl connector run" for advanced Connector configuration.`,
 						return exitcode.UsageError(fmt.Errorf("--%s is not supported for a local Connector publish", name))
 					}
 				}
-				return runLocalPublish(cmd.Context(), opts, target, connectorID)
+				resolvedRefreshMode, err := validateRefreshModeFlag(refreshMode)
+				if err != nil {
+					return err
+				}
+				return runLocalPublish(cmd.Context(), opts, target, connectorID, resolvedRefreshMode)
 			}
 			if cmd.Flags().Changed("id") {
 				return exitcode.UsageError(errors.New("--id applies only when publishing a loopback HTTP origin"))
+			}
+			if cmd.Flags().Changed("refresh-mode") {
+				return exitcode.UsageError(errors.New("--refresh-mode applies only when publishing a loopback HTTP origin"))
 			}
 			client, err := opts.newClient()
 			if err != nil {
@@ -89,11 +97,12 @@ the CRID. Use "qurl connector run" for advanced Connector configuration.`,
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tag stored with the resource (repeatable)")
 	cmd.Flags().StringVar(&alias, "alias", "", "memorable handle stored with the resource")
 	cmd.Flags().StringVar(&connectorID, "id", "", "Connector ID for a local publish (default: stable ID for this machine and origin)")
+	cmd.Flags().StringVar(&refreshMode, "refresh-mode", "", "assignment-refresh policy after sustained local-Connector failures: manual, auto, or disabled (default manual)")
 
 	return cmd
 }
 
-func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string) error {
+func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID, refreshMode string) error {
 	requestedID, err := resolveConnectorID(opts, &connectorRunFlags{id: flagID})
 	if err != nil {
 		return err
@@ -158,8 +167,9 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 
 	printer := opts.printer()
 	return serveConnector(ctx, opts, &connectorServeInputs{
-		localIP:   target.localIP,
-		localPort: target.localPort,
+		localIP:     target.localIP,
+		localPort:   target.localPort,
+		refreshMode: refreshMode,
 		configureAgent: func(cfg *agent.Config) {
 			cfg.EnrollmentTokenProvider = provider
 		},

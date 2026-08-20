@@ -108,7 +108,7 @@ const (
 	// msgConnectorRefreshApproval renders agent.ErrRefreshApprovalRequired.
 	msgConnectorRefreshApproval = "This Connector needs its qURL platform assignment refreshed, and that refresh waits for your explicit approval."
 
-	hintConnectorRefreshApproval = "Hint: review why it stopped (see your previous run's output), then run `qurl connector run` once with --refresh-mode auto to approve the refresh, and return to manual afterwards. Automatic restarts are deliberately not treated as approval."
+	hintConnectorRefreshApproval = "Hint: review why it stopped (see your previous run's output), then run the same command once with --refresh-mode auto. That flag approves only this start; automatic restarts are deliberately not treated as approval."
 
 	// msgConnectorRefreshModeInvalid renders agent.ErrRefreshModeInvalid —
 	// the env-sourced refresh mode carries a value that is not a mode.
@@ -131,7 +131,7 @@ const (
 	// (IsTooManyKnockFailures).
 	msgConnectorRetryBudget = "The qURL platform kept refusing or not answering this Connector's connection attempts, so it stopped rather than retry forever."
 
-	hintConnectorRetryBudget = "Hint: check this machine's outbound network access, then run `qurl connector run` again. If the problem persists, the next start will ask to refresh this Connector's platform assignment (--refresh-mode auto approves it once)."
+	hintConnectorRetryBudget = "Hint: check this machine's outbound network access, then run the same command again. If the problem persists, the next start will ask to refresh this Connector's platform assignment (--refresh-mode auto approves it once)."
 
 	// msgConnectorProxyNotServing renders supervisor.ErrProxyNotServing. A
 	// Login succeeded, but NewProxy did not, so the route and its CRID must not
@@ -210,7 +210,7 @@ const (
 	// difference.
 	msgConnectorAssignmentUnavailable = "The qURL platform couldn't give this Connector its platform assignment right now — it's busy, moving capacity, or briefly unreachable from this machine."
 
-	hintConnectorAssignmentUnavailable = "Hint: this is usually temporary and nothing on this machine needs to change. Run `qurl connector run` again in a few minutes; if it keeps happening, check this machine's outbound network access and contact LayerV support."
+	hintConnectorAssignmentUnavailable = "Hint: this is usually temporary and nothing on this machine needs to change. Run the same command again in a few minutes; if it keeps happening, check this machine's outbound network access and contact LayerV support."
 
 	// msgConnectorAssignmentInvalid renders
 	// qurl.ErrAssignmentInvalidResponse: the platform answered outside its
@@ -225,7 +225,7 @@ const (
 	// means the renewal did not happen.
 	msgConnectorAssignmentExpired = "This Connector's qURL platform assignment has expired and wasn't renewed."
 
-	hintConnectorAssignmentExpired = "Hint: run `qurl connector run` again — a Connector renews its own assignment at startup. If it keeps expiring, check this machine's clock and its outbound network access."
+	hintConnectorAssignmentExpired = "Hint: run the same command again — a Connector renews its own assignment at startup. If it keeps expiring, check this machine's clock and its outbound network access."
 )
 
 // CustomerMessages returns every fixed customer-facing string this package

@@ -99,6 +99,7 @@ prints its CRID and exits immediately.
 | No API key is configured | Run `qurl login` |
 | The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
 | The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
+| `This Connector needs its qURL platform assignment refreshed` | Update to qURL CLI 1.6.1 or newer. If the message remains because a saved assignment genuinely needs a refresh, review why the previous connection stopped, then rerun the same publish command once with `--refresh-mode auto`. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
 
 ## Install

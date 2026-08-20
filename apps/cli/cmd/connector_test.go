@@ -900,6 +900,9 @@ func TestConnectorRunRefreshGates(t *testing.T) {
 		if err := store.RequestRefresh("test outage episode"); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(dir, state.AgentStateFile), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		return dir
 	}
 
@@ -1552,6 +1555,9 @@ func TestConnectorGoldens(t *testing.T) {
 		}
 		defer func() { _ = store.Close() }()
 		if err := store.RequestRefresh("sustained connection failures"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, state.AgentStateFile), []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return dir
