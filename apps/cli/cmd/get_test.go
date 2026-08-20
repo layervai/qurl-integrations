@@ -170,7 +170,7 @@ func TestGetBrowserOpensVerifiedLinkOnTTY(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	wantLink := "https://qurl.link/#qv2.test.link"
+	wantLink := "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"
 	if len(browser.opened) != 1 || browser.opened[0] != wantLink {
 		t.Fatalf("browser opened %q, want exactly [%s]", browser.opened, wantLink)
 	}
@@ -434,7 +434,7 @@ func mustNotExistCmd(t *testing.T, path string) {
 func portalServer(t *testing.T) (srv *apitest.Server, link string) {
 	t.Helper()
 	srv = apitest.NewServer(t)
-	link = srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
+	link = srv.URL + apitest.PortalPath + "#qv2t1.1.1.1.claims.secret.sig"
 	srv.SetResolveQURL(link)
 	return srv, link
 }
@@ -452,9 +452,9 @@ func mustNeverFetchPortalPage(t *testing.T, srv *apitest.Server) {
 	}
 }
 
-// TestGetDownloadFetchesGrantedContentNotPortalPage is the regression test
-// for the fragment-credential defect: `get --file` on a qv2 link must ask
-// the platform for access and download the granted content URL — never the
+// TestGetDownloadFetchesGrantedContentNotPortalPage is the regression test for
+// the fragment-credential defect: `get --file` on a qURL credential link must
+// ask the platform for access and download the granted content URL — never the
 // link itself, whose plain GET serves the in-browser verification page.
 func TestGetDownloadFetchesGrantedContentNotPortalPage(t *testing.T) {
 	srv, link := portalServer(t)

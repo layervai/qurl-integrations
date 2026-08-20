@@ -11,12 +11,12 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// Direct access for downloads. A resolved qv2 link carries its credential in
-// the URL fragment, which HTTP clients never transmit — a plain GET of the
-// link can only ever fetch the in-browser page that consumes the fragment,
-// never the content itself. Downloads therefore go through the SDK's
-// programmatic opener (qurl.EnterPortalWith): verify the link locally, ask
-// the qURL platform for access, then fetch the granted content URL.
+// Direct access for downloads. A resolved qURL credential link carries its
+// credential in the URL fragment, which HTTP clients never transmit — a plain
+// GET of the link can only ever fetch the in-browser page that consumes the
+// fragment, never the content itself. Downloads therefore go through the SDK's
+// programmatic opener (qurl.EnterPortalWith): verify the link locally, ask the
+// qURL platform for access, then fetch the granted content URL.
 //
 // The opener needs deployment trust configuration — issuer keys plus a relay
 // allowlist or cell catalog. AccessOpener sources it from QURL_DEPLOYMENT
@@ -25,26 +25,15 @@ import (
 // shipped deployment. A build with neither fails closed with
 // ErrAccessNotConfigured rather than saving the wrong bytes.
 
-// credentialFragmentPrefix marks a link whose fragment is an in-link
-// credential rather than a page anchor.
-//
-// TODO(upstream-contract): "qv2." is the pinned wire prefix for
-// fragment-credential links (qurl-go internal/qv2 FragmentPrefix). If the
-// platform adds another credential-bearing link form, widen NeedsAccessGrant
-// in lockstep.
-const credentialFragmentPrefix = "qv2."
-
 // NeedsAccessGrant reports whether link carries an in-link credential and so
 // must be opened through the platform access flow. A link without one (a
 // direct or pre-signed URL) serves its bytes to a plain GET, so the
-// downloader fetches it as delivered.
+// downloader fetches it as delivered. Classification belongs to qurl-go so
+// every consumer follows the same transport versions and fail-closed shape
+// rule: malformed declared credential links still take the access flow, where
+// verification rejects them, instead of falling through to an ordinary GET.
 func NeedsAccessGrant(link string) bool {
-	u, err := url.Parse(link)
-	if err != nil {
-		// Unparseable links fail loudly at request build; nothing to grant.
-		return false
-	}
-	return strings.HasPrefix(u.Fragment, credentialFragmentPrefix)
+	return qurl.IsCredentialLink(link)
 }
 
 // Fixed customer-facing messages for the access flow, registered with the

@@ -24,16 +24,25 @@ func TestNeedsAccessGrant(t *testing.T) {
 		link string
 		want bool
 	}{
-		"fragment credential":          {"https://qurl.link/#qv2.claims.secret.sig", true},
-		"fragment credential w/ path":  {"https://qurl.link/portal#qv2.a.b.c", true},
-		"plain URL":                    {"https://example.com/file.bin", false},
-		"page anchor":                  {"https://example.com/doc#section-2", false},
-		"bare qv2 anchor, no parts":    {"https://qurl.link/#qv2", false},
-		"credential-like query":        {"https://qurl.link/?f=qv2.a.b.c", false},
-		"unparseable":                  {"\x00https://qurl.link/#qv2.a.b.c", false},
-		"empty":                        {"", false},
-		"scheme-relative no fragment":  {"//qurl.link/x", false},
-		"fragment prefix must be qv2.": {"https://qurl.link/#qv3.a.b.c", false},
+		"fragment credential":                  {"https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ", true},
+		"fragment credential with path":        {"https://qurl.link/portal#qv2t1.1.1.1.AQ.AQ.AQ", true},
+		"fragment credential on direct host":   {"https://downloads.example/file.bin#qv2t1.1.1.1.AQ.AQ.AQ", true},
+		"non-web scheme declares credential":   {"file:///tmp/content#qv2t1.not-valid", true},
+		"query before credential fragment":     {"https://qurl.link/?download=1#qv2t1.1.1.1.AQ.AQ.AQ", true},
+		"malformed declared credential":        {"https://qurl.link/#qv2t1.not-valid", true},
+		"credential before second hash":        {"https://qurl.link/#qv2t1.not-valid#section", true},
+		"retired qv2 transport":                {"https://qurl.link/#qv2.claims.secret.sig", false},
+		"plain direct URL":                     {"https://example.com/file.bin", false},
+		"page anchor":                          {"https://example.com/doc#section-2", false},
+		"bare qv2t1 anchor without separator":  {"https://qurl.link/#qv2t1", false},
+		"credential text in query":             {"https://qurl.link/?f=qv2t1.1.1.1.AQ.AQ.AQ", false},
+		"credential text in path":              {"https://qurl.link/qv2t1.1.1.1.AQ.AQ.AQ", false},
+		"credential after other fragment text": {"https://qurl.link/#section#qv2t1.1.1.1.AQ.AQ.AQ", false},
+		"encoded separator":                    {"https://qurl.link/#qv2t1%2E1%2E1%2E1", false},
+		"unparseable":                          {"\x00https://qurl.link/#qv2t1.not-valid", false},
+		"empty":                                {"", false},
+		"scheme-relative no fragment":          {"//qurl.link/x", false},
+		"unknown transport version":            {"https://qurl.link/#qv2t2.1.1.1.AQ.AQ.AQ", false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -48,7 +57,7 @@ func TestNeedsAccessGrant(t *testing.T) {
 // portalLink is a shape-valid fragment-credential link for offline tests;
 // its parts are not real credentials, so a configured opener discards it at
 // the local check — before any network I/O.
-const portalLink = "https://qurl.link/#qv2.claims.secret.sig"
+const portalLink = "https://qurl.link/#qv2t1.1.1.1.claims.secret.sig"
 
 // testDeploymentJSON writes a syntactically valid deployment settings file
 // carrying one freshly generated key under kid, returning its path.
@@ -154,7 +163,7 @@ func TestOpenDiscardsLinkFailingLocalCheck(t *testing.T) {
 	opener := &AccessOpener{LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: path})}
 	for name, link := range map[string]string{
 		"undecodable parts": portalLink,
-		"wrong part count":  "https://qurl.link/#qv2.onlyone",
+		"wrong part count":  "https://qurl.link/#qv2t1.1.1.1.onlyone",
 	} {
 		if _, err := opener.Open(context.Background(), link); !errors.Is(err, ErrLinkVerification) {
 			t.Errorf("%s: err = %v, want ErrLinkVerification", name, err)

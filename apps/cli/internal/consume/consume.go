@@ -6,15 +6,15 @@
 // no --file is refused outright — the CLI never launches a browser nobody
 // can see (§16.2).
 //
-// Downloads split by link shape (NeedsAccessGrant). A qv2 link carries its
-// credential in the URL fragment, which HTTP clients never transmit — a
-// plain GET of it can only ever fetch the in-browser page that consumes the
+// Downloads split by link shape (NeedsAccessGrant). A qURL credential link
+// carries its credential in the URL fragment, which HTTP clients never transmit
+// — a plain GET of it can only ever fetch the in-browser page that consumes the
 // fragment, never the content — so those links are opened through the SDK's
 // programmatic opener first (AccessOpener over qurl.EnterPortalWith) and the
 // Downloader fetches the granted content URL it returns. A link without an
 // in-link credential serves its bytes to a plain GET and is fetched as
-// delivered. The browser path carries the full link, fragment included,
-// because the in-browser page is exactly what a browser needs.
+// delivered. The browser path carries the full link, fragment included, because
+// the in-browser page is exactly what a browser needs.
 //
 // Nothing here talks to the qURL API and nothing here carries the API
 // credential: the download client is a plain HTTP client, so the bearer key
