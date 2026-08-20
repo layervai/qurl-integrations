@@ -210,16 +210,24 @@ func validateConnectorRunInputs(opts *globalOpts, flags *connectorRunFlags) (*co
 	if err != nil {
 		return nil, err
 	}
-	refreshMode := strings.ToLower(strings.TrimSpace(flags.refreshMode))
+	refreshMode, err := validateRefreshModeFlag(flags.refreshMode)
+	if err != nil {
+		return nil, err
+	}
+	return &connectorRunInputs{id: id, localIP: localIP, localPort: localPort, refreshMode: refreshMode}, nil
+}
+
+func validateRefreshModeFlag(raw string) (string, error) {
+	refreshMode := strings.ToLower(strings.TrimSpace(raw))
 	switch refreshMode {
 	case "", agent.RefreshModeManual, agent.RefreshModeAuto, agent.RefreshModeDisabled:
 		// Empty falls through to the agent package's env-then-manual chain;
 		// a flag typo is a usage error here, while a bad ENV spelling maps to
 		// the configuration exit through agent.ErrRefreshModeInvalid.
 	default:
-		return nil, exitcode.UsageError(fmt.Errorf(msgConnectorRefreshModeInvalid, flags.refreshMode))
+		return "", exitcode.UsageError(fmt.Errorf(msgConnectorRefreshModeInvalid, raw))
 	}
-	return &connectorRunInputs{id: id, localIP: localIP, localPort: localPort, refreshMode: refreshMode}, nil
+	return refreshMode, nil
 }
 
 // runConnector wires the Connector serve loop: agent open/enroll ladder →

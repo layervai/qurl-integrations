@@ -131,6 +131,13 @@ func armMarker(t *testing.T, dir, reason string, attempted bool) {
 	}
 }
 
+func seedAgentStateEntry(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, state.AgentStateFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readMarker(t *testing.T, dir string) (state.RefreshMarker, bool) {
 	t.Helper()
 	store, err := state.Open(dir)
@@ -416,8 +423,8 @@ func TestOpenLeaseExpiredArmsMarkerAndManualGateHolds(t *testing.T) {
 		}, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if !errors.Is(err, ErrRefreshApprovalRequired) || !strings.Contains(err.Error(), EnvRefreshMode) {
-		t.Fatalf("Open under manual mode = %v, want ErrRefreshApprovalRequired naming %s", err, EnvRefreshMode)
+	if !errors.Is(err, ErrRefreshApprovalRequired) || !strings.Contains(err.Error(), "refresh mode auto") {
+		t.Fatalf("Open under manual mode = %v, want ErrRefreshApprovalRequired naming the one-start auto approval", err)
 	}
 	marker, present := readMarker(t, dir)
 	if !present || marker.Attempted || marker.Reason != "assigned NHP cell lease expired" {
@@ -431,6 +438,7 @@ func TestOpenLeaseExpiredArmsMarkerAndManualGateHolds(t *testing.T) {
 func TestOpenRefreshDisabledFailsClosed(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", false)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "disabled")
 	calls := &seamCalls{}
 	installSeams(t, calls, nil, nil, nil)
@@ -447,6 +455,7 @@ func TestOpenRefreshDisabledFailsClosed(t *testing.T) {
 func TestOpenRefreshModeFlagOverridesEnv(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", false)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "auto")
 	calls := &seamCalls{}
 	installSeams(t, calls, nil, nil, nil)
@@ -465,6 +474,7 @@ func TestOpenRefreshModeFlagOverridesEnv(t *testing.T) {
 func TestOpenRefreshAutoConsumesEpisodeOnce(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", false)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "auto")
 	calls := &seamCalls{}
 	wantClient, wantBinding := fakeRuntimePair(t, "agent-a")
@@ -504,6 +514,7 @@ func TestOpenRefreshAutoConsumesEpisodeOnce(t *testing.T) {
 func TestOpenAttemptedMarkerBlocksSecondRefresh(t *testing.T) {
 	dir := lifecycleEnv(t)
 	armMarker(t, dir, "sustained failures", true)
+	seedAgentStateEntry(t, dir)
 	t.Setenv(EnvRefreshMode, "auto")
 	calls := &seamCalls{}
 	warmErr := errors.New("still failing after the consumed refresh")
@@ -518,6 +529,38 @@ func TestOpenAttemptedMarkerBlocksSecondRefresh(t *testing.T) {
 	}
 	if calls.refresh != 0 {
 		t.Fatalf("refresh calls = %d, want the consumed episode to block a second refresh", calls.refresh)
+	}
+}
+
+func TestOpenOrphanRefreshMarkerClearsAndRegisters(t *testing.T) {
+	for _, attempted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attempted_%v", attempted), func(t *testing.T) {
+			dir := lifecycleEnv(t)
+			armMarker(t, dir, "stale failure from a removed identity", attempted)
+			calls := &seamCalls{}
+			wantClient, wantBinding := fakeRuntimePair(t, "agent-new")
+			installSeams(t, calls,
+				func(context.Context, string, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+					return wantClient, wantBinding, nil
+				},
+				func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+					return nil, nil, qurl.ErrAgentStateNotFound
+				}, nil)
+
+			cfg := testConfig()
+			cfg.EnrollmentToken = testEnrollmentToken
+			runtime, err := Open(context.Background(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = runtime.Close() }()
+			if calls.open != 1 || calls.register != 1 || calls.refresh != 0 {
+				t.Fatalf("seam calls = %+v, want warm-open probe then fresh registration", calls)
+			}
+			if _, present := readMarker(t, dir); present {
+				t.Fatal("orphaned refresh marker survived first registration")
+			}
+		})
 	}
 }
 

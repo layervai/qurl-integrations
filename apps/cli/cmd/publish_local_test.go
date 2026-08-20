@@ -24,6 +24,8 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 		{name: "https", args: []string{"publish", "https://localhost:3000"}, want: "cleartext http"},
 		{name: "path", args: []string{"publish", "http://127.0.0.1:3000/api"}, want: "without a path"},
 		{name: "remote id", args: []string{"publish", "https://example.com", "--id", "local-test"}, want: "--id applies only"},
+		{name: "remote refresh mode", args: []string{"publish", "https://example.com", "--refresh-mode", "auto"}, want: "--refresh-mode applies only"},
+		{name: "invalid refresh mode", args: []string{"publish", "http://127.0.0.1:3000", "--refresh-mode", "sometimes"}, want: "--refresh-mode must be manual, auto, or disabled"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -54,6 +56,26 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestLocalPublishThreadsOneShotRefreshApproval(t *testing.T) {
+	t.Parallel()
+	var gotRefreshMode string
+	res := runCLI(t, &runOpts{
+		args: []string{"publish", "http://127.0.0.1:3000", "--refresh-mode", "auto"},
+		env:  map[string]string{},
+		connectorOpen: func(_ context.Context, cfg *agent.Config) (*agent.Runtime, error) {
+			gotRefreshMode = cfg.RefreshMode
+			return nil, errors.New("stop after inspecting Connector configuration")
+		},
+	})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), "stop after inspecting") {
+		t.Fatalf("result = exit %d stderr %q", res.code, res.stderr.String())
+	}
+	if gotRefreshMode != agent.RefreshModeAuto {
+		t.Fatalf("Connector refresh mode = %q, want %q", gotRefreshMode, agent.RefreshModeAuto)
+	}
+	mustEmptyStdout(t, res)
 }
 
 func TestLocalPublishRejectsInvalidExplicitConnectorIDBeforeOpen(t *testing.T) {

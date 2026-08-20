@@ -162,6 +162,31 @@ func TestStoreHandoffReturnsConcreteSDKStore(t *testing.T) {
 	}
 }
 
+func TestAgentStatePresentDistinguishesOnlyTrueAbsence(t *testing.T) {
+	store := openTestStore(t)
+	if present, err := store.AgentStatePresent(); err != nil || present {
+		t.Fatalf("AgentStatePresent on fresh store = (%v, %v), want false, nil", present, err)
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir(), AgentStateFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := store.AgentStatePresent(); err != nil || !present {
+		t.Fatalf("AgentStatePresent with state entry = (%v, %v), want true, nil", present, err)
+	}
+	if err := os.Remove(filepath.Join(store.Dir(), AgentStateFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing-agent-state", filepath.Join(store.Dir(), AgentStateFile)); err != nil {
+		if isWindows(t) {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if present, err := store.AgentStatePresent(); err != nil || !present {
+		t.Fatalf("AgentStatePresent with unsafe entry = (%v, %v), want true, nil so SDK validation remains authoritative", present, err)
+	}
+}
+
 func TestStoreFailsClosedAfterClose(t *testing.T) {
 	store := openTestStore(t)
 	if err := store.Close(); err != nil {

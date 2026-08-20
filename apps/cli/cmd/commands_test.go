@@ -177,6 +177,26 @@ func TestNormalizeDocumentationNewlines(t *testing.T) {
 	}
 }
 
+func TestLocalPublishRefreshRecoveryStaysActionable(t *testing.T) {
+	publish := runCLI(t, &runOpts{args: []string{"publish", "--help"}})
+	if publish.code != 0 {
+		t.Fatalf("publish help exit = %d, stderr: %s", publish.code, publish.stderr.String())
+	}
+	publishHelp := publish.stdout.String()
+	if !strings.Contains(publishHelp, "--refresh-mode") || !strings.Contains(publishHelp, "manual, auto, or disabled") {
+		t.Fatalf("publish help does not expose the one-start assignment-refresh approval:\n%s", publishHelp)
+	}
+	readme := readCLIREADME(t)
+	for _, want := range []string{
+		"Update to qURL CLI 1.6.1 or newer",
+		"rerun the same publish command once with `--refresh-mode auto`",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("CLI README does not carry the shipped local-publish refresh remedy %q", want)
+		}
+	}
+}
+
 func TestCompletionGeneratesScripts(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
 		t.Run(shell, func(t *testing.T) {
