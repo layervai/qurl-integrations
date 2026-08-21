@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/layervai/qurl-integrations/compare/v1.6.2...v1.7.0) (2026-08-21)
+
+
+### Features
+
+* **cli:** resolve Connector resources through native NHP ([79c7358](https://github.com/layervai/qurl-integrations/commit/79c735821c64dd7ce2f0590a8258ada8cc2e5402))
+
+
+### Bug Fixes
+
+* **cli:** pin Connector proof to sandbox origin ([#1242](https://github.com/layervai/qurl-integrations/issues/1242)) ([13cde81](https://github.com/layervai/qurl-integrations/commit/13cde8130a06fd0e212db1b345559daec8bb3d5e))
+* **cli:** pin proof to the sandbox NHP Hub ([#1243](https://github.com/layervai/qurl-integrations/issues/1243)) ([f39ac2e](https://github.com/layervai/qurl-integrations/commit/f39ac2ed477e9f33dc83b075447e6e5f4742655e))
+
 ## [1.6.2](https://github.com/layervai/qurl-integrations/compare/v1.6.1...v1.6.2) (2026-08-20)
 
 
