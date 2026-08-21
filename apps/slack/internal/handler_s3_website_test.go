@@ -349,27 +349,35 @@ func TestPreparedS3WebsiteInstallMessageOmitsGenericResourceDescription(t *testi
 	}
 }
 
-func TestKubernetesS3WebsiteInstallMessageFitsBlockDeliveryAtMaxSlug(t *testing.T) {
+// TestS3WebsiteInstallMessagesFitBlockDeliveryAtMaxSlug covers every environment,
+// not just the longest one, because the guidance prose is where these messages
+// grow. A prose run over slackSectionTextMaxBytes silently drops the whole
+// message to the plain-text fallback, so growth has to fail here instead.
+func TestS3WebsiteInstallMessagesFitBlockDeliveryAtMaxSlug(t *testing.T) {
 	h := NewHandler(Config{
 		TunnelImage:   testTunnelImageRef,
 		S3OriginImage: defaultS3StaticConnectorImage,
 	})
-	args := testS3WebsiteArgs(tunnelEnvKubernetes)
-	args.Slug = "a" + strings.Repeat("b", 62) + "c"
+	for _, env := range []tunnelInstallEnvironment{
+		tunnelEnvDocker, tunnelEnvCompose, tunnelEnvECSFargate, tunnelEnvKubernetes,
+	} {
+		args := testS3WebsiteArgs(env)
+		args.Slug = "a" + strings.Repeat("b", 62) + "c"
 
-	prepared, err := h.prepareS3WebsiteInstallMessage(args)
-	if err != nil {
-		t.Fatalf("prepareS3WebsiteInstallMessage: %v", err)
-	}
-	msg, err := prepared.render(args, &client.APIKey{APIKey: testTunnelModalKey}, "", defaultS3WebsiteDescription, fixedNow)
-	if err != nil {
-		t.Fatalf("render max-slug Kubernetes message: %v", err)
-	}
-	if len(msg) > 40_000 {
-		t.Fatalf("max-slug Kubernetes message length = %d, exceeds Slack text ceiling", len(msg))
-	}
-	if _, ok := installMessageBlocks(msg); !ok {
-		t.Fatal("max-slug Kubernetes message unexpectedly requires plain-text fallback")
+		prepared, err := h.prepareS3WebsiteInstallMessage(args)
+		if err != nil {
+			t.Fatalf("prepareS3WebsiteInstallMessage(%s): %v", env, err)
+		}
+		msg, err := prepared.render(args, &client.APIKey{APIKey: testTunnelModalKey}, "", defaultS3WebsiteDescription, fixedNow)
+		if err != nil {
+			t.Fatalf("render max-slug %s message: %v", env, err)
+		}
+		if len(msg) > 40_000 {
+			t.Fatalf("max-slug %s message length = %d, exceeds Slack text ceiling", env, len(msg))
+		}
+		if _, ok := installMessageBlocks(msg); !ok {
+			t.Fatalf("max-slug %s message unexpectedly requires plain-text fallback; a prose run likely exceeds %d bytes", env, slackSectionTextMaxBytes)
+		}
 	}
 }
 
@@ -1302,12 +1310,16 @@ func TestS3WebsiteInstallArgsRequirePinnedTunnelResourceValidatesAPIURL(t *testi
 	}
 }
 
-func TestRenderDockerS3WebsiteInstructionsMentionsOriginAutoRestart(t *testing.T) {
+func TestRenderDockerS3WebsiteInstructions(t *testing.T) {
 	got, err := renderDockerS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvDocker), testTunnelImageRef, defaultS3StaticConnectorImage)
 	if err != nil {
 		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
 	}
 	for _, want := range []string{
+		// The qURL Connector runs in the origin container's network namespace,
+		// so an origin recreate or auto-restart strands it. Keep the recovery
+		// note pinned here: a prose edit that drops it leaves the operator with
+		// two "running" containers and a dead qURL.
 		"Docker auto-restarts it after a crash",
 		"recreate or restart the qURL Connector container",
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
@@ -1363,6 +1375,7 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 		t.Fatalf("Compose instructions do not make connector config readable by UID 65532:\n%s", got)
 	}
 	body := extractS3TestBlock(t, got, "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n", "\nQURL_COMPOSE_YAML_EOF")
+	body = strings.Replace(body, "${S3_ORIGIN_CREDENTIAL_ENVIRONMENT}", "", 1)
 
 	var parsed struct {
 		Services map[string]struct {
@@ -1457,11 +1470,17 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if !strings.Contains(got, "QURL_API_URL_YAML="+shellSingleQuote(quotedAPIURL)) {
 		t.Fatalf("Compose instructions missing shell-quoted API URL assignment:\n%s", got)
 	}
-	if !strings.Contains(got, "After a Docker daemon restart, verify both services are running") {
-		t.Fatalf("Compose instructions missing daemon-restart recovery note:\n%s", got)
-	}
-	if !strings.Contains(got, "Docker auto-restarts the S3 origin service after a crash") {
-		t.Fatalf("Compose instructions missing origin auto-restart recovery note:\n%s", got)
+	// The qURL Connector shares the origin service's network namespace, so an
+	// origin recreate or auto-restart strands it. Keep both recovery notes
+	// pinned here: a prose edit that drops them leaves the operator with two
+	// "running" services and a dead qURL.
+	for _, want := range []string{
+		"Docker auto-restarts the S3 origin service after a crash",
+		"After a Docker daemon restart, verify both services are running",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Compose instructions missing shared-namespace recovery note %q:\n%s", want, got)
+		}
 	}
 	assertNoS3SecretLeaks(t, got)
 }
@@ -1826,6 +1845,218 @@ func ecsEnvMap(vars []ecsEnvironmentVar) map[string]string {
 		env[item.Name] = item.Value
 	}
 	return env
+}
+
+// s3WebsiteAWSCredentialEnv is the credential set the origin's AWS provider
+// chain reads when no instance/task role exists.
+var s3WebsiteAWSCredentialEnv = []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+
+// TestS3WebsiteInstallGatesStaticAWSCredentialForwarding is the guardrail on
+// the opt-in escape hatch for hosts without a workload role or credentials-file
+// mount. Docker and Compose must carry each credential variable by name only,
+// validate a long-lived pair or temporary trio, and never import ambient AWS
+// variables unless the operator explicitly enables forwarding.
+func TestS3WebsiteInstallGatesStaticAWSCredentialForwarding(t *testing.T) {
+	t.Parallel()
+	renderers := map[tunnelInstallEnvironment]func(*s3WebsiteInstallArgs, string, string) (string, error){
+		tunnelEnvDocker:     renderDockerS3WebsiteInstructions,
+		tunnelEnvCompose:    renderDockerComposeS3WebsiteInstructions,
+		tunnelEnvECSFargate: renderECSS3WebsiteInstructions,
+		tunnelEnvKubernetes: renderKubernetesS3WebsiteInstructions,
+	}
+	for env, render := range renderers {
+		got, err := render(testS3WebsiteArgs(env), testTunnelImageRef, defaultS3StaticConnectorImage)
+		if err != nil {
+			t.Fatalf("render %s instructions: %v", env, err)
+		}
+		for _, name := range s3WebsiteAWSCredentialEnv {
+			for _, assigned := range []string{name + "=", name + ": ", `"name": "` + name + `"`} {
+				if strings.Contains(got, assigned) {
+					t.Fatalf("%s instructions bind a value to %s via %q; credentials must never pass through Slack:\n%s", env, name, assigned, got)
+				}
+			}
+		}
+	}
+
+	docker, err := renderDockerS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvDocker), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
+	}
+	for _, want := range []string{
+		`case "${QURL_S3_FORWARD_AWS_CREDENTIALS:-false}" in`,
+		`AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set`,
+		`AWS_SESSION_TOKEN requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY`,
+		`QURL_S3_FORWARD_AWS_CREDENTIALS must be true or false`,
+		`S3_ORIGIN_CREDENTIAL_ARGS='-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY'`,
+		`S3_ORIGIN_CREDENTIAL_ARGS="$S3_ORIGIN_CREDENTIAL_ARGS -e AWS_SESSION_TOKEN"`,
+		`  $S3_ORIGIN_CREDENTIAL_ARGS \`,
+	} {
+		if !strings.Contains(docker, want) {
+			t.Fatalf("Docker instructions missing static-credential gate %q:\n%s", want, docker)
+		}
+	}
+
+	compose, err := renderDockerComposeS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvCompose), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerComposeS3WebsiteInstructions: %v", err)
+	}
+	for _, want := range []string{
+		`case "${QURL_S3_FORWARD_AWS_CREDENTIALS:-false}" in`,
+		`AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set`,
+		`AWS_SESSION_TOKEN requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY`,
+		`QURL_S3_FORWARD_AWS_CREDENTIALS must be true or false`,
+		`S3_ORIGIN_CREDENTIAL_ENVIRONMENT='      AWS_ACCESS_KEY_ID:`,
+		`${S3_ORIGIN_CREDENTIAL_ENVIRONMENT}`,
+	} {
+		if !strings.Contains(compose, want) {
+			t.Fatalf("Compose instructions missing static-credential gate %q:\n%s", want, compose)
+		}
+	}
+	body := extractS3TestBlock(t, compose, "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n", "\nQURL_COMPOSE_YAML_EOF")
+	body = strings.Replace(body, "${S3_ORIGIN_CREDENTIAL_ENVIRONMENT}", "      AWS_ACCESS_KEY_ID:\n      AWS_SECRET_ACCESS_KEY:\n      AWS_SESSION_TOKEN:", 1)
+	var parsed struct {
+		Services map[string]struct {
+			Environment map[string]*string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("Compose fragment did not parse: %v\n%s", err, body)
+	}
+	origin := parsed.Services["qurl-s3-origin-"+testTunnelSlug].Environment
+	for _, name := range s3WebsiteAWSCredentialEnv {
+		value, ok := origin[name]
+		if !ok {
+			t.Fatalf("Compose origin service does not forward %s:\n%s", name, body)
+		}
+		if value != nil {
+			t.Fatalf("Compose origin %s = %q, want a valueless passthrough key", name, *value)
+		}
+	}
+
+	for _, rendered := range []struct {
+		name string
+		text string
+	}{
+		{name: "Docker", text: docker},
+		{name: "Compose", text: compose},
+	} {
+		gate := strings.Index(rendered.text, `case "${QURL_S3_FORWARD_AWS_CREDENTIALS:-false}" in`)
+		if gate < 0 {
+			t.Fatalf("%s instructions do not contain a bounded credential gate:\n%s", rendered.name, rendered.text)
+		}
+		gateEnd := strings.Index(rendered.text[gate:], "\nesac")
+		if gateEnd < 0 {
+			t.Fatalf("%s instructions do not terminate the credential gate:\n%s", rendered.name, rendered.text)
+		}
+		outsideGate := rendered.text[:gate] + rendered.text[gate+gateEnd+len("\nesac"):]
+		for _, name := range s3WebsiteAWSCredentialEnv {
+			if strings.Contains(outsideGate, "-e "+name) || strings.Contains(outsideGate, "      "+name+":") {
+				t.Fatalf("%s instructions forward ambient %s outside the explicit opt-in gate:\n%s", rendered.name, name, rendered.text)
+			}
+		}
+	}
+}
+
+func TestS3WebsiteStaticAWSCredentialGateShell(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	renderers := []struct {
+		name       string
+		render     func(*s3WebsiteInstallArgs, string, string) (string, error)
+		env        tunnelInstallEnvironment
+		resultName string
+		pair       string
+		trio       string
+	}{
+		{
+			name:       "Docker",
+			render:     renderDockerS3WebsiteInstructions,
+			env:        tunnelEnvDocker,
+			resultName: "S3_ORIGIN_CREDENTIAL_ARGS",
+			pair:       "-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY",
+			trio:       "-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN",
+		},
+		{
+			name:       "Compose",
+			render:     renderDockerComposeS3WebsiteInstructions,
+			env:        tunnelEnvCompose,
+			resultName: "S3_ORIGIN_CREDENTIAL_ENVIRONMENT",
+			pair:       "      AWS_ACCESS_KEY_ID:\n      AWS_SECRET_ACCESS_KEY:",
+			trio:       "      AWS_ACCESS_KEY_ID:\n      AWS_SECRET_ACCESS_KEY:\n      AWS_SESSION_TOKEN:",
+		},
+	}
+	cases := []struct {
+		name       string
+		env        []string
+		wantOK     bool
+		wantOutput string
+		wantExact  bool
+	}{
+		{name: "ambient variables ignored by default", env: []string{"AWS_ACCESS_KEY_ID=ambient"}, wantOK: true, wantExact: true},
+		{name: "invalid opt-in rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=yes"}, wantOutput: "must be true or false"},
+		{name: "enabled without credentials rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true"}, wantOutput: "requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"},
+		{name: "access key alone rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key"}, wantOutput: "must both be set"},
+		{name: "session token alone rejected", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_SESSION_TOKEN=token"}, wantOutput: "AWS_SESSION_TOKEN requires"},
+		{name: "long-lived pair accepted", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key", "AWS_SECRET_ACCESS_KEY=secret"}, wantOK: true, wantOutput: "pair", wantExact: true},
+		{name: "temporary trio accepted", env: []string{"QURL_S3_FORWARD_AWS_CREDENTIALS=true", "AWS_ACCESS_KEY_ID=key", "AWS_SECRET_ACCESS_KEY=secret", "AWS_SESSION_TOKEN=token"}, wantOK: true, wantOutput: "trio", wantExact: true},
+	}
+
+	baseEnv := make([]string, 0, len(os.Environ()))
+	for _, item := range os.Environ() {
+		if strings.HasPrefix(item, "QURL_S3_FORWARD_AWS_CREDENTIALS=") ||
+			strings.HasPrefix(item, "AWS_ACCESS_KEY_ID=") ||
+			strings.HasPrefix(item, "AWS_SECRET_ACCESS_KEY=") ||
+			strings.HasPrefix(item, "AWS_SESSION_TOKEN=") {
+			continue
+		}
+		baseEnv = append(baseEnv, item)
+	}
+
+	for _, renderer := range renderers {
+		got, err := renderer.render(testS3WebsiteArgs(renderer.env), testTunnelImageRef, defaultS3StaticConnectorImage)
+		if err != nil {
+			t.Fatalf("render %s instructions: %v", renderer.name, err)
+		}
+		block := firstSlackCodeBlock(t, got)
+		start := strings.Index(block, renderer.resultName+"=\ncase ")
+		if start < 0 {
+			t.Fatalf("%s instructions missing credential gate start:\n%s", renderer.name, block)
+		}
+		end := strings.Index(block[start:], "\nesac")
+		if end < 0 {
+			t.Fatalf("%s instructions missing credential gate end:\n%s", renderer.name, block)
+		}
+		gate := block[start : start+end+len("\nesac")]
+		gate += "\nprintf '%s' \"$" + renderer.resultName + "\"\n"
+
+		for _, tc := range cases {
+			t.Run(renderer.name+"/"+tc.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, sh, "-c", gate) //nolint:gosec // G204: sh comes from exec.LookPath and gate is generated from constants.
+				cmd.Env = append(append([]string{}, baseEnv...), tc.env...)
+				output, err := cmd.CombinedOutput()
+				if tc.wantOK != (err == nil) {
+					t.Fatalf("gate error = %v, output = %q, wantOK = %v", err, output, tc.wantOK)
+				}
+				wantOutput := tc.wantOutput
+				switch wantOutput {
+				case "pair":
+					wantOutput = renderer.pair
+				case "trio":
+					wantOutput = renderer.trio
+				}
+				if tc.wantExact && string(output) != wantOutput {
+					t.Fatalf("gate output = %q, want exact %q", output, wantOutput)
+				}
+				if !tc.wantExact && !strings.Contains(string(output), wantOutput) {
+					t.Fatalf("gate output = %q, want substring %q", output, wantOutput)
+				}
+			})
+		}
+	}
 }
 
 func assertNoS3SecretLeaks(t *testing.T, got string) {
