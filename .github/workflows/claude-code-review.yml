@@ -262,7 +262,7 @@ jobs:
         # `is_error: true` fail instead of producing a false-green review
         # check. Moving the pin forward keeps that guarantee; do not pin below
         # that floor.
-        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
+        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
@@ -395,12 +395,43 @@ jobs:
             echo "::error::Claude changed the credential-free review configuration; failing closed."
             exit 1
           fi
+          # claude-code-action >= v1.0.187 runs replaceCheckoutCredentials() in
+          # every mode (anthropics/claude-code-action#1597), including the API
+          # signing mode used here. It unconditionally runs
+          #   git remote set-url origin https://x-access-token:<token>@<host>/<repo>.git
+          # which sets the fetch and push URL together, so after the action
+          # origin is either still LOCAL_ORIGIN or exactly that one remote.
+          #
+          # `contents: read` on this job -- not the workflow-level
+          # `permissions: {}`, which the job block replaces -- is what denies a
+          # push with that token. Accept only these two states, and require
+          # fetch and push to be the SAME one: a split (hermetic fetch,
+          # credentialed push) is not something the action can produce.
+          # Match the remote structurally, not by token value: claude.yml omits
+          # github_token so the action embeds its own GitHub App token, which
+          # this step never sees. Userinfo must be x-access-token plus a single
+          # opaque secret containing no "@" or "/", so a crafted host cannot be
+          # smuggled through the credential field.
+          origin_host="${GITHUB_SERVER_URL#https://}"
+          action_origin_re="^https://x-access-token:[^@/]+@${origin_host//./\\.}/${GITHUB_REPOSITORY//./\\.}\\.git$"
           mapfile -t origin_urls < <(git remote get-url --all origin 2>/dev/null)
           mapfile -t origin_push_urls < <(git remote get-url --push --all origin 2>/dev/null)
+          origin_fetch="${origin_urls[0]-}"
+          origin_push="${origin_push_urls[0]-}"
           if (( ${#origin_urls[@]} != 1 || ${#origin_push_urls[@]} != 1 )) ||
-             [[ "${origin_urls[0]}" != "${LOCAL_ORIGIN}" || "${origin_push_urls[0]}" != "${LOCAL_ORIGIN}" ]]; then
+             [[ "${origin_fetch}" != "${origin_push}" ]] ||
+             [[ "${origin_fetch}" != "${LOCAL_ORIGIN}" && ! "${origin_fetch}" =~ ${action_origin_re} ]]; then
+            # Redact any embedded credential before logging.
             echo "::error::Claude changed the credential-free review origin; failing closed."
+            echo "::error::origin fetch=${origin_fetch//:*@/:***@} push=${origin_push//:*@/:***@}"
             exit 1
+          fi
+          # Drop the action's credentialed remote before anything downstream can
+          # use it. Everything after this point is local rev-parse plus gh, which
+          # authenticates from GH_TOKEN directly, so nothing needs a real remote.
+          if [[ "${origin_fetch}" != "${LOCAL_ORIGIN}" ]]; then
+            git remote set-url origin "${LOCAL_ORIGIN}"
+            git remote set-url --push origin "${LOCAL_ORIGIN}"
           fi
           mapfile -t recurse_submodule_values < <(git config --local --get-all fetch.recurseSubmodules 2>/dev/null)
           if (( ${#recurse_submodule_values[@]} != 1 )) || [[ "${recurse_submodule_values[0]}" != "false" ]]; then
