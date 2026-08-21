@@ -25,14 +25,16 @@ const (
 )
 
 // crawlFlags returns a flags value pointed at the qURL test server, in either
-// dry-run or apply mode. Tables are sandbox-named so the prod rail stays off.
+// dry-run or apply mode. The two scanned tables are sandbox-named so the prod
+// rail stays off; workspaceStateTable carries its real env-agnostic infra name,
+// which the rail does not look at either way.
 func crawlFlags(endpoint string, dryRun bool) *flags {
 	return &flags{
 		envLabel:               "sandbox",
-		channelPoliciesTable:   "qurl-bot-slack-sandbox-channel-policies",
-		workspaceMappingsTable: "qurl-bot-slack-sandbox-workspace-mappings",
-		workspaceStateTable:    "qurl-sandbox-workspace-state",
-		kmsKeyARN:              "arn:aws:kms:us-east-1:111122223333:key/abc",
+		channelPoliciesTable:   sandboxPoliciesTable,
+		workspaceMappingsTable: sandboxMappingsTable,
+		workspaceStateTable:    stateTableName,
+		kmsKeyARN:              testKMSKeyARN,
 		qurlEndpoint:           endpoint,
 		logFormat:              "json",
 		pageLimit:              100,
@@ -61,7 +63,7 @@ func orphanScenario(t *testing.T, dryRun bool) (*flags, *fakeDDB, fakeProvider, 
 	provider := fakeProvider{keys: map[string]string{testTeam: "key"}}
 	store, err := slackdata.NewStore(context.Background(),
 		slackdata.WithDynamoDBClient(fake),
-		slackdata.WithTableNames("qurl-bot-slack-sandbox-workspace-mappings", "qurl-bot-slack-sandbox-channel-policies"),
+		slackdata.WithTableNames(sandboxMappingsTable, sandboxPoliciesTable),
 	)
 	if err != nil {
 		t.Fatalf("build store: %v", err)

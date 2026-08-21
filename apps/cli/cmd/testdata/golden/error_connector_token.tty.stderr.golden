@@ -1,0 +1,3 @@
+[31m[1mError:[0m This machine isn't enrolled as a qURL Connector yet, and no enrollment token is configured.
+
+  [2mHint: set QURL_CONNECTOR_TOKEN (or point QURL_CONNECTOR_TOKEN_FILE at a file holding the token) and run the command again. Enrollment tokens are single-use — create one in the qURL console. There is deliberately no flag for it: command-line arguments leak into shell history.[0m

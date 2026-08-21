@@ -1,0 +1,6 @@
+Error: Forbidden (HTTP 403)
+
+  this key does not carry the scope this operation requires
+
+  Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access.
+  Request ID: req_test

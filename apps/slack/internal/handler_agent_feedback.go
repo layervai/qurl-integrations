@@ -24,12 +24,12 @@ func agentFeedbackBlock() map[string]any {
 				blockKitFieldType:     "feedback_buttons",
 				blockKitFieldActionID: agentFeedbackActionID,
 				"positive_button": map[string]any{
-					"text":                plainTextObj("Helpful"),
+					blockKitFieldText:     plainTextObj("Helpful"),
 					"accessibility_label": "Mark this qURL response as helpful",
 					blockKitFieldValue:    agentFeedbackPositiveValue,
 				},
 				"negative_button": map[string]any{
-					"text":                plainTextObj("Not helpful"),
+					blockKitFieldText:     plainTextObj("Not helpful"),
 					"accessibility_label": "Mark this qURL response as not helpful",
 					blockKitFieldValue:    agentFeedbackNegativeValue,
 				},
@@ -46,7 +46,7 @@ func agentGeneratedReplyBlocks(markdown string) []any {
 	return []any{
 		map[string]any{
 			blockKitFieldType: "markdown",
-			"text":            markdown,
+			blockKitFieldText: markdown,
 		},
 		agentFeedbackBlock(),
 	}

@@ -1,63 +1,52 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
-	"github.com/layervai/qurl-integrations/shared/client"
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 )
 
 func listCmd(opts *globalOpts) *cobra.Command {
 	var (
-		limit  int
-		cursor string
-		status string
-		query  string
-		sort   string
+		limit   int
+		cursor  string
+		status  string
+		resType string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List qURLs",
-		Example: `  qurl list
-  qurl list --status active --limit 50
-  qurl list --sort created_at:desc
-  qurl list --query "dashboard"`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if status != "" {
-				switch status {
-				case client.StatusActive, client.StatusExpired, client.StatusRevoked, client.StatusConsumed:
-				default:
-					return fmt.Errorf("invalid status %q: must be active, expired, revoked, or consumed", status)
-				}
-			}
+		Short: "List your published resources",
+		Long: `List the resources published under your account, one row per resource.
 
-			c, err := opts.newClient()
+The text table shortens each CRID from the middle so rows stay readable;
+JSON output and --quiet always carry the full CRID. Pages continue with
+--cursor when there are more results.`,
+		Example: `  qurl list --status active
+  qurl list --quiet | xargs -n1 qurl resolve --quiet`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := opts.newClient()
 			if err != nil {
 				return err
 			}
-
-			result, err := c.List(cmd.Context(), client.ListInput{
+			page, err := client.List(cmd.Context(), qurlapi.ListOptions{
 				Limit:  limit,
 				Cursor: cursor,
 				Status: status,
-				Query:  query,
-				Sort:   sort,
+				Type:   resType,
 			})
 			if err != nil {
-				return fmt.Errorf("list qURLs: %w", err)
+				return err
 			}
-
-			return opts.formatter().FormatList(cmd.OutOrStdout(), result)
+			return opts.printer().List(page)
 		},
 	}
 
-	cmd.Flags().IntVarP(&limit, "limit", "l", 20, "Maximum number of qURLs to return")
-	cmd.Flags().StringVar(&cursor, "cursor", "", "Pagination cursor from a previous list response")
-	cmd.Flags().StringVar(&status, "status", "", "Filter by status (active, expired, revoked, consumed)")
-	cmd.Flags().StringVar(&query, "query", "", "Search description and target URL")
-	cmd.Flags().StringVar(&sort, "sort", "", "Sort field:direction (e.g., created_at:desc)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum resources per page, 1-100 (default: service decides)")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "continue from a previous page's cursor")
+	cmd.Flags().StringVar(&status, "status", "", "only resources with this status, e.g. active")
+	cmd.Flags().StringVar(&resType, "type", "", "only resources of this kind: url or tunnel")
 
 	return cmd
 }

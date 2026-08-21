@@ -137,23 +137,17 @@ moves after checks turn green, update the PR branch or rerun checks against the
 new merge result before merging. When required contexts change in GitHub
 settings, update this section in the same operational change.
 
-App- and shared-impacting PRs report always-present aggregate checks that can be
-required by branch protection: `slack / required`, `discord / required`,
+App- and shared-impacting PRs report always-present aggregate checks, and
+branch protection requires all nine: `slack / required`, `discord / required`,
 `chrome-extension / required`, `edge-extension / required`, `teams / required`,
 `cli / required`, `s3-static-connector / required`, `e2e / required`, and
-`shared / required`. The
-connector aggregate is new in #1042 (refs #1022), which moved
-`s3-static-connector.yml` off `on.push.paths` onto the `changes`-job pattern;
-adding it to branch protection is a separate settings change. `e2e / required`
-is new and needs that same settings change — until it is added, `e2e.yml`
-reports its result on every PR without gating any merge. `cli / required` is
-newer still (it landed with the CLI v2 CI family) and needs the same settings
-change — until then, `cli.yml` likewise reports without gating. Each workflow's
-`changes` filter is the source of truth for which paths need validation. When
-that filter matches, the aggregate validates every quality gate listed in its
-workflow `needs:` set. When branch protection requires path-gated app/shared
-workflows, it should require only these aggregate checks, not the internally
-skipped expensive jobs.
+`shared / required`. The connector aggregate arrived in #1042 (refs #1022),
+which moved `s3-static-connector.yml` off `on.push.paths` onto the
+`changes`-job pattern; `cli / required` arrived with the CLI v2 CI family in
+#1109. Each workflow's `changes` filter is the source of truth for which paths
+need validation. When that filter matches, the aggregate validates every
+quality gate listed in its workflow `needs:` set. Branch protection requires
+only these aggregate checks, never the internally skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external
@@ -166,6 +160,237 @@ it. Branch protection requires the exact `Validate GitHub Actions pins`
 context. It is separate from the existing
 `age-check / Check GitHub Actions pin ages` context, even though both contexts
 are produced by the same workflow file.
+
+Every PR is likewise gated by `Lint and test scripts`, the single job in
+`.github/workflows/scripts.yml`, which became required on 2026-08-19. It is the
+only pre-merge enforcement of `scripts/check-extension-lockstep.sh` — the 26
+files Chrome and Edge share, among them the multipart header-injection
+sanitizers, the HTTPS-only link normalization, and the optional-host-permission
+grant and revoke paths — as well as of `scripts/check-i18n-parity.sh`, the
+release-please config/manifest pairing, and `install.sh`'s tag-selection policy.
+CLAUDE.md describes all four as CI-enforced and no other workflow re-checks any
+of them, so while this context was advisory the drift it detects annotated a PR
+without blocking its merge. It could also sit red on `main` unnoticed, and did:
+2026-08-13 at `0caf00d4`, fixed the same day by #1052.
+
+It earns the requirement on the three properties `workflow-contract.yml`'s
+header cites for its own context. It is unfiltered on `pull_request`, so it
+reports on every PR rather than going missing on a stacked one; it is
+secret-free on a read-only token, so requiring it adds no privileged surface;
+and it runs in about eight seconds against a five-minute cap. It also carries no
+job-level `if:`, so unlike `claude-review` below it cannot report `skipped` and
+cannot be satisfied empty — the step-level `!cancelled()` guards change which
+steps run, never whether the job reports. Requiring it removes an asymmetry that
+had begun to distort where guards get written: #1191 put a new Chrome/Edge
+workflow lockstep guard in `internal/ciworkflows/` rather than in `scripts/`
+precisely because only the Go test rode a required check.
+
+Every human-authored, non-draft PR is also gated by `claude-review`, the
+terminal Claude pass in `.github/workflows/claude-code-review.yml`. It became
+required on 2026-08-19, after #1173 merged three minutes before its review
+posted. That review is the long pole — roughly four minutes against a minute or
+less for every other context — so the merge box turns green while it is still
+running, and a review landing afterwards lands on a closed PR nobody rereads.
+That job runs `if: always()` and decides inside itself, for the same reason the
+per-app aggregates above do: a job-level `if:` that withholds the review
+reports `skipped`, GitHub scores a skipped required check as satisfied, and
+withholding a review would then also satisfy the context meant to gate on it.
+Its first step classifies the PR and its last step refuses to finish green
+unless the run either published a review or declared why it withheld one, so a
+pass with nothing behind it fails instead of going quietly green.
+
+Bot-authored and fork PRs cannot receive this secrets-bearing review and still
+pass without one. That exemption is deliberate, and it is now annotated on the
+check and written to the run summary rather than left as an unexplained skip —
+a green `claude-review` on one of those PRs means the changes are unreviewed by
+Claude, and says so. Drafts are exempt too but cannot merge on it: GitHub
+blocks merging a draft, and marking one ready retriggers the workflow. Release
+PRs are unaffected because a `GITHUB_TOKEN`-authored PR triggers no workflow run
+at all, so it already reports none of these contexts and merges by admin
+override.
+
+`internal/ciworkflows` pins that shape and executes both of those steps
+directly. It has to: the workflow runs on `pull_request_target`, so a PR
+editing it is checked by the default branch's copy of the file, and its own
+green `claude-review` is never evidence about the edit.
+
+The full required set is the block below — those nine aggregates plus
+`Workflow Contract`, `Validate GitHub Actions pins`, `Lint and test scripts`,
+`claude-review`, and the four `age-check / *` contexts, seventeen in all. That
+block is the machine-readable source of truth: `internal/ciworkflows` parses it,
+so a context added, removed, or respelled belongs there first. **Required
+contexts match case-sensitively**, and a context that matches no job does not
+fail open: it pins the merge box at "Expected — Waiting for status to be
+reported" until an admin overrides it.
+
+<!-- BEGIN required-contexts -->
+
+```text
+slack / required
+discord / required
+chrome-extension / required
+edge-extension / required
+teams / required
+cli / required
+s3-static-connector / required
+e2e / required
+shared / required
+Workflow Contract
+Validate GitHub Actions pins
+Lint and test scripts
+claude-review
+age-check / Check GitHub Actions pin ages
+age-check / check-docker-age
+age-check / check-go-age
+age-check / check-pip-age
+```
+
+<!-- END required-contexts -->
+
+What that block buys, and what it does not. `internal/ciworkflows` asserts that
+every context in it resolves to a job this repo actually defines — a job's
+`name:`, its job id where it sets none, or the caller half of a
+`<caller-job> / <inner-job>` reusable call — and that its nine aggregates match
+`requiredWorkflowSpecs` and README.md exactly. A typo, a case slip, or a job
+rename that orphans a documented context fails `Workflow Contract` at PR time.
+
+This block also bounds which workflows may narrow the three `on.pull_request`
+keys that decide whether a workflow starts at all: `branches:`, `types:`, and a
+trigger-level `paths:`. A workflow reporting a context listed here must run on
+PRs stacked on a feature branch too: `main`'s protection does not reach such a
+PR, so its checks are absent rather than pending, and the PR reads green having
+run none of them. Deleting the merged base does not recover the run: GitHub
+retargets the PR onto `main`, where the context applies again, but a base change
+arrives as the `edited` activity type, which no branch-filtered workflow here
+takes, so the PR then stalls at "Expected — Waiting for status to be reported"
+until its next push — which strict status checks require before merging anyway.
+One lost signal surfacing late, not a second failure.
+`internal/ciworkflows` records each pull-request workflow's intended filters and
+reads this block to tell which of them gate merges, so one recorded as
+deliberately narrow fails `Workflow Contract` the moment it starts gating. The
+nine aggregate workflows are additionally pinned against their own recorded
+filters, but that record is not what authorizes a narrowing: every one of them
+reports a context listed above, so this block is what a narrow filter is
+weighed against. Narrowing one and editing `requiredWorkflowSpecs` to match
+fails `Workflow Contract` rather than passing as self-consistent (#1183, #1213).
+
+The two keys beside `branches:` reach that failure from a different direction,
+and on any PR rather than only a stacked one. A workflow that never starts
+registers nothing, so a required context behind a narrowed `types:` — or behind
+a trigger-level `paths:` the diff misses — leaves the merge box at "Expected —
+Waiting for status to be reported" with nothing red to point at. The nine narrow
+by diff with `dorny/paths-filter` inside their `changes` job precisely so the
+workflow still starts and the aggregate still reports; lifting that up to the
+trigger is what this catches (#1225).
+
+The four `age-check / *` contexts are the one partial exception. Only their
+caller half — the `age-check` job in each `dependency-age-check-*.yml` — is
+defined here; the inner half is a job in the reusable workflow upstream. So a
+respelled *inner* name (`check-goo-age`) still resolves offline, and the count
+check only catches a caller going missing. Those four inner spellings are
+checked by the live diff below and nothing else.
+
+It cannot read the live setting. That needs `administration: read`, which
+`GITHUB_TOKEN` cannot be granted at all (the workflow `permissions:` block has
+no such key) and which no repo or org secret here carries; branch protection is
+also unreadable unauthenticated, and this repo uses classic protection, so the
+low-permission rulesets endpoints return nothing. A settings edit that never
+touches this file therefore stays invisible to CI — the exact shape of the
+2026-08-14 incident below. Diff the two by hand as the last step of any
+protection change, with a `gh` login that has admin on the repo:
+
+```bash
+QURL_LIVE_BRANCH_PROTECTION=1 go test -run TestLiveBranchProtection -count=1 ./internal/ciworkflows/...
+```
+
+That test prints the live set against the documented one, context by context,
+and flags case-only differences by name. Without the variable it skips, so CI
+and everyday `go test ./...` runs never reach the API.
+
+On 2026-08-14 the required list was six contexts — `slack / required`,
+`Validate GitHub Actions pins`, and the four `age-check / *`. An edit that
+day replaced all six with a single context spelled `Workflow contract`,
+lowercase `c`, which no job reports. For the next three days every merge was
+blocked by that phantom check and landed through an admin override, with none
+of the six real contexts validating anything. The fix was to correct the
+setting rather than rename the job: `Workflow Contract` is the spelling
+README.md and `internal/ciworkflows` already pin, so renaming would have
+broken both.
+
+Two things made the mistake easy. `PATCH .../required_status_checks`
+*replaces* the `contexts` list rather than appending to it — only
+`POST .../required_status_checks/contexts` appends — so adding one check that
+way silently dropped the rest. And the requirement was added an hour and a
+quarter before #1092 merged the workflow behind it, so for that window nothing
+distinguished a typo from a workflow that had not landed yet: neither
+reports.
+
+When changing required contexts, send the complete desired set in one `PATCH`
+and spell each exactly as the check renders: a job's `name:` where it sets
+one, its job id where it doesn't, and `<caller-job> / <inner-job>` for
+reusable workflow calls, whose inner half is defined in the upstream repo.
+Verify with `gh pr checks <open-PR> --required`, which prints `no required
+checks reported` when a context matches nothing — the cheapest way to catch a
+typo.
+
+Send that set as `checks`, not as the deprecated `contexts`. Every context on
+`main` today is pinned to `app_id` 15368, GitHub Actions; the `contexts` form
+carries no app, so a round-trip through it unpins all of them and leaves each
+satisfiable by any GitHub App with `checks: write`. A `GET` still populates
+both fields, so read `checks` to see the pinning — `contexts` looks identical
+either way.
+
+PRs opened by release-please carry no checks at all, because GitHub does not
+fire workflows for events created by `GITHUB_TOKEN` — the same recursion
+guard `release-please.yml` documents for tag pushes. Those PRs need an admin
+override to merge regardless of the required set.
+
+No workflow here runs on `merge_group`, deliberately. Merges are manual squashes
+and no queue is configured. Ask GraphQL, not branch protection:
+
+```bash
+gh api graphql -f query='{repository(owner:"layervai",name:"qurl-integrations"){mergeQueue(branch:"main"){id}}}'
+```
+
+That returns `{"data":{"repository":{"mergeQueue":null}}}` today. The classic
+protection response carries no merge-queue field at all, so reaching for
+`--jq '.required_merge_queue'` there prints nothing whether or not a queue
+exists — confirm with `--jq 'has("required_merge_queue")'`, which is `false`.
+That is a check that cannot fail, the same shape as a required context matching
+no job, and it does not belong in this section.
+
+A queue evaluates required contexts against its own temporary ref, so a required
+context whose workflow does not handle that event never reports for a queue
+entry, leaving it at "Expected — Waiting for status to be reported" — the
+2026-08-14 stall above, moved from one pull request onto every queue entry.
+Until this change exactly two workflows carried the trigger,
+`workflow-contract.yml` from #1092 and `scripts.yml` from #940 for "future
+merge-queue compatibility", while the required contexts never followed; the
+configuration read as queue support that would have hung on first use. Both
+lines are gone, and `internal/ciworkflows` now fails when the required set stops
+agreeing, in either direction.
+
+Enabling a queue later is more than restoring those two lines. Every workflow
+behind a required context needs the trigger; the nine aggregates need a
+merge-group path in their `changes` detector, since `dorny/paths-filter` runs
+its pull-request path or its push path here and a queue ref is neither; and
+`claude-review` cannot be given one as written. `claude-code-review.yml` is
+`pull_request_target`-only because it holds `ANTHROPIC_API_KEY` and must load
+from the trusted default branch. That trigger, not the job gate, is the
+property: a merge group never starts the workflow, so the context cannot
+report for a queue entry. Restructuring is more than adding the trigger — the
+job's steps read `github.event.pull_request` throughout, for the head and base
+SHAs the review is pinned to, the number it publishes against, and the draft
+and fork guards, and a merge group carries none of it. So that workflow has to
+be restructured before the required set can agree on `merge_group` at all.
+
+The marker below is the machine-readable half, read by `internal/ciworkflows`
+the same way the required-contexts block is. While it reads `none`, no workflow
+may declare `merge_group`; flipping it to `required` means every workflow behind
+a required context must declare the trigger in the same change — after clearing
+the `claude-review` blocker above, which no offline check can verify for you.
+
+<!-- merge-queue-posture: none -->
 
 ## Code Conventions
 
@@ -183,7 +408,6 @@ are produced by the same workflow file.
 import (
     "github.com/layervai/qurl-integrations/shared/client"
     "github.com/layervai/qurl-integrations/shared/auth"
-    "github.com/layervai/qurl-integrations/shared/formatting"
 )
 ```
 

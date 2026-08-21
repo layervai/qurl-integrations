@@ -193,7 +193,7 @@ func rateLimitOAuth(limiter *oauthRateLimiter, next http.Handler) http.Handler {
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(decision.retryAfterSeconds))
 		if decision.logLimited {
-			slog.Warn("oauth rate limit exceeded", //nolint:gosec // G706: slog escapes control bytes; values are needed for operator triage.
+			slog.Warn("oauth rate limit exceeded",
 				"ip", ip,
 				"rate_limit_key", key,
 				"path", r.URL.Path,
@@ -254,7 +254,7 @@ func warnOAuthClientIPFallback(limiter *oauthClientIPFallbackLogLimiter, r *http
 	if !limiter.allow(reason + ":" + fallback) {
 		return
 	}
-	slog.Warn("oauth client ip using fallback", //nolint:gosec // G706: path is request-controlled; slog escapes control bytes and the path is useful for proxy triage.
+	slog.Warn("oauth client ip using fallback",
 		"path", r.URL.Path,
 		"reason", reason,
 		"fallback", fallback)
