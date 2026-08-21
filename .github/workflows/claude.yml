@@ -386,14 +386,20 @@ jobs:
           # Accept only those two states, and require fetch and push to be the
           # SAME one: a split (hermetic fetch, credentialed push) is not
           # something the action can produce.
-          expected_action_origin="https://x-access-token:${GH_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git"
+          # Match the remote structurally, not by token value: claude.yml omits
+          # github_token so the action embeds its own GitHub App token, which
+          # this step never sees. Userinfo must be x-access-token plus a single
+          # opaque secret containing no "@" or "/", so a crafted host cannot be
+          # smuggled through the credential field.
+          origin_host="${GITHUB_SERVER_URL#https://}"
+          action_origin_re="^https://x-access-token:[^@/]+@${origin_host//./\\.}/${GITHUB_REPOSITORY//./\\.}\\.git$"
           mapfile -t origin_urls < <(git remote get-url --all origin 2>/dev/null)
           mapfile -t origin_push_urls < <(git remote get-url --push --all origin 2>/dev/null)
           origin_fetch="${origin_urls[0]-}"
           origin_push="${origin_push_urls[0]-}"
           if (( ${#origin_urls[@]} != 1 || ${#origin_push_urls[@]} != 1 )) ||
              [[ "${origin_fetch}" != "${origin_push}" ]] ||
-             [[ "${origin_fetch}" != "${LOCAL_ORIGIN}" && "${origin_fetch}" != "${expected_action_origin}" ]]; then
+             [[ "${origin_fetch}" != "${LOCAL_ORIGIN}" && ! "${origin_fetch}" =~ ${action_origin_re} ]]; then
             # Redact any embedded credential before logging.
             echo "::error::Claude changed the credential-free local origin; failing closed."
             echo "::error::origin fetch=${origin_fetch//:*@/:***@} push=${origin_push//:*@/:***@}"
