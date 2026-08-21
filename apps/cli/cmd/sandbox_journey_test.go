@@ -232,7 +232,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	assertListFindsCRID(ctx, t, cliEnv, pub.CRID)
 	link := assertResolveJourney(ctx, t, cliEnv, pub.CRID)
 	// The link value never reaches the log: CI logs are public, and a
-	// minted link carries the sandbox hostname and a live qv2 credential.
+	// minted link carries the sandbox hostname and a live qURL credential.
 	t.Logf("resolved %s -> a verified %d-byte https link", pub.CRID, len(link))
 	assertGetDownloadsBytes(ctx, t, cliEnv, pub.CRID)
 	assertDeleteJourney(ctx, t, cliEnv, pub.CRID)

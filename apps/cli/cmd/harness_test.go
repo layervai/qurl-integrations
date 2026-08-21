@@ -133,9 +133,11 @@ type runOpts struct {
 	ctx context.Context
 	// Connector seams; nil keeps the production wiring (agent.Open /
 	// knock.NewNative / package-default supervisor timings).
-	connectorOpen func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
-	newKnocker    func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
-	connectorTune func(cfg *supervisor.Config)
+	connectorOpen    func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
+	connectorResolve func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error)
+	newKnocker       func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
+	connectorTune    func(cfg *supervisor.Config)
+	connectorReady   func()
 	// syncStreams serializes writes to the captured stdout/stderr buffers.
 	// The connector serve test needs it: the linked FRP client and the
 	// in-process test server log from their own goroutines through the
@@ -229,12 +231,16 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		if o.connectorOpen != nil {
 			g.openConnectorRuntime = o.connectorOpen
 		}
+		if o.connectorResolve != nil {
+			g.resolveConnectorResource = o.connectorResolve
+		}
 		if o.newKnocker != nil {
 			g.newConnectorKnocker = o.newKnocker
 		}
 		if o.connectorTune != nil {
 			g.tuneConnectorSupervisor = o.connectorTune
 		}
+		g.onConnectorProxyReady = o.connectorReady
 		// The FRP global logger is pinned once for the whole test binary in
 		// TestMain; a per-invocation swap would race the in-process tunnel
 		// server's own log goroutines.

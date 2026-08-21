@@ -170,7 +170,7 @@ func TestGetBrowserOpensVerifiedLinkOnTTY(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	wantLink := "https://qurl.link/#qv2.test.link"
+	wantLink := "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"
 	if len(browser.opened) != 1 || browser.opened[0] != wantLink {
 		t.Fatalf("browser opened %q, want exactly [%s]", browser.opened, wantLink)
 	}
@@ -434,7 +434,7 @@ func mustNotExistCmd(t *testing.T, path string) {
 func portalServer(t *testing.T) (srv *apitest.Server, link string) {
 	t.Helper()
 	srv = apitest.NewServer(t)
-	link = srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
+	link = srv.URL + apitest.PortalPath + "#qv2t1.1.1.1.claims.secret.sig"
 	srv.SetResolveQURL(link)
 	return srv, link
 }
@@ -452,9 +452,9 @@ func mustNeverFetchPortalPage(t *testing.T, srv *apitest.Server) {
 	}
 }
 
-// TestGetDownloadFetchesGrantedContentNotPortalPage is the regression test
-// for the fragment-credential defect: `get --file` on a qv2 link must ask
-// the platform for access and download the granted content URL — never the
+// TestGetDownloadFetchesGrantedContentNotPortalPage is the regression test for
+// the fragment-credential defect: `get --file` on a qURL credential link must
+// ask the platform for access and download the granted content URL — never the
 // link itself, whose plain GET serves the in-browser verification page.
 func TestGetDownloadFetchesGrantedContentNotPortalPage(t *testing.T) {
 	srv, link := portalServer(t)
@@ -508,6 +508,36 @@ func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
 	if !strings.Contains(res.stderr.String(), "QURL_DEPLOYMENT") {
 		t.Errorf("stderr = %q, want the QURL_DEPLOYMENT remedy", res.stderr.String())
 	}
+	mustNeverFetchPortalPage(t, srv)
+}
+
+// TestGetRetiredQv2LinkFailsThroughAccessFlow pins the retired transport as a
+// fail-closed tombstone. It is not accepted for compatibility, but it must
+// still reach the opener and be discarded instead of plain-GETting the portal
+// page and saving verifier HTML as if it were content.
+func TestGetRetiredQv2LinkFailsThroughAccessFlow(t *testing.T) {
+	srv := apitest.NewServer(t)
+	link := srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
+	srv.SetResolveQURL(link)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var opened []string
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortal: func(_ context.Context, got string) (string, error) {
+			opened = append(opened, got)
+			return "", consume.ErrLinkVerification
+		},
+	})
+	if res.code != 12 {
+		t.Fatalf("exit = %d, want 12 (verification failed); stderr: %s", res.code, res.stderr.String())
+	}
+	if len(opened) != 1 || opened[0] != link {
+		t.Fatalf("access opener saw %q, want exactly the retired link once", opened)
+	}
+	mustEmptyStdout(t, res)
+	mustNotExistCmd(t, dest)
+	mustNotExistCmd(t, dest+".part")
 	mustNeverFetchPortalPage(t, srv)
 }
 

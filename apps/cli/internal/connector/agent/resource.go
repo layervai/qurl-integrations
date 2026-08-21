@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 
 	qurl "github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 // EnvKnockResourceID is an advanced custom-deployment override for the
@@ -16,90 +17,116 @@ import (
 // qURL Connector operator contract shared with the standalone Connector.
 const EnvKnockResourceID = "LAYERV_KNOCK_RESOURCE_ID"
 
-// ResolveResource resolves slug to its active qURL Connector resource using
-// the registered device's resource client: read-by-slug first, ensure on
-// not-found, and a read-back reconcile when the ensure outcome is uncertain.
-//
-// The ensure leg is a mutation whose outcome can be unknown (the request may
-// have committed server-side after a transport failure). An authoritative
-// platform rejection (a 4xx that is not outcome-ambiguous) is surfaced
-// directly; any other ensure failure triggers one read-back by slug so an
-// already-committed row is adopted instead of a second mutation being fired.
-// When that reconcile still finds nothing, the uncertainty is surfaced to the
-// operator rather than retried: a second blind ensure could double-provision.
-func ResolveResource(ctx context.Context, client *qurl.Client, slug string) (*qurl.ConnectorResource, error) {
-	result, err := ResolveResourceWithResult(ctx, client, slug)
-	if err != nil {
-		return nil, err
-	}
-	return result.Resource, nil
-}
-
-// ResolvedResource carries the selected Connector resource plus the strongest
-// available provenance for publish-style output. FoundExisting is nil only
-// when a failed ensure was reconciled by a read: the resource exists, but the
-// client cannot truthfully say whether this invocation created it.
+// ResolvedResource carries the selected Connector resource plus the creation
+// provenance authenticated by the assigned cell.
 type ResolvedResource struct {
 	Resource      *qurl.ConnectorResource
 	FoundExisting *bool
 }
 
-// ResolveResourceWithResult is ResolveResource with creation provenance.
-func ResolveResourceWithResult(ctx context.Context, client *qurl.Client, slug string) (*ResolvedResource, error) {
-	if client == nil {
-		return nil, errors.New("registered device resource client is nil")
-	}
-	resource, err := client.GetConnectorResourceBySlug(ctx, slug)
-	if err == nil {
-		found := true
-		return &ResolvedResource{Resource: resource, FoundExisting: &found}, nil
-	}
-	if errors.Is(err, qurl.ErrAgentStateContinuity) {
-		return nil, fmt.Errorf("connector %q: state continuity lost while reading by slug: %w", slug, err)
-	}
-	if !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
-		return nil, fmt.Errorf("connector %q: read existing identity by slug before ensure: %w", slug, err)
-	}
+// Test-only seam for qurl-go's direct assigned-cell LST. Production keeps this
+// bound to the SDK and has no HTTP, Hub, relay, or cross-cell fallback.
+var resolveRegisteredAgentConnectorResource = qurl.ResolveRegisteredAgentConnectorResource
 
-	result, ensureErr := client.EnsureConnectorResource(ctx, slug)
-	if ensureErr == nil {
-		if result == nil || result.Resource == nil {
-			return nil, fmt.Errorf("connector %q: qURL API returned no resource after ensure", slug)
-		}
-		found := result.FoundExisting
-		return &ResolvedResource{Resource: result.Resource, FoundExisting: &found}, nil
-	}
-	if errors.Is(ensureErr, qurl.ErrAgentStateContinuity) {
-		return nil, fmt.Errorf("connector %q: state continuity lost during ensure: %w", slug, ensureErr)
-	}
-	if authoritativeEnsureRejection(ensureErr) {
-		return nil, fmt.Errorf("connector %q: %w", slug, ensureErr)
-	}
-	resource, err = client.GetConnectorResourceBySlug(ctx, slug)
-	if err == nil {
-		return &ResolvedResource{Resource: resource}, nil
-	}
-	if errors.Is(err, qurl.ErrConnectorResourceNotFound) {
-		return nil, fmt.Errorf("connector %q: ensure outcome is uncertain and no active resource is visible by slug; not retrying automatically (a second ensure could double-provision): %w", slug, ensureErr)
-	}
-	return nil, errors.Join(
-		fmt.Errorf("connector %q: ensure outcome is uncertain: %w", slug, ensureErr),
-		fmt.Errorf("connector %q: reconcile read after uncertain ensure: %w", slug, err),
-	)
+// ResolveResourceWithResult resolves or creates one Connector resource over
+// native NHP using the registered runtime's assigned cell. It persists the
+// exact nonce and continuity assertion before dispatch, replays them after an
+// uncertain outcome, and atomically commits the complete authenticated binding
+// on success.
+func ResolveResourceWithResult(
+	ctx context.Context,
+	binding *qurl.AgentRuntimeBinding,
+	store *state.Store,
+	connectorID string,
+	udpOpts ...qurl.AgentRuntimeUDPOption,
+) (resolved *ResolvedResource, retErr error) {
+	return resolveResourceWithRequestObserver(ctx, binding, store, connectorID, nil, udpOpts...)
 }
 
-// authoritativeEnsureRejection reports whether an ensure failure is a
-// definitive platform rejection rather than an ambiguous outcome: a 4xx API
-// error that is not marked outcome-unknown. Definitive rejections must not
-// trigger the read-back adoption path — the platform said no.
-func authoritativeEnsureRejection(err error) bool {
-	if errors.Is(err, qurl.ErrConnectorResourceOutcomeUnknown) {
-		return false
+type connectorResourceRequestObserver func(qurl.NativeConnectorResourceRequest) error
+
+func resolveResourceWithRequestObserver(
+	ctx context.Context,
+	binding *qurl.AgentRuntimeBinding,
+	store *state.Store,
+	connectorID string,
+	observer connectorResourceRequestObserver,
+	udpOpts ...qurl.AgentRuntimeUDPOption,
+) (resolved *ResolvedResource, retErr error) {
+	if binding == nil {
+		return nil, errors.New("registered device runtime binding is nil")
 	}
-	var apiErr *qurl.APIError
-	return errors.As(err, &apiErr) &&
-		apiErr.StatusCode >= http.StatusBadRequest &&
-		apiErr.StatusCode < http.StatusInternalServerError
+	if store == nil {
+		return nil, errors.New("registered device state store is nil")
+	}
+	tx, err := store.BeginConnectorResource(ctx, connectorID)
+	if err != nil {
+		return nil, fmt.Errorf("connector %q: prepare native resource request: %w", connectorID, err)
+	}
+	defer func() {
+		if closeErr := tx.Close(); closeErr != nil {
+			// Do not report a usable result when transaction ownership could not
+			// be released cleanly. Commit already made a successful binding
+			// durable, so the next invocation warm-continues from that identity.
+			resolved = nil
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
+	request := tx.Request()
+	if observer != nil {
+		if err := observer(*request); err != nil {
+			return nil, fmt.Errorf("connector %q: observe durable native resource request before dispatch: %w", connectorID, err)
+		}
+	}
+	resolution, err := resolveRegisteredAgentConnectorResource(ctx, binding, request, udpOpts...)
+	if err != nil {
+		if terminalConnectorResourceDenial(err) {
+			if clearErr := tx.ClearPending(); clearErr != nil {
+				return nil, errors.Join(
+					fmt.Errorf("connector %q: assigned cell rejected resource request: %w", connectorID, err),
+					clearErr,
+				)
+			}
+		}
+		return nil, fmt.Errorf("connector %q: resolve resource through assigned NHP cell: %w", connectorID, err)
+	}
+	if resolution == nil || resolution.Resource == nil {
+		// A successful SDK return is an authenticated completed response. Route
+		// an absent binding through Commit's terminal local-verification policy
+		// so this exact nonce cannot become an unrecoverable replay loop. This is
+		// deliberately VerificationFailed rather than the retryable SDK invalid-
+		// response taxonomy: success means the SDK completed authentication, and
+		// Commit atomically discards the completed request while accepting no
+		// identity.
+		return nil, fmt.Errorf("connector %q: verify authenticated resource binding: %w", connectorID, tx.Commit(nil))
+	}
+	resource := resolution.Resource
+	if err := tx.Commit(&state.ConnectorResourceBinding{
+		ConnectorID:        resource.Slug,
+		ResourceID:         resource.ResourceID,
+		CRID:               resource.CRID,
+		ConnectorRoutingID: resource.ConnectorRoutingID,
+		KnockResourceID:    resource.KnockResourceID,
+	}); err != nil {
+		return nil, fmt.Errorf("connector %q: verify and persist authenticated resource binding: %w", connectorID, err)
+	}
+	found := resolution.FoundExisting
+	return &ResolvedResource{Resource: resource, FoundExisting: &found}, nil
+}
+
+// terminalConnectorResourceDenial is the closed set of authenticated outcomes
+// that prove no mutation occurred. Transport failures, cancellations,
+// unavailable/rate-limited results, and malformed authenticated replies keep
+// the pending request for exact replay. qurl-go guarantees an invalid native
+// request is rejected before DNS, socket creation, or packet construction; it
+// also keeps pending so repairing the local context or runtime binding retries
+// the exact logical request instead of silently replacing its nonce.
+func terminalConnectorResourceDenial(err error) bool {
+	return errors.Is(err, qurl.ErrConnectorResourceIdentityRejected) ||
+		errors.Is(err, qurl.ErrConnectorResourceEntitlementDenied) ||
+		errors.Is(err, qurl.ErrConnectorResourceIdentityConflict) ||
+		errors.Is(err, qurl.ErrConnectorResourceQuotaExceeded) ||
+		errors.Is(err, qurl.ErrConnectorResourceRequestRejected)
 }
 
 // KnockResourceID resolves the NHP knock operand for a resolved resource: the

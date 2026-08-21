@@ -64,15 +64,21 @@ type globalOpts struct {
 	enterPortal func(ctx context.Context, link string) (string, error)
 
 	// Connector seams. openConnectorRuntime walks the agent enroll/open
-	// ladder (production: agent.Open) and newConnectorKnocker builds the
+	// ladder (production: agent.Open), resolveConnectorResource runs the
+	// assigned-cell LST, and newConnectorKnocker builds the
 	// per-cycle platform client from the opened runtime (production:
 	// knock.NewNative over the runtime's binding); tests inject fakes so cmd
 	// tests never touch the real UDP wire. tuneConnectorSupervisor, when
 	// non-nil, adjusts the supervisor config before construction — test-only,
 	// mirroring the supervisor package's own timing seams.
-	openConnectorRuntime    func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
-	newConnectorKnocker     func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
-	tuneConnectorSupervisor func(cfg *supervisor.Config)
+	openConnectorRuntime     func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
+	resolveConnectorResource func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error)
+	newConnectorKnocker      func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
+	tuneConnectorSupervisor  func(cfg *supervisor.Config)
+	// onConnectorProxyReady is a command-test observation seam. Production
+	// leaves it nil; hermetic tests use it to wait for FRP's synchronized
+	// running-phase observation before opening a work connection.
+	onConnectorProxyReady func()
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
 	// no-op and pins the global once in TestMain instead, because its
@@ -153,6 +159,11 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 	}
 	if opts.openConnectorRuntime == nil {
 		opts.openConnectorRuntime = agent.Open
+	}
+	if opts.resolveConnectorResource == nil {
+		opts.resolveConnectorResource = func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error) {
+			return agent.ResolveResourceWithResult(ctx, rt.Binding, rt.Store, connectorID)
+		}
 	}
 	if opts.newConnectorKnocker == nil {
 		opts.newConnectorKnocker = newNativeConnectorKnocker
