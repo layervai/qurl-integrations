@@ -146,6 +146,33 @@ const (
 
 	hintConnectorHubConfig = "Hint: production builds ship this configuration built in — install an official qURL release, or for a custom deployment set QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 together."
 
+	// Native assigned-cell resource setup. These messages deliberately call
+	// the capability a Connector resource, distinct from enrollment and from
+	// the longer-lived cell assignment.
+	msgConnectorResourceInvalidRequest  = "This Connector's saved resource request is invalid, so it stopped instead of sending or changing it."
+	hintConnectorResourceInvalidRequest = "Hint: update to the latest qURL CLI and run the same command again. If it still fails, do not edit the state file; contact LayerV support with the detail above."
+
+	msgConnectorResourceUnavailable  = "The qURL platform couldn't set up this Connector's resource right now."
+	hintConnectorResourceUnavailable = "Hint: run the same command again after a short wait. The CLI saved the exact request and will safely replay it; if the problem persists, check this machine's outbound network access and contact LayerV support."
+
+	msgConnectorResourceEntitlement  = "This Connector identity is not allowed to use the Connector ID you requested."
+	hintConnectorResourceEntitlement = "Hint: confirm --id matches the Connector this machine was enrolled to run. To change that identity, deliberately enroll a fresh state directory with a token created for the correct Connector ID; otherwise ask your qURL administrator to grant access."
+
+	msgConnectorResourceConflict  = "This machine's saved Connector resource identity no longer matches the active resource for that Connector ID, so it refused the replacement."
+	hintConnectorResourceConflict = "Hint: do not delete or edit the state file just to bypass this check. Confirm whether the resource was deliberately replaced, then contact your qURL administrator or LayerV support before reprovisioning this machine."
+
+	msgConnectorResourceQuota  = "Your qURL account has reached its limit on active Connector resources."
+	hintConnectorResourceQuota = "Hint: remove a Connector resource you no longer use with the qURL management tools, or ask your qURL administrator to raise the limit, then run the command again."
+
+	msgConnectorResourceInvalidResponse  = "The qURL platform answered this Connector's resource request in a way this version can't accept, so it stopped instead of guessing."
+	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support with the detail above."
+
+	msgConnectorResourceLocalVerification  = "The qURL platform's answer did not match this Connector's saved request or resource identity, so the CLI refused the answer and stopped."
+	hintConnectorResourceLocalVerification = "Hint: do not delete or edit the state file to accept a different identity. Contact LayerV support with the detail above before running this Connector again."
+
+	msgConnectorResourceLocalConflict  = "The qURL platform's answer reused an identity already saved for a different Connector ID, so the CLI kept the earlier identity and stopped."
+	hintConnectorResourceLocalConflict = "Hint: confirm each Connector uses its intended --id and state directory. Do not edit the state file to bypass this check; contact your qURL administrator or LayerV support with the detail above."
+
 	// Enrollment and platform-assignment renderings for the qurl-go
 	// assignment taxonomy. Without these the SDK's own text reaches the
 	// terminal, and that text is written for SDK callers: it names Go
@@ -275,6 +302,22 @@ func CustomerMessages() []string {
 		hintConnectorProxyNotServing,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
+		msgConnectorResourceInvalidRequest,
+		hintConnectorResourceInvalidRequest,
+		msgConnectorResourceUnavailable,
+		hintConnectorResourceUnavailable,
+		msgConnectorResourceEntitlement,
+		hintConnectorResourceEntitlement,
+		msgConnectorResourceConflict,
+		hintConnectorResourceConflict,
+		msgConnectorResourceQuota,
+		hintConnectorResourceQuota,
+		msgConnectorResourceInvalidResponse,
+		hintConnectorResourceInvalidResponse,
+		msgConnectorResourceLocalVerification,
+		hintConnectorResourceLocalVerification,
+		msgConnectorResourceLocalConflict,
+		hintConnectorResourceLocalConflict,
 		msgConnectorTokenConsumed,
 		hintConnectorTokenConsumed,
 		msgConnectorTokenRejected,

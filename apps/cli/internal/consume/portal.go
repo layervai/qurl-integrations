@@ -11,12 +11,12 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 )
 
-// Direct access for downloads. A resolved qv2 link carries its credential in
-// the URL fragment, which HTTP clients never transmit — a plain GET of the
-// link can only ever fetch the in-browser page that consumes the fragment,
-// never the content itself. Downloads therefore go through the SDK's
-// programmatic opener (qurl.EnterPortalWith): verify the link locally, ask
-// the qURL platform for access, then fetch the granted content URL.
+// Direct access for downloads. A resolved qURL credential link carries its
+// credential in the URL fragment, which HTTP clients never transmit — a plain
+// GET of the link can only ever fetch the in-browser page that consumes the
+// fragment, never the content itself. Downloads therefore go through the SDK's
+// programmatic opener (qurl.EnterPortalWith): verify the link locally, ask the
+// qURL platform for access, then fetch the granted content URL.
 //
 // The opener needs deployment trust configuration — issuer keys plus a relay
 // allowlist or cell catalog. AccessOpener sources it from QURL_DEPLOYMENT
@@ -25,26 +25,20 @@ import (
 // shipped deployment. A build with neither fails closed with
 // ErrAccessNotConfigured rather than saving the wrong bytes.
 
-// credentialFragmentPrefix marks a link whose fragment is an in-link
-// credential rather than a page anchor.
-//
-// TODO(upstream-contract): "qv2." is the pinned wire prefix for
-// fragment-credential links (qurl-go internal/qv2 FragmentPrefix). If the
-// platform adds another credential-bearing link form, widen NeedsAccessGrant
-// in lockstep.
-const credentialFragmentPrefix = "qv2."
-
 // NeedsAccessGrant reports whether link carries an in-link credential and so
 // must be opened through the platform access flow. A link without one (a
 // direct or pre-signed URL) serves its bytes to a plain GET, so the
-// downloader fetches it as delivered.
+// downloader fetches it as delivered. Current-transport classification belongs
+// to qurl-go so every consumer follows the same versions and fail-closed shape
+// rule. The retired qv2 prefix is also routed here as a safety tombstone: the
+// opener still rejects it, but the CLI must never plain-GET a fragment-bearing
+// portal link and silently save verifier HTML.
 func NeedsAccessGrant(link string) bool {
-	u, err := url.Parse(link)
-	if err != nil {
-		// Unparseable links fail loudly at request build; nothing to grant.
-		return false
+	if qurl.IsCredentialLink(link) {
+		return true
 	}
-	return strings.HasPrefix(u.Fragment, credentialFragmentPrefix)
+	_, fragment, ok := strings.Cut(link, "#")
+	return ok && strings.HasPrefix(fragment, "qv2.")
 }
 
 // Fixed customer-facing messages for the access flow, registered with the

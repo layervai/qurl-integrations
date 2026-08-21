@@ -26,6 +26,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -246,6 +247,9 @@ func cliSentinelCode(err error) (int, bool) {
 // Each choice is documented at its case because the conditions do not all
 // share one row of the §16.5 table.
 func connectorSentinelCode(err error) (int, bool) {
+	if code, ok := connectorResourceSentinelCode(err); ok {
+		return code, true
+	}
 	switch {
 	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
 		// A missing enrollment credential is the Auth row's "no credential"
@@ -346,6 +350,37 @@ func connectorSentinelCode(err error) (int, bool) {
 		// An authenticated producer-contract violation is the service
 		// "answered outside its contract" — the ServerError row, and terminal
 		// by the SDK's own design.
+		return ServerError, true
+	default:
+		return 0, false
+	}
+}
+
+func connectorResourceSentinelCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, state.ErrConnectorResourceVerification):
+		// An authenticated response contradicted the exact durable request or
+		// the same Connector's accepted identity. No replacement was accepted.
+		return VerificationFailed, true
+	case errors.Is(err, state.ErrConnectorResourceStateConflict):
+		// The authenticated response aliases a different Connector already in
+		// this owner's durable state: valid identities in conflicting state.
+		return Conflict, true
+	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceRequest),
+		errors.Is(err, qurl.ErrConnectorResourceRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrConnectorResourceIdentityRejected):
+		return Auth, true
+	case errors.Is(err, qurl.ErrConnectorResourceEntitlementDenied),
+		errors.Is(err, qurl.ErrConnectorResourceQuotaExceeded):
+		return Forbidden, true
+	case errors.Is(err, qurl.ErrConnectorResourceIdentityConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrConnectorResourceRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrConnectorResourceUnavailable):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceResponse):
 		return ServerError, true
 	default:
 		return 0, false

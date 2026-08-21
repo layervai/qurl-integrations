@@ -14,6 +14,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
@@ -72,6 +73,9 @@ func renderErrorLines(p *Printer, err error) []string {
 // fired on a bare sentinel would be dead code on the real path.
 func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 	headline, hint, includeDetail := "", "", true
+	if resourceHeadline, resourceHint, ok := connectorResourceErrorPosture(err); ok {
+		return renderConnectorPosture(p, head, err, resourceHeadline, resourceHint, true), true
+	}
 	switch {
 	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
 		headline, hint, includeDetail = msgConnectorTokenRequired, hintConnectorTokenRequired, false
@@ -134,6 +138,10 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 	default:
 		return nil, false
 	}
+	return renderConnectorPosture(p, head, err, headline, hint, includeDetail), true
+}
+
+func renderConnectorPosture(p *Printer, head string, err error, headline, hint string, includeDetail bool) []string {
 	lines := []string{head + " " + headline}
 	if includeDetail {
 		lines = append(lines, "")
@@ -144,7 +152,34 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		}
 	}
 	lines = append(lines, "", "  "+p.dim(hint))
-	return lines, true
+	return lines
+}
+
+func connectorResourceErrorPosture(err error) (headline, hint string, ok bool) {
+	switch {
+	case errors.Is(err, state.ErrConnectorResourceVerification):
+		return msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification, true
+	case errors.Is(err, state.ErrConnectorResourceStateConflict):
+		return msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict, true
+	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceRequest),
+		errors.Is(err, qurl.ErrConnectorResourceRequestRejected):
+		return msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest, true
+	case errors.Is(err, qurl.ErrConnectorResourceIdentityRejected):
+		return msgConnectorIdentityRejected, hintConnectorIdentityRejected, true
+	case errors.Is(err, qurl.ErrConnectorResourceEntitlementDenied):
+		return msgConnectorResourceEntitlement, hintConnectorResourceEntitlement, true
+	case errors.Is(err, qurl.ErrConnectorResourceIdentityConflict):
+		return msgConnectorResourceConflict, hintConnectorResourceConflict, true
+	case errors.Is(err, qurl.ErrConnectorResourceQuotaExceeded):
+		return msgConnectorResourceQuota, hintConnectorResourceQuota, true
+	case errors.Is(err, qurl.ErrConnectorResourceRateLimited),
+		errors.Is(err, qurl.ErrConnectorResourceUnavailable):
+		return msgConnectorResourceUnavailable, hintConnectorResourceUnavailable, true
+	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceResponse):
+		return msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse, true
+	default:
+		return "", "", false
+	}
 }
 
 // apiErrorLines is the RFC 7807 anatomy: headline with status, detail

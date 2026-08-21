@@ -35,8 +35,8 @@ type connectorKnocker interface {
 // The customer term for a Connector's identity is its ID — the route name
 // the app serves under — matching the standalone qurl-connector's contract
 // (QURL_CONNECTOR_ID, YAML `id:`). "Slug" is internal/platform-wire
-// vocabulary only (qurl-go's GetConnectorResourceBySlug, the `slug` wire
-// param, frpgen.Route.Slug); it must not appear on customer surfaces (the
+// vocabulary only (the platform resource payload's `slug` field and
+// frpgen.Route.Slug); it must not appear on customer surfaces (the
 // jargon gate enforces this).
 const (
 	// envConnectorID supplies the Connector ID when --id is not passed. It
@@ -231,8 +231,9 @@ func validateRefreshModeFlag(raw string) (string, error) {
 }
 
 // runConnector wires the Connector serve loop: agent open/enroll ladder →
-// resource ensure by ID → FRP config generation → supervised knock-then-login
-// serving, with INT/TERM handing the supervisor a bounded graceful stop.
+// assigned-cell native resource setup → FRP config generation → supervised
+// knock-then-login serving, with INT/TERM handing the supervisor a bounded
+// graceful stop.
 func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlags) error {
 	// Local validation first: nothing below runs until the command line
 	// itself is coherent.
@@ -305,10 +306,23 @@ func openConnectorForServe(ctx context.Context, opts *globalOpts, in *connectorS
 	if err := validateConnectorID(id); err != nil {
 		return nil, err
 	}
-	resolved, err := agent.ResolveResourceWithResult(ctx, rt.Client, id)
+	resolved, err := opts.resolveConnectorResource(ctx, rt, id)
 	if err != nil {
 		return nil, err
 	}
+	// Defensive caller boundary: the production resolver rejects this shape
+	// before returning, but custom test seams must not pass it into FRP config.
+	if resolved == nil || resolved.Resource == nil {
+		return nil, errors.New("assigned NHP cell returned no Connector resource")
+	}
+	resourceAttrs := []any{
+		"event", "connector_resource_resolved",
+		"connector_id", id,
+	}
+	if resolved.FoundExisting != nil {
+		resourceAttrs = append(resourceAttrs, "found_existing", *resolved.FoundExisting)
+	}
+	logger.InfoContext(ctx, "connector: assigned-cell resource resolved", resourceAttrs...)
 	knockResourceID, err := agent.KnockResourceID(resolved.Resource)
 	if err != nil {
 		return nil, err
@@ -381,13 +395,7 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 	}
 	defer knocker.Close()
 
-	var ready chan struct{}
-	var readyOnce sync.Once
-	var onProxyReady func()
-	if in.onServing != nil {
-		ready = make(chan struct{})
-		onProxyReady = func() { readyOnce.Do(func() { close(ready) }) }
-	}
+	ready, onProxyReady := connectorProxyReadyCallback(in.onServing != nil, opts.onConnectorProxyReady)
 	factory, err := supervisor.NewFRPRunnerFactory(&supervisor.FRPFactoryConfig{
 		Knocker:      knocker,
 		ResourceID:   knockResourceID,
@@ -414,9 +422,9 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 		return err
 	}
 
-	// The resource resolved above already carries its own CRID — on the
-	// read-by-ID leg and the ensure leg alike — so the serve note can hand it
-	// to the customer with no extra lookup and no extra request.
+	// The assigned cell's authenticated native response above already carries
+	// the resource's CRID, so the serve note can hand it to the customer with no
+	// extra lookup and no extra request.
 	serveTarget := net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort))
 	if in.onServing == nil {
 		printer.ConnectorServing(resource.Slug, serveTarget, resource.CRID)
@@ -451,6 +459,26 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 		}
 	}
 	return waitForConnector(ctx, sup, printer)
+}
+
+func connectorProxyReadyCallback(waitForServing bool, observer func()) (ready chan struct{}, onReady func()) {
+	if !waitForServing && observer == nil {
+		return nil, nil
+	}
+	if waitForServing {
+		ready = make(chan struct{})
+	}
+	var once sync.Once
+	return ready, func() {
+		once.Do(func() {
+			if ready != nil {
+				close(ready)
+			}
+			if observer != nil {
+				observer()
+			}
+		})
+	}
 }
 
 func connectorStartingAttrs(connectorID, target, crid string, includeCRID bool) []any {

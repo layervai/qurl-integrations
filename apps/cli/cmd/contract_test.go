@@ -92,7 +92,7 @@ func TestResolveByCRIDEchoVerifies(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	if got := res.stdout.String(); got != "https://qurl.link/#qv2.test.link\n" {
+	if got := res.stdout.String(); got != "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ\n" {
 		t.Errorf("piped resolve stdout = %q, want the bare link", got)
 	}
 }
@@ -135,7 +135,7 @@ func TestResolveResponseWithoutCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
-			"qurl": "https://qurl.link/#qv2.test.link",
+			"qurl": "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ",
 			"type": "qv2",
 		}, nil)
 	})

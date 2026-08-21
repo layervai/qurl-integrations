@@ -90,6 +90,42 @@ func TestMintConnectorEnrollmentTokenSendsPinnedWireShape(t *testing.T) {
 	}
 }
 
+func TestMintConnectorEnrollmentTokenCanonicalOriginAppendsV1ExactlyOnce(t *testing.T) {
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	responseBody, err := json.Marshal(map[string]any{"data": validEnrollmentData(expiresAt)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var requestURL string
+	client, err := New(&Config{
+		BaseURL: "https://api.layerv.xyz",
+		APIKey:  "lv_test_logincredential123456789",
+		Version: "test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requestURL = req.URL.String()
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader(responseBody)),
+				Request:    req,
+			}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.MintConnectorEnrollmentToken(context.Background(), MintConnectorEnrollmentTokenOptions{
+		ConnectorID:    testConnectorID,
+		IdempotencyKey: testIdempotencyKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestURL != "https://api.layerv.xyz/v1/api-keys" {
+		t.Fatalf("enrollment request URL = %q, want one version prefix", requestURL)
+	}
+}
+
 func TestMintConnectorEnrollmentTokenValidatesOptionsLocally(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
@@ -298,4 +334,10 @@ func assertJSONString(t *testing.T, body map[string]json.RawMessage, field, want
 	if got != want {
 		t.Errorf("%s = %q, want %q", field, got, want)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
