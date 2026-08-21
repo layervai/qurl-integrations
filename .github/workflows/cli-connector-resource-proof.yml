@@ -6,6 +6,10 @@ name: "cli: Connector Resource Sandbox Proof"
 # a same-owner cleanup JWT replaced for every run. The test rejects that token
 # before mutation unless its remaining lifetime is 20 minutes through 2 hours,
 # and its mandatory cleanup fails the run if resource or agent removal fails.
+# QURL_SANDBOX_ENDPOINT is the canonical API origin https://api.layerv.xyz;
+# the CLI appends versioned paths such as /v1/api-keys itself.
+# QURL_SANDBOX_ENDPOINT_SHA256 must be
+# 6365fdb1bc9a2fcdeb40e9ba3c76154fb2b6a02c60dea9b4536b7bd8dd9a1bd4.
 # rollout_evidence is syntax-checked only: the Environment reviewer is the
 # explicit verification boundary that it is the non-superseded, successful
 # "Build and Deploy NHP" run for the NHP merge SHA (including its
@@ -152,7 +156,8 @@ jobs:
 
           # Literal production management and agent-bootstrap hostnames, both
           # forced to the same dual-stack TCP trap. Cold enrollment uses the
-          # pinned sandbox QURL_ENDPOINT. Replay, warm continuity, LST,
+          # pinned canonical sandbox QURL_ENDPOINT origin. Replay, warm
+          # continuity, LST,
           # KNK/ACK, and FRP Login must all succeed while these hosts are dark.
           printf '%s\n' \
             '127.0.0.1 api.layerv.ai' \
