@@ -21,6 +21,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -77,6 +78,10 @@ var cliSentinels = map[string]struct {
 	// The episode's one self-heal already ran and the platform still is not
 	// serving this Connector: an Unavailable posture, kin to the budget exit.
 	"agent.ErrRefreshAlreadyAttempted": {agent.ErrRefreshAlreadyAttempted, Unavailable},
+	// A same-Connector response contradiction is a fail-closed verification
+	// failure; a cross-Connector alias is valid identity in conflicting state.
+	"state.ErrConnectorResourceVerification":  {state.ErrConnectorResourceVerification, VerificationFailed},
+	"state.ErrConnectorResourceStateConflict": {state.ErrConnectorResourceStateConflict, Conflict},
 	// The Hub trust triple (or a dark build's absent pin) is configuration
 	// even though it lives in the environment.
 	"hub.ErrConfig": {hub.ErrConfig, Config},
@@ -130,6 +135,17 @@ var sdkSentinels = map[string]struct {
 	"qurl.ErrAssignmentLeaseExpired":         {qurl.ErrAssignmentLeaseExpired, Unavailable},
 	// An authenticated producer-contract violation.
 	"qurl.ErrAssignmentInvalidResponse": {qurl.ErrAssignmentInvalidResponse, ServerError},
+
+	// Native assigned-cell Connector-resource setup taxonomy.
+	"qurl.ErrInvalidNativeConnectorResourceRequest":  {qurl.ErrInvalidNativeConnectorResourceRequest, InvalidInput},
+	"qurl.ErrConnectorResourceUnavailable":           {qurl.ErrConnectorResourceUnavailable, Unavailable},
+	"qurl.ErrConnectorResourceIdentityRejected":      {qurl.ErrConnectorResourceIdentityRejected, Auth},
+	"qurl.ErrConnectorResourceEntitlementDenied":     {qurl.ErrConnectorResourceEntitlementDenied, Forbidden},
+	"qurl.ErrConnectorResourceIdentityConflict":      {qurl.ErrConnectorResourceIdentityConflict, Conflict},
+	"qurl.ErrConnectorResourceQuotaExceeded":         {qurl.ErrConnectorResourceQuotaExceeded, Forbidden},
+	"qurl.ErrConnectorResourceRateLimited":           {qurl.ErrConnectorResourceRateLimited, RateLimited},
+	"qurl.ErrConnectorResourceRequestRejected":       {qurl.ErrConnectorResourceRequestRejected, InvalidInput},
+	"qurl.ErrInvalidNativeConnectorResourceResponse": {qurl.ErrInvalidNativeConnectorResourceResponse, ServerError},
 }
 
 // TestSentinelMapping asserts every defined sentinel — CLI and SDK — maps to

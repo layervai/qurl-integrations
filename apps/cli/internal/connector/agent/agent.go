@@ -84,10 +84,11 @@ type EnrollmentTokenRequest = qurl.AgentEnrollmentCredentialRequest
 // inside qurl-go's serialized native lifecycle setup.
 type EnrollmentTokenProvider = qurl.AgentEnrollmentCredentialProvider
 
-// Runtime is the opened Connector runtime: the registered device's resource
-// client, its native runtime binding, and the owning state store. The caller
-// owns Close; hand the Binding to the knocker (which then owns it) and set
-// Binding to nil before Close to transfer ownership.
+// Runtime is the opened Connector runtime: the SDK's explicit-management
+// client handle, its native runtime binding, and the owning state store.
+// Resource setup and admission use Binding directly and never Client. The
+// caller owns Close; hand the Binding to the knocker (which then owns it) and
+// set Binding to nil before Close to transfer ownership.
 type Runtime struct {
 	Client  *qurl.Client
 	Binding *qurl.AgentRuntimeBinding

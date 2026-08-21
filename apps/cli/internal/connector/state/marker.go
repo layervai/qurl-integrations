@@ -32,6 +32,8 @@ import (
 // env override points at keeps its episode semantics.
 const RefreshMarkerFile = "registration_refresh.json"
 
+const jsonFieldVersion = "version"
+
 // errInvalidRefreshMarker distinguishes a corrupt marker shape that the
 // native warm-open path may safely log and remove from a real filesystem I/O
 // fault. A transient read/stat fault must not erase an Attempted=true marker
@@ -268,7 +270,7 @@ func decodeRefreshMarkerField(decoder *json.Decoder, marker *RefreshMarker, seen
 	}
 	seen[key] = struct{}{}
 	switch key {
-	case "version":
+	case jsonFieldVersion:
 		return decoder.Decode(&marker.Version)
 	case "reason":
 		return decoder.Decode(&marker.Reason)
@@ -282,7 +284,7 @@ func decodeRefreshMarkerField(decoder *json.Decoder, marker *RefreshMarker, seen
 }
 
 func validateDecodedRefreshMarker(marker RefreshMarker, seen map[string]struct{}) error {
-	for _, required := range []string{"version", "attempted", "set_at_unix"} {
+	for _, required := range []string{jsonFieldVersion, "attempted", "set_at_unix"} {
 		if _, ok := seen[required]; !ok {
 			return fmt.Errorf("registration refresh marker is missing required field %q", required)
 		}

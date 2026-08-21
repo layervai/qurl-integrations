@@ -19,6 +19,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
@@ -416,6 +417,39 @@ func TestConnectorAssignmentRenderings(t *testing.T) {
 	}
 }
 
+func TestConnectorResourceRenderings(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"invalid local request", qurl.ErrInvalidNativeConnectorResourceRequest, msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"request rejected", qurl.ErrConnectorResourceRequestRejected, msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"identity rejected", qurl.ErrConnectorResourceIdentityRejected, msgConnectorIdentityRejected, hintConnectorIdentityRejected},
+		{"entitlement", qurl.ErrConnectorResourceEntitlementDenied, msgConnectorResourceEntitlement, hintConnectorResourceEntitlement},
+		{"continuity conflict", qurl.ErrConnectorResourceIdentityConflict, msgConnectorResourceConflict, hintConnectorResourceConflict},
+		{"quota", qurl.ErrConnectorResourceQuotaExceeded, msgConnectorResourceQuota, hintConnectorResourceQuota},
+		{"rate limited", qurl.ErrConnectorResourceRateLimited, msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"unavailable", qurl.ErrConnectorResourceUnavailable, msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},
+		{"local verification", state.ErrConnectorResourceVerification, msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification},
+		{"local cross-Connector conflict", state.ErrConnectorResourceStateConflict, msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			for _, err := range []error{test.err, fmt.Errorf("connector setup: %w", test.err)} {
+				var buf bytes.Buffer
+				RenderError(&buf, err, false)
+				got := buf.String()
+				if !strings.Contains(got, test.headline) || !strings.Contains(got, test.hint) {
+					t.Fatalf("rendered error missing customer posture:\n%s", got)
+				}
+			}
+		})
+	}
+}
+
 // TestConnectorAssignmentOrdering pins the two overlaps that a naive switch
 // order would render wrongly, because in both the SDK (or the CLI) matches two
 // sentinels at once.
@@ -534,6 +568,8 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 	}
 	rendered := []string{
 		msgConnectorServing, msgConnectorReachIt, labelCRID,
+		msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification,
+		msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict,
 		msgConnectorTokenConsumed, hintConnectorTokenConsumed,
 		msgConnectorTokenRejected, hintConnectorTokenRejected,
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
