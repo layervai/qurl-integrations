@@ -34,8 +34,12 @@ import (
 )
 
 const (
-	connectorResourceProofArming             = "QURL_CLI_SANDBOX_CONNECTOR_RESOURCE_PROOF"
-	connectorResourceProofHubHost            = "hub.sandbox.nhp.layerv.xyz"
+	connectorResourceProofArming = "QURL_CLI_SANDBOX_CONNECTOR_RESOURCE_PROOF"
+	// This exact name aliases the sandbox NHP Hub NLB, whose public listener is
+	// UDP/443. Do not insert a sandbox label: that wildcard name resolves to a
+	// different, TCP-only access-control load balancer.
+	connectorResourceProofHubHost            = "hub.nhp.layerv.xyz"
+	connectorResourceProofObsoleteHubHost    = "hub.sandbox.nhp.layerv.xyz"
 	connectorResourceProofSandboxAPIAudience = "https://api.layerv.xyz"
 	connectorResourceProofSandboxAPIOrigin   = "https://api.layerv.xyz"
 	connectorResourceProofAPIHost            = "api.layerv.ai"
@@ -245,7 +249,7 @@ func loadConnectorResourceProofConfig(lookup func(string) string, now time.Time)
 		return connectorResourceProofConfig{}, fmt.Errorf("Connector resource proof rollout attestation = %q, want five-op-cells-ready", got)
 	}
 	if strings.TrimSpace(lookup(hub.EnvHost)) != connectorResourceProofHubHost || strings.TrimSpace(lookup(hub.EnvPort)) != "443" {
-		return connectorResourceProofConfig{}, errors.New("Connector resource proof Hub must be the pinned sandbox NHP endpoint on port 443")
+		return connectorResourceProofConfig{}, fmt.Errorf("Connector resource proof Hub must be %s on UDP port 443", connectorResourceProofHubHost)
 	}
 	if err := validateConnectorResourceProofCleanupJWT(cfg.CleanupJWT, now); err != nil {
 		return connectorResourceProofConfig{}, err
@@ -535,14 +539,27 @@ func TestLoadConnectorResourceProofConfigFailsClosed(t *testing.T) {
 			t.Fatalf("versioned sandbox endpoint error = %v", err)
 		}
 	})
-	t.Run("non-sandbox Hub rejected", func(t *testing.T) {
+	t.Run("production Hub rejected", func(t *testing.T) {
 		copy := make(map[string]string, len(complete))
 		for key, value := range complete {
 			copy[key] = value
 		}
 		copy[hub.EnvHost] = "hub.nhp.layerv.ai"
-		if _, err := loadConnectorResourceProofConfig(func(key string) string { return copy[key] }, now); err == nil || !strings.Contains(err.Error(), "sandbox NHP") {
-			t.Fatalf("non-sandbox Hub error = %v", err)
+		if _, err := loadConnectorResourceProofConfig(func(key string) string { return copy[key] }, now); err == nil || !strings.Contains(err.Error(), connectorResourceProofHubHost) {
+			t.Fatalf("production Hub error = %v", err)
+		}
+	})
+	t.Run("obsolete wildcard Hub rejected with otherwise valid pin", func(t *testing.T) {
+		copy := make(map[string]string, len(complete))
+		for key, value := range complete {
+			copy[key] = value
+		}
+		// Keep the valid UDP port and server key. The hostname alone must fail:
+		// this wildcard resolves to the TCP-only access-control load balancer,
+		// not the sandbox NHP Hub NLB.
+		copy[hub.EnvHost] = connectorResourceProofObsoleteHubHost
+		if _, err := loadConnectorResourceProofConfig(func(key string) string { return copy[key] }, now); err == nil || !strings.Contains(err.Error(), connectorResourceProofHubHost) {
+			t.Fatalf("obsolete wildcard Hub error = %v", err)
 		}
 	})
 	for name, expiresAt := range map[string]int64{

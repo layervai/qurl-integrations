@@ -10,6 +10,10 @@ name: "cli: Connector Resource Sandbox Proof"
 # the CLI appends versioned paths such as /v1/api-keys itself.
 # QURL_SANDBOX_ENDPOINT_SHA256 must be
 # 6365fdb1bc9a2fcdeb40e9ba3c76154fb2b6a02c60dea9b4536b7bd8dd9a1bd4.
+# QURL_CONNECTOR_HUB_HOST must be the exact sandbox NHP Hub name
+# hub.nhp.layerv.xyz, which aliases the UDP/443 Hub NLB. The tempting
+# hub.sandbox.nhp.layerv.xyz wildcard resolves to a different, TCP-only
+# access-control load balancer and is deliberately rejected by the proof.
 # rollout_evidence is syntax-checked only: the Environment reviewer is the
 # explicit verification boundary that it is the non-superseded, successful
 # "Build and Deploy NHP" run for the NHP merge SHA (including its
@@ -141,6 +145,9 @@ jobs:
           QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
           QURL_CLI_SANDBOX_ENDPOINT_SHA256: ${{ vars.QURL_SANDBOX_ENDPOINT_SHA256 }}
           QURL_CLI_SANDBOX_CLEANUP_JWT: ${{ secrets.QURL_CLI_SANDBOX_CLEANUP_JWT }}
+          # The test fail-closes unless this protected variable is exactly the
+          # documented UDP/443 Hub name above; DNS aliases and wildcard names
+          # are not accepted as equivalent trust-bootstrap configuration.
           QURL_CONNECTOR_HUB_HOST: ${{ vars.QURL_CONNECTOR_HUB_HOST }}
           QURL_CONNECTOR_HUB_PORT: ${{ vars.QURL_CONNECTOR_HUB_PORT }}
           QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 }}
