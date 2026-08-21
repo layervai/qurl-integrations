@@ -117,6 +117,51 @@ func TestRevokeResource_Success(t *testing.T) {
 	}
 }
 
+// TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote fences the
+// teardown story without assuming Docker: the reply must open with what revoke
+// DID do (new viewers blocked, viewer sessions deleted) before naming the gap,
+// condition Connector cleanup on one having been installed, and reserve the
+// S3-origin instruction for the S3 static-site flow.
+func TestRevokeResource_SuccessCarriesWorkloadNeutralTeardownNote(t *testing.T) {
+	h := newRevokeHandlerWithDeleteStatus(t, http.StatusNoContent, "")
+	msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+	for _, want := range []string{
+		"New viewers are blocked",
+		"viewer sessions deleted",
+		"Workloads you run",
+		"if you installed a qURL Connector for this resource",
+		"S3 origin workload for an S3 static site",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("success message = %q, want workload-neutral teardown contract %q", msg, want)
+		}
+	}
+}
+
+// TestRevokeResource_FailureRepliesOmitTeardownNote fences the other half: on a
+// failed revoke nothing was torn down upstream, so telling the admin to go
+// delete containers would be wrong. The 404 branch is the sharp one — a typo'd
+// id must not send someone hunting for a container this workspace never ran.
+func TestRevokeResource_FailureRepliesOmitTeardownNote(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"not found", http.StatusNotFound, `{"error":{"title":"Not Found","detail":"resource gone","code":"not_found","status":404}}`},
+		{"auth rejected", http.StatusUnauthorized, `{"error":{"title":"Unauthorized","detail":"bad key","code":"unauthorized","status":401}}`},
+		{"upstream 5xx", http.StatusInternalServerError, `{"error":{"title":"Internal","detail":"boom","code":"internal","status":500}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRevokeHandlerWithDeleteStatus(t, tc.status, tc.body)
+			msg := h.revokeResource(context.Background(), slog.Default(), testAdminTeamID, testAdminUserID, testRevokeResourceID, testRevokeAlias)
+			if strings.Contains(msg, revokeTeardownNote) {
+				t.Errorf("status %d message = %q, want no teardown note on a failed revoke", tc.status, msg)
+			}
+		})
+	}
+}
+
 // TestRevokeResource_NotFound fences the 404/410 surface: an already-revoked or
 // stale id reads as a friendly "already revoked" hint, not a raw upstream error.
 func TestRevokeResource_NotFound(t *testing.T) {

@@ -1,10 +1,16 @@
+# This workflow and its sibling browser-extension counterpart are one file with
+# the host browser's name swapped. TestExtensionWorkflowsStayInLockstep, run by
+# the required Workflow Contract check, fails the build if they drift — so an
+# edit here needs the same edit there. The sibling is deliberately not named:
+# each copy masks its own slug, so a cross-reference would itself read as drift.
 name: "edge-extension: Build and Test"
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Stacked Edge extension PRs must run the same gates before their base reaches main.
+    branches: ["**"]
 
 permissions:
   contents: read

@@ -54,6 +54,34 @@ const (
 	lifecyclePurgeRetryBaseDelay = 500 * time.Millisecond
 )
 
+// purgeScope selects how much of a workspace's local data a purge removes. The
+// two teardown signals are NOT interchangeable, and conflating them is what made
+// `/qurl uninstall` unrecoverable:
+//
+//   - Slack lifecycle (app_uninstalled / tokens_revoked) means the app is gone
+//     and its bot token is already dead, so the whole workspace_state row goes
+//     with it. That is the Marketplace "uninstall forgets the token" requirement.
+//   - `/qurl uninstall` means the admin disconnected qURL while the Slack app
+//     stays INSTALLED. Its bot token is still valid and is the only credential
+//     that can open a modal, send a DM, or publish App Home. Nothing reachable
+//     from inside Slack can rewrite one — slackinstall.Callback is the sole
+//     writer and needs a fresh Slack app authorization — so deleting it strands
+//     the workspace in a half-installed state that `/qurl setup` cannot repair.
+type purgeScope int
+
+const (
+	// purgeScopeFull removes the workspace_state row, bot token included.
+	purgeScopeFull purgeScope = iota
+	// purgeScopeDisconnect retains the workspace_state row. DeleteAPIKey has
+	// already removed the qURL columns from it by the time this runs; every other
+	// table in the cascade is still purged.
+	purgeScopeDisconnect
+)
+
+// retainsSlackBotToken reports whether this scope must leave the Slack bot token
+// (and the rest of the workspace_state row) in place.
+func (s purgeScope) retainsSlackBotToken() bool { return s == purgeScopeDisconnect }
+
 // isLifecycleEvent reports whether an inner event is an install-teardown signal
 // that should trigger a full workspace purge.
 func isLifecycleEvent(event *slackInnerEvent, botTokenRotationEnabled bool) bool {
@@ -311,7 +339,7 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		}
 		for _, workspaceID := range workspaceIDs {
 			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID, purgeCutoff)
+			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeFull)
 			cancel()
 		}
 		for _, workspaceID := range agentStateOnlyIDs {
@@ -348,14 +376,18 @@ type workspaceStateBeforeIdentityDeleter interface {
 	DeleteWorkspaceStateBeforeWithIdentity(ctx context.Context, workspaceID string, cutoff time.Time) (auth.DeletedWorkspaceStateIdentity, error)
 }
 
-// purgeWorkspace forgets every trace of a Slack workspace's bot data across the
-// per-workspace DynamoDB tables. It is the storage cascade behind both a Slack
-// lifecycle teardown (app_uninstalled / tokens_revoked) and the `/qurl uninstall`
-// command:
+// purgeWorkspace forgets a Slack workspace's bot data across the per-workspace
+// DynamoDB tables. It is the storage cascade behind both a Slack lifecycle
+// teardown (app_uninstalled / tokens_revoked) and the `/qurl uninstall` command.
+// How much it forgets depends on the scope: purgeScopeFull forgets every trace,
+// while purgeScopeDisconnect deliberately retains the workspace_state row so a
+// still-installed Slack app keeps the bot token only it can use (see purgeScope).
 //
 //   - workspace_state (auth provider): the encrypted Slack bot token + its data
 //     key, the encrypted qURL API key + its data key, and all install/setup
-//     metadata. Removed via the workspaceStateDeleter capability.
+//     metadata. Removed via the workspaceStateDeleter capability on
+//     purgeScopeFull ONLY; retained wholesale on purgeScopeDisconnect, where
+//     DeleteAPIKey has already stripped the qURL credential columns.
 //   - workspace_mappings (AdminStore): owner + admin set + agent toggle, plus
 //     TTL-backed synthetic slash-command rate-limit counters.
 //   - channel_policies (AdminStore): every channel's alias_bindings and
@@ -384,7 +416,7 @@ type workspaceStateBeforeIdentityDeleter interface {
 //
 // Keeping purgeWorkspace a pure local storage sweep keeps the auth package free
 // of the qurl-service client dependency.
-func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time) error {
+func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time, scope purgeScope) error {
 	if workspaceID == "" {
 		log.Warn("purgeWorkspace called with empty workspace id — skipping")
 		return nil
@@ -396,35 +428,44 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 	// load-bearing delete for the Marketplace "uninstall forgets the token"
 	// requirement. Skip silently when the provider can't delete a row (sandbox /
 	// EnvProvider); there's no per-workspace state to remove in that mode.
-	switch deleter := h.cfg.AuthProvider.(type) {
-	case workspaceStateBeforeIdentityDeleter:
-		identity, err := deleter.DeleteWorkspaceStateBeforeWithIdentity(ctx, workspaceID, cutoff)
-		switch {
-		case err == nil:
-			logWorkspaceStateDeleted(log, identity)
-		case errors.Is(err, auth.ErrWorkspaceStateUpdatedAfterCutoff):
-			log.Info("purgeWorkspace: retained workspace_state row updated after purge cutoff")
+	//
+	// A disconnect skips this entirely: the Slack app is still installed, so the
+	// bot token in this row is still live and is the only way back to modals/DMs.
+	// DeleteAPIKey has already stripped the qURL credential columns, so the row
+	// that survives holds no qURL secret.
+	if scope.retainsSlackBotToken() {
+		log.Info("purgeWorkspace: retaining workspace_state row — Slack app is still installed, so its bot token stays valid")
+	} else {
+		switch deleter := h.cfg.AuthProvider.(type) {
+		case workspaceStateBeforeIdentityDeleter:
+			identity, err := deleter.DeleteWorkspaceStateBeforeWithIdentity(ctx, workspaceID, cutoff)
+			switch {
+			case err == nil:
+				logWorkspaceStateDeleted(log, identity)
+			case errors.Is(err, auth.ErrWorkspaceStateUpdatedAfterCutoff):
+				log.Info("purgeWorkspace: retained workspace_state row updated after purge cutoff")
+			default:
+				log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
+				errs = append(errs, err)
+			}
+		case workspaceStateIdentityDeleter:
+			identity, err := deleter.DeleteWorkspaceStateWithIdentity(ctx, workspaceID)
+			if err != nil {
+				log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
+				errs = append(errs, err)
+			} else {
+				logWorkspaceStateDeleted(log, identity)
+			}
+		case workspaceStateDeleter:
+			if err := deleter.DeleteWorkspaceState(ctx, workspaceID); err != nil {
+				log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
+				errs = append(errs, err)
+			} else {
+				logWorkspaceStateDeleted(log, auth.DeletedWorkspaceStateIdentity{})
+			}
 		default:
-			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
-			errs = append(errs, err)
+			log.Debug("purgeWorkspace: auth provider does not support workspace_state delete — skipping")
 		}
-	case workspaceStateIdentityDeleter:
-		identity, err := deleter.DeleteWorkspaceStateWithIdentity(ctx, workspaceID)
-		if err != nil {
-			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
-			errs = append(errs, err)
-		} else {
-			logWorkspaceStateDeleted(log, identity)
-		}
-	case workspaceStateDeleter:
-		if err := deleter.DeleteWorkspaceState(ctx, workspaceID); err != nil {
-			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
-			errs = append(errs, err)
-		} else {
-			logWorkspaceStateDeleted(log, auth.DeletedWorkspaceStateIdentity{})
-		}
-	default:
-		log.Debug("purgeWorkspace: auth provider does not support workspace_state delete — skipping")
 	}
 
 	// qurl_agent_state is optional because conversation mode can be dark or
@@ -486,9 +527,9 @@ func logWorkspaceStateDeleted(log *slog.Logger, identity auth.DeletedWorkspaceSt
 	log.Info("purgeWorkspace: deleted workspace_state row", attrs...)
 }
 
-func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time) {
+func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time, scope purgeScope) {
 	retryLifecyclePurge(ctx, log, "purgeWorkspace", func(attemptLog *slog.Logger) error {
-		return h.purgeWorkspace(ctx, attemptLog, workspaceID, cutoff)
+		return h.purgeWorkspace(ctx, attemptLog, workspaceID, cutoff, scope)
 	})
 }
 

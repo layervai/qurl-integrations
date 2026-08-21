@@ -16,7 +16,7 @@ apps/                Per-integration apps (released apps get independent release
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   edge-extension/    Edge extension — Gmail file uploads as expiring qURL links (MV3)
-  cli/               CLI — create & manage qURLs from the terminal (Go)
+  cli/               CLI — publish, resolve, and manage qURL resources by CRID (Go)
   teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
@@ -24,8 +24,6 @@ origins/             Reusable origin images for qURL Connector-protected resourc
 shared/              Shared Go libraries used by the Go apps
   client/            qURL API client
   auth/              API key helpers
-  events/            Webhook event parsing
-  formatting/        Chat message templates
   observability/     OpenTelemetry setup
 ```
 
@@ -44,7 +42,7 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 The Slack, Discord, and CLI apps connect to the qURL API:
 
 - **Endpoint** — the qURL API is `https://api.layerv.ai`, set via `QURL_ENDPOINT`. Required for Slack; the CLI and Discord use it by default.
-- **Authentication** — an API key (`lv_live_…`) in `QURL_API_KEY`.
+- **Authentication** — an API key (`lv_live_…`) in `QURL_API_KEY`. The CLI can also store one on the machine with `qurl login` (OS keyring preferred); see [apps/cli/README.md](apps/cli/README.md#authentication).
 
 The Chrome and Edge extensions upload to a qURL file server instead; see their [Chrome README](apps/chrome-extension/README.md) and [Edge README](apps/edge-extension/README.md) for configuration.
 
@@ -100,14 +98,18 @@ version stream that something downstream pins to — not by merely publishing an
 - Only commits touching an app's directory trigger its release; `shared/` changes ship with each
   app's next release
 - Each released app gets its own `CHANGELOG.md` once its first release lands
+- CLI release assets are keyless-signed (cosign/Sigstore) and ship per-archive SPDX SBOMs — the
+  consumer verification recipe lives in [RELEASING.md](RELEASING.md)
 
 ## CI
 
 Each app's workflow runs on every PR. A `changes` detector job inside it decides whether that
 app's quality gates actually execute, and an always-reporting aggregate check — `slack / required`,
 `discord / required`, `chrome-extension / required`, `edge-extension / required`,
-`teams / required`, `s3-static-connector / required`, `e2e / required`, `shared / required` —
-summarizes the result. Branch protection requires those aggregates, never the gates themselves.
+`teams / required`, `cli / required`, `s3-static-connector / required`, `e2e / required`,
+`shared / required` — summarizes the result. Branch protection requires those aggregates, never
+the gates themselves. The full required-context set, and the rules for changing it, live in
+[CONTRIBUTING.md](CONTRIBUTING.md#merge-result-checks) — keep this list in step with that one.
 
 Path filtering deliberately lives in the detector rather than in `on: paths:`: a workflow skipped
 by a trigger-level path filter never reports its checks at all, so a required aggregate would
@@ -118,9 +120,18 @@ is modified.
 That pattern is itself under test. `internal/ciworkflows` reads every file in
 `.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
 spec, leaves a quality gate out of `required.needs`, ships a verifier that treats a skipped gate
-as a pass, or makes the contract check conditional. Its check — `Workflow Contract` — is
-unfiltered and reports on every PR and merge group, because a check behind a paths filter cannot
-police the paths filters (#1081).
+as a pass, or makes the contract check conditional. It also records every pull-request workflow's
+intended `branches:` filter, so one recorded as deliberately narrow fails the moment it reports a
+required context — including the nine aggregates, whose recorded filter is weighed against the
+documented contexts rather than only against itself, so narrowing one cannot be laundered by
+editing `requiredWorkflowSpecs` to match. This is the paths filter's trap inverted: a
+workflow filtered off PRs stacked on a feature branch never registers its checks at all, and
+protection guards only `main`, so the stacked PR reads green having run none of them
+(#1183, #1185). Deleting the merged base does not recover the run: GitHub retargets the PR onto
+`main`, but a base change arrives as the `edited` activity type, which no branch-filtered workflow
+here takes, so the retarget re-runs nothing. The PR stalls on the check that never registered until
+its next push (#1219). The package's own check — `Workflow Contract` — is unfiltered and reports
+on every PR, because a check behind a paths filter cannot police the paths filters (#1081).
 
 ## License
 

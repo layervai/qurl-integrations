@@ -97,6 +97,20 @@ function ddbSendConfigGuardFitsTransaction(sends = []) {
 // Keep in sync with Discord's own 25MB attachment limit.
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
+// TODO(upstream-contract): max access tokens the qURL API allows per resource.
+// Draining the pool means a new resource (re-upload) is needed for a fresh
+// one; exceeding it comes back as connector.js's `quota_exceeded` apiCode.
+//
+// The cap is qurl-service's and we do not control it, so nothing here fails
+// loudly if it moves — a smaller cap turns mintLinksInBatches' later batches
+// into quota errors mid-send, a larger one leaves us re-uploading more often
+// than we need to. Lives here rather than in commands.js so the send pipeline
+// and scripts/loadtest-standalone.js read one value: commands.js cannot be
+// required from a standalone script (it pulls in ./store, which throws
+// without DDB_TABLE_PREFIX), and a copy in the script had no way to notice
+// this one moving.
+const TOKENS_PER_RESOURCE = 10;
+
 // Cap on concurrent link-status monitors. Each monitor fires setInterval
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
 const MAX_CONCURRENT_MONITORS = 50;
@@ -654,6 +668,7 @@ module.exports = {
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
+  TOKENS_PER_RESOURCE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,

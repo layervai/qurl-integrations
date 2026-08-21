@@ -6,9 +6,18 @@
 # relied on reviewers catching it by hand).
 name: Scripts
 
+# No `merge_group`. #940 added it here for "future merge-queue compatibility",
+# but no queue was ever configured and the required contexts never followed, so
+# it only made a half-wired repo look queue-ready. Correct while the posture is
+# `none`, and load-bearing the other way now that this check is required: a
+# queue evaluates required contexts against its own ref, so enabling one means
+# adding the trigger back here in the same change, or every entry hangs on a
+# context that never reports. The absence is what the posture check enforces
+# today, and the presence is what it would enforce after the flip — it fails in
+# both directions. See the note in workflow-contract.yml; CONTRIBUTING.md
+# declares the posture that both obey.
 on:
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -52,6 +61,21 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-release-please-sync.sh
 
+      # Its three invariants are the only pre-merge check on release-please's
+      # config, and each passes by accident while the repo is already correct,
+      # so an assertion that stopped biting would be silent.
+      - name: Test release-please sync check
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-check-release-please-sync.sh
+
+      # The verifier it exercises only ever runs on a push to main, after a
+      # CLI release has already been made or dropped, so a defect in it ships
+      # green and surfaces exactly when it is needed. Same reason as the
+      # validated-base resolver below.
+      - name: Test CLI release verifier
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-verify-cli-release.sh
+
       - name: Check Chrome/Edge extension lockstep
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-extension-lockstep.sh
@@ -81,11 +105,3 @@ jobs:
       - name: Test validated-base resolver
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-resolve-validated-base.sh
-
-      # The report step only runs once the Claude review has already failed, so
-      # a defect in it ships green and surfaces exactly when it is needed. This
-      # pins that every branch still annotates — a bare echo there would restore
-      # the silent pass the step exists to remove.
-      - name: Test Claude review budget report
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-claude-review-budget-report.sh

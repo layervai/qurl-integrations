@@ -1,0 +1,5 @@
+Logged in as own_cli_fixture.
+
+  Key:     key_fixturecli01 (lv_test_abcd)
+  Scopes:  qurl:read, qurl:resolve, qurl:write
+  Stored:  OS keyring

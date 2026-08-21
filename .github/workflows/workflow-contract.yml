@@ -1,19 +1,32 @@
 # Repo-wide CI contract tests: every workflow that defines a required
 # aggregate is registered in requiredWorkflowSpecs, lists all of its quality
 # gates in needs, and ships a verifier script that fails on a skipped or red
-# gate.
+# gate. internal/ciworkflows also records every pull-request workflow's
+# intended `branches:` filter, so one that goes narrow has to say so in that
+# record rather than quietly editing a trigger (#1183, #1185).
 #
-# Unfiltered on purpose. These tests read every file in .github/workflows, so
-# any workflow edit can break them. They used to live in apps/slack and rode
-# slack.yml's paths filter, which matches `.github/workflows/slack.yml` alone
-# — a PR adding a new workflow skipped them entirely, reported every check
-# green, and would have reddened main on merge (#1081). The filter was the
-# bug, not the tests.
+# Unfiltered on purpose — no paths filter and no `branches:` filter. These
+# tests read every file in .github/workflows, so any workflow edit can break
+# them. They used to live in apps/slack and rode slack.yml's paths filter,
+# which matches `.github/workflows/slack.yml` alone — a PR adding a new
+# workflow skipped them entirely, reported every check green, and would have
+# reddened main on merge (#1081). The filter was the bug, not the tests. A
+# `branches:` filter here would take the whole CI contract off PRs stacked
+# on a feature branch, these tests included. This file's entry in
+# otherPullRequestWorkflows records that, and because the check below is
+# required, narrowing the trigger fails the contract check with or without a
+# matching edit to that entry.
 name: Workflow Contract
 
+# No `merge_group`. This repo merges by hand with squash commits and configures
+# no merge queue, and this workflow carried the trigger from #1092 while every
+# other required context went without it — config that read as queue support and
+# would have stalled on first use. CONTRIBUTING.md's "Merge-result checks"
+# section declares the posture and internal/ciworkflows enforces it, so adding
+# this back alone fails the contract check rather than sitting here unnoticed.
 on:
+  # No `branches:` filter: one here takes the CI contract off stacked PRs.
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -29,8 +42,9 @@ jobs:
   # requiredWorkflowSpecs entry for it.
   contract:
     # Branch protection requires this check by name, which is safe only
-    # because the job has no `changes` detector and no paths filter — it
-    # reports on every PR rather than skipping the ones it does not apply to.
+    # because the job has no `changes` detector, no paths filter, and no
+    # branches filter — it reports on every PR rather than skipping the ones
+    # it does not apply to.
     name: Workflow Contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -53,9 +67,9 @@ jobs:
 
       # Test first so a linter failure cannot hide the contract result.
       - name: Lint workflow contract
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.10.1
+          version: v2.12.2
           # Slack/shared gates verify the root config schema. Repeating that
           # network-dependent fetch here adds flake; the linter still applies it.
           verify: false

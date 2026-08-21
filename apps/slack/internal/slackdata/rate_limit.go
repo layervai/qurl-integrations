@@ -148,15 +148,15 @@ func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey 
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET #updated_at_nano = :now_nano ADD #count :one"),
+		UpdateExpression:    aws.String("SET " + exprUpdatedAtNano + " = " + exprNowNano + " ADD #count " + exprOne),
 		ConditionExpression: aws.String("#window = :window AND #count < :limit"),
 		ExpressionAttributeNames: map[string]string{
-			"#count":           attrRateLimitCount,
-			"#updated_at_nano": attrUpdatedAtNano,
-			"#window":          attrRateLimitWindow,
+			"#count":          attrRateLimitCount,
+			exprUpdatedAtNano: attrUpdatedAtNano,
+			"#window":         attrRateLimitWindow,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":one":      numberAttr(1),
+			exprOne:     numberAttr(1),
 			":now_nano": unixNanoAttr(now),
 			":window":   numberAttr(windowUnix),
 			":limit":    numberAttr(int64(limit)),
@@ -187,7 +187,7 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, now t
 	values := map[string]ddbtypes.AttributeValue{
 		":expires_at": numberAttr(time.Unix(windowUnix, 0).Add(2 * s.rateLimitWindow()).Unix()),
 		":now_nano":   unixNanoAttr(now),
-		":one":        numberAttr(1),
+		exprOne:       numberAttr(1),
 		":window":     numberAttr(windowUnix),
 	}
 	for k, v := range extra {
@@ -198,13 +198,13 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, now t
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET #window = :window, #count = :one, #expires_at = :expires_at, #updated_at_nano = :now_nano"),
+		UpdateExpression:    aws.String("SET #window = :window, #count = " + exprOne + ", #expires_at = :expires_at, " + exprUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String(condition),
 		ExpressionAttributeNames: map[string]string{
-			"#count":           attrRateLimitCount,
-			"#expires_at":      attrRateLimitExpiresAt,
-			"#updated_at_nano": attrUpdatedAtNano,
-			"#window":          attrRateLimitWindow,
+			"#count":          attrRateLimitCount,
+			"#expires_at":     attrRateLimitExpiresAt,
+			exprUpdatedAtNano: attrUpdatedAtNano,
+			"#window":         attrRateLimitWindow,
 		},
 		ExpressionAttributeValues: values,
 	})
@@ -279,10 +279,10 @@ func (s *Store) PurgeTeamRateLimitCountersBefore(ctx context.Context, teamID str
 			if !cutoff.IsZero() {
 				deleteInput.ConditionExpression = aws.String(purgeCutoffCondition)
 				deleteInput.ExpressionAttributeNames = map[string]string{
-					"#updated_at_nano": attrUpdatedAtNano,
+					exprUpdatedAtNano: attrUpdatedAtNano,
 				}
 				deleteInput.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-					":purge_cutoff_nano": unixNanoAttr(cutoff),
+					exprPurgeCutoffNano: unixNanoAttr(cutoff),
 				}
 			}
 			if _, err := s.Client.DeleteItem(ctx, deleteInput); err != nil {

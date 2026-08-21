@@ -43,9 +43,25 @@ finding and every mutation is an auditable record.
   and only for resources **confirmed** revoked/deleted against a fully paginated
   resource list.
 - **Prod purge requires an explicit opt-in.** A mutating run against a
-  prod-looking deployment — the `-env` label says `prod`/`production`, **or** any
-  resolved table name contains `prod` (defense-in-depth) — is refused unless you
-  pass `-allow-prod-purge`. The reject error names the flag.
+  prod-looking deployment is refused unless you pass `-allow-prod-purge`; the
+  reject error names the flag. A deployment looks prod when **any** of these
+  holds — defense-in-depth, so one is enough:
+
+  - the `-env` label says `prod`/`production`;
+  - an **environment-bearing** table name contains `prod` — `channel_policies`
+    or `workspace_mappings`, the two whose infra names carry the environment;
+  - the qURL endpoint string contains `prod`, **or** contains `layerv.ai`.
+
+  That last check is a plain substring match over the whole endpoint string —
+  not a host parse, and not just the canonical prod origin `api.layerv.ai`. Any
+  endpoint containing `layerv.ai` anywhere, a path included, trips the rail. The
+  breadth is deliberate: narrowing it to the exact host would stop a prod
+  endpoint on some other subdomain from tripping, and over-tripping only costs
+  you the opt-in flag.
+
+  `workspace_state` is **not** scanned. Infra names that table
+  `qurl-bot-slack-workspace-state` in every environment, so it carries no prod
+  signal, and statecrawl only ever reads it. See `looksProd` in `main.go`.
 - **Indeterminate is never purged.** A workspace whose API key can't be resolved,
   or whose resource list fails to load, is reported `indeterminate` and skipped.
 - A non-zero `purge_errors` in the summary is **ALERTABLE** and makes the process

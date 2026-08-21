@@ -1,0 +1,5 @@
+Logged in as [1mown_cli_fixture[0m.
+
+  [1mKey:[0m     key_fixturecli01 (lv_test_abcd)
+  [1mScopes:[0m  qurl:read, qurl:resolve, qurl:write
+  [1mStored:[0m  OS keyring

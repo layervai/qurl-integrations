@@ -591,8 +591,26 @@ function assertDetectResourceFailureBackoffAllowed() {
 // re-knocks per call (the full no-cache invariant + rationale live on
 // _detectResourceId above and in resolveDetectTarget's docstring).
 //
-// NOTE: createQurlForResource's `target_path` option needs @layervai/qurl
-// >= 0.3.0 (it landed in qurl-typescript#145); package.json pins ~0.3.0.
+// NOTE: the detect mint deliberately does NOT send `target_path`, even though
+// @layervai/qurl whitelists it on createQurlForResource. `target_path` is a
+// property of MintLinkRequest (`POST /v1/qurls/{id}/mint_link`) and has never
+// been one of CreateQurlForResourceRequest, so qurl-service dropped it on
+// arrival; qurl-service#1402 (`additionalProperties: false`) turns that drop
+// into a 400. The SDK allowlist is inverted here — `target_path` is on
+// CREATE_QURL_FOR_RESOURCE_FIELD_KEYS, where the server rejects it, and absent
+// from MINT_FIELD_KEYS, where the server accepts it — so the SDK forwards it to
+// the one endpoint that will now refuse it. Tracked upstream in qurl-typescript.
+//
+// `/api/detect` still reaches the tunnel: buildDetectTargetUrl appends it to
+// the minted `qurl_site` origin, and that constructed URL — never a
+// server-supplied target — has always been what the detect POST goes to.
+// What the dropped field silently cost is the per-session path SCOPE
+// (qurl-service#928): a session minted with target_path may reach only that
+// path and its descendants. That scope has never applied to detect, and this
+// change does not regress it. Restoring it needs BOTH a qurl-service change
+// (MintLinkData carries no `qurl_site`, so mint_link cannot supply the POST
+// host detect requires) and an SDK change (target_path is not on
+// MINT_FIELD_KEYS, so mintLink rejects it client-side before any request).
 //
 // Bearer note: the SDK's `apiKey` is the qURL API Bearer for the
 // listAllResources (read) / createQurlForResource (mint/write) / resolve calls,
@@ -710,6 +728,12 @@ function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
   }
 }
 
+// Build the detect POST target: the minted host-only `qurl_site` origin plus
+// DETECT_TARGET_PATH. This local join is the ONLY thing that puts `/api/detect`
+// on the wire — the mint carries no target_path (not a property of
+// CreateQurlForResourceRequest) and resolve's `target_url` is deliberately
+// ignored (it is "" for tunnels). Keep it that way: dropping the join would
+// silently POST image bytes to the tunnel root.
 function buildDetectTargetUrl(qurlSite, expectedResourceId) {
   let parsed;
   try {
@@ -778,9 +802,12 @@ function detectTargetHostname(qurlSite) {
  *      single DETECT_TUNNEL_SLUG; if detect becomes per-guild/per-resource,
  *      key the backoff by slug/resource instead.
  *   2. mint a fresh short-lived qURL on that resource
- *      (`createQurlForResource(resource_id, { target_path: '/api/detect' })`)
- *      whose `qurl_link` fragment carries the `at_…` access token and whose
- *      host-only `qurl_site` is the tunnel POST host;
+ *      (`createQurlForResource(resource_id, { expires_in })`) whose
+ *      `qurl_link` fragment carries the `at_…` access token and whose
+ *      host-only `qurl_site` is the tunnel POST host. No `target_path` —
+ *      it is not a CreateQurlForResourceRequest property (see the
+ *      getQurlClient note above); buildDetectTargetUrl appends
+ *      DETECT_TARGET_PATH to `qurl_site` in step 4 instead;
  *   3. `resolve({ access_token })` — this is the NHP knock: it grants network
  *      access for the CALLER'S CURRENT IP. The live tunnel API returns
  *      `target_url: ""`; do not use it as the POST target.
@@ -870,7 +897,6 @@ async function resolveDetectTarget() {
   let minted;
   try {
     minted = await getQurlClient().createQurlForResource(resourceId, {
-      target_path: DETECT_TARGET_PATH,
       expires_in: DETECT_LINK_EXPIRES_IN,
     });
   } catch (err) {
@@ -973,8 +999,9 @@ async function resolveDetectTarget() {
  *     `config.QURL_API_KEY` (the SDK Bearer; needs `qurl:read` + `qurl:write` +
  *     `qurl:resolve` — list / mint / resolve) against the DETECT_TUNNEL_SLUG
  *     resource. It calls listAllResources({ slug, limit: 100 }), filters
- *     active resources client-side, mints target_path=/api/detect for 5m,
- *     ignores resolve target_url, and POSTs to qurl_site. No pre-seeded access
+ *     active resources client-side, mints for 5m, ignores resolve target_url,
+ *     and POSTs to qurl_site + /api/detect (the path is appended locally by
+ *     buildDetectTargetUrl, not carried on the mint). No pre-seeded access
  *     token.
  *   - POST headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
  *     Content-Type: <imageContentType || 'application/octet-stream'>.

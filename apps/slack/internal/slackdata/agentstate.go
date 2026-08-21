@@ -455,11 +455,11 @@ func (s *AgentStore) BumpTurnCount(ctx context.Context, teamID, scope string, wi
 		// "reserved keyword: ttl", which (the rate-limit gate being fail-open) silently
 		// disabled the per-user/team cap. The PutItem-based markers (putMarkerIfAbsent)
 		// set `ttl` as a raw item-map key, which is fine — only EXPRESSIONS reserve it.
-		UpdateExpression:         aws.String("ADD " + attrTurnCount + " :one SET #ttl = :ttl"),
+		UpdateExpression:         aws.String("ADD " + attrTurnCount + " " + exprOne + " SET #ttl = :ttl"),
 		ExpressionAttributeNames: map[string]string{"#ttl": attrAgentTTL},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":one": numberAttr(1),
-			":ttl": numberAttr(expiresAt),
+			exprOne: numberAttr(1),
+			":ttl":  numberAttr(expiresAt),
 		},
 		ReturnValues: ddbtypes.ReturnValueUpdatedNew,
 	})

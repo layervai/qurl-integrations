@@ -122,11 +122,14 @@ const (
 var version = "dev"
 
 func newAppLogger(w io.Writer) *slog.Logger {
-	// JSON handler is load-bearing for log-injection safety and operational log
-	// metrics: the G706 gosec suppressions in apps/slack/internal/handler.go
-	// assume slog's JSON output escapes control characters in tainted attribute
-	// values, and alert filters match the JSON "msg" field. Don't swap to
-	// TextHandler without revisiting those sites.
+	// JSON handler is load-bearing for operational log metrics: alert filters
+	// match the JSON "msg" field. It is not, on its own, what makes the attribute
+	// values safe — apps/slack/internal/handler.go logs request-controlled values
+	// such as r.URL.Path as slog attributes, and both stdlib handlers escape
+	// control characters in attribute values (gosec v2.26.1 scopes its G706 check
+	// to args[0] for exactly that reason). The message is the part TextHandler
+	// would write verbatim. Don't swap to TextHandler without revisiting those
+	// sites.
 	// Redaction mirrors Discord: matched keys blank string/byte values, while
 	// containers under matched keys are walked by their inner field names.
 	return slog.New(observability.NewRedactingJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -215,7 +218,7 @@ func run() error {
 	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
 	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
 	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil)
-	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
+	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "")
 
 	postFeedback := buildPostFeedback(userAgent)
 
@@ -929,7 +932,7 @@ func missingOAuthEnvVars(vals map[string]string) []string {
 	// Stable order so the slog attribute is diff-friendly across runs.
 	keys := []string{
 		"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET",
-		"AUTH0_AUDIENCE", "SLACK_BASE_URL", "OAUTH_STATE_SECRET", "QURL_ENDPOINT",
+		"AUTH0_AUDIENCE", envSlackBaseURL, "OAUTH_STATE_SECRET", "QURL_ENDPOINT",
 	}
 	var missing []string
 	for _, k := range keys {
@@ -1014,7 +1017,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// Auth0 audience mapping and sets this env var for managed deployments.
 	expectedAudience := os.Getenv(envAuth0ExpectedAudience)
 	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
-	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
+	baseURL := strings.TrimRight(os.Getenv(envSlackBaseURL), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
 	qurlEndpoint := strings.TrimRight(os.Getenv("QURL_ENDPOINT"), "/")
 
@@ -1027,7 +1030,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		"AUTH0_CLIENT_ID":     clientID,
 		"AUTH0_CLIENT_SECRET": clientSecret,
 		"AUTH0_AUDIENCE":      audience,
-		"SLACK_BASE_URL":      baseURL,
+		envSlackBaseURL:       baseURL,
 		"OAUTH_STATE_SECRET":  stateSecret,
 		"QURL_ENDPOINT":       qurlEndpoint,
 	})
@@ -1115,6 +1118,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 }
 
 const (
+	envSlackBaseURL                     = "SLACK_BASE_URL"
 	envSlackClientID                    = "SLACK_CLIENT_ID"
 	envSlackClientSecret                = "SLACK_CLIENT_SECRET"
 	envSlackInstallStateSecret          = "SLACK_INSTALL_STATE_SECRET"
@@ -1125,7 +1129,7 @@ const (
 func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, bool, error) {
 	clientID := strings.TrimSpace(os.Getenv(envSlackClientID))
 	clientSecret := strings.TrimSpace(os.Getenv(envSlackClientSecret))
-	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("SLACK_BASE_URL")), "/")
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv(envSlackBaseURL)), "/")
 	stateSecret := os.Getenv(envSlackInstallStateSecret)
 	if stateSecret == "" {
 		stateSecret = os.Getenv("OAUTH_STATE_SECRET")
@@ -1134,7 +1138,7 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 	missing := missingSlackInstallEnvVars(map[string]string{
 		envSlackClientID:                    clientID,
 		envSlackClientSecret:                clientSecret,
-		"SLACK_BASE_URL":                    baseURL,
+		envSlackBaseURL:                     baseURL,
 		displayKeySlackInstallStateFallback: stateSecret,
 	})
 	if len(missing) > 0 {
@@ -1171,7 +1175,7 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 }
 
 func missingSlackInstallEnvVars(values map[string]string) []string {
-	keys := []string{envSlackClientID, envSlackClientSecret, "SLACK_BASE_URL", displayKeySlackInstallStateFallback}
+	keys := []string{envSlackClientID, envSlackClientSecret, envSlackBaseURL, displayKeySlackInstallStateFallback}
 	var missing []string
 	for _, k := range keys {
 		if values[k] == "" {
@@ -1365,11 +1369,11 @@ func readPoolSizeEnv(name string) int {
 	parsed, err := strconv.Atoi(raw)
 	switch {
 	case err != nil:
-		slog.Warn("ignoring malformed pool-size env var; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+		slog.Warn("ignoring malformed pool-size env var; falling back to default",
 			"env", name, "raw", raw, "error", err)
 		return 0
 	case parsed <= 0:
-		slog.Warn("ignoring non-positive pool-size env var; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+		slog.Warn("ignoring non-positive pool-size env var; falling back to default",
 			"env", name, "raw", raw)
 		return 0
 	default:
@@ -1417,7 +1421,7 @@ func readBoolEnvFailSafe(name string, emptyDefault, parseErrDefault bool) bool {
 	}
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		slog.Warn("env flag set to an unparseable value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+		slog.Warn("env flag set to an unparseable value; using the fail-safe default",
 			"env", name, "value", raw, "fail_safe_default", parseErrDefault)
 		return parseErrDefault
 	}
@@ -1525,7 +1529,7 @@ func readIntEnvFailSafe(name string, def int) int {
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil || v < 0 {
-		slog.Warn("agent env int flag set to an invalid value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+		slog.Warn("agent env int flag set to an invalid value; using the fail-safe default",
 			"env", name, "value", raw, "fail_safe_default", def)
 		return def
 	}
@@ -1648,7 +1652,7 @@ func buildAdminStore(ctx context.Context) *slackdata.Store {
 		slog.Error("slackdata.NewStore failed; /qurl-admin admin will be disabled", "error", err)
 		return nil
 	}
-	slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.
+	slog.Info("admin store wired",
 		"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
 		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable),
 		"slack_rate_limit_enabled", rateLimitEnabled)
@@ -1675,7 +1679,7 @@ func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
 		return nil
 	default:
 		if !strings.EqualFold(host, slackIncomingWebhookHost) {
-			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost) // #nosec G706 -- host is operator-set; slog's JSON handler escapes control bytes in attribute values.
+			slog.Warn("FEEDBACK_SLACK_WEBHOOK_URL host is not Slack's incoming-webhook host; delivering feedback there anyway", "host", host, "expected", slackIncomingWebhookHost)
 		}
 		slog.Info("feedback delivery wired via Slack incoming webhook")
 		return newFeedbackWebhookPoster(feedbackWebhookURL, userAgent, nil)

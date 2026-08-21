@@ -1,24 +1,25 @@
 package main
 
 import (
-	"context"
-	"time"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
-	"github.com/layervai/qurl-integrations/shared/client"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func completionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "completion [bash|zsh|fish|powershell]",
 		Short: "Generate shell completion scripts",
-		Long: `Generate shell completion scripts for qurl.
+		Long: `Generate a shell completion script for qurl.
 
   Bash:   eval "$(qurl completion bash)"
   Zsh:    qurl completion zsh > "${fpath[1]}/_qurl"
   Fish:   qurl completion fish > ~/.config/fish/completions/qurl.fish`,
-		Args:      cobra.ExactArgs(1),
+		Example: `  qurl completion zsh > "${fpath[1]}/_qurl"
+  eval "$(qurl completion bash)"`,
+		Args:      exactArgs(1),
 		ValidArgs: []string{"bash", "zsh", "fish", "powershell"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch args[0] {
@@ -31,36 +32,8 @@ func completionCmd() *cobra.Command {
 			case "powershell":
 				return cmd.Root().GenPowerShellCompletionWithDesc(cmd.OutOrStdout())
 			default:
-				return cmd.Usage()
+				return exitcode.UsageError(fmt.Errorf("unsupported shell %q: use bash, zsh, fish, or powershell", args[0]))
 			}
 		},
-	}
-}
-
-// resourceIDCompletion provides dynamic shell completions for resource IDs.
-func resourceIDCompletion(opts *globalOpts) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
-	return func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		c, err := opts.newClient()
-		if err != nil {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		}
-
-		ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
-		defer cancel()
-		result, err := c.List(ctx, client.ListInput{Limit: 20, Query: toComplete})
-		if err != nil {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		}
-
-		var ids []string
-		for i := range result.QURLs {
-			q := &result.QURLs[i]
-			desc := q.TargetURL
-			if len(desc) > 50 {
-				desc = desc[:49] + "…"
-			}
-			ids = append(ids, q.ResourceID+"\t"+desc)
-		}
-		return ids, cobra.ShellCompDirectiveNoFileComp
 	}
 }

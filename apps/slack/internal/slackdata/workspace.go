@@ -91,7 +91,7 @@ const (
 	ErrCodeOwnerTransferNotOwner = "owner_transfer_not_owner"
 )
 
-const purgeCutoffCondition = "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano"
+const purgeCutoffCondition = "attribute_not_exists(" + exprUpdatedAtNano + ") OR " + exprUpdatedAtNano + " <= " + exprPurgeCutoffNano
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
 // between the caller-already-bound (idempotent-continue) and
@@ -909,10 +909,10 @@ func (s *Store) deleteWorkspaceMapping(ctx context.Context, teamID string, cutof
 	if !cutoff.IsZero() {
 		input.ConditionExpression = aws.String(purgeCutoffCondition)
 		input.ExpressionAttributeNames = map[string]string{
-			"#updated_at_nano": attrUpdatedAtNano,
+			exprUpdatedAtNano: attrUpdatedAtNano,
 		}
 		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-			":purge_cutoff_nano": unixNanoAttr(cutoff),
+			exprPurgeCutoffNano: unixNanoAttr(cutoff),
 		}
 	}
 	_, err := s.Client.DeleteItem(ctx, input)

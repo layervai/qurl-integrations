@@ -1,0 +1,5 @@
+Error: Resource Revoked (HTTP 400)
+
+  this resource was revoked and no longer resolves
+
+  Hint: this resource was deleted. Deleted resources stop resolving; publish the target again to get a new CRID.

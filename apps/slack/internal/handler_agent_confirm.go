@@ -1027,8 +1027,13 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		}
 		flags := map[string]string{}
 		if pa.Reason != "" {
-			// Carry the agent's distilled intent into the mint's audit log
-			// (Command.Reason → client.CreateInput.Reason), same as `/qurl get reason:…`.
+			// Carry the agent's distilled intent into the mint's audit record
+			// (Command.Reason → slackaudit.QURLMintReason), same as `/qurl get reason:…`.
+			// That record is emitted by getWork; it no longer rides in the mint body,
+			// which never recorded it (see slackaudit.QURLMintReason). This is the
+			// SECOND record of the same intent — recordAgentAudit also stores it on the
+			// App Home row — and they are not redundant: the App Home row is
+			// per-viewer and agent-gated, the audit event is the workspace-wide one.
 			// The asker-only gate (processAgentConfirm) guarantees clicker==asker here,
 			// so the mint actor (payload.User.ID) and the reason (the asker's distilled
 			// intent) are the same person — same actor/reason parity as a typed get.

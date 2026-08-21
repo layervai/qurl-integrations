@@ -77,10 +77,9 @@ describe('Concurrency: Parallel Minting', () => {
 });
 
 describe('Concurrency: Parallel Access', () => {
-  test('10 parallel accesses of a max_uses:1 link: SPA serves all, counter stays coherent', async () => {
+  test('10 parallel accesses of a minted link: SPA serves all, counter stays coherent', async () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/parallel-access'),
-      max_uses: 1,
     });
     tracked.track(result.resource_id);
 
@@ -102,16 +101,22 @@ describe('Concurrency: Parallel Access', () => {
     // … and the counter check lives in the management response. Honest
     // scope: the knock that consumes a use is client-side JS, so ten
     // bare GETs may consume nothing at all — this pins parallel SPA
-    // serving plus counter COHERENCE (never past the max_uses:1 cap),
-    // not consumption-race enforcement. Racing real knocks would need
+    // serving plus counter COHERENCE, not consumption-race enforcement.
+    // NOTE the bound below is NOT a server-side cap: this mint sends no
+    // `one_time_use`, and the `max_uses: 1` it used to send was never a
+    // property of any mint schema, so qurl-service dropped it and has never
+    // capped this link. What holds `use_count` at 0/1 is that bare GETs
+    // don't knock. Sending `one_time_use: true` — the declared field that
+    // means what `max_uses: 1` intended — is the deliberate follow-up noted
+    // on helpers/qurl-api.ts's mintLink. Racing real knocks would need
     // ten parallel browsers; the single-consumption guarantee itself is
     // pinned knock-driven in file-revoke.test.ts ("a consumed one-time
     // link does not serve a second knock"), and URL-target knock
     // coverage is #951. This management coherence check depends on terminal-token
     // retention in the preview.
     // TODO(upstream-contract): layervai/qurl-service#1233 tracks that behavior.
-    // The summary must resolve and its use_count must stay within the max_uses:1
-    // cap. Missing summaries are hard failures.
+    // The summary must resolve and its use_count must stay coherent.
+    // Missing summaries are hard failures.
     const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id);
     expect(status.use_count).toBeLessThanOrEqual(1);
   });

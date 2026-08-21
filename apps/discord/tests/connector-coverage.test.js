@@ -841,15 +841,57 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       };
     }
 
+    // Every field CreateQurlForResourceRequest declares. qurl-service#1402 adds
+    // `additionalProperties: false` to the mint schemas, so anything outside
+    // this set is a 400 rather than the silent drop it used to be — and
+    // @layervai/qurl will happily forward `target_path` here, because its
+    // CREATE_QURL_FOR_RESOURCE_FIELD_KEYS allowlist wrongly includes a field
+    // that only MintLinkRequest accepts. Keep this list in sync with the
+    // service's openapi.yaml, NOT with the SDK's allowlist.
+    const CREATE_QURL_FOR_RESOURCE_ALLOWED_KEYS = [
+      'expires_in',
+      'one_time_use',
+      'max_sessions',
+      'session_duration',
+      'access_policy',
+      'label',
+    ];
+
+    it('mints the detect qURL with no field outside CreateQurlForResourceRequest', async () => {
+      captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9', apiKey: 'k-detect' });
+
+      expect(mockClient.createQurlForResource).toHaveBeenCalledTimes(1);
+      const [, body] = mockClient.createQurlForResource.mock.calls[0];
+      const undeclared = Object.keys(body ?? {}).filter(
+        (k) => !CREATE_QURL_FOR_RESOURCE_ALLOWED_KEYS.includes(k),
+      );
+      expect(undeclared).toEqual([]);
+    });
+
+    it('still POSTs to /api/detect once target_path is off the mint body', async () => {
+      // The guard above only proves the field is gone. This proves removing it
+      // did not quietly drop the path: buildDetectTargetUrl joins
+      // DETECT_TARGET_PATH onto the minted qurl_site origin locally, which is
+      // what has always determined the POST target (resolve's target_url is ""
+      // for tunnels and is ignored).
+      const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9', apiKey: 'k-detect' });
+      expect(get().url).toBe(`${TUNNEL_SITE}/api/detect`);
+    });
+
     it('self-mints then POSTs to qurl_site with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
       const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
       const bytes = Buffer.from('imagedata');
       await connector.detectWatermark(bytes, { guildId: 'guild-9', contentType: 'image/png', apiKey: 'k-detect' });
       // The three SDK legs fire: list the active resource for the slug, mint a
-      // fresh ephemeral qURL on it (target_path /api/detect), resolve that (the
-      // NHP knock for our IP) using the at_ token from the minted qurl_link.
+      // fresh ephemeral qURL on it, resolve that (the NHP knock for our IP)
+      // using the at_ token from the minted qurl_link. The mint body carries
+      // NO target_path — see the allowed-key guard below — yet the POST url
+      // asserted further down still ends in /api/detect, because
+      // buildDetectTargetUrl appends it to qurl_site locally.
       expect(mockClient.listAllResources).toHaveBeenCalledWith({ slug: 'detect-sandbox', limit: 100 });
-      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, { target_path: '/api/detect', expires_in: '5m' });
+      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, { expires_in: '5m' });
       expect(mockClient.resolve).toHaveBeenCalledWith({ access_token: 'at_testtoken123' });
       const { url, opts } = get();
       expect(url).toBe(TUNNEL_TARGET);
@@ -962,7 +1004,6 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9', apiKey: 'k-detect' });
       expect(mockClient.listAllResources).toHaveBeenCalledWith({ slug: 'detect-sandbox', limit: 100 });
       expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, {
-        target_path: '/api/detect',
         expires_in: '5m',
       });
     });

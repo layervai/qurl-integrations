@@ -29,6 +29,33 @@ name: Release Please
 # set to the affected tag. Do NOT "Re-run all jobs": release-please then
 # sees the release already exists and skips release-cli. Asset re-uploads
 # are idempotent (release.replace_existing_artifacts in .goreleaser.yml).
+#
+# The other failure mode, and the worse one, is a release release-please
+# never made. What it looks like: this workflow runs green, main carries an
+# updated .release-please-manifest.json and apps/cli/CHANGELOG.md, and there
+# is no tag and no GitHub Release for that version. release-cli never fires
+# (apps/cli--release_created is false), so nothing goes red. Every later
+# release-please run then aborts with "There are untagged, merged release PRs
+# outstanding", which blocks release PRs for EVERY component until someone
+# relabels the merged PR "autorelease: pending" -> "autorelease: tagged".
+#
+# Why: release-please matches a merged release PR to a package before
+# building its release. A PR body carrying a single componentless section
+# takes the "standalone release PR" path, which compares the PR's *branch*
+# component against getBranchComponent() — and getBranchComponent(), unlike
+# getComponent(), ignores include-component-in-tag. The manifest release PR
+# always sits on `release-please--branches--main` (branch component:
+# undefined) and the CLI's section is componentless because the CLI is
+# bare-tagged, so a `component` declared for apps/cli loses that comparison
+# and the release is skipped with a warning while the action exits 0. A CLI
+# release sharing its PR with any other component takes the multi-section
+# path and succeeds, so this bites only when the CLI is released alone. It
+# dropped v1.1.0, v1.3.0 and v1.4.0 that way.
+#
+# Both halves are now pinned. apps/cli declares no component, and
+# scripts/check-release-please-sync.sh fails the build if one comes back.
+# scripts/verify-cli-release.sh runs below on every push and turns a dropped
+# release from a green run into a red one that names the recovery.
 
 on:
   push:
@@ -66,6 +93,27 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # Checked out after the release step, not before: release-please works
+      # entirely over the API and never reads the workspace, so ordering it
+      # this way keeps this change provably unable to affect the release
+      # itself. Default fetch-depth is enough — the verifier reads one file at
+      # this push's commit and asks the API about the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The header above describes what this catches. It is silent on ordinary
+      # pushes: the manifest names the last released CLI version and that
+      # release exists. It fails the run only when the manifest names a version
+      # nothing released — the state that otherwise reports green and then
+      # blocks every component's next release PR.
+      #
+      # Deliberately not `if: always()`. A release-please step that already
+      # failed has reddened the run; this exists for the case where it
+      # succeeded and released nothing.
+      - name: Verify the CLI release was created
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/verify-cli-release.sh
+
   release-cli:
     needs: release-please
     if: >-
@@ -77,6 +125,14 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      # Required for cosign keyless signing (`signs:` in .goreleaser.yml) —
+      # cosign requests an OIDC token from GitHub
+      # (`ACTIONS_ID_TOKEN_REQUEST_TOKEN` / `_URL`, auto-discovered) and
+      # presents it to Fulcio to mint the short-lived signing certificate.
+      # Job-scoped rather than workflow-level, mirroring qurl-connector's
+      # docker-publish.yml: the release-please job above must not be able to
+      # mint certificates carrying this repo's release identity.
+      id-token: write
     env:
       CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
     steps:
@@ -95,6 +151,32 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # cosign for the keyless `signs:` step in .goreleaser.yml and the
+      # self-test below. Pin copied from qurl-connector's docker-publish.yml:
+      # sigstore/cosign-installer v4.1.2
+      # (6f9f17788090df1f26f669e9d70d6ae9567deba6, 2026-05-07).
+      # `cosign-release` pins the cosign binary the installer fetches —
+      # without it, an upstream installer default-bump would silently change
+      # the binary that signs releases. Update it in lockstep with the action
+      # SHA, and keep RELEASING.md's "cosign v3.0+" consumer floor a subset
+      # of the version signed with here.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+
+      # syft for the `sboms:` step in .goreleaser.yml (GoReleaser shells out
+      # to `syft` on PATH). Same explicit-tool-pin rationale as cosign above:
+      # sbom-action v0.24.0's bundled default is syft v1.42.3 — pinning it as
+      # an input keeps a future action bump from silently changing the SBOM
+      # generator, and surfaces the tool bump as a one-line reviewable diff.
+      # Keep in lockstep with cli-nightly.yml's copy (the snapshot exercises
+      # the same SBOM path).
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: 'v1.42.3'
+
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
       # keeps its notes.
@@ -110,6 +192,29 @@ jobs:
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.
           GORELEASER_CURRENT_TAG: ${{ env.CLI_TAG }}
+
+      # Self-test the signature with the EXACT consumer recipe from
+      # RELEASING.md — qurl-connector's docker-publish.yml runs the same
+      # post-sign verify against its documented recipe. If the documented
+      # identity/issuer and what Fulcio actually minted ever drift — a
+      # workflow rename, a recovery dispatch from a non-main ref, an OIDC
+      # claim change — the release fails loudly here instead of shipping
+      # artifacts whose published verification recipe is wrong.
+      #
+      # The identity is exact, not a regexp: unlike the connector's
+      # tag-triggered publish (whose SAN embeds the per-release tag ref and
+      # so needs `--certificate-identity-regexp`), this job always runs from
+      # refs/heads/main — release-please only triggers on main pushes, and
+      # recovery dispatches must be run from main. Rename cost: renaming this
+      # workflow file changes the identity; update this step and RELEASING.md
+      # in lockstep.
+      - name: Verify release signature (self-test)
+        run: |
+          cosign verify-blob \
+            --bundle dist/checksums.txt.sigstore.json \
+            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            dist/checksums.txt
 
       - name: Post recovery instructions on failure
         if: failure()
