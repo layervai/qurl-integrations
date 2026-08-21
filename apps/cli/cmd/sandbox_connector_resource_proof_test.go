@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,10 +37,10 @@ const (
 	connectorResourceProofArming             = "QURL_CLI_SANDBOX_CONNECTOR_RESOURCE_PROOF"
 	connectorResourceProofHubHost            = "hub.sandbox.nhp.layerv.xyz"
 	connectorResourceProofSandboxAPIAudience = "https://api.layerv.xyz"
-	connectorResourceProofSandboxAPIHost     = "api.layerv.xyz"
+	connectorResourceProofSandboxAPIOrigin   = "https://api.layerv.xyz"
 	connectorResourceProofAPIHost            = "api.layerv.ai"
 	connectorResourceProofBootstrapHost      = "bootstrap.layerv.ai"
-	connectorResourceProofAPIURL             = "https://api.layerv.ai/v1"
+	connectorResourceProofAPIURL             = "https://api.layerv.ai"
 	connectorResourceProofTimeout            = 60 * time.Second
 	connectorResourceProofMinJWTLifetime     = 20 * time.Minute
 	connectorResourceProofMaxJWTLifetime     = 2 * time.Hour
@@ -236,12 +235,11 @@ func loadConnectorResourceProofConfig(lookup func(string) string, now time.Time)
 		wantEndpointDigest != hex.EncodeToString(actualEndpointDigest[:]) {
 		return connectorResourceProofConfig{}, errors.New("Connector resource proof sandbox endpoint does not match its pinned SHA-256 digest")
 	}
-	endpointURL, endpointErr := url.Parse(cfg.Endpoint)
-	endpointHost := strings.ToLower(endpointURL.Hostname())
-	if endpointErr != nil || endpointURL.Scheme != "https" || endpointURL.User != nil || endpointURL.RawQuery != "" || endpointURL.Fragment != "" ||
-		endpointURL.Path != "/v1" || (endpointURL.Port() != "" && endpointURL.Port() != "443") ||
-		endpointHost != connectorResourceProofSandboxAPIHost {
-		return connectorResourceProofConfig{}, errors.New("Connector resource proof endpoint must be the pinned HTTPS sandbox /v1 endpoint under layerv.xyz")
+	// The CLI API client appends versioned paths such as /v1/api-keys to its
+	// configured origin. Requiring the canonical origin here prevents a
+	// versioned base path from becoming /v1/v1/api-keys during enrollment.
+	if cfg.Endpoint != connectorResourceProofSandboxAPIOrigin {
+		return connectorResourceProofConfig{}, errors.New("Connector resource proof endpoint must be the pinned canonical HTTPS sandbox API origin")
 	}
 	if got := strings.TrimSpace(lookup("QURL_CLI_SANDBOX_ROLLOUT_ATTESTATION")); got != "five-op-cells-ready" {
 		return connectorResourceProofConfig{}, fmt.Errorf("Connector resource proof rollout attestation = %q, want five-op-cells-ready", got)
@@ -463,7 +461,7 @@ func mustProofURLPort(t *testing.T, rawURL string) string {
 }
 
 func TestLoadConnectorResourceProofConfigFailsClosed(t *testing.T) {
-	endpoint := "https://api.layerv.xyz/v1"
+	endpoint := connectorResourceProofSandboxAPIOrigin
 	endpointDigest := sha256.Sum256([]byte(endpoint))
 	now := time.Unix(1_800_000_000, 0)
 	cleanupJWT := proofJWT(t, now.Add(time.Hour).Unix())
@@ -518,11 +516,23 @@ func TestLoadConnectorResourceProofConfigFailsClosed(t *testing.T) {
 		for key, value := range complete {
 			copy[key] = value
 		}
-		copy["QURL_ENDPOINT"] = "https://api.layerv.ai/v1"
+		copy["QURL_ENDPOINT"] = "https://api.layerv.ai"
 		digest := sha256.Sum256([]byte(copy["QURL_ENDPOINT"]))
 		copy["QURL_CLI_SANDBOX_ENDPOINT_SHA256"] = hex.EncodeToString(digest[:])
 		if _, err := loadConnectorResourceProofConfig(func(key string) string { return copy[key] }, now); err == nil || !strings.Contains(err.Error(), "sandbox") {
 			t.Fatalf("production endpoint error = %v", err)
+		}
+	})
+	t.Run("versioned sandbox endpoint rejected even when its digest matches", func(t *testing.T) {
+		copy := make(map[string]string, len(complete))
+		for key, value := range complete {
+			copy[key] = value
+		}
+		copy["QURL_ENDPOINT"] = connectorResourceProofSandboxAPIOrigin + "/v1"
+		digest := sha256.Sum256([]byte(copy["QURL_ENDPOINT"]))
+		copy["QURL_CLI_SANDBOX_ENDPOINT_SHA256"] = hex.EncodeToString(digest[:])
+		if _, err := loadConnectorResourceProofConfig(func(key string) string { return copy[key] }, now); err == nil || !strings.Contains(err.Error(), "canonical") {
+			t.Fatalf("versioned sandbox endpoint error = %v", err)
 		}
 	})
 	t.Run("non-sandbox Hub rejected", func(t *testing.T) {
