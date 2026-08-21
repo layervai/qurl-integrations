@@ -1,0 +1,6 @@
+Error: Unauthorized (HTTP 401)
+
+  the provided API key has expired
+
+  Hint: this API key has expired. Create a new key in the qURL console and run `qurl login` again.
+  Request ID: req_test

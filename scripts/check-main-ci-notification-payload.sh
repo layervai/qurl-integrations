@@ -65,7 +65,7 @@ import tempfile
 WORKFLOW = ".github/workflows/main-ci-notifications.yml"
 STEP_NAME = "Post Slack notification"
 # Emitted by the `*)` arm of the workflow's impact case statement.
-FALLBACK_IMPACT_PREFIX = "Main CI failed before the repository reached"
+FALLBACK_IMPACT_PREFIX = "Main CI did not complete successfully before"
 # This repository's default branch. STUB below carries the same value as
 # payload data; these are two different facts that only coincide today.
 DEFAULT_BRANCH = "main"
@@ -79,8 +79,10 @@ NOTIFY_EXEMPT = {}
 # Stand-in for the workflow_run context the step reads from its env: block.
 STUB = {
     "SLACK_WEBHOOK_URL": "https://hooks.example.invalid/stub",
+    "GH_TOKEN": "stub-token",
     "REPOSITORY": "layervai/qurl-integrations",
     "REPOSITORY_URL": "https://github.com/layervai/qurl-integrations",
+    "WORKFLOW_ID": "242171096",
     "EVENT": "push",
     "CONCLUSION": "failure",
     "HEAD_SHA": "8d0bf8686e2904c3dcdef76a077c226070a52ea1",
@@ -88,6 +90,7 @@ STUB = {
     "RUN_URL": "https://github.com/layervai/qurl-integrations/actions/runs/1",
     "DEFAULT_BRANCH": "main",
     "ACTOR": "octocat",
+    "COMMIT_MESSAGE": "test: exercise notifier",
 }
 
 def die(msg, path=None):
@@ -253,6 +256,16 @@ if not run_script or "jq -n" not in run_script:
     die("could not extract the %r step's run: block -- if the workflow was "
         "restructured, update this check rather than deleting it" % STEP_NAME)
 
+# A missing actions permission or token does not crash the cancellation path: it
+# deliberately degrades to amber. Fence the wiring statically so every benign
+# supersession does not silently become a false alert after a permissions edit.
+workflow_text = "\n".join(lines)
+if not re.search(r"(?m)^permissions:\n  actions: read\s*$", workflow_text):
+    die("top-level permissions must grant actions: read for supersession lookup")
+if not re.search(r"(?m)^          GH_TOKEN: \$\{\{ github\.token \}\}\s*$",
+                 workflow_text):
+    die("Post Slack notification must pass github.token to gh as GH_TOKEN")
+
 notifier_on = on_block(WORKFLOW)
 if "workflow_run" not in notifier_on:
     die("no `on.workflow_run` block to read the trigger list from")
@@ -356,7 +369,7 @@ if stale:
     die("NOTIFY_EXEMPT names workflows that can no longer trigger this "
         "notifier: %s (drop the entry)" % stale)
 
-# --- 3. run the real step body against a stub curl, for every trigger
+# --- 3. run the real step body against stubbed Slack and GitHub APIs
 
 tmp = tempfile.mkdtemp()
 try:
@@ -374,6 +387,25 @@ try:
             '  prev="$a"\ndone\nexit 0\n'
         )
     os.chmod(stub, 0o755)
+    gh_stub = os.path.join(bindir, "gh")
+    with open(gh_stub, "w") as fh:
+        fh.write(
+            '#!/bin/sh\n'
+            'args=" $* "\n'
+            'case "$args" in *" --method GET "*) ;; *) exit 3 ;; esac\n'
+            'case "$args" in *" repos/layervai/qurl-integrations/actions/workflows/242171096/runs "*) ;; *) exit 3 ;; esac\n'
+            'case "$args" in *" -f branch=main "*) ;; *) exit 3 ;; esac\n'
+            'case "$args" in *" -f event=push "*) ;; *) exit 3 ;; esac\n'
+            'case "$args" in *" -f per_page=100 "*) ;; *) exit 3 ;; esac\n'
+            'case "$args" in *" --jq "*) ;; *) exit 3 ;; esac\n'
+            'case "${GH_STUB_MODE:-successor}" in\n'
+            '  successor) printf "3838\\thttps://github.example.invalid/runs/2\\n" ;;\n'
+            '  none) exit 0 ;;\n'
+            '  failure) exit 1 ;;\n'
+            '  *) echo "unknown GH_STUB_MODE" >&2; exit 2 ;;\n'
+            'esac\n'
+        )
+    os.chmod(gh_stub, 0o755)
     out = os.path.join(tmp, "payload.json")
 
     def run(env_overrides):
@@ -418,12 +450,19 @@ try:
         except ValueError as exc:
             die("invalid JSON payload for %s: %s" % (label, exc))
 
-        if set(obj) != {"text", "blocks"}:
+        if set(obj) != {"text", "attachments"}:
             die("payload keys changed for %s: %s" % (label, sorted(obj)))
-        if len(obj["blocks"]) != 4:
-            die("expected 4 Slack blocks for %s, got %d"
-                % (label, len(obj["blocks"])))
-        fields = obj["blocks"][1]["fields"]
+        if len(obj["attachments"]) != 1:
+            die("expected one Slack attachment for %s" % label)
+        attachment = obj["attachments"][0]
+        if set(attachment) != {"color", "blocks"}:
+            die("attachment keys changed for %s: %s"
+                % (label, sorted(attachment)))
+        blocks = attachment["blocks"]
+        if len(blocks) != 5:
+            die("expected 5 Slack blocks for %s, got %d"
+                % (label, len(blocks)))
+        fields = blocks[1]["fields"]
         if len(fields) != 4:
             die("expected 4 fields for %s" % label)
 
@@ -434,28 +473,42 @@ try:
         # this list, and the mismatch message shows both sides.
         ctx = dict(STUB)
         ctx.update(extra)
-        actor = ("schedule" if ctx["EVENT"] == "schedule"
-                 else (ctx["ACTOR"] or "unknown"))
+        trigger = ("Scheduled" if ctx["EVENT"] == "schedule"
+                   else "Push by %s" % (ctx["ACTOR"] or "unknown"))
         expected = [
-            "*Repository*\n<%s|%s>" % (ctx["REPOSITORY_URL"], ctx["REPOSITORY"]),
-            "*Commit*\n<%s/commit/%s|`%s`>"
-            % (ctx["REPOSITORY_URL"], ctx["HEAD_SHA"], ctx["HEAD_SHA"][:7]),
-            "*Triggered by*\n%s" % actor,
-            "*Run*\n<%s|#%s>" % (ctx["RUN_URL"], ctx["RUN_NUMBER"]),
+            "*Workflow:*\n`%s`" % workflow,
+            "*Result:*\n:x: `failure`",
+            "*Branch:*\n`%s` (%s)"
+            % (ctx["DEFAULT_BRANCH"], ctx["HEAD_SHA"][:7]),
+            "*Trigger:*\n%s" % trigger,
         ]
         for i, want in enumerate(expected):
             if fields[i]["text"] != want:
                 die("field %d rendered wrong for %s\n  expected: %r\n"
                     "  actual:   %r" % (i, label, want, fields[i]["text"]))
 
-        for block in obj["blocks"]:
+        if attachment["color"] != "#dc3545":
+            die("failure attachment color wrong for %s: %r"
+                % (label, attachment["color"]))
+        if blocks[0]["text"]["text"] != ":x: *qURL Integrations CI* failed":
+            die("failure header wrong for %s: %r"
+                % (label, blocks[0]["text"]["text"]))
+        if blocks[2]["text"]["text"] != "*Commit:* `test: exercise notifier`":
+            die("commit block rendered wrong for %s" % label)
+        footer = ("<%s/commit/%s|%s>  |  <%s|View workflow>"
+                  % (ctx["REPOSITORY_URL"], ctx["HEAD_SHA"],
+                     ctx["HEAD_SHA"][:7], ctx["RUN_URL"]))
+        if blocks[-1]["elements"][0]["text"] != footer:
+            die("footer rendered wrong for %s" % label)
+
+        for block in blocks:
             for text in ([block["text"]["text"]] if "text" in block else []) + \
                         [f["text"] for f in block.get("fields", [])] + \
                         [e["text"] for e in block.get("elements", [])]:
                 if text.strip() in ("", "*Impact*"):
                     die("empty text rendered for %s: %r" % (label, text))
 
-        impact = obj["blocks"][2]["text"]["text"]
+        impact = blocks[-2]["text"]["text"]
         generic = FALLBACK_IMPACT_PREFIX in impact
         # A listed trigger falling through to the generic arm means the case
         # statement and the trigger list drifted apart.
@@ -464,6 +517,69 @@ try:
                 "case statement drifted)" % workflow)
         if not listed and not generic:
             die("unlisted %r did not hit the fallback arm" % workflow)
+
+    # Every admitted conclusion gets its own visual/operational classification.
+    outcome_cases = [
+        ({"CONCLUSION": "timed_out"}, "#dc3545", ":x:", "timed out"),
+        ({"CONCLUSION": "cancelled", "GH_STUB_MODE": "successor"},
+         "#6c757d", ":fast_forward:", "superseded by run #3838"),
+        ({"CONCLUSION": "cancelled", "GH_STUB_MODE": "none"},
+         "#ffc107", ":warning:", "stopped early"),
+        ({"CONCLUSION": "cancelled", "GH_STUB_MODE": "failure"},
+         "#ffc107", ":warning:", "stopped early"),
+    ]
+    for extra, color, result_emoji, status_text in outcome_cases:
+        env = {"WORKFLOW_NAME": triggers[0]}
+        env.update(extra)
+        label = str(extra)
+        proc, payload = run(env)
+        if proc.returncode != 0 or payload is None:
+            die("step failed for outcome %s (exit %d)\n%s"
+                % (label, proc.returncode, proc.stderr.strip()))
+        obj = json.loads(payload)
+        attachment = obj["attachments"][0]
+        blocks = attachment["blocks"]
+        if attachment["color"] != color:
+            die("outcome %s color = %r, want %r"
+                % (label, attachment["color"], color))
+        if blocks[0]["text"]["text"] != ":%s: *qURL Integrations CI* %s" \
+                % (result_emoji.strip(":"), status_text):
+            die("outcome %s header rendered wrong: %r"
+                % (label, blocks[0]["text"]["text"]))
+        if blocks[1]["fields"][1]["text"] != \
+                "*Result:*\n%s `%s`" % (result_emoji, extra["CONCLUSION"]):
+            die("outcome %s result field rendered wrong" % label)
+        impact = blocks[-2]["text"]["text"]
+        if extra.get("GH_STUB_MODE") == "successor":
+            if "Superseded — no action needed" not in impact or \
+                    "runs/2|run #3838" not in impact:
+                die("verified successor did not render a no-action impact")
+        elif extra.get("GH_STUB_MODE") == "none":
+            if "No newer" not in impact:
+                die("stranded cancellation did not ask for a re-run")
+        elif extra.get("GH_STUB_MODE") == "failure":
+            if "could not verify" not in impact:
+                die("lookup failure did not fail closed")
+
+    # An empty commit message omits the optional block without changing the
+    # fixed ordering of impact and footer.
+    proc, payload = run({
+        "WORKFLOW_NAME": triggers[0], "COMMIT_MESSAGE": ""
+    })
+    if proc.returncode != 0 or payload is None:
+        die("step failed for empty commit message")
+    if len(json.loads(payload)["attachments"][0]["blocks"]) != 4:
+        die("empty commit message must omit its block")
+
+    # Backticks in a commit subject must not break the inline-code wrapper.
+    proc, payload = run({
+        "WORKFLOW_NAME": triggers[0], "COMMIT_MESSAGE": "fix: keep `code` readable"
+    })
+    if proc.returncode != 0 or payload is None:
+        die("step failed for commit message containing backticks")
+    commit_block = json.loads(payload)["attachments"][0]["blocks"][2]
+    if commit_block["text"]["text"] != "*Commit:* `fix: keep 'code' readable`":
+        die("commit-message backticks must be normalized inside mrkdwn code")
 
     # --- 4. a missing webhook must fail loudly, not no-op
     proc, payload = run({
@@ -493,7 +609,8 @@ if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
     )
 
 print("main CI notification payload builds on %s for all %d triggers "
-      "(+ fallback, schedule, missing actor); the list and the %d reachable "
-      "workflows agree in both directions; webhook guard fails loudly"
+      "(+ fallback, schedule, missing actor, every conclusion and successor "
+      "lookup outcome); the list and the %d reachable workflows agree in both "
+      "directions; webhook guard fails loudly"
       % (version, len(triggers), len(candidates)))
 EOF

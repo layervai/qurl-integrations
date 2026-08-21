@@ -10,6 +10,8 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 IMG="${IMG:-s3-static-connector:test}"
+REQUESTED_IMG="$IMG"
+S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE="${S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE:-}"
 NET="s3-static-connector-testnet"
 STUB="s3-static-connector-stub"
 ORIGIN="s3-static-connector-app"
@@ -17,6 +19,19 @@ ORIGIN="s3-static-connector-app"
 STUB_IMG="python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9"
 arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) ;; esac
 PLATFORM="${PLATFORM:-linux/$arch}"
+waive_control_char_contract=false
+if [ -n "$S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE" ]; then
+  if [[ ! "$S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE" =~ ^ghcr\.io/layervai/qurl-integrations/s3-static-connector@sha256:[0-9a-f]{64}$ ]]; then
+    printf 'FAIL S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE must be the canonical released S3 origin digest\n' >&2
+    exit 1
+  fi
+  if [ "$REQUESTED_IMG" != "$S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE" ]; then
+    printf 'FAIL control-char waiver digest does not match the image under test\n' >&2
+    exit 1
+  fi
+  waive_control_char_contract=true
+fi
+
 TMPROOT="${TMPDIR:-/tmp}"
 H="$(mktemp "$TMPROOT/qns_h.XXXXXX")"
 B="$(mktemp "$TMPROOT/qns_b.XXXXXX")"
@@ -141,6 +156,9 @@ stub_get_count_since() {
   pattern="$2"
   docker logs "$STUB" 2>&1 | tail -n +"$((mark + 1))" | grep -c "$pattern"
 }
+origin_log_mark() {
+  docker logs "$ORIGIN" 2>&1 | wc -l | tr -d ' '
+}
 ok() { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
 no() { fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else no "$1 (got '$2', want '$3')"; fi; }
@@ -170,6 +188,49 @@ expect_stub_gets_since() {
     sleep 0.1
   done
   expect_eq "$label" "$got" "$want"
+}
+# Assert one JSON access-log field of the origin request whose logged $uri
+# starts with $3, among the log lines written since mark $2. Clients cannot tell
+# a locally-rejected request from an upstream-rejected one (both are the generic
+# 404), so the access log is the only evidence of where a request stopped: a
+# request rejected before `set $s3_target` logs an empty "key" and
+# "upstream_status", while a proxied one logs the key it built and the status
+# the signer hop returned.
+# This takes an origin-log mark, not a stub-log one, so it must not touch the
+# `mark`/`label` globals the stub helpers share with their call sites — hence
+# the ol_/cc_ prefixes here and below.
+expect_origin_log_field_since() {
+  ol_label="$1"
+  ol_mark="$2"
+  ol_prefix="$3"
+  ol_field="$4"
+  ol_want="$5"
+  ol_line=""
+  for _ in $(seq 1 20); do
+    ol_line="$(docker logs "$ORIGIN" 2>&1 | tail -n +"$((ol_mark + 1))" \
+      | grep -F "\"path\":\"$ol_prefix" | tail -n 1)"
+    [ -n "$ol_line" ] && break
+    sleep 0.1
+  done
+  if [ -z "$ol_line" ]; then
+    no "$ol_label (no access log line for path prefix '$ol_prefix')"
+    return
+  fi
+  expect_eq "$ol_label" "$(printf '%s\n' "$ol_line" | cache_json_str "$ol_field")" "$ol_want"
+}
+# One control-char probe: the client gets the generic 404, and the access log
+# proves nginx stopped the request before it became an S3 key or reached the
+# signer. $2 is the percent-encoded request path; $3 is the decoded $uri prefix
+# to match in the log, kept clear of the control byte itself.
+expect_control_char_rejected() {
+  cc_label="$1"
+  cc_probe="$2"
+  cc_prefix="$3"
+  cc_mark="$(origin_log_mark)"
+  cc_code="$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$base$cc_probe")"
+  expect_eq "$cc_label is rejected" "$cc_code" 404
+  expect_origin_log_field_since "$cc_label builds no S3 key" "$cc_mark" "$cc_prefix" key ""
+  expect_origin_log_field_since "$cc_label never reaches the signer" "$cc_mark" "$cc_prefix" upstream_status ""
 }
 
 # 0. Runtime cachectl JSON escaping matches the host-side unit contract. This
@@ -340,6 +401,33 @@ expect_eq "Range status (cached different slice)" "$code" 206
 expect_eq "Range body (cached different slice)" "$(cat "$B")" "456"
 expect_stub_gets_since "Range upstream GETs after cached range" "$mark" 'GET /range.bin ' 0
 
+# 13b. Control bytes are rejected in the default (no S3_PREFIX) config too —
+# the common deployment shape — and the rejection path keeps the security
+# headers and stays out of error_log.
+if [ "$waive_control_char_contract" != "true" ]; then
+  warn_mark="$(origin_log_mark)"
+  expect_control_char_rejected "default-config CRLF viewer path" \
+    "/crlf%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css" '/crlf HTTP'
+  expect_control_char_rejected "default-config bare-LF viewer path" \
+    "/lf%20HTTP/1.1%0aHost:h%0a%0aGET%20/styles/app.css" '/lf HTTP'
+  expect_control_char_rejected "default-config tab viewer path" "/tab%09probe.html" '/tab'
+
+  # A rejection is an internal 400 -> @notfound redirect; pin that it still
+  # carries the same header set as every other error status.
+  fetch --path-as-is "$base/hdr%09probe.html"
+  expect_eq "control-char rejection status" "$(status_code)" 404
+  expect_security_headers "control-char rejection"
+
+  # $s3_target is initialized above the guard, so a rejected request must not
+  # also emit a per-request "uninitialized variable" warning — that would turn a
+  # control-char flood into an error_log flood.
+  if docker logs "$ORIGIN" 2>&1 | tail -n +"$((warn_mark + 1))" | grep -q 'uninitialized "s3_target"'; then
+    no "control-char rejection emits no uninitialized s3_target warning"
+  else
+    ok "control-char rejection emits no uninitialized s3_target warning"
+  fi
+fi
+
 # 14. S3_PREFIX is joined with the clean-URL path at runtime.
 docker rm -f "$ORIGIN" >/dev/null 2>&1
 docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
@@ -371,6 +459,36 @@ expect_eq "S3_PREFIX / signed path" "$(hval X-Stub-Path)" "/site/index.html"
 mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/website"
 expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
+
+if [ "$waive_control_char_contract" = "true" ]; then
+  message="Known pre-fix S3 origin digest remains pinned by Slack; control-char assertions are waived only for this exact immutable image. Rotate the pin after PR #1158 publishes, then remove S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE."
+  if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
+    printf '::warning title=S3 origin security pin pending rotation::%s\n' "$message"
+  else
+    printf 'WARNING: %s\n' "$message" >&2
+  fi
+else
+  # A viewer path carrying percent-encoded CR/LF must not splice a second request
+  # past S3_PREFIX into the signer hop. styles/app.css exists only at the bucket
+  # root; under S3_PREFIX=site a legit request signs /site/styles/app.css, so any
+  # upstream GET for the bare /styles/app.css means the prefix boundary escaped.
+  mark="$(stub_log_mark)"
+  expect_control_char_rejected "CRLF control-char viewer path" \
+    "/q%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css" '/q HTTP'
+  expect_stub_gets_since "CRLF request-splitting cannot escape S3_PREFIX" "$mark" 'GET /styles/app.css ' 0
+
+  # A bare LF splits the request just as well; CR is not required, so pin it
+  # separately instead of assuming the CR/LF pair is the whole vector.
+  mark="$(stub_log_mark)"
+  expect_control_char_rejected "bare-LF control-char viewer path" \
+    "/l%20HTTP/1.1%0aHost:h%0a%0aGET%20/styles/app.css" '/l HTTP'
+  expect_stub_gets_since "bare-LF request-splitting cannot escape S3_PREFIX" "$mark" 'GET /styles/app.css ' 0
+
+  # Pin a non-CR/LF member of the complete C0/DEL class too. The stub would 404
+  # this path on its own, so the access log — not the stub — is what proves the
+  # request stopped in nginx.
+  expect_control_char_rejected "tab control-char viewer path" "/tab%09probe.html" '/tab'
+fi
 
 # 15. The entrypoint supervisor exits the container if either child dies.
 for child in envoy nginx; do

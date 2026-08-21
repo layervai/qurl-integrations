@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean check-i18n-parity test-i18n-parity
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-extension-lockstep check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean check-i18n-parity test-i18n-parity
 
 VERSION ?= dev
 
@@ -18,7 +18,7 @@ fmt:
 # and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
 # drifts: newer golangci-lint versions flag issues the pinned config is clean
 # on.
-GOLANGCI_LINT_VERSION := v2.10.1
+GOLANGCI_LINT_VERSION := v2.12.2
 
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./...
@@ -65,10 +65,12 @@ vendor:
 	go mod vendor
 	go mod tidy
 
-## Release (requires goreleaser)
+## Release (requires goreleaser + syft; .goreleaser.yml's sboms block shells
+## out to syft). Signing is skipped: keyless cosign needs GitHub's OIDC
+## broker, which only exists on Actions runs — see `signs:` in .goreleaser.yml.
 
 release-snapshot: # Build release artifacts without publishing
-	goreleaser release --snapshot --clean
+	goreleaser release --snapshot --clean --skip=sign
 
 ## Security
 
@@ -103,6 +105,12 @@ check-notification-payload:
 
 test-validated-base:
 	scripts/test-resolve-validated-base.sh
+
+test-cli-release-verifier:
+	scripts/test-verify-cli-release.sh
+
+test-release-please-sync:
+	scripts/test-check-release-please-sync.sh
 
 ## Pre-commit
 
@@ -146,8 +154,8 @@ endef
 # cli.yml's quality gates for the host OS, so a contributor can run them
 # before pushing. Adding or removing a gate there means updating this target
 # too. What it deliberately cannot mirror: the three-OS matrix (only the host
-# OS runs here; the workflow's per-OS keyring setup is dormant until apps/cli
-# references a keyring, so omitting it matches CI today) and the sandbox
+# OS runs here; CI provisions an ephemeral platform keyring while this target
+# uses the host's configured keyring) and the sandbox
 # gate's vars.CLI_SANDBOX_E2E arming plus repo-wide serialization — the tagged
 # test command itself still runs. `goreleaser check` needs goreleaser on PATH,
 # like release-snapshot above. The 40 floor mirrors cli.yml's coverage gate;
@@ -165,12 +173,7 @@ check-cli:
 	go tool govulncheck ./apps/cli/...
 	QURL_TEST_HARNESS=1 go test -count=1 ./apps/cli/...
 	go test -tags=clisandbox -count=1 ./apps/cli/...
-	@goreleaser check; rc=$$?; \
-	if [ $$rc -eq 2 ]; then \
-		echo "warning: .goreleaser.yml valid but uses deprecated properties (exit 2) — matches cli.yml's tolerated state"; \
-	elif [ $$rc -ne 0 ]; then \
-		exit $$rc; \
-	fi
+	goreleaser check
 
 # Kept verbose for local debugging — discord.yml adds --silent.
 test-discord:
@@ -261,7 +264,7 @@ check-node: check-chrome-extension check-edge-extension check-discord check-team
 ## Full check (Go + repo-wide checks, matching the Go CI path; the Node.js
 ## suites are opt-in above — `make check-node` or a single `check-<app>`)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-i18n-parity test-i18n-parity check-notification-payload test-validated-base lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync test-release-please-sync test-cli-release-verifier check-extension-lockstep check-i18n-parity test-i18n-parity check-notification-payload test-validated-base lint test-race
 
 ## Cleanup
 

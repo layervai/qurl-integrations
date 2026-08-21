@@ -1,0 +1,6 @@
+Error: Unauthorized (HTTP 401)
+
+  the provided API key is not valid
+
+  Hint: the qURL service doesn't recognize this API key. Re-copy it from the qURL console, then run `qurl login` again (or update QURL_API_KEY if that's where it lives).
+  Request ID: req_test

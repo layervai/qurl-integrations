@@ -69,9 +69,10 @@ jobs:
           filters: |
             cli:
               # Source of truth for CLI-impacting paths on PR and main push events.
-              # No 'shared/**' here even though apps/cli imports it: shared-test.yml's
-              # `shared / test all` gate runs `go test ./...` — apps/cli included —
-              # on every shared/ change, so those changes are already validated.
+              # No 'shared/**' here: the v2 CLI does not import shared/ at all, and
+              # even if an import returns, shared-test.yml's `shared / test all` gate
+              # runs `go test ./...` — apps/cli included — on every shared/ change,
+              # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
               - 'apps/cli/**'
@@ -80,6 +81,7 @@ jobs:
               - '.golangci.yml'
               - '.goreleaser.yml'
               - '.github/workflows/cli.yml'
+              - '.github/workflows/cli-connector-resource-proof.yml'
 
   lint:
     name: cli / lint
@@ -96,12 +98,12 @@ jobs:
           cache: true
 
       - name: Verify golangci-lint config
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1 config verify
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 config verify
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.10.1
+          version: v2.12.2
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m ./apps/cli/...
 
@@ -187,20 +189,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Keyring-backed credential-store tests are part of the CLI v2 plan, and
-      # CI keyrings start locked (macOS) or absent (Linux), so each OS needs
-      # arming before tests can touch them. Both setup steps are dormant — they
-      # no-op — until apps/cli actually references a keyring, so the pipeline
-      # lands ahead of the code without dead red. Windows needs no setup step:
-      # the Credential Manager API works headless as-is.
+      # The live credential-store smoke needs an unlocked keyring on every OS.
+      # CI keyrings start locked on macOS and absent on Linux; Windows
+      # Credential Manager works headless as-is.
       - name: Set up macOS keychain
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          if ! grep -riq keyring apps/cli; then
-            echo "apps/cli does not reference a keyring yet; leaving the default keychain alone"
-            exit 0
-          fi
           # Ephemeral CI keychain: throwaway random password, auto-lock timeout
           # cleared, made the default so keyring libraries find it unlocked.
           password="$(uuidgen)"
@@ -212,13 +207,82 @@ jobs:
       - name: Set up Linux keyring (gnome-keyring over D-Bus)
         if: runner.os == 'Linux'
         shell: bash
+        timeout-minutes: 5
         run: |
-          if ! grep -riq keyring apps/cli; then
-            echo "apps/cli does not reference a keyring yet; skipping gnome-keyring install"
-            exit 0
+          select_fallback_mirrors() {
+            local status
+            echo "::warning::Switching Linux package downloads away from the slow Azure mirror"
+            # TODO(upstream-contract): actions/runner-images routes apt through
+            # /etc/apt/apt-mirrors.txt and configure-apt-sources.sh writes one
+            # URI plus a tab-delimited priority on each mirror-list line.
+            if printf '%s\tpriority:%s\n' \
+              'https://archive.ubuntu.com/ubuntu/' '1' \
+              'https://security.ubuntu.com/ubuntu/' '2' | \
+              sudo -n tee /etc/apt/apt-mirrors.txt >/dev/null; then
+              return 0
+            else
+              status=$?
+            fi
+            echo "::error::Unable to select the bounded Ubuntu package mirror fallback"
+            return "$status"
+          }
+
+          install_keyring_packages() {
+            local attempt status
+            for attempt in 1 2; do
+              echo "Installing Linux keyring packages (attempt ${attempt}/2)"
+              if sudo -n env DEBIAN_FRONTEND=noninteractive \
+                timeout --signal=TERM --kill-after=10s 90s \
+                apt-get \
+                  -o Acquire::Retries=2 \
+                  -o Acquire::http::Timeout=20 \
+                  -o Acquire::https::Timeout=20 \
+                  -o DPkg::Lock::Timeout=30 \
+                  -o Dpkg::Use-Pty=0 \
+                  install -y --no-install-recommends gnome-keyring dbus; then
+                return 0
+              else
+                status=$?
+              fi
+              echo "::warning::Linux keyring package install attempt ${attempt}/2 failed with exit ${status}"
+              if [ "$attempt" -lt 2 ]; then
+                # runner-images already routes apt through this mirror list;
+                # the TODO(upstream-contract) above tracks that dependency.
+                # A slow-but-responsive Azure endpoint does not trigger apt's
+                # own failover, so make the official Ubuntu mirrors explicit
+                # before the one remaining bounded attempt.
+                if ! select_fallback_mirrors; then
+                  return 1
+                fi
+                sleep 5
+              fi
+            done
+            echo "::error::Linux keyring package install failed after 2 bounded attempts"
+            return "$status"
+          }
+
+          # Hosted images already carry D-Bus and may eventually carry
+          # gnome-keyring too. Avoid an unnecessary apt index refresh: the
+          # image's configured Azure mirror can stall indefinitely while
+          # fetching package indexes or archives. The image's package metadata
+          # is sufficient for installing its own release packages, and a slow
+          # first download gets one retry through the official Ubuntu mirrors.
+          if ! command -v gnome-keyring-daemon >/dev/null 2>&1 || ! command -v dbus-run-session >/dev/null 2>&1; then
+            install_keyring_packages
           fi
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gnome-keyring dbus
+          for command in gnome-keyring-daemon dbus-run-session; do
+            if ! command -v "$command" >/dev/null 2>&1; then
+              echo "::error::Linux keyring setup completed without required command: ${command}"
+              exit 1
+            fi
+          done
+          # gnome-keyring-daemon cannot create/unlock the default collection
+          # unless the keyrings directory already exists with owner-only
+          # permissions. This preparation (and the unlock in the test step)
+          # is zalando/go-keyring's own CI recipe — the upstream-proven shape.
+          mkdir -p "$HOME/.cache/"
+          mkdir -p "$HOME/.local/share/keyrings/"
+          chmod -R 700 "$HOME/.local/"
           # Arms the dbus-run-session wrapper in the test step below: the
           # daemon must be unlocked inside the same session the tests run in,
           # so the wrapper cannot live in this step.
@@ -228,7 +292,16 @@ jobs:
         shell: bash
         run: |
           if [ "${QURL_CLI_KEYRING_DBUS:-}" = "1" ]; then
-            dbus-run-session -- bash -c 'printf "" | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/...'
+            # The unlock password must be non-empty and piped to the daemon
+            # inside the same D-Bus session the tests run in; an empty
+            # password leaves the Secret Service refusing every store with
+            # "failed to unlock correct collection
+            # '/org/freedesktop/secrets/aliases/default'". The incantation is
+            # copied from zalando/go-keyring's own CI (a throwaway password
+            # for an ephemeral runner keyring, not a secret). -eo pipefail
+            # makes a failed unlock redden this step itself instead of
+            # surfacing as a confusing failure inside the tests.
+            dbus-run-session -- bash -c "set -eo pipefail; echo 'somecredstorepass' | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/..."
           else
             go test -count=1 ./apps/cli/...
           fi
@@ -263,16 +336,36 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Placeholder until the v2 sandbox suite lands: nothing carries the
-      # clisandbox build tag yet, so this runs the regular suite under the tag
-      # and passes. The notice below self-silences the moment the first tagged
-      # test file appears, at which point this becomes the real gate.
+      # The clisandbox-tagged suites exist now, so this is the real gate. The
+      # CRID journey (apps/cli/cmd/sandbox_journey_test.go) arms itself from
+      # the env below and runs against the live sandbox; until the operator
+      # mints the QURL_SANDBOX_API_KEY secret it skips loudly by name while
+      # this step still proves the whole tree under the tag. Arming is
+      # layered on purpose: the job itself runs only when
+      # vars.CLI_SANDBOX_E2E == 'enabled' on a same-repo ref (see this job's
+      # if:, whose disarmed skip the required aggregate's verifier reports as
+      # expected), and the suite inside arms on its env contract. -v keeps a
+      # suite-level skip visible in the log instead of silent green.
+      #
+      # The Connector smokes are deliberately NOT armed here: beyond an
+      # endpoint they need explicit arming and credentials. In particular, the
+      # local-publish smoke enrolls a native device, so a one-off proof must
+      # also supply its JWT cleanup credential instead of leaking one durable
+      # device/assignment per hosted-runner invocation.
       - name: Run sandbox e2e suite
-        run: |
-          go test -tags=clisandbox -count=1 ./apps/cli/...
-          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
-            echo "::notice::cli / sandbox e2e: no sandbox suite yet — no file carries the clisandbox build tag; this gate arms when the first tagged test lands"
-          fi
+        env:
+          QURL_API_KEY: ${{ secrets.QURL_SANDBOX_API_KEY }}
+          # The sandbox hostname is deliberately a secret, not a literal.
+          QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+          # Deployment settings for the journey's direct-download step
+          # (`get --file` opens links through the platform access flow).
+          # Repository variables, not literals: the sandbox values live with
+          # the tenancy, mirroring the same-named qurl-connector variables.
+          # The journey converts them into a QURL_DEPLOYMENT settings file
+          # and never prints them — variables are not masked in logs.
+          QURL_SANDBOX_QV2_ISSUER_KEY: ${{ vars.QURL_SANDBOX_QV2_ISSUER_KEY }}
+          QURL_SANDBOX_QV2_RELAY_URL: ${{ vars.QURL_SANDBOX_QV2_RELAY_URL }}
+        run: go test -tags=clisandbox -count=1 -v ./apps/cli/...
 
   goreleaser-check:
     name: cli / goreleaser check
@@ -294,32 +387,13 @@ jobs:
           install-only: true
 
       # `goreleaser check` exits 1 on an invalid config and 2 on a valid one
-      # that uses deprecated properties. .goreleaser.yml is in the second
-      # state today (archives.builds, nfpms.builds, format_overrides.format,
-      # brews — the brews→casks migration is a Homebrew-install behaviour
-      # change that needs its own PR), and release-cli releases fine through
-      # it because `goreleaser release` only warns on deprecations. Failing
-      # this gate on exit 2 would therefore block every CLI PR on a release
-      # migration it must not smuggle in — so warn loudly on 2, fail on
-      # anything else. Once .goreleaser.yml is migrated, exit 2 stops
-      # occurring and this tolerance becomes dead code to remove.
+      # that uses deprecated properties. Both fail this gate on purpose: a
+      # new upstream deprecation should redden CLI PRs here, where fixing it
+      # is cheap, instead of surfacing first in release-cli. (An exit-2
+      # tolerance lived here until .goreleaser.yml was migrated off its
+      # deprecated keys; keep the gate strict.)
       - name: goreleaser check
-        shell: bash
-        run: |
-          set +e
-          goreleaser check
-          rc=$?
-          set -e
-          case "$rc" in
-            0)
-              ;;
-            2)
-              echo "::warning::goreleaser check: .goreleaser.yml is valid but uses deprecated properties (exit 2). Migrate them before GoReleaser hard-removes support and reddens release-cli."
-              ;;
-            *)
-              exit "$rc"
-              ;;
-          esac
+        run: goreleaser check
 
   required:
     name: cli / required

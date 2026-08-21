@@ -1598,6 +1598,7 @@ func TestTunnelInstallAgentMetadataTruncatesReason(t *testing.T) {
 	})
 	if meta == nil {
 		t.Fatal("metadata = nil, want protect-connector metadata")
+		return
 	}
 	if got := len([]rune(meta.Reason)); got != agentConnectorAuditReasonMaxRunes {
 		t.Fatalf("reason runes = %d, want %d", got, agentConnectorAuditReasonMaxRunes)

@@ -63,8 +63,7 @@ describe('Smoke: qURL link lifecycle', () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/e2e-smoke-test'),
       expires_in: '1h',
-      description: 'E2E smoke test link',
-      max_uses: 1,
+      label: 'E2E smoke test link',
     });
     tracked.track(result.resource_id);
     expect(result.qurl_link).toBeDefined();
@@ -103,7 +102,7 @@ describe('Smoke: qURL link lifecycle', () => {
     // a bare HTTP GET may or may not register a consumed use server-side —
     // `use_count >= 1` is NOT a contract this suite can hold (the old
     // try/catch-swallowed assertion of it could never fail anyway). What
-    // IS guaranteed after one access of a max_uses:1 link: the status
+    // IS guaranteed after one access of this link: the status
     // TODO(upstream-contract): layervai/qurl-service#1233 tracks the current
     // contract: the management API retains this token summary and reports at
     // most one use.
@@ -126,7 +125,10 @@ describe('Smoke: qURL link lifecycle', () => {
     // one-time link does not serve a second knock") can catch the
     // reusable-links bug (URL-target knock coverage: #951). Where bare
     // GETs DO consume, `use_count === 2` here is that exact bug shape.
-    // Either way the counter must never exceed the max_uses:1 cap.
+    // Either way the counter must stay coherent. That bound is NOT a
+    // server-side cap — see the note in concurrency.test.ts: this mint sends
+    // no `one_time_use`, and the `max_uses: 1` it used to send was dropped
+    // by qurl-service as an undeclared field.
     //
     // Depends on prior tests setting qurlLink + qurlId — guard explicitly
     // so a jest rerandomize doesn't silently no-op.
@@ -156,7 +158,6 @@ describe('Smoke: Revocation', () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/e2e-revoke-test'),
       expires_in: '1h',
-      max_uses: 1,
     });
     tracked.track(result.resource_id);
     resourceId = result.resource_id;

@@ -27,10 +27,13 @@
 //   - -dry-run defaults TRUE. A dry run makes zero mutations: it only reads
 //     (DynamoDB Scan + GetItem, KMS Decrypt for the per-workspace key, and
 //     GET /v1/resources) and reports what it WOULD purge.
-//   - Mutating requires -dry-run=false. Against a prod-looking deployment
-//     (the -env label or any table name says "prod") it ALSO requires the
-//     explicit -allow-prod-purge opt-in — the "rail" that makes an irreversible
-//     prod write a deliberate act, not a flag-default accident.
+//   - Mutating requires -dry-run=false. Against a prod-looking deployment —
+//     the -env label says prod, an environment-bearing table name contains
+//     "prod", or the qURL endpoint is prod-looking (it contains "prod" OR is
+//     any layerv.ai host) — it ALSO requires the explicit -allow-prod-purge
+//     opt-in: the "rail" that makes an irreversible prod write a deliberate
+//     act, not a flag-default accident. See looksProd for the exact signals,
+//     and for why workspace_state is not one of the scanned names.
 //   - Only confirmed orphans (resource absent or revoked, verified against a
 //     fully paginated resource list) are ever purged. A workspace whose API key
 //     can't be resolved, or whose list fails, is reported indeterminate and
@@ -191,17 +194,53 @@ func validateRails(f *flags) error {
 }
 
 // looksProd reports whether this run targets production: the operator label, a
-// "prod" substring in any resolved table name or the qurl-service endpoint, or
-// the canonical prod API origin — the endpoint is the clearest prod signal, and
-// the real one (api.layerv.ai) carries no "prod" substring, so it gets its own
-// check. Defense-in-depth: a forgotten -env=prod still trips the rail when the
-// wiring says prod. False positives just require the explicit opt-in flag.
+// "prod" substring in a resolved environment-bearing table name or the qurl-service
+// endpoint, or a "layerv.ai" substring in the endpoint — the endpoint is the
+// clearest prod signal, and the real one (api.layerv.ai) carries no "prod"
+// substring, so it gets its own check.
+//
+// That last check is a plain substring match over the whole endpoint string,
+// not a host parse: it trips on "layerv.ai" appearing anywhere, a path
+// included, and on any subdomain. Deliberately broad — don't narrow it to the
+// canonical api.layerv.ai host, or a prod endpoint on another subdomain stops
+// tripping. Over-tripping only costs the explicit opt-in flag, which is the
+// safe direction for a rail. Defense-in-depth: a forgotten -env=prod still
+// trips when the wiring says prod.
+//
+// f.workspaceStateTable is deliberately NOT scanned, for one mechanical reason:
+// no deployment can make it trip. (The name is an operator-supplied flag, so a
+// hand-typed prod-flavored value would once have tripped it — but that is a
+// value no environment actually renders, and the rail exists to read the real
+// wiring.) qurl-integrations-infra renders that table as
+// "${local.project}-workspace-state" (qurl-bot-slack/terraform/workspace_state.tf)
+// with no var.environment interpolation, so it is bare
+// `qurl-bot-slack-workspace-state` in sandbox AND prod. The two names above DO
+// carry the env (`qurl-bot-slack-production-channel-policies`, via
+// modules/qurl-slack-ddb), which is the entire reason they are worth scanning.
+//
+// Carrying the environment is the ONLY criterion. Do NOT generalize this to
+// "tables statecrawl mutates" — that rule would be wrong and would cost real
+// coverage: the only table ever written is channel_policies (via
+// PurgeResourceFromChannel), and workspace_mappings is scanned despite never
+// being mutated, because its name carries the env and so CAN fire.
+//
+// Don't re-add workspace_state: a check that cannot fire reads as coverage that
+// isn't there. Prod stays covered by those two names plus the mandatory
+// QURL_ENDPOINT (validateConfig), which is api.layerv.ai in prod.
+//
+// TODO(upstream-contract): if that table is ever renamed to interpolate the
+// environment, add it back to the loop and re-point the test that pins its
+// absence.
 func looksProd(f *flags) bool {
 	switch strings.ToLower(strings.TrimSpace(f.envLabel)) {
 	case "prod", "production":
 		return true
 	}
-	for _, v := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.workspaceStateTable, f.qurlEndpoint} {
+	// f.qurlEndpoint is scanned twice on purpose: here for a literal "prod"
+	// substring, and again below for the layerv.ai domain. The two signals are
+	// independent — a prod endpoint may carry either, both, or (as the
+	// canonical api.layerv.ai does) only the domain.
+	for _, v := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.qurlEndpoint} {
 		if strings.Contains(strings.ToLower(v), "prod") {
 			return true
 		}

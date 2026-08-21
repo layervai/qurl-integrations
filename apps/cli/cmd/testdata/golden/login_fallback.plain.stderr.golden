@@ -1,0 +1,6 @@
+Warning: OS keyring storage isn't available on this system; your qURL API key is kept in a file only your user can read (mode 0600)
+Logged in as own_cli_fixture.
+
+  Key:     key_fixturecli01 (lv_test_abcd)
+  Scopes:  qurl:read, qurl:resolve, qurl:write
+  Stored:  credential file
