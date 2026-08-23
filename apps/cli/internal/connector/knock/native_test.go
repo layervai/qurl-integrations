@@ -222,9 +222,11 @@ func TestNativeRejectsIncompleteExactSessionReceipt(t *testing.T) {
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			logger, rec := captureLogger()
 			knocker := &Native{
 				binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x43}, 32),
 				resourceID: "resource-public-key", runID: "01abcdef23456789",
+				target: "hub.test.nhp.layerv.ai:443", logger: logger,
 			}
 			defer knocker.Close()
 			knocker.knock = func(_ context.Context, _ *qurl.AgentRuntimeBinding, _ []byte, _ string, opts qurl.NativeKnockOptions, _ ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error) {
@@ -237,6 +239,16 @@ func TestNativeRejectsIncompleteExactSessionReceipt(t *testing.T) {
 			}
 			if knocker.receipt != nil {
 				t.Fatalf("invalid receipt was retained: %+v", knocker.receipt)
+			}
+			entries := rec.snapshot()
+			if len(entries) != 1 {
+				t.Fatalf("log entries = %d, want 1", len(entries))
+			}
+			entry := entries[0]
+			if entry.attrs["event"] != eventKnockError || entry.attrs["reason"] != "knock_invalid_response" ||
+				entry.attrs["resource_id"] != knocker.resourceID || entry.attrs["target"] != knocker.target ||
+				entry.attrs["run_id"] != knocker.runID || entry.attrs["err"] == "" {
+				t.Fatalf("invalid-receipt log = %#v, want attributed knock_error/knock_invalid_response", entry)
 			}
 		})
 	}

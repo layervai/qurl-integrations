@@ -182,7 +182,16 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 		result.SessionReceipt.SessionID == 0 || result.SessionReceipt.SessionID != result.SessionID ||
 		result.SessionReceipt.SessionIssuedAtMillis <= 0 || result.SessionReceipt.RunID != k.runID ||
 		result.SessionReceipt.RunAttempt != runAttempt {
-		return nil, errors.New("native NHP knock returned an invalid exact-session receipt")
+		err := errors.New("native NHP knock returned an invalid exact-session receipt")
+		k.log().WarnContext(ctx, "connector: native NHP knock failed",
+			"event", eventKnockError,
+			"reason", "knock_invalid_response",
+			"resource_id", k.resourceID,
+			"target", k.target,
+			"run_id", k.runID,
+			"latency_ms", latency,
+			"err", err.Error())
+		return nil, err
 	}
 	receipt := result.SessionReceipt
 	k.receipt = &receipt
