@@ -1,9 +1,11 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +175,38 @@ func TestEndNativeCycleUsesIndependentTimeout(t *testing.T) {
 	}
 	if knocker.endBudget <= 0 || knocker.endBudget > endCycleTimeout {
 		t.Fatalf("EndCycle timeout budget = %v, want a live budget within %v", knocker.endBudget, endCycleTimeout)
+	}
+}
+
+func TestEndNativeCycleNeverSynthesizesPositiveRetirementEvidence(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		endErr error
+	}{
+		{name: "success"},
+		{name: "failure", endErr: errors.New("retirement unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			knocker := &fakeCycleKnocker{current: "cycle-authority-1", endErr: tc.endErr}
+			sup := &Supervisor{cfg: Config{
+				Knocker: knock.CycleKnocker(knocker), KnockResourceID: testResource,
+				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+			}}
+
+			sup.endNativeCycle(context.Background(), true)
+
+			got := logs.String()
+			if strings.Contains(got, `"event":"nhp_session_retired"`) {
+				t.Fatalf("supervisor synthesized positive retirement evidence = %s", got)
+			}
+			if tc.endErr != nil && (!strings.Contains(got, `"event":"nhp_session_exit_failed"`) ||
+				!strings.Contains(got, `"run_id":"cycle-authority-1"`)) {
+				t.Fatalf("failure evidence = %s", got)
+			}
+		})
 	}
 }
 

@@ -84,11 +84,19 @@ func captureLogger() (*slog.Logger, *captureHandler) {
 	return slog.New(h), h
 }
 
+func TestNativeWithoutInjectedLoggerNeverUsesProcessDefault(t *testing.T) {
+	t.Parallel()
+	knocker := &Native{}
+	if got := knocker.log(); got == slog.Default() || got != discardedOperatorLogger {
+		t.Fatalf("log() = %p, want package discard logger %p and not process default %p", got, discardedOperatorLogger, slog.Default())
+	}
+}
+
 func TestNewNativeFailsClosedOnInvalidRuntimeInputs(t *testing.T) {
 	t.Parallel()
 	t.Run("nil binding", func(t *testing.T) {
 		t.Parallel()
-		knocker, err := NewNative(nil, "resource-public-key")
+		knocker, err := NewNative(nil, "resource-public-key", slog.Default())
 		if knocker != nil || err == nil || !strings.Contains(err.Error(), "native NHP runtime binding is nil") {
 			t.Fatalf("NewNative = (%v, %v), want nil-binding rejection", knocker, err)
 		}
@@ -96,12 +104,19 @@ func TestNewNativeFailsClosedOnInvalidRuntimeInputs(t *testing.T) {
 	for name, resourceID := range map[string]string{"empty resource": "", "whitespace resource": " \t "} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			knocker, err := NewNative(&qurl.AgentRuntimeBinding{}, resourceID)
+			knocker, err := NewNative(&qurl.AgentRuntimeBinding{}, resourceID, slog.Default())
 			if knocker != nil || err == nil || !strings.Contains(err.Error(), "native NHP knock resource is empty") {
 				t.Fatalf("NewNative = (%v, %v), want empty-resource rejection", knocker, err)
 			}
 		})
 	}
+	t.Run("nil logger", func(t *testing.T) {
+		t.Parallel()
+		knocker, err := NewNative(&qurl.AgentRuntimeBinding{}, "resource-public-key", nil)
+		if knocker != nil || err == nil || !strings.Contains(err.Error(), "native NHP operator logger is nil") {
+			t.Fatalf("NewNative = (%v, %v), want nil-logger rejection", knocker, err)
+		}
+	})
 	// A binding that never held a runtime key yields a zero-length key from
 	// TakeDeviceStaticPrivateKey. Longer-but-short keys are unreachable from
 	// outside qurl-go (its lifecycle validates 32 bytes before binding
@@ -112,7 +127,7 @@ func TestNewNativeFailsClosedOnInvalidRuntimeInputs(t *testing.T) {
 		knocker, err := NewNative(&qurl.AgentRuntimeBinding{
 			AgentID:        "agent-a",
 			NHPUDPEndpoint: qurl.NHPUDPEndpoint{Host: "hub.test.nhp.layerv.ai", Port: 443},
-		}, "resource-public-key")
+		}, "resource-public-key", slog.Default())
 		if knocker != nil || err == nil || !strings.Contains(err.Error(), "native NHP runtime key is 0 bytes, want 32") {
 			t.Fatalf("NewNative = (%v, %v), want short-key rejection", knocker, err)
 		}
@@ -348,6 +363,9 @@ func TestNativeEndCycleRetriesExactReceiptUntilAccepted(t *testing.T) {
 	if err := knocker.EndCycle(context.Background()); err != nil || called != 0 {
 		t.Fatalf("EndCycle() without receipt = %v, calls %d; want nil, 0", err, called)
 	}
+	if records := capture.snapshot(); len(records) != 0 {
+		t.Fatalf("EndCycle() without receipt emitted retirement evidence: %#v", records)
+	}
 
 	knocker.runID = wantRunID
 	knocker.receipt = &wantReceipt
@@ -379,6 +397,37 @@ func TestNativeEndCycleRetriesExactReceiptUntilAccepted(t *testing.T) {
 	}
 	if knocker.receipt != nil {
 		t.Fatalf("successful retirement retained receipt %+v", knocker.receipt)
+	}
+	records = capture.snapshot()
+	if len(records) != 3 || records[2].attrs["event"] != "nhp_session_retired" ||
+		records[2].attrs["run_id"] != wantRunID || records[2].attrs["run_attempt"] != "1" ||
+		records[2].attrs["state"] != "closing" {
+		t.Fatalf("positive exact-retirement evidence = %#v", records)
+	}
+}
+
+func TestNativeRejectsInvalidRetirementAcknowledgmentWithoutPositiveEvidence(t *testing.T) {
+	t.Parallel()
+	logger, capture := captureLogger()
+	receipt := testNativeReceipt("01abcdef23456789", 1)
+	knocker := &Native{
+		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x45}, 32),
+		resourceID: "resource-public-key", target: "cell0.nhp.layerv.ai:443",
+		runID: receipt.RunID, receipt: &receipt, logger: logger,
+	}
+	defer knocker.Close()
+	knocker.retire = func(context.Context, *qurl.AgentRuntimeBinding, []byte, qurl.NativeSessionReceipt, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error) {
+		return nil, nil //nolint:nilnil // A malformed SDK seam must not mint positive retirement evidence.
+	}
+
+	err := knocker.EndCycle(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid strict acknowledgment") || knocker.receipt == nil {
+		t.Fatalf("invalid retirement = %v, retained receipt %+v", err, knocker.receipt)
+	}
+	for _, record := range capture.snapshot() {
+		if record.attrs["event"] == "nhp_session_retired" {
+			t.Fatalf("invalid retirement emitted positive evidence: %#v", capture.snapshot())
+		}
 	}
 }
 

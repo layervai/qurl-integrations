@@ -389,7 +389,7 @@ func serveConnector(ctx context.Context, opts *globalOpts, in *connectorServeInp
 		return fmt.Errorf("complete tunnel client configuration: %w", err)
 	}
 
-	knocker, err := opts.newConnectorKnocker(rt, knockResourceID)
+	knocker, err := opts.newConnectorKnocker(rt, knockResourceID, logger)
 	if err != nil {
 		return err
 	}
@@ -544,8 +544,8 @@ func parseConnectorTarget(target string) (host string, port int, err error) {
 // newNativeConnectorKnocker is the production knocker constructor: it hands
 // the runtime's binding to knock.Native, which then owns it (Close destroys
 // it), so the runtime must forget the binding rather than Destroy it again.
-func newNativeConnectorKnocker(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
-	knocker, err := knock.NewNative(rt.Binding, knockResourceID)
+func newNativeConnectorKnocker(rt *agent.Runtime, knockResourceID string, logger *slog.Logger) (connectorKnocker, error) {
+	knocker, err := knock.NewNative(rt.Binding, knockResourceID, logger)
 	if err != nil {
 		return nil, err
 	}

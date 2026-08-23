@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -49,18 +50,25 @@ type Native struct {
 
 var _ CycleKnocker = (*Native)(nil)
 
+var discardedOperatorLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
 type nativeKnockFunc func(context.Context, *qurl.AgentRuntimeBinding, []byte, string, qurl.NativeKnockOptions, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error)
 type nativeRetireFunc func(context.Context, *qurl.AgentRuntimeBinding, []byte, qurl.NativeSessionReceipt, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error)
 
 // NewNative takes ownership of the binding's device runtime key and returns
-// the process-lifetime cycle knocker for resourceID. The caller must Close
-// the returned knocker; Close also destroys the binding.
-func NewNative(binding *qurl.AgentRuntimeBinding, resourceID string, udpOpts ...qurl.AgentRuntimeUDPOption) (*Native, error) {
+// the process-lifetime cycle knocker for resourceID. Operator evidence is
+// emitted only through logger; requiring it here keeps the CLI's strict
+// retirement evidence on the same captured stderr stream as the supervisor.
+// The caller must Close the returned knocker; Close also destroys the binding.
+func NewNative(binding *qurl.AgentRuntimeBinding, resourceID string, logger *slog.Logger, udpOpts ...qurl.AgentRuntimeUDPOption) (*Native, error) {
 	if binding == nil {
 		return nil, errors.New("native NHP runtime binding is nil")
 	}
 	if strings.TrimSpace(resourceID) == "" {
 		return nil, errors.New("native NHP knock resource is empty")
+	}
+	if logger == nil {
+		return nil, errors.New("native NHP operator logger is nil")
 	}
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	if len(privateKey) != 32 {
@@ -75,6 +83,7 @@ func NewNative(binding *qurl.AgentRuntimeBinding, resourceID string, udpOpts ...
 		udpOpts:    append([]qurl.AgentRuntimeUDPOption(nil), udpOpts...),
 		knock:      qurl.KnockRegisteredAgent,
 		retire:     qurl.RetireRegisteredAgentSession,
+		logger:     logger,
 	}, nil
 }
 
@@ -82,7 +91,10 @@ func (k *Native) log() *slog.Logger {
 	if k.logger != nil {
 		return k.logger
 	}
-	return slog.Default()
+	// Direct package tests build Native literals to exercise narrow state
+	// transitions. Never let an omitted test logger escape through the
+	// process-global sink; production construction rejects nil above.
+	return discardedOperatorLogger
 }
 
 // aliveLocked reports whether the runtime still holds a usable binding and
@@ -278,9 +290,27 @@ func (k *Native) retireReceiptLocked(ctx context.Context) error {
 		return err
 	}
 	receipt := *k.receipt
-	if _, err := k.retire(ctx, k.binding, k.privateKey, receipt, k.udpOpts...); err != nil {
+	retirement, err := k.retire(ctx, k.binding, k.privateKey, receipt, k.udpOpts...)
+	if err != nil {
 		return err
 	}
+	if retirement == nil || retirement.SessionReceipt.CellID != receipt.CellID ||
+		retirement.SessionReceipt.SessionID != receipt.SessionID ||
+		retirement.SessionReceipt.SessionIssuedAtMillis != receipt.SessionIssuedAtMillis ||
+		retirement.SessionReceipt.RunID != receipt.RunID ||
+		retirement.SessionReceipt.RunAttempt != receipt.RunAttempt ||
+		strings.TrimSpace(retirement.CloseEventID) == "" ||
+		(retirement.State != "closing" && retirement.State != "closed") {
+		return errors.New("native NHP retirement returned an invalid strict acknowledgment")
+	}
+	k.log().InfoContext(ctx, "connector: native NHP exact-session retirement accepted",
+		"event", "nhp_session_retired",
+		"resource_id", k.resourceID,
+		"target", k.target,
+		"run_id", receipt.RunID,
+		"run_attempt", receipt.RunAttempt,
+		"state", retirement.State,
+	)
 	*k.receipt = qurl.NativeSessionReceipt{}
 	k.receipt = nil
 	return nil

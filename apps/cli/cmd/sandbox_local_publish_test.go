@@ -43,14 +43,11 @@ var sandboxCleanupHTTPClient = &http.Client{
 	},
 }
 
-// TestSandboxLocalPublishSmoke exercises the unified customer command against
-// the live sandbox. Unlike the legacy Connector smoke, it starts with an
-// ordinary login key and no pre-issued enrollment token or device state. A
-// passing run proves the login key can mint the exact one-shot credential,
-// native UDP enrollment exchanges it for a device identity, the device creates
-// the tunnel resource, and the FRP server admits the resulting route. The
-// hermetic command journey separately sends HTTP bytes over that admitted
-// route; this live smoke avoids depending on a public sandbox access hostname.
+// TestSandboxLocalPublishLifecycleSmoke runs two complete unified customer
+// command lifecycles against the live sandbox. The first cold-enrolls and
+// serves; its graceful stop must retire the exact NHP session. The immediate
+// second run must reuse the same durable device and Connector identities and
+// serve again, proving exact retirement did not strand replacement admission.
 //
 // This is an attended, one-off proof rather than an every-commit CI test. It
 // creates a native device in an ephemeral state directory, so the operator must
@@ -61,25 +58,34 @@ var sandboxCleanupHTTPClient = &http.Client{
 // resource and device key are both reclaimed before returning. Run explicitly:
 //
 //	QURL_CLI_SANDBOX_LOCAL_PUBLISH=enabled \
-//	QURL_API_KEY=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT=... \
+//	QURL_API_KEY_FILE=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT_FILE=... \
+//	QURL_SHARING_RUN_ID=... QURL_SHARING_RUN_ATTEMPT=... QURL_SHARING_RUNTIME=host \
 //	QURL_CONNECTOR_HUB_HOST=... QURL_CONNECTOR_HUB_PORT=... \
 //	QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=... \
-//	go test -tags=clisandbox -count=1 -run '^TestSandboxLocalPublishSmoke$' ./apps/cli/cmd
-func TestSandboxLocalPublishSmoke(t *testing.T) {
+//	go test -tags=clisandbox -count=1 -run '^TestSandboxLocalPublishLifecycleSmoke$' ./apps/cli/cmd
+func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 	if os.Getenv(localPublishSandboxArming) != "enabled" {
-		t.Skipf("SKIPPED LOUDLY: unified local-publish sandbox smoke is disarmed — %s != enabled", localPublishSandboxArming)
+		t.Skipf("SKIPPED LOUDLY: unified local-publish lifecycle smoke is disarmed — %s != enabled", localPublishSandboxArming)
 	}
-	key := strings.TrimSpace(os.Getenv("QURL_API_KEY"))
+	key, err := readSandboxSecretFile(sandboxAPIKeyFileEnv, "QURL_API_KEY")
+	if err != nil {
+		t.Fatalf("load protected sandbox API key: %v", err)
+	}
+	cleanupJWT, err := readSandboxSecretFile(sandboxCleanupJWTFileEnv, "QURL_CLI_SANDBOX_CLEANUP_JWT")
+	if err != nil {
+		t.Fatalf("load protected sandbox cleanup JWT: %v", err)
+	}
+	namespace, err := sandboxNamespace("smoke")
+	if err != nil {
+		t.Fatalf("derive sandbox lifecycle namespace: %v", err)
+	}
 	endpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
-	cleanupJWT := strings.TrimSpace(os.Getenv("QURL_CLI_SANDBOX_CLEANUP_JWT"))
 	missing := []string{}
 	for name, value := range map[string]string{
-		"QURL_API_KEY":                 key,
-		"QURL_ENDPOINT":                endpoint,
-		"QURL_CLI_SANDBOX_CLEANUP_JWT": cleanupJWT,
-		hub.EnvHost:                    os.Getenv(hub.EnvHost),
-		hub.EnvPort:                    os.Getenv(hub.EnvPort),
-		hub.EnvServerPublicKey:         os.Getenv(hub.EnvServerPublicKey),
+		"QURL_ENDPOINT":        endpoint,
+		hub.EnvHost:            os.Getenv(hub.EnvHost),
+		hub.EnvPort:            os.Getenv(hub.EnvPort),
+		hub.EnvServerPublicKey: os.Getenv(hub.EnvServerPublicKey),
 	} {
 		if strings.TrimSpace(value) == "" {
 			missing = append(missing, name)
@@ -87,51 +93,153 @@ func TestSandboxLocalPublishSmoke(t *testing.T) {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		t.Skipf("SKIPPED LOUDLY: unified local-publish sandbox smoke is disarmed — missing %v", missing)
+		t.Fatalf("unified local-publish lifecycle smoke is armed but missing %v", missing)
 	}
 
 	stateDir := t.TempDir()
 	t.Setenv(state.EnvStateDirPrimary, stateDir)
-	t.Setenv(state.EnvAgentID, "")
+	t.Setenv(state.EnvAgentID, namespace.AgentID)
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "sandbox-local-publish-smoke")
+		_, _ = io.WriteString(w, "sandbox-local-publish-lifecycle")
 	}))
 	t.Cleanup(echo.Close)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	timer := time.AfterFunc(45*time.Second, cancel)
-	t.Cleanup(func() {
-		timer.Stop()
-		cancel()
+	var loaded *qurl.AgentState
+	first := runSandboxLocalPublishCycle(t, "cold lifecycle", key, cleanupJWT, endpoint, echo.URL, namespace.ConnectorID, time.Second, func() {
+		loaded = loadSandboxAgentState(t, stateDir)
+		if loaded != nil {
+			registerSandboxDeviceCredentialCleanup(t, endpoint, cleanupJWT, loaded.DeviceAPIKeyID)
+			registerSandboxResourceCleanup(t, endpoint, namespace.ConnectorID, loaded.DeviceAPIKey)
+		}
 	})
-	connectorID := fmt.Sprintf("connector-sandbox-local-publish-%d", time.Now().UnixNano())
+	if loaded == nil {
+		t.Fatal("cold lifecycle produced no durable device state")
+	}
+	if err := validateSandboxDeviceIdentity(loaded, namespace.AgentID, ""); err != nil {
+		t.Fatalf("cold lifecycle identity: %v", err)
+	}
+
+	firstID := strings.TrimSpace(first.stdout.String())
+	if assessment, assessErr := cridux.Assess(firstID); assessErr != nil || assessment.Kind != cridux.KindCRID {
+		t.Fatalf("cold quiet local publish stdout = %q, want exactly one CRID: %v", first.stdout.String(), assessErr)
+	}
+
+	second := runSandboxLocalPublishCycle(t, "immediate replacement lifecycle", key, cleanupJWT, endpoint, echo.URL, namespace.ConnectorID, time.Second, nil)
+	secondID := strings.TrimSpace(second.stdout.String())
+	if secondID != firstID {
+		t.Fatalf("replacement CRID = %q, want stable resource CRID %q", secondID, firstID)
+	}
+	firstRunID, firstRunErr := sandboxRetiredRunID(first.stderr.String())
+	secondRunID, secondRunErr := sandboxRetiredRunID(second.stderr.String())
+	if firstRunErr != nil || secondRunErr != nil || firstRunID == secondRunID {
+		t.Fatalf("retirement run authorities = first %q (%v), second %q (%v); want two distinct positive retirement events", firstRunID, firstRunErr, secondRunID, secondRunErr)
+	}
+	reloaded := loadSandboxAgentState(t, stateDir)
+	if err := validateSandboxDeviceIdentity(reloaded, namespace.AgentID, loaded.DeviceAPIKeyID); err != nil {
+		t.Fatalf("replacement lifecycle identity: %v", err)
+	}
+}
+
+func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDeviceKeyID string) error {
+	if loaded == nil {
+		return errors.New("durable device state is missing")
+	}
+	if loaded.AgentID != wantAgentID {
+		return errors.New("durable agent identity does not match the canonical run namespace")
+	}
+	if wantDeviceKeyID != "" && loaded.DeviceAPIKeyID != wantDeviceKeyID {
+		return errors.New("durable device credential identity changed across lifecycle restart")
+	}
+	return nil
+}
+
+func runSandboxLocalPublishCycle(t *testing.T, label, key, cleanupJWT, endpoint, targetURL, connectorID string, serveFor time.Duration, afterRun func()) *runResult {
+	t.Helper()
+	if serveFor <= 0 || serveFor > 90*time.Minute {
+		t.Fatalf("%s serve duration %s is outside the protected lifecycle bound", label, serveFor)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serveFor+60*time.Second)
+	defer cancel()
+	var cancelAfterReady *time.Timer
 	res := runCLI(t, &runOpts{
 		ctx:         ctx,
-		args:        []string{"--endpoint", endpoint, "--quiet", "publish", echo.URL, "--id", connectorID},
+		args:        []string{"--endpoint", endpoint, "--quiet", "publish", targetURL, "--id", connectorID},
 		env:         map[string]string{"QURL_API_KEY": key},
 		syncStreams: true,
 		realSleep:   true,
+		connectorReady: func() {
+			// Local publish writes its one-CRID stdout contract immediately
+			// after this readiness callback. Keep the admitted route alive for
+			// the requested interval, then simulate the customer's interrupt.
+			cancelAfterReady = time.AfterFunc(serveFor, cancel)
+		},
 	})
+	// Enrollment and resource creation may have committed even when the
+	// command later reports a teardown/evidence failure. Install cleanup from
+	// the durable local authority before any assertion below can stop the test.
+	if afterRun != nil {
+		afterRun()
+	}
+	if cancelAfterReady != nil {
+		cancelAfterReady.Stop()
+	}
 	assertSandboxStreamsDoNotContainSecrets(t, res, key, cleanupJWT)
-
-	loaded := loadSandboxAgentState(t, stateDir)
-	if loaded != nil {
-		registerSandboxDeviceCredentialCleanup(t, endpoint, cleanupJWT, loaded.DeviceAPIKeyID)
-		registerSandboxResourceCleanup(t, endpoint, connectorID, loaded.DeviceAPIKey)
-	}
-
-	id := strings.TrimSpace(res.stdout.String())
-	if assessment, err := cridux.Assess(id); err != nil || assessment.Kind != cridux.KindCRID {
-		t.Errorf("quiet local publish stdout = %q, want exactly one CRID: %v", res.stdout.String(), err)
-	}
 	if res.code != 130 {
-		t.Fatalf("local publish exit = %d, want 130 after graceful cancellation; stderr: %s", res.code, res.stderr.String())
+		t.Fatalf("%s exit = %d, want 130 after ready-triggered graceful cancellation; stderr: %s", label, res.code, res.stderr.String())
 	}
-	for _, evidence := range []string{"login_success", "Stopped."} {
+	for _, evidence := range []string{"login_success", "event=proxy_ready", "event=nhp_session_retired", "Stopped."} {
 		if !strings.Contains(res.stderr.String(), evidence) {
-			t.Errorf("sandbox local publish lacks %q evidence:\n%s", evidence, res.stderr.String())
+			t.Fatalf("%s lacks %q evidence:\n%s", label, evidence, res.stderr.String())
 		}
 	}
+	for _, failure := range []string{"session_retirement_failed", "nhp_session_exit_failed"} {
+		if strings.Contains(res.stderr.String(), failure) {
+			t.Fatalf("%s reported exact-session cleanup failure %q:\n%s", label, failure, res.stderr.String())
+		}
+	}
+	retiredRunID, retiredErr := sandboxEventRunID(res.stderr.String(), "nhp_session_retired")
+	admittedRunID, admittedErr := sandboxEventRunID(res.stderr.String(), "login_success")
+	if retiredErr != nil || admittedErr != nil || retiredRunID != admittedRunID {
+		t.Fatalf("%s exact-session evidence = admitted %q (%v), retired %q (%v); want the final admitted RunID retired", label, admittedRunID, admittedErr, retiredRunID, retiredErr)
+	}
+	return res
+}
+
+func sandboxRetiredRunID(logText string) (string, error) {
+	return sandboxEventRunID(logText, "nhp_session_retired")
+}
+
+func sandboxEventRunID(logText, event string) (string, error) {
+	if event == "" || strings.ContainsAny(event, " \t\r\n=") {
+		return "", errors.New("sandbox evidence event name is invalid")
+	}
+	runID := ""
+	for _, line := range strings.Split(logText, "\n") {
+		fields := strings.Fields(line)
+		hasEvent := false
+		for _, field := range fields {
+			if field == "event="+event {
+				hasEvent = true
+				break
+			}
+		}
+		if !hasEvent {
+			continue
+		}
+		for _, field := range fields {
+			if strings.HasPrefix(field, "run_id=") {
+				runID = strings.Trim(strings.TrimPrefix(field, "run_id="), `"`)
+				break
+			}
+		}
+	}
+	if runID == "" {
+		return "", errors.New("sandbox lifecycle event carried no cycle RunID")
+	}
+	if err := qurl.ValidateCycleRunID(runID); err != nil {
+		return "", errors.New("sandbox lifecycle event carried a noncanonical cycle RunID")
+	}
+	return runID, nil
 }
 
 func assertSandboxStreamsDoNotContainSecrets(t *testing.T, res *runResult, secrets ...string) {
@@ -389,5 +497,51 @@ func TestSandboxCleanupReclaimsResourceBeforeDeviceCredential(t *testing.T) {
 		if order[i] != want[i] {
 			t.Fatalf("cleanup order = %v, want %v", order, want)
 		}
+	}
+}
+
+func TestValidateSandboxDeviceIdentity(t *testing.T) {
+	valid := &qurl.AgentState{AgentID: "qurl-share-r1-a1-hs", DeviceAPIKeyID: "key-1"}
+	if err := validateSandboxDeviceIdentity(valid, valid.AgentID, valid.DeviceAPIKeyID); err != nil {
+		t.Fatalf("valid identity: %v", err)
+	}
+	for name, loaded := range map[string]*qurl.AgentState{
+		"missing":          nil,
+		"wrong agent":      {AgentID: "other", DeviceAPIKeyID: "key-1"},
+		"wrong credential": {AgentID: valid.AgentID, DeviceAPIKeyID: "key-2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSandboxDeviceIdentity(loaded, valid.AgentID, valid.DeviceAPIKeyID); err == nil {
+				t.Fatal("invalid durable identity accepted")
+			}
+		})
+	}
+}
+
+func TestSandboxRetiredRunIDEvidence(t *testing.T) {
+	got, err := sandboxRetiredRunID("time=x event=nhp_session_retired run_id=01abcdef23456789\n")
+	if err != nil || got != "01abcdef23456789" {
+		t.Fatalf("retired RunID = %q, %v", got, err)
+	}
+	for name, logText := range map[string]string{
+		"missing": "event=proxy_ready run_id=01abcdef23456789\n",
+		"empty":   "event=nhp_session_retired run_id=\n",
+		"invalid": "event=nhp_session_retired run_id=not-canonical\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := sandboxRetiredRunID(logText); err == nil {
+				t.Fatal("invalid retirement evidence accepted")
+			}
+		})
+	}
+	multiple, multipleErr := sandboxRetiredRunID("event=nhp_session_retired run_id=01abcdef23456789\nevent=nhp_session_retired run_id=02abcdef23456789\n")
+	if multipleErr != nil || multiple != "02abcdef23456789" {
+		t.Fatalf("last authoritative retirement = %q, %v", multiple, multipleErr)
+	}
+	matching := "event=login_success run_id=01abcdef23456789\nevent=nhp_session_retired run_id=01abcdef23456789\n"
+	admitted, admittedErr := sandboxEventRunID(matching, "login_success")
+	retired, retiredErr := sandboxEventRunID(matching, "nhp_session_retired")
+	if admittedErr != nil || retiredErr != nil || admitted != retired {
+		t.Fatalf("matching lifecycle evidence = admitted %q (%v), retired %q (%v)", admitted, admittedErr, retired, retiredErr)
 	}
 }

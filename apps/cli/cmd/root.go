@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -73,7 +74,7 @@ type globalOpts struct {
 	// mirroring the supervisor package's own timing seams.
 	openConnectorRuntime     func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
 	resolveConnectorResource func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error)
-	newConnectorKnocker      func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
+	newConnectorKnocker      func(rt *agent.Runtime, knockResourceID string, logger *slog.Logger) (connectorKnocker, error)
 	tuneConnectorSupervisor  func(cfg *supervisor.Config)
 	// onConnectorProxyReady is a command-test observation seam. Production
 	// leaves it nil; hermetic tests use it to wait for FRP's synchronized

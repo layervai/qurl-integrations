@@ -32,10 +32,10 @@ import (
 //
 // Credential contract (all four required before this suite runs anything):
 //
-//	QURL_API_KEY  — a sandbox API key holding the qurl:read, qurl:write, and
-//	    qurl:resolve scopes. Read through the CLI's hermetic mode: with the
-//	    variable set, the credential store is bypassed entirely and nothing
-//	    on disk is read or written.
+//	QURL_API_KEY_FILE — a protected 0600/0440 file containing the sandbox API
+//	    key. The test reads it once, then injects the value only into the
+//	    in-process CLI environment; the Go test process never receives the
+//	    bearer as an environment variable.
 //	QURL_ENDPOINT — the sandbox qURL API base URL (a repository secret:
 //	    the sandbox hostname is deliberately not public).
 //	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
@@ -74,20 +74,23 @@ const journeyTimeout = 4 * time.Minute
 const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
 
 // sandboxJourneyEnv reads the suite's env contract from the real process
-// environment and skips loudly — naming every missing variable — when it
-// is not fully provisioned. The returned map is the ONLY environment the
+// environment and fails closed when the selected live gate is not fully
+// provisioned. The returned map is the ONLY environment the
 // CLI invocations see, which is what keeps hermetic mode airtight: the
 // deployment settings the download step needs enter it as QURL_DEPLOYMENT,
 // built by journeyDeploymentFile below, never read from the process.
 func sandboxJourneyEnv(t *testing.T) map[string]string {
 	t.Helper()
-	key := strings.TrimSpace(os.Getenv("QURL_API_KEY"))
+	key, err := readSandboxSecretFile(sandboxAPIKeyFileEnv, "QURL_API_KEY")
+	if err != nil {
+		t.Fatalf("load protected sandbox API key: %v", err)
+	}
 	endpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
 	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
 	relayURL := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
 	missing := []string{}
 	for name, value := range map[string]string{
-		"QURL_API_KEY":                key,
+		sandboxAPIKeyFileEnv:          os.Getenv(sandboxAPIKeyFileEnv),
 		"QURL_ENDPOINT":               endpoint,
 		"QURL_SANDBOX_QV2_ISSUER_KEY": issuerKey,
 		"QURL_SANDBOX_QV2_RELAY_URL":  relayURL,
@@ -98,8 +101,8 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
-			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:read, qurl:write, "+
+		t.Fatalf("live sandbox CRID journey is selected but missing %v. "+
+			"Arm this by setting QURL_API_KEY_FILE (a protected file containing a sandbox key with qurl:read, qurl:write, "+
 			"and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
 			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
 			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
@@ -185,7 +188,14 @@ type journeyListDoc struct {
 // get --file (real bytes through the minted link) → delete --yes →
 // idempotent re-delete → resolve-after-delete (owner-truthful revoked exit).
 func TestSandboxCRIDJourney(t *testing.T) {
+	if os.Getenv(sandboxAPIKeyFileEnv) == "" && strings.TrimSpace(os.Getenv("QURL_API_KEY")) == "" {
+		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — %s is unset", sandboxAPIKeyFileEnv)
+	}
 	cliEnv := sandboxJourneyEnv(t)
+	namespace, err := sandboxNamespace("crid")
+	if err != nil {
+		t.Fatalf("derive sandbox CRID journey namespace: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), journeyTimeout)
 	defer cancel()
 
@@ -195,8 +205,9 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	// dedupes an already-published target. The download step's content
 	// assertion leans on the same stability: this page's body is known to
 	// carry journeyTargetMarker.
-	target := "https://example.com/?qurl-cli-sandbox-e2e=" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", journeyDescription)
+	target := "https://example.com/?qurl-cli-sandbox-e2e=" + url.QueryEscape(namespace.ConnectorID)
+	description := journeyDescription + "; " + namespace.AgentID
+	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", description)
 	if res.code != 0 {
 		t.Fatalf("publish exit = %d, want 0\nstderr: %s", res.code, res.stderr.String())
 	}
@@ -229,7 +240,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 		t.Fatalf("published CRID environment = %v, want the test environment on the sandbox", environment)
 	}
 
-	assertListFindsCRID(ctx, t, cliEnv, pub.CRID)
+	assertListFindsCRID(ctx, t, cliEnv, pub.CRID, description)
 	link := assertResolveJourney(ctx, t, cliEnv, pub.CRID)
 	// The link value never reaches the log: CI logs are public, and a
 	// minted link carries the sandbox hostname and a live qURL credential.
@@ -279,7 +290,7 @@ const (
 // honored server-side (handlers/resource.go parses it into ListFilters) —
 // if it ever stops being, the filter silently becomes a no-op and this walk
 // quietly reverts to scanning the whole history.
-func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
+func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id, expectedDescription string) {
 	t.Helper()
 	seen := 0
 	label := ""
@@ -322,9 +333,9 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 	}
 	// Not a Fatal: the row was found, so the rest of the journey (resolve,
 	// download, delete) is still worth running and still reclaims the row.
-	if label != journeyDescription {
+	if label != expectedDescription {
 		t.Errorf("listed row description = %q, want %q; nothing built on `qurl list` can identify this fixture",
-			label, journeyDescription)
+			label, expectedDescription)
 	}
 }
 
