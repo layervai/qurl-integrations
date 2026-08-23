@@ -54,6 +54,18 @@ import (
 // the first byte), mirroring the agent suite's test pin.
 const connectorTestHubKeyB64 = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
+func TestNewNativeConnectorKnockerRequiresCapturedOperatorLogger(t *testing.T) {
+	t.Parallel()
+	rt := &agent.Runtime{Binding: &qurl.AgentRuntimeBinding{}}
+	knocker, err := newNativeConnectorKnocker(rt, "resource-public-key", nil)
+	if knocker != nil || err == nil || !strings.Contains(err.Error(), "native NHP operator logger is nil") {
+		t.Fatalf("newNativeConnectorKnocker = (%v, %v), want nil-logger rejection", knocker, err)
+	}
+	if rt.Binding == nil {
+		t.Fatal("failed constructor consumed runtime binding before accepting the captured operator logger")
+	}
+}
+
 // TestMain pins the FRP library's process-global logger ONCE, before any test
 // goroutine exists. The hermetic serve test runs the FRP fork's server and
 // client in this one process, both logging through that global from their own

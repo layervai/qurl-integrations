@@ -791,12 +791,14 @@ func (s *Supervisor) endNativeCycle(logCtx context.Context, cycleBegun bool) {
 	if !ok {
 		return
 	}
+	runID := cycleKnocker.CycleRunID()
 	exitCtx, cancelExit := context.WithTimeout(context.Background(), endCycleTimeout)
 	defer cancelExit()
 	if err := cycleKnocker.EndCycle(exitCtx); err != nil {
 		s.log().WarnContext(logCtx, "connector: native NHP session cleanup failed",
 			append(s.knockLogAttrs(),
 				"event", "nhp_session_exit_failed",
+				"run_id", runID,
 				"err", err.Error(),
 			)...,
 		)
