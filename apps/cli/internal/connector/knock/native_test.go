@@ -323,8 +323,12 @@ func TestNativeLogsMissingResourceHostAsDeny(t *testing.T) {
 func TestNativeEndCycleRetriesExactReceiptUntilAccepted(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("EXT reply unavailable")
+	logger, capture := captureLogger()
 	called := 0
-	knocker := &Native{binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x33}, 32), resourceID: "resource-public-key"}
+	knocker := &Native{
+		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x33}, 32),
+		resourceID: "resource-public-key", target: "cell0.nhp.layerv.ai:443", logger: logger,
+	}
 	defer knocker.Close()
 	wantRunID := "01abcdef23456789"
 	wantReceipt := testNativeReceipt(wantRunID, 1)
@@ -333,7 +337,7 @@ func TestNativeEndCycleRetriesExactReceiptUntilAccepted(t *testing.T) {
 		if binding != knocker.binding || !bytes.Equal(key, knocker.privateKey) || !sameTestNativeReceipt(&receipt, &wantReceipt) || len(transportOpts) != 0 {
 			t.Fatalf("EndCycle adapter call did not preserve binding/key/receipt/options")
 		}
-		if called == 1 {
+		if called <= 2 {
 			return nil, wantErr
 		}
 		return &qurl.NativeSessionRetirement{SessionReceipt: receipt, CloseEventID: strings.Repeat("a", 32), State: "closing"}, nil
@@ -356,8 +360,22 @@ func TestNativeEndCycleRetriesExactReceiptUntilAccepted(t *testing.T) {
 	if knocker.receipt == nil {
 		t.Fatal("EndCycle discarded failed retirement receipt")
 	}
-	if err := knocker.EndCycle(context.Background()); err != nil || called != 2 {
-		t.Fatalf("second EndCycle() = %v, calls %d; want exact retry success", err, called)
+	records := capture.snapshot()
+	if len(records) != 1 || records[0].attrs["event"] != eventKnockError ||
+		records[0].attrs["reason"] != "session_retirement_failed" ||
+		records[0].attrs["resource_id"] != knocker.resourceID || records[0].attrs["target"] != knocker.target ||
+		records[0].attrs["run_id"] != wantRunID || records[0].attrs["err"] == "" {
+		t.Fatalf("teardown retirement log = %#v, want attributed knock_error/session_retirement_failed", records)
+	}
+	if err := knocker.EndCycle(context.Background()); !errors.Is(err, wantErr) || called != 2 {
+		t.Fatalf("second EndCycle() = %v, calls %d; want exact retry failure", err, called)
+	}
+	records = capture.snapshot()
+	if len(records) != 2 || records[1].attrs["run_id"] != wantRunID {
+		t.Fatalf("retry teardown logs = %#v, want retained receipt RunID on both failures", records)
+	}
+	if err := knocker.EndCycle(context.Background()); err != nil || called != 3 {
+		t.Fatalf("third EndCycle() = %v, calls %d; want exact retry success", err, called)
 	}
 	if knocker.receipt != nil {
 		t.Fatalf("successful retirement retained receipt %+v", knocker.receipt)

@@ -240,12 +240,26 @@ func (k *Native) EndCycle(ctx context.Context) error {
 	if k.runID == "" && k.receipt == nil {
 		return nil
 	}
+	runID := k.runID
+	if runID == "" && k.receipt != nil {
+		runID = k.receipt.RunID
+	}
 	k.runID = ""
 	k.runAttempt = 0
 	if !k.aliveLocked() {
 		return errors.New("native NHP runtime is closed")
 	}
-	return k.retireReceiptLocked(ctx)
+	if err := k.retireReceiptLocked(ctx); err != nil {
+		k.log().WarnContext(ctx, "connector: exact-session retirement failed at cycle teardown",
+			"event", eventKnockError,
+			"reason", "session_retirement_failed",
+			"resource_id", k.resourceID,
+			"target", k.target,
+			"run_id", runID,
+			"err", err.Error())
+		return err
+	}
+	return nil
 }
 
 // retireReceiptLocked retires and clears the one retained exact-session
