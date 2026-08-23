@@ -517,10 +517,11 @@ func TestNativeBlocksNewCycleAdmissionUntilPriorReceiptRetires(t *testing.T) {
 	t.Parallel()
 	const oldRunID = "01abcdef23456789"
 	wantErr := errors.New("old exact retirement unavailable")
+	logger, capture := captureLogger()
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x35}, 32),
 		resourceID: "resource-public-key", runID: oldRunID,
-		receipt: testNativeReceiptPtr(oldRunID, 1),
+		receipt: testNativeReceiptPtr(oldRunID, 1), logger: logger,
 	}
 	defer knocker.Close()
 	retireCalls := 0
@@ -537,6 +538,7 @@ func TestNativeBlocksNewCycleAdmissionUntilPriorReceiptRetires(t *testing.T) {
 	if err := knocker.BeginCycle(); err != nil {
 		t.Fatal(err)
 	}
+	newRunID := knocker.runID
 	knockCalls := 0
 	knocker.knock = func(_ context.Context, _ *qurl.AgentRuntimeBinding, _ []byte, _ string, opts qurl.NativeKnockOptions, _ ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error) {
 		knockCalls++
@@ -544,6 +546,11 @@ func TestNativeBlocksNewCycleAdmissionUntilPriorReceiptRetires(t *testing.T) {
 	}
 	if _, err := knocker.Knock(context.Background()); !errors.Is(err, wantErr) || knockCalls != 0 {
 		t.Fatalf("new Knock before old retirement = (%v, calls %d), want fail closed without admission", err, knockCalls)
+	}
+	records := capture.snapshot()
+	if len(records) != 2 || records[0].attrs["run_id"] != oldRunID ||
+		records[1].attrs["run_id"] != oldRunID || records[1].attrs["run_id"] == newRunID {
+		t.Fatalf("cross-cycle retirement logs = %#v, want both failures attributed to old receipt %q rather than replacement %q", records, oldRunID, newRunID)
 	}
 	if _, err := knocker.Knock(context.Background()); err != nil || knockCalls != 1 {
 		t.Fatalf("new Knock after old retirement = (%v, calls %d), want one admission", err, knockCalls)

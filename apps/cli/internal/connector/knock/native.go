@@ -135,6 +135,10 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 	// The connector only asks for a replacement admission after its old control
 	// connection is done. Retire that exact obsolete session first. Failure is
 	// fail-closed: retain the opaque receipt and do not open a replacement.
+	retiringRunID := k.runID
+	if k.receipt != nil {
+		retiringRunID = k.receipt.RunID
+	}
 	if err := k.retireReceiptLocked(ctx); err != nil {
 		err = fmt.Errorf("retire prior native NHP session before replacement: %w", err)
 		k.log().WarnContext(ctx, "connector: exact-session retirement failed before replacement",
@@ -142,7 +146,7 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 			"reason", "session_retirement_failed",
 			"resource_id", k.resourceID,
 			"target", k.target,
-			"run_id", k.runID,
+			"run_id", retiringRunID,
 			"err", err.Error())
 		return nil, err
 	}
