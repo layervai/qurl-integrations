@@ -340,7 +340,7 @@ jobs:
       # CRID journey (apps/cli/cmd/sandbox_journey_test.go) arms itself from
       # the file-only contract below and runs against the live sandbox. Once
       # this job is armed, a missing secret is a hard failure rather than a
-      # skipped proof. Arming is
+      # skipped journey. Arming is
       # layered on purpose: the job itself runs only when
       # vars.CLI_SANDBOX_E2E == 'enabled' on a same-repo ref (see this job's
       # if:, whose disarmed skip the required aggregate's verifier reports as
@@ -348,7 +348,7 @@ jobs:
       #
       # The Connector smokes are deliberately NOT armed here: beyond an
       # endpoint they need explicit arming and credentials. In particular, the
-      # local-publish smoke enrolls a native device, so a one-off proof must
+      # local-publish smoke enrolls a native device, so a one-off journey must
       # also supply its JWT cleanup credential instead of leaking one durable
       # device/assignment per hosted-runner invocation.
       - name: Materialize sandbox API key for the test process

@@ -49,7 +49,7 @@ var sandboxCleanupHTTPClient = &http.Client{
 // second run must reuse the same durable device and Connector identities and
 // serve again, proving exact retirement did not strand replacement admission.
 //
-// This is an attended, one-off proof rather than an every-commit CI test. It
+// This is a protected, one-off journey rather than an every-commit CI test. It
 // creates a native device in an ephemeral state directory, so the operator must
 // provide a short-lived JWT that can revoke the resulting device credential;
 // otherwise a hosted runner would leak durable device/assignment quota on every
