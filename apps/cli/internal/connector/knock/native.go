@@ -21,15 +21,15 @@ import (
 // named and exact so a future, different authenticated denial stays generic.
 const nativeKnockResourceNotFoundCode = "52004"
 
-// Native owns the one process-lifetime native runtime key and one immutable
-// RunID per supervisor cycle. qurl-go owns packet construction, assigned-cell
-// resolution, server authentication, ACK parsing, and the knock/exit
-// transactions. The supervisor sequences BeginCycle, Knock/EndCycle, and
-// Close. The mutex additionally keeps Close from wiping the key or destroying
-// the binding while an in-flight UDP exchange is using them, so safety does
-// not rely only on call order. Consequently Close may wait for that
-// exchange's bounded context deadline; callers must include the native UDP
-// timeout in their shutdown budget.
+// Native owns the one process-lifetime native runtime key, one immutable RunID
+// per supervisor cycle, and at most one opaque exact-session receipt. qurl-go
+// owns packet construction, assigned-cell resolution, server authentication,
+// ACK parsing, and the knock/retirement transactions. The supervisor sequences
+// BeginCycle, Knock/EndCycle, and Close. The mutex additionally keeps Close
+// from wiping the key or destroying the binding while an in-flight UDP
+// exchange is using them, so safety does not rely only on call order.
+// Consequently Close may wait for that exchange's bounded context deadline;
+// callers must include the native UDP timeout in their shutdown budget.
 type Native struct {
 	mu sync.Mutex
 
@@ -38,17 +38,19 @@ type Native struct {
 	privateKey []byte
 	resourceID string
 	runID      string
+	runAttempt uint64
+	receipt    *qurl.NativeSessionReceipt
 	target     string
 	udpOpts    []qurl.AgentRuntimeUDPOption
 	knock      nativeKnockFunc
-	exit       nativeExitFunc
+	retire     nativeRetireFunc
 	logger     *slog.Logger
 }
 
 var _ CycleKnocker = (*Native)(nil)
 
 type nativeKnockFunc func(context.Context, *qurl.AgentRuntimeBinding, []byte, string, qurl.NativeKnockOptions, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error)
-type nativeExitFunc func(context.Context, *qurl.AgentRuntimeBinding, []byte, string, qurl.NativeKnockOptions, ...qurl.AgentRuntimeUDPOption) error
+type nativeRetireFunc func(context.Context, *qurl.AgentRuntimeBinding, []byte, qurl.NativeSessionReceipt, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error)
 
 // NewNative takes ownership of the binding's device runtime key and returns
 // the process-lifetime cycle knocker for resourceID. The caller must Close
@@ -72,7 +74,7 @@ func NewNative(binding *qurl.AgentRuntimeBinding, resourceID string, udpOpts ...
 		target:     binding.NHPUDPEndpoint.Host + ":" + strconv.Itoa(binding.NHPUDPEndpoint.Port),
 		udpOpts:    append([]qurl.AgentRuntimeUDPOption(nil), udpOpts...),
 		knock:      qurl.KnockRegisteredAgent,
-		exit:       qurl.ExitRegisteredAgentSession,
+		retire:     qurl.RetireRegisteredAgentSession,
 	}, nil
 }
 
@@ -102,6 +104,7 @@ func (k *Native) BeginCycle() error {
 		return fmt.Errorf("generate native cycle RunID: %w", err)
 	}
 	k.runID = runID
+	k.runAttempt = 0
 	return nil
 }
 
@@ -120,12 +123,38 @@ func (k *Native) CycleRunID() string {
 func (k *Native) Knock(ctx context.Context) (*Result, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if ctx == nil {
+		return nil, errors.New("native NHP knock context is nil")
+	}
 	if !k.aliveLocked() {
 		return nil, errors.New("native NHP runtime is closed")
 	}
 	if k.runID == "" {
 		return nil, errors.New("native NHP cycle has no RunID")
 	}
+	// The connector only asks for a replacement admission after its old control
+	// connection is done. Retire that exact obsolete session first. Failure is
+	// fail-closed: retain the opaque receipt and do not open a replacement.
+	retiringRunID := k.runID
+	if k.receipt != nil {
+		retiringRunID = k.receipt.RunID
+	}
+	if err := k.retireReceiptLocked(ctx); err != nil {
+		err = fmt.Errorf("retire prior native NHP session before replacement: %w", err)
+		k.log().WarnContext(ctx, "connector: exact-session retirement failed before replacement",
+			"event", eventKnockError,
+			"reason", "session_retirement_failed",
+			"resource_id", k.resourceID,
+			"target", k.target,
+			"run_id", retiringRunID,
+			"err", err.Error())
+		return nil, err
+	}
+	if k.runAttempt == ^uint64(0) {
+		return nil, errors.New("native NHP cycle exhausted its attempt space")
+	}
+	k.runAttempt++
+	runAttempt := k.runAttempt
 
 	start := time.Now()
 	result, err := k.knock(
@@ -133,7 +162,7 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 		k.binding,
 		k.privateKey,
 		k.resourceID,
-		qurl.NativeKnockOptions{RunID: k.runID},
+		qurl.NativeKnockOptions{RunID: k.runID, RunAttempt: runAttempt},
 		k.udpOpts...,
 	)
 	latency := latencyMS(time.Since(start))
@@ -161,6 +190,23 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 			"err", err.Error())
 		return nil, err
 	}
+	if strings.TrimSpace(result.SessionReceipt.CellID) == "" ||
+		result.SessionReceipt.SessionID == 0 || result.SessionReceipt.SessionID != result.SessionID ||
+		result.SessionReceipt.SessionIssuedAtMillis <= 0 || result.SessionReceipt.RunID != k.runID ||
+		result.SessionReceipt.RunAttempt != runAttempt {
+		err := errors.New("native NHP knock returned an invalid exact-session receipt")
+		k.log().WarnContext(ctx, "connector: native NHP knock failed",
+			"event", eventKnockError,
+			"reason", "knock_invalid_response",
+			"resource_id", k.resourceID,
+			"target", k.target,
+			"run_id", k.runID,
+			"latency_ms", latency,
+			"err", err.Error())
+		return nil, err
+	}
+	receipt := result.SessionReceipt
+	k.receipt = &receipt
 	event, reason := eventKnockSuccess, ""
 	if result.ACToken == "" {
 		event, reason = eventKnockDeny, "knock_token_missing"
@@ -186,29 +232,58 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 	}, nil
 }
 
-// EndCycle consumes the current cycle RunID and sends the best-effort native
-// session exit for it. Replays after the RunID is consumed are no-ops; the
-// RunID is consumed even when the runtime turns out to be closed, so an
-// invalid-state return can never resurrect a spent cycle.
+// EndCycle consumes the current cycle identity and retires its exact session.
+// A failed retirement retains the opaque receipt so a later EndCycle retries
+// the same authority even though the RunID has already been consumed.
 func (k *Native) EndCycle(ctx context.Context) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.runID == "" {
+	if ctx == nil {
+		return errors.New("native NHP retirement context is nil")
+	}
+	if k.runID == "" && k.receipt == nil {
 		return nil
 	}
 	runID := k.runID
+	if runID == "" && k.receipt != nil {
+		runID = k.receipt.RunID
+	}
 	k.runID = ""
+	k.runAttempt = 0
 	if !k.aliveLocked() {
 		return errors.New("native NHP runtime is closed")
 	}
-	return k.exit(
-		ctx,
-		k.binding,
-		k.privateKey,
-		k.resourceID,
-		qurl.NativeKnockOptions{RunID: runID},
-		k.udpOpts...,
-	)
+	if err := k.retireReceiptLocked(ctx); err != nil {
+		k.log().WarnContext(ctx, "connector: exact-session retirement failed at cycle teardown",
+			"event", eventKnockError,
+			"reason", "session_retirement_failed",
+			"resource_id", k.resourceID,
+			"target", k.target,
+			"run_id", runID,
+			"err", err.Error())
+		return err
+	}
+	return nil
+}
+
+// retireReceiptLocked retires and clears the one retained exact-session
+// capability. The receipt remains byte-for-byte intact after every failure so
+// replacement Knock and EndCycle can retry the exact same retirement.
+// Callers must hold k.mu.
+func (k *Native) retireReceiptLocked(ctx context.Context) error {
+	if k.receipt == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	receipt := *k.receipt
+	if _, err := k.retire(ctx, k.binding, k.privateKey, receipt, k.udpOpts...); err != nil {
+		return err
+	}
+	*k.receipt = qurl.NativeSessionReceipt{}
+	k.receipt = nil
+	return nil
 }
 
 // Close zeroes the runtime key, clears the cycle, and destroys the owned
@@ -229,6 +304,11 @@ func (k *Native) Close() {
 	clear(k.privateKey)
 	k.privateKey = nil
 	k.runID = ""
+	k.runAttempt = 0
+	if k.receipt != nil {
+		*k.receipt = qurl.NativeSessionReceipt{}
+		k.receipt = nil
+	}
 	k.mu.Unlock()
 	if binding != nil {
 		binding.Destroy()
