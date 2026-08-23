@@ -136,7 +136,15 @@ func (k *Native) Knock(ctx context.Context) (*Result, error) {
 	// connection is done. Retire that exact obsolete session first. Failure is
 	// fail-closed: retain the opaque receipt and do not open a replacement.
 	if err := k.retireReceiptLocked(ctx); err != nil {
-		return nil, fmt.Errorf("retire prior native NHP session before replacement: %w", err)
+		err = fmt.Errorf("retire prior native NHP session before replacement: %w", err)
+		k.log().WarnContext(ctx, "connector: exact-session retirement failed before replacement",
+			"event", eventKnockError,
+			"reason", "session_retirement_failed",
+			"resource_id", k.resourceID,
+			"target", k.target,
+			"run_id", k.runID,
+			"err", err.Error())
+		return nil, err
 	}
 	if k.runAttempt == ^uint64(0) {
 		return nil, errors.New("native NHP cycle exhausted its attempt space")

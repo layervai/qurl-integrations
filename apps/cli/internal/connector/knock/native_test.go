@@ -448,9 +448,11 @@ func TestNativeRetirementFailureBlocksReplacementAdmission(t *testing.T) {
 	t.Parallel()
 	const runID = "01abcdef23456789"
 	wantErr := errors.New("exact retirement unavailable")
+	logger, rec := captureLogger()
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x37}, 32),
 		resourceID: "resource-public-key", runID: runID,
+		target: "hub.test.nhp.layerv.ai:443", logger: logger,
 	}
 	defer knocker.Close()
 	knockCalls := 0
@@ -474,6 +476,16 @@ func TestNativeRetirementFailureBlocksReplacementAdmission(t *testing.T) {
 	}
 	if knockCalls != 1 || knocker.receipt == nil || knocker.receipt.RunAttempt != 1 {
 		t.Fatalf("failed replacement changed authority: knocks %d receipt %+v", knockCalls, knocker.receipt)
+	}
+	entries := rec.snapshot()
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want initial success and retirement failure", len(entries))
+	}
+	entry := entries[1]
+	if entry.attrs["event"] != eventKnockError || entry.attrs["reason"] != "session_retirement_failed" ||
+		entry.attrs["resource_id"] != knocker.resourceID || entry.attrs["target"] != knocker.target ||
+		entry.attrs["run_id"] != runID || entry.attrs["err"] == "" {
+		t.Fatalf("retirement-failure log = %#v, want attributed knock_error/session_retirement_failed", entry)
 	}
 	if _, err := knocker.Knock(context.Background()); err != nil {
 		t.Fatalf("replacement after retirement recovery: %v", err)
