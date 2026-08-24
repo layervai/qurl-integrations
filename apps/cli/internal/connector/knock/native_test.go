@@ -55,6 +55,20 @@ func captureLogger() (*slog.Logger, *captureHandler) {
 	return slog.New(h), h
 }
 
+func testSessionReceipt(runID string, sessionID uint64) qurl.NativeSessionReceipt {
+	return qurl.NativeSessionReceipt{
+		CellID: "cell-a", SessionID: sessionID, SessionIssuedAtMillis: 1_700_000_000_000,
+		RunID: runID, RunAttempt: 1,
+	}
+}
+
+func testAdmission(runID string, sessionID uint64) *qurl.NativeKnockResult {
+	return &qurl.NativeKnockResult{
+		ACToken: "token", ResourceHost: "tunnel.test.layerv.ai:7000",
+		SessionReceipt: testSessionReceipt(runID, sessionID),
+	}
+}
+
 func TestNewNativeFailsClosedOnInvalidRuntimeInputs(t *testing.T) {
 	t.Parallel()
 	t.Run("nil binding", func(t *testing.T) {
@@ -97,7 +111,7 @@ func TestNativeTranslatesAuthenticatedAdmission(t *testing.T) {
 	transportOpt := qurl.WithAgentRuntimeUDPBounds(2*time.Second, 1)
 	knocker := &Native{
 		binding: binding, privateKey: privateKey, resourceID: "resource-public-key",
-		runID: "01abcdef23456789", target: "hub.test.nhp.layerv.ai:443",
+		runID: "01abcdef23456789", runAttempt: 1, target: "hub.test.nhp.layerv.ai:443",
 		udpOpts: []qurl.AgentRuntimeUDPOption{transportOpt},
 	}
 	defer knocker.Close()
@@ -108,7 +122,12 @@ func TestNativeTranslatesAuthenticatedAdmission(t *testing.T) {
 		if resourceID != knocker.resourceID || opts.RunID != knocker.runID || len(transportOpts) != 1 {
 			t.Fatalf("adapter call = resource %q, RunID %q, transport opts %d", resourceID, opts.RunID, len(transportOpts))
 		}
-		return &qurl.NativeKnockResult{ACToken: "admission-token", ResourceHost: "tunnel.test.layerv.ai:7000"}, nil
+		if opts.RunAttempt != 1 {
+			t.Fatalf("adapter RunAttempt = %d, want 1", opts.RunAttempt)
+		}
+		result := testAdmission(opts.RunID, 101)
+		result.ACToken = "admission-token"
+		return result, nil
 	}
 
 	got, err := knocker.Knock(context.Background())
@@ -162,6 +181,7 @@ func TestNativeRejectsMissingRunIDAndNilAdmission(t *testing.T) {
 	}
 
 	knocker.runID = "01abcdef23456789"
+	knocker.runAttempt = 1
 	if _, err := knocker.Knock(context.Background()); err == nil || !strings.Contains(err.Error(), "no admission") {
 		t.Fatalf("Knock() nil-admission error = %v", err)
 	}
@@ -180,7 +200,7 @@ func TestNativeLogsMissingACTokenAsDeny(t *testing.T) {
 	logger, rec := captureLogger()
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x52}, 32),
-		resourceID: "resource-public-key", runID: "01abcdef23456789",
+		resourceID: "resource-public-key", runID: "01abcdef23456789", runAttempt: 1,
 		target: "hub.test.nhp.layerv.ai:443", logger: logger,
 	}
 	defer knocker.Close()
@@ -213,7 +233,7 @@ func TestNativeLogsMissingResourceHostAsDeny(t *testing.T) {
 	logger, rec := captureLogger()
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x53}, 32),
-		resourceID: "resource-public-key", runID: "01abcdef23456789",
+		resourceID: "resource-public-key", runID: "01abcdef23456789", runAttempt: 1,
 		target: "hub.test.nhp.layerv.ai:443", logger: logger,
 	}
 	defer knocker.Close()
@@ -248,18 +268,20 @@ func TestNativeEndCycleForwardsIdentityAndSkipsEmptyRunID(t *testing.T) {
 	knocker := &Native{binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x33}, 32), resourceID: "resource-public-key"}
 	defer knocker.Close()
 	wantRunID := "01abcdef23456789"
-	knocker.exit = func(_ context.Context, binding *qurl.AgentRuntimeBinding, key []byte, resourceID string, opts qurl.NativeKnockOptions, transportOpts ...qurl.AgentRuntimeUDPOption) error {
+	knocker.receipts = []qurl.NativeSessionReceipt{testSessionReceipt(wantRunID, 102)}
+	knocker.retire = func(_ context.Context, binding *qurl.AgentRuntimeBinding, key []byte, receipt qurl.NativeSessionReceipt, transportOpts ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error) {
 		called++
-		if binding != knocker.binding || !bytes.Equal(key, knocker.privateKey) || resourceID != knocker.resourceID || opts.RunID != wantRunID || len(transportOpts) != 0 {
-			t.Fatalf("EndCycle adapter call did not preserve binding/key/resource/RunID/options")
+		if binding != knocker.binding || !bytes.Equal(key, knocker.privateKey) || receipt.RunID != wantRunID || len(transportOpts) != 0 {
+			t.Fatalf("EndCycle adapter call did not preserve binding/key/receipt/options")
 		}
-		return wantErr
+		return nil, wantErr
 	}
 	if err := knocker.EndCycle(context.Background()); err != nil || called != 0 {
 		t.Fatalf("EndCycle() without RunID = %v, calls %d; want nil, 0", err, called)
 	}
 
 	knocker.runID = wantRunID
+	knocker.runAttempt = 1
 	if err := knocker.EndCycle(context.Background()); !errors.Is(err, wantErr) || called != 1 {
 		t.Fatalf("EndCycle() = %v, calls %d; want transport error, 1", err, called)
 	}
@@ -276,7 +298,7 @@ func TestNativeRejectsUseAfterClose(t *testing.T) {
 	knockCalls := 0
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x61}, 32),
-		resourceID: "resource-public-key", runID: "01abcdef23456789",
+		resourceID: "resource-public-key", runID: "01abcdef23456789", runAttempt: 1,
 	}
 	knocker.knock = func(context.Context, *qurl.AgentRuntimeBinding, []byte, string, qurl.NativeKnockOptions, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error) {
 		knockCalls++
@@ -299,7 +321,7 @@ func TestNativeEndCycleConsumesRunIDBeforeInvalidStateReturn(t *testing.T) {
 	t.Parallel()
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: make([]byte, 31),
-		resourceID: "resource-public-key", runID: "01abcdef23456789",
+		resourceID: "resource-public-key", runID: "01abcdef23456789", runAttempt: 1,
 	}
 	if err := knocker.EndCycle(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("EndCycle() = %v, want closed runtime error", err)
@@ -319,7 +341,7 @@ func TestNativeCloseCannotRaceInFlightKnock(t *testing.T) {
 	release := make(chan struct{})
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: privateKey,
-		resourceID: "resource-public-key", runID: "01abcdef23456789",
+		resourceID: "resource-public-key", runID: "01abcdef23456789", runAttempt: 1,
 	}
 	knocker.knock = func(context.Context, *qurl.AgentRuntimeBinding, []byte, string, qurl.NativeKnockOptions, ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error) {
 		close(entered)
@@ -359,7 +381,7 @@ func TestNativeEndCycleCannotRaceInFlightKnock(t *testing.T) {
 	release := make(chan struct{})
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x71}, 32),
-		resourceID: "resource-public-key", runID: runID,
+		resourceID: "resource-public-key", runID: runID, runAttempt: 1,
 	}
 	defer knocker.Close()
 	var exitRunIDs []string
@@ -371,11 +393,11 @@ func TestNativeEndCycleCannotRaceInFlightKnock(t *testing.T) {
 		if opts.RunID != runID {
 			t.Errorf("in-flight knock RunID = %q, want %q", opts.RunID, runID)
 		}
-		return &qurl.NativeKnockResult{ACToken: "token", ResourceHost: "tunnel.test.layerv.ai:7000"}, nil
+		return testAdmission(opts.RunID, 103), nil
 	}
-	knocker.exit = func(_ context.Context, _ *qurl.AgentRuntimeBinding, _ []byte, _ string, opts qurl.NativeKnockOptions, _ ...qurl.AgentRuntimeUDPOption) error {
-		exitRunIDs = append(exitRunIDs, opts.RunID)
-		return nil
+	knocker.retire = func(_ context.Context, _ *qurl.AgentRuntimeBinding, _ []byte, receipt qurl.NativeSessionReceipt, _ ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error) {
+		exitRunIDs = append(exitRunIDs, receipt.RunID)
+		return &qurl.NativeSessionRetirement{SessionReceipt: receipt, State: "closed"}, nil
 	}
 
 	knockDone := make(chan error, 1)
@@ -418,9 +440,10 @@ func TestNativeCloseCannotRaceInFlightEndCycle(t *testing.T) {
 	release := make(chan struct{})
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: privateKey,
-		resourceID: "resource-public-key", runID: runID,
+		resourceID: "resource-public-key", runID: runID, runAttempt: 1,
+		receipts: []qurl.NativeSessionReceipt{testSessionReceipt(runID, 104)},
 	}
-	knocker.exit = func(_ context.Context, binding *qurl.AgentRuntimeBinding, key []byte, _ string, opts qurl.NativeKnockOptions, _ ...qurl.AgentRuntimeUDPOption) error {
+	knocker.retire = func(_ context.Context, binding *qurl.AgentRuntimeBinding, key []byte, receipt qurl.NativeSessionReceipt, _ ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error) {
 		close(entered)
 		<-release
 		// Close must not wipe the key or destroy the binding while this EXT
@@ -428,10 +451,10 @@ func TestNativeCloseCannotRaceInFlightEndCycle(t *testing.T) {
 		if binding == nil || !bytes.Equal(key, wantKey) {
 			t.Error("Close wiped runtime state under an in-flight EXT")
 		}
-		if opts.RunID != runID {
-			t.Errorf("in-flight EXT RunID = %q, want %q", opts.RunID, runID)
+		if receipt.RunID != runID {
+			t.Errorf("in-flight EXT RunID = %q, want %q", receipt.RunID, runID)
 		}
-		return nil
+		return &qurl.NativeSessionRetirement{SessionReceipt: receipt, State: "closed"}, nil
 	}
 
 	endDone := make(chan error, 1)
@@ -466,7 +489,7 @@ func TestNativeBeginCycleCannotRaceInFlightKnock(t *testing.T) {
 	release := make(chan struct{})
 	knocker := &Native{
 		binding: &qurl.AgentRuntimeBinding{}, privateKey: bytes.Repeat([]byte{0x73}, 32),
-		resourceID: "resource-public-key", runID: firstRunID,
+		resourceID: "resource-public-key", runID: firstRunID, runAttempt: 1,
 	}
 	defer knocker.Close()
 	knocker.knock = func(_ context.Context, _ *qurl.AgentRuntimeBinding, _ []byte, _ string, opts qurl.NativeKnockOptions, _ ...qurl.AgentRuntimeUDPOption) (*qurl.NativeKnockResult, error) {
@@ -477,7 +500,7 @@ func TestNativeBeginCycleCannotRaceInFlightKnock(t *testing.T) {
 		if opts.RunID != firstRunID {
 			t.Errorf("in-flight knock RunID = %q, want %q", opts.RunID, firstRunID)
 		}
-		return &qurl.NativeKnockResult{ACToken: "token", ResourceHost: "tunnel.test.layerv.ai:7000"}, nil
+		return testAdmission(opts.RunID, 105), nil
 	}
 
 	knockDone := make(chan error, 1)
@@ -524,16 +547,16 @@ func TestNativeConcurrentLifecycleStress(t *testing.T) {
 		if binding == nil || !bytes.Equal(key, wantKey) || opts.RunID == "" {
 			t.Error("in-flight knock observed torn runtime state")
 		}
-		return &qurl.NativeKnockResult{ACToken: "token", ResourceHost: "tunnel.test.layerv.ai:7000"}, nil
+		return testAdmission(opts.RunID, uint64(len(opts.RunID))+106), nil
 	}
-	knocker.exit = func(_ context.Context, binding *qurl.AgentRuntimeBinding, key []byte, _ string, opts qurl.NativeKnockOptions, _ ...qurl.AgentRuntimeUDPOption) error {
-		if binding == nil || !bytes.Equal(key, wantKey) || opts.RunID == "" {
+	knocker.retire = func(_ context.Context, binding *qurl.AgentRuntimeBinding, key []byte, receipt qurl.NativeSessionReceipt, _ ...qurl.AgentRuntimeUDPOption) (*qurl.NativeSessionRetirement, error) {
+		if binding == nil || !bytes.Equal(key, wantKey) || receipt.RunID == "" {
 			t.Error("in-flight EXT observed torn runtime state")
 		}
 		integrity.Lock()
-		consumed[opts.RunID]++
+		consumed[receipt.RunID]++
 		integrity.Unlock()
-		return nil
+		return &qurl.NativeSessionRetirement{SessionReceipt: receipt, State: "closed"}, nil
 	}
 
 	const workers = 4
@@ -566,7 +589,7 @@ func TestNativeConcurrentLifecycleStress(t *testing.T) {
 		wg.Wait()
 	}
 	liveErrs := func(err error) bool {
-		return err == nil || strings.Contains(err.Error(), "no RunID")
+		return err == nil || strings.Contains(err.Error(), "no RunID") || strings.Contains(err.Error(), "no authenticated session receipt")
 	}
 	runPhase(false, liveErrs)
 	runPhase(true, func(err error) bool {
