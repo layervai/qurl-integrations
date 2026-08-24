@@ -2,12 +2,13 @@
 //
 // The API key is the only durable customer credential. It is never accepted
 // as a command-line flag (argv leaks into shell history and process lists);
-// it comes from exactly two places, in this order:
+// it comes from exactly three places, in this order:
 //
-//  1. The QURL_API_KEY environment variable — hermetic mode. When set, the
+//  1. The QURL_API_KEY_FILE environment variable — private-file hermetic mode.
+//  2. The QURL_API_KEY environment variable — inline hermetic mode. When set, the
 //     credential store is bypassed entirely: nothing is read from or written
 //     to disk, which is what CI jobs and containers want.
-//  2. The credential store: the OS keyring first, with a mode-0600 file
+//  3. The credential store: the OS keyring first, with a mode-0600 file
 //     fallback used only where the keyring is unavailable. See Chain.
 package auth
 
@@ -20,9 +21,14 @@ import (
 	"strings"
 )
 
-// EnvAPIKey is the environment variable holding the qURL API key.
-// #nosec G101 -- the NAME of the variable, not a secret.
-const EnvAPIKey = "QURL_API_KEY"
+const (
+	// EnvAPIKey is the environment variable holding the qURL API key.
+	// #nosec G101 -- the NAME of the variable, not a secret.
+	EnvAPIKey = "QURL_API_KEY"
+	// EnvAPIKeyFile names one exact owner-only file holding the qURL API key.
+	// #nosec G101 -- the NAME of the variable, not a secret.
+	EnvAPIKeyFile = "QURL_API_KEY_FILE"
+)
 
 // Sentinel errors; each maps to the authentication exit code.
 var (
@@ -30,6 +36,8 @@ var (
 	ErrNoCredential = errors.New("cli: no qURL API key configured")
 	// ErrInvalidKey reports a configured value that cannot be a qURL API key.
 	ErrInvalidKey = errors.New("cli: the configured value does not look like a qURL API key")
+	// ErrCredentialConflict rejects ambiguous inline and file authority.
+	ErrCredentialConflict = errors.New("cli: QURL_API_KEY and QURL_API_KEY_FILE cannot both be set")
 )
 
 // Source names where a resolved credential came from.
@@ -37,8 +45,9 @@ type Source string
 
 // Credential sources, in precedence order.
 const (
-	SourceEnvironment Source = "environment"
-	SourceStore       Source = "credential store"
+	SourceEnvironment     Source = "environment"
+	SourceEnvironmentFile Source = "environment file"
+	SourceStore           Source = "credential store"
 )
 
 // CredentialStore persists the API key between runs. Implementations must
@@ -66,8 +75,20 @@ type CredentialStore interface {
 // when no on-disk store is available.
 func Resolve(lookup func(string) (string, bool), store CredentialStore) (string, Source, error) {
 	if lookup != nil {
-		if v, ok := lookup(EnvAPIKey); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v), SourceEnvironment, nil
+		inline, inlineSet := lookup(EnvAPIKey)
+		path, fileSet := lookup(EnvAPIKeyFile)
+		if inlineSet && fileSet {
+			return "", "", ErrCredentialConflict
+		}
+		if fileSet {
+			key, err := readAPIKeyEnvironmentFile(path)
+			if err != nil {
+				return "", "", err
+			}
+			return key, SourceEnvironmentFile, nil
+		}
+		if inlineSet && strings.TrimSpace(inline) != "" {
+			return strings.TrimSpace(inline), SourceEnvironment, nil
 		}
 	}
 	if store == nil {
