@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This command is selected by the protected NHP rollout from the exact released
+# qurl source. Prepare runs while public admission is open and writes private,
+# replayable customer authority. Verify consumes only that authority after the
+# gate closes. Raw UDP silence or a successful TCP connect is not evidence that
+# NHP admission is closed.
+
+die() { echo "prod matched-cohort closure rejected: $*" >&2; exit 1; }
+
+operation=
+intent_file=
+journal_file=
+report_file=
+server_endpoint=
+ac_endpoint=
+frps_selectors_json=
+relay_hostname=
+while (($#)); do
+  (($# >= 2)) || die "option $1 has no value"
+  case "$1" in
+    --operation) [[ -z "$operation" ]] || die "duplicate --operation"; operation=$2 ;;
+    --intent-file) [[ -z "$intent_file" ]] || die "duplicate --intent-file"; intent_file=$2 ;;
+    --journal-file) [[ -z "$journal_file" ]] || die "duplicate --journal-file"; journal_file=$2 ;;
+    --report-file) [[ -z "$report_file" ]] || die "duplicate --report-file"; report_file=$2 ;;
+    --server-endpoint) [[ -z "$server_endpoint" ]] || die "duplicate --server-endpoint"; server_endpoint=$2 ;;
+    --ac-endpoint) [[ -z "$ac_endpoint" ]] || die "duplicate --ac-endpoint"; ac_endpoint=$2 ;;
+    --frps-selectors-json) [[ -z "$frps_selectors_json" ]] || die "duplicate --frps-selectors-json"; frps_selectors_json=$2 ;;
+    --ac-frps-ports-json) die "ports-only FRPS authority is forbidden" ;;
+    --relay-hostname) [[ -z "$relay_hostname" ]] || die "duplicate --relay-hostname"; relay_hostname=$2 ;;
+    *) die "unknown option $1" ;;
+  esac
+  shift 2
+done
+
+[[ "$operation" == prepare || "$operation" == verify ]] || die "--operation must be prepare or verify"
+for path in "$intent_file" "$journal_file" "$report_file"; do
+  [[ "$path" == /* && "$path" != *$'\n'* && "$path" != *$'\r'* ]] || die "one output path is not exact absolute"
+done
+[[ "$intent_file" != "$journal_file" && "$intent_file" != "$report_file" && "$journal_file" != "$report_file" ]] || die "authority paths must be distinct"
+for value in "$server_endpoint" "$ac_endpoint" "$frps_selectors_json" "$relay_hostname"; do
+  [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "one required operation authority is missing or malformed"
+done
+for name in \
+  QURL_PROD_MATCHED_COHORT_TEST_BINARY \
+  QURL_PROD_MATCHED_COHORT_RELEASE_MANIFEST \
+  QURL_PROD_MATCHED_COHORT_RELEASE_ID \
+  QURL_PROD_MATCHED_COHORT_BINARY \
+  QURL_PROD_CANDIDATE_DEPLOYMENT_FILE \
+  QURL_PROD_CANONICAL_DEPLOYMENT_FILE \
+  QURL_API_KEY_FILE \
+  QURL_CLI_PROD_CLEANUP_JWT_FILE \
+  QURL_CLI_PROD_API_KEY_ID_FILE \
+  QURL_SHARING_RUN_ID \
+  QURL_SHARING_RUN_ATTEMPT; do
+  [[ -n "${!name:-}" ]] || die "$name is missing"
+done
+for forbidden in \
+  QURL_CLI_SANDBOX_CLEANUP_JWT \
+  QURL_CLI_SANDBOX_CLEANUP_JWT_FILE \
+  QURL_CLI_SANDBOX_LOCAL_PUBLISH \
+  QURL_CLI_SANDBOX_SIBLING_CONTINUITY \
+  QURL_CONNECTOR_TOKEN \
+  QURL_CONNECTOR_TOKEN_FILE; do
+  [[ -z "${!forbidden+x}" ]] || die "$forbidden is forbidden"
+done
+
+export QURL_PROD_MATCHED_COHORT_ADMISSION_CLOSED=enabled
+export QURL_PROD_MATCHED_COHORT_CLOSURE_OPERATION=$operation
+export QURL_PROD_MATCHED_COHORT_CLOSURE_INTENT_FILE=$intent_file
+export QURL_PROD_MATCHED_COHORT_CLOSURE_JOURNAL_FILE=$journal_file
+export QURL_PROD_MATCHED_COHORT_CLOSURE_REPORT_FILE=$report_file
+export QURL_PROD_MATCHED_COHORT_SERVER_ENDPOINT=$server_endpoint
+export QURL_PROD_MATCHED_COHORT_AC_ENDPOINT=$ac_endpoint
+export QURL_PROD_MATCHED_COHORT_FRPS_SELECTORS_JSON=$frps_selectors_json
+export QURL_PROD_MATCHED_COHORT_RELAY_HOSTNAME=$relay_hostname
+export QURL_PROD_MATCHED_COHORT_TARGET=canonical
+export QURL_PROD_MATCHED_COHORT_TRANSPORT=direct
+export QURL_SHARING_RUNTIME=prod-canonical-direct
+
+test_binary=${QURL_PROD_MATCHED_COHORT_TEST_BINARY}
+[[ "$test_binary" == /* && -f "$test_binary" && -x "$test_binary" && ! -L "$test_binary" ]] || die "test binary is not one exact executable regular file"
+
+python3 - "$test_binary" "$report_file" <<'PY'
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+
+binary, report_path = sys.argv[1:]
+directory = os.path.dirname(report_path)
+diagnostics_path = report_path + ".failure.log"
+limit = 65_536
+marker = b"\n[diagnostics truncated]\n"
+
+directory_info = os.lstat(directory)
+if (
+    not stat.S_ISDIR(directory_info.st_mode)
+    or stat.S_ISLNK(directory_info.st_mode)
+    or stat.S_IMODE(directory_info.st_mode) != 0o700
+    or directory_info.st_uid not in (0, os.geteuid())
+):
+    raise SystemExit("closure diagnostics directory is unsafe")
+
+try:
+    previous = os.lstat(diagnostics_path)
+except FileNotFoundError:
+    previous = None
+if previous is not None:
+    if (
+        not stat.S_ISREG(previous.st_mode)
+        or stat.S_ISLNK(previous.st_mode)
+        or stat.S_IMODE(previous.st_mode) != 0o600
+        or previous.st_uid not in (0, os.geteuid())
+        or previous.st_nlink != 1
+    ):
+        raise SystemExit("prior closure diagnostics file is unsafe")
+    os.unlink(diagnostics_path)
+
+fd, temporary_path = tempfile.mkstemp(prefix=".closure-diagnostics-", dir=directory)
+os.fchmod(fd, 0o600)
+truncated = False
+written = 0
+returncode = 127
+try:
+    with os.fdopen(fd, "wb", closefd=True) as diagnostics:
+        try:
+            process = subprocess.Popen(
+                [binary, "-test.run", "^TestProdMatchedCohortAdmissionClosed$", "-test.count=1"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+                env=os.environ,
+            )
+            assert process.stdout is not None
+            while True:
+                chunk = process.stdout.read(65_536)
+                if not chunk:
+                    break
+                remaining = limit - len(marker) - written
+                if remaining > 0:
+                    part = chunk[:remaining]
+                    diagnostics.write(part)
+                    written += len(part)
+                if len(chunk) > max(remaining, 0):
+                    truncated = True
+            returncode = process.wait()
+        except Exception as exc:  # noqa: BLE001 - retain a private bounded launch diagnostic.
+            encoded = ("closure test launch failed: " + str(exc)).encode("utf-8", "replace")
+            remaining = limit - len(marker) - written
+            if remaining > 0:
+                diagnostics.write(encoded[:remaining])
+                written += min(len(encoded), remaining)
+            truncated = truncated or len(encoded) > max(remaining, 0)
+        if truncated:
+            diagnostics.write(marker)
+        diagnostics.flush()
+        os.fsync(diagnostics.fileno())
+    if returncode == 0:
+        os.unlink(temporary_path)
+    else:
+        os.replace(temporary_path, diagnostics_path)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    try:
+        os.unlink(temporary_path)
+    except FileNotFoundError:
+        pass
+
+if returncode != 0:
+    print(
+        f"closure test failed with status {returncode}; private diagnostics retained at {diagnostics_path}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+[[ -f "$report_file" && ! -L "$report_file" ]] || die "closure operation emitted no report"
+python3 - "$report_file" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+before = os.lstat(path)
+if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600:
+    raise SystemExit("closure report metadata is unsafe")
+if before.st_uid not in (0, os.geteuid()) or before.st_nlink != 1:
+    raise SystemExit("closure report owner or link count is unsafe")
+fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        raise SystemExit("closure report changed while opening")
+    raw = os.read(fd, 1_048_577)
+    if not raw or len(raw) > 1_048_576 or os.read(fd, 1):
+        raise SystemExit("closure report is empty or exceeds its bound")
+    final = os.fstat(fd)
+    if (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns) != (
+        opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns
+    ):
+        raise SystemExit("closure report changed while reading")
+finally:
+    os.close(fd)
+PY
