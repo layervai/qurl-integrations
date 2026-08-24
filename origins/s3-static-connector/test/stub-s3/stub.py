@@ -7,10 +7,14 @@ the expected canonical path/Host, which is what proves nginx's rewrite + query
 strip + signing-after-rewrite wiring. Cryptographic verification against real S3
 happens during the staging soak.
 
-Known keys return fixture bodies + headers. `badrequest*` -> 400, `forbidden*`
--> 403 (auth/signing failure), `throttle*` -> 429, `boom*` -> 500 (upstream
-5xx), unknown -> 404. The received request line is echoed to stderr (docker
-logs) so the test can assert cache behavior by counting upstream hits.
+An unsigned request gets 403 like a private bucket does, whatever the key: that
+is what an empty AWS provider chain produces, and the origin's startup preflight
+exists to catch it.
+
+Known keys return fixture bodies + headers. `wrongregion*` -> 301,
+`badrequest*` -> 400, `forbidden*` -> 403, `throttle*` -> 429, `boom*` -> 500
+(upstream 5xx), unknown -> 404. The received request line is echoed to stderr
+(docker logs) so the test can assert cache behavior by counting upstream hits.
 """
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +79,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve(self, head_only=False):
         key = self._key()
+        # A private bucket answers an unsigned request with 403 AccessDenied.
+        # The echo header cannot reach the preflight test — the origin exits
+        # before nginx starts — so name the identity state on stderr too.
+        if not self.headers.get("Authorization"):
+            self.log_message("authorization absent %s", self.path)
+            return self._send(403, b"<Error><Code>AccessDenied</Code></Error>",
+                              ctype="application/xml", head_only=head_only)
+        if "wrongregion" in key:
+            return self._send(301, b"", head_only=head_only,
+                              extra={"x-amz-bucket-region": "us-west-2"})
         if "badrequest" in key:
             return self._send(400, b"<Error><Code>InvalidRequest</Code></Error>",
                               ctype="application/xml", head_only=head_only)
