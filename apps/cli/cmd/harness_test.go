@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -235,7 +236,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.resolveConnectorResource = o.connectorResolve
 		}
 		if o.newKnocker != nil {
-			g.newConnectorKnocker = o.newKnocker
+			g.newConnectorKnocker = func(rt *agent.Runtime, knockResourceID string, _ *slog.Logger) (connectorKnocker, error) {
+				return o.newKnocker(rt, knockResourceID)
+			}
 		}
 		if o.connectorTune != nil {
 			g.tuneConnectorSupervisor = o.connectorTune
