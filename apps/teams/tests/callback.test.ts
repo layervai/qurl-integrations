@@ -102,6 +102,29 @@ describe('OAuthCallbackCore', () => {
     expect(exchanged).toBe(0);
   });
 
+  it('rejects a missing CSRF cookie before consuming state or exchanging a token', async () => {
+    let consumed = 0;
+    let exchanged = 0;
+    const state: OAuthStateConsumer = {
+      consume: async () => {
+        consumed += 1;
+        throw new Error('must not run');
+      },
+    };
+    const core = new OAuthCallbackCore({
+      state,
+      tokenClient: stubTokenClient(() => { exchanged += 1; }),
+      idTokenVerifier: identityVerifier,
+      providerBinder: new FirstBinderWins(),
+    });
+    await expect(core.complete({
+      state: Buffer.alloc(32, 20).toString('base64url'),
+      code: 'synthetic-authorization-code',
+    })).rejects.toSatisfy((error: unknown) => expectCode(error, 'COOKIE_MISMATCH'));
+    expect(consumed).toBe(0);
+    expect(exchanged).toBe(0);
+  });
+
   it('consumes state before token exchange and prevents callback reuse', async () => {
     const events: string[] = [];
     const persistence = new InMemoryStatePersistence();

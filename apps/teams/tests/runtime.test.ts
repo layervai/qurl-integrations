@@ -32,6 +32,8 @@ describe('Teams runtime adapters', () => {
     expect(client.requests[0]?.input.ConditionExpression).toBe('attribute_not_exists(state_handle_hash)');
     expect(client.requests[1]?.input.ConditionExpression).toContain('expires_at > :now');
     expect(client.requests[1]?.input.ReturnValues).toBe('ALL_OLD');
+    await store.read('a'.repeat(64));
+    expect(client.requests[2]?.input.ConsistentRead).toBe(true);
   });
 
 });

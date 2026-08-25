@@ -65,6 +65,8 @@ export type ConditionalConsumeResult =
  */
 export interface OAuthStatePersistence {
   conditionalCreate(state: StoredOAuthState): Promise<ConditionalCreateResult>;
+  /** Returns a state row without consuming it for the authorization redirect. */
+  read(stateKey: string): Promise<StoredOAuthState | undefined>;
   conditionalConsume(
     stateKey: string,
     nowEpochSeconds: number,

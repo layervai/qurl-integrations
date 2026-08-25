@@ -86,6 +86,21 @@ export class DynamoOAuthStatePersistence implements OAuthStatePersistence {
     }
   }
 
+  async read(stateKey: string): Promise<StoredOAuthState | undefined> {
+    const result = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({
+      operation: 'get',
+      input: {
+        TableName: this.#tableName,
+        Key: { state_handle_hash: stateKey },
+        ConsistentRead: true,
+      },
+    });
+    if (!result.Item) return undefined;
+    const stored = stateFromItem(result.Item);
+    if (!stored) throw new Error('DynamoDB state read returned an invalid row');
+    return stored;
+  }
+
 
   async conditionalConsume(stateKey: string, nowEpochSeconds: number): Promise<ConditionalConsumeResult> {
     try {

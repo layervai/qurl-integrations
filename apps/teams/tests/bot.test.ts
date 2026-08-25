@@ -4,7 +4,7 @@ import { TeamsBot } from '../src/bot.js';
 import { parseCommand } from '../src/parser.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
-import { renderTunnelInstallMessage } from '../src/tunnel.js';
+import { renderTunnelInstallMessage, validateTunnelSlug } from '../src/tunnel.js';
 
 describe('Teams bot primitives', () => {
   it('parses the bind-only setup command', () => {
@@ -31,6 +31,49 @@ describe('Teams bot primitives', () => {
   it('quotes connector bootstrap secrets in the rendered command', () => {
     const message = renderTunnelInstallMessage({ slug: 'prod', alias: 'prod', environment: 'docker', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: "key'with-space" });
     expect(message).toContain("'key'\"'\"'with-space'");
+  });
+
+  it('enforces the documented 3-64 character connector ID boundary', () => {
+    expect(() => validateTunnelSlug('ab')).toThrow('3-64');
+    expect(() => validateTunnelSlug('abc')).not.toThrow();
+    expect(() => validateTunnelSlug(`a${'b'.repeat(62)}c`)).not.toThrow();
+    expect(() => validateTunnelSlug(`a${'b'.repeat(63)}c`)).toThrow('3-64');
+  });
+
+  it('renders safe authorization errors to the Teams user', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'admins', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['This command is limited to the tenant owner and qURL admins.']);
+  });
+
+  it('keeps unexpected failures generic', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => { throw new Error('upstream secret detail'); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'list', from: { aadObjectId: 'actor', id: 'delivery' },
+      channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['The qURL command could not be completed. Check the command syntax and try again.']);
+  });
+
+  it('renders ECS and Kubernetes connector instructions', () => {
+    const base = { slug: 'prod', alias: 'prod', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: 'key' };
+    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate environment');
+    expect(renderTunnelInstallMessage({ ...base, environment: 'kubernetes' })).toContain('kind: Deployment');
   });
 
   it('parses connector deployment options instead of silently dropping them', () => {

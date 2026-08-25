@@ -18,7 +18,7 @@ import { KmsCredentialCipher } from './credential-cipher.js';
 import { TeamsBot } from './bot.js';
 import { TeamsSdkMessagePoster } from './teams-sdk.js';
 import { validateTunnelImageRef } from './tunnel.js';
-import type { FetchLike } from './interfaces.js';
+import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
 import type { TeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
@@ -27,8 +27,9 @@ export interface TeamsServerOptions {
   readonly baseUrl: string;
   readonly app: App;
   readonly expressApp: Application;
-  readonly tokenClient: ReturnType<typeof createConfidentialTokenClient>;
+  readonly tokenClient: ConfidentialTokenClient;
   readonly callback: OAuthCallbackCore;
+  readonly state: OAuthStateManager;
   readonly maxBodyBytes?: number;
 }
 
@@ -62,24 +63,22 @@ function readCookie(request: Request, name: string): string | undefined {
   return undefined;
 }
 
-function installOAuthRoutes(options: TeamsServerOptions): void {
+export function installOAuthRoutes(options: TeamsServerOptions): void {
   const { expressApp } = options;
   expressApp.get('/health', (_request, response) => {
     response.status(200).type('application/json').set('Cache-Control', 'no-store').send({ ok: true });
   });
 
-  expressApp.get('/oauth/qurl/start', (request, response) => {
+  expressApp.get('/oauth/qurl/start', async (request, response) => {
     try {
       const state = request.query.state;
-      const challenge = request.query.code_challenge;
-      const nonce = request.query.nonce;
-      const loginHint = request.query.login_hint;
-      if (typeof state !== 'string' || typeof challenge !== 'string' || typeof nonce !== 'string') throw new Error('invalid setup link');
+      if (typeof state !== 'string') throw new Error('invalid setup link');
+      const authorizationRequest = await options.state.authorizationRequest(state);
       const authorization = options.tokenClient.createAuthorizationUrl({
         state,
-        codeChallenge: challenge,
-        nonce,
-        ...(typeof loginHint === 'string' ? { loginHint } : {}),
+        codeChallenge: authorizationRequest.codeChallenge,
+        nonce: authorizationRequest.nonce,
+        loginHint: authorizationRequest.loginHint,
       });
       const cookie = createOAuthStateCookie(state);
       setCookie(response, cookie);
@@ -102,6 +101,7 @@ function installOAuthRoutes(options: TeamsServerOptions): void {
         message = 'The qURL setup was cancelled or the callback was incomplete.';
       } else {
         const cookieState = readCookie(request, OAUTH_STATE_COOKIE_NAME);
+        // OAuthCallbackCore rejects an absent cookie before it consumes state.
         const completion = await options.callback.complete({ state, code, ...(cookieState === undefined ? {} : { cookieState }) });
         if (completion.binding.status === 'conflict') {
           status = 409;
@@ -124,6 +124,9 @@ function installOAuthRoutes(options: TeamsServerOptions): void {
 /** Official Teams SDK owns POST /api/messages, Activity routing, JWT
  * validation, and Connector responses. qURL OAuth remains separate. */
 export async function createTeamsServer(options: TeamsServerOptions): Promise<Server> {
+  // ExpressAdapter also installs express.json() for its message route and
+  // consumes req.body. Parsing first is supported by Express and preserves
+  // qURL's explicit 1 MiB Activity limit for cards and attachments.
   options.expressApp.use(express.json({ limit: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES }));
   installOAuthRoutes(options);
   await options.app.initialize();
@@ -214,7 +217,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   app.on('activity', async ({ activity }) => {
     if (activity.type === 'conversationUpdate') await bot.captureConversation(activity as unknown as TeamsActivity);
   });
-  const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback });
+  const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState });
   const host = process.env.HOST?.trim() || '0.0.0.0';
   const port = Number(process.env.PORT ?? '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');

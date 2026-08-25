@@ -20,9 +20,6 @@ export class TeamsSetupLinkBuilder {
     const minted = await this.#state.mint({ teamsTenantId: tenantId, actorAadObjectId: actorId, actorDeliveryId: deliveryId, setupEmail: email, setupMode });
     const url = new URL('/oauth/qurl/start', this.#setupBaseUrl);
     url.searchParams.set('state', minted.handle);
-    url.searchParams.set('code_challenge', pkceChallengeForVerifier(minted.transaction.pkceVerifier));
-    url.searchParams.set('nonce', minted.transaction.oidcNonce);
-    url.searchParams.set('login_hint', minted.transaction.setupEmail);
     // Keep the token client in this boundary so a malformed authorization
     // request is rejected before a link is sent to Teams. The URL itself is
     // intentionally the local start route, which is where the CSRF cookie is

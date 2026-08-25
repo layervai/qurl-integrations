@@ -11,7 +11,7 @@ import type {
 } from './interfaces.js';
 import { systemClock } from './interfaces.js';
 import { generateOidcNonce, isOidcNonce } from './nonce.js';
-import { generatePkcePair, isPkceVerifier } from './pkce.js';
+import { generatePkcePair, isPkceVerifier, pkceChallengeForVerifier } from './pkce.js';
 import type { RandomBytes } from './pkce.js';
 
 export const OAUTH_STATE_TTL_SECONDS = 5 * 60;
@@ -37,6 +37,12 @@ export interface OAuthStateManagerOptions {
   readonly persistence: OAuthStatePersistence;
   readonly clock?: Clock;
   readonly randomBytes?: RandomBytes;
+}
+
+export interface OAuthAuthorizationRequest {
+  readonly codeChallenge: string;
+  readonly nonce: string;
+  readonly loginHint: string;
 }
 
 export function normalizeEmail(email: string): string {
@@ -177,6 +183,30 @@ export class OAuthStateManager {
       throw new OAuthCoreError('STATE_STORE_FAILED', 'OAuth state storage returned an invalid expiry.');
     }
     return transaction;
+  }
+
+  /**
+   * Reconstruct provider-facing parameters from the persisted transaction.
+   * This does not consume the one-shot state; the callback remains the only
+   * atomic consume point, and the PKCE verifier stays server-side.
+   */
+  async authorizationRequest(handle: string): Promise<OAuthAuthorizationRequest> {
+    const stateKey = stateLookupKey(handle);
+    const now = this.#now();
+    let stored: StoredOAuthState | undefined;
+    try {
+      stored = await this.#persistence.read(stateKey);
+    } catch {
+      throw new OAuthCoreError('STATE_STORE_FAILED', 'OAuth state could not be read.', { retryable: true });
+    }
+    if (!stored) throw new OAuthCoreError('STATE_NOT_FOUND', 'OAuth state is invalid or already consumed.');
+    const transaction = transactionFromStored(stored, stateKey);
+    if (now >= transaction.expiresAtEpochSeconds) throw new OAuthCoreError('STATE_EXPIRED', 'OAuth state has expired.');
+    return {
+      codeChallenge: pkceChallengeForVerifier(transaction.pkceVerifier),
+      nonce: transaction.oidcNonce,
+      loginHint: transaction.setupEmail,
+    };
   }
 
   #now(): number {
