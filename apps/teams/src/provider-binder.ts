@@ -84,7 +84,7 @@ export class HttpProviderBinder implements ProviderBinder {
     if (response.status === 409) {
       const result = await this.existingBindingResult(request);
       if (result.status === 'already_bound' && !(await this.#data.tenantCredential(request.teamsTenantId))) {
-        throw new Error('qURL tenant binding exists but its credential is unavailable');
+        throw new Error('qURL tenant binding exists but its credential is unavailable; an operator must revoke the upstream binding before reinstalling');
       }
       return result;
     }

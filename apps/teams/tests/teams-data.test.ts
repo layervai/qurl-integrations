@@ -88,5 +88,7 @@ describe('Teams DynamoDB data paths', () => {
     const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
     await expect(store.allowedResourceIds('tenant', 'channel')).resolves.toEqual(new Set(['one', 'two']));
     expect(client.requests[1]?.input).toHaveProperty('ExclusiveStartKey');
+    expect(client.requests[0]?.input.KeyConditionExpression).toContain('begins_with(policy_key, :policyPrefix)');
+    expect((client.requests[0]?.input.ExpressionAttributeValues as Record<string, unknown>)[':policyPrefix']).toBe('scope#channel#');
   });
 });

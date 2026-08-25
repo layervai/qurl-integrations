@@ -28,18 +28,18 @@ const MAX_FEEDBACK_LENGTH = 2_000;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_REASON_LENGTH = 200;
 
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   const tokens: string[] = [];
   let current = '';
   let quoted = false;
   for (const char of text.trim()) {
-    if (char === '"') { quoted = !quoted; current += char; continue; }
+    if (char === '"') { quoted = !quoted; continue; }
     if (/\s/.test(char) && !quoted) {
-      if (current) { tokens.push(current.replace(/^"|"$/g, '')); current = ''; }
+      if (current) { tokens.push(current); current = ''; }
     } else current += char;
   }
   if (quoted) throw new UserFacingError('unterminated quoted value');
-  if (current) tokens.push(current.replace(/^"|"$/g, ''));
+  if (current) tokens.push(current);
   return tokens;
 }
 
@@ -81,7 +81,7 @@ export function parseCommand(input: string): TeamsCommand {
     for (const token of args.slice(1)) {
       const match = /^([a-z][a-z0-9_]*):(.*)$/.exec(token);
       const key = match?.[1];
-      const value = match?.[2]?.trim().replace(/^"/, '').replace(/"$/, '');
+      const value = match?.[2]?.trim();
       if (!key || value === undefined || !['dm', 'reason'].includes(key)) throw new UserFacingError('invalid get flag');
       if (key === 'dm' && value !== 'true' && value !== 'false') throw new UserFacingError('dm flag must be true or false');
       if (key === 'reason' && value.length > MAX_REASON_LENGTH) throw new UserFacingError('reason is too long');

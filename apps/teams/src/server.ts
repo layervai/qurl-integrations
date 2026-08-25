@@ -146,13 +146,13 @@ function env(name: string): string {
   return value;
 }
 
-function httpsOrigin(value: string, name: string): string {
+export function httpsOrigin(value: string, name: string): string {
   const url = new URL(value.includes('://') ? value : `https://${value}`);
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error(`${name} must be an HTTPS origin`);
   return url.toString().replace(/\/$/, '');
 }
 
-function httpsIssuer(value: string, name: string): string {
+export function httpsIssuer(value: string, name: string): string {
   const url = new URL(value.includes('://') ? value : `https://${value}`);
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error(`${name} must be an HTTPS issuer`);
   // OIDC issuer identifiers are exact strings; Auth0 includes the root slash

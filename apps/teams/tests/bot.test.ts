@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { deriveScope, normalizeActivityText, toTeamsActivity } from '../src/activity.js';
 import { TeamsBot } from '../src/bot.js';
-import { parseCommand } from '../src/parser.js';
+import { parseCommand, tokenize } from '../src/parser.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
-import { renderTunnelInstallMessage, validateTunnelSlug } from '../src/tunnel.js';
+import { renderTunnelInstallMessage, validateTunnelImageRef, validateTunnelSlug } from '../src/tunnel.js';
 
 describe('Teams bot primitives', () => {
   it('parses the bind-only setup command', () => {
@@ -14,6 +14,11 @@ describe('Teams bot primitives', () => {
 
   it('parses get flags and quoted values', () => {
     expect(parseCommand('get $docs dm:true reason:"private docs"')).toMatchObject({ verb: 'get', resource: 'docs', flags: { dm: 'true', reason: 'private docs' } });
+  });
+
+  it('removes quote delimiters without corrupting mid-token values', () => {
+    expect(tokenize('get $docs reason:"private docs"')).toEqual(['get', '$docs', 'reason:private docs']);
+    expect(tokenize('set-display-name $docs "Internal docs"')).toEqual(['set-display-name', '$docs', 'Internal docs']);
   });
 
   it('removes a bot mention and derives a channel tenant scope', () => {
@@ -57,6 +62,11 @@ describe('Teams bot primitives', () => {
   it('quotes connector bootstrap secrets in the rendered command', () => {
     const message = renderTunnelInstallMessage({ slug: 'prod', alias: 'prod', environment: 'docker', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: "key'with-space" });
     expect(message).toContain("'key'\"'\"'with-space'");
+  });
+
+  it('rejects unsafe connector image references and renders Compose configuration', () => {
+    expect(() => validateTunnelImageRef('registry.example/qurl:1;rm -rf /')).toThrow('invalid connector image reference');
+    expect(renderTunnelInstallMessage({ slug: 'prod', alias: 'prod', environment: 'compose', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: 'bootstrap' })).toContain('QURL_BOOTSTRAP_KEY: "bootstrap"');
   });
 
   it('enforces the documented 3-64 character connector ID boundary', () => {
@@ -146,5 +156,39 @@ describe('Teams bot primitives', () => {
       'tenant-1', 'channel-1', true, parseCommand('get $docs'),
     )).resolves.toContain('https://qurl.example/one');
     expect(createdResourceId).toBe('resource-1');
+  });
+
+  it('does not silently reassign an existing alias with set-alias', async () => {
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => 'other-resource',
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await expect(bot.execute(
+      { type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant-1', 'channel-1', true, parseCommand('set-alias $docs $resource-1'),
+    )).rejects.toThrow('Alias `$docs` is already in use in this channel.');
+  });
+
+  it('explains that unsetting an alias does not unprotect its resource', async () => {
+    let unbound = '';
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }) } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        unbindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { unbound = alias; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await expect(bot.execute(
+      { type: 'message', from: { aadObjectId: 'admin' } },
+      'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs'),
+    )).resolves.toContain('resource remains protected');
+    expect(unbound).toBe('docs');
   });
 });

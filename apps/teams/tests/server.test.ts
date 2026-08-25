@@ -3,7 +3,7 @@ import type { Application, Request } from 'express';
 import { describe, expect, it } from 'vitest';
 import type { OAuthCallbackCore } from '../src/callback.js';
 import type { ConfidentialTokenClient } from '../src/interfaces.js';
-import { installOAuthRoutes } from '../src/server.js';
+import { createProductionTeamsConfig, httpsIssuer, httpsOrigin, installOAuthRoutes } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
 
 const OPAQUE_STATE = Buffer.alloc(32, 1).toString('base64url');
@@ -81,5 +81,36 @@ describe('Teams OAuth routes', () => {
     expect(response.status).toBe(409);
     expect(response.body).toContain('already connected to another qURL account');
     expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+  });
+});
+
+describe('Teams production URL configuration', () => {
+  it('accepts HTTPS origins and preserves the OIDC issuer trailing slash', () => {
+    expect(httpsOrigin('https://teams.example', 'TEAMS_BASE_URL')).toBe('https://teams.example');
+    expect(httpsIssuer('https://tenant.auth0.com', 'AUTH0_DOMAIN')).toBe('https://tenant.auth0.com/');
+  });
+
+  it('rejects credentials, paths, queries, fragments, and non-HTTPS URLs', () => {
+    for (const value of [
+      'http://teams.example',
+      'https://user:pass@teams.example',
+      'https://teams.example/path',
+      'https://teams.example/?redirect=bad',
+      'https://teams.example/#fragment',
+    ]) {
+      expect(() => httpsOrigin(value, 'TEAMS_BASE_URL')).toThrow('must be an HTTPS origin');
+    }
+    expect(() => httpsIssuer('https://tenant.auth0.com/path', 'AUTH0_DOMAIN')).toThrow('must be an HTTPS issuer');
+  });
+
+  it('fails before constructing production dependencies when a required env value is invalid', async () => {
+    const previous = process.env.TEAMS_BASE_URL;
+    process.env.TEAMS_BASE_URL = 'http://teams.example';
+    try {
+      await expect(createProductionTeamsConfig()).rejects.toThrow('TEAMS_BASE_URL must be an HTTPS origin');
+    } finally {
+      if (previous === undefined) delete process.env.TEAMS_BASE_URL;
+      else process.env.TEAMS_BASE_URL = previous;
+    }
   });
 });

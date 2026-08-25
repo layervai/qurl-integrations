@@ -95,6 +95,9 @@ function resourcePolicyKey(scopeId: string, resourceId: string): string {
 function aliasPolicyKey(scopeId: string, alias: string): string {
   return `scope#${keyPart(scopeId)}#alias#${keyPart(alias)}`;
 }
+function scopePolicyPrefix(scopeId: string): string {
+  return `scope#${keyPart(scopeId)}#`;
+}
 function resourceIndexKey(tenantId: string, resourceId: string): string {
   return `${keyPart(tenantId)}#${keyPart(resourceId)}`;
 }
@@ -265,8 +268,8 @@ export class TeamsDataStore {
 
   async allowedResourceIds(tenantId: string, scopeId: string): Promise<ReadonlySet<string>> {
     assertPresent(tenantId, scopeId);
-    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
-    return new Set(items.filter(item => item.scope_id === scopeId && (item.item_type === 'resource' || item.item_type === 'alias'))
+    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, scopePolicyPrefix(scopeId));
+    return new Set(items.filter(item => item.item_type === 'resource' || item.item_type === 'alias')
       .map(item => asString(item.resource_id)).filter((id): id is string => id !== undefined));
   }
 
@@ -306,8 +309,8 @@ export class TeamsDataStore {
 
   async scopeAliases(tenantId: string, scopeId: string): Promise<readonly PolicyEntry[]> {
     assertPresent(tenantId, scopeId);
-    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
-    return items.filter(item => item.scope_id === scopeId && item.item_type === 'alias')
+    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, scopePolicyPrefix(scopeId));
+    return items.filter(item => item.item_type === 'alias')
       .map(item => ({ scopeId, alias: asString(item.alias) ?? '', resourceId: asString(item.resource_id) ?? '' }))
       .filter(item => item.alias !== '' && item.resourceId !== '').sort((a, b) => a.alias.localeCompare(b.alias));
   }
@@ -344,7 +347,7 @@ export class TeamsDataStore {
     };
   }
 
-  async #queryTenant(tableName: string, tenantId: string): Promise<readonly Record<string, unknown>[]> {
+  async #queryTenant(tableName: string, tenantId: string, sortKeyPrefix?: string): Promise<readonly Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
     do {
@@ -353,8 +356,8 @@ export class TeamsDataStore {
         readonly LastEvaluatedKey?: Record<string, unknown>;
       }>({ operation: 'query', input: {
         TableName: tableName,
-        KeyConditionExpression: `${tenantKey} = :tenant`,
-        ExpressionAttributeValues: { ':tenant': tenantId },
+        KeyConditionExpression: `${tenantKey} = :tenant${sortKeyPrefix === undefined ? '' : ` AND begins_with(${policyKey}, :policyPrefix)`}`,
+        ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKeyPrefix === undefined ? {} : { ':policyPrefix': sortKeyPrefix }) },
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       } });
       items.push(...(output.Items ?? []));

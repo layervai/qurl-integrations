@@ -24,7 +24,11 @@ function encode(value: Uint8Array): string {
 
 function decode(value: string): Uint8Array {
   if (!value.startsWith(PREFIX)) throw new Error('tenant credential is not KMS encrypted');
-  return Buffer.from(value.slice(PREFIX.length), 'base64url');
+  const encoded = value.slice(PREFIX.length);
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded) || encoded.length % 4 === 1) throw new Error('tenant credential ciphertext is malformed');
+  const decoded = Buffer.from(encoded, 'base64url');
+  if (!decoded.length || decoded.toString('base64url') !== encoded) throw new Error('tenant credential ciphertext is malformed');
+  return decoded;
 }
 
 export class KmsCredentialCipher implements CredentialCipher {
