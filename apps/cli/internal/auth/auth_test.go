@@ -95,6 +95,98 @@ func TestResolveEnvironmentBypassesWholeChain(t *testing.T) {
 	}
 }
 
+func TestResolveEnvironmentFileIsStrictPrivateAndHermetic(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "api-key")
+	if err := os.WriteFile(path, []byte(testKeyEnv+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &probeStore{key: testKeyStored}
+	key, source, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path}), store)
+	if runtime.GOOS == goosWindows {
+		if err == nil || key != "" || source != "" || store.touched {
+			t.Fatalf("unsupported Windows file credential = %q %q %v, store touched=%v", key, source, err, store.touched)
+		}
+		return
+	}
+	if err != nil || key != testKeyEnv || source != SourceEnvironmentFile || store.touched {
+		t.Fatalf("file credential = %q %q %v, store touched=%v", key, source, err, store.touched)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path}), store); err != nil {
+		t.Fatalf("0400 file rejected: %v", err)
+	}
+	if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKey: testKeyStored, EnvAPIKeyFile: path}), store); !errors.Is(err, ErrCredentialConflict) {
+		t.Fatalf("inline and file conflict = %v", err)
+	}
+}
+
+func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {
+	if runtime.GOOS == goosWindows {
+		t.Skip("file-backed API keys are fail-closed on Windows")
+	}
+	directory := t.TempDir()
+	base := filepath.Join(directory, "base")
+	if err := os.WriteFile(base, []byte(testKeyEnv+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct {
+		name string
+		body []byte
+		mode os.FileMode
+	}{
+		{"missing LF", []byte(testKeyEnv), 0o600},
+		{"double LF", []byte(testKeyEnv + "\n\n"), 0o600},
+		{"CRLF", []byte(testKeyEnv + "\r\n"), 0o600},
+		{"leading space", []byte(" " + testKeyEnv + "\n"), 0o600},
+		{"trailing space", []byte(testKeyEnv + " \n"), 0o600},
+		{"tab", []byte(testKeyEnv + "\t\n"), 0o600},
+		{"embedded control", append([]byte(testKeyEnv[:20]), append([]byte{0}, []byte(testKeyEnv[20:]+"\n")...)...), 0o600},
+		{"group readable", []byte(testKeyEnv + "\n"), 0o440},
+		{"world readable", []byte(testKeyEnv + "\n"), 0o644},
+		{"no permissions", []byte(testKeyEnv + "\n"), 0o000},
+		{"owner write only", []byte(testKeyEnv + "\n"), 0o200},
+		{"owner executable", []byte(testKeyEnv + "\n"), 0o700},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			path := filepath.Join(directory, strings.ReplaceAll(mutation.name, " ", "-"))
+			if err := os.WriteFile(path, mutation.body, mutation.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, mutation.mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path}), &probeStore{}); !errors.Is(err, ErrInvalidKey) {
+				t.Fatalf("mutation = %v", err)
+			}
+		})
+	}
+	for name, path := range map[string]string{
+		"relative": "api-key",
+		"symlink":  filepath.Join(directory, "symlink"),
+		"hardlink": filepath.Join(directory, "hardlink"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			switch name {
+			case "symlink":
+				if err := os.Symlink(base, path); err != nil {
+					t.Fatal(err)
+				}
+			case "hardlink":
+				if err := os.Link(base, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path}), &probeStore{}); !errors.Is(err, ErrInvalidKey) {
+				t.Fatalf("mutation = %v", err)
+			}
+		})
+	}
+}
+
 func TestResolveFallsBackToStore(t *testing.T) {
 	store := &probeStore{key: testKeyStored}
 	key, source, err := Resolve(lookupFrom(nil), store)
