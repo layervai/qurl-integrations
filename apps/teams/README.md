@@ -37,3 +37,12 @@ npm run build
 
 Node.js 22 is pinned in `.nvmrc`, matching the repository's shipped Discord
 runtime convention.
+
+## Deployment
+
+The production entrypoint listens on `0.0.0.0:3000` by default; `HOST` and
+`PORT` can override those values. Put it behind an HTTPS/TLS terminator before
+exposing `/oauth/qurl/start`, `/oauth/qurl/callback`, or `/api/messages`.
+OAuth cookies are marked `Secure`, and the configured `TEAMS_BASE_URL` must be
+the public HTTPS origin used for the callback. The proxy should forward the
+Teams messaging route and the OAuth routes to the same server instance.

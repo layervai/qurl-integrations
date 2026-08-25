@@ -78,6 +78,9 @@ export class HttpProviderBinder implements ProviderBinder {
     let body: Uint8Array;
     try {
       body = await readBoundedBody(response, BODY_LIMIT, 'TOKEN_RESPONSE_TOO_LARGE');
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error('qURL tenant binding request timed out or was cancelled', { cause: error });
+      throw error;
     } finally {
       clearTimeout(timeout);
     }

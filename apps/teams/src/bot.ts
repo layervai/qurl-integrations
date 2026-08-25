@@ -9,6 +9,7 @@ import { ScopeAliasConflictError, type TeamsDataStore } from './teams-data.js';
 import type { TeamsSetupLinkBuilder } from './setup-link.js';
 import { normalizeTunnelEnvironment, renderTunnelInstallMessage, validateTunnelSlug } from './tunnel.js';
 import { isUserFacingError, UserFacingError } from './user-facing-error.js';
+import type { Logger } from './interfaces.js';
 
 export interface TeamsBotOptions {
   readonly qurl?: QurlClient;
@@ -17,6 +18,7 @@ export interface TeamsBotOptions {
   readonly messages: TeamsMessagePoster;
   readonly setup?: TeamsSetupLinkBuilder;
   readonly connectorImage?: string;
+  readonly logger?: Logger;
   readonly feedback?: (input: { readonly tenantId: string; readonly actorId: string; readonly message: string }) => Promise<void>;
 }
 
@@ -55,7 +57,8 @@ export class TeamsBot {
     // available (and some clients do not emit it for an existing chat). Keep
     // the DM reference fresh from authenticated personal messages as well.
     if (activity.conversation?.conversationType === 'personal') {
-      try { await this.captureConversation(activity); } catch { /* conversation capture is best-effort */ }
+      try { await this.captureConversation(activity); }
+      catch (error) { this.#options.logger?.warn('Teams conversation capture failed', { error }); }
     }
     let response: string;
     try {
@@ -63,9 +66,11 @@ export class TeamsBot {
       const command = parseCommand(normalizeActivityText(activity));
       response = await this.execute(activity, scope.tenantId, scope.scopeId, scope.channel, command, signal);
     } catch (error) {
-      response = isUserFacingError(error)
-        ? error.message
-        : 'The qURL command could not be completed. Check the command syntax and try again.';
+      if (isUserFacingError(error)) response = error.message;
+      else {
+        this.#options.logger?.error('Teams command failed', { error });
+        response = 'The qURL command could not be completed. Check the command syntax and try again.';
+      }
     }
     if (response) {
       if (reply) await reply(response);

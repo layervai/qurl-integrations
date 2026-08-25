@@ -55,4 +55,24 @@ describe('HttpProviderBinder', () => {
     expect(bound).toBe(true);
     expect(saved).toEqual({ apiKey: 'api-key', keyId: 'key-1', keyPrefix: 'qurl_' });
   });
+
+  it('normalizes a timeout while reading the binding response body', async () => {
+    let aborted = false;
+    const binder = new HttpProviderBinder({
+      endpoint: 'https://qurl.example',
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      timeoutMs: 5,
+      fetch: async (_input, init) => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () => {
+            aborted = true;
+            controller.error(new Error('aborted'));
+          }, { once: true });
+        },
+      }), { status: 201 }),
+    });
+
+    await expect(binder.bind(request)).rejects.toThrow('timed out or was cancelled');
+    expect(aborted).toBe(true);
+  });
 });

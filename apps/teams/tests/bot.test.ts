@@ -103,6 +103,33 @@ describe('Teams bot primitives', () => {
     expect(replies).toEqual(['This command is limited to the tenant owner and qURL admins.']);
   });
 
+  it('rejects every mutating admin command for non-admins', async () => {
+    const commands = [
+      'protect-url url:https://example.com as:$docs',
+      'protect-connector prod',
+      'revoke $resource-1',
+      'set-alias $docs $resource-1',
+      'unset-alias $docs',
+      'set-display-name $resource-1 Friendly name',
+      'unset-display-name $resource-1',
+      'add <@victim>',
+      'remove <@victim>',
+      'uninstall',
+    ];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+
+    for (const input of commands) {
+      await expect(bot.execute(
+        { type: 'message', from: { aadObjectId: 'actor' } },
+        'tenant-1', 'channel-1', true, parseCommand(input),
+      ), input).rejects.toThrow('limited to the tenant owner');
+    }
+  });
+
   it('keeps unexpected failures generic', async () => {
     const replies: string[] = [];
     const bot = new TeamsBot({
@@ -211,6 +238,33 @@ describe('Teams bot primitives', () => {
     )).resolves.toContain('sent the bootstrap instructions');
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('revokes a connector enrollment key when bootstrap delivery fails', async () => {
+    const revoked: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('delivery failed'); } } as never,
+      connectorImage: 'registry.example/qurl:1',
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('delivery failed');
+    expect(revoked).toEqual(['key-1']);
   });
 
   it('does not fetch the resource catalog twice for protect-connector', async () => {

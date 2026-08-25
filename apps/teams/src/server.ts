@@ -1,3 +1,4 @@
+import { Console } from 'node:console';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import express from 'express';
 import type { Application, Request } from 'express';
@@ -19,9 +20,13 @@ import { TeamsBot } from './bot.js';
 import { TeamsSdkMessagePoster, validateTeamsServiceUrl } from './teams-sdk.js';
 import { validateTunnelImageRef } from './tunnel.js';
 import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
+import type { Logger } from './interfaces.js';
+import { RedactingLogger } from './logger.js';
 import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+const ACTIVITY_TIMEOUT_MS = 30_000;
+const runtimeConsole = new Console({ stdout: process.stdout, stderr: process.stderr });
 
 export interface TeamsServerOptions {
   readonly baseUrl: string;
@@ -31,6 +36,7 @@ export interface TeamsServerOptions {
   readonly callback: OAuthCallbackCore;
   readonly state: OAuthStateManager;
   readonly maxBodyBytes?: number;
+  readonly logger?: Logger;
 }
 
 function escapeHtml(value: string): string {
@@ -84,7 +90,8 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
       const cookie = createOAuthStateCookie(state);
       setCookie(response, cookie);
       response.set('Cache-Control', 'no-store').redirect(302, authorization.toString());
-    } catch {
+    } catch (error) {
+      options.logger?.error('Teams OAuth start failed', { error });
       setCookie(response, clearOAuthStateCookie());
       html(response, 400, 'qURL setup link invalid', 'The qURL setup link is invalid or expired. Return to Teams and run setup again.');
     }
@@ -114,8 +121,9 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
           message = 'qURL is connected to this Microsoft Teams tenant. You can close this tab and return to Teams.';
         }
       }
-    } catch {
+    } catch (error) {
       // Do not expose OAuth codes, tokens, state, or upstream error details.
+      options.logger?.error('Teams OAuth callback failed', { error });
     }
     setCookie(response, clearOAuthStateCookie());
     html(response, status, title, message);
@@ -215,22 +223,34 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     // Keep mention normalization in the existing qURL Activity adapter.
     activity: { mentions: { stripText: false } },
   });
+  const logger = new RedactingLogger({
+    debug: (message, context) => runtimeConsole.debug(message, context),
+    info: (message, context) => runtimeConsole.info(message, context),
+    warn: (message, context) => runtimeConsole.warn(message, context),
+    error: (message, context) => runtimeConsole.error(message, context),
+  });
   const bot = new TeamsBot({
     qurlForTenant: new TenantQurlClientFactory(data, qurlEndpoint),
     data,
     messages: new TeamsSdkMessagePoster(app),
     connectorImage,
     setup: new TeamsSetupLinkBuilder({ state: oauthState, tokenClient, setupBaseUrl: baseUrl }),
+    logger,
   });
   app.on('message', async ({ activity, reply }) => {
     const normalized = toTeamsActivity(activity);
-    if (normalized) await bot.handleActivity(normalized, undefined, async text => { await reply(text); });
+    if (normalized) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ACTIVITY_TIMEOUT_MS);
+      try { await bot.handleActivity(normalized, controller.signal, async text => { await reply(text); }); }
+      finally { clearTimeout(timeout); }
+    }
   });
   app.on('activity', async ({ activity }) => {
     const normalized = toTeamsActivity(activity);
     if (normalized?.type === 'conversationUpdate') await bot.captureConversation(normalized);
   });
-  const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState });
+  const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState, logger });
   const host = process.env.HOST?.trim() || '0.0.0.0';
   const port = Number(process.env.PORT?.trim() || '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');
