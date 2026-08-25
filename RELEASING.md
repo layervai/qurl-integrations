@@ -26,6 +26,31 @@ qurl-connector's sign-the-digest-once model: the signature covers
 other asset. Verify the signature, then verify your download against the
 manifest — nothing else needs its own signature.
 
+## Production Hub trust pin
+
+Official CLI releases embed the public X25519 identity of the production NHP
+Hub. That pin is the only out-of-band trust root for native Connector
+enrollment: DNS selects where to send packets, while the key proves the peer
+is the production Hub before the Hub can assign a cell.
+
+The release job reads the canonical padded-base64 key from the public
+repository variable `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64`. Before
+GoReleaser starts, it decodes that value with the CLI's runtime decoder and
+compares the SHA-256 of the decoded 32 bytes with
+[`production-public-key.sha256`](apps/cli/internal/connector/hub/production-public-key.sha256).
+The workflow fails closed if the variable or fingerprint is absent, malformed,
+or mismatched; it never publishes an artifact that trusts an unreviewed key.
+
+The production value originates at the NHP Control parameter
+`/prod/nhp/control/hub/identity/public-key`. Provisioning or rotating it is a
+two-repository review event: validate its canonical X25519 encoding, commit the
+raw-key fingerprint here, set the repository variable to that exact public
+value, and release only after both values match. Never substitute a cell server
+key—the Hub is a separate trust root. Source, test, and snapshot builds remain
+dark unless the complete `QURL_CONNECTOR_HUB_HOST`,
+`QURL_CONNECTOR_HUB_PORT`, and `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64`
+custom-deployment triple is supplied.
+
 ## Verify a release
 
 Requires [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
