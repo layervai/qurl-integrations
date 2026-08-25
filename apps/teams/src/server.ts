@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { Console } from 'node:console';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';

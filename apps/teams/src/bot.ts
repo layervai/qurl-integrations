@@ -11,6 +11,11 @@ import { normalizeTunnelEnvironment, renderTunnelInstallMessage, validateTunnelS
 import { isUserFacingError, UserFacingError } from './user-facing-error.js';
 import type { Logger } from './interfaces.js';
 
+const ADMIN_COMMANDS = new Set([
+  'admins', 'add', 'remove', 'uninstall', 'protect-url', 'protect-connector',
+  'set-alias', 'unset-alias', 'set-display-name', 'unset-display-name', 'revoke',
+]);
+
 export interface TeamsBotOptions {
   readonly qurl?: QurlClient;
   readonly qurlForTenant?: QurlClientFactory;
@@ -95,8 +100,10 @@ export class TeamsBot {
       if (!this.#options.feedback) throw new Error('Feedback is not enabled');
       await this.#options.feedback({ tenantId, actorId, message: command.text ?? '' }); return 'Thanks. The qURL team received your feedback.';
     }
-    const admin = await this.#options.data.checkAdmin(tenantId, actorId);
-    if (['admins', 'add', 'remove', 'uninstall', 'protect-url', 'protect-connector', 'set-alias', 'unset-alias', 'set-display-name', 'unset-display-name', 'revoke'].includes(command.verb) && !admin.isAdmin) throw new UserFacingError('This command is limited to the tenant owner and qURL admins.');
+    if (ADMIN_COMMANDS.has(command.verb)) {
+      const admin = await this.#options.data.checkAdmin(tenantId, actorId);
+      if (!admin.isAdmin) throw new UserFacingError('This command is limited to the tenant owner and qURL admins.');
+    }
     if (command.verb === 'admins') { const admins = await this.#options.data.listAdmins(tenantId); return `Tenant owner: ${admins.ownerId}\nAdmins: ${admins.adminIds.length ? admins.adminIds.join(', ') : 'none'}`; }
     const mentionedAadObjectId = command.userId === undefined ? undefined : activity.entities?.find(entity => entity.mentioned?.id === command.userId)?.mentioned?.aadObjectId?.trim().toLowerCase();
     if (command.verb === 'add' || command.verb === 'remove') {

@@ -47,6 +47,8 @@ export interface TeamsDataStoreOptions {
   readonly tenantPrincipalsTable: string;
   readonly channelPoliciesTable: string;
   readonly personalConversationsTable: string;
+  // TODO(upstream-contract): this externally managed table intentionally uses
+  // tenant_id, unlike the Teams-scoped tables that use teams_tenant_id.
   readonly tenantCredentialsTable: string;
   readonly credentialCipher?: CredentialCipher;
   readonly now?: () => Date;

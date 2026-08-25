@@ -214,6 +214,26 @@ describe('Teams bot primitives', () => {
     expect(createdResourceId).toBe('resource-1');
   });
 
+  it('filters list and get results to resources exposed in the channel', async () => {
+    const resources = [
+      { resourceId: 'visible', description: 'Visible resource' },
+      { resourceId: 'hidden', description: 'Hidden resource' },
+    ];
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources }) } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => { throw new Error('checkAdmin must not run for read commands'); },
+        allowedResourceIds: async () => new Set(['visible']),
+        lookupScopeAlias: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    const activity = { type: 'message', from: { aadObjectId: 'actor' } };
+
+    await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('list'))).resolves.toMatch(/Visible resource/);
+    await expect(bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $hidden'))).rejects.toThrow('Resource not found');
+  });
+
   it('follows a next cursor even when has_more is omitted', async () => {
     const cursors: Array<string | undefined> = [];
     const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });

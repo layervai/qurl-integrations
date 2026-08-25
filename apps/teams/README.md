@@ -38,6 +38,11 @@ npm run build
 Node.js 22 is pinned in `.nvmrc`, matching the repository's shipped Discord
 runtime convention.
 
+The npm overrides in `package.json` pin `fast-xml-parser`, `brace-expansion`,
+and `nanoid` to audited versions. Review these overrides when upgrading
+dependencies, especially the `nanoid` major-version constraint, so security
+fixes do not become stale or conflict with a future transitive requirement.
+
 ## Deployment
 
 The production entrypoint listens on `127.0.0.1:3000` by default; `HOST` and
