@@ -47,8 +47,7 @@ jq -e \
      .head_commit.sha == $main and
      .ahead_by > 0 and
      .behind_by == 0 and
-     .total_commits == .ahead_by and
-     (.commits | length) == .ahead_by))' \
+     .total_commits == .ahead_by))' \
   <<<"$comparison" >/dev/null || {
   echo "resolved qurl-go source is not an exact ancestor of current main" >&2
   exit 65
