@@ -27,6 +27,7 @@ const mentionPattern = /^<@([A-Za-z0-9._:-]{1,200})>$/;
 const MAX_FEEDBACK_LENGTH = 2_000;
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_REASON_LENGTH = 200;
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function tokenize(text: string): string[] {
   const tokens: string[] = [];
@@ -67,6 +68,7 @@ export function parseCommand(input: string): TeamsCommand {
   if (verb === 'setup') {
     if (!args[0]) throw new UserFacingError('setup email is required');
     if (args.length !== 1) throw new UserFacingError('OAuth setup supports only the bind flow');
+    if (!emailPattern.test(args[0])) throw new UserFacingError('setup email is invalid');
     return { raw, verb, email: args[0], setupMode: 'bind', flags: {}, args };
   }
   if (verb === 'feedback') {

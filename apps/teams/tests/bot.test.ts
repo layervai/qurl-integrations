@@ -352,6 +352,33 @@ describe('Teams bot primitives', () => {
     expect(revoked).toEqual(['key-1']);
   });
 
+  it('revokes a connector enrollment key when install rendering fails', async () => {
+    const revoked: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async () => ({ resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }),
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap-secret' }),
+        revokeApiKey: async (keyId: string) => { revoked.push(keyId); },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => { throw new Error('delivery should not run'); } } as never,
+      connectorImage: 'invalid image',
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).rejects.toThrow('invalid connector image reference');
+    expect(revoked).toEqual(['key-1']);
+  });
+
   it('does not fetch the resource catalog twice for protect-connector', async () => {
     let listCalls = 0;
     const bot = new TeamsBot({

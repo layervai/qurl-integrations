@@ -2,7 +2,7 @@ import type { TeamsActivity } from './activity.js';
 import { deriveScope, normalizeActivityText } from './activity.js';
 import type { TeamsMessagePoster } from './connector.js';
 import { idempotencyKey } from './qurl-client.js';
-import type { QurlClient, QurlResource } from './qurl-client.js';
+import type { QurlApiKey, QurlClient, QurlResource } from './qurl-client.js';
 import { parseCommand } from './parser.js';
 import type { TeamsCommand } from './parser.js';
 import { ScopeAliasConflictError, type TeamsDataStore } from './teams-data.js';
@@ -165,12 +165,15 @@ export class TeamsBot {
     const alias = command.flags.alias ?? slug;
     await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
-    const token = await qurl.createEnrollmentToken(slug, idempotencyKey(...operationKey, 'enrollment'), signal);
-    const installText = renderTunnelInstallMessage({ slug, alias, environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'), port: Number(command.flags.port ?? '8080'), image: this.#options.connectorImage ?? '', bootstrapKey: token.apiKey });
+    let token: QurlApiKey | undefined;
     try {
+      token = await qurl.createEnrollmentToken(slug, idempotencyKey(...operationKey, 'enrollment'), signal);
+      const installText = renderTunnelInstallMessage({ slug, alias, environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'), port: Number(command.flags.port ?? '8080'), image: this.#options.connectorImage ?? '', bootstrapKey: token.apiKey });
       await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `Connector \`${slug}\` bootstrap instructions:\n${installText}`, signal);
     } catch (error) {
-      try { await qurl.revokeApiKey(token.keyId, signal); } catch { /* preserve the delivery failure without leaking the bootstrap key */ }
+      if (token) {
+        try { await qurl.revokeApiKey(token.keyId, signal); } catch { /* preserve the failure without leaking the bootstrap key */ }
+      }
       // Resource and alias changes may predate this request or be concurrently updated. The one-time credential is the only newly-created secret and is revoked above.
       throw error;
     }
