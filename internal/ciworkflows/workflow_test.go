@@ -52,12 +52,150 @@ const (
 	checkoutActionPrefix       = "actions/checkout@"
 	cliWorkflow                = "cli.yml"
 	cliMatrixJobID             = "matrix"
+	cliSandboxArtifactsJobID   = "sandbox-customer-artifacts"
 	cliMacOSKeychainSetupStep  = "Set up macOS keychain"
 	cliLinuxKeyringSetupStep   = "Set up Linux keyring (gnome-keyring over D-Bus)"
 	cliMatrixTestStep          = "Run tests"
 
 	workflowContractWorkflow = "workflow-contract.yml"
 )
+
+// TestCLISandboxCustomerArtifactsAreExactAndHermetic pins the bootstrap
+// producer consumed by the later NHP customer-journey gate. This first stage
+// builds and uploads only reviewed bytes. It has no token, dispatch, live
+// sandbox, or deployment authority. Forks keep a visible failed gate instead
+// of publishing executable input under the trusted repository identity.
+func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliWorkflow)
+	job, ok := workflow.Jobs[cliSandboxArtifactsJobID]
+	if !ok {
+		t.Fatalf("%s is missing %q", cliWorkflow, cliSandboxArtifactsJobID)
+	}
+	if job.Name != "cli / sandbox matched-cohort artifacts" ||
+		job.If != "(github.event_name == 'push' && github.ref == 'refs/heads/main') || needs.changes.outputs.cli == 'true'" {
+		t.Errorf("artifact job name/if = %q / %q", job.Name, job.If)
+	}
+	for _, fixture := range []struct {
+		name, event, ref string
+		cliChanged       bool
+		want             bool
+	}{
+		{name: "non-CLI main push", event: "push", ref: "refs/heads/main", want: true},
+		{name: "CLI pull request", event: "pull_request", ref: "refs/pull/1/merge", cliChanged: true, want: true},
+		{name: "non-CLI pull request", event: "pull_request", ref: "refs/pull/1/merge", want: false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			t.Parallel()
+			got := (fixture.event == "push" && fixture.ref == "refs/heads/main") || fixture.cliChanged
+			if got != fixture.want {
+				t.Fatalf("artifact producer run decision = %t, want %t", got, fixture.want)
+			}
+		})
+	}
+	if timeout, ok := job.TimeoutMinutes.(int); !ok || timeout != 15 {
+		t.Errorf("artifact job timeout = %#v, want 15", job.TimeoutMinutes)
+	}
+	assertJobPermissions(t, cliSandboxArtifactsJobID, job.Permissions, map[string]string{"contents": "read"})
+
+	indices := map[string]int{}
+	steps := map[string]*step{}
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		if current.Name != "" {
+			indices[current.Name], steps[current.Name] = index, current
+		}
+	}
+	requiredNames := []string{
+		"Require the trusted artifact producer",
+		"Build exact sandbox customer artifacts",
+		"Upload exact sandbox customer binaries",
+		"Upload exact sandbox customer source receipt",
+	}
+	for _, name := range requiredNames {
+		if steps[name] == nil {
+			t.Fatalf("artifact job is missing %q", name)
+		}
+	}
+
+	guard := steps[requiredNames[0]]
+	if indices[requiredNames[0]] != 0 || !strings.Contains(guard.Run, "pull_request|push") ||
+		!strings.Contains(guard.Run, "layervai/qurl-integrations") || !strings.Contains(guard.Run, "does not accept a fork") {
+		t.Errorf("trusted producer guard is not the first exact fail-closed step")
+	}
+
+	checkoutIndex := -1
+	var checkout *step
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		if strings.HasPrefix(current.Uses, checkoutActionPrefix) {
+			checkout, checkoutIndex = current, index
+			break
+		}
+	}
+	if checkout == nil || checkoutIndex <= 0 || checkout.With["persist-credentials"] != false ||
+		checkout.With["ref"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" {
+		t.Errorf("artifact checkout does not bind the exact caller head without credentials: %#v", checkout)
+	}
+
+	build := steps[requiredNames[1]]
+	if !strings.Contains(build.Run, "scripts/build-sandbox-matched-cohort-pr-artifacts.sh") ||
+		!strings.Contains(build.Run, `"$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"`) ||
+		!strings.Contains(build.Run, `"$QURL_GO_SOURCE_SHA"`) {
+		t.Errorf("artifact build does not bind the exact repository/head/run identity")
+	}
+	for _, expected := range []string{
+		`scripts/resolve-sandbox-artifact-qurl-go-source.sh`,
+	} {
+		if !strings.Contains(build.Run, expected) {
+			t.Errorf("artifact build is missing moving qurl-go source authority %q", expected)
+		}
+	}
+
+	for label, current := range map[string]*step{
+		"binaries": steps[requiredNames[2]],
+		"receipt":  steps[requiredNames[3]],
+	} {
+		if current.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+			current.With["if-no-files-found"] != "error" || current.With["retention-days"] != 1 ||
+			current.With["compression-level"] != 0 || current.With["include-hidden-files"] != false {
+			t.Errorf("%s artifact upload is not exact: %#v", label, current.With)
+		}
+	}
+	if steps[requiredNames[2]].With["name"] != "sandbox-matched-cohort-binaries" ||
+		steps[requiredNames[3]].With["name"] != "sandbox-matched-cohort-source-receipt" {
+		t.Errorf("customer artifact names are not exact")
+	}
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobText, err := yaml.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"actions/create-github-app-token", "DEPLOY_DISPATCHER", "nhp-smoke-tests",
+		"blue-green-deploy", "qurl-live-env-lock", "run-sandbox-matched-cohort-pr-journey",
+	} {
+		if strings.Contains(string(jobText), forbidden) {
+			t.Errorf("artifact producer retains forbidden live authority %q", forbidden)
+		}
+	}
+	if !strings.Contains(string(raw), "scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh") {
+		t.Errorf("CLI hermetic test job does not execute the artifact contract test")
+	}
+	for _, script := range []string{
+		"scripts/build-sandbox-matched-cohort-pr-artifacts.sh",
+		"scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh",
+		"scripts/resolve-sandbox-artifact-qurl-go-source.sh",
+		"scripts/resolve-sandbox-artifact-qurl-go-source_test.sh",
+	} {
+		assertExecutableRepoScript(t, script)
+	}
+}
 
 type requiredWorkflowSpec struct {
 	name                 string
