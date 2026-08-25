@@ -115,11 +115,11 @@ export class TeamsBot {
     if (!channel) throw new UserFacingError('This command must be run in a Teams channel.');
     if (command.verb === 'aliases') return this.aliases(tenantId, scopeId);
     const qurl = await this.#qurl(tenantId);
+    if (command.verb === 'protect-connector') return this.protectConnector(qurl, activity, tenantId, scopeId, command, signal);
     const resources = await this.resources(qurl, signal);
     if (command.verb === 'list') return this.list(tenantId, scopeId, resources);
     if (command.verb === 'get') return this.get(qurl, activity, tenantId, scopeId, resources, command, signal);
     if (command.verb === 'protect-url') return this.protectUrl(qurl, activity, tenantId, scopeId, resources, command, signal);
-    if (command.verb === 'protect-connector') return this.protectConnector(qurl, activity, tenantId, scopeId, command, signal);
     if (command.verb === 'set-alias') return this.setAlias(qurl, tenantId, scopeId, resources, command, signal);
     if (command.verb === 'unset-alias') { await this.#options.data.unbindScopeAlias(tenantId, scopeId, command.resource ?? ''); return `Removed alias \`$${command.resource}\` from this channel. The resource remains protected.`; }
     if (command.verb === 'set-display-name' || command.verb === 'unset-display-name') { const resource = this.resolve(resources, command.resource ?? ''); await qurl.updateResource(resource.resourceId, command.verb === 'set-display-name' ? command.text ?? '' : '', signal); return `${command.verb === 'set-display-name' ? 'Updated' : 'Reset'} display name for \`$${resource.resourceId}\`.`; }

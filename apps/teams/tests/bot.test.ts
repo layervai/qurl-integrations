@@ -132,6 +132,8 @@ describe('Teams bot primitives', () => {
   it('rejects unterminated quotes and invalid boolean get flags', () => {
     expect(() => parseCommand('get $docs reason:"missing')).toThrow();
     expect(() => parseCommand('get $docs dm:yes')).toThrow();
+    expect(() => parseCommand(`feedback ${'x'.repeat(2_001)}`)).toThrow('feedback message is too long');
+    expect(() => parseCommand('add not-a-mention')).toThrow('Teams user mention');
   });
 
   it('resolves a channel-local alias when minting a qURL', async () => {
@@ -197,6 +199,27 @@ describe('Teams bot primitives', () => {
     )).resolves.toContain('sent the bootstrap instructions');
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('does not fetch the resource catalog twice for protect-connector', async () => {
+    let listCalls = 0;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { listCalls += 1; return { resources: [{ resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }] }; },
+        createEnrollmentToken: async () => ({ keyId: 'key-1', apiKey: 'bootstrap' }),
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'registry.example/qurl:1',
+    });
+    await bot.execute({ type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } }, 'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'));
+    expect(listCalls).toBe(1);
   });
 
   it('continues commands when personal-conversation capture fails', async () => {

@@ -50,7 +50,8 @@ function html(response: ServerResponse, status: number, title: string, message: 
 }
 
 function setCookie(response: ServerResponse, cookie: { readonly name: string; readonly value: string; readonly path: string; readonly maxAgeSeconds: number; readonly secure: boolean; readonly httpOnly: boolean; readonly sameSite: string }): void {
-  response.setHeader('Set-Cookie', `${cookie.name}=${cookie.value}; Path=${cookie.path}; Max-Age=${cookie.maxAgeSeconds}; HttpOnly; Secure; SameSite=${cookie.sameSite}`);
+  const attributes = [`Path=${cookie.path}`, `Max-Age=${cookie.maxAgeSeconds}`, ...(cookie.httpOnly ? ['HttpOnly'] : []), ...(cookie.secure ? ['Secure'] : []), `SameSite=${cookie.sameSite}`];
+  response.setHeader('Set-Cookie', `${cookie.name}=${cookie.value}; ${attributes.join('; ')}`);
 }
 
 function readCookie(request: Request, name: string): string | undefined {
@@ -231,7 +232,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   });
   const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState });
   const host = process.env.HOST?.trim() || '0.0.0.0';
-  const port = Number(process.env.PORT ?? '3000');
+  const port = Number(process.env.PORT?.trim() || '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');
   return { server, app, port, host };
 }

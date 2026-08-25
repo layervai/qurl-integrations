@@ -1,9 +1,11 @@
 import type { ServerResponse } from 'node:http';
 import type { Application, Request } from 'express';
+import express from 'express';
+import type { App } from '@microsoft/teams.apps';
 import { describe, expect, it } from 'vitest';
 import type { OAuthCallbackCore } from '../src/callback.js';
 import type { ConfidentialTokenClient } from '../src/interfaces.js';
-import { createProductionTeamsConfig, httpsIssuer, httpsOrigin, installOAuthRoutes } from '../src/server.js';
+import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
 
 const OPAQUE_STATE = Buffer.alloc(32, 1).toString('base64url');
@@ -112,5 +114,28 @@ describe('Teams production URL configuration', () => {
       if (previous === undefined) delete process.env.TEAMS_BASE_URL;
       else process.env.TEAMS_BASE_URL = previous;
     }
+  });
+});
+
+describe('Teams HTTP body limits', () => {
+  it('installs the body limit before the SDK messaging route parser', async () => {
+    const expressApp = express();
+    const app = {
+      initialize: async () => {
+        expressApp.post('/api/messages', express.json(), (_request, response) => { response.sendStatus(200); });
+      },
+    } as unknown as App;
+    const server = await createTeamsServer({
+      baseUrl: 'https://teams.example', expressApp, app,
+      tokenClient: {} as never, callback: {} as never, state: {} as never, maxBodyBytes: 1_024,
+    });
+    const router = (expressApp as unknown as { readonly router?: { readonly stack?: readonly { readonly name?: string; readonly route?: { readonly path?: string; readonly stack?: readonly { readonly name?: string }[] } }[] } }).router;
+    const stack = router?.stack ?? [];
+    const bodyParserIndex = stack.findIndex(layer => layer.name === 'jsonParser');
+    const messageRouteIndex = stack.findIndex(layer => layer.route?.path === '/api/messages');
+    expect(bodyParserIndex).toBeGreaterThanOrEqual(0);
+    expect(messageRouteIndex).toBeGreaterThan(bodyParserIndex);
+    expect(stack[messageRouteIndex]?.route?.stack?.[0]?.name).toBe('jsonParser');
+    expect(server).toBeDefined();
   });
 });

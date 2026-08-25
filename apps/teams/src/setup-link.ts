@@ -2,11 +2,11 @@ import type { ConfidentialTokenClient, SetupMode } from './interfaces.js';
 import type { OAuthStateManager } from './state.js';
 import { pkceChallengeForVerifier } from './pkce.js';
 
-export interface TeamsSetupLinkBuilderOptions { readonly state: OAuthStateManager; readonly tokenClient: ConfidentialTokenClient; }
+export interface TeamsSetupLinkBuilderOptions { readonly state: OAuthStateManager; readonly tokenClient: ConfidentialTokenClient; readonly setupBaseUrl: string; }
 export class TeamsSetupLinkBuilder {
   readonly #state: OAuthStateManager; readonly #tokenClient: ConfidentialTokenClient;
   readonly #setupBaseUrl: URL;
-  constructor(options: TeamsSetupLinkBuilderOptions & { readonly setupBaseUrl: string }) {
+  constructor(options: TeamsSetupLinkBuilderOptions) {
     this.#state = options.state;
     this.#tokenClient = options.tokenClient;
     this.#setupBaseUrl = new URL(options.setupBaseUrl);

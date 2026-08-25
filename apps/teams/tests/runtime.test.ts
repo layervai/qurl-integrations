@@ -36,4 +36,25 @@ describe('Teams runtime adapters', () => {
     expect(client.requests[2]?.input.ConsistentRead).toBe(true);
   });
 
+  it('reports expired rows from conditional consume failures', async () => {
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        if (request.operation === 'delete') {
+          const error = new Error('conditional failure');
+          error.name = 'ConditionalCheckFailedException';
+          Object.assign(error, { Item: {
+            state_handle_hash: 'a'.repeat(64), teams_tenant_id: '00000000-0000-4000-8000-000000000001',
+            actor_aad_object_id: '00000000-0000-4000-8000-000000000002', actor_delivery_id: '29:delivery',
+            setup_email: 'admin@example.com', setup_mode: 'bind', pkce_verifier: 'a'.repeat(43),
+            oidc_nonce: 'b'.repeat(43), expires_at: 1_000,
+          } });
+          throw error;
+        }
+        return {} as T;
+      },
+    };
+    const store = new DynamoOAuthStatePersistence({ client, tableName: 'oauth-state' });
+    await expect(store.conditionalConsume('a'.repeat(64), 2_000)).resolves.toEqual({ status: 'expired' });
+  });
+
 });
