@@ -63,6 +63,10 @@ good_compare=$(compare ahead "$source_sha" "$main_sha")
 test "$(run "$good_commit" "$good_main" "$good_compare")" = "$source_sha"
 test "$(run "$good_commit" "$(main_ref "$source_sha")" \
   "$(compare identical "$source_sha" "$source_sha")")" = "$source_sha"
+truncated_compare=$(jq -cn --arg source "$source_sha" --arg main "$main_sha" \
+  '{status:"ahead",base_commit:{sha:$source},merge_base_commit:{sha:$source},head_commit:{sha:$main},
+    ahead_by:251,behind_by:0,total_commits:251,commits:[{sha:$main}]}')
+test "$(run "$good_commit" "$good_main" "$truncated_compare")" = "$source_sha"
 
 assert_rejected() {
   local label=$1
@@ -85,6 +89,12 @@ assert_rejected "drifted comparison base" "$good_commit" "$good_main" \
   "$(compare ahead 1111111111111111111111111111111111111111 "$main_sha")"
 assert_rejected "drifted comparison head" "$good_commit" "$good_main" \
   "$(compare ahead "$source_sha" 1111111111111111111111111111111111111111)"
+assert_rejected "nonpositive ahead counter" "$good_commit" "$good_main" \
+  "$(jq -c '.ahead_by=0 | .total_commits=0' <<<"$good_compare")"
+assert_rejected "mismatched total counter" "$good_commit" "$good_main" \
+  "$(jq -c '.total_commits=2' <<<"$good_compare")"
+assert_rejected "nonzero behind counter" "$good_commit" "$good_main" \
+  "$(jq -c '.behind_by=1' <<<"$good_compare")"
 fabricated_identical=$(compare identical "$source_sha" "$source_sha")
 fabricated_identical=$(jq -c --arg sha "$source_sha" '.head_commit={sha:$sha}' <<<"$fabricated_identical")
 assert_rejected "fabricated identical head" "$good_commit" "$(main_ref "$source_sha")" \
