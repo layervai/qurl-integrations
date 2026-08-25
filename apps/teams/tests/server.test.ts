@@ -1,7 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import type { Application, Request } from 'express';
 import { describe, expect, it } from 'vitest';
-import { OAuthCallbackCore } from '../src/callback.js';
+import type { OAuthCallbackCore } from '../src/callback.js';
 import type { ConfidentialTokenClient } from '../src/interfaces.js';
 import { installOAuthRoutes } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
