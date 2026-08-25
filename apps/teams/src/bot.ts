@@ -104,13 +104,21 @@ export class TeamsBot {
     }
     if (command.verb === 'uninstall') {
       const credential = await this.#options.data.tenantCredential(tenantId);
-      if (credential && !credential.keyId) throw new UserFacingError('Tenant credential has no revocation key id');
+      let upstreamRevocationPending = credential !== undefined && credential.keyId === undefined;
       if (credential?.keyId) {
-        const qurl = await this.#qurl(tenantId);
-        await qurl.revokeApiKey(credential.keyId, signal);
+        try {
+          const qurl = await this.#qurl(tenantId);
+          await qurl.revokeApiKey(credential.keyId, signal);
+        } catch {
+          // Local teardown must remain recoverable even when qURL is
+          // unavailable. An operator can revoke the upstream key later.
+          upstreamRevocationPending = true;
+        }
       }
       await this.#options.data.deleteWorkspace(tenantId);
-      return 'Disconnected qURL from this Teams tenant.';
+      return upstreamRevocationPending
+        ? 'Disconnected qURL from this Teams tenant. Upstream API-key revocation may require operator follow-up.'
+        : 'Disconnected qURL from this Teams tenant.';
     }
     if (!channel) throw new UserFacingError('This command must be run in a Teams channel.');
     if (command.verb === 'aliases') return this.aliases(tenantId, scopeId);

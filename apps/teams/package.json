@@ -1,5 +1,5 @@
 {
-  "name": "@layervai/qurl-teams-oauth-core",
+  "name": "@layervai/qurl-teams",
   "version": "0.0.0",
   "private": true,
   "description": "qURL™ Microsoft Teams Bot and OAuth integration",

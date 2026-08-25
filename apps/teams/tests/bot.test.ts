@@ -266,4 +266,32 @@ describe('Teams bot primitives', () => {
     )).resolves.toContain('resource remains protected');
     expect(unbound).toBe('docs');
   });
+
+  it('always removes local data when uninstalling a damaged or unavailable binding', async () => {
+    let deleted = false;
+    const bot = new TeamsBot({
+      qurl: { revokeApiKey: async () => { throw new Error('qURL unavailable'); } } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        tenantCredential: async () => ({ apiKey: 'secret' }),
+        deleteWorkspace: async () => { deleted = true; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await expect(bot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
+    expect(deleted).toBe(true);
+
+    deleted = false;
+    const unavailableBot = new TeamsBot({
+      qurl: { revokeApiKey: async () => { throw new Error('qURL unavailable'); } } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        tenantCredential: async () => ({ apiKey: 'secret', keyId: 'key-1' }),
+        deleteWorkspace: async () => { deleted = true; },
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await expect(unavailableBot.execute({ type: 'message', from: { aadObjectId: 'admin' } }, 'tenant-1', 'personal', false, parseCommand('uninstall'))).resolves.toContain('operator follow-up');
+    expect(deleted).toBe(true);
+  });
 });

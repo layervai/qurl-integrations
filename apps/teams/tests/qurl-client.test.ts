@@ -17,8 +17,9 @@ describe('qURL HTTP adapter', () => {
       },
     });
 
-    await expect(client.create({ resourceId: 'r_1', oneTimeUse: true })).resolves.toMatchObject({ resourceId: 'r_1' });
+    await expect(client.create({ resourceId: 'r_1', oneTimeUse: true, idempotencyKey: 'create-key' })).resolves.toMatchObject({ resourceId: 'r_1' });
     expect(requests[0]?.url).toBe('https://api.example.test/v1/resources/r_1/qurls');
+    expect(requests[0]?.headers.get('Idempotency-Key')).toBe('create-key');
     expect(JSON.parse(await requests[0]!.text())).toEqual({ one_time_use: true });
   });
 
