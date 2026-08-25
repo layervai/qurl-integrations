@@ -39,6 +39,18 @@ describe('qURL HTTP adapter', () => {
     });
   });
 
+  it('preserves a continuation cursor when the server omits has_more', async () => {
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test',
+      apiKey: 'secret',
+      fetch: async () => new Response(JSON.stringify({
+        data: [{ resource_id: 'r_1' }],
+        meta: { next_cursor: 'next' },
+      })),
+    });
+    await expect(client.listResources()).resolves.toEqual({ resources: [{ resourceId: 'r_1' }], nextCursor: 'next' });
+  });
+
   it('sends kind-first connector enrollment credentials', async () => {
     let body = '';
     const client = new HttpQurlClient({

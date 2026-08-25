@@ -37,4 +37,22 @@ describe('HttpProviderBinder', () => {
     const binder = new HttpProviderBinder({ endpoint: 'https://qurl.example', data, fetch: async () => response(409) });
     await expect(binder.bind(request)).rejects.toThrow('credential is unavailable');
   });
+
+  it('stores and returns a newly provisioned binding credential', async () => {
+    let bound = false;
+    let saved: unknown;
+    const data = {
+      checkAdmin: async () => ({ isAdmin: false }),
+      bindWorkspace: async () => { bound = true; },
+      saveTenantCredential: async (_tenantId: string, credential: unknown) => { saved = credential; },
+    } as unknown as TeamsDataStore;
+    const binder = new HttpProviderBinder({
+      endpoint: 'https://qurl.example',
+      data,
+      fetch: async () => response(201, JSON.stringify({ data: { api_key: { plaintext: 'api-key', key_id: 'key-1', key_prefix: 'qurl_' } } })),
+    });
+    await expect(binder.bind(request)).resolves.toEqual({ status: 'bound', bindingReference: 'key-1' });
+    expect(bound).toBe(true);
+    expect(saved).toEqual({ apiKey: 'api-key', keyId: 'key-1', keyPrefix: 'qurl_' });
+  });
 });

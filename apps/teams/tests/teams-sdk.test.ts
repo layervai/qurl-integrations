@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { TeamsSdkMessagePoster } from '../src/teams-sdk.js';
+import { TeamsSdkMessagePoster, validateTeamsServiceUrl } from '../src/teams-sdk.js';
 
 describe('TeamsSdkMessagePoster', () => {
+  it('validates configured Teams service URLs while preserving their region path', () => {
+    expect(validateTeamsServiceUrl('https://smba.trafficmanager.net/teams')).toBe('https://smba.trafficmanager.net/teams');
+    expect(() => validateTeamsServiceUrl('https://attacker.example/teams')).toThrow('not trusted');
+    expect(() => validateTeamsServiceUrl('http://smba.trafficmanager.net/teams')).toThrow('not trusted');
+  });
+
   it('rejects outbound messages to untrusted service URLs', async () => {
     const poster = new TeamsSdkMessagePoster({ api: { http: {} } } as never);
     await expect(poster.sendText('https://attacker.example', 'conversation', 'hello')).rejects.toThrow('not trusted');

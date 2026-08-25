@@ -16,7 +16,7 @@ import { HttpQurlClient } from './qurl-client.js';
 import { createDynamoClient, TeamsDataStore } from './teams-data.js';
 import { KmsCredentialCipher } from './credential-cipher.js';
 import { TeamsBot } from './bot.js';
-import { TeamsSdkMessagePoster } from './teams-sdk.js';
+import { TeamsSdkMessagePoster, validateTeamsServiceUrl } from './teams-sdk.js';
 import { validateTunnelImageRef } from './tunnel.js';
 import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
 import { toTeamsActivity } from './activity.js';
@@ -203,12 +203,14 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   const binder = new HttpProviderBinder({ endpoint: qurlEndpoint, data });
   const callback = new OAuthCallbackCore({ state: oauthState, tokenClient, idTokenVerifier: verifier, providerBinder: binder });
   const expressApp = express();
+  const configuredServiceUrl = process.env.TEAMS_SERVICE_URL?.trim();
+  const serviceUrl = configuredServiceUrl ? validateTeamsServiceUrl(configuredServiceUrl) : undefined;
   const app = new App({
     clientId: appId,
     clientSecret: appPassword,
     httpServerAdapter: new ExpressAdapter(expressApp),
     messagingEndpoint: '/api/messages',
-    ...(process.env.TEAMS_SERVICE_URL ? { serviceUrl: process.env.TEAMS_SERVICE_URL.trim() } : {}),
+    ...(serviceUrl === undefined ? {} : { serviceUrl }),
     // Keep mention normalization in the existing qURL Activity adapter.
     activity: { mentions: { stripText: false } },
   });

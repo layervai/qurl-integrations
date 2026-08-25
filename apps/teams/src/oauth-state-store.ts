@@ -101,7 +101,6 @@ export class DynamoOAuthStatePersistence implements OAuthStatePersistence {
     return stored;
   }
 
-
   async conditionalConsume(stateKey: string, nowEpochSeconds: number): Promise<ConditionalConsumeResult> {
     try {
       const result = await this.#client.send<{ readonly Attributes?: Record<string, unknown> }>({

@@ -21,7 +21,9 @@ The Bot supports setup, resource listing/get, URL and connector protection,
 aliases, display names, admin membership, uninstall, feedback, and private
 Teams delivery. Policies and principals are stored as normalized rows matching
 the `qurl-teams-ddb` Terraform module; OAuth state uses `state_handle_hash`
-and numeric `expires_at`.
+and numeric `expires_at`. Tenant administrators can manage tenant-wide resource
+metadata and revocation from any channel; channel aliases and visibility remain
+scope-specific.
 
 ## Development
 

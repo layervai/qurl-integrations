@@ -158,6 +158,58 @@ describe('Teams bot primitives', () => {
     expect(createdResourceId).toBe('resource-1');
   });
 
+  it('follows a next cursor even when has_more is omitted', async () => {
+    const cursors: Array<string | undefined> = [];
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const qurl = {
+      listResources: async (_signal?: AbortSignal, cursor?: string) => {
+        cursors.push(cursor);
+        return cursor === undefined
+          ? { resources: [{ resourceId: 'resource-1' }], nextCursor: 'next' }
+          : { resources: [{ resourceId: 'resource-2' }] };
+      },
+    } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).resolves.toEqual([{ resourceId: 'resource-1' }, { resourceId: 'resource-2' }]);
+    expect(cursors).toEqual([undefined, 'next']);
+  });
+
+  it('uses distinct idempotency keys for connector resources and enrollment tokens', async () => {
+    const keys: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [] }),
+        createResource: async (input: { readonly idempotencyKey?: string }) => { keys.push(input.idempotencyKey ?? ''); return { resourceId: 'connector-1', type: 'tunnel', slug: 'prod' }; },
+        createEnrollmentToken: async (_slug: string, key: string) => { keys.push(key); return { keyId: 'key-1', apiKey: 'bootstrap' }; },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'conversation' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => undefined,
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined } as never,
+      connectorImage: 'registry.example/qurl:1',
+    });
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-connector prod'),
+    )).resolves.toContain('sent the bootstrap instructions');
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('continues commands when personal-conversation capture fails', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { savePersonalConversationRef: async () => { throw new Error('temporary DDB failure'); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await bot.handleActivity({ type: 'message', text: 'help', from: { aadObjectId: 'actor' }, serviceUrl: 'https://smba.trafficmanager.net', conversation: { id: 'personal', conversationType: 'personal' }, channelData: { tenant: { id: 'tenant' } } }, undefined, async text => { replies.push(text); });
+    expect(replies[0]).toContain('qURL for Teams');
+  });
+
   it('does not silently reassign an existing alias with set-alias', async () => {
     const bot = new TeamsBot({
       qurl: {

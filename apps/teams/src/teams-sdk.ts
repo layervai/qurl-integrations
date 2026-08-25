@@ -3,6 +3,22 @@ import { Client, toActivityParams, type ActivityLike } from '@microsoft/teams.ap
 import type { TeamsActivity } from './activity.js';
 import type { TeamsMessagePoster } from './connector.js';
 
+const TRUSTED_SERVICE_HOSTS = new Set([
+  'smba.trafficmanager.net',
+  'smba.infra.gcc.teams.microsoft.com',
+  'smba.infra.gov.teams.microsoft.us',
+  'smba.infra.dod.teams.microsoft.us',
+]);
+
+export function validateTeamsServiceUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash
+    || !TRUSTED_SERVICE_HOSTS.has(url.hostname.toLowerCase())) {
+    throw new Error('Teams service URL is not trusted');
+  }
+  return url.toString().replace(/\/$/, '');
+}
+
 /**
  * Teams SDK-backed outbound adapter. The SDK owns Bot Framework credentials,
  * service-token handling, and Connector REST calls; qURL business logic only
@@ -27,12 +43,7 @@ export class TeamsSdkMessagePoster implements TeamsMessagePoster {
   }
 
   private async sendActivity(serviceUrl: string, conversationId: string, activity: ActivityLike): Promise<void> {
-    const base = new URL(serviceUrl);
-    if (base.protocol !== 'https:' || base.username || base.password || base.port || base.search || base.hash
-      || !['smba.trafficmanager.net', 'smba.infra.gcc.teams.microsoft.com', 'smba.infra.gov.teams.microsoft.us', 'smba.infra.dod.teams.microsoft.us'].includes(base.hostname.toLowerCase())) {
-      throw new Error('Teams service URL is not trusted');
-    }
-    const client = new Client(serviceUrl.replace(/\/$/, ''), this.#app.api.http);
+    const client = new Client(validateTeamsServiceUrl(serviceUrl), this.#app.api.http);
     const params = toActivityParams(activity);
     await client.conversations.createActivity(conversationId, params);
   }
