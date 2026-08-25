@@ -382,7 +382,7 @@ jobs:
           if-no-files-found: error
           include-hidden-files: false
           compression-level: 0
-          retention-days: 1
+          retention-days: 30
 
       - name: Upload exact sandbox customer source receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -392,7 +392,7 @@ jobs:
           if-no-files-found: error
           include-hidden-files: false
           compression-level: 0
-          retention-days: 1
+          retention-days: 30
 
   sandbox-e2e:
     name: cli / sandbox e2e
