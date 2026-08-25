@@ -15,6 +15,8 @@ export interface TeamsEntity {
   readonly type?: string;
   readonly mentioned?: TeamsAccount;
   readonly text?: string;
+  readonly offset?: number;
+  readonly length?: number;
 }
 
 export interface TeamsChannelData {
@@ -40,14 +42,98 @@ export interface TeamsScope {
   readonly channel: boolean;
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
+
+function account(value: unknown): TeamsAccount | undefined {
+  const source = record(value);
+  if (!source) return undefined;
+  const id = stringValue(source.id);
+  const name = stringValue(source.name);
+  const aadObjectId = stringValue(source.aadObjectId);
+  return { ...(id === undefined ? {} : { id }), ...(name === undefined ? {} : { name }), ...(aadObjectId === undefined ? {} : { aadObjectId }) };
+}
+
+/** Copy only the small, untrusted activity subset consumed by the bot. */
+export function toTeamsActivity(value: unknown): TeamsActivity | undefined {
+  const source = record(value);
+  const id = stringValue(source?.id);
+  const type = stringValue(source?.type);
+  const text = stringValue(source?.text);
+  const serviceUrl = stringValue(source?.serviceUrl);
+  if (!source) return undefined;
+  const from = account(source.from);
+  const recipient = account(source.recipient);
+  const conversationSource = record(source.conversation);
+  const conversationId = stringValue(conversationSource?.id);
+  const conversationType = stringValue(conversationSource?.conversationType);
+  const conversationTenantId = stringValue(conversationSource?.tenantId);
+  const conversation = conversationSource ? {
+    ...(conversationId === undefined ? {} : { id: conversationId }),
+    ...(conversationType === undefined ? {} : { conversationType }),
+    ...(conversationTenantId === undefined ? {} : { tenantId: conversationTenantId }),
+    ...(typeof conversationSource.isGroup === 'boolean' ? { isGroup: conversationSource.isGroup } : {}),
+  } : undefined;
+  const channelDataSource = record(source.channelData);
+  const tenantSource = record(channelDataSource?.tenant);
+  const channelSource = record(channelDataSource?.channel);
+  const tenantId = stringValue(tenantSource?.id);
+  const channelId = stringValue(channelSource?.id);
+  const channelData = channelDataSource ? {
+    ...(tenantSource ? { tenant: { ...(tenantId === undefined ? {} : { id: tenantId }) } } : {}),
+    ...(channelSource ? { channel: { ...(channelId === undefined ? {} : { id: channelId }) } } : {}),
+  } : undefined;
+  const entities = Array.isArray(source.entities) ? source.entities.map(entityValue => {
+    const entity = record(entityValue);
+    if (!entity) return undefined;
+    const mentioned = account(entity.mentioned);
+    return {
+      ...(stringValue(entity.type) === undefined ? {} : { type: stringValue(entity.type) }),
+      ...(mentioned === undefined ? {} : { mentioned }),
+      ...(stringValue(entity.text) === undefined ? {} : { text: stringValue(entity.text) }),
+      ...(typeof entity.offset === 'number' ? { offset: entity.offset } : {}),
+      ...(typeof entity.length === 'number' ? { length: entity.length } : {}),
+    };
+  }).filter((entity): entity is TeamsEntity => entity !== undefined) : undefined;
+  return {
+    ...(id === undefined ? {} : { id }),
+    ...(type === undefined ? {} : { type }),
+    ...(text === undefined ? {} : { text }),
+    ...(serviceUrl === undefined ? {} : { serviceUrl }),
+    ...(from === undefined ? {} : { from }),
+    ...(recipient === undefined ? {} : { recipient }),
+    ...(conversation === undefined ? {} : { conversation }),
+    ...(channelData === undefined ? {} : { channelData }),
+    ...(entities === undefined ? {} : { entities }),
+  };
+}
+
 export function normalizeActivityText(activity: TeamsActivity): string {
   let text = activity.text ?? '';
+  const replacements: Array<{ readonly start: number; readonly end: number; readonly value: string }> = [];
+  let fallbackSearchFrom = 0;
   for (const entity of activity.entities ?? []) {
     if (entity.type !== 'mention' || !entity.mentioned?.id || !entity.text) continue;
-    const mention = entity.text.replace(/^<at>|<\/at>$/gi, '').trim();
     const botId = activity.recipient?.id;
-    text = text.replace(entity.text, entity.mentioned.id === botId ? '' : `<@${entity.mentioned.id}>`);
-    if (mention && entity.mentioned.id !== botId) text = text.replace(mention, `<@${entity.mentioned.id}>`);
+    const value = entity.mentioned.id === botId ? '' : `<@${entity.mentioned.id}>`;
+    const start = entity.offset;
+    const length = entity.length;
+    const end = start === undefined || length === undefined ? -1 : start + length;
+    if (typeof start === 'number' && Number.isInteger(start) && start >= 0 && typeof length === 'number' && Number.isInteger(length) && length > 0 && end <= text.length && text.slice(start, end) === entity.text) {
+      replacements.push({ start, end, value });
+      continue;
+    }
+    const fallbackStart = text.indexOf(entity.text, fallbackSearchFrom);
+    if (fallbackStart >= 0) {
+      replacements.push({ start: fallbackStart, end: fallbackStart + entity.text.length, value });
+      fallbackSearchFrom = fallbackStart + entity.text.length;
+    }
+  }
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    text = text.slice(0, replacement.start) + replacement.value + text.slice(replacement.end);
   }
   return text.replace(/<at>[^<]*<\/at>/gi, '').replace(/\s+/g, ' ').trim();
 }

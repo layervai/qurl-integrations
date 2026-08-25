@@ -7,6 +7,9 @@ import type { TeamsMessagePoster } from './connector.js';
  * Teams SDK-backed outbound adapter. The SDK owns Bot Framework credentials,
  * service-token handling, and Connector REST calls; qURL business logic only
  * sees the existing TeamsMessagePoster seam.
+ *
+ * TODO(upstream-contract): keep this allowlist aligned with Microsoft's
+ * documented regional Bot Framework service hosts.
  */
 export class TeamsSdkMessagePoster implements TeamsMessagePoster {
   readonly #app: App;
@@ -16,11 +19,11 @@ export class TeamsSdkMessagePoster implements TeamsMessagePoster {
   }
 
   async reply(activity: TeamsActivity, text: string): Promise<void> {
-    await this.sendActivity(activity.serviceUrl ?? '', activity.conversation?.id ?? '', { type: 'message', text, replyToId: activity.id } as ActivityLike);
+    await this.sendActivity(activity.serviceUrl ?? '', activity.conversation?.id ?? '', { type: 'message', text, ...(activity.id === undefined ? {} : { replyToId: activity.id }) });
   }
 
   async sendText(serviceUrl: string, conversationId: string, text: string): Promise<void> {
-    await this.sendActivity(serviceUrl, conversationId, { type: 'message', text } as ActivityLike);
+    await this.sendActivity(serviceUrl, conversationId, { type: 'message' as const, text });
   }
 
   private async sendActivity(serviceUrl: string, conversationId: string, activity: ActivityLike): Promise<void> {
@@ -31,10 +34,6 @@ export class TeamsSdkMessagePoster implements TeamsMessagePoster {
     }
     const client = new Client(serviceUrl.replace(/\/$/, ''), this.#app.api.http);
     const params = toActivityParams(activity);
-    await client.conversations.createActivity(conversationId, {
-      ...params,
-      from: { id: this.#app.id ?? '', role: 'bot' },
-      conversation: { id: conversationId },
-    } as never);
+    await client.conversations.createActivity(conversationId, params);
   }
 }

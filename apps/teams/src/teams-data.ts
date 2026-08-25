@@ -73,6 +73,18 @@ function assertPresent(...values: string[]): void {
 function isConditionalCheckFailed(error: unknown): boolean {
   return error instanceof Error && error.name === 'ConditionalCheckFailedException';
 }
+
+export class ScopeAliasConflictError extends Error {
+  readonly alias: string;
+  readonly existingResourceId: string | undefined;
+
+  constructor(alias: string, existingResourceId?: string) {
+    super(`Scope alias is already bound: ${alias}`);
+    this.name = 'ScopeAliasConflictError';
+    this.alias = alias;
+    this.existingResourceId = existingResourceId;
+  }
+}
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
@@ -260,7 +272,16 @@ export class TeamsDataStore {
 
   async bindScopeAlias(tenantId: string, scopeId: string, alias: string, resourceId: string): Promise<void> {
     assertPresent(tenantId, scopeId, alias, resourceId);
-    await this.#client.send({ operation: 'put', input: { TableName: this.#channelPoliciesTable, Item: this.#policyItem(tenantId, scopeId, 'alias', alias, resourceId), ConditionExpression: `attribute_not_exists(${tenantKey}) AND attribute_not_exists(${policyKey})` } });
+    try {
+      await this.#client.send({ operation: 'put', input: { TableName: this.#channelPoliciesTable, Item: this.#policyItem(tenantId, scopeId, 'alias', alias, resourceId), ConditionExpression: `attribute_not_exists(${tenantKey}) AND attribute_not_exists(${policyKey})` } });
+    } catch (error) {
+      if (!isConditionalCheckFailed(error)) throw error;
+      // A retry of the same operation is safe, but an existing alias must
+      // never be silently reassigned to a different resource.
+      const existingResourceId = await this.lookupScopeAlias(tenantId, scopeId, alias);
+      if (existingResourceId === resourceId) return;
+      throw new ScopeAliasConflictError(alias, existingResourceId);
+    }
   }
 
   async setScopeAlias(tenantId: string, scopeId: string, alias: string, resourceId: string): Promise<void> {

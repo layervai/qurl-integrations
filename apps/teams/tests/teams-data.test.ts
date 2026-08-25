@@ -40,6 +40,34 @@ describe('Teams DynamoDB data paths', () => {
     expect(client.requests[0]?.input.TableName).toBe('policy');
   });
 
+  it('keeps alias binding idempotent for the same resource', async () => {
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        if (request.operation === 'put') {
+          const error = new Error('conditional failure');
+          error.name = 'ConditionalCheckFailedException';
+          throw error;
+        }
+        return { Item: { resource_id: 'resource' } } as T;
+      },
+    };
+    await expect(new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' }).bindScopeAlias('tenant', 'channel', 'docs', 'resource')).resolves.toBeUndefined();
+  });
+
+  it('rejects alias hijacking when a conditional bind finds another resource', async () => {
+    const client: DynamoClient = {
+      async send<T>(request: DynamoRequest): Promise<T> {
+        if (request.operation === 'put') {
+          const error = new Error('conditional failure');
+          error.name = 'ConditionalCheckFailedException';
+          throw error;
+        }
+        return { Item: { resource_id: 'other-resource' } } as T;
+      },
+    };
+    await expect(new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' }).bindScopeAlias('tenant', 'channel', 'docs', 'resource')).rejects.toThrow('Scope alias is already bound');
+  });
+
   it('writes personal conversations to the normalized table', async () => {
     const client = new RecordingDynamo();
     await new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' }).savePersonalConversationRef('tenant', 'actor', { serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'conversation' });

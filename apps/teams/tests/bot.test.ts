@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveScope, normalizeActivityText } from '../src/activity.js';
+import { deriveScope, normalizeActivityText, toTeamsActivity } from '../src/activity.js';
 import { TeamsBot } from '../src/bot.js';
 import { parseCommand } from '../src/parser.js';
 import type { QurlClient } from '../src/qurl-client.js';
@@ -20,6 +20,32 @@ describe('Teams bot primitives', () => {
     const activity = { type: 'message', text: '<at>qURL</at> list', recipient: { id: 'bot' }, entities: [{ type: 'mention', text: '<at>qURL</at>', mentioned: { id: 'bot' } }], channelData: { tenant: { id: 'Tenant' }, channel: { id: 'channel' } }, conversation: { id: 'conversation', conversationType: 'channel' } };
     expect(normalizeActivityText(activity)).toBe('list');
     expect(deriveScope(activity)).toEqual({ tenantId: 'tenant', scopeId: 'channel', channel: true });
+  });
+
+  it('normalizes repeated mentions using entity offsets', () => {
+    expect(normalizeActivityText({
+      text: '<at>qURL</at> list <at>qURL</at>',
+      recipient: { id: 'bot' },
+      entities: [
+        { type: 'mention', text: '<at>qURL</at>', offset: 0, length: 13, mentioned: { id: 'bot' } },
+        { type: 'mention', text: '<at>qURL</at>', offset: 19, length: 13, mentioned: { id: 'bot' } },
+      ],
+    })).toBe('list');
+  });
+
+  it('maps only supported inbound activity fields at the SDK boundary', () => {
+    expect(toTeamsActivity({
+      type: 'message',
+      text: 'list',
+      from: { id: 'actor', aadObjectId: 'aad' },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+      unexpectedSecret: 'must not cross the boundary',
+    })).toEqual({
+      type: 'message',
+      text: 'list',
+      from: { id: 'actor', aadObjectId: 'aad' },
+      conversation: { id: 'conversation', conversationType: 'channel' },
+    });
   });
 
   it('does not treat group chats as channel policy scopes', () => {

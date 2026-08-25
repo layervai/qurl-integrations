@@ -5,7 +5,7 @@ import { idempotencyKey } from './qurl-client.js';
 import type { QurlClient, QurlResource } from './qurl-client.js';
 import { parseCommand } from './parser.js';
 import type { TeamsCommand } from './parser.js';
-import type { TeamsDataStore } from './teams-data.js';
+import { ScopeAliasConflictError, type TeamsDataStore } from './teams-data.js';
 import type { TeamsSetupLinkBuilder } from './setup-link.js';
 import { normalizeTunnelEnvironment, renderTunnelInstallMessage, validateTunnelSlug } from './tunnel.js';
 import { isUserFacingError, UserFacingError } from './user-facing-error.js';
@@ -32,6 +32,21 @@ export class TeamsBot {
     if (this.#options.qurlForTenant) return this.#options.qurlForTenant.forTenant(tenantId);
     if (this.#options.qurl) return this.#options.qurl;
     throw new Error('qURL client is not configured');
+  }
+
+  async #bindAlias(tenantId: string, scopeId: string, alias: string, resourceId: string): Promise<void> {
+    const existing = await this.#options.data.lookupScopeAlias(tenantId, scopeId, alias);
+    if (existing !== undefined && existing !== resourceId) {
+      throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel.`);
+    }
+    try {
+      await this.#options.data.bindScopeAlias(tenantId, scopeId, alias, resourceId);
+    } catch (error) {
+      if (error instanceof ScopeAliasConflictError) {
+        throw new UserFacingError(`Alias \`$${alias}\` is already in use in this channel.`);
+      }
+      throw error;
+    }
   }
 
   async handleActivity(activity: TeamsActivity, signal?: AbortSignal, reply?: (text: string) => Promise<void>): Promise<void> {
@@ -116,7 +131,7 @@ export class TeamsBot {
   list(tenantId: string, scopeId: string, resources: readonly QurlResource[]): Promise<string> { return this.#options.data.allowedResourceIds(tenantId, scopeId).then(allowed => { const visible = resources.filter(resource => allowed.has(resource.resourceId)); return visible.length ? `Protected resources in this channel:\n${visible.map(resource => `- \`$${resource.resourceId}\`  ${resource.description ?? resource.slug ?? resource.targetUrl ?? resource.resourceId}`).join('\n')}` : 'No protected resources are available in this channel yet.'; }); }
   resolve(resources: readonly QurlResource[], token: string): QurlResource { const matches = resources.filter(resource => resource.resourceId === token || resource.slug === token || resource.alias === token); if (matches.length !== 1) throw new UserFacingError(matches.length ? 'Resource token is ambiguous' : `Resource not found: ${token}`); const resource = matches[0]; if (!resource) throw new UserFacingError('Resource not found'); return resource; }
   async get(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, _signal?: AbortSignal): Promise<string> { const allowed = await this.#options.data.allowedResourceIds(tenantId, scopeId); const token = command.resource ?? ''; const localAliasResourceId = await this.#options.data.lookupScopeAlias(tenantId, scopeId, token); const visible = resources.filter(item => allowed.has(item.resourceId)); const resource = localAliasResourceId ? this.resolve(visible, localAliasResourceId) : this.resolve(visible, token); const wantsDm = command.flags.dm?.toLowerCase() === 'true'; const dmActor = activity.from?.aadObjectId?.trim().toLowerCase() ?? ''; const ref = wantsDm && dmActor ? await this.#options.data.personalConversationRef(tenantId, dmActor) : undefined; if (wantsDm && !ref) throw new UserFacingError('Open a personal chat with the bot before using dm:true.'); const input = { resourceId: resource.resourceId, expiresIn: '1m', oneTimeUse: true, maxSessions: 1, sessionDuration: '1h', idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', resource.resourceId, activity.id ?? JSON.stringify(activity)), ...(command.flags.reason ? { label: command.flags.reason } : {}) }; const output = await qurl.create(input, _signal); if (ref) { await this.#options.messages.sendText(ref.serviceUrl, ref.conversationId, `qURL for \`$${command.resource}\`: ${output.qurlLink}`, _signal); return 'Sent the one-time qURL to your personal Teams chat.'; } return `qURL for \`$${command.resource}\`: ${output.qurlLink}`; }
-  async protectUrl(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, signal?: AbortSignal): Promise<string> { const value = command.args[0] ?? ''; const alias = command.flags.as ?? ''; const creating = value.toLowerCase().startsWith('url:'); const resource = creating ? await qurl.createResource({ targetUrl: value.slice(4), type: 'url', idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', value, activity.id ?? JSON.stringify(activity)) }, signal) : this.resolve(resources, value.replace(/^\$/, '')); if (!creating && resource.type !== 'url') throw new UserFacingError('Only URL resources can be protected with protect-url'); await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId); await this.#options.data.bindScopeAlias(tenantId, scopeId, alias || resource.alias || resource.slug || resource.resourceId, resource.resourceId); return `URL resource \`$${resource.resourceId}\` is now available in this channel.`; }
+  async protectUrl(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, signal?: AbortSignal): Promise<string> { const value = command.args[0] ?? ''; const alias = command.flags.as ?? ''; const creating = value.toLowerCase().startsWith('url:'); const resource = creating ? await qurl.createResource({ targetUrl: value.slice(4), type: 'url', idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', value, activity.id ?? JSON.stringify(activity)) }, signal) : this.resolve(resources, value.replace(/^\$/, '')); if (!creating && resource.type !== 'url') throw new UserFacingError('Only URL resources can be protected with protect-url'); const resolvedAlias = alias || resource.alias || resource.slug || resource.resourceId; await this.#bindAlias(tenantId, scopeId, resolvedAlias, resource.resourceId); await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId); return `URL resource \`$${resource.resourceId}\` is now available in this channel.`; }
   async setAlias(qurl: QurlClient, tenantId: string, scopeId: string, resources: readonly QurlResource[], command: TeamsCommand, _signal?: AbortSignal): Promise<string> { const resource = this.resolve(resources, command.target ?? ''); await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId); await this.#options.data.setScopeAlias(tenantId, scopeId, command.alias ?? '', resource.resourceId); return `Alias \`$${command.alias}\` now points to \`$${resource.resourceId}\` in this channel.`; }
   async protectConnector(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
     const slug = command.resource ?? command.args[0] ?? '';
@@ -126,9 +141,9 @@ export class TeamsBot {
     const resources = await this.resources(qurl, signal);
     const resource = resources.find(item => item.type === 'tunnel' && item.slug === slug)
       ?? await qurl.createResource({ type: 'tunnel', slug, findOrCreate: true, idempotencyKey: idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', slug, activity.id ?? JSON.stringify(activity)) }, signal);
-    await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
     const alias = command.flags.alias ?? slug;
-    await this.#options.data.bindScopeAlias(tenantId, scopeId, alias, resource.resourceId);
+    await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
+    await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
     const token = await qurl.createEnrollmentToken(slug, idempotencyKey(tenantId, scopeId, activity.from?.id ?? '', slug, activity.id ?? JSON.stringify(activity)), signal);
     const installText = renderTunnelInstallMessage({ slug, alias, environment: normalizeTunnelEnvironment(command.flags.env ?? 'docker'), port: Number(command.flags.port ?? '8080'), image: this.#options.connectorImage ?? '', bootstrapKey: token.apiKey });
     try {

@@ -19,7 +19,7 @@ import { TeamsBot } from './bot.js';
 import { TeamsSdkMessagePoster } from './teams-sdk.js';
 import { validateTunnelImageRef } from './tunnel.js';
 import type { ConfidentialTokenClient, FetchLike } from './interfaces.js';
-import type { TeamsActivity } from './activity.js';
+import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 
@@ -152,6 +152,14 @@ function httpsOrigin(value: string, name: string): string {
   return url.toString().replace(/\/$/, '');
 }
 
+function httpsIssuer(value: string, name: string): string {
+  const url = new URL(value.includes('://') ? value : `https://${value}`);
+  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error(`${name} must be an HTTPS issuer`);
+  // OIDC issuer identifiers are exact strings; Auth0 includes the root slash
+  // in both discovery metadata and the ID-token iss claim.
+  return url.toString();
+}
+
 class TenantQurlClientFactory {
   readonly #data: TeamsDataStore;
   readonly #endpoint: string;
@@ -181,7 +189,7 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     credentialCipher: new KmsCredentialCipher({ keyId: env('QURL_TEAMS_TENANT_CREDENTIALS_KMS_KEY_ARN'), region }),
   });
   const oauthState = new OAuthStateManager({ persistence: new DynamoOAuthStatePersistence({ client: ddb, tableName: env('OAUTH_STATE_TABLE') }) });
-  const auth0Issuer = httpsOrigin(env('AUTH0_DOMAIN'), 'AUTH0_DOMAIN');
+  const auth0Issuer = httpsIssuer(env('AUTH0_DOMAIN'), 'AUTH0_DOMAIN');
   const tokenClient = createConfidentialTokenClient({
     issuer: auth0Issuer,
     clientId: env('AUTH0_CLIENT_ID'),
@@ -212,10 +220,12 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     setup: new TeamsSetupLinkBuilder({ state: oauthState, tokenClient, setupBaseUrl: baseUrl }),
   });
   app.on('message', async ({ activity, reply }) => {
-    await bot.handleActivity(activity as unknown as TeamsActivity, undefined, async text => { await reply(text); });
+    const normalized = toTeamsActivity(activity);
+    if (normalized) await bot.handleActivity(normalized, undefined, async text => { await reply(text); });
   });
   app.on('activity', async ({ activity }) => {
-    if (activity.type === 'conversationUpdate') await bot.captureConversation(activity as unknown as TeamsActivity);
+    const normalized = toTeamsActivity(activity);
+    if (normalized?.type === 'conversationUpdate') await bot.captureConversation(normalized);
   });
   const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState });
   const host = process.env.HOST?.trim() || '0.0.0.0';
