@@ -17,7 +17,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
 - `apps/edge-extension/` — Edge MV3 extension (JavaScript); see **Chrome↔Edge lockstep** below
-- `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); Microsoft Teams bot, OAuth callback routes, Teams SDK adapter, and deployable HTTP server
+- `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); OAuth security core only — no HTTP routes, Teams SDK, or deploy yet
 - `apps/zapier/` — placeholder dir, no implementation yet
 - `origins/s3-static-connector/` — reusable private S3 static origin image
 - `internal/ciworkflows/` — repo-wide tests for required-check workflow contracts
