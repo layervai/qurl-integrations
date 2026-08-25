@@ -17,7 +17,7 @@ apps/                Per-integration apps (released apps get independent release
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   edge-extension/    Edge extension — Gmail file uploads as expiring qURL links (MV3)
   cli/               CLI — publish, resolve, and manage qURL resources by CRID (Go)
-  teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
+  teams/             Microsoft Teams Bot and OAuth integration (TypeScript)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
