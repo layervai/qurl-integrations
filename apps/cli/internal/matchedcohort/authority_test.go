@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -19,34 +16,21 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
-func TestRequiredQURLGoSourceMatchesStandaloneModulePin(t *testing.T) {
-	_, sourceFile, _, ok := goruntime.Caller(0)
-	if !ok {
-		t.Fatal("test source path is unavailable")
-	}
-	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", ".."))
-	moduleRaw, err := os.ReadFile(filepath.Join(repositoryRoot, "go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	moduleRaw = bytes.ReplaceAll(moduleRaw, []byte("\r\n"), []byte("\n"))
-	version := "v0.8.1-0.20260824221936-" + RequiredQURLGoSourceSHA[:12]
-	wantModuleLine := "\tgithub.com/layervai/qurl-go " + version + "\n"
-	if bytes.Count(moduleRaw, []byte(wantModuleLine)) != 1 || bytes.Contains(moduleRaw, []byte("replace github.com/layervai/qurl-go")) {
-		t.Fatalf("go.mod does not pin exact reviewed qurl-go source %s", RequiredQURLGoSourceSHA)
-	}
-	sumRaw, err := os.ReadFile(filepath.Join(repositoryRoot, "go.sum"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sumRaw = bytes.ReplaceAll(sumRaw, []byte("\r\n"), []byte("\n"))
-	wantModuleSum := "github.com/layervai/qurl-go " + version + " h1:FPdbSiIeZqvsKkHZKW0xfSHGnO/b9VimuLsgzLOuDTc=\n"
-	if bytes.Count(sumRaw, []byte(wantModuleSum)) != 1 {
-		t.Fatal("go.sum does not bind the exact reviewed qurl-go module bytes")
+const (
+	testNHPSourceSHA    = "a70e5d66dda604459b0a37ed7c634da8c8e46c3d"
+	testQURLGoSourceSHA = "c92478b3f70ff027fe7bd9c306b7a9fd96553b64"
+)
+
+func TestValidatePlanAcceptsDynamicallyResolvedSourceIdentities(t *testing.T) {
+	plan := validPlan("a")
+	plan.NHPSourceSHA = strings.Repeat("e", 40)
+	plan.QURLGoSourceSHA = strings.Repeat("f", 40)
+	if err := ValidatePlan(plan); err != nil {
+		t.Fatalf("dynamic source identities: %v", err)
 	}
 }
 
-func TestValidatePlanClosedTwoColorEightIdentityShape(t *testing.T) {
+func TestValidatePlanClosedSharedSandboxFourIdentityShape(t *testing.T) {
 	plan := validPlan("1")
 	if err := ValidatePlan(plan); err != nil {
 		t.Fatalf("ValidatePlan: %v", err)
@@ -56,16 +40,16 @@ func TestValidatePlanClosedTwoColorEightIdentityShape(t *testing.T) {
 		edit func(*Plan)
 	}{
 		{"environment", func(p *Plan) { p.Environment = "prod" }},
-		{"NHP source", func(p *Plan) { p.NHPSourceSHA = strings.Repeat("f", 40) }},
-		{"qurl-go source", func(p *Plan) { p.QURLGoSourceSHA = strings.Repeat("f", 40) }},
-		{"cohort order", func(p *Plan) { p.Cohorts[0], p.Cohorts[1] = p.Cohorts[1], p.Cohorts[0] }},
+		{"NHP source shape", func(p *Plan) { p.NHPSourceSHA = strings.Repeat("f", 39) }},
+		{"qurl-go source shape", func(p *Plan) { p.QURLGoSourceSHA = strings.Repeat("f", 39) }},
+		{"extra cohort", func(p *Plan) { p.Cohorts = append(p.Cohorts, p.Cohorts[0]) }},
 		{"identity order", func(p *Plan) { p.Identities[0], p.Identities[1] = p.Identities[1], p.Identities[0] }},
 		{"identity owner", func(p *Plan) { p.Identities[0].OwnerID = "different-owner@clients" }},
 		{"duplicate agent", func(p *Plan) { p.Identities[1].AgentID = p.Identities[0].AgentID }},
 		{"duplicate connector", func(p *Plan) { p.Identities[1].ConnectorID = p.Identities[0].ConnectorID }},
 		{"wrong hub port", func(p *Plan) { p.Cohorts[0].HubPort = 62206 }},
 		{"wrong cell endpoint", func(p *Plan) { p.Cohorts[0].CellEndpoint.Port = 62206 }},
-		{"missing identity", func(p *Plan) { p.Identities = p.Identities[:7] }},
+		{"missing identity", func(p *Plan) { p.Identities = p.Identities[:3] }},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -78,10 +62,44 @@ func TestValidatePlanClosedTwoColorEightIdentityShape(t *testing.T) {
 	}
 }
 
+func TestValidateAuthorityBindsExactSharedStateKeys(t *testing.T) {
+	_, authority, _ := lifecycleFixture(t)
+	if err := ValidateAuthority(authority); err != nil {
+		t.Fatalf("ValidateAuthority: %v", err)
+	}
+	mutations := []struct {
+		name string
+		edit func(*Authority)
+	}{
+		{"blue state path", func(a *Authority) {
+			a.Identities[0].AgentState.Key = "generations/" + a.GenerationID + "/blue/direct-a/agent-state"
+		}},
+		{"green state path", func(a *Authority) {
+			a.Identities[0].ConnectorState.Key = "generations/" + a.GenerationID + "/green/direct-a/connector-state"
+		}},
+		{"cross-label state path", func(a *Authority) {
+			a.Identities[0].AgentState.Key = "generations/" + a.GenerationID + "/shared/direct-b/agent-state"
+		}},
+		{"arbitrary state path", func(a *Authority) { a.Identities[0].AgentState.Key = "restored/agent-state" }},
+		{"wrong enrollment receipt path", func(a *Authority) {
+			a.EnrollmentCredentialReceipt.Key = "generations/" + a.GenerationID + "/shared/enrollment-credential-receipt"
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			changed := cloneAuthority(t, authority)
+			mutation.edit(&changed)
+			if err := ValidateAuthority(changed); err == nil {
+				t.Fatal("mutated durable path accepted")
+			}
+		})
+	}
+}
+
 func TestDurableAgentStateEverySaveCASAndLostResponse(t *testing.T) {
 	ctx := context.Background()
 	blobs := newMemoryBlobs()
-	store, err := NewDurableAgentStateStore(blobs, "generations/g/blue/direct-a/agent-state")
+	store, err := NewDurableAgentStateStore(blobs, "generations/g/shared/direct-a/agent-state")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +107,7 @@ func TestDurableAgentStateEverySaveCASAndLostResponse(t *testing.T) {
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		t.Fatalf("first save: %v", err)
 	}
-	first, err := blobs.Load(ctx, "generations/g/blue/direct-a/agent-state")
+	first, err := blobs.Load(ctx, "generations/g/shared/direct-a/agent-state")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +138,35 @@ func TestDurableAgentStateEverySaveCASAndLostResponse(t *testing.T) {
 	}
 }
 
+func TestDurableStateAndConnectorRejectAliasedLoadKeys(t *testing.T) {
+	ctx := context.Background()
+	blobs := newMemoryBlobs()
+	stateKey := "generations/g/shared/direct-a/agent-state"
+	store, err := NewDurableAgentStateStore(blobs, stateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRaw, err := CanonicalJSON(testAgentState("fixed-shared-direct-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs.values[stateKey] = Blob{Key: "restored/agent-state", VersionID: "version", SHA256: Digest(stateRaw), Body: stateRaw}
+	if _, err := store.LoadAgentState(ctx); !errors.Is(err, errStateConflict) {
+		t.Fatalf("aliased agent state = %v", err)
+	}
+
+	connectorKey := "generations/g/shared/direct-a/connector-state"
+	connector := connectorState{Schema: connectorStateSchema, Generation: "g", Label: labelDirectA}
+	connectorRaw, err := CanonicalJSON(connector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs.values[connectorKey] = Blob{Key: "restored/connector-state", VersionID: "version", SHA256: Digest(connectorRaw), Body: connectorRaw}
+	if _, _, err := loadConnectorState(ctx, blobs, connectorKey, "g", IdentityPlan{Label: labelDirectA}); !errors.Is(err, errStateConflict) {
+		t.Fatalf("aliased connector state = %v", err)
+	}
+}
+
 func TestProvisionPersistsPlanAndConnectorIntentBeforeNetwork(t *testing.T) {
 	ctx := context.Background()
 	blobs := newMemoryBlobs()
@@ -131,7 +178,7 @@ func TestProvisionPersistsPlanAndConnectorIntentBeforeNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if len(result.Authority.Identities) != 8 || runtime.connects != 8 || runtime.resolves != 8 {
+	if len(result.Authority.Identities) != 4 || runtime.connects != 4 || runtime.resolves != 4 {
 		t.Fatalf("provision counts identities=%d connect=%d resolve=%d", len(result.Authority.Identities), runtime.connects, runtime.resolves)
 	}
 	if result.Authority.Cohorts[0].CellEndpoint.Host == result.Authority.Identities[0].Selector.Host {
@@ -154,6 +201,15 @@ func TestProvisionPersistsPlanAndConnectorIntentBeforeNetwork(t *testing.T) {
 	}
 	if lock.entries != 1 || lock.operation.Operation != "provision" || lock.operation.OwnerSubject != result.Authority.OwnerSubject {
 		t.Fatalf("credential writer lock = %#v entries=%d", lock.operation, lock.entries)
+	}
+	if len(result.Authority.Cohorts) != 1 {
+		t.Fatalf("shared provision cohort count = %d", len(result.Authority.Cohorts))
+	}
+	for _, identity := range result.Authority.Identities {
+		if !strings.Contains(identity.AgentState.Key, "/shared/"+identity.Label+"/") ||
+			!strings.Contains(identity.ConnectorState.Key, "/shared/"+identity.Label+"/") || strings.Contains(identity.AgentState.Key, "//") {
+			t.Fatalf("shared identity path = %#v", identity)
+		}
 	}
 }
 
@@ -388,7 +444,7 @@ func (f *fakeRuntime) Connect(ctx context.Context, store qurl.AgentStateStore, c
 		f.t.Fatalf("enrollment credential receipt was not durable before identity network: %v", err)
 	}
 	state := testAgentState(plan.AgentID)
-	state.DeviceAPIKeyID = "device-key-" + plan.Label + "-" + plan.Color
+	state.DeviceAPIKeyID = "device-key-" + plan.Label
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}
@@ -403,8 +459,8 @@ func (f *fakeRuntime) Connect(ctx context.Context, store qurl.AgentStateStore, c
 
 func (f *fakeRuntime) Resolve(ctx context.Context, binding *RuntimeBinding, request *qurl.NativeConnectorResourceRequest) (*qurl.ConnectorResourceResolution, error) {
 	f.resolves++
-	color, label := identityFromAgent(binding.AgentID)
-	key := fmt.Sprintf("generations/%s/%s/%s/connector-state", generationFromAgent(binding.AgentID), color, label)
+	_, label := identityFromAgent(binding.AgentID)
+	key := fmt.Sprintf("generations/%s/shared/%s/connector-state", generationFromAgent(binding.AgentID), label)
 	blob, err := f.blobs.Load(ctx, key)
 	if err != nil {
 		f.t.Fatalf("connector request was not durable before network: %v", err)
@@ -424,22 +480,19 @@ func validPlan(generationDigit string) Plan {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 32))
 	plan := Plan{Schema: AuthoritySchema, Environment: EnvironmentSandbox, GenerationID: generationDigit + string(bytes.Repeat([]byte{'0'}, 63)),
 		OwnerSubject: "sandbox-sharing-owner@clients", AWSAccountID: "123456789012", AWSRegion: "us-east-1",
-		NHPSourceSHA: RequiredNHPSourceSHA, QURLGoSourceSHA: RequiredQURLGoSourceSHA}
-	for _, color := range []string{ColorBlue, ColorGreen} {
-		plan.Cohorts = append(plan.Cohorts, CohortPlan{Color: color, ServerASG: "sandbox-server-" + color, ACASG: "sandbox-ac-" + color,
-			RelayASG: "sandbox-relay-" + color, SessionControlTable: "sandbox-session-control", QURLAgentKeysTable: "sandbox-agent-keys",
-			CellID: "sandbox-cell", AssignmentGeneration: 7, HubHost: color + ".sandbox.layerv.xyz", HubPort: 443,
-			HubServerPublicKeyB64: key, CellEndpoint: qurl.NHPUDPEndpoint{Host: color + "-cell.sandbox.layerv.xyz", Port: 443,
-				ServerPublicKeyB64: key}})
-		for _, label := range labels {
-			selector := string(label[len(label)-1])
-			if label == "relay-d" {
-				selector = "a"
-			}
-			plan.Identities = append(plan.Identities, IdentityPlan{Color: color, Label: label, OwnerID: plan.OwnerSubject,
-				AgentID: fmt.Sprintf("canary-%s-%s-g%s", color, label, generationDigit), ConnectorID: fmt.Sprintf("canary-%s-%s-g%s", color, label, generationDigit),
-				Selector: FRPSSelector{ResourceID: "qurl-tunnel-server-" + selector, Host: color + "-ac.sandbox.layerv.xyz", Port: 6000 + int(selector[0])}})
+		NHPSourceSHA: testNHPSourceSHA, QURLGoSourceSHA: testQURLGoSourceSHA,
+		Cohorts: []CohortPlan{{ServerASG: "sandbox-server-current", ACASG: "sandbox-ac-current", RelayASG: "sandbox-relay",
+			SessionControlTable: "sandbox-session-control", QURLAgentKeysTable: "sandbox-agent-keys", CellID: "sandbox-cell",
+			AssignmentGeneration: 7, HubHost: "hub.sandbox.layerv.xyz", HubPort: 443, HubServerPublicKeyB64: key,
+			CellEndpoint: qurl.NHPUDPEndpoint{Host: "cell.sandbox.layerv.xyz", Port: 443, ServerPublicKeyB64: key}}}}
+	for _, label := range labels {
+		selector := string(label[len(label)-1])
+		if label == labelRelayD {
+			selector = "a"
 		}
+		plan.Identities = append(plan.Identities, IdentityPlan{Label: label, OwnerID: plan.OwnerSubject,
+			AgentID: fmt.Sprintf("canary-shared-%s-g%s", label, generationDigit), ConnectorID: fmt.Sprintf("canary-shared-%s-g%s", label, generationDigit),
+			Selector: FRPSSelector{ResourceID: "qurl-tunnel-server-" + selector, Host: "connect.sandbox.layerv.xyz", Port: 6000 + int(selector[0])}})
 	}
 	return plan
 }
@@ -462,13 +515,23 @@ func clonePlan(t *testing.T, plan Plan) Plan { //nolint:gocritic // Test clone s
 	return cloned
 }
 
+func cloneAuthority(t *testing.T, authority Authority) Authority { //nolint:gocritic // Test clone snapshots one closed authority value.
+	t.Helper()
+	raw, _ := CanonicalJSON(authority)
+	var cloned Authority
+	if err := jsonUnmarshal(raw, &cloned); err != nil {
+		t.Fatal(err)
+	}
+	return cloned
+}
+
 func jsonUnmarshal(raw []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(value)
 }
 
-func identityFromAgent(agent string) (color, label string) {
+func identityFromAgent(agent string) (scope, label string) {
 	parts := strings.Split(agent, "-")
 	return parts[1], parts[2] + "-" + parts[3]
 }

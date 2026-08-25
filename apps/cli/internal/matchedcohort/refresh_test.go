@@ -11,19 +11,18 @@ import (
 	qurl "github.com/layervai/qurl-go/qurl"
 )
 
-func TestRefreshSelectedIdentityStatesAdvancesExactColorInParallel(t *testing.T) {
+func TestRefreshSelectedIdentityStatesAdvancesSharedSetInParallel(t *testing.T) {
 	consumer, authority, _ := lifecycleFixture(t)
 	refresher := &fakeStateRefresher{started: make(chan string, 2), release: make(chan struct{})}
-	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts}, ColorBlue)
+	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts})
 	done := make(chan struct {
 		updates []StateUpdate
 		err     error
 	}, 1)
 	go func() {
-		updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, ColorBlue,
+		updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority,
 			[]string{labelDirectA, labelDirectB}, qurl.HubBootstrap{Host: cohort.HubHost, Port: cohort.HubPort,
-				ServerPublicKeyB64: cohort.HubServerPublicKeyB64}, qurl.NHPUDPEndpoint{Host: authority.Identities[0].Selector.Host,
-				Port: 443, ServerPublicKeyB64: cohort.CellEndpoint.ServerPublicKeyB64}, refresher)
+				ServerPublicKeyB64: cohort.HubServerPublicKeyB64}, cohort.CellEndpoint, refresher)
 		done <- struct {
 			updates []StateUpdate
 			err     error
@@ -47,12 +46,11 @@ func TestRefreshSelectedIdentityStatesAdvancesExactColorInParallel(t *testing.T)
 
 func TestRefreshSelectedIdentityStatesRejectsWrongPhysicalCohort(t *testing.T) {
 	consumer, authority, _ := lifecycleFixture(t)
-	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts}, ColorBlue)
-	refresher := &fakeStateRefresher{endpointHost: "green-ac.sandbox.layerv.xyz"}
-	updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, ColorBlue, []string{labelDirectA},
+	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts})
+	refresher := &fakeStateRefresher{endpointHost: "other-ac.sandbox.layerv.xyz"}
+	updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, []string{labelDirectA, labelDirectB},
 		qurl.HubBootstrap{Host: cohort.HubHost, Port: 443, ServerPublicKeyB64: cohort.HubServerPublicKeyB64},
-		qurl.NHPUDPEndpoint{Host: authority.Identities[0].Selector.Host, Port: 443,
-			ServerPublicKeyB64: cohort.CellEndpoint.ServerPublicKeyB64}, refresher)
+		cohort.CellEndpoint, refresher)
 	if err == nil || updates != nil {
 		t.Fatalf("wrong physical cohort refresh = %#v, %v", updates, err)
 	}
@@ -60,9 +58,9 @@ func TestRefreshSelectedIdentityStatesRejectsWrongPhysicalCohort(t *testing.T) {
 
 func TestRefreshSelectedIdentityStatesRejectsWrongHubKeyBeforeRefresh(t *testing.T) {
 	consumer, authority, _ := lifecycleFixture(t)
-	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts}, ColorBlue)
+	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts})
 	refresher := &fakeStateRefresher{}
-	updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, ColorBlue, []string{labelDirectA},
+	updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, []string{labelDirectA, labelDirectB},
 		qurl.HubBootstrap{Host: cohort.HubHost, Port: 443, ServerPublicKeyB64: base64.StdEncoding.EncodeToString(make([]byte, 32))},
 		cohort.CellEndpoint, refresher)
 	if err == nil || updates != nil || refresher.calls.Load() != 0 {
@@ -70,16 +68,26 @@ func TestRefreshSelectedIdentityStatesRejectsWrongHubKeyBeforeRefresh(t *testing
 	}
 }
 
-func TestRefreshSelectedIdentityStatesAcceptsSignedCanonicalEndpointProjection(t *testing.T) {
-	consumer, authority, _ := lifecycleFixture(t)
-	cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts}, ColorBlue)
-	canonicalHost := "canonical-ac.sandbox.layerv.xyz"
-	refresher := &fakeStateRefresher{endpointHost: canonicalHost}
-	updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, ColorBlue, []string{labelDirectA},
-		qurl.HubBootstrap{Host: "canonical-hub.sandbox.layerv.xyz", Port: 443, ServerPublicKeyB64: cohort.HubServerPublicKeyB64},
-		qurl.NHPUDPEndpoint{Host: canonicalHost, Port: 443, ServerPublicKeyB64: cohort.CellEndpoint.ServerPublicKeyB64}, refresher)
-	if err != nil || len(updates) != 1 || updates[0].Label != labelDirectA {
-		t.Fatalf("canonical endpoint projection = %#v, %v", updates, err)
+func TestRefreshSelectedIdentityStatesRejectsRouteDriftBeforeRefresh(t *testing.T) {
+	for _, labels := range [][]string{{labelDirectA, labelDirectB}, {labelRelayC, labelRelayD}} {
+		for _, field := range []string{"hub-host", "cell-host"} {
+			t.Run(labels[0]+"/"+field, func(t *testing.T) {
+				consumer, authority, _ := lifecycleFixture(t)
+				cohort, _ := cohortFor(Plan{Cohorts: authority.Cohorts})
+				hub := qurl.HubBootstrap{Host: cohort.HubHost, Port: cohort.HubPort, ServerPublicKeyB64: cohort.HubServerPublicKeyB64}
+				endpoint := cohort.CellEndpoint
+				if field == "hub-host" {
+					hub.Host = "other-hub.sandbox.layerv.xyz"
+				} else {
+					endpoint.Host = "other-cell.sandbox.layerv.xyz"
+				}
+				refresher := &fakeStateRefresher{}
+				updates, err := consumer.RefreshSelectedIdentityStates(context.Background(), authority, labels, hub, endpoint, refresher)
+				if err == nil || updates != nil || refresher.calls.Load() != 0 {
+					t.Fatalf("route drift refresh = %#v, calls=%d, err=%v", updates, refresher.calls.Load(), err)
+				}
+			})
+		}
 	}
 }
 
@@ -111,7 +119,7 @@ func (f *fakeStateRefresher) refresh(ctx context.Context, store qurl.AgentStateS
 	if err := store.SaveAgentState(ctx, state); err != nil {
 		return nil, err
 	}
-	host := identity.Selector.Host
+	host := cohort.CellEndpoint.Host
 	if f.endpointHost != "" {
 		host = f.endpointHost
 	}

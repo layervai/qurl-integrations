@@ -43,7 +43,6 @@ type CredentialWriterLock interface {
 type connectorState struct {
 	Schema     int                       `json:"schema"`
 	Generation string                    `json:"generation_id"`
-	Color      string                    `json:"color"`
 	Label      string                    `json:"label"`
 	Request    *connectorResourceRequest `json:"request,omitempty"`
 	Resolution *connectorResolution      `json:"resolution,omitempty"`
@@ -138,7 +137,7 @@ type ProvisionedGeneration struct {
 	Reference StateReference
 }
 
-// Provision creates or resumes all eight fixed identities under one writer lock.
+// Provision creates or resumes all four fixed identities under one writer lock.
 func (p *Provisioner) Provision(ctx context.Context, plan Plan) (ProvisionedGeneration, error) { //nolint:gocritic // Provision pins one immutable plan value.
 	if err := ValidatePlan(plan); err != nil {
 		return ProvisionedGeneration{}, err
@@ -181,7 +180,7 @@ func (p *Provisioner) Provision(ctx context.Context, plan Plan) (ProvisionedGene
 		for _, identityPlan := range plan.Identities {
 			identity, provisionErr := p.ProvisionOne(lockedCtx, plan, identityPlan)
 			if provisionErr != nil {
-				return fmt.Errorf("provision %s %s: %w", identityPlan.Color, identityPlan.Label, provisionErr)
+				return fmt.Errorf("provision %s: %w", identityPlan.Label, provisionErr)
 			}
 			result.Identities = append(result.Identities, identity)
 		}
@@ -216,11 +215,11 @@ func validateEnrollmentCredentialReceipt(receipt EnrollmentCredentialReceipt, ex
 
 // ProvisionOne creates or resumes one identity; callers must hold WriterLock.
 func (p *Provisioner) ProvisionOne(ctx context.Context, plan Plan, identityPlan IdentityPlan) (FixedIdentity, error) { //nolint:gocritic // Closed plan values are intentionally copied.
-	cohort, err := cohortFor(plan, identityPlan.Color)
+	cohort, err := cohortFor(plan)
 	if err != nil {
 		return FixedIdentity{}, err
 	}
-	stateKey := fmt.Sprintf("generations/%s/%s/%s/agent-state", plan.GenerationID, identityPlan.Color, identityPlan.Label)
+	stateKey := fmt.Sprintf("generations/%s/shared/%s/agent-state", plan.GenerationID, identityPlan.Label)
 	stateStore, err := NewDurableAgentStateStore(p.Blobs, stateKey)
 	if err != nil {
 		return FixedIdentity{}, err
@@ -244,7 +243,7 @@ func (p *Provisioner) ProvisionOne(ctx context.Context, plan Plan, identityPlan 
 		return FixedIdentity{}, errors.New("fixed agent runtime contradicts signed cohort")
 	}
 
-	connectorKey := fmt.Sprintf("generations/%s/%s/%s/connector-state", plan.GenerationID, identityPlan.Color, identityPlan.Label)
+	connectorKey := fmt.Sprintf("generations/%s/shared/%s/connector-state", plan.GenerationID, identityPlan.Label)
 	resolution, connectorRef, err := p.resolveConnector(ctx, connectorKey, plan.GenerationID, identityPlan, runtime, binding)
 	if err != nil {
 		return FixedIdentity{}, err
@@ -253,7 +252,7 @@ func (p *Provisioner) ProvisionOne(ctx context.Context, plan Plan, identityPlan 
 	if err != nil {
 		return FixedIdentity{}, fmt.Errorf("read committed agent state reference: %w", err)
 	}
-	return FixedIdentity{Color: identityPlan.Color, Label: identityPlan.Label, OwnerID: identityPlan.OwnerID,
+	return FixedIdentity{Label: identityPlan.Label, OwnerID: identityPlan.OwnerID,
 		AgentID: identityPlan.AgentID, AgentPublicKeyB64: binding.PublicKeyB64, AgentKeySchemaVersion: AgentKeySchemaVersion,
 		EnrollmentCredentialKind: EnrollmentCredentialKindAccount, ConnectorIDClaim: "", DeviceAPIKeyID: binding.DeviceAPIKeyID,
 		ConnectorID: resolution.ConnectorID, ResourceID: resolution.ResourceID, CRID: resolution.CRID,
@@ -306,12 +305,12 @@ func (p *Provisioner) resolveConnector(ctx context.Context, key, generation stri
 func loadConnectorState(ctx context.Context, authority BlobAuthority, key, generation string, plan IdentityPlan) (connectorState, Blob, error) { //nolint:gocritic // Closed identity values are intentionally copied.
 	blob, err := authority.Load(ctx, key)
 	if errors.Is(err, errStateNotFound) {
-		return connectorState{Schema: connectorStateSchema, Generation: generation, Color: plan.Color, Label: plan.Label}, Blob{Key: key}, nil
+		return connectorState{Schema: connectorStateSchema, Generation: generation, Label: plan.Label}, Blob{Key: key}, nil
 	}
 	if err != nil {
 		return connectorState{}, Blob{}, err
 	}
-	if Digest(blob.Body) != blob.SHA256 || !validText(blob.VersionID) {
+	if blob.Key != key || Digest(blob.Body) != blob.SHA256 || !validText(blob.VersionID) {
 		return connectorState{}, Blob{}, fmt.Errorf("%w: connector state blob", errStateConflict)
 	}
 	var state connectorState
@@ -319,7 +318,7 @@ func loadConnectorState(ctx context.Context, authority BlobAuthority, key, gener
 		return connectorState{}, Blob{}, fmt.Errorf("%w: connector state JSON", errStateConflict)
 	}
 	canonical, _ := CanonicalJSON(state)
-	if !bytes.Equal(canonical, blob.Body) || state.Schema != connectorStateSchema || state.Generation != generation || state.Color != plan.Color || state.Label != plan.Label {
+	if !bytes.Equal(canonical, blob.Body) || state.Schema != connectorStateSchema || state.Generation != generation || state.Label != plan.Label {
 		return connectorState{}, Blob{}, fmt.Errorf("%w: connector state binding", errStateConflict)
 	}
 	return state, cloneBlob(blob), nil
@@ -356,7 +355,7 @@ func persistImmutable(ctx context.Context, authority BlobAuthority, key, kind st
 	operationID := Digest([]byte("layerv/matched-cohort-immutable/v1\x00" + kind + "\x00" + key + "\x00" + digest))
 	current, err := authority.Load(ctx, key)
 	if err == nil {
-		if current.PreviousVersion != "" || current.OperationID != operationID || current.SHA256 != digest || !bytes.Equal(current.Body, raw) {
+		if current.Key != key || current.PreviousVersion != "" || current.OperationID != operationID || current.SHA256 != digest || !bytes.Equal(current.Body, raw) {
 			return Blob{}, fmt.Errorf("%w: immutable %s drift", errStateConflict, kind)
 		}
 		return current, nil
@@ -379,11 +378,9 @@ func persistImmutable(ctx context.Context, authority BlobAuthority, key, kind st
 	return committed, nil
 }
 
-func cohortFor(plan Plan, color string) (CohortPlan, error) { //nolint:gocritic // The closed two-item plan favors value semantics.
-	for i := range plan.Cohorts {
-		if plan.Cohorts[i].Color == color {
-			return plan.Cohorts[i], nil
-		}
+func cohortFor(plan Plan) (CohortPlan, error) { //nolint:gocritic // The closed one-item plan favors value semantics.
+	if len(plan.Cohorts) != 1 {
+		return CohortPlan{}, fmt.Errorf("%w: missing shared cohort", errInvalidAuthority)
 	}
-	return CohortPlan{}, fmt.Errorf("%w: missing %s cohort", errInvalidAuthority, color)
+	return plan.Cohorts[0], nil
 }

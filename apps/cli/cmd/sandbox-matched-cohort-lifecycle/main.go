@@ -1,7 +1,7 @@
 //go:build linux && !android
 
 // Command sandbox-matched-cohort-lifecycle runs the protected sandbox-only
-// fixed-canary lifecycle and closed-admission outcomes.
+// fixed-canary lifecycle and recovery-first outcomes.
 package main
 
 import (
@@ -30,19 +30,18 @@ import (
 )
 
 const (
-	inputSchema            = 1
-	reportSchema           = 1
-	maxInputSize           = 1 << 20
-	operationLifecycle     = "lifecycle"
-	operationPrepareClosed = "prepare-closed"
-	operationVerifyClosed  = "verify-closed"
-	transportDirect        = "direct"
-	transportRelay         = "relay"
-	labelDirectA           = "direct-a"
-	labelDirectB           = "direct-b"
-	labelRelayC            = "relay-c"
-	labelRelayD            = "relay-d"
-	sandboxAPIEndpoint     = "https://api.layerv.xyz"
+	inputSchema              = 1
+	reportSchema             = 1
+	maxInputSize             = 1 << 20
+	operationLifecycle       = "lifecycle"
+	operationRecoverPrepared = "recover-prepared"
+	transportDirect          = "direct"
+	transportRelay           = "relay"
+	labelDirectA             = "direct-a"
+	labelDirectB             = "direct-b"
+	labelRelayC              = "relay-c"
+	labelRelayD              = "relay-d"
+	sandboxAPIEndpoint       = "https://api.layerv.xyz"
 )
 
 type lifecycleInput struct {
@@ -52,7 +51,6 @@ type lifecycleInput struct {
 	ReleaseID        string                       `json:"release_id"`
 	Phase            string                       `json:"phase"`
 	Attempt          uint64                       `json:"attempt"`
-	Color            string                       `json:"color"`
 	Transport        string                       `json:"transport"`
 	Authority        matchedcohort.StateReference `json:"authority"`
 	AdmissionHub     qurl.HubBootstrap            `json:"admission_hub"`
@@ -72,7 +70,6 @@ type lifecycleInput struct {
 	QURLSourceSHA    string                       `json:"qurl_source_sha"`
 	QURLGoSourceSHA  string                       `json:"qurl_go_source_sha"`
 	ClientVersion    string                       `json:"client_version"`
-	PreparedClosure  *closurePreparation          `json:"prepared_closure,omitempty"`
 }
 
 type lifecycleReport struct {
@@ -82,7 +79,6 @@ type lifecycleReport struct {
 	ReleaseID        string                       `json:"release_id"`
 	Phase            string                       `json:"phase"`
 	Attempt          uint64                       `json:"attempt"`
-	Color            string                       `json:"color"`
 	Transport        string                       `json:"transport"`
 	InputSHA256      string                       `json:"input_sha256"`
 	Authority        matchedcohort.StateReference `json:"authority"`
@@ -92,7 +88,13 @@ type lifecycleReport struct {
 	QURLSourceSHA    string                       `json:"qurl_source_sha"`
 	QURLGoSourceSHA  string                       `json:"qurl_go_source_sha"`
 	Lifecycle        *lifecycleReportOutcome      `json:"lifecycle,omitempty"`
-	Closure          *closureReportOutcome        `json:"closure,omitempty"`
+	Recovery         *recoveryReportOutcome       `json:"recovery,omitempty"`
+}
+
+type recoveryReportOutcome struct {
+	Status  string                             `json:"status"`
+	Label   string                             `json:"label"`
+	Receipt matchedcohort.RecoveryFirstReceipt `json:"receipt"`
 }
 
 type lifecycleReportOutcome struct {
@@ -103,19 +105,6 @@ type lifecycleReportOutcome struct {
 	ReplacementKey  string                             `json:"replacement_key"`
 	Outcome         *matchedcohort.LifecycleOutcome    `json:"outcome,omitempty"`
 	Settlement      *matchedcohort.LifecycleSettlement `json:"settlement,omitempty"`
-}
-
-type closureReportOutcome struct {
-	Status        string                           `json:"status"`
-	Intent        matchedcohort.StateReference     `json:"intent"`
-	OperationKeys []string                         `json:"operation_keys"`
-	Outcome       *matchedcohort.ClosureOutcome    `json:"outcome,omitempty"`
-	Settlement    *matchedcohort.ClosureSettlement `json:"settlement,omitempty"`
-}
-
-type closurePreparation struct {
-	Intent        matchedcohort.StateReference `json:"intent"`
-	OperationKeys []string                     `json:"operation_keys"`
 }
 
 type commandArgs struct {
@@ -141,7 +130,7 @@ func parseArgs(args []string) (commandArgs, error) {
 	return values, nil
 }
 
-func loadInput(path string) (lifecycleInput, []byte, error) { //nolint:gocyclo,gocognit // This is the closed input trust boundary.
+func loadInput(path string) (lifecycleInput, []byte, error) { //nolint:gocyclo // This is the closed input trust boundary.
 	raw, err := readPrivateFile(path, maxInputSize)
 	if err != nil {
 		return lifecycleInput{}, nil, err
@@ -157,8 +146,8 @@ func loadInput(path string) (lifecycleInput, []byte, error) { //nolint:gocyclo,g
 		return lifecycleInput{}, nil, errors.New("lifecycle input is not canonical")
 	}
 	if input.Schema != inputSchema || input.Environment != matchedcohort.EnvironmentSandbox ||
-		(input.Operation != operationLifecycle && input.Operation != operationPrepareClosed && input.Operation != operationVerifyClosed) || !hex64(input.ReleaseID) ||
-		(input.Color != "blue" && input.Color != "green") || (input.Transport != transportDirect && input.Transport != transportRelay) ||
+		(input.Operation != operationLifecycle && input.Operation != operationRecoverPrepared) || !hex64(input.ReleaseID) ||
+		(input.Transport != transportDirect && input.Transport != transportRelay) ||
 		input.Phase == "" || input.Phase != strings.TrimSpace(input.Phase) || input.Attempt == 0 ||
 		input.PreparedAtMS <= 0 || input.ExpiresAtMS <= input.PreparedAtMS || input.ExpiresAtMS-input.PreparedAtMS > int64(30*time.Minute/time.Millisecond) ||
 		input.Authority.Key == "" || input.Authority.Key != strings.TrimSpace(input.Authority.Key) ||
@@ -169,25 +158,18 @@ func loadInput(path string) (lifecycleInput, []byte, error) { //nolint:gocyclo,g
 		!cleanAbsolute(input.APIKeyFile) || !cleanAbsolute(input.DeploymentFile) || !cleanAbsolute(input.QURLBinary) ||
 		input.APIEndpoint != sandboxAPIEndpoint || !hex64(input.DeploymentSHA256) || !hex64(input.CommandSHA256) ||
 		!hex64(input.QURLBinarySHA256) ||
-		!hex40(input.QURLSourceSHA) || input.QURLGoSourceSHA != matchedcohort.RequiredQURLGoSourceSHA ||
+		!hex40(input.QURLSourceSHA) || !hex40(input.QURLGoSourceSHA) ||
 		input.ClientVersion == "" || input.ClientVersion != strings.TrimSpace(input.ClientVersion) {
 		return lifecycleInput{}, nil, errors.New("lifecycle input authority is invalid")
 	}
 	wantRunIDs := 3
-	if input.Operation == operationPrepareClosed || input.Operation == operationVerifyClosed {
-		wantRunIDs = 4
-		if input.Transport != "direct" || input.Phase != "active_"+input.Color+"_closure_recovery" {
-			return lifecycleInput{}, nil, errors.New("closed-admission input phase is invalid")
+	if input.Operation == operationRecoverPrepared {
+		wantRunIDs = 1
+		if input.Transport != transportDirect || input.Phase != "fixed_shared_recovery_first" {
+			return lifecycleInput{}, nil, errors.New("recovery-first input is invalid")
 		}
-	}
-	wantsPreparedClosure := input.Operation == operationVerifyClosed ||
-		input.Operation == operationPrepareClosed && input.Attempt > 1
-	if wantsPreparedClosure != (input.PreparedClosure != nil) ||
-		(input.Operation == operationPrepareClosed || input.Operation == operationVerifyClosed) && input.Attempt > matchedcohort.MaxClosureAttempts {
-		return lifecycleInput{}, nil, errors.New("closed-admission preparation receipt is invalid")
-	}
-	if input.PreparedClosure != nil && (!validClosurePreparation(*input.PreparedClosure)) {
-		return lifecycleInput{}, nil, errors.New("closed-admission preparation receipt is invalid")
+	} else if input.Phase != "fixed_shared_"+input.Transport {
+		return lifecycleInput{}, nil, errors.New("shared lifecycle input phase is invalid")
 	}
 	if len(input.RunIDs) != wantRunIDs {
 		return lifecycleInput{}, nil, errors.New("lifecycle RunID count is invalid")
@@ -222,26 +204,20 @@ func run(ctx context.Context, args commandArgs) (lifecycleReport, error) { //nol
 		return lifecycleReport{}, err
 	}
 	authorityBlob, err := rpc.Load(ctx, input.Authority.Key)
-	if err != nil || authorityBlob.VersionID != input.Authority.VersionID || authorityBlob.SHA256 != input.Authority.SHA256 {
+	if err != nil {
 		return lifecycleReport{}, errors.New("fixed canary authority reference does not match durable storage")
 	}
-	var authority matchedcohort.Authority
-	decoder := json.NewDecoder(bytes.NewReader(authorityBlob.Body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&authority); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return lifecycleReport{}, errors.New("fixed canary authority JSON is invalid")
-	}
-	canonicalAuthority, err := matchedcohort.CanonicalJSON(authority)
-	if err != nil || !bytes.Equal(canonicalAuthority, authorityBlob.Body) || matchedcohort.ValidateAuthority(authority) != nil ||
-		authority.NHPSourceSHA != matchedcohort.RequiredNHPSourceSHA || authority.QURLGoSourceSHA != input.QURLGoSourceSHA {
-		return lifecycleReport{}, errors.New("fixed canary authority is not exact")
+	authority, err := validateAuthorityBlob(input, authorityBlob)
+	if err != nil {
+		return lifecycleReport{}, err
 	}
 	deployment, err := validateTransportDeployment(input)
 	if err != nil {
 		return lifecycleReport{}, err
 	}
-	cohort, err := selectedCohort(authority, input.Color)
-	if err != nil || (input.Transport == transportDirect && deployment.Cells[0].CellID != cohort.CellID) {
+	cohort, err := selectedCohort(authority)
+	if err != nil || validateSelectedRoute(input, cohort) != nil ||
+		(input.Transport == transportDirect && deployment.Cells[0].CellID != cohort.CellID) {
 		return lifecycleReport{}, errors.New("customer deployment does not match selected physical cohort")
 	}
 	sessionRuntime, err := matchedcohort.NewQURLSessionRuntime(input.AdmissionHub)
@@ -249,84 +225,40 @@ func run(ctx context.Context, args commandArgs) (lifecycleReport, error) { //nol
 		return lifecycleReport{}, err
 	}
 	consumer := &matchedcohort.Consumer{Blobs: rpc, Runtime: sessionRuntime}
-	if input.Operation == operationPrepareClosed {
-		var stateUpdates []matchedcohort.StateUpdate
-		var stateReferences map[string]matchedcohort.StateReference
-		var previous *matchedcohort.PreparedClosure
-		if input.Attempt == 1 {
-			closureLabels := []string{labelDirectA, labelDirectB, labelRelayC, labelRelayD}
-			var refreshErr error
-			stateUpdates, refreshErr = consumer.RefreshSelectedIdentityStates(ctx, authority, input.Color, closureLabels,
-				input.AdmissionHub, input.AdmissionCell, nil)
-			if refreshErr != nil {
-				return lifecycleReport{}, refreshErr
+	if input.Operation == operationRecoverPrepared {
+		var identity *matchedcohort.FixedIdentity
+		for index := range authority.Identities {
+			candidate := &authority.Identities[index]
+			if candidate.Label == labelDirectA {
+				identity = candidate
+				break
 			}
-			stateReferences = make(map[string]matchedcohort.StateReference, len(stateUpdates))
-			for _, update := range stateUpdates {
-				stateReferences[update.Label] = update.After
-			}
-		} else {
-			loaded, loadErr := loadPreparedClosure(ctx, rpc, *input.PreparedClosure)
-			if loadErr != nil || loaded.Intent.Attempt+1 != input.Attempt {
-				return lifecycleReport{}, errors.New("closed-admission predecessor is not exact")
-			}
-			previous = &loaded
-			stateUpdates = []matchedcohort.StateUpdate{}
 		}
-		prepared, prepareErr := consumer.PrepareClosure(ctx, authority, matchedcohort.ClosureIntentInput{
-			ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt, Color: input.Color, AdmissionEndpoint: input.AdmissionCell,
-			RecoveryEndpoint: input.RecoveryEndpoint,
-			RunIDs:           [4]string{input.RunIDs[0], input.RunIDs[1], input.RunIDs[2], input.RunIDs[3]},
-			PreparedAt:       time.UnixMilli(input.PreparedAtMS).UTC(), ExpiresAt: time.UnixMilli(input.ExpiresAtMS).UTC(),
-			AgentStates: stateReferences, Previous: previous,
+		if identity == nil {
+			return lifecycleReport{}, errors.New("recovery-first fixed identity is absent")
+		}
+		receipt, recoverErr := consumer.RecoverPrepared(ctx, authority, matchedcohort.PrepareOperationRequest{
+			ReleaseID: input.ReleaseID, Phase: input.Phase, AWSAccountID: authority.AWSAccountID, AWSRegion: authority.AWSRegion,
+			Identity: *identity, Cohort: cohort, ExpectedAgentState: identity.AgentState, RecoveryEndpoint: input.RecoveryEndpoint,
+			RunID: input.RunIDs[0], RunAttempt: input.Attempt, PreparedAt: time.UnixMilli(input.PreparedAtMS).UTC(),
+			ExpiresAt: time.UnixMilli(input.ExpiresAtMS).UTC(),
 		})
-		if prepareErr != nil {
-			return lifecycleReport{}, prepareErr
+		if recoverErr != nil {
+			return lifecycleReport{}, recoverErr
 		}
 		return lifecycleReport{Schema: reportSchema, Environment: matchedcohort.EnvironmentSandbox,
 			Operation: input.Operation, ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt,
-			Color: input.Color, Transport: input.Transport, InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority,
-			StateUpdates: stateUpdates, CommandSHA256: input.CommandSHA256,
+			Transport: input.Transport, InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority,
+			StateUpdates: []matchedcohort.StateUpdate{}, CommandSHA256: input.CommandSHA256,
 			QURLBinarySHA256: input.QURLBinarySHA256, QURLSourceSHA: input.QURLSourceSHA,
-			QURLGoSourceSHA: input.QURLGoSourceSHA, Closure: &closureReportOutcome{Status: "prepared",
-				Intent: prepared.IntentReference, OperationKeys: append([]string(nil), prepared.OperationKeys[:]...)}}, nil
-	}
-	if input.Operation == operationVerifyClosed {
-		prepared, loadErr := loadPreparedClosure(ctx, rpc, *input.PreparedClosure)
-		if loadErr != nil || prepared.Intent.ReleaseID != input.ReleaseID || prepared.Intent.Phase != input.Phase ||
-			prepared.Intent.Attempt != input.Attempt || prepared.Intent.Color != input.Color ||
-			prepared.Intent.AdmissionEndpoint != input.AdmissionCell || prepared.Intent.RecoveryEndpoint != input.RecoveryEndpoint {
-			return lifecycleReport{}, errors.New("closed-admission intent is not exact")
-		}
-		outcome, closureErr := consumer.RunPreparedClosure(ctx, authority, prepared, 5*time.Second, 15*time.Second)
-		if closureErr != nil {
-			settlement, settleErr := consumer.SettlePreparedClosure(ctx, prepared)
-			if settleErr != nil {
-				return lifecycleReport{}, errors.Join(closureErr, settleErr)
-			}
-			return lifecycleReport{Schema: reportSchema, Environment: matchedcohort.EnvironmentSandbox,
-				Operation: input.Operation, ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt,
-				Color: input.Color, Transport: input.Transport, StateUpdates: []matchedcohort.StateUpdate{},
-				InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority,
-				CommandSHA256: input.CommandSHA256, QURLBinarySHA256: input.QURLBinarySHA256,
-				QURLSourceSHA: input.QURLSourceSHA, QURLGoSourceSHA: input.QURLGoSourceSHA,
-				Closure: &closureReportOutcome{Status: "settled-retry-required", Intent: prepared.IntentReference,
-					OperationKeys: append([]string(nil), prepared.OperationKeys[:]...), Settlement: &settlement}}, nil
-		}
-		return lifecycleReport{Schema: reportSchema, Environment: matchedcohort.EnvironmentSandbox,
-			Operation: input.Operation, ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt,
-			Color: input.Color, Transport: input.Transport, StateUpdates: []matchedcohort.StateUpdate{},
-			InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority,
-			CommandSHA256: input.CommandSHA256, QURLBinarySHA256: input.QURLBinarySHA256,
-			QURLSourceSHA: input.QURLSourceSHA, QURLGoSourceSHA: input.QURLGoSourceSHA,
-			Closure: &closureReportOutcome{Status: "completed", Intent: prepared.IntentReference,
-				OperationKeys: append([]string(nil), prepared.OperationKeys[:]...), Outcome: &outcome}}, nil
+			QURLGoSourceSHA: input.QURLGoSourceSHA,
+			Recovery:        &recoveryReportOutcome{Status: "completed", Label: labelDirectA, Receipt: receipt}}, nil
 	}
 	labels := []string{labelDirectA, labelDirectB}
 	if input.Transport == transportRelay {
 		labels = []string{labelRelayC, labelRelayD}
 	}
-	stateUpdates, err := consumer.RefreshSelectedIdentityStates(ctx, authority, input.Color, labels,
+	stateUpdates, err := consumer.RefreshSelectedIdentityStates(ctx, authority, labels,
 		input.AdmissionHub, input.AdmissionCell, nil)
 	if err != nil {
 		return lifecycleReport{}, err
@@ -336,7 +268,7 @@ func run(ctx context.Context, args commandArgs) (lifecycleReport, error) { //nol
 		stateReferences[update.Label] = update.After
 	}
 	prepared, err := consumer.PrepareLifecycle(ctx, authority, matchedcohort.LifecycleIntentInput{
-		ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt, Color: input.Color, Transport: input.Transport,
+		ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt, Transport: input.Transport,
 		RecoveryEndpoint: input.RecoveryEndpoint, RunIDs: [3]string{input.RunIDs[0], input.RunIDs[1], input.RunIDs[2]},
 		PreparedAt: time.UnixMilli(input.PreparedAtMS).UTC(), ExpiresAt: time.UnixMilli(input.ExpiresAtMS).UTC(),
 		AgentStates: stateReferences,
@@ -355,7 +287,7 @@ func run(ctx context.Context, args commandArgs) (lifecycleReport, error) { //nol
 		}
 		return lifecycleReport{Schema: reportSchema, Environment: matchedcohort.EnvironmentSandbox,
 			Operation: input.Operation, ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt,
-			Color: input.Color, Transport: input.Transport, InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority, StateUpdates: stateUpdates,
+			Transport: input.Transport, InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority, StateUpdates: stateUpdates,
 			CommandSHA256: input.CommandSHA256, QURLBinarySHA256: input.QURLBinarySHA256,
 			QURLSourceSHA: input.QURLSourceSHA, QURLGoSourceSHA: input.QURLGoSourceSHA,
 			Lifecycle: &lifecycleReportOutcome{Status: "settled-retry-required", Intent: prepared.IntentReference,
@@ -388,7 +320,7 @@ func run(ctx context.Context, args commandArgs) (lifecycleReport, error) { //nol
 	var selected []matchedcohort.FixedIdentity
 	for index := range authority.Identities {
 		identity := authority.Identities[index]
-		if identity.Color == input.Color && (identity.Label == labelPair[0] || identity.Label == labelPair[1]) {
+		if identity.Label == labelPair[0] || identity.Label == labelPair[1] {
 			selected = append(selected, identity)
 		}
 	}
@@ -403,12 +335,43 @@ func run(ctx context.Context, args commandArgs) (lifecycleReport, error) { //nol
 		return lifecycleReport{}, err
 	}
 	return lifecycleReport{Schema: reportSchema, Environment: matchedcohort.EnvironmentSandbox, Operation: input.Operation,
-		ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt, Color: input.Color, Transport: input.Transport,
+		ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt, Transport: input.Transport,
 		InputSHA256: matchedcohort.Digest(inputRaw), Authority: input.Authority, StateUpdates: stateUpdates,
 		CommandSHA256: input.CommandSHA256, QURLBinarySHA256: input.QURLBinarySHA256, QURLSourceSHA: input.QURLSourceSHA,
 		QURLGoSourceSHA: input.QURLGoSourceSHA, Lifecycle: &lifecycleReportOutcome{Status: "completed", Intent: prepared.IntentReference,
 			PrimaryFirstKey: prepared.PrimaryFirstKey, SiblingKey: prepared.SiblingKey,
 			ReplacementKey: prepared.ReplacementKey, Outcome: &outcome}}, nil
+}
+
+// validateAuthorityBlob binds the outer durable key and every canonical body
+// field before any qurl runtime is constructed.
+func validateAuthorityBlob(input lifecycleInput, authorityBlob matchedcohort.Blob) (matchedcohort.Authority, error) { //nolint:gocritic // Input and blob are immutable invocation snapshots.
+	if authorityBlob.Key != input.Authority.Key || authorityBlob.VersionID != input.Authority.VersionID ||
+		authorityBlob.SHA256 != input.Authority.SHA256 || matchedcohort.Digest(authorityBlob.Body) != authorityBlob.SHA256 {
+		return matchedcohort.Authority{}, errors.New("fixed canary authority reference does not match durable storage")
+	}
+	var authority matchedcohort.Authority
+	decoder := json.NewDecoder(bytes.NewReader(authorityBlob.Body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&authority); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return matchedcohort.Authority{}, errors.New("fixed canary authority JSON is invalid")
+	}
+	canonicalAuthority, err := matchedcohort.CanonicalJSON(authority)
+	if err != nil || !bytes.Equal(canonicalAuthority, authorityBlob.Body) || matchedcohort.ValidateAuthority(authority) != nil ||
+		input.Authority.Key != "generations/"+authority.GenerationID+"/authority" ||
+		authority.QURLGoSourceSHA != input.QURLGoSourceSHA {
+		return matchedcohort.Authority{}, errors.New("fixed canary authority is not exact")
+	}
+	return authority, nil
+}
+
+func validateSelectedRoute(input lifecycleInput, cohort matchedcohort.CohortPlan) error { //nolint:gocritic // Both values are immutable authority snapshots.
+	if input.AdmissionHub.Host != cohort.HubHost || input.AdmissionHub.Port != cohort.HubPort ||
+		input.AdmissionHub.ServerPublicKeyB64 != cohort.HubServerPublicKeyB64 || input.AdmissionCell != cohort.CellEndpoint ||
+		input.RecoveryEndpoint != cohort.CellEndpoint {
+		return errors.New("customer route does not match shared cohort")
+	}
+	return nil
 }
 
 func startOutcomeServers(releaseID string, labels [2]string) (servers []*http.Server, targets map[string]string,
@@ -714,60 +677,6 @@ func hex40(value string) bool {
 	return len(value) == 40 && hex64(value+strings.Repeat("0", 24))
 }
 
-func validClosurePreparation(value closurePreparation) bool {
-	if !validateStateReferenceInput(value.Intent) || len(value.OperationKeys) != 4 {
-		return false
-	}
-	seen := make(map[string]struct{}, len(value.OperationKeys))
-	for _, key := range value.OperationKeys {
-		if key == "" || key != strings.TrimSpace(key) {
-			return false
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return false
-		}
-		seen[key] = struct{}{}
-	}
-	return true
-}
-
-func loadPreparedClosure(ctx context.Context, rpc *matchedcohort.AuthorityRPC,
-	value closurePreparation,
-) (matchedcohort.PreparedClosure, error) {
-	if rpc == nil || !validClosurePreparation(value) {
-		return matchedcohort.PreparedClosure{}, errors.New("closed-admission preparation receipt is invalid")
-	}
-	intentBlob, err := rpc.Load(ctx, value.Intent.Key)
-	observed := matchedcohort.StateReference{Key: intentBlob.Key, VersionID: intentBlob.VersionID, SHA256: intentBlob.SHA256}
-	if err != nil || observed != value.Intent {
-		return matchedcohort.PreparedClosure{}, errors.New("closed-admission intent reference does not match durable storage")
-	}
-	var intent matchedcohort.ClosureIntent
-	if decodeExactJSON(intentBlob.Body, &intent) != nil {
-		return matchedcohort.PreparedClosure{}, errors.New("closed-admission intent is invalid")
-	}
-	var operationKeys [4]string
-	copy(operationKeys[:], value.OperationKeys)
-	return matchedcohort.PreparedClosure{IntentReference: value.Intent, Intent: intent, OperationKeys: operationKeys}, nil
-}
-
-func validateStateReferenceInput(value matchedcohort.StateReference) bool {
-	return value.Key != "" && value.Key == strings.TrimSpace(value.Key) && hex64(value.VersionID) && hex64(value.SHA256)
-}
-
-func decodeExactJSON(raw []byte, value any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(value); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("durable JSON schema is invalid")
-	}
-	canonical, err := json.Marshal(value)
-	if err != nil || !bytes.Equal(canonical, raw) {
-		return errors.New("durable JSON is not canonical")
-	}
-	return nil
-}
-
 func validRaw32Key(value string) bool {
 	raw, err := base64.StdEncoding.Strict().DecodeString(value)
 	return err == nil && len(raw) == 32 && base64.StdEncoding.EncodeToString(raw) == value
@@ -799,13 +708,11 @@ func validateTransportDeployment(input lifecycleInput) (*qurl.Deployment, error)
 	return deployment, nil
 }
 
-func selectedCohort(authority matchedcohort.Authority, color string) (matchedcohort.CohortPlan, error) { //nolint:gocritic // Authority is one immutable projection.
-	for index := range authority.Cohorts {
-		if authority.Cohorts[index].Color == color {
-			return authority.Cohorts[index], nil
-		}
+func selectedCohort(authority matchedcohort.Authority) (matchedcohort.CohortPlan, error) { //nolint:gocritic // Authority is one immutable projection.
+	if len(authority.Cohorts) != 1 {
+		return matchedcohort.CohortPlan{}, errors.New("shared cohort is absent")
 	}
-	return matchedcohort.CohortPlan{}, errors.New("selected physical cohort is absent")
+	return authority.Cohorts[0], nil
 }
 
 func validDeploymentHostname(value string) bool {

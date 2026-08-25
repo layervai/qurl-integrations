@@ -124,7 +124,11 @@ func (a *AuthorityRPC) Load(ctx context.Context, key string) (Blob, error) {
 	if response.Status != "ok" || response.Blob == nil || response.Error != "" || response.Credential != "" || response.OTP != "" || response.WriterToken != "" {
 		return Blob{}, fmt.Errorf("%w: load response", errStateConflict)
 	}
-	return decodeRPCBlob(*response.Blob)
+	blob, err := decodeRPCBlob(*response.Blob)
+	if err != nil || blob.Key != key {
+		return Blob{}, errors.Join(err, fmt.Errorf("%w: load key readback", errStateConflict))
+	}
+	return blob, nil
 }
 
 // Commit implements exact CAS BlobAuthority mutation through orchestration.
