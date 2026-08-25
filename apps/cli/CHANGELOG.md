@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0](https://github.com/layervai/qurl-integrations/compare/v1.7.0...v1.8.0) (2026-08-25)
+
+
+### Features
+
+* **cli:** add sandbox matched-cohort lifecycle authority ([#1256](https://github.com/layervai/qurl-integrations/issues/1256)) ([7a1b061](https://github.com/layervai/qurl-integrations/commit/7a1b0613d527de8924c59f72aed91fc8a08fb190))
+* **cli:** use shared sandbox fixed canaries ([#1259](https://github.com/layervai/qurl-integrations/issues/1259)) ([78b0254](https://github.com/layervai/qurl-integrations/commit/78b025404be1d52e9fe9144a28812b71dcd80b96))
+
 ## [1.7.0](https://github.com/layervai/qurl-integrations/compare/v1.6.2...v1.7.0) (2026-08-21)
 
 
