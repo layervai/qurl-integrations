@@ -71,6 +71,21 @@ describe('Teams bot primitives', () => {
     });
   });
 
+  it('explains that resource commands are unavailable in group chats', async () => {
+    const replies: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: false }) } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await bot.handleActivity({
+      type: 'message', text: 'list', from: { aadObjectId: 'actor' },
+      channelData: { tenant: { id: 'tenant' } },
+      conversation: { id: 'group', conversationType: 'groupChat' },
+    }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual(['This command is available only in Teams channels, not direct or group chats.']);
+  });
+
   it('quotes connector bootstrap secrets in the rendered command', () => {
     const message = renderTunnelInstallMessage({ slug: 'prod', alias: 'prod', environment: 'docker', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: "key'with-space" });
     expect(message).toContain("'key'\"'\"'with-space'");
@@ -212,6 +227,56 @@ describe('Teams bot primitives', () => {
     } as unknown as QurlClient;
     await expect(bot.resources(qurl)).resolves.toEqual([{ resourceId: 'resource-1' }, { resourceId: 'resource-2' }]);
     expect(cursors).toEqual([undefined, 'next']);
+  });
+
+  it('rejects a resource pagination cursor cycle', async () => {
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const qurl = { listResources: async () => ({ resources: [], nextCursor: 'loop' }) } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
+  });
+
+  it('rejects has_more without a continuation cursor', async () => {
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const qurl = { listResources: async () => ({ resources: [], hasMore: true }) } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).rejects.toThrow('pagination is invalid');
+  });
+
+  it('enforces the resource pagination safety cap', async () => {
+    let calls = 0;
+    const bot = new TeamsBot({ qurl: {} as QurlClient, data: {} as TeamsDataStore, messages: {} as never });
+    const qurl = {
+      listResources: async (_signal?: AbortSignal, cursor?: string) => {
+        calls += 1;
+        return { resources: [], nextCursor: String(Number(cursor ?? '0') + 1) };
+      },
+    } as unknown as QurlClient;
+    await expect(bot.resources(qurl)).rejects.toThrow('exceeded the safety limit');
+    expect(calls).toBe(1_000);
+  });
+
+  it('delivers dm:true qURLs to the actor personal conversation', async () => {
+    let sent: { readonly serviceUrl: string; readonly conversationId: string; readonly text: string } | undefined;
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+        create: async () => ({ resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' }),
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: false }),
+        allowedResourceIds: async () => new Set(['resource-1']),
+        lookupScopeAlias: async () => undefined,
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'personal-conversation' }),
+      } as unknown as TeamsDataStore,
+      messages: {
+        sendText: async (serviceUrl: string, conversationId: string, text: string) => { sent = { serviceUrl, conversationId, text }; },
+      } as never,
+    });
+
+    await expect(bot.execute(
+      { type: 'message', id: 'activity-1', from: { id: 'delivery', aadObjectId: 'actor' } },
+      'tenant-1', 'channel-1', true, parseCommand('get $resource-1 dm:true'),
+    )).resolves.toBe('Sent the one-time qURL to your personal Teams chat.');
+    expect(sent).toEqual({ serviceUrl: 'https://smba.trafficmanager.net', conversationId: 'personal-conversation', text: 'qURL for `$resource-1`: https://qurl.example/one' });
   });
 
   it('uses distinct idempotency keys for connector resources and enrollment tokens', async () => {

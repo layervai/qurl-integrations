@@ -1,5 +1,6 @@
 import { Console } from 'node:console';
 import { createServer, type Server, type ServerResponse } from 'node:http';
+import { pathToFileURL } from 'node:url';
 import express from 'express';
 import type { Application, Request } from 'express';
 import { App, ExpressAdapter } from '@microsoft/teams.apps';
@@ -26,6 +27,7 @@ import { toTeamsActivity } from './activity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const ACTIVITY_TIMEOUT_MS = 30_000;
+const DEFAULT_HOST = '127.0.0.1';
 const runtimeConsole = new Console({ stdout: process.stdout, stderr: process.stderr });
 
 export interface TeamsServerOptions {
@@ -149,6 +151,10 @@ export interface TeamsProductionConfig {
   readonly host: string;
 }
 
+export function isMainModule(entrypoint: string | undefined, moduleUrl: string): boolean {
+  return entrypoint !== undefined && pathToFileURL(entrypoint).href === moduleUrl;
+}
+
 function env(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -248,16 +254,19 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
   });
   app.on('activity', async ({ activity }) => {
     const normalized = toTeamsActivity(activity);
-    if (normalized?.type === 'conversationUpdate') await bot.captureConversation(normalized);
+    if (normalized?.type === 'conversationUpdate') {
+      try { await bot.captureConversation(normalized); }
+      catch (error) { logger.warn('Teams conversation capture failed', { error }); }
+    }
   });
   const server = await createTeamsServer({ baseUrl, app, expressApp, tokenClient, callback, state: oauthState, logger });
-  const host = process.env.HOST?.trim() || '0.0.0.0';
+  const host = process.env.HOST?.trim() || DEFAULT_HOST;
   const port = Number(process.env.PORT?.trim() || '3000');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT is invalid');
   return { server, app, port, host };
 }
 
-if (process.argv[1]?.endsWith('/server.js')) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   const runtime = await createProductionTeamsConfig();
   runtime.server.listen(runtime.port, runtime.host, () => { process.stdout.write(`Teams bot listening on ${runtime.host}:${runtime.port}\n`); });
 }

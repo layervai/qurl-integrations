@@ -21,6 +21,35 @@ class PagedDynamo implements DynamoClient {
   }
 }
 
+class CleanupDynamo implements DynamoClient {
+  readonly requests: DynamoRequest[] = [];
+  async send<T>(request: DynamoRequest): Promise<T> {
+    this.requests.push(request);
+    if (request.operation !== 'query') return {} as T;
+    const table = request.input.TableName;
+    const paged = request.input.ExclusiveStartKey !== undefined;
+    if (table === 'principals') return { Items: [{ principal_key: 'owner' }, { principal_key: 'admin%2Factor' }] } as T;
+    if (table === 'policy') {
+      return paged
+        ? { Items: [{ policy_key: 'scope%23channel%23alias%23docs', resource_id: 'resource-2' }] } as T
+        : { Items: [{ policy_key: 'scope%23channel%23resource%23resource-1', resource_id: 'resource-1' }], LastEvaluatedKey: { teams_tenant_id: 'tenant', policy_key: 'next' } } as T;
+    }
+    if (table === 'conversations') return { Items: [{ actor_aad_object_id: 'actor' }] } as T;
+    return {} as T;
+  }
+}
+
+class PurgeDynamo implements DynamoClient {
+  readonly requests: DynamoRequest[] = [];
+  async send<T>(request: DynamoRequest): Promise<T> {
+    this.requests.push(request);
+    if (request.operation !== 'query') return {} as T;
+    return request.input.ExclusiveStartKey === undefined
+      ? { Items: [{ policy_key: 'scope%23one%23resource%23target', resource_id: 'target' }, { policy_key: 'scope%23one%23resource%23other', resource_id: 'other' }], LastEvaluatedKey: { teams_tenant_id: 'tenant', policy_key: 'next' } } as T
+      : { Items: [{ policy_key: 'scope%23two%23alias%23target', resource_id: 'target' }] } as T;
+  }
+}
+
 describe('Teams DynamoDB data paths', () => {
   it('encrypts tenant credentials through the injected CMK adapter', async () => {
     const client = new RecordingDynamo();
@@ -90,5 +119,27 @@ describe('Teams DynamoDB data paths', () => {
     expect(client.requests[1]?.input).toHaveProperty('ExclusiveStartKey');
     expect(client.requests[0]?.input.KeyConditionExpression).toContain('begins_with(policy_key, :policyPrefix)');
     expect((client.requests[0]?.input.ExpressionAttributeValues as Record<string, unknown>)[':policyPrefix']).toBe('scope#channel#');
+  });
+
+  it('deletes all workspace rows across tables and query pages', async () => {
+    const client = new CleanupDynamo();
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await store.deleteWorkspace('tenant');
+    const deletes = client.requests.filter(request => request.operation === 'delete');
+    expect(client.requests.filter(request => request.operation === 'query')).toHaveLength(4);
+    expect(deletes).toHaveLength(6);
+    expect(deletes.map(request => request.input.TableName)).toEqual(['principals', 'principals', 'policy', 'policy', 'conversations', 'credentials']);
+  });
+
+  it('purges matching resource policies across query pages', async () => {
+    const client = new PurgeDynamo();
+    const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
+    await store.purgeResourceFromTenant('tenant', 'target');
+    const deletes = client.requests.filter(request => request.operation === 'delete');
+    expect(deletes).toHaveLength(2);
+    expect(deletes.map(request => (request.input.Key as Record<string, string>).policy_key)).toEqual([
+      'scope%23one%23resource%23target',
+      'scope%23two%23alias%23target',
+    ]);
   });
 });

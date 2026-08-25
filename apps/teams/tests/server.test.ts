@@ -5,7 +5,7 @@ import type { App } from '@microsoft/teams.apps';
 import { describe, expect, it } from 'vitest';
 import type { OAuthCallbackCore } from '../src/callback.js';
 import type { ConfidentialTokenClient } from '../src/interfaces.js';
-import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes } from '../src/server.js';
+import { createProductionTeamsConfig, createTeamsServer, httpsIssuer, httpsOrigin, installOAuthRoutes, isMainModule } from '../src/server.js';
 import type { OAuthStateManager } from '../src/state.js';
 
 const OPAQUE_STATE = Buffer.alloc(32, 1).toString('base64url');
@@ -87,6 +87,11 @@ describe('Teams OAuth routes', () => {
 });
 
 describe('Teams production URL configuration', () => {
+  it('only treats the exact server module as the executable entrypoint', () => {
+    expect(isMainModule('/srv/server.js', 'file:///srv/server.js')).toBe(true);
+    expect(isMainModule('/srv/server.js', 'file:///srv/consumer.js')).toBe(false);
+  });
+
   it('accepts HTTPS origins and preserves the OIDC issuer trailing slash', () => {
     expect(httpsOrigin('https://teams.example', 'TEAMS_BASE_URL')).toBe('https://teams.example');
     expect(httpsIssuer('https://tenant.auth0.com', 'AUTH0_DOMAIN')).toBe('https://tenant.auth0.com/');

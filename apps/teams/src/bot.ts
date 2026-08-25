@@ -56,10 +56,8 @@ export class TeamsBot {
     // ConversationUpdate can be emitted before the user's identity is
     // available (and some clients do not emit it for an existing chat). Keep
     // the DM reference fresh from authenticated personal messages as well.
-    if (activity.conversation?.conversationType === 'personal') {
-      try { await this.captureConversation(activity); }
-      catch (error) { this.#options.logger?.warn('Teams conversation capture failed', { error }); }
-    }
+    try { await this.captureConversation(activity); }
+    catch (error) { this.#options.logger?.warn('Teams conversation capture failed', { error }); }
     let response: string;
     try {
       const scope = deriveScope(activity);
@@ -125,7 +123,7 @@ export class TeamsBot {
         ? 'Disconnected qURL from this Teams tenant. Upstream API-key revocation may require operator follow-up.'
         : 'Disconnected qURL from this Teams tenant.';
     }
-    if (!channel) throw new UserFacingError('This command must be run in a Teams channel.');
+    if (!channel) throw new UserFacingError('This command is available only in Teams channels, not direct or group chats.');
     if (command.verb === 'aliases') return this.aliases(tenantId, scopeId);
     const qurl = await this.#qurl(tenantId);
     if (command.verb === 'protect-connector') return this.protectConnector(qurl, activity, tenantId, scopeId, command, signal);

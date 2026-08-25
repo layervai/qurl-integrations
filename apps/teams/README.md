@@ -40,9 +40,11 @@ runtime convention.
 
 ## Deployment
 
-The production entrypoint listens on `0.0.0.0:3000` by default; `HOST` and
-`PORT` can override those values. Put it behind an HTTPS/TLS terminator before
-exposing `/oauth/qurl/start`, `/oauth/qurl/callback`, or `/api/messages`.
+The production entrypoint listens on `127.0.0.1:3000` by default; `HOST` and
+`PORT` can override those values. Container deployments that receive traffic
+from a sidecar or external load balancer must explicitly set `HOST=0.0.0.0`.
+Put it behind an HTTPS/TLS terminator before exposing `/oauth/qurl/start`,
+`/oauth/qurl/callback`, or `/api/messages`.
 OAuth cookies are marked `Secure`, and the configured `TEAMS_BASE_URL` must be
 the public HTTPS origin used for the callback. The proxy should forward the
 Teams messaging route and the OAuth routes to the same server instance.
