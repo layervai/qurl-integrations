@@ -158,7 +158,7 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 		"receipt":  steps[requiredNames[3]],
 	} {
 		if current.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
-			current.With["if-no-files-found"] != "error" || current.With["retention-days"] != 1 ||
+			current.With["if-no-files-found"] != "error" || current.With["retention-days"] != 30 ||
 			current.With["compression-level"] != 0 || current.With["include-hidden-files"] != false {
 			t.Errorf("%s artifact upload is not exact: %#v", label, current.With)
 		}
