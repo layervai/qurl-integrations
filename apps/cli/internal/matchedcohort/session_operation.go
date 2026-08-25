@@ -71,6 +71,17 @@ type SessionTerminal struct {
 	CloseEventID          string `json:"close_event_id,omitempty"`
 }
 
+// RecoveryFirstReceipt binds one offline-prepared operation to its durable
+// CANCELED tombstone. The tombstone is intentionally retained by NHP; its
+// absence would let a delayed KNK create a session after this method returned.
+type RecoveryFirstReceipt struct {
+	OperationKey  string          `json:"operation_key"`
+	Record        StateReference  `json:"record"`
+	OperationID   string          `json:"operation_id"`
+	BindingSHA256 string          `json:"binding_sha256"`
+	Terminal      SessionTerminal `json:"terminal"`
+}
+
 // OperationRecord is the durable credential-free lifecycle receipt. PREPARED
 // is committed before any KNK. DISPATCHING is committed immediately before the
 // call, so a restarted process never emits a second admission and instead uses
@@ -79,8 +90,8 @@ type OperationRecord struct {
 	Schema           int                         `json:"schema"`
 	ReleaseID        string                      `json:"release_id"`
 	NHPSourceSHA     string                      `json:"nhp_source_sha"`
+	AuthoritySHA256  string                      `json:"authority_sha256"`
 	Phase            string                      `json:"phase"`
-	Color            string                      `json:"color"`
 	Label            string                      `json:"label"`
 	AgentState       StateReference              `json:"agent_state"`
 	RecoveryEndpoint qurl.NHPUDPEndpoint         `json:"recovery_endpoint"`
@@ -107,8 +118,6 @@ type SessionRuntime interface {
 	Retire(context.Context, OperationRecord, *LiveSession) (SessionTerminal, error)
 	Recover(context.Context, qurl.AgentStateStore, OperationRecord) (SessionTerminal, error)
 }
-
-type admissionFailureObserver func(context.Context, OperationRecord, error) error
 
 type qurlConnectAgentRuntime func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error)
 
@@ -250,15 +259,20 @@ type Consumer struct {
 // Prepare persists one exact operation before any network-facing child starts.
 func (c *Consumer) Prepare(ctx context.Context, authority Authority, request PrepareOperationRequest) (string, OperationRecord, error) { //nolint:gocritic,gocyclo // Closed projection checks remain explicit at the trust boundary.
 	if c == nil || c.Blobs == nil || ValidateAuthority(authority) != nil || request.ReleaseID == "" || !hex64Pattern.MatchString(request.ReleaseID) ||
-		request.Identity.Color == "" || request.Identity.Color != request.Cohort.Color ||
 		request.ExpectedAgentState.Key != request.Identity.AgentState.Key || validateStateReference(request.ExpectedAgentState) != nil {
 		return "", OperationRecord{}, fmt.Errorf("%w: operation preparation authority", errInvalidAuthority)
+	}
+	if !validSharedOperationPhase(request.Phase, request.Identity.Label) {
+		return "", OperationRecord{}, fmt.Errorf("%w: operation phase", errInvalidAuthority)
 	}
 	if request.AWSAccountID != authority.AWSAccountID || request.AWSRegion != authority.AWSRegion {
 		return "", OperationRecord{}, fmt.Errorf("%w: operation AWS authority", errInvalidAuthority)
 	}
 	if !authorityContainsIdentity(authority, request.Identity) || !authorityContainsCohort(authority, request.Cohort) {
 		return "", OperationRecord{}, fmt.Errorf("%w: operation identity or cohort projection", errInvalidAuthority)
+	}
+	if request.RecoveryEndpoint != request.Cohort.CellEndpoint {
+		return "", OperationRecord{}, fmt.Errorf("%w: operation recovery route", errInvalidAuthority)
 	}
 	stateStore, err := NewDurableAgentStateStore(c.Blobs, request.ExpectedAgentState.Key)
 	if err != nil {
@@ -280,11 +294,17 @@ func (c *Consumer) Prepare(ctx context.Context, authority Authority, request Pre
 		operation.OwnerID != request.Identity.OwnerID || operation.ResourceID != request.Identity.KnockResourceID ||
 		operation.CellID != request.Cohort.CellID || operation.SessionControlTable != request.Cohort.SessionControlTable ||
 		operation.QURLAgentKeysTable != request.Cohort.QURLAgentKeysTable || operation.AWSAccountID != authority.AWSAccountID ||
-		operation.AWSRegion != authority.AWSRegion || operation.RunID != request.RunID || operation.RunAttempt != request.RunAttempt {
+		operation.AWSRegion != authority.AWSRegion || operation.RunID != request.RunID || operation.RunAttempt != request.RunAttempt ||
+		operation.PreparedAtMillis != request.PreparedAt.UnixMilli() || operation.ExpiresAtMillis != request.ExpiresAt.UnixMilli() {
 		return "", OperationRecord{}, fmt.Errorf("%w: prepared operation projection", errStateConflict)
 	}
-	record := OperationRecord{Schema: OperationRecordSchema, ReleaseID: request.ReleaseID, NHPSourceSHA: authority.NHPSourceSHA, Phase: request.Phase,
-		Color: request.Identity.Color, Label: request.Identity.Label, AgentState: stateRef,
+	authorityRaw, encodeErr := CanonicalJSON(authority)
+	if encodeErr != nil {
+		return "", OperationRecord{}, encodeErr
+	}
+	record := OperationRecord{Schema: OperationRecordSchema, ReleaseID: request.ReleaseID, NHPSourceSHA: authority.NHPSourceSHA,
+		AuthoritySHA256: Digest(authorityRaw), Phase: request.Phase,
+		Label: request.Identity.Label, AgentState: stateRef,
 		RecoveryEndpoint: request.RecoveryEndpoint, Operation: *operation, Status: OperationPrepared}
 	key := operationRecordKey(record)
 	committed, err := persistInitialOperation(ctx, c.Blobs, key, record)
@@ -297,17 +317,6 @@ func (c *Consumer) Prepare(ctx context.Context, authority Authority, request Pre
 // Admit marks dispatch before KNK. A resumed non-PREPARED operation is never
 // admitted again and must pass through Recover.
 func (c *Consumer) Admit(ctx context.Context, key string) (*LiveSession, error) {
-	return c.admit(ctx, key, nil)
-}
-
-// admitObserved durably records caller-specific failure evidence before the
-// recovery packet. A crash before the observer leaves only DISPATCHING; a
-// crash after it leaves an immutable observation that a successor can verify.
-func (c *Consumer) admitObserved(ctx context.Context, key string, observer admissionFailureObserver) (*LiveSession, error) {
-	return c.admit(ctx, key, observer)
-}
-
-func (c *Consumer) admit(ctx context.Context, key string, observer admissionFailureObserver) (*LiveSession, error) {
 	record, blob, err := loadOperation(ctx, c.Blobs, key)
 	if err != nil {
 		return nil, err
@@ -333,12 +342,8 @@ func (c *Consumer) admit(ctx context.Context, key string, observer admissionFail
 	if err != nil {
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), sessionOperationCleanupBudget)
 		defer cancelCleanup()
-		var observeErr error
-		if observer != nil {
-			observeErr = observer(cleanupCtx, record, err)
-		}
 		_, recoverErr := c.Recover(cleanupCtx, key)
-		return nil, errors.Join(err, observeErr, recoverErr)
+		return nil, errors.Join(err, recoverErr)
 	}
 	record.Status = OperationMapped
 	record.Admission = &admission
@@ -419,6 +424,37 @@ func (c *Consumer) Recover(ctx context.Context, key string) (SessionTerminal, er
 	return terminal, nil
 }
 
+// RecoverPrepared commits an offline operation before network I/O, then sends
+// only its authenticated recovery EXT and requires the exact absent-session
+// CANCELED terminal. Replaying the same request reads the retained terminal
+// receipt and emits no second recovery packet.
+//
+//nolint:gocritic // Both values are one immutable signed authority projection.
+func (c *Consumer) RecoverPrepared(ctx context.Context, authority Authority,
+	request PrepareOperationRequest,
+) (RecoveryFirstReceipt, error) {
+	if request.Phase != "fixed_shared_recovery_first" || request.Identity.Label != labelDirectA {
+		return RecoveryFirstReceipt{}, fmt.Errorf("%w: recovery-first phase", errInvalidAuthority)
+	}
+	key, prepared, err := c.Prepare(ctx, authority, request)
+	if err != nil {
+		return RecoveryFirstReceipt{}, err
+	}
+	terminal, err := c.Recover(ctx, key)
+	if err != nil {
+		return RecoveryFirstReceipt{}, err
+	}
+	record, blob, err := loadOperation(ctx, c.Blobs, key)
+	if err != nil || record.Status != OperationCanceled || record.Terminal == nil || *record.Terminal != terminal ||
+		terminal.State != OperationCanceled || terminal.WasAdmitted || record.Operation.OperationID != prepared.Operation.OperationID ||
+		record.Operation.BindingSHA256 != prepared.Operation.BindingSHA256 {
+		return RecoveryFirstReceipt{}, errors.Join(err, fmt.Errorf("%w: recovery-first terminal receipt", errStateConflict))
+	}
+	return RecoveryFirstReceipt{OperationKey: key,
+		Record:      StateReference{Key: key, VersionID: blob.VersionID, SHA256: blob.SHA256},
+		OperationID: record.Operation.OperationID, BindingSHA256: record.Operation.BindingSHA256, Terminal: terminal}, nil
+}
+
 func (c *Consumer) runtime() SessionRuntime {
 	if c.Runtime != nil {
 		return c.Runtime
@@ -463,6 +499,9 @@ func loadOperation(ctx context.Context, authority BlobAuthority, key string) (Op
 	if err != nil {
 		return OperationRecord{}, Blob{}, err
 	}
+	if blob.Key != key {
+		return OperationRecord{}, Blob{}, fmt.Errorf("%w: operation key readback", errStateConflict)
+	}
 	record, err := decodeOperation(blob)
 	return record, blob, err
 }
@@ -476,7 +515,7 @@ func decodeOperation(blob Blob) (OperationRecord, error) { //nolint:gocritic // 
 		return OperationRecord{}, fmt.Errorf("%w: operation JSON", errStateConflict)
 	}
 	canonical, _ := CanonicalJSON(record)
-	if !bytes.Equal(canonical, blob.Body) || !validOperationRecord(record) {
+	if !bytes.Equal(canonical, blob.Body) || !validOperationRecord(record) || blob.Key != operationRecordKey(record) {
 		return OperationRecord{}, fmt.Errorf("%w: operation binding", errStateConflict)
 	}
 	return record, nil
@@ -509,9 +548,8 @@ func commitOperation(ctx context.Context, authority BlobAuthority, key string, p
 }
 
 func validOperationRecord(record OperationRecord) bool { //nolint:gocritic,gocyclo // Each state has a distinct closed field union.
-	if record.Schema != OperationRecordSchema || !hex64Pattern.MatchString(record.ReleaseID) || !validText(record.Phase) ||
-		record.NHPSourceSHA != RequiredNHPSourceSHA ||
-		(record.Color != ColorBlue && record.Color != ColorGreen) || !containsLabel(record.Label) ||
+	if record.Schema != OperationRecordSchema || !hex64Pattern.MatchString(record.ReleaseID) || !validSharedOperationPhase(record.Phase, record.Label) ||
+		!hex40Pattern.MatchString(record.NHPSourceSHA) || !hex64Pattern.MatchString(record.AuthoritySHA256) || !containsLabel(record.Label) ||
 		record.Operation.OperationID == "" || record.RecoveryEndpoint.Port != 443 || !validDNS(record.RecoveryEndpoint.Host) ||
 		!validBase64Raw32(record.RecoveryEndpoint.ServerPublicKeyB64) {
 		return false
@@ -554,7 +592,7 @@ func validCanceledTerminal(terminal *SessionTerminal) bool {
 }
 
 func operationRecordKey(record OperationRecord) string { //nolint:gocritic // Record is one immutable authority snapshot.
-	return fmt.Sprintf("releases/%s/operations/%s/%s/%s/%s", record.ReleaseID, record.Phase, record.Color, record.Label, record.Operation.OperationID)
+	return fmt.Sprintf("releases/%s/operations/%s/shared/%s/%s", record.ReleaseID, record.Phase, record.Label, record.Operation.OperationID)
 }
 
 func sameOperationAuthority(left, right OperationRecord) bool { //nolint:gocritic // Closed record values are intentionally compared by canonical bytes.
@@ -577,6 +615,19 @@ func containsLabel(label string) bool {
 		}
 	}
 	return false
+}
+
+func validSharedOperationPhase(phase, label string) bool {
+	switch phase {
+	case "fixed_shared_direct":
+		return label == labelDirectA || label == labelDirectB
+	case "fixed_shared_relay":
+		return label == labelRelayC || label == labelRelayD
+	case "fixed_shared_recovery_first":
+		return label == labelDirectA
+	default:
+		return false
+	}
 }
 
 func authorityContainsIdentity(authority Authority, identity FixedIdentity) bool { //nolint:gocritic // Exact closed value equality is the contract.

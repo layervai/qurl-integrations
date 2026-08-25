@@ -80,6 +80,9 @@ func (s *DurableAgentStateStore) LoadAgentState(ctx context.Context) (*qurl.Agen
 	if err != nil {
 		return nil, fmt.Errorf("load durable agent state: %w", err)
 	}
+	if blob.Key != s.key {
+		return nil, fmt.Errorf("%w: agent state key readback", errStateConflict)
+	}
 	state, err := decodeAgentStateBlob(blob)
 	if err != nil {
 		return nil, err
@@ -110,6 +113,9 @@ func (s *DurableAgentStateStore) SaveAgentState(ctx context.Context, state *qurl
 		current, loadErr := s.authority.Load(ctx, s.key)
 		switch {
 		case loadErr == nil:
+			if current.Key != s.key {
+				return fmt.Errorf("%w: agent state key readback", errStateConflict)
+			}
 			if _, decodeErr := decodeAgentStateBlob(current); decodeErr != nil {
 				return decodeErr
 			}
@@ -146,6 +152,9 @@ func (s *DurableAgentStateStore) Reference(ctx context.Context) (StateReference,
 		blob, err := s.authority.Load(ctx, s.key)
 		if err != nil {
 			return StateReference{}, err
+		}
+		if blob.Key != s.key {
+			return StateReference{}, fmt.Errorf("%w: agent state key readback", errStateConflict)
 		}
 		if _, err := decodeAgentStateBlob(blob); err != nil {
 			return StateReference{}, err

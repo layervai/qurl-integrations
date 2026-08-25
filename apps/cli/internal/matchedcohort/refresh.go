@@ -37,28 +37,28 @@ func (qurlIdentityStateRefresher) refresh(ctx context.Context, store qurl.AgentS
 		CellID: assignment.CellID, AssignmentGeneration: assignment.AssignmentGeneration, Endpoint: assignment.Endpoint}, nil
 }
 
-// RefreshSelectedIdentityStates refreshes the exact ordered color projection
+// RefreshSelectedIdentityStates refreshes the exact ordered shared projection
 // through one signed Hub before operation preparation. Independent identities
 // run concurrently. Each qurl-go save is already a durable CAS; a partial
 // result is safe to retry because no operation has been prepared or sent yet.
 //
 //nolint:gocognit,gocritic,gocyclo // The closed authority projection is intentionally checked at one boundary.
-func (c *Consumer) RefreshSelectedIdentityStates(ctx context.Context, authority Authority, color string, labels []string,
+func (c *Consumer) RefreshSelectedIdentityStates(ctx context.Context, authority Authority, labels []string,
 	hub qurl.HubBootstrap, expectedEndpoint qurl.NHPUDPEndpoint, refresher IdentityStateRefresher,
 ) ([]StateUpdate, error) {
 	if c == nil || c.Blobs == nil || ValidateAuthority(authority) != nil ||
-		(color != ColorBlue && color != ColorGreen) || len(labels) == 0 || len(labels) > 4 ||
+		!validRefreshLabels(labels) ||
 		!validDNS(hub.Host) || hub.Port != 443 || !validBase64Raw32(hub.ServerPublicKeyB64) ||
 		!validDNS(expectedEndpoint.Host) || expectedEndpoint.Port != 443 || !validBase64Raw32(expectedEndpoint.ServerPublicKeyB64) {
 		return nil, fmt.Errorf("%w: fixed state refresh authority", errInvalidAuthority)
 	}
-	cohort, err := cohortFor(Plan{Cohorts: authority.Cohorts}, color)
+	cohort, err := cohortFor(Plan{Cohorts: authority.Cohorts})
 	if err != nil {
 		return nil, err
 	}
-	if hub.ServerPublicKeyB64 != cohort.HubServerPublicKeyB64 ||
-		expectedEndpoint.ServerPublicKeyB64 != cohort.CellEndpoint.ServerPublicKeyB64 {
-		return nil, fmt.Errorf("%w: signed Hub or cell endpoint key", errInvalidAuthority)
+	if hub.Host != cohort.HubHost || hub.Port != cohort.HubPort || hub.ServerPublicKeyB64 != cohort.HubServerPublicKeyB64 ||
+		expectedEndpoint != cohort.CellEndpoint {
+		return nil, fmt.Errorf("%w: signed Hub or cell endpoint", errInvalidAuthority)
 	}
 	if refresher == nil {
 		refresher = qurlIdentityStateRefresher{}
@@ -73,7 +73,7 @@ func (c *Consumer) RefreshSelectedIdentityStates(ctx context.Context, authority 
 		found := false
 		for index := range authority.Identities {
 			identity := authority.Identities[index]
-			if identity.Color == color && identity.Label == label {
+			if identity.Label == label {
 				selected = append(selected, identity)
 				found = true
 				break
@@ -135,4 +135,10 @@ func (c *Consumer) RefreshSelectedIdentityStates(ctx context.Context, authority 
 		return nil, errors.Join(failures...)
 	}
 	return ordered, nil
+}
+
+func validRefreshLabels(values []string) bool {
+	return len(values) == 2 &&
+		((values[0] == labelDirectA && values[1] == labelDirectB) ||
+			(values[0] == labelRelayC && values[1] == labelRelayD))
 }

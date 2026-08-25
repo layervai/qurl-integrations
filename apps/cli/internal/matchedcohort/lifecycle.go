@@ -31,8 +31,8 @@ type LifecycleIntent struct {
 	ReleaseID        string                     `json:"release_id"`
 	Phase            string                     `json:"phase"`
 	Attempt          uint64                     `json:"attempt"`
-	Color            string                     `json:"color"`
 	Transport        string                     `json:"transport"`
+	NHPSourceSHA     string                     `json:"nhp_source_sha"`
 	AuthoritySHA256  string                     `json:"authority_sha256"`
 	RecoveryEndpoint qurl.NHPUDPEndpoint        `json:"recovery_endpoint"`
 	Operations       []LifecycleOperationIntent `json:"operations"`
@@ -56,7 +56,6 @@ type LifecycleIntentInput struct {
 	ReleaseID        string
 	Phase            string
 	Attempt          uint64
-	Color            string
 	Transport        string
 	RecoveryEndpoint qurl.NHPUDPEndpoint
 	RunIDs           [3]string
@@ -79,11 +78,11 @@ type PreparedLifecycle struct {
 // operation records before any network-facing runner can start.
 func (c *Consumer) PrepareLifecycle(ctx context.Context, authority Authority, input LifecycleIntentInput) (PreparedLifecycle, error) { //nolint:gocritic,gocyclo // One closed lifecycle authority is validated explicitly.
 	if c == nil || c.Blobs == nil || ValidateAuthority(authority) != nil || !hex64Pattern.MatchString(input.ReleaseID) ||
-		!validText(input.Phase) || input.Attempt == 0 || (input.Color != ColorBlue && input.Color != ColorGreen) {
+		!validText(input.Phase) || input.Attempt == 0 {
 		return PreparedLifecycle{}, fmt.Errorf("%w: lifecycle authority", errInvalidAuthority)
 	}
 	labels, ok := lifecycleLabels[input.Transport]
-	if !ok || input.RecoveryEndpoint.Port != 443 || !validDNS(input.RecoveryEndpoint.Host) ||
+	if !ok || input.Phase != "fixed_shared_"+input.Transport || input.RecoveryEndpoint.Port != 443 || !validDNS(input.RecoveryEndpoint.Host) ||
 		!validBase64Raw32(input.RecoveryEndpoint.ServerPublicKeyB64) {
 		return PreparedLifecycle{}, fmt.Errorf("%w: lifecycle route or transport", errInvalidAuthority)
 	}
@@ -107,12 +106,16 @@ func (c *Consumer) PrepareLifecycle(ctx context.Context, authority Authority, in
 	if input.RunIDs[0] == input.RunIDs[1] || input.RunIDs[0] == input.RunIDs[2] || input.RunIDs[1] == input.RunIDs[2] {
 		return PreparedLifecycle{}, fmt.Errorf("%w: lifecycle RunIDs are not distinct", errInvalidAuthority)
 	}
+	cohort, identityByLabel, err := lifecycleProjection(authority, labels)
+	if err != nil || input.RecoveryEndpoint != cohort.CellEndpoint {
+		return PreparedLifecycle{}, fmt.Errorf("%w: lifecycle recovery route", errInvalidAuthority)
+	}
 	authorityRaw, err := CanonicalJSON(authority)
 	if err != nil {
 		return PreparedLifecycle{}, err
 	}
 	intent := LifecycleIntent{Schema: lifecycleIntentSchema, ReleaseID: input.ReleaseID, Phase: input.Phase, Attempt: input.Attempt,
-		Color: input.Color, Transport: input.Transport, AuthoritySHA256: Digest(authorityRaw), RecoveryEndpoint: input.RecoveryEndpoint,
+		Transport: input.Transport, NHPSourceSHA: authority.NHPSourceSHA, AuthoritySHA256: Digest(authorityRaw), RecoveryEndpoint: input.RecoveryEndpoint,
 		Operations: []LifecycleOperationIntent{
 			{Role: "primary-first", Label: labels[0], RunID: input.RunIDs[0], RunAttempt: input.Attempt, PreparedAtMS: input.PreparedAt.UTC().UnixMilli(), ExpiresAtMS: input.ExpiresAt.UTC().UnixMilli()},
 			{Role: "sibling", Label: labels[1], RunID: input.RunIDs[1], RunAttempt: input.Attempt, PreparedAtMS: input.PreparedAt.UTC().UnixMilli(), ExpiresAtMS: input.ExpiresAt.UTC().UnixMilli()},
@@ -122,14 +125,10 @@ func (c *Consumer) PrepareLifecycle(ctx context.Context, authority Authority, in
 	if err != nil {
 		return PreparedLifecycle{}, err
 	}
-	intentKey := fmt.Sprintf("releases/%s/lifecycle-intents/%s/%s/%s/attempt-%d", input.ReleaseID, input.Phase, input.Color, input.Transport, input.Attempt)
+	intentKey := fmt.Sprintf("releases/%s/lifecycle-intents/%s/shared/%s/attempt-%d", input.ReleaseID, input.Phase, input.Transport, input.Attempt)
 	intentBlob, err := persistImmutable(ctx, c.Blobs, intentKey, "lifecycle-intent", intentRaw)
 	if err != nil {
 		return PreparedLifecycle{}, fmt.Errorf("persist lifecycle intent before operations: %w", err)
-	}
-	cohort, identityByLabel, err := lifecycleProjection(authority, input.Color, labels)
-	if err != nil {
-		return PreparedLifecycle{}, err
 	}
 	keys := make([]string, 0, len(intent.Operations))
 	for _, operation := range intent.Operations {
@@ -153,15 +152,15 @@ func (c *Consumer) PrepareLifecycle(ctx context.Context, authority Authority, in
 		PrimaryFirstKey: keys[0], SiblingKey: keys[1], ReplacementKey: keys[2]}, nil
 }
 
-func lifecycleProjection(authority Authority, color string, labels [2]string) (CohortPlan, map[string]FixedIdentity, error) { //nolint:gocritic // Closed authority values are intentionally copied.
-	cohort, err := cohortFor(Plan{Cohorts: authority.Cohorts}, color)
+func lifecycleProjection(authority Authority, labels [2]string) (CohortPlan, map[string]FixedIdentity, error) { //nolint:gocritic // Closed authority values are intentionally copied.
+	cohort, err := cohortFor(Plan{Cohorts: authority.Cohorts})
 	if err != nil {
 		return CohortPlan{}, nil, err
 	}
 	identities := map[string]FixedIdentity{}
 	for index := range authority.Identities {
 		identity := authority.Identities[index]
-		if identity.Color == color && (identity.Label == labels[0] || identity.Label == labels[1]) {
+		if identity.Label == labels[0] || identity.Label == labels[1] {
 			identities[identity.Label] = identity
 		}
 	}
@@ -363,7 +362,7 @@ func (l *ManagedSessionLauncher) Start(ctx context.Context, key string, identity
 	}
 	return StartManagedSession(ctx, ManagedSessionConfig{Consumer: l.Consumer, OperationKey: key, Identity: identity,
 		LocalIP: host, LocalPort: port, ClientVersion: l.ClientVersion,
-		ReplicaDiscriminator: "fixed-" + identity.Color + "-" + identity.Label,
+		ReplicaDiscriminator: "fixed-shared-" + identity.Label,
 		Logger:               l.Logger, ReadyTimeout: l.ReadyTimeout})
 }
 
@@ -400,7 +399,7 @@ func (c *Consumer) RunPreparedLifecycle(ctx context.Context, authority Authority
 	if !ok {
 		return LifecycleOutcome{}, fmt.Errorf("%w: lifecycle transport", errInvalidAuthority)
 	}
-	_, identities, err := lifecycleProjection(authority, prepared.Intent.Color, labels)
+	_, identities, err := lifecycleProjection(authority, labels)
 	if err != nil {
 		return LifecycleOutcome{}, err
 	}
@@ -530,9 +529,9 @@ func (c *Consumer) ValidatePreparedLifecycle(ctx context.Context, prepared Prepa
 	return err
 }
 
-//nolint:gocritic // PreparedLifecycle is one immutable authority snapshot.
+//nolint:gocritic,gocyclo // PreparedLifecycle is one immutable authority snapshot with a closed cross-binding union.
 func (c *Consumer) validateLifecycleBundle(ctx context.Context, prepared PreparedLifecycle, requirePrepared bool) ([]OperationRecord, error) {
-	if c == nil || c.Blobs == nil || prepared.Intent.Schema != lifecycleIntentSchema || len(prepared.Intent.Operations) != 3 {
+	if c == nil || c.Blobs == nil || !validLifecycleIntent(prepared.Intent) {
 		return nil, fmt.Errorf("%w: prepared lifecycle", errInvalidAuthority)
 	}
 	raw, err := CanonicalJSON(prepared.Intent)
@@ -540,15 +539,21 @@ func (c *Consumer) validateLifecycleBundle(ctx context.Context, prepared Prepare
 		return nil, err
 	}
 	blob, err := c.Blobs.Load(ctx, prepared.IntentReference.Key)
-	if err != nil || blobReference(blob) != prepared.IntentReference || !bytes.Equal(blob.Body, raw) {
+	expectedIntentKey := fmt.Sprintf("releases/%s/lifecycle-intents/%s/shared/%s/attempt-%d", prepared.Intent.ReleaseID,
+		prepared.Intent.Phase, prepared.Intent.Transport, prepared.Intent.Attempt)
+	if err != nil || prepared.IntentReference.Key != expectedIntentKey || blobReference(blob) != prepared.IntentReference || !bytes.Equal(blob.Body, raw) {
 		return nil, fmt.Errorf("%w: lifecycle intent readback", errStateConflict)
 	}
 	records := make([]OperationRecord, 0, 3)
 	for index, key := range []string{prepared.PrimaryFirstKey, prepared.SiblingKey, prepared.ReplacementKey} {
 		record, _, loadErr := loadOperation(ctx, c.Blobs, key)
 		want := prepared.Intent.Operations[index]
-		if loadErr != nil || record.Operation.RunID != want.RunID ||
-			record.Operation.RunAttempt != want.RunAttempt || record.Label != want.Label {
+		if loadErr != nil || record.ReleaseID != prepared.Intent.ReleaseID || record.Phase != prepared.Intent.Phase ||
+			record.NHPSourceSHA != prepared.Intent.NHPSourceSHA || record.AuthoritySHA256 != prepared.Intent.AuthoritySHA256 ||
+			record.RecoveryEndpoint != prepared.Intent.RecoveryEndpoint || record.Operation.RunID != want.RunID ||
+			record.Operation.RunAttempt != want.RunAttempt || record.Operation.PreparedAtMillis != want.PreparedAtMS ||
+			record.Operation.ExpiresAtMillis != want.ExpiresAtMS || record.Label != want.Label ||
+			record.Operation.ResourceID == "" {
 			return nil, fmt.Errorf("%w: lifecycle operation %s", errStateConflict, want.Role)
 		}
 		if requirePrepared && record.Status != OperationPrepared {
@@ -557,6 +562,38 @@ func (c *Consumer) validateLifecycleBundle(ctx context.Context, prepared Prepare
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+func validLifecycleIntent(intent LifecycleIntent) bool { //nolint:gocritic,gocyclo // Intent is one immutable closed authority snapshot.
+	labels, ok := lifecycleLabels[intent.Transport]
+	if !ok || intent.Schema != lifecycleIntentSchema || !hex64Pattern.MatchString(intent.ReleaseID) || !hex40Pattern.MatchString(intent.NHPSourceSHA) ||
+		intent.Phase != "fixed_shared_"+intent.Transport || intent.Attempt == 0 || !hex64Pattern.MatchString(intent.AuthoritySHA256) ||
+		intent.RecoveryEndpoint.Port != 443 || !validDNS(intent.RecoveryEndpoint.Host) ||
+		!validBase64Raw32(intent.RecoveryEndpoint.ServerPublicKeyB64) || len(intent.Operations) != 3 {
+		return false
+	}
+	wantRoles := [3]string{"primary-first", "sibling", "primary-replacement"}
+	wantLabels := [3]string{labels[0], labels[1], labels[0]}
+	seenRunIDs := make(map[string]struct{}, len(intent.Operations))
+	var preparedAt, expiresAt int64
+	for index := range intent.Operations {
+		operation := intent.Operations[index]
+		if operation.Role != wantRoles[index] || operation.Label != wantLabels[index] || operation.RunAttempt != intent.Attempt ||
+			qurl.ValidateCycleRunID(operation.RunID) != nil || operation.PreparedAtMS <= 0 || operation.ExpiresAtMS <= operation.PreparedAtMS ||
+			operation.ExpiresAtMS-operation.PreparedAtMS > int64(30*time.Minute/time.Millisecond) {
+			return false
+		}
+		if index == 0 {
+			preparedAt, expiresAt = operation.PreparedAtMS, operation.ExpiresAtMS
+		} else if operation.PreparedAtMS != preparedAt || operation.ExpiresAtMS != expiresAt {
+			return false
+		}
+		if _, duplicate := seenRunIDs[operation.RunID]; duplicate {
+			return false
+		}
+		seenRunIDs[operation.RunID] = struct{}{}
+	}
+	return true
 }
 
 // LifecycleAttemptNeedsSettlement returns true only for an exact immutable

@@ -23,25 +23,17 @@ const (
 	AuthoritySchema = 1
 	// EnvironmentSandbox prevents this package from accepting production authority.
 	EnvironmentSandbox = "sandbox"
-	// ColorBlue is the blue physical cohort identity.
-	ColorBlue = "blue"
-	// ColorGreen is the green physical cohort identity.
-	ColorGreen = "green"
 	// AgentKeySchemaVersion is the required qurl-agent-keys row schema.
 	AgentKeySchemaVersion = 2
 	// EnrollmentCredentialKindAccount requires an account registration row.
 	EnrollmentCredentialKindAccount = "account"
-	// RequiredNHPSourceSHA is the reviewed merged native-operation authority.
-	RequiredNHPSourceSHA = "a70e5d66dda604459b0a37ed7c634da8c8e46c3d"
-	// RequiredQURLGoSourceSHA is the reviewed merged durable-operation SDK.
-	RequiredQURLGoSourceSHA = "c92478b3f70ff027fe7bd9c306b7a9fd96553b64"
-	labelDirectA            = "direct-a"
-	labelDirectB            = "direct-b"
-	labelRelayC             = "relay-c"
-	labelRelayD             = "relay-d"
-	selectorResourceA       = "qurl-tunnel-server-a"
-	selectorResourceB       = "qurl-tunnel-server-b"
-	selectorResourceC       = "qurl-tunnel-server-c"
+	labelDirectA                    = "direct-a"
+	labelDirectB                    = "direct-b"
+	labelRelayC                     = "relay-c"
+	labelRelayD                     = "relay-d"
+	selectorResourceA               = "qurl-tunnel-server-a"
+	selectorResourceB               = "qurl-tunnel-server-b"
+	selectorResourceC               = "qurl-tunnel-server-c"
 )
 
 var (
@@ -59,8 +51,8 @@ var (
 	selectorResources = []string{selectorResourceA, selectorResourceB, selectorResourceC, selectorResourceA}
 )
 
-// Plan is the complete non-secret input for one fixed two-color generation.
-// The eight identities are permanent until an explicit rotation activates a
+// Plan is the complete non-secret input for one fixed shared-sandbox generation.
+// The four identities are permanent until an explicit rotation activates a
 // replacement generation. A normal release reads this authority and never
 // creates, deletes, or revokes any identity.
 type Plan struct {
@@ -76,9 +68,8 @@ type Plan struct {
 	Identities      []IdentityPlan `json:"identities"`
 }
 
-// CohortPlan binds one physical color to its signed runtime and state authority.
+// CohortPlan binds the delivered shared sandbox to its signed runtime and state authority.
 type CohortPlan struct {
-	Color                 string              `json:"color"`
 	ServerASG             string              `json:"server_asg"`
 	ACASG                 string              `json:"ac_asg"`
 	RelayASG              string              `json:"relay_asg"`
@@ -101,7 +92,6 @@ type FRPSSelector struct {
 
 // IdentityPlan is the non-secret immutable identity requested by provisioning.
 type IdentityPlan struct {
-	Color       string       `json:"color"`
 	Label       string       `json:"label"`
 	OwnerID     string       `json:"owner_id"`
 	AgentID     string       `json:"agent_id"`
@@ -131,7 +121,6 @@ type EnrollmentCredentialReceipt struct {
 
 // FixedIdentity is one completed permanent canary identity and its state pointers.
 type FixedIdentity struct {
-	Color                    string         `json:"color"`
 	Label                    string         `json:"label"`
 	OwnerID                  string         `json:"owner_id"`
 	AgentID                  string         `json:"agent_id"`
@@ -150,7 +139,7 @@ type FixedIdentity struct {
 	ConnectorState           StateReference `json:"connector_state"`
 }
 
-// Authority is the credential-free completed two-color, eight-identity envelope.
+// Authority is the credential-free completed shared-sandbox four-identity envelope.
 type Authority struct {
 	Schema                      int             `json:"schema"`
 	Environment                 string          `json:"environment"`
@@ -166,45 +155,41 @@ type Authority struct {
 }
 
 // ValidatePlan enforces the exact ordered sandbox provisioning input.
-func ValidatePlan(plan Plan) error { //nolint:gocognit,gocritic,gocyclo // Closed trust-boundary checks remain explicit.
+func ValidatePlan(plan Plan) error { //nolint:gocritic,gocyclo // Closed trust-boundary checks remain explicit.
 	if plan.Schema != AuthoritySchema || plan.Environment != EnvironmentSandbox || !hex64Pattern.MatchString(plan.GenerationID) {
 		return fmt.Errorf("%w: plan identity", errInvalidAuthority)
 	}
 	if !validText(plan.OwnerSubject) || !accountPattern.MatchString(plan.AWSAccountID) || !awsRegionPattern.MatchString(plan.AWSRegion) ||
-		!hex40Pattern.MatchString(plan.NHPSourceSHA) || plan.NHPSourceSHA != RequiredNHPSourceSHA ||
-		!hex40Pattern.MatchString(plan.QURLGoSourceSHA) || plan.QURLGoSourceSHA != RequiredQURLGoSourceSHA {
+		!hex40Pattern.MatchString(plan.NHPSourceSHA) || !hex40Pattern.MatchString(plan.QURLGoSourceSHA) {
 		return fmt.Errorf("%w: plan owner or AWS authority", errInvalidAuthority)
 	}
-	if len(plan.Cohorts) != 2 || len(plan.Identities) != 8 {
-		return fmt.Errorf("%w: require two cohorts and eight identities", errInvalidAuthority)
+	if len(plan.Cohorts) != 1 || len(plan.Identities) != len(labels) {
+		return fmt.Errorf("%w: require one cohort and four identities", errInvalidAuthority)
 	}
-	for index, color := range []string{ColorBlue, ColorGreen} {
-		cohort := plan.Cohorts[index]
-		if cohort.Color != color || !validCohort(cohort) {
-			return fmt.Errorf("%w: %s cohort", errInvalidAuthority, color)
+	if !validCohort(plan.Cohorts[0]) {
+		return fmt.Errorf("%w: shared cohort", errInvalidAuthority)
+	}
+	selectors := make(map[string]FRPSSelector, 3)
+	for index, label := range labels {
+		identity := plan.Identities[index]
+		expectedSelector := selectorResources[index]
+		if identity.Label != label || identity.OwnerID != plan.OwnerSubject || !validIdentityPlan(identity) ||
+			identity.Selector.ResourceID != expectedSelector {
+			return fmt.Errorf("%w: shared %s identity", errInvalidAuthority, label)
 		}
-		selectors := make(map[string]FRPSSelector, 3)
-		for labelIndex, label := range labels {
-			identity := plan.Identities[index*len(labels)+labelIndex]
-			expectedSelector := selectorResources[labelIndex]
-			if identity.Color != color || identity.Label != label || identity.OwnerID != plan.OwnerSubject || !validIdentityPlan(identity) ||
-				identity.Selector.ResourceID != expectedSelector {
-				return fmt.Errorf("%w: %s %s identity", errInvalidAuthority, color, label)
+		if expectedSelector == selectorResourceA {
+			if prior, exists := selectors[expectedSelector]; exists && prior != identity.Selector {
+				return fmt.Errorf("%w: shared selector a is inconsistent", errInvalidAuthority)
 			}
-			if expectedSelector == selectorResourceA {
-				if prior, exists := selectors[expectedSelector]; exists && prior != identity.Selector {
-					return fmt.Errorf("%w: %s selector a is inconsistent", errInvalidAuthority, color)
-				}
-			}
-			selectors[expectedSelector] = identity.Selector
 		}
-		if len(selectors) != 3 || selectors[selectorResourceA].Host != selectors[selectorResourceB].Host ||
-			selectors[selectorResourceA].Host != selectors[selectorResourceC].Host ||
-			selectors[selectorResourceA].Port == selectors[selectorResourceB].Port ||
-			selectors[selectorResourceA].Port == selectors[selectorResourceC].Port ||
-			selectors[selectorResourceB].Port == selectors[selectorResourceC].Port {
-			return fmt.Errorf("%w: %s selector set", errInvalidAuthority, color)
-		}
+		selectors[expectedSelector] = identity.Selector
+	}
+	if len(selectors) != 3 || selectors[selectorResourceA].Host != selectors[selectorResourceB].Host ||
+		selectors[selectorResourceA].Host != selectors[selectorResourceC].Host ||
+		selectors[selectorResourceA].Port == selectors[selectorResourceB].Port ||
+		selectors[selectorResourceA].Port == selectors[selectorResourceC].Port ||
+		selectors[selectorResourceB].Port == selectors[selectorResourceC].Port {
+		return fmt.Errorf("%w: shared selector set", errInvalidAuthority)
 	}
 	seenAgents := map[string]struct{}{}
 	seenConnectors := map[string]struct{}{}
@@ -229,7 +214,7 @@ func ValidateAuthority(authority Authority) error { //nolint:gocritic // Public 
 		Cohorts: slices.Clone(authority.Cohorts), Identities: make([]IdentityPlan, len(authority.Identities))}
 	for i := range authority.Identities {
 		identity := &authority.Identities[i]
-		plan.Identities[i] = IdentityPlan{Color: identity.Color, Label: identity.Label, OwnerID: identity.OwnerID,
+		plan.Identities[i] = IdentityPlan{Label: identity.Label, OwnerID: identity.OwnerID,
 			AgentID: identity.AgentID, ConnectorID: identity.ConnectorID, Selector: identity.Selector}
 	}
 	if err := ValidatePlan(plan); err != nil {
@@ -237,6 +222,9 @@ func ValidateAuthority(authority Authority) error { //nolint:gocritic // Public 
 	}
 	if err := validateStateReference(authority.EnrollmentCredentialReceipt); err != nil {
 		return fmt.Errorf("%w: enrollment credential receipt", errInvalidAuthority)
+	}
+	if authority.EnrollmentCredentialReceipt.Key != fmt.Sprintf("generations/%s/enrollment-credential-receipt", authority.GenerationID) {
+		return fmt.Errorf("%w: enrollment credential receipt key", errInvalidAuthority)
 	}
 	for i := range authority.Identities {
 		identity := &authority.Identities[i]
@@ -252,6 +240,10 @@ func ValidateAuthority(authority Authority) error { //nolint:gocritic // Public 
 		}
 		if err := validateStateReference(identity.ConnectorState); err != nil {
 			return err
+		}
+		prefix := fmt.Sprintf("generations/%s/shared/%s/", authority.GenerationID, identity.Label)
+		if identity.AgentState.Key != prefix+"agent-state" || identity.ConnectorState.Key != prefix+"connector-state" {
+			return fmt.Errorf("%w: completed identity state key", errInvalidAuthority)
 		}
 	}
 	return nil
@@ -272,14 +264,14 @@ func Digest(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func validCohort(cohort CohortPlan) bool { //nolint:gocritic // The closed two-item plan favors value semantics.
+func validCohort(cohort CohortPlan) bool { //nolint:gocritic // The closed single-cohort plan favors value semantics.
 	return validText(cohort.ServerASG) && validText(cohort.ACASG) && validText(cohort.RelayASG) &&
 		validText(cohort.SessionControlTable) && validText(cohort.QURLAgentKeysTable) && validText(cohort.CellID) &&
 		cohort.AssignmentGeneration > 0 && validDNS(cohort.HubHost) && cohort.HubPort == 443 && validBase64Raw32(cohort.HubServerPublicKeyB64) &&
 		validDNS(cohort.CellEndpoint.Host) && cohort.CellEndpoint.Port == 443 && validBase64Raw32(cohort.CellEndpoint.ServerPublicKeyB64)
 }
 
-func validIdentityPlan(identity IdentityPlan) bool { //nolint:gocritic // The closed eight-item plan favors value semantics.
+func validIdentityPlan(identity IdentityPlan) bool { //nolint:gocritic // The closed four-identity plan favors value semantics.
 	return validText(identity.OwnerID) && identityPattern.MatchString(identity.AgentID) && identityPattern.MatchString(identity.ConnectorID) &&
 		validText(identity.Selector.ResourceID) && validDNS(identity.Selector.Host) && identity.Selector.Port > 0 && identity.Selector.Port <= 65535
 }

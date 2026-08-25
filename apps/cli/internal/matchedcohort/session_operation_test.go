@@ -44,11 +44,11 @@ func TestQURLSessionRuntimePreparesOfflineFromDurableState(t *testing.T) {
 	}
 	now := time.Now().UTC().Round(time.Second)
 	publicKey := base64.StdEncoding.EncodeToString(private.PublicKey().Bytes())
-	state := &qurl.AgentState{AgentID: "fixed-blue-direct-a", PrivateKeyB64: base64.StdEncoding.EncodeToString(private.Bytes()),
+	state := &qurl.AgentState{AgentID: "fixed-shared-direct-a", PrivateKeyB64: base64.StdEncoding.EncodeToString(private.Bytes()),
 		PublicKeyB64: publicKey, RegisteredAt: &now, SchemaVersion: 7,
 		DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", DeviceAPIKeyID: "key_AbCdEf123456",
 		Assignment: &qurl.AgentAssignment{CellID: "cell-01", AssignmentGeneration: 7, EndpointRevision: 1,
-			LeaseExpiresAt: now.Add(time.Hour), Endpoint: qurl.NHPUDPEndpoint{Host: "blue.sandbox.layerv.xyz", Port: 443,
+			LeaseExpiresAt: now.Add(time.Hour), Endpoint: qurl.NHPUDPEndpoint{Host: "shared.sandbox.layerv.xyz", Port: 443,
 				ServerPublicKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 32))}}}
 	blobs := newMemoryBlobs()
 	store, _ := NewDurableAgentStateStore(blobs, "actual/offline/agent-state")
@@ -94,6 +94,169 @@ func TestConsumerHealthyAdmissionAndExactRetirement(t *testing.T) {
 	}
 	if live.ACToken != "" {
 		t.Fatal("retired live session retained ACToken")
+	}
+}
+
+func TestConsumerRecoveryFirstCommitsCanceledReceiptAndReplaysWithoutNetwork(t *testing.T) {
+	ctx := context.Background()
+	consumer, authority, request, runtime := sessionFixture(t)
+	receipt, err := consumer.RecoverPrepared(ctx, authority, request)
+	if err != nil || receipt.Terminal.State != OperationCanceled || receipt.Terminal.WasAdmitted ||
+		receipt.OperationKey == "" || receipt.Record.Key != receipt.OperationKey || receipt.Record.VersionID == "" ||
+		receipt.Record.SHA256 == "" || receipt.OperationID != runtime.operation.OperationID ||
+		receipt.BindingSHA256 != runtime.operation.BindingSHA256 {
+		t.Fatalf("recovery-first receipt = %#v, %v", receipt, err)
+	}
+	if runtime.prepares != 1 || runtime.admits != 0 || runtime.retires != 0 || runtime.recovers != 1 {
+		t.Fatalf("recovery-first network calls = %#v", runtime)
+	}
+	replayed, err := consumer.RecoverPrepared(ctx, authority, request)
+	if err != nil || replayed != receipt {
+		t.Fatalf("recovery-first replay = %#v, %v", replayed, err)
+	}
+	if runtime.prepares != 2 || runtime.admits != 0 || runtime.retires != 0 || runtime.recovers != 1 {
+		t.Fatalf("recovery-first replay emitted network = %#v", runtime)
+	}
+}
+
+func TestConsumerSharedRecoveryFirstRetainsCanceledAndReplaysWithoutNetwork(t *testing.T) {
+	ctx := context.Background()
+	consumer, authority, request, runtime := sessionFixture(t)
+	receipt, err := consumer.RecoverPrepared(ctx, authority, request)
+	if err != nil || receipt.Terminal.State != OperationCanceled || receipt.Terminal.WasAdmitted ||
+		!strings.Contains(receipt.OperationKey, "/shared/direct-a/") {
+		t.Fatalf("shared recovery-first receipt = %#v, %v", receipt, err)
+	}
+	record, _, loadErr := loadOperation(ctx, consumer.Blobs, receipt.OperationKey)
+	if loadErr != nil || record.AuthoritySHA256 == "" || record.Status != OperationCanceled {
+		t.Fatalf("shared terminal record = %#v, %v", record, loadErr)
+	}
+	replayed, err := consumer.RecoverPrepared(ctx, authority, request)
+	if err != nil || replayed != receipt || runtime.recovers != 1 {
+		t.Fatalf("shared recovery replay = %#v runtime=%#v err=%v", replayed, runtime, err)
+	}
+}
+
+func TestConsumerRejectsWrongPhaseAndMovedOperationBeforeRuntime(t *testing.T) {
+	consumer, authority, request, runtime := sessionFixture(t)
+	request.Phase = "candidate-direct"
+	if _, _, err := consumer.Prepare(context.Background(), authority, request); err == nil || runtime.prepares != 0 {
+		t.Fatalf("wrong phase reached runtime: %v %#v", err, runtime)
+	}
+	request.Phase = "fixed_shared_recovery_first"
+	key, _, err := consumer.Prepare(context.Background(), authority, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := consumer.Blobs.(*memoryBlobs)
+	blob, err := blobs.Load(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := key + "-moved"
+	blob.Key = moved
+	blobs.mu.Lock()
+	blobs.values[moved] = blob
+	blobs.mu.Unlock()
+	if _, err := consumer.Recover(context.Background(), moved); err == nil || runtime.recovers != 0 {
+		t.Fatalf("moved operation reached recovery runtime: %v %#v", err, runtime)
+	}
+}
+
+func TestConsumerRejectsRecoveryRouteDriftBeforeRuntime(t *testing.T) {
+	for _, field := range []string{"host", "key"} {
+		t.Run(field, func(t *testing.T) {
+			consumer, authority, request, runtime := sessionFixture(t)
+			if field == "host" {
+				request.RecoveryEndpoint.Host = "other-recovery.sandbox.layerv.xyz"
+			} else {
+				request.RecoveryEndpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x53}, 32))
+			}
+			if _, _, err := consumer.Prepare(context.Background(), authority, request); err == nil || runtime.prepares != 0 {
+				t.Fatalf("recovery route drift reached runtime: %v %#v", err, runtime)
+			}
+		})
+	}
+}
+
+func TestConsumerRejectsPreparedOperationTimeDriftBeforeCommitOrRecovery(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*qurl.NativeSessionOperation)
+	}{
+		{name: "prepared-before", mutate: func(operation *qurl.NativeSessionOperation) { operation.PreparedAtMillis-- }},
+		{name: "prepared-after", mutate: func(operation *qurl.NativeSessionOperation) { operation.PreparedAtMillis++ }},
+		{name: "expires-before", mutate: func(operation *qurl.NativeSessionOperation) { operation.ExpiresAtMillis-- }},
+		{name: "expires-after", mutate: func(operation *qurl.NativeSessionOperation) { operation.ExpiresAtMillis++ }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			consumer, authority, request, runtime := sessionFixture(t)
+			mutation.mutate(&runtime.operation)
+			blobs := consumer.Blobs.(*memoryBlobs)
+			blobs.mu.Lock()
+			before := len(blobs.values)
+			blobs.mu.Unlock()
+			if _, _, err := consumer.Prepare(context.Background(), authority, request); err == nil {
+				t.Fatal("prepared operation time drift accepted")
+			}
+			blobs.mu.Lock()
+			after := len(blobs.values)
+			blobs.mu.Unlock()
+			if runtime.prepares != 1 || runtime.recovers != 0 || after != before {
+				t.Fatalf("time drift changed durable or recovery state: before=%d after=%d runtime=%#v", before, after, runtime)
+			}
+		})
+	}
+}
+
+func TestConsumerRecoveryFirstResumesDispatchAndClassifiesLostCommit(t *testing.T) {
+	ctx := context.Background()
+	consumer, authority, request, runtime := sessionFixture(t)
+	key, _, err := consumer.Prepare(ctx, authority, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, blob, _ := loadOperation(ctx, consumer.Blobs, key)
+	record.Status = OperationDispatching
+	record.DispatchToken = strings.Repeat("a", 64)
+	if _, err := commitOperation(ctx, consumer.Blobs, key, blob, record); err != nil {
+		t.Fatal(err)
+	}
+	blobs := consumer.Blobs.(*memoryBlobs)
+	blobs.mu.Lock()
+	blobs.failAfterCommit = true
+	blobs.mu.Unlock()
+	receipt, err := consumer.RecoverPrepared(ctx, authority, request)
+	if err != nil || receipt.Terminal.State != OperationCanceled || runtime.admits != 0 || runtime.recovers != 1 {
+		t.Fatalf("resumed recovery-first = %#v runtime=%#v err=%v", receipt, runtime, err)
+	}
+	loaded, _, loadErr := loadOperation(ctx, consumer.Blobs, key)
+	if loadErr != nil || loaded.Status != OperationCanceled || loaded.Terminal == nil {
+		t.Fatalf("lost-response terminal = %#v, %v", loaded, loadErr)
+	}
+}
+
+func TestConsumerRecoveryFirstRetriesAmbiguousNetworkOnlyUntilTerminalIsDurable(t *testing.T) {
+	ctx := context.Background()
+	consumer, authority, request, runtime := sessionFixture(t)
+	runtime.recoveryErrors = []error{context.DeadlineExceeded}
+	if receipt, err := consumer.RecoverPrepared(ctx, authority, request); !errors.Is(err, context.DeadlineExceeded) || receipt != (RecoveryFirstReceipt{}) {
+		t.Fatalf("ambiguous recovery-first = %#v, %v", receipt, err)
+	}
+	record, _, loadErr := loadOperation(ctx, consumer.Blobs, operationRecordKey(OperationRecord{
+		ReleaseID: request.ReleaseID, Phase: request.Phase,
+		Label: request.Identity.Label, Operation: runtime.operation,
+	}))
+	if loadErr != nil || record.Status != OperationDispatching || record.Terminal != nil || runtime.recovers != 1 {
+		t.Fatalf("ambiguous recovery state = %#v runtime=%#v err=%v", record, runtime, loadErr)
+	}
+	receipt, err := consumer.RecoverPrepared(ctx, authority, request)
+	if err != nil || receipt.Terminal.State != OperationCanceled || runtime.recovers != 2 {
+		t.Fatalf("recovered ambiguity = %#v runtime=%#v err=%v", receipt, runtime, err)
+	}
+	if replayed, replayErr := consumer.RecoverPrepared(ctx, authority, request); replayErr != nil || replayed != receipt || runtime.recovers != 2 {
+		t.Fatalf("terminal replay = %#v runtime=%#v err=%v", replayed, runtime, replayErr)
 	}
 }
 
@@ -307,6 +470,7 @@ type fakeSessionRuntime struct {
 	retires          int
 	recovers         int
 	recovery         []SessionTerminal
+	recoveryErrors   []error
 	failMappedCommit *memoryBlobs
 	lastLive         *LiveSession
 	resourceHost     string
@@ -376,6 +540,11 @@ func (f *fakeSessionRuntime) Retire(_ context.Context, record OperationRecord, l
 
 func (f *fakeSessionRuntime) Recover(_ context.Context, _ qurl.AgentStateStore, record OperationRecord) (SessionTerminal, error) { //nolint:gocritic // Implements the immutable production interface.
 	f.recovers++
+	if len(f.recoveryErrors) != 0 {
+		err := f.recoveryErrors[0]
+		f.recoveryErrors = f.recoveryErrors[1:]
+		return SessionTerminal{}, err
+	}
 	if len(f.recovery) == 0 {
 		return SessionTerminal{State: OperationCanceled, WasAdmitted: false}, nil
 	}
@@ -393,7 +562,8 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 	t.Helper()
 	ctx := context.Background()
 	blobs := newMemoryBlobs()
-	stateStore, _ := NewDurableAgentStateStore(blobs, "fixed/blue/direct-a/agent-state")
+	plan := validPlan("6")
+	stateStore, _ := NewDurableAgentStateStore(blobs, "generations/"+plan.GenerationID+"/shared/direct-a/agent-state")
 	if err := stateStore.SaveAgentState(ctx, testAgentState("agent-a")); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +575,6 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 	if err := json.Unmarshal([]byte(operationJSON), &operation); err != nil {
 		t.Fatal(err)
 	}
-	plan := validPlan("6")
 	plan.AWSAccountID, plan.AWSRegion = operation.AWSAccountID, operation.AWSRegion
 	plan.OwnerSubject = operation.OwnerID
 	for index := range plan.Identities {
@@ -415,16 +584,18 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 	authority := Authority{Schema: plan.Schema, Environment: plan.Environment, GenerationID: plan.GenerationID,
 		OwnerSubject: plan.OwnerSubject, AWSAccountID: plan.AWSAccountID, AWSRegion: plan.AWSRegion, NHPSourceSHA: plan.NHPSourceSHA,
 		QURLGoSourceSHA:             plan.QURLGoSourceSHA,
-		EnrollmentCredentialReceipt: StateReference{Key: "enrollment-receipt", VersionID: "version", SHA256: strings.Repeat("d", 64)}, Cohorts: plan.Cohorts}
+		EnrollmentCredentialReceipt: StateReference{Key: "generations/" + plan.GenerationID + "/enrollment-credential-receipt", VersionID: "version", SHA256: strings.Repeat("d", 64)}, Cohorts: plan.Cohorts}
 	for index, identityPlan := range plan.Identities {
-		identity := FixedIdentity{Color: identityPlan.Color, Label: identityPlan.Label, OwnerID: identityPlan.OwnerID,
+		identity := FixedIdentity{Label: identityPlan.Label, OwnerID: identityPlan.OwnerID,
 			AgentID: identityPlan.AgentID, AgentPublicKeyB64: publicKey, AgentKeySchemaVersion: 2,
 			EnrollmentCredentialKind: "account", DeviceAPIKeyID: "device-" + identityPlan.AgentID,
 			ConnectorID: identityPlan.ConnectorID, ResourceID: "resource-" + identityPlan.AgentID, CRID: "crid-" + identityPlan.AgentID,
 			ConnectorRoutingID: "route-" + identityPlan.AgentID, KnockResourceID: "knock-" + identityPlan.AgentID,
-			Selector:       identityPlan.Selector,
-			AgentState:     StateReference{Key: "state-" + identityPlan.AgentID, VersionID: "version", SHA256: strings.Repeat("a", 64)},
-			ConnectorState: StateReference{Key: "resource-" + identityPlan.AgentID, VersionID: "version", SHA256: strings.Repeat("b", 64)}}
+			Selector: identityPlan.Selector,
+			AgentState: StateReference{Key: "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/agent-state",
+				VersionID: "version", SHA256: strings.Repeat("a", 64)},
+			ConnectorState: StateReference{Key: "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/connector-state",
+				VersionID: "version", SHA256: strings.Repeat("b", 64)}}
 		if index == 0 {
 			identity.AgentID, identity.OwnerID, identity.AgentPublicKeyB64, identity.KnockResourceID, identity.AgentState = operation.AgentID, operation.OwnerID, operation.AgentPublicKeyB64, operation.ResourceID, stateRef
 		}
@@ -435,12 +606,11 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 	}
 	selector := authority.Identities[0].Selector
 	runtime := &fakeSessionRuntime{operation: operation, resourceHost: net.JoinHostPort(selector.Host, strconv.Itoa(selector.Port))}
-	request := PrepareOperationRequest{ReleaseID: strings.Repeat("c", 64), Phase: "candidate-direct",
+	request := PrepareOperationRequest{ReleaseID: strings.Repeat("c", 64), Phase: "fixed_shared_recovery_first",
 		AWSAccountID: authority.AWSAccountID, AWSRegion: authority.AWSRegion,
 		Identity: authority.Identities[0], Cohort: authority.Cohorts[0], ExpectedAgentState: stateRef,
-		RecoveryEndpoint: qurl.NHPUDPEndpoint{Host: "blue-recovery.sandbox.layerv.xyz", Port: 443,
-			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 32))},
-		RunID: operation.RunID, RunAttempt: operation.RunAttempt, PreparedAt: time.UnixMilli(operation.PreparedAtMillis), ExpiresAt: time.UnixMilli(operation.ExpiresAtMillis)}
+		RecoveryEndpoint: authority.Cohorts[0].CellEndpoint,
+		RunID:            operation.RunID, RunAttempt: operation.RunAttempt, PreparedAt: time.UnixMilli(operation.PreparedAtMillis), ExpiresAt: time.UnixMilli(operation.ExpiresAtMillis)}
 	return &Consumer{Blobs: blobs, Runtime: runtime}, authority, request, runtime
 }
 

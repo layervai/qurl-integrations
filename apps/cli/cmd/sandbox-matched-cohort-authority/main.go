@@ -32,7 +32,10 @@ const (
 	sandboxAPIOrigin    = "https://api.layerv.xyz"
 )
 
-var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var (
+	hex40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 type provisionReport struct {
 	Schema          int                          `json:"schema"`
@@ -200,8 +203,8 @@ func runRotation(ctx context.Context, authority *matchedcohort.AuthorityRPC, com
 		return fmt.Errorf("read provisioning receipt: %w", err)
 	}
 	if input.Schema != 1 || input.Environment != matchedcohort.EnvironmentSandbox || input.Operation != operationProvision ||
-		!hex64.MatchString(input.GenerationID) || input.NHPSourceSHA != matchedcohort.RequiredNHPSourceSHA ||
-		input.QURLGoSourceSHA != matchedcohort.RequiredQURLGoSourceSHA ||
+		!hex64.MatchString(input.GenerationID) || !hex40.MatchString(input.NHPSourceSHA) ||
+		!hex40.MatchString(input.QURLGoSourceSHA) ||
 		input.Authority.Key != "generations/"+input.GenerationID+"/authority" {
 		return errors.New("provisioning receipt is not exact")
 	}

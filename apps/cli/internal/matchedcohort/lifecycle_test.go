@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +49,192 @@ func TestPrepareLifecycleCommitsIntentAndThreeOperationsBeforeReturn(t *testing.
 	}
 }
 
+func TestPrepareSharedSandboxLifecycleBindsScopeAndTransportPairs(t *testing.T) {
+	for _, transport := range []string{"direct", "relay"} {
+		t.Run(transport, func(t *testing.T) {
+			consumer, authority, runtime := lifecycleFixture(t)
+			input := lifecycleInput()
+			input.Transport = transport
+			input.Phase = "fixed_shared_" + transport
+			runtime.intentKey = fmt.Sprintf("releases/%s/lifecycle-intents/%s/shared/%s/attempt-1", input.ReleaseID, input.Phase, transport)
+			prepared, err := consumer.PrepareLifecycle(context.Background(), authority, input)
+			if err != nil {
+				t.Fatalf("PrepareLifecycle shared: %v", err)
+			}
+			if !strings.Contains(prepared.IntentReference.Key, "/shared/"+transport+"/") {
+				t.Fatalf("shared intent = %#v", prepared)
+			}
+			for _, key := range []string{prepared.PrimaryFirstKey, prepared.SiblingKey, prepared.ReplacementKey} {
+				record, _, loadErr := loadOperation(context.Background(), consumer.Blobs, key)
+				if loadErr != nil || record.AuthoritySHA256 != prepared.Intent.AuthoritySHA256 || !strings.Contains(key, "/shared/") {
+					t.Fatalf("shared operation = %#v key=%q err=%v", record, key, loadErr)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateSharedLifecycleRejectsAuthorityDrift(t *testing.T) {
+	consumer, authority, runtime := lifecycleFixture(t)
+	input := lifecycleInput()
+	input.Phase = "fixed_shared_direct"
+	runtime.intentKey = fmt.Sprintf("releases/%s/lifecycle-intents/%s/shared/direct/attempt-1", input.ReleaseID, input.Phase)
+	prepared, err := consumer.PrepareLifecycle(context.Background(), authority, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := consumer.Blobs.(*memoryBlobs)
+	record, blob, err := loadOperation(context.Background(), blobs, prepared.SiblingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.AuthoritySHA256 = strings.Repeat("e", 64)
+	raw, err := CanonicalJSON(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob.Body, blob.SHA256 = raw, Digest(raw)
+	blobs.mu.Lock()
+	blobs.values[prepared.SiblingKey] = blob
+	blobs.mu.Unlock()
+	if err := consumer.ValidatePreparedLifecycle(context.Background(), prepared); !errors.Is(err, errStateConflict) {
+		t.Fatalf("cross-authority operation replay = %v", err)
+	}
+}
+
+func TestValidatePreparedLifecycleRejectsOperationRouteAndTimeDriftBeforeRuntime(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*testing.T, *memoryBlobs, Authority, *OperationRecord)
+	}{
+		{"recovery endpoint", func(_ *testing.T, _ *memoryBlobs, _ Authority, record *OperationRecord) {
+			record.RecoveryEndpoint.Host = "other-cell.sandbox.layerv.xyz"
+		}},
+		{"NHP source", func(_ *testing.T, _ *memoryBlobs, _ Authority, record *OperationRecord) {
+			record.NHPSourceSHA = strings.Repeat("f", 40)
+		}},
+		{"prepared time", func(t *testing.T, blobs *memoryBlobs, authority Authority, record *OperationRecord) {
+			reprepareLifecycleOperation(t, blobs, &authority, record,
+				record.Operation.PreparedAtMillis+1_000, record.Operation.ExpiresAtMillis)
+		}},
+		{"expiry time", func(t *testing.T, blobs *memoryBlobs, authority Authority, record *OperationRecord) {
+			reprepareLifecycleOperation(t, blobs, &authority, record,
+				record.Operation.PreparedAtMillis, record.Operation.ExpiresAtMillis+1_000)
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			consumer, authority, runtime := lifecycleFixture(t)
+			prepared, err := consumer.PrepareLifecycle(context.Background(), authority, lifecycleInput())
+			if err != nil {
+				t.Fatal(err)
+			}
+			blobs := consumer.Blobs.(*memoryBlobs)
+			record, blob, err := loadOperation(context.Background(), blobs, prepared.SiblingKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutation.mutate(t, blobs, authority, &record)
+			raw, err := CanonicalJSON(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blob.Body, blob.SHA256 = raw, Digest(raw)
+			blobs.mu.Lock()
+			blobs.values[prepared.SiblingKey] = blob
+			blobs.mu.Unlock()
+			beforePrepares, beforeAdmits := runtime.prepares, runtime.admits
+			if err := consumer.ValidatePreparedLifecycle(context.Background(), prepared); !errors.Is(err, errStateConflict) {
+				t.Fatalf("mutated operation accepted: %v", err)
+			}
+			if runtime.prepares != beforePrepares || runtime.admits != beforeAdmits {
+				t.Fatalf("mutated operation reached runtime: before=(%d,%d) after=(%d,%d)",
+					beforePrepares, beforeAdmits, runtime.prepares, runtime.admits)
+			}
+		})
+	}
+}
+
+func reprepareLifecycleOperation(t *testing.T, blobs *memoryBlobs, authority *Authority, record *OperationRecord,
+	preparedAtMillis, expiresAtMillis int64,
+) {
+	t.Helper()
+	var identity FixedIdentity
+	for index := range authority.Identities {
+		if authority.Identities[index].Label == record.Label {
+			identity = authority.Identities[index]
+			break
+		}
+	}
+	store, err := NewDurableAgentStateStore(blobs, record.AgentState.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := (qurlSessionRuntime{}).Prepare(context.Background(), store, PrepareOperationRequest{
+		AWSAccountID: authority.AWSAccountID, AWSRegion: authority.AWSRegion, Identity: identity, Cohort: authority.Cohorts[0],
+		RecoveryEndpoint: record.RecoveryEndpoint, RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt,
+		PreparedAt: time.UnixMilli(preparedAtMillis).UTC(), ExpiresAt: time.UnixMilli(expiresAtMillis).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Operation = *operation
+}
+
+func TestValidatePreparedLifecycleRejectsAliasedIntentKeyBeforeRuntime(t *testing.T) {
+	consumer, authority, runtime := lifecycleFixture(t)
+	prepared, err := consumer.PrepareLifecycle(context.Background(), authority, lifecycleInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforePrepares, beforeAdmits := runtime.prepares, runtime.admits
+	blobs := consumer.Blobs.(*memoryBlobs)
+	blob, err := blobs.Load(context.Background(), prepared.IntentReference.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := prepared.IntentReference.Key + "-restored"
+	blob.Key = alias
+	blobs.mu.Lock()
+	blobs.values[alias] = blob
+	blobs.mu.Unlock()
+	prepared.IntentReference = blobReference(blob)
+	if err := consumer.ValidatePreparedLifecycle(context.Background(), prepared); !errors.Is(err, errStateConflict) {
+		t.Fatalf("aliased intent = %v", err)
+	}
+	if runtime.prepares != beforePrepares || runtime.admits != beforeAdmits {
+		t.Fatalf("aliased intent reached runtime: before=(%d,%d) after=(%d,%d)",
+			beforePrepares, beforeAdmits, runtime.prepares, runtime.admits)
+	}
+}
+
+func TestValidatePreparedLifecycleRejectsIntentRoleDriftBeforeOperationReads(t *testing.T) {
+	consumer, authority, runtime := lifecycleFixture(t)
+	prepared, err := consumer.PrepareLifecycle(context.Background(), authority, lifecycleInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Intent.Operations[0].Role = "sibling"
+	raw, err := CanonicalJSON(prepared.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := consumer.Blobs.(*memoryBlobs)
+	blobs.mu.Lock()
+	blob := blobs.values[prepared.IntentReference.Key]
+	blob.Body, blob.SHA256 = raw, Digest(raw)
+	blobs.values[prepared.IntentReference.Key] = blob
+	blobs.mu.Unlock()
+	prepared.IntentReference = blobReference(blob)
+	beforePrepares, beforeAdmits := runtime.prepares, runtime.admits
+	if err := consumer.ValidatePreparedLifecycle(context.Background(), prepared); err == nil {
+		t.Fatal("mutated lifecycle role accepted")
+	}
+	if runtime.prepares != beforePrepares || runtime.admits != beforeAdmits {
+		t.Fatalf("mutated lifecycle role reached runtime: %#v", runtime)
+	}
+}
+
 func TestPrepareLifecycleResumeAfterPartialOfflinePreparation(t *testing.T) {
 	consumer, authority, runtime := lifecycleFixture(t)
 	runtime.failPrepareAt = 3
@@ -76,6 +263,10 @@ func TestPrepareLifecycleRejectsAuthorityAndIntentMutationUnion(t *testing.T) {
 		{"duplicate RunID", func(input *LifecycleIntentInput) { input.RunIDs[2] = input.RunIDs[0] }},
 		{"unknown transport", func(input *LifecycleIntentInput) { input.Transport = "other" }},
 		{"wrong recovery port", func(input *LifecycleIntentInput) { input.RecoveryEndpoint.Port = 62206 }},
+		{"wrong recovery host", func(input *LifecycleIntentInput) { input.RecoveryEndpoint.Host = "other-recovery.sandbox.example" }},
+		{"wrong recovery key", func(input *LifecycleIntentInput) {
+			input.RecoveryEndpoint.ServerPublicKeyB64 = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x53}, 32))
+		}},
 		{"long admission window", func(input *LifecycleIntentInput) { input.ExpiresAt = input.PreparedAt.Add(31 * time.Minute) }},
 	}
 	for _, mutation := range mutations {
@@ -165,7 +356,7 @@ func TestDurableCycleKnockerRejectsWrongAuthenticatedResourceHostAndCleansBothTr
 			consumer.Runtime = runtime
 			input := lifecycleInput()
 			input.Transport = transport
-			input.Phase = "candidate-" + transport
+			input.Phase = "fixed_shared_" + transport
 			prepared, err := consumer.PrepareLifecycle(context.Background(), authority, input)
 			if err != nil {
 				t.Fatal(err)
@@ -173,7 +364,7 @@ func TestDurableCycleKnockerRejectsWrongAuthenticatedResourceHostAndCleansBothTr
 			label := lifecycleLabels[transport][0]
 			var identity FixedIdentity
 			for index := range authority.Identities {
-				if authority.Identities[index].Color == input.Color && authority.Identities[index].Label == label {
+				if authority.Identities[index].Label == label {
 					identity = authority.Identities[index]
 					break
 				}
@@ -224,20 +415,20 @@ func TestLifecycleInterruptedAttemptSettlesBeforeAttemptTwo(t *testing.T) {
 	if err != nil || !needsSettlement {
 		t.Fatalf("needs settlement = %v, %v", needsSettlement, err)
 	}
-	recovery := &closureRuntime{}
+	recovery := &lifecycleSettlementRuntime{}
 	consumer.Runtime = recovery
 	settlement, err := consumer.SettlePreparedLifecycle(context.Background(), authority, prepared, time.Second)
 	if err != nil || settlement.Attempt != 1 || !settlement.RetryRequired || len(settlement.TerminalStates) != 3 {
 		t.Fatalf("settlement = %#v, %v", settlement, err)
 	}
-	if recovery.admits != 0 || recovery.recovers != 3 {
+	if recovery.admits != 0 || recovery.recovers.Load() != 3 {
 		t.Fatalf("settlement performed admission: %#v", recovery)
 	}
 	secondInput := firstInput
 	secondInput.Attempt = 2
 	secondInput.RunIDs = [3]string{"4123456789abcdef", "5123456789abcdef", "6123456789abcdef"}
 	secondRuntime := &lifecycleRuntime{blobs: consumer.Blobs,
-		intentKey: "releases/" + secondInput.ReleaseID + "/lifecycle-intents/" + secondInput.Phase + "/" + secondInput.Color + "/" + secondInput.Transport + "/attempt-2"}
+		intentKey: "releases/" + secondInput.ReleaseID + "/lifecycle-intents/" + secondInput.Phase + "/shared/" + secondInput.Transport + "/attempt-2"}
 	consumer.Runtime = secondRuntime
 	second, err := consumer.PrepareLifecycle(context.Background(), authority, secondInput)
 	if err != nil {
@@ -336,6 +527,29 @@ type wrongResourceHostRuntime struct {
 	lastLive *LiveSession
 }
 
+type lifecycleSettlementRuntime struct {
+	admits   int
+	recovers atomic.Int32
+}
+
+func (*lifecycleSettlementRuntime) Prepare(context.Context, qurl.AgentStateStore, PrepareOperationRequest) (*qurl.NativeSessionOperation, error) {
+	return nil, errors.New("unexpected settlement preparation")
+}
+
+func (r *lifecycleSettlementRuntime) Admit(context.Context, qurl.AgentStateStore, OperationRecord) (*LiveSession, SessionAdmission, error) {
+	r.admits++
+	return nil, SessionAdmission{}, errors.New("unexpected settlement admission")
+}
+
+func (*lifecycleSettlementRuntime) Retire(context.Context, OperationRecord, *LiveSession) (SessionTerminal, error) {
+	return SessionTerminal{}, errors.New("unexpected settlement retirement")
+}
+
+func (r *lifecycleSettlementRuntime) Recover(context.Context, qurl.AgentStateStore, OperationRecord) (SessionTerminal, error) {
+	r.recovers.Add(1)
+	return SessionTerminal{State: OperationCanceled}, nil
+}
+
 func (*wrongResourceHostRuntime) Prepare(ctx context.Context, store qurl.AgentStateStore,
 	request PrepareOperationRequest, //nolint:gocritic // SessionRuntime deliberately has value-oriented authority.
 ) (*qurl.NativeSessionOperation, error) {
@@ -410,13 +624,13 @@ func lifecycleFixture(t *testing.T) (*Consumer, Authority, *lifecycleRuntime) {
 		OwnerSubject: plan.OwnerSubject, AWSAccountID: plan.AWSAccountID, AWSRegion: plan.AWSRegion,
 		NHPSourceSHA:                plan.NHPSourceSHA,
 		QURLGoSourceSHA:             plan.QURLGoSourceSHA,
-		EnrollmentCredentialReceipt: StateReference{Key: "enrollment-receipt", VersionID: "version", SHA256: strings.Repeat("d", 64)}, Cohorts: plan.Cohorts}
+		EnrollmentCredentialReceipt: StateReference{Key: "generations/" + plan.GenerationID + "/enrollment-credential-receipt", VersionID: "version", SHA256: strings.Repeat("d", 64)}, Cohorts: plan.Cohorts}
 	for identityIndex, identityPlan := range plan.Identities {
-		cohort, cohortErr := cohortFor(plan, identityPlan.Color)
+		cohort, cohortErr := cohortFor(plan)
 		if cohortErr != nil {
 			t.Fatal(cohortErr)
 		}
-		stateKey := "generations/" + plan.GenerationID + "/" + identityPlan.Color + "/" + identityPlan.Label + "/agent-state"
+		stateKey := "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/agent-state"
 		stateStore, err := NewDurableAgentStateStore(blobs, stateKey)
 		if err != nil {
 			t.Fatal(err)
@@ -427,8 +641,7 @@ func lifecycleFixture(t *testing.T) (*Consumer, Authority, *lifecycleRuntime) {
 			DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", DeviceAPIKeyID: deviceKeyID,
 			Assignment: &qurl.AgentAssignment{CellID: cohort.CellID, AssignmentGeneration: cohort.AssignmentGeneration,
 				EndpointRevision: 1, LeaseExpiresAt: time.Unix(2_000_000_000, 0).UTC(),
-				Endpoint: qurl.NHPUDPEndpoint{Host: identityPlan.Selector.Host, Port: 443,
-					ServerPublicKeyB64: cohort.HubServerPublicKeyB64}}}
+				Endpoint: cohort.CellEndpoint}}
 		if err := stateStore.SaveAgentState(context.Background(), state); err != nil {
 			t.Fatal(err)
 		}
@@ -436,28 +649,28 @@ func lifecycleFixture(t *testing.T) (*Consumer, Authority, *lifecycleRuntime) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		authority.Identities = append(authority.Identities, FixedIdentity{Color: identityPlan.Color, Label: identityPlan.Label,
+		authority.Identities = append(authority.Identities, FixedIdentity{Label: identityPlan.Label,
 			OwnerID: identityPlan.OwnerID, AgentID: identityPlan.AgentID, AgentPublicKeyB64: publicKey,
 			AgentKeySchemaVersion: 2, EnrollmentCredentialKind: "account", DeviceAPIKeyID: deviceKeyID,
 			ConnectorID: identityPlan.ConnectorID, ResourceID: "resource-" + identityPlan.AgentID, CRID: "crid-" + identityPlan.AgentID,
 			ConnectorRoutingID: "route-" + identityPlan.AgentID, KnockResourceID: "knock-" + identityPlan.AgentID,
 			Selector: identityPlan.Selector, AgentState: stateRef,
-			ConnectorState: StateReference{Key: "connector-" + identityPlan.AgentID, VersionID: "version", SHA256: strings.Repeat("c", 64)}})
+			ConnectorState: StateReference{Key: "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/connector-state", VersionID: "version", SHA256: strings.Repeat("c", 64)}})
 	}
 	if err := ValidateAuthority(authority); err != nil {
 		t.Fatal(err)
 	}
 	input := lifecycleInput()
-	intentKey := "releases/" + input.ReleaseID + "/lifecycle-intents/" + input.Phase + "/" + input.Color + "/" + input.Transport + "/attempt-1"
+	intentKey := "releases/" + input.ReleaseID + "/lifecycle-intents/" + input.Phase + "/shared/" + input.Transport + "/attempt-1"
 	runtime := &lifecycleRuntime{blobs: blobs, intentKey: intentKey}
 	return &Consumer{Blobs: blobs, Runtime: runtime}, authority, runtime
 }
 
 func lifecycleInput() LifecycleIntentInput {
 	prepared := time.Unix(1_800_000_000, 0).UTC()
-	return LifecycleIntentInput{ReleaseID: strings.Repeat("d", 64), Phase: "candidate-direct", Attempt: 1, Color: "blue", Transport: "direct",
-		RecoveryEndpoint: qurl.NHPUDPEndpoint{Host: "blue-recovery.sandbox.example", Port: 443,
-			ServerPublicKeyB64: base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyzABCDEF"))},
+	return LifecycleIntentInput{ReleaseID: strings.Repeat("d", 64), Phase: "fixed_shared_direct", Attempt: 1, Transport: "direct",
+		RecoveryEndpoint: qurl.NHPUDPEndpoint{Host: "cell.sandbox.layerv.xyz", Port: 443,
+			ServerPublicKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 32))},
 		RunIDs:     [3]string{"0123456789abcdef", "1123456789abcdef", "2123456789abcdef"},
 		PreparedAt: prepared, ExpiresAt: prepared.Add(20 * time.Minute)}
 }
