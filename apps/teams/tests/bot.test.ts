@@ -14,6 +14,7 @@ describe('Teams bot primitives', () => {
 
   it('parses get flags and quoted values', () => {
     expect(parseCommand('get $docs dm:true reason:"private docs"')).toMatchObject({ verb: 'get', resource: 'docs', flags: { dm: 'true', reason: 'private docs' } });
+    expect(() => parseCommand('unset-alias $Docs')).toThrow('invalid alias');
   });
 
   it('removes quote delimiters without corrupting mid-token values', () => {
@@ -36,6 +37,17 @@ describe('Teams bot primitives', () => {
         { type: 'mention', text: '<at>qURL</at>', offset: 19, length: 13, mentioned: { id: 'bot' } },
       ],
     })).toBe('list');
+  });
+
+  it('resolves malformed mention metadata without overlapping valid mentions', () => {
+    expect(normalizeActivityText({
+      text: '<at>qURL</at> list <at>other</at>',
+      recipient: { id: 'bot' },
+      entities: [
+        { type: 'mention', text: '<at>other</at>', mentioned: { id: 'other' } },
+        { type: 'mention', text: '<at>qURL</at>', offset: 0, length: 13, mentioned: { id: 'bot' } },
+      ],
+    })).toBe('list <@other>');
   });
 
   it('maps only supported inbound activity fields at the SDK boundary', () => {

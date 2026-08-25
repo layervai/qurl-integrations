@@ -114,23 +114,39 @@ export function toTeamsActivity(value: unknown): TeamsActivity | undefined {
 export function normalizeActivityText(activity: TeamsActivity): string {
   let text = activity.text ?? '';
   const replacements: Array<{ readonly start: number; readonly end: number; readonly value: string }> = [];
-  let fallbackSearchFrom = 0;
-  for (const entity of activity.entities ?? []) {
-    if (entity.type !== 'mention' || !entity.mentioned?.id || !entity.text) continue;
+  const entities = [...(activity.entities ?? [])];
+  const validEntities = entities
+    .map((entity, index) => ({ entity, index }))
+    .filter(({ entity }) => {
+      const start = entity.offset;
+      const length = entity.length;
+      return typeof start === 'number' && Number.isInteger(start) && start >= 0
+        && typeof length === 'number' && Number.isInteger(length) && length > 0
+        && entity.type === 'mention' && Boolean(entity.text) && Boolean(entity.mentioned?.id) && start + length <= text.length
+        && text.slice(start, start + length) === entity.text;
+    })
+    .sort((left, right) => (left.entity.offset ?? 0) - (right.entity.offset ?? 0) || left.index - right.index);
+  const usedRanges: Array<{ readonly start: number; readonly end: number }> = [];
+  const overlaps = (start: number, end: number): boolean => usedRanges.some(range => start < range.end && end > range.start);
+  const addReplacement = (entity: TeamsEntity, start: number, end: number): void => {
+    if (!entity.text || overlaps(start, end)) return;
     const botId = activity.recipient?.id;
-    const value = entity.mentioned.id === botId ? '' : `<@${entity.mentioned.id}>`;
+    const value = entity.mentioned?.id === botId ? '' : `<@${entity.mentioned?.id ?? ''}>`;
+    replacements.push({ start, end, value });
+    usedRanges.push({ start, end });
+  };
+  for (const { entity } of validEntities) {
+    addReplacement(entity, entity.offset ?? 0, (entity.offset ?? 0) + (entity.length ?? 0));
+  }
+  for (const entity of entities) {
+    if (entity.type !== 'mention' || !entity.mentioned?.id || !entity.text) continue;
     const start = entity.offset;
     const length = entity.length;
     const end = start === undefined || length === undefined ? -1 : start + length;
-    if (typeof start === 'number' && Number.isInteger(start) && start >= 0 && typeof length === 'number' && Number.isInteger(length) && length > 0 && end <= text.length && text.slice(start, end) === entity.text) {
-      replacements.push({ start, end, value });
-      continue;
-    }
-    const fallbackStart = text.indexOf(entity.text, fallbackSearchFrom);
-    if (fallbackStart >= 0) {
-      replacements.push({ start: fallbackStart, end: fallbackStart + entity.text.length, value });
-      fallbackSearchFrom = fallbackStart + entity.text.length;
-    }
+    if (typeof start === 'number' && Number.isInteger(start) && start >= 0 && typeof length === 'number' && Number.isInteger(length) && length > 0 && end <= text.length && text.slice(start, end) === entity.text) continue;
+    let fallbackStart = text.indexOf(entity.text);
+    while (fallbackStart >= 0 && overlaps(fallbackStart, fallbackStart + entity.text.length)) fallbackStart = text.indexOf(entity.text, fallbackStart + 1);
+    if (fallbackStart >= 0) addReplacement(entity, fallbackStart, fallbackStart + entity.text.length);
   }
   for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
     text = text.slice(0, replacement.start) + replacement.value + text.slice(replacement.end);

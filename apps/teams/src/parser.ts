@@ -146,7 +146,7 @@ export function parseCommand(input: string): TeamsCommand {
     if (args.length !== 1) throw new UserFacingError('resource token is required');
     const resource = args[0];
     if (!resource) throw new UserFacingError('resource token is required');
-    return { raw, verb, resource: lookup(resource), flags: {}, args };
+    return { raw, verb, resource: verb === 'unset-alias' ? alias(resource) : lookup(resource), flags: {}, args };
   }
   if (['add', 'remove'].includes(verb)) {
     const match = mentionPattern.exec(args[0] ?? '');

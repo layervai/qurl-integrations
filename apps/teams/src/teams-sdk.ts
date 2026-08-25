@@ -1,5 +1,5 @@
 import type { App } from '@microsoft/teams.apps';
-import { Client, toActivityParams, type ActivityLike } from '@microsoft/teams.api';
+import { toActivityParams, type ActivityLike } from '@microsoft/teams.api';
 import type { TeamsActivity } from './activity.js';
 import type { TeamsMessagePoster } from './connector.js';
 
@@ -34,17 +34,24 @@ export class TeamsSdkMessagePoster implements TeamsMessagePoster {
     this.#app = app;
   }
 
-  async reply(activity: TeamsActivity, text: string): Promise<void> {
-    await this.sendActivity(activity.serviceUrl ?? '', activity.conversation?.id ?? '', { type: 'message', text, ...(activity.id === undefined ? {} : { replyToId: activity.id }) });
+  async reply(activity: TeamsActivity, text: string, signal?: AbortSignal): Promise<void> {
+    await this.sendActivity(activity.serviceUrl ?? '', activity.conversation?.id ?? '', { type: 'message', text, ...(activity.id === undefined ? {} : { replyToId: activity.id }) }, signal);
   }
 
-  async sendText(serviceUrl: string, conversationId: string, text: string): Promise<void> {
-    await this.sendActivity(serviceUrl, conversationId, { type: 'message' as const, text });
+  async sendText(serviceUrl: string, conversationId: string, text: string, signal?: AbortSignal): Promise<void> {
+    await this.sendActivity(serviceUrl, conversationId, { type: 'message' as const, text }, signal);
   }
 
-  private async sendActivity(serviceUrl: string, conversationId: string, activity: ActivityLike): Promise<void> {
-    const client = new Client(validateTeamsServiceUrl(serviceUrl), this.#app.api.http);
+  private async sendActivity(serviceUrl: string, conversationId: string, activity: ActivityLike, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error('Teams message delivery was cancelled');
+    const baseUrl = validateTeamsServiceUrl(serviceUrl);
     const params = toActivityParams(activity);
-    await client.conversations.createActivity(conversationId, params);
+    // The Teams API activity helper does not expose Axios request options.
+    // Use the SDK's authenticated HTTP client directly so cancellation and
+    // the outbound timeout remain part of this adapter's contract.
+    await this.#app.api.http.post(`${baseUrl}/v3/conversations/${encodeURIComponent(conversationId)}/activities`, params, {
+      timeout: 15_000,
+      ...(signal === undefined ? {} : { signal }),
+    });
   }
 }
