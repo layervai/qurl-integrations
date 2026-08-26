@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/layervai/qurl-integrations/compare/v1.8.0...v2.0.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266))
+
+### Features
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266)) ([16916c9](https://github.com/layervai/qurl-integrations/commit/16916c94937b36a63a8022946d64e7ce47053016))
+
 ## [1.8.0](https://github.com/layervai/qurl-integrations/compare/v1.7.0...v1.8.0) (2026-08-25)
 
 
