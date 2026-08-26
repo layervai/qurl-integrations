@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -42,10 +41,10 @@ For a local app, pass its loopback HTTP address:
 
 On macOS, qURL starts a per-user background daemon, waits until the route is
 serving, prints the CRID, and exits. The daemon resumes desired-on shares after
-login, sleep, wake, and network changes. On Linux and Windows, use --foreground;
-background lifecycle management is not yet available. Running the same command
-later reuses the same resource and CRID. Use --id only when you want to choose
-the Connector ID yourself.
+login, sleep, wake, and network changes. On Linux, use --foreground; background
+lifecycle management is not yet available. Local app sharing is not supported
+on Windows. Running the same command later reuses the same resource and CRID.
+Use --id only when you want to choose the Connector ID yourself.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
 
@@ -111,8 +110,11 @@ share and turns it off when it exits.`,
 }
 
 func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (retErr error) {
+	if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
+		return err
+	}
 	if !foreground {
-		if err := requireBackgroundShareSupport(runtime.GOOS); err != nil {
+		if err := requireBackgroundShareSupport(opts.backgroundShareGOOS); err != nil {
 			return err
 		}
 	}

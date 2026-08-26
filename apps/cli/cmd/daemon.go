@@ -66,6 +66,9 @@ func daemonCmd(opts *globalOpts) *cobra.Command {
 		Hidden: true,
 		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
+				return err
+			}
 			expected, err := connectordaemon.JobVersion(opts.version)
 			if err != nil {
 				return err

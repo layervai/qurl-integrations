@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -210,6 +211,9 @@ func TestManagerStopsRetryingPermanentMissingResource(t *testing.T) {
 }
 
 func TestManagerPersistsTerminalDisableWithRealLocalRegistry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local sharing state is unsupported on Windows")
+	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only state directory.
 		t.Fatal(err)

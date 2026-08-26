@@ -145,6 +145,9 @@ type runOpts struct {
 	localResource        localResourceResolver
 	foregroundDaemon     func(context.Context, *globalOpts, string, string) error
 	sharingWaitLimit     time.Duration
+	// platformGOOS overrides the hermetic default of darwin for tests that
+	// exercise the production platform fence.
+	platformGOOS string
 	// syncStreams serializes writes to the captured stdout/stderr buffers.
 	// The connector serve test needs it: the linked FRP client and the
 	// in-process test server log from their own goroutines through the
@@ -202,6 +205,12 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	}
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
+		// Exercise the injected LaunchAgent/daemon boundary on every host. The
+		// separate platform-contract test keeps Linux and Windows fail-closed.
+		g.backgroundShareGOOS = o.platformGOOS
+		if g.backgroundShareGOOS == "" {
+			g.backgroundShareGOOS = "darwin"
+		}
 		g.lookupEnv = func(key string) (string, bool) {
 			v, ok := env[key]
 			return v, ok

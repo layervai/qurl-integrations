@@ -134,7 +134,7 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(workflow)
+	text := strings.ReplaceAll(string(workflow), "\r\n", "\n")
 	for _, want := range []string{
 		"timeout-minutes: 40",
 		`[ "$GITHUB_REF" = refs/heads/main ]`,

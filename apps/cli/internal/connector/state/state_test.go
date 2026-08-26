@@ -132,6 +132,9 @@ func openTestStore(t *testing.T) *Store {
 
 func openTestStoreAt(t *testing.T, dir string) *Store {
 	t.Helper()
+	if isWindows(t) {
+		t.Skip("qurl-go pinned agent state is unsupported on Windows")
+	}
 	store, err := Open(dir)
 	if err != nil {
 		if errors.Is(err, qurl.ErrAgentStateContinuity) && strings.Contains(err.Error(), "unsupported on this platform") {

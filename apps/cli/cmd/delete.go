@@ -127,6 +127,9 @@ func confirmDelete(opts *globalOpts, id string) (bool, error) {
 	}
 	scanner := bufio.NewScanner(opts.streams.In)
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, fmt.Errorf("read delete confirmation: %w", err)
+		}
 		return false, nil
 	}
 	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))

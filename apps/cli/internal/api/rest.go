@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
@@ -572,10 +573,14 @@ func (r *restReply) problem() error {
 const maxSnippet = 256
 
 func bodySnippet(body []byte) string {
-	fields := strings.Fields(string(body))
+	fields := strings.Fields(strings.ToValidUTF8(string(body), "\uFFFD"))
 	snippet := strings.Join(fields, " ")
 	if len(snippet) > maxSnippet {
-		snippet = snippet[:maxSnippet] + "..."
+		end := maxSnippet
+		for end > 0 && !utf8.RuneStart(snippet[end]) {
+			end--
+		}
+		snippet = snippet[:end] + "..."
 	}
 	return snippet
 }

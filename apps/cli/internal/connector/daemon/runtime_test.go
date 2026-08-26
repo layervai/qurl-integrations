@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,6 +90,9 @@ func newCloseTrackingFactory() *closeTrackingFactory {
 }
 
 func TestDaemonIPCIsReadyWhileNativeAssignmentRecoveryContinues(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local sharing IPC is unsupported on Windows")
+	}
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
 	started := make(chan struct{})
 	recovered := make(chan struct{})

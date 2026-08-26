@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -533,6 +534,22 @@ func TestDeleteInteractiveConfirmAndCancel(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr.String(), "Canceled") {
 		t.Errorf("expected cancel note, got %q", res.stderr.String())
+	}
+}
+
+func TestDeleteInteractiveReadErrorIsSurfaced(t *testing.T) {
+	srv := apitest.NewServer(t)
+	want := errors.New("confirmation input failed")
+	res := runCLI(t, &runOpts{
+		args:  []string{"--endpoint", srv.URL, "delete", srv.Key.CRID},
+		stdin: iotest.ErrReader(want),
+		inTTY: true,
+	})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), want.Error()) {
+		t.Fatalf("delete input error = exit %d stderr %q", res.code, res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Fatal("delete input error must not send a request")
 	}
 }
 

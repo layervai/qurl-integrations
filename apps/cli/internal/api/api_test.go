@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -614,6 +615,20 @@ func TestProblemErrorParsesPinnedEnvelope(t *testing.T) {
 	limited := (&restReply{status: 429, header: retryHeader, body: []byte(`{}`)}).problem()
 	if !errors.As(limited, &e) || e.RetryAfter != 7 {
 		t.Errorf("retry-after: %+v", e)
+	}
+}
+
+func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
+	input := strings.Repeat("a", maxSnippet-1) + "étail"
+	got := bodySnippet([]byte(input))
+	if !utf8.ValidString(got) {
+		t.Fatalf("body snippet is not valid UTF-8: %q", got)
+	}
+	if want := strings.Repeat("a", maxSnippet-1) + "..."; got != want {
+		t.Fatalf("body snippet = %q, want %q", got, want)
+	}
+	if got := bodySnippet([]byte{'o', 'k', 0xff, 'x'}); !utf8.ValidString(got) || !strings.Contains(got, "\uFFFD") {
+		t.Fatalf("invalid response bytes were not sanitized: %q", got)
 	}
 }
 

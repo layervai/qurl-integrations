@@ -79,6 +79,11 @@ type globalOpts struct {
 	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
 	runForegroundDaemon  func(context.Context, *globalOpts, string, string) error
 	sharingWaitLimit     time.Duration
+	// backgroundShareGOOS is the platform contract used by lifecycle commands.
+	// Production pins it to runtime.GOOS; hermetic tests inject darwin so they
+	// can exercise the daemon control plane on every CI runner without enabling
+	// unsupported production paths.
+	backgroundShareGOOS string
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -119,10 +124,11 @@ func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 // newRoot builds the v2 command tree.
 func newRoot(version string, streams *output.Streams, options ...rootOption) (*cobra.Command, *globalOpts) {
 	opts := &globalOpts{
-		version:   version,
-		streams:   streams,
-		lookupEnv: os.LookupEnv,
-		now:       time.Now,
+		version:             version,
+		streams:             streams,
+		lookupEnv:           os.LookupEnv,
+		now:                 time.Now,
+		backgroundShareGOOS: runtime.GOOS,
 	}
 	for _, opt := range options {
 		opt(opts)

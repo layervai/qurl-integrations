@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -89,7 +88,10 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if action == "stop" {
 		return stopShare(ctx, opts, id)
 	}
-	if err := requireBackgroundShareSupport(runtime.GOOS); err != nil {
+	if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
+		return err
+	}
+	if err := requireBackgroundShareSupport(opts.backgroundShareGOOS); err != nil {
 		return err
 	}
 	registry, daemon, _, err := openShareControl(opts)
@@ -148,10 +150,20 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 }
 
 func requireBackgroundShareSupport(goos string) error {
+	if err := requireLocalShareSupport(goos); err != nil {
+		return err
+	}
 	if goos == "darwin" {
 		return nil
 	}
 	return fmt.Errorf("background local sharing is currently supported only on macOS; use qurl publish --foreground on %s", goos)
+}
+
+func requireLocalShareSupport(goos string) error {
+	if goos == "darwin" || goos == "linux" {
+		return nil
+	}
+	return fmt.Errorf("local app sharing is supported on macOS and Linux only; %s supports remote qURL commands", goos)
 }
 
 func changeAuthoritativeSharing(ctx context.Context, client qurlapi.Client, id string, prior *qurlapi.Sharing, action string) (*qurlapi.Sharing, bool, error) {

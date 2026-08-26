@@ -1,3 +1,5 @@
+//go:build !windows
+
 package daemon
 
 import (
@@ -269,14 +271,4 @@ func emptyManager(t *testing.T) *Manager {
 		t.Fatal(err)
 	}
 	return manager
-}
-
-func shortTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "qurl-ipc-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
 }

@@ -72,7 +72,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On macOS", "background daemon", "Linux and Windows", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On macOS", "background daemon", "On Linux", "--foreground", "Local app sharing is not supported", "Windows", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
@@ -215,10 +215,30 @@ func TestBackgroundSharePlatformContract(t *testing.T) {
 	if err := requireBackgroundShareSupport("darwin"); err != nil {
 		t.Fatalf("darwin background share support: %v", err)
 	}
-	for _, goos := range []string{"linux", "windows"} {
-		err := requireBackgroundShareSupport(goos)
-		if err == nil || !strings.Contains(err.Error(), "supported only on macOS") || !strings.Contains(err.Error(), "--foreground") {
-			t.Fatalf("%s background share error = %v", goos, err)
+	err := requireBackgroundShareSupport("linux")
+	if err == nil || !strings.Contains(err.Error(), "supported only on macOS") || !strings.Contains(err.Error(), "--foreground") {
+		t.Fatalf("linux background share error = %v", err)
+	}
+	if err := requireBackgroundShareSupport("windows"); err == nil || !strings.Contains(err.Error(), "macOS and Linux only") {
+		t.Fatalf("windows background share error = %v", err)
+	}
+}
+
+func TestLocalSharePlatformContractFailsBeforeStateOrNetwork(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		if err := requireLocalShareSupport(goos); err != nil {
+			t.Fatalf("%s local share support: %v", goos, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"publish", "http://127.0.0.1:3000", "--foreground"},
+		{"start", exampleCRID},
+		{"restart", exampleCRID},
+		{"daemon", "run"},
+	} {
+		res := runCLI(t, &runOpts{args: args, platformGOOS: "windows"})
+		if res.code != 1 || !strings.Contains(res.stderr.String(), "local app sharing is supported on macOS and Linux only") {
+			t.Fatalf("windows %v = exit %d stderr %q", args, res.code, res.stderr.String())
 		}
 	}
 }
