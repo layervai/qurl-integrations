@@ -722,7 +722,7 @@ func (s *Supervisor) overlayKnockResult(ctx context.Context, cycleCommon *v1.Cli
 	// appear as an IP SAN on the presented certificate. Both fail after the
 	// knock has already been spent, which is why this rejects before dialing.
 	//
-	// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+	// TODO(upstream-contract): mirrors github.com/layervai/frp v1.0.0
 	// client/connector.go — both dial paths run
 	// `sn := c.cfg.Transport.TLS.ServerName; if sn == "" { sn = c.cfg.ServerAddr }`
 	// and hand sn to transport.NewClientTLSConfig, which assigns it straight to
@@ -1040,7 +1040,7 @@ func IsIPLiteralHost(host string) bool {
 // running service's own common. Complete defaults the flag to true, so those
 // guards are live on the real path rather than branches nothing takes.
 //
-// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// TODO(upstream-contract): mirrors github.com/layervai/frp v1.0.0
 // client/connector.go. The fork makes this decision in two places and the
 // predicate below is their union:
 //
@@ -1092,7 +1092,7 @@ func TLSEnabled(common *v1.ClientCommonConfig) bool {
 // breadcrumb to re-audit TLSEnabled when a future FRP bump introduces a new
 // TLS-implying protocol.
 //
-// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// TODO(upstream-contract): mirrors github.com/layervai/frp v1.0.0
 // pkg/config/v1/validation.SupportedTransportProtocols — exactly
 // `{"tcp", "kcp", "quic", "websocket", "wss"}` — widened by "", which
 // `c.Protocol = util.EmptyOr(c.Protocol, "tcp")` in

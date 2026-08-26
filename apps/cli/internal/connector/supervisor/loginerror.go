@@ -96,7 +96,7 @@ const reasonDialError = "dial_error"
 // reported directly instead, as event=reconnect_stalled from the watchdog and
 // event=reconnect_stall_counted from the budget.
 //
-// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// TODO(upstream-contract): mirrors github.com/layervai/frp v1.0.0
 // client/service.go — Run's `fmt.Errorf("login to the server failed: %v. With
 // loginFailExit enabled, no additional retries will be attempted", ...)`, the
 // fork's only construction of the text the login_failed case below matches.
