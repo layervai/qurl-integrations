@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/layervai/qurl-integrations/compare/v2.0.0...v2.0.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** pin qurl-go and stabilize release smoke ([#1270](https://github.com/layervai/qurl-integrations/issues/1270)) ([8243c04](https://github.com/layervai/qurl-integrations/commit/8243c04cd967a112c2883d1e5b23ead93491fb21))
+
 ## [2.0.0](https://github.com/layervai/qurl-integrations/compare/v1.8.0...v2.0.0) (2026-08-26)
 
 
