@@ -153,6 +153,13 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		`candidate="${IMAGE_NAME}@${IMAGE_DIGEST}"`,
 		"Resolve an existing released qurl image",
 		"steps.qurl_existing.outputs.digest || steps.qurl_image.outputs.digest",
+		`image_name="${QURL_IMAGE%@*}"`,
+		`docker buildx imagetools inspect "$QURL_IMAGE" --raw`,
+		`.platform.os == $os`,
+		`.platform.architecture == $architecture`,
+		`if length == 1 then .[0].digest`,
+		`platform_candidate="${image_name}@${platform_digest}"`,
+		`docker run --rm --platform "$platform" "$platform_candidate" version`,
 		"scripts/extract-qurl-image-attestations.sh",
 		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations",
 		`cosign sign --yes "$candidate"`,
@@ -177,6 +184,9 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 	}
 	if got := strings.Count(text, "outputs: type=image,name=ghcr.io/layervai/qurl,"); got != 1 {
 		t.Errorf("release workflow publishes qurl customer image %d times, want exactly once", got)
+	}
+	if strings.Contains(text, `docker run --rm --platform "$platform" "$QURL_IMAGE" version`) {
+		t.Error("release image smoke runs multiple platforms through one local index digest reference")
 	}
 	for _, forbidden := range []string{
 		"ghcr.io/layervai/qurl-connector",
