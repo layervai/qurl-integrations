@@ -342,6 +342,84 @@ func TestShareStatusDoesNotStartOrReloadDaemon(t *testing.T) {
 	}
 }
 
+func TestShareStatusReportsRemoteURLResource(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodGet, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
+				// Detail is intentionally unrelated prose: status branches only on
+				// the stable code, then uses the generic resource type to prove
+				// whether this is a non-Connector resource.
+				apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "This wording may change")
+			})
+			srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+					"target_url": "https://aol.com", "type": "url", "status": "active",
+				}}, nil)
+			})
+			registryOpens := 0
+			daemonBuilds := 0
+			args := []string{"--endpoint", srv.URL}
+			if format == "json" {
+				args = append(args, "--output", "json")
+			}
+			args = append(args, "status", srv.Key.CRID)
+			res := runCLI(t, &runOpts{
+				args: args,
+				env:  map[string]string{"QURL_API_KEY": testAPIKey},
+				shareRegistryFactory: func(string) (localShareRegistry, error) {
+					registryOpens++
+					return nil, errors.New("URL status constructed a local registry")
+				},
+				shareDaemonFactory: func(string, string) shareDaemonController {
+					daemonBuilds++
+					return &recordingShareDaemon{}
+				},
+				shareStateDirErr: connectorstate.ErrNoDefaultStateDir,
+			})
+			if res.code != 0 {
+				t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+			}
+			for _, want := range []string{srv.Key.CRID, "https://aol.com", "url", "active"} {
+				if !strings.Contains(res.stdout.String(), want) {
+					t.Errorf("stdout missing %q:\n%s", want, res.stdout.String())
+				}
+			}
+			if registryOpens != 0 || daemonBuilds != 0 {
+				t.Fatalf("URL status constructed local controls: registry=%d daemon=%d", registryOpens, daemonBuilds)
+			}
+			requests := srv.Requests()
+			if len(requests) != 2 || requests[0].Path != sharingPath || requests[1].Path != "/v1/resources/"+srv.Key.CRID {
+				t.Fatalf("URL status requests = %#v", requests)
+			}
+		})
+	}
+}
+
+func TestShareStatusPreservesInvalidInputForConnectorResource(t *testing.T) {
+	srv := apitest.NewServer(t)
+	detail := "the Connector request was invalid for another reason"
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", detail)
+	})
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+			"type": "tunnel", "status": "active", "desired_state": "off", "serving_epoch": 0,
+		}}, nil)
+	})
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "status", srv.Key.CRID},
+		env:  map[string]string{"QURL_API_KEY": testAPIKey},
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), detail) {
+		t.Fatalf("exit=%d stderr=%s, want original Connector invalid_input", res.code, res.stderr.String())
+	}
+}
+
 func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()

@@ -58,7 +58,14 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 
 func shareStatusCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
-		Use: "status <CRID>", Short: "Show sharing state", Args: exactArgs(1),
+		Use:   "status <CRID>",
+		Short: "Show resource or local sharing state",
+		Long: `Show the current state of a published resource.
+
+For a remote URL, status reports the resource type, target, and active or
+revoked state. For a local app, it reports durable desired state separately
+from the platform's observed Connector state and serving epoch.`,
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := opts.newClient()
 			if err != nil {
@@ -66,7 +73,17 @@ func shareStatusCmd(opts *globalOpts) *cobra.Command {
 			}
 			sharing, err := client.Sharing(cmd.Context(), args[0])
 			if err != nil {
-				return err
+				if !isPotentialNonConnectorSharingError(err) {
+					return err
+				}
+				resource, resourceErr := client.Resource(cmd.Context(), args[0])
+				if resourceErr != nil {
+					return resourceErr
+				}
+				if resource.Type == "tunnel" {
+					return fmt.Errorf("connector sharing state was unavailable: %w", err)
+				}
+				return opts.printer().ResourceStatus(resource)
 			}
 			local, _, err := readLocalShareIfPresent(cmd.Context(), opts, args[0])
 			if err != nil {
@@ -82,6 +99,16 @@ func shareStatusCmd(opts *globalOpts) *cobra.Command {
 			return opts.printer().Sharing(target, sharing)
 		},
 	}
+}
+
+// isPotentialNonConnectorSharingError uses only the stable problem code. The
+// generic resource read below is the authoritative discriminator: a tunnel
+// preserves the original sharing error, while another resource type gets the
+// generic status view.
+func isPotentialNonConnectorSharingError(err error) bool {
+	var apiErr *qurlapi.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest &&
+		apiErr.Code == "invalid_input"
 }
 
 func changeShareState(ctx context.Context, opts *globalOpts, id, action string) error {

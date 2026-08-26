@@ -268,36 +268,124 @@ func (c *client) List(ctx context.Context, opts ListOptions) (*ResourcePage, err
 	}
 	page := &ResourcePage{NextCursor: env.Meta.NextCursor, HasMore: env.Meta.HasMore}
 	for i := range env.Data {
-		row := &env.Data[i]
-		if strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
-			return nil, fmt.Errorf("%w: resource list row has missing type or status", qurl.ErrInvalidAPIResponse)
+		summary, err := summarizeResourceRow(&env.Data[i], "resource list row")
+		if err != nil {
+			return nil, err
 		}
-		if row.Type == "tunnel" {
-			if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
-				return nil, fmt.Errorf("%w: tunnel resource list identity: %w", qurl.ErrInvalidAPIResponse, err)
-			}
-			if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
-				return nil, fmt.Errorf("%w: tunnel resource list row has invalid desired_state %q", qurl.ErrInvalidAPIResponse, row.DesiredState)
-			}
-			if row.DesiredState == DesiredStateOn && row.ServingEpoch == 0 {
-				return nil, fmt.Errorf("%w: desired-on tunnel resource list row has zero serving_epoch", qurl.ErrInvalidAPIResponse)
-			}
-		}
-		page.Items = append(page.Items, ResourceSummary{
-			CRID:         row.CRID,
-			ResourceID:   row.ResourceID,
-			TargetURL:    row.TargetURL,
-			Type:         row.Type,
-			Status:       row.Status,
-			DesiredState: row.DesiredState,
-			ServingEpoch: row.ServingEpoch,
-			Description:  row.Description,
-			Tags:         row.Tags,
-			CreatedAt:    row.CreatedAt,
-			ExpiresAt:    row.ExpiresAt,
-		})
+		page.Items = append(page.Items, *summary)
 	}
 	return page, nil
+}
+
+// Resource reads one owner-visible resource. The status command uses this
+// generic surface only after the connector-only sharing surface says the CRID
+// belongs to another resource type.
+func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
+	}
+	reply, err := c.doREST(ctx, http.MethodGet, "/v1/resources/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		problem := reply.problem()
+		var apiErr *Error
+		// Some deployed edges predate the owner-facing single-resource GET
+		// route and answer that path with an unstructured 404. Only that exact
+		// route-level absence may use the paged list compatibility path. A
+		// structured not_found response is an authoritative missing resource
+		// and must not trigger an account-wide scan.
+		if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "" {
+			return nil, problem
+		}
+		return c.findResourceInList(ctx, id)
+	}
+	var env struct {
+		Data *struct {
+			Resource *resourceRow `json:"resource"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode resource detail: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if env.Data == nil || env.Data.Resource == nil {
+		return nil, fmt.Errorf("%w: resource detail has no resource", qurl.ErrInvalidAPIResponse)
+	}
+	row := env.Data.Resource
+	if id != row.CRID && id != row.ResourceID {
+		return nil, fmt.Errorf("%w: resource detail identity does not match the request", qurl.ErrInvalidAPIResponse)
+	}
+	if row.CRID != "" {
+		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
+			return nil, fmt.Errorf("%w: resource detail identity: %w", qurl.ErrInvalidAPIResponse, err)
+		}
+	}
+	return summarizeResourceRow(row, "resource detail")
+}
+
+func (c *client) findResourceInList(ctx context.Context, id string) (*ResourceSummary, error) {
+	const (
+		pageLimit       = 100
+		maximumPageRead = 100
+	)
+	cursor := ""
+	seen := map[string]struct{}{}
+	for pageNumber := 0; pageNumber < maximumPageRead; pageNumber++ {
+		page, err := c.List(ctx, ListOptions{Limit: pageLimit, Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page.Items {
+			item := &page.Items[i]
+			if item.CRID != id && item.ResourceID != id {
+				continue
+			}
+			if item.CRID != "" {
+				if err := resourceidentity.ValidatePair(item.CRID, item.ResourceID); err != nil {
+					return nil, fmt.Errorf("%w: resource list lookup identity: %w", qurl.ErrInvalidAPIResponse, err)
+				}
+			}
+			return item, nil
+		}
+		if !page.HasMore {
+			return nil, &Error{StatusCode: http.StatusNotFound, Code: "not_found", Title: "Resource Not Found"}
+		}
+		next := strings.TrimSpace(page.NextCursor)
+		if next == "" {
+			return nil, fmt.Errorf("%w: resource list lookup has_more without a cursor", qurl.ErrInvalidAPIResponse)
+		}
+		if _, exists := seen[next]; exists {
+			return nil, fmt.Errorf("%w: resource list lookup repeated its cursor", qurl.ErrInvalidAPIResponse)
+		}
+		seen[next] = struct{}{}
+		cursor = next
+	}
+	return nil, fmt.Errorf("%w: resource list lookup exceeded %d pages", qurl.ErrInvalidAPIResponse, maximumPageRead)
+}
+
+func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, error) {
+	if row == nil || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
+		return nil, fmt.Errorf("%w: %s has missing type or status", qurl.ErrInvalidAPIResponse, source)
+	}
+	if row.Type == "tunnel" {
+		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
+			return nil, fmt.Errorf("%w: tunnel %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
+		}
+		if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
+			return nil, fmt.Errorf("%w: tunnel %s has invalid desired_state %q", qurl.ErrInvalidAPIResponse, source, row.DesiredState)
+		}
+		if row.DesiredState == DesiredStateOn && row.ServingEpoch == 0 {
+			return nil, fmt.Errorf("%w: desired-on tunnel %s has zero serving_epoch", qurl.ErrInvalidAPIResponse, source)
+		}
+	}
+	return &ResourceSummary{
+		CRID: row.CRID, ResourceID: row.ResourceID, TargetURL: row.TargetURL,
+		Type: row.Type, Status: row.Status, DesiredState: row.DesiredState,
+		ServingEpoch: row.ServingEpoch, Description: row.Description, Tags: row.Tags,
+		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
+	}, nil
 }
 
 // Sharing reads one tunnel resource's durable and observed serving state.

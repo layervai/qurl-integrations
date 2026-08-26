@@ -40,6 +40,8 @@ type Client interface {
 	Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error)
 	// List returns a page of the caller's resources.
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
+	// Resource returns one owner-visible resource by CRID or public resource ID.
+	Resource(ctx context.Context, id string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
 	// connection state of one tunnel resource.
 	Sharing(ctx context.Context, id string) (*Sharing, error)
