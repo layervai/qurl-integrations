@@ -589,7 +589,14 @@ func validateSandboxCLIBinary(raw string) (string, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return "", errors.New("customer CLI binary path must be an exact absolute path")
 	}
-	info, err := os.Lstat(path)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", errors.New("customer CLI binary is unavailable")
+	}
+	if !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {
+		return "", errors.New("customer CLI binary resolved to a noncanonical path")
+	}
+	info, err := os.Lstat(resolved)
 	if err != nil {
 		return "", errors.New("customer CLI binary is unavailable")
 	}
@@ -603,7 +610,7 @@ func validateSandboxCLIBinary(raw string) (string, error) {
 	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); err != nil {
 		return "", err
 	}
-	return path, nil
+	return resolved, nil
 }
 
 func validateSandboxCLIBinaryMetadata(mode os.FileMode, ownerUID, effectiveUID uint32, links uint64) error {
@@ -625,8 +632,12 @@ func TestValidateSandboxCLIBinary(t *testing.T) {
 	if err := os.Chmod(valid, 0o700); err != nil { //nolint:gosec // The fixture must be executable.
 		t.Fatal(err)
 	}
-	if got, err := validateSandboxCLIBinary(valid); err != nil || got != valid {
-		t.Fatalf("valid binary = %q, %v", got, err)
+	resolvedValid, err := filepath.EvalSymlinks(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := validateSandboxCLIBinary(valid); err != nil || got != resolvedValid {
+		t.Fatalf("valid binary = %q, %v; want %q", got, err, resolvedValid)
 	}
 	for name, path := range map[string]string{
 		"missing":      filepath.Join(dir, "missing"),
@@ -651,8 +662,8 @@ func TestValidateSandboxCLIBinary(t *testing.T) {
 	if err := os.Symlink(valid, symlink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := validateSandboxCLIBinary(symlink); err == nil {
-		t.Fatal("symlink binary accepted")
+	if got, err := validateSandboxCLIBinary(symlink); err != nil || got != resolvedValid {
+		t.Fatalf("Homebrew-style symlink = %q, %v; want resolved %q", got, err, resolvedValid)
 	}
 	for name, fixture := range map[string]struct {
 		mode  os.FileMode
