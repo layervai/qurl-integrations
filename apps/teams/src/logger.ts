@@ -40,7 +40,13 @@ function redactValue(value: unknown, protectedValues: readonly string[], seen: W
     return redactText(value, protectedValues);
   }
   if (value instanceof Error) {
-    return { name: value.name, message: redactText(value.message, protectedValues) };
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    return {
+      name: value.name,
+      message: redactText(value.message, protectedValues),
+      ...(value.cause === undefined ? {} : { cause: redactValue(value.cause, protectedValues, seen) }),
+    };
   }
   if (Array.isArray(value)) {
     return value.map((item) => redactValue(item, protectedValues, seen));

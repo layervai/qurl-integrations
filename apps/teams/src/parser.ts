@@ -79,6 +79,7 @@ export function parseCommand(input: string): TeamsCommand {
   }
   if (verb === 'get') {
     if (!args[0]) throw new UserFacingError('resource token is required');
+    if (/^(?:dm|reason):/i.test(args[0])) throw new UserFacingError('resource token is required');
     const flags: Record<string, string> = {};
     for (const token of args.slice(1)) {
       const match = /^([a-z][a-z0-9_]*):(.*)$/.exec(token);

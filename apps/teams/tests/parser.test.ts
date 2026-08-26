@@ -22,6 +22,7 @@ describe('Teams command parser', () => {
     expect(parseCommand('protect-connector prod env:compose port:9090 alias:$web')).toMatchObject({ flags: { env: 'compose', port: '9090', alias: 'web' } });
     expect(() => parseCommand('get $docs dm:yes')).toThrow('dm flag must be true or false');
     expect(() => parseCommand('protect-connector prod port:0')).toThrow('connector port is invalid');
+    expect(() => parseCommand('get dm:true')).toThrow('resource token is required');
   });
 
   it('requires safe HTTPS URL targets and valid mentions', () => {

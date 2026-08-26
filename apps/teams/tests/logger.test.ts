@@ -35,4 +35,22 @@ describe('RedactingLogger', () => {
     expect(rendered).toContain('[REDACTED]');
     expect(rendered).toContain('401');
   });
+
+  it('preserves a recursively redacted error cause for diagnostics', () => {
+    const entries: Array<{ context: LogContext | undefined }> = [];
+    const sink: Logger = {
+      debug: (_message, context) => entries.push({ context }),
+      info: (_message, context) => entries.push({ context }),
+      warn: (_message, context) => entries.push({ context }),
+      error: (_message, context) => entries.push({ context }),
+    };
+    const logger = new RedactingLogger(sink, ['upstream-secret']);
+    const cause = new Error('cause contains upstream-secret');
+    logger.error('request failed', { error: new Error('outer failure', { cause }) });
+    expect(entries[0]?.context).toEqual({ error: {
+      name: 'Error',
+      message: 'outer failure',
+      cause: { name: 'Error', message: 'cause contains [REDACTED]' },
+    } });
+  });
 });

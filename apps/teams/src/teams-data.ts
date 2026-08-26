@@ -194,6 +194,8 @@ export class TeamsDataStore {
 
   async deleteWorkspace(tenantId: string): Promise<void> {
     assertPresent(tenantId);
+    // DynamoDB has no cross-table transaction for this cleanup. Deletes are
+    // deliberately idempotent so an interrupted uninstall can be retried.
     for (const [table, keyName] of [[this.#tenantPrincipalsTable, principalKey], [this.#channelPoliciesTable, policyKey]] as const) {
       const items = await this.#queryTenant(table, tenantId);
       for (const item of items) {
@@ -211,6 +213,8 @@ export class TeamsDataStore {
 
   async purgeResourceFromTenant(tenantId: string, resourceId: string): Promise<void> {
     assertPresent(tenantId, resourceId);
+    // As above, this best-effort cleanup is safe to rerun after a partial
+    // failure; each row deletion is independently idempotent.
     const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
     for (const item of items) {
       if (asString(item.resource_id) !== resourceId) continue;

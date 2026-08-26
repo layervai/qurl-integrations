@@ -139,7 +139,8 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
 export async function createTeamsServer(options: TeamsServerOptions): Promise<Server> {
   // ExpressAdapter also installs express.json() for its message route and
   // consumes req.body. Parsing first is supported by Express and preserves
-  // qURL's explicit 1 MiB Activity limit for cards and attachments.
+  // qURL's intentional 1 MiB Activity limit for cards and attachments. This
+  // is the effective /api/messages ceiling, including ahead of the SDK parser.
   options.expressApp.use(express.json({ limit: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES }));
   installOAuthRoutes(options);
   await options.app.initialize();
@@ -250,6 +251,9 @@ export async function createProductionTeamsConfig(): Promise<TeamsProductionConf
     if (normalized) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), ACTIVITY_TIMEOUT_MS);
+      // The Teams SDK replies against its authenticated inbound conversation
+      // reference. validateTeamsServiceUrl intentionally guards only qURL's
+      // DM and other out-of-band Connector sends in TeamsSdkMessagePoster.
       try { await bot.handleActivity(normalized, controller.signal, async text => { await reply(text); }); }
       finally { clearTimeout(timeout); }
     }

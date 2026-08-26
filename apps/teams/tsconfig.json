@@ -7,7 +7,9 @@
     "strict": true,
     // The Teams/AWS SDK declaration graphs currently contain incompatible
     // transitive declarations; keep application type checking strict while
-    // avoiding failures originating solely inside node_modules.
+    // avoiding failures originating solely inside node_modules. This does
+    // reduce validation of consumed SDK declarations; review SDK upgrades in
+    // CI and remove this exception when their declaration graphs are fixed.
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
