@@ -53,4 +53,23 @@ describe('RedactingLogger', () => {
       cause: { name: 'Error', message: 'cause contains [REDACTED]' },
     } });
   });
+
+  it('renders repeated errors independently while retaining true cycle protection', () => {
+    const entries: Array<{ context: LogContext | undefined }> = [];
+    const sink: Logger = {
+      debug: (_message, context) => entries.push({ context }),
+      info: (_message, context) => entries.push({ context }),
+      warn: (_message, context) => entries.push({ context }),
+      error: (_message, context) => entries.push({ context }),
+    };
+    const logger = new RedactingLogger(sink);
+    const repeated = new Error('same error');
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    logger.error('request failed', { errors: [repeated, repeated], circular });
+    expect(entries[0]?.context).toEqual({
+      errors: [{ name: 'Error', message: 'same error' }, { name: 'Error', message: 'same error' }],
+      circular: { self: '[Circular]' },
+    });
+  });
 });

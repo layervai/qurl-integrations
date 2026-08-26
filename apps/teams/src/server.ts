@@ -166,6 +166,8 @@ function env(name: string): string {
 
 export function httpsOrigin(value: string, name: string): string {
   const url = new URL(value.includes('://') ? value : `https://${value}`);
+  // qURL and the public Teams callback may be served on a non-default HTTPS
+  // port. Bot Framework service URLs are stricter and are validated separately.
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error(`${name} must be an HTTPS origin`);
   return url.toString().replace(/\/$/, '');
 }

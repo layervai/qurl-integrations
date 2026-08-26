@@ -99,4 +99,13 @@ describe('qURL HTTP adapter', () => {
     await expect(client.listResources(controller.signal)).rejects.toThrow('timed out or was cancelled');
     expect(calls).toBe(0);
   });
+
+  it('maps a non-UTF-8 response body to a stable adapter error', async () => {
+    const client = new HttpQurlClient({
+      endpoint: 'https://api.example.test',
+      apiKey: 'secret',
+      fetch: async () => new Response(new Uint8Array([0xff])),
+    });
+    await expect(client.listResources()).rejects.toThrow('qURL response is invalid UTF-8');
+  });
 });

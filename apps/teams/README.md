@@ -17,6 +17,18 @@ personal conversations, and tenant credentials tables. The official Teams SDK
 owns inbound Activity handling, Bot Framework token validation, and outbound
 Connector calls. Its OAuth/Signin features are intentionally not enabled.
 
+## Tenant trust boundary
+
+The Teams SDK must remain the only public ingress for `/api/messages`: it
+validates the Bot Framework token before the qURL bot receives an Activity.
+The SDK handler seam used by this package does not expose the validated token's
+`tid` claim, so tenant scoping intentionally relies on the tenant identifiers
+delivered in that authenticated Activity. `deriveScope` rejects contradictory
+`channelData.tenant.id` and `conversation.tenantId` values, but cannot perform
+a cryptographic claim cross-check until the upstream SDK exposes that claim.
+Do not add a route that invokes the bot directly with caller-supplied Activity
+objects; doing so would violate this tenant-isolation trust boundary.
+
 The Bot supports setup, resource listing/get, URL and connector protection,
 aliases, display names, admin membership, uninstall, feedback, and private
 Teams delivery. Policies and principals are stored as normalized rows matching

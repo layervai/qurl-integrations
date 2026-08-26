@@ -13,6 +13,20 @@ import {
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { CredentialCipher } from './credential-cipher.js';
 
+export class TenantOwnerRemovalError extends Error {
+  constructor() {
+    super('tenant owner cannot be removed');
+    this.name = 'TenantOwnerRemovalError';
+  }
+}
+
+export class TenantOwnerAlreadyAdminError extends Error {
+  constructor() {
+    super('tenant owner already has admin access');
+    this.name = 'TenantOwnerAlreadyAdminError';
+  }
+}
+
 export interface DynamoRequest {
   readonly operation: 'get' | 'put' | 'update' | 'delete' | 'query';
   readonly input: Record<string, unknown>;
@@ -169,7 +183,7 @@ export class TeamsDataStore {
   async addAdmin(tenantId: string, actorId: string): Promise<void> {
     assertPresent(tenantId, actorId);
     const owner = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true } });
-    if (asString(owner.Item?.actor_aad_object_id) === actorId) return;
+    if (asString(owner.Item?.actor_aad_object_id) === actorId) throw new TenantOwnerAlreadyAdminError();
     try {
       await this.#client.send({ operation: 'put', input: {
         TableName: this.#tenantPrincipalsTable,
@@ -184,7 +198,7 @@ export class TeamsDataStore {
   async removeAdmin(tenantId: string, actorId: string): Promise<void> {
     assertPresent(tenantId, actorId);
     const owner = await this.#client.send<{ readonly Item?: Record<string, unknown> }>({ operation: 'get', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, ownerPrincipal), ConsistentRead: true } });
-    if (asString(owner.Item?.actor_aad_object_id) === actorId) throw new Error('tenant owner cannot be removed');
+    if (asString(owner.Item?.actor_aad_object_id) === actorId) throw new TenantOwnerRemovalError();
     try {
       await this.#client.send({ operation: 'delete', input: { TableName: this.#tenantPrincipalsTable, Key: principalDdbKey(tenantId, `admin#${keyPart(actorId)}`), ConditionExpression: `attribute_exists(${principalKey})` } });
     } catch (error) {

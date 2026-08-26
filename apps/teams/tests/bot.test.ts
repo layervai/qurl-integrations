@@ -4,6 +4,7 @@ import { TeamsBot } from '../src/bot.js';
 import { parseCommand, tokenize } from '../src/parser.js';
 import type { QurlClient } from '../src/qurl-client.js';
 import type { TeamsDataStore } from '../src/teams-data.js';
+import { TenantOwnerAlreadyAdminError, TenantOwnerRemovalError } from '../src/teams-data.js';
 import { renderTunnelInstallMessage, validateTunnelImageRef, validateTunnelSlug } from '../src/tunnel.js';
 
 describe('Teams bot primitives', () => {
@@ -219,6 +220,52 @@ describe('Teams bot primitives', () => {
       'tenant-1', 'channel-1', true, parseCommand('get $docs'),
     )).resolves.toContain('https://qurl.example/one');
     expect(createdResourceId).toBe('resource-1');
+  });
+
+  it('uses distinct idempotency keys when unexpected activities lack IDs', async () => {
+    const keys: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }),
+        create: async (input: { readonly idempotencyKey?: string }) => {
+          keys.push(input.idempotencyKey ?? '');
+          return { resourceId: 'resource-1', qurlLink: 'https://qurl.example/one' };
+        },
+      } as unknown as QurlClient,
+      data: {
+        allowedResourceIds: async () => new Set(['resource-1']),
+        lookupScopeAlias: async () => undefined,
+        personalConversationRef: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    const activity = { type: 'message', from: { id: 'delivery', aadObjectId: 'actor' } };
+    await bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $resource-1'));
+    await bot.execute(activity, 'tenant-1', 'channel-1', true, parseCommand('get $resource-1'));
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('returns clear owner-management errors to administrators', async () => {
+    const base = { type: 'message' as const, from: { aadObjectId: 'admin' }, channelData: { tenant: { id: 'tenant' }, channel: { id: 'channel' } }, conversation: { id: 'conversation', conversationType: 'channel' } };
+    const ownerBot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true }), addAdmin: async () => { throw new TenantOwnerAlreadyAdminError(); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    const removalBot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: { checkAdmin: async () => ({ isAdmin: true }), removeAdmin: async () => { throw new TenantOwnerRemovalError(); } } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    const mention = [{ type: 'mention', mentioned: { id: 'owner', aadObjectId: 'owner-aad' } }];
+    const replies: string[] = [];
+    await ownerBot.handleActivity({ ...base, text: 'add <@owner>', entities: mention }, undefined, async text => { replies.push(text); });
+    await removalBot.handleActivity({ ...base, text: 'remove <@owner>', entities: mention }, undefined, async text => { replies.push(text); });
+    expect(replies).toEqual([
+      'The tenant owner already has qURL admin access.',
+      'The tenant owner cannot be removed.',
+    ]);
   });
 
   it('filters list and get results to resources exposed in the channel', async () => {

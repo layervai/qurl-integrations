@@ -160,7 +160,11 @@ async function boundedText(response: Response): Promise<string> {
   const body = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch {
+    throw new Error('qURL response is invalid UTF-8');
+  }
 }
 
 export function idempotencyKey(...fields: string[]): string { return sha256Hex(fields.map(value => `${value.length}:${value}`).join('|')); }

@@ -94,6 +94,7 @@ describe('Teams production URL configuration', () => {
 
   it('accepts HTTPS origins and preserves the OIDC issuer trailing slash', () => {
     expect(httpsOrigin('https://teams.example', 'TEAMS_BASE_URL')).toBe('https://teams.example');
+    expect(httpsOrigin('https://teams.example:8443', 'QURL_ENDPOINT')).toBe('https://teams.example:8443');
     expect(httpsIssuer('https://tenant.auth0.com', 'AUTH0_DOMAIN')).toBe('https://tenant.auth0.com/');
   });
 

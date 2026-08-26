@@ -188,7 +188,9 @@ export class OAuthStateManager {
   /**
    * Reconstruct provider-facing parameters from the persisted transaction.
    * This does not consume the one-shot state; the callback remains the only
-   * atomic consume point, and the PKCE verifier stays server-side.
+   * atomic consume point, and the PKCE verifier stays server-side. The start
+   * route may therefore be replayed during the five-minute TTL, but it cannot
+   * complete more than one callback or bypass the CSRF, PKCE, and nonce checks.
    */
   async authorizationRequest(handle: string): Promise<OAuthAuthorizationRequest> {
     const stateKey = stateLookupKey(handle);
