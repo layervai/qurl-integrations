@@ -62,12 +62,21 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	t.Parallel()
 	var gotRefreshMode string
+	var recoveryCredential string
 	res := runCLI(t, &runOpts{
 		args:            []string{"publish", "http://127.0.0.1:3000"},
-		env:             map[string]string{},
+		env:             map[string]string{"QURL_API_KEY": testAPIKey},
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
 			gotRefreshMode = cfg.RefreshMode
+			if cfg.RecoveryCredentialProvider == nil {
+				return nil, errors.New("missing Connector credential-recovery provider")
+			}
+			var err error
+			recoveryCredential, err = cfg.RecoveryCredentialProvider(context.Background())
+			if err != nil {
+				return nil, err
+			}
 			return nil, errors.New("stop after inspecting Connector configuration")
 		},
 	})
@@ -76,6 +85,9 @@ func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	}
 	if gotRefreshMode != "auto" {
 		t.Fatalf("Connector refresh mode = %q, want auto", gotRefreshMode)
+	}
+	if recoveryCredential != testAPIKey {
+		t.Fatalf("Connector recovery credential did not resolve the exact signed-in account authority")
 	}
 	mustEmptyStdout(t, res)
 }

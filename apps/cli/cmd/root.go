@@ -366,14 +366,26 @@ func (o *globalOpts) credentialStore() *auth.Chain {
 // keyring, falling back to the 0600 credential file where no keyring is
 // available).
 func (o *globalOpts) newClient() (qurlapi.Client, error) {
-	key, _, err := auth.Resolve(o.lookupEnv, o.credentialStore())
+	key, err := o.apiCredential()
 	if err != nil {
 		return nil, err
 	}
-	if err := auth.ValidateKeyShape(key); err != nil {
-		return nil, err
-	}
 	return o.apiClient(key)
+}
+
+// apiCredential resolves one account credential without retaining it. Native
+// Connector recovery calls this lazily only after the pinned Hub has rejected
+// a persisted device credential; ordinary warm starts never read it twice or
+// pass it into the background daemon.
+func (o *globalOpts) apiCredential() (string, error) {
+	key, _, err := auth.Resolve(o.lookupEnv, o.credentialStore())
+	if err != nil {
+		return "", err
+	}
+	if err := auth.ValidateKeyShape(key); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 // apiClient builds the API client around one explicit key. login uses it

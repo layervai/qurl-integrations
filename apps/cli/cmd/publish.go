@@ -204,6 +204,10 @@ func (e *localEnrollment) credential(ctx context.Context, request qurl.AgentEnro
 	return token.Token, nil
 }
 
+func (e *localEnrollment) recoveryCredential(context.Context) (string, error) {
+	return e.opts.apiCredential()
+}
+
 func (e *localEnrollment) resolveID(agentID string) (string, error) {
 	id, err := e.connectorID(agentID)
 	if err != nil {
@@ -241,7 +245,9 @@ func prepareLocalPublishResource(
 	cfg := &connectorshare.NativeRuntimeConfig{
 		StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 		Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
-		EnrollmentCredentialProvider: enrollment.credential, RefreshMode: connectorRefreshModeAuto,
+		EnrollmentCredentialProvider: enrollment.credential,
+		RecoveryCredentialProvider:   enrollment.recoveryCredential,
+		RefreshMode:                  connectorRefreshModeAuto,
 	}
 	resolved, err = opts.resolveLocalResource(ctx, cfg, enrollment.resolveID)
 	if err != nil {
