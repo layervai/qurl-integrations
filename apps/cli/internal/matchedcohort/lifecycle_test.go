@@ -650,7 +650,7 @@ func lifecycleFixture(t *testing.T) (*Consumer, Authority, *lifecycleRuntime) {
 		authority.Identities = append(authority.Identities, FixedIdentity{Label: identityPlan.Label,
 			OwnerID: identityPlan.OwnerID, AgentID: identityPlan.AgentID, AgentPublicKeyB64: publicKey,
 			AgentKeySchemaVersion: 2, EnrollmentCredentialKind: "account", DeviceAPIKeyID: deviceKeyID,
-			ConnectorID: identityPlan.ConnectorID, ResourceID: "resource-" + identityPlan.AgentID, CRID: "crid-" + identityPlan.AgentID,
+			ConnectorID: identityPlan.ConnectorID, ResourceID: testProtectedResourceID(t, byte(identityIndex+1)), CRID: "crid-" + identityPlan.AgentID,
 			ConnectorRoutingID: "route-" + identityPlan.AgentID, KnockResourceID: "knock-" + identityPlan.AgentID,
 			Selector: identityPlan.Selector, AgentState: stateRef,
 			ConnectorState: StateReference{Key: "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/connector-state", VersionID: "version", SHA256: strings.Repeat("c", 64)}})

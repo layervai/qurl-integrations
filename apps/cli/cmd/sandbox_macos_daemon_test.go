@@ -55,7 +55,10 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 		}
 		cliEnv[name] = value
 	}
-	stateDir := t.TempDir()
+	stateDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve canonical macOS state directory: %v", err)
+	}
 	cliEnv[connectorstate.EnvStateDirPrimary] = stateDir
 	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
 
@@ -168,11 +171,41 @@ func externalSandboxEnvironment(overrides map[string]string) []string {
 	for key, value := range overrides {
 		values[key] = value
 	}
+	// The protected harness reads the API key from QURL_API_KEY_FILE, then
+	// passes only the exact value to the customer process. Do not inherit the
+	// file source as well: the production CLI rejects two credential sources.
+	if _, ok := overrides["QURL_API_KEY"]; ok {
+		delete(values, "QURL_API_KEY_FILE")
+	}
 	result := make([]string, 0, len(values))
 	for key, value := range values {
 		result = append(result, key+"="+value)
 	}
 	return result
+}
+
+func TestExternalSandboxEnvironmentUsesOneAPIKeySource(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "inherited-inline")
+	t.Setenv("QURL_API_KEY_FILE", "/run/secrets/inherited-api-key")
+	got := map[string]string{}
+	for _, entry := range externalSandboxEnvironment(map[string]string{
+		"QURL_API_KEY":  "exact-customer-key",
+		"QURL_ENDPOINT": "https://sandbox.example",
+	}) {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["QURL_API_KEY"] != "exact-customer-key" {
+		t.Fatal("customer process did not receive the exact inline API key")
+	}
+	if _, present := got["QURL_API_KEY_FILE"]; present {
+		t.Fatal("customer process inherited a second API key source")
+	}
+	if got["QURL_ENDPOINT"] != "https://sandbox.example" {
+		t.Fatal("customer process lost its exact endpoint override")
+	}
 }
 
 func waitExternalSandboxShare(t *testing.T, stateDir, cridValue string, limit time.Duration) *connectorstate.LocalShare {
