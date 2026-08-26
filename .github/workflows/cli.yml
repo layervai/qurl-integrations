@@ -394,6 +394,24 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+  # Incident-only active-caller window. This branch is not for merge: the NHP
+  # manual journey requires its exact PR artifact producer to remain active
+  # through terminal receipt verification. Cancel this run after that receipt.
+  sandbox-customer-journey-window:
+    name: cli / sandbox customer journey active window
+    needs: sandbox-customer-artifacts
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'incident/crid-active-journey-window'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions: {}
+    steps:
+      - name: Keep the exact PR artifact producer active
+        shell: bash
+        run: sleep 5100
+
   sandbox-e2e:
     name: cli / sandbox e2e
     runs-on: ubuntu-latest
