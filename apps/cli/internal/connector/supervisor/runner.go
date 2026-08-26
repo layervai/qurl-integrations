@@ -103,7 +103,7 @@ type cycleRunner struct {
 // presented — the RunID-to-session binding is what the whole knock-then-login
 // correlation rests on — so a mismatch rejects the accepted session.
 //
-// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// TODO(upstream-contract): mirrors github.com/layervai/frp v1.0.0
 // client/service.go — ServiceOptions.OnFirstLoginSuccess, dispatched by
 // runFirstLoginSuccessHook as `svr.onFirstLoginSuccess(svr.runID)` from
 // inside loopLoginUntilSuccess's loginFunc: synchronously, after

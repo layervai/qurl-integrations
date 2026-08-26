@@ -61,7 +61,7 @@ const (
 	//
 	// TODO(upstream-contract): failingDialLoginReadBudget and
 	// failingDialBackoffCeiling mirror github.com/layervai/frp
-	// v0.70.0-layerv.4 — named, not numbered, because the third constant in
+	// v1.0.0 — named, not numbered, because the third constant in
 	// this block is NOT a fork mirror. Neither has a config seam; both are
 	// literals inside the fork:
 	//
@@ -139,7 +139,7 @@ const (
 	// run. Without this watchdog a Connector in that state loops in silence.
 	//
 	// TODO(upstream-contract): that unboundedness mirrors
-	// github.com/layervai/frp v0.70.0-layerv.4 client/service.go —
+	// github.com/layervai/frp v1.0.0 client/service.go —
 	// `svr.loopLoginUntilSuccess(20*time.Second, false)` in
 	// keepControllerWorking, where the literal false is firstLoginExit.
 	// LoginFailExit is consulted once, on the first login, where Run passes
@@ -227,7 +227,7 @@ var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could no
 // COUPLING note.
 //
 // TODO(upstream-contract): the goroutine topology above mirrors
-// github.com/layervai/frp v0.70.0-layerv.4 — client/control_session.go (Dial
+// github.com/layervai/frp v1.0.0 — client/control_session.go (Dial
 // is the only connector.Open call site, and buildLoginMsg reads Metadatas off
 // the same pointer the ConnectorCreator is handed), client/service.go (Run's
 // first-login loop returns before `go keepControllerWorking()`, so Dial never
@@ -620,7 +620,7 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 // path reports errNilCommonConfig (from applyKnockResult, after the knock has
 // already been spent) and fails the cycle closed.
 //
-// TODO(upstream-contract): mirrors github.com/layervai/frp v0.70.0-layerv.4
+// TODO(upstream-contract): mirrors github.com/layervai/frp v1.0.0
 // client/connector.go — defaultConnectorImpl.Open dials for QUIC and, for
 // every other protocol, only past
 // `if !lo.FromPtr(c.cfg.Transport.TCPMux) { return nil }` (that guard is not
