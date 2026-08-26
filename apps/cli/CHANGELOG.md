@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.2](https://github.com/layervai/qurl-integrations/compare/v2.0.1...v2.0.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** bind and validate CRID lifecycle continuity ([#1272](https://github.com/layervai/qurl-integrations/issues/1272)) ([6d25194](https://github.com/layervai/qurl-integrations/commit/6d25194d824a9dcf8e1b7d5748d30909dd47dd9e))
+
 ## [2.0.1](https://github.com/layervai/qurl-integrations/compare/v2.0.0...v2.0.1) (2026-08-26)
 
 
