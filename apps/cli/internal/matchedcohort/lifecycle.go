@@ -221,7 +221,7 @@ func newDurableManagedAdmitter(ctx context.Context, consumer *Consumer, key stri
 	record, _, err := loadOperation(ctx, consumer.Blobs, key)
 	if err != nil || record.Status != OperationPrepared || record.Label != identity.Label ||
 		record.Operation.ResourceID != identity.KnockResourceID || record.Operation.AgentID != identity.AgentID ||
-		record.Operation.OwnerID != identity.OwnerID {
+		record.Operation.OwnerID != identity.OwnerID || record.Operation.ProtectedResourceID != identity.ResourceID {
 		return nil, errors.Join(fmt.Errorf("%w: managed session operation", errStateConflict), err)
 	}
 	return &durableManagedAdmitter{consumer: consumer, key: key, identity: *identity}, nil
@@ -693,7 +693,7 @@ func (c *Consumer) validateLifecycleBundle(ctx context.Context, prepared Prepare
 			record.RecoveryEndpoint != prepared.Intent.RecoveryEndpoint || record.Operation.RunID != want.RunID ||
 			record.Operation.RunAttempt != want.RunAttempt || record.Operation.PreparedAtMillis != want.PreparedAtMS ||
 			record.Operation.ExpiresAtMillis != want.ExpiresAtMS || record.Label != want.Label ||
-			record.Operation.ResourceID == "" {
+			record.Operation.ResourceID == "" || record.Operation.ProtectedResourceID == "" {
 			return nil, fmt.Errorf("%w: lifecycle operation %s", errStateConflict, want.Role)
 		}
 		if requirePrepared && record.Status != OperationPrepared {

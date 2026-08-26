@@ -170,7 +170,8 @@ func (r qurlSessionRuntime) Prepare(ctx context.Context, store qurl.AgentStateSt
 		AWSAccountID: request.AWSAccountID, AWSRegion: request.AWSRegion, CellID: request.Cohort.CellID,
 		ExpiresAtMillis: request.ExpiresAt.UTC().UnixMilli(), OwnerID: request.Identity.OwnerID,
 		PreparedAtMillis: request.PreparedAt.UTC().UnixMilli(), QURLAgentKeysTable: request.Cohort.QURLAgentKeysTable,
-		ResourceID: request.Identity.KnockResourceID, RunAttempt: request.RunAttempt, RunID: request.RunID,
+		ProtectedResourceID: request.Identity.ResourceID, ResourceID: request.Identity.KnockResourceID,
+		RunAttempt: request.RunAttempt, RunID: request.RunID,
 		SessionControlTable: request.Cohort.SessionControlTable,
 	})
 }
@@ -186,7 +187,8 @@ func (r qurlSessionRuntime) Admit(ctx context.Context, store qurl.AgentStateStor
 	}
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	result, err := qurl.KnockRegisteredAgent(ctx, binding, privateKey, record.Operation.ResourceID,
-		qurl.NativeKnockOptions{RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt, Operation: &record.Operation}, r.udpOptions...)
+		qurl.NativeKnockOptions{ProtectedResourceID: record.Operation.ProtectedResourceID, RunID: record.Operation.RunID,
+			RunAttempt: record.Operation.RunAttempt, Operation: &record.Operation}, r.udpOptions...)
 	if err != nil {
 		clear(privateKey)
 		binding.Destroy()
@@ -295,6 +297,7 @@ func (c *Consumer) Prepare(ctx context.Context, authority Authority, request Pre
 	}
 	if operation.AgentID != request.Identity.AgentID || operation.AgentPublicKeyB64 != request.Identity.AgentPublicKeyB64 ||
 		operation.OwnerID != request.Identity.OwnerID || operation.ResourceID != request.Identity.KnockResourceID ||
+		operation.ProtectedResourceID != request.Identity.ResourceID ||
 		operation.CellID != request.Cohort.CellID || operation.SessionControlTable != request.Cohort.SessionControlTable ||
 		operation.QURLAgentKeysTable != request.Cohort.QURLAgentKeysTable || operation.AWSAccountID != authority.AWSAccountID ||
 		operation.AWSRegion != authority.AWSRegion || operation.RunID != request.RunID || operation.RunAttempt != request.RunAttempt ||

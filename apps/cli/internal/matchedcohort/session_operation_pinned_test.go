@@ -91,7 +91,7 @@ func TestQURLSessionRuntimePinnedAdmissionKeepsPhysicalAssignment(t *testing.T) 
 			preparedAt := now.Add(-time.Second)
 			operation, err := runtime.Prepare(context.Background(), store, PrepareOperationRequest{AWSAccountID: "111122223333",
 				AWSRegion: "us-east-2", Identity: FixedIdentity{AgentID: "agent-conform", OwnerID: "sandbox-owner@clients",
-					KnockResourceID: "resource-public-key"}, Cohort: CohortPlan{CellID: "cell0", SessionControlTable: "sandbox-session-control",
+					ResourceID: testProtectedResourceID(t, 1), KnockResourceID: "resource-public-key"}, Cohort: CohortPlan{CellID: "cell0", SessionControlTable: "sandbox-session-control",
 					QURLAgentKeysTable: "sandbox-agent-keys"}, RunID: "0123456789abcdef", RunAttempt: 1,
 				PreparedAt: preparedAt, ExpiresAt: preparedAt.Add(20 * time.Minute)})
 			if err != nil {
