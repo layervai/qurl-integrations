@@ -72,3 +72,10 @@ The first tenant member who runs `setup <email>` and completes the verified,
 email-bound OAuth flow becomes the tenant owner. This first-authenticated-
 installer behavior is intentional; later setup attempts are owner-gated and
 cannot silently rebind the tenant to another qURL account.
+
+Uninstall removes all local tenant state after revoking the tenant API key.
+The current upstream qURL external-identity-binding API has no documented
+owner-authorized delete or rebind operation. If a later setup reports a
+retained upstream binding, the qURL operator must remove it before reinstall;
+the bot deliberately does not treat an unowned local tenant plus upstream 409
+as permission to claim that binding.

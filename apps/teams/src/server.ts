@@ -118,7 +118,9 @@ export function installOAuthRoutes(options: TeamsServerOptions): void {
         if (completion.binding.status === 'conflict') {
           status = 409;
           title = 'qURL setup blocked';
-          message = 'This Teams tenant is already connected to another qURL account.';
+          message = completion.binding.reason === 'upstream_binding_cleanup_required'
+            ? 'A previous qURL installation still has an upstream tenant binding. Ask your qURL operator to remove that binding before reinstalling.'
+            : 'This Teams tenant is already connected to another qURL account.';
         } else {
           status = 200;
           title = 'qURL connected';
@@ -141,6 +143,9 @@ export async function createTeamsServer(options: TeamsServerOptions): Promise<Se
   // consumes req.body. Parsing first is supported by Express and preserves
   // qURL's intentional 1 MiB Activity limit for cards and attachments. This
   // is the effective /api/messages ceiling, including ahead of the SDK parser.
+  // TODO(upstream-contract): verify this parser-ordering contract on every
+  // @microsoft/teams.apps upgrade; the route-level SDK parser must continue
+  // respecting an already parsed body.
   options.expressApp.use(express.json({ limit: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES }));
   installOAuthRoutes(options);
   await options.app.initialize();

@@ -149,7 +149,7 @@ export class TeamsBot {
       await this.#options.data.deleteWorkspace(tenantId);
       return upstreamRevocationPending
         ? 'Disconnected qURL from this Teams tenant. Upstream API-key revocation may require operator follow-up.'
-        : 'Disconnected qURL from this Teams tenant.';
+        : 'Disconnected qURL from this Teams tenant. If a later reinstall reports a retained upstream binding, contact your qURL operator for cleanup.';
     }
     if (!channel) throw new UserFacingError('This command is available only in Teams channels, not direct or group chats.');
     if (command.verb === 'aliases') return this.aliases(tenantId, scopeId);

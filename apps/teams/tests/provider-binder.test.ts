@@ -29,6 +29,15 @@ describe('HttpProviderBinder', () => {
     await expect(binder.bind(request)).resolves.toEqual({ status: 'conflict', reason: 'tenant_bound_to_another_account' });
   });
 
+  it('fails closed with a distinct recovery state after local uninstall removes the owner', async () => {
+    const data = {
+      checkAdmin: async () => ({ isAdmin: false }),
+      tenantCredential: async () => undefined,
+    } as unknown as TeamsDataStore;
+    const binder = new HttpProviderBinder({ endpoint: 'https://qurl.example', data, fetch: async () => response(409) });
+    await expect(binder.bind(request)).resolves.toEqual({ status: 'conflict', reason: 'upstream_binding_cleanup_required' });
+  });
+
   it('fails closed when an existing qURL binding has no recoverable credential', async () => {
     const data = {
       checkAdmin: async () => ({ isAdmin: true, ownerId: 'actor' }),

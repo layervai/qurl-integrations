@@ -85,6 +85,9 @@ export class HttpProviderBinder implements ProviderBinder {
       clearTimeout(timeout);
     }
     if (response.status === 409) {
+      // TODO(upstream-contract): qurl-service must expose an owner-authorized
+      // external-binding delete or rebind operation. API-key revocation alone
+      // does not prove a fresh installer may take over a retained binding.
       const result = await this.existingBindingResult(request);
       if (result.status === 'already_bound' && !(await this.#data.tenantCredential(request.teamsTenantId))) {
         throw new Error('qURL tenant binding exists but its credential is unavailable; an operator must revoke the upstream binding before reinstalling');
@@ -112,6 +115,7 @@ export class HttpProviderBinder implements ProviderBinder {
   async existingBindingResult(request: ProviderBindingRequest): Promise<ProviderBindingResult> {
     const current = await this.#data.checkAdmin(request.teamsTenantId, request.actorAadObjectId);
     if (current.ownerId === request.actorAadObjectId) return { status: 'already_bound' };
+    if (current.ownerId === undefined) return { status: 'conflict', reason: 'upstream_binding_cleanup_required' };
     return { status: 'conflict', reason: 'tenant_bound_to_another_account' };
   }
 }

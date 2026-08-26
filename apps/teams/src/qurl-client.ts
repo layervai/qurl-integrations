@@ -1,4 +1,5 @@
 import { sha256Hex } from './encoding.js';
+import { decodeUtf8WithError, readBoundedBytes } from './http.js';
 
 export interface QurlResource {
   readonly resourceId: string;
@@ -125,7 +126,10 @@ export class HttpQurlClient implements QurlClient {
     let response: Response;
     try {
       response = await this.#fetch(url, { method: options.method ?? 'GET', headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), Authorization: `Bearer ${this.#apiKey}`, 'User-Agent': this.#userAgent, ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}) }, ...(options.body === undefined ? {} : { body: options.body }), signal: controller.signal, redirect: 'error' });
-      const text = await boundedText(response);
+      const text = decodeUtf8WithError(await readBoundedBytes(response, QURL_RESPONSE_LIMIT_BYTES, {
+        invalidLimit: () => new Error('qURL response body limit is invalid'),
+        tooLarge: () => new Error('qURL response exceeded the configured size limit'),
+      }), () => new Error('qURL response is invalid UTF-8'));
       if (!response.ok && !(options.ignoreNotFound && response.status === 404)) throw new Error(`qURL request failed (${response.status})`); if (!text) return undefined;
       try { return JSON.parse(text) as unknown; } catch { throw new Error('qURL response is invalid JSON'); }
     } catch (error) {
@@ -135,35 +139,6 @@ export class HttpQurlClient implements QurlClient {
       clearTimeout(timeout);
       options.signal?.removeEventListener('abort', abort);
     }
-  }
-}
-
-async function boundedText(response: Response): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      total += chunk.value.byteLength;
-      if (total > QURL_RESPONSE_LIMIT_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error('qURL response exceeded the configured size limit');
-      }
-      chunks.push(chunk.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(body);
-  } catch {
-    throw new Error('qURL response is invalid UTF-8');
   }
 }
 

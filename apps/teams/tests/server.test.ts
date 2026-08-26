@@ -1,4 +1,5 @@
 import type { ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import type { Application, Request } from 'express';
 import express from 'express';
 import type { App } from '@microsoft/teams.apps';
@@ -17,7 +18,7 @@ type RouteHandler = (request: Request, response: ServerResponse & {
 
 function routes(input: {
   readonly authorizationRequest?: () => Promise<{ readonly codeChallenge: string; readonly nonce: string; readonly loginHint: string }>;
-  readonly complete?: () => Promise<{ readonly binding: { readonly status: 'bound' | 'conflict' } }>;
+  readonly complete?: () => Promise<{ readonly binding: { readonly status: 'bound' } | { readonly status: 'conflict'; readonly reason?: string } }>;
 } = {}): Map<string, RouteHandler> {
   const registered = new Map<string, RouteHandler>();
   const app = {
@@ -84,6 +85,14 @@ describe('Teams OAuth routes', () => {
     expect(response.body).toContain('already connected to another qURL account');
     expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
   });
+
+  it('explains how to recover a retained upstream binding after uninstall', async () => {
+    const handler = routes({ complete: async () => ({ binding: { status: 'conflict', reason: 'upstream_binding_cleanup_required' } }) }).get('/oauth/qurl/callback');
+    if (!handler) throw new Error('callback route was not registered');
+    const response = await invoke(handler, { state: OPAQUE_STATE, code: 'code' }, `qurl_teams_oauth_state=${OPAQUE_STATE}`);
+    expect(response.status).toBe(409);
+    expect(response.body).toContain('Ask your qURL operator to remove that binding before reinstalling');
+  });
 });
 
 describe('Teams production URL configuration', () => {
@@ -142,6 +151,29 @@ describe('Teams HTTP body limits', () => {
     expect(bodyParserIndex).toBeGreaterThanOrEqual(0);
     expect(messageRouteIndex).toBeGreaterThan(bodyParserIndex);
     expect(stack[messageRouteIndex]?.route?.stack?.[0]?.name).toBe('jsonParser');
+    expect(server).toBeDefined();
+  });
+
+  it('enforces the configured body limit on the Teams message route', async () => {
+    const expressApp = express();
+    const app = {
+      initialize: async () => {
+        expressApp.post('/api/messages', (_request, response) => { response.sendStatus(200); });
+      },
+    } as unknown as App;
+    const server = await createTeamsServer({
+      baseUrl: 'https://teams.example', expressApp, app,
+      tokenClient: {} as never, callback: {} as never, state: {} as never, maxBodyBytes: 128,
+    });
+    const router = (expressApp as unknown as { readonly router?: { readonly stack?: readonly { readonly name?: string; readonly handle?: (request: unknown, response: unknown, next: (error?: unknown) => void) => void }[] } }).router;
+    const parser = router?.stack?.find(layer => layer.name === 'jsonParser')?.handle;
+    if (!parser) throw new Error('body-limit parser was not registered');
+    const body = Buffer.from(JSON.stringify({ padding: 'x'.repeat(256) }));
+    const request = Object.assign(Readable.from([body]), {
+      headers: { 'content-type': 'application/json', 'content-length': String(body.byteLength) }, method: 'POST', url: '/api/messages',
+    });
+    const error = await new Promise<unknown>(resolve => parser(request, {}, resolve));
+    expect(error).toMatchObject({ status: 413, type: 'entity.too.large' });
     expect(server).toBeDefined();
   });
 });
