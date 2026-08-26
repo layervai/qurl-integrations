@@ -76,8 +76,15 @@ export class TeamsBot {
       }
     }
     if (response) {
-      if (reply) await reply(response);
-      else await this.#options.messages.reply(activity, response, signal);
+      try {
+        if (reply) await reply(response);
+        else await this.#options.messages.reply(activity, response, signal);
+      } catch (error) {
+        // Delivery is outside command execution: a malformed activity (for
+        // example, one without serviceUrl or conversation.id) must not turn
+        // the SDK message handler into an unhandled rejection.
+        this.#options.logger?.error('Teams message delivery failed', { error });
+      }
     }
   }
 

@@ -155,7 +155,16 @@ export function normalizeActivityText(activity: TeamsActivity): string {
 }
 
 export function deriveScope(activity: TeamsActivity): TeamsScope {
-  const tenantId = (activity.channelData?.tenant?.id ?? activity.conversation?.tenantId ?? '').trim().toLowerCase();
+  const channelTenantId = activity.channelData?.tenant?.id?.trim().toLowerCase() ?? '';
+  const conversationTenantId = activity.conversation?.tenantId?.trim().toLowerCase() ?? '';
+  // The Teams SDK validates the inbound Bot Framework token before exposing
+  // the activity, but its validated token claims are not part of this seam.
+  // Reject the only contradictory tenant identities available to us rather
+  // than silently preferring one untrusted field over the other.
+  if (channelTenantId && conversationTenantId && channelTenantId !== conversationTenantId) {
+    throw new Error('Teams activity tenant identities do not match');
+  }
+  const tenantId = channelTenantId || conversationTenantId;
   const conversationId = (activity.conversation?.id ?? '').trim();
   const channel = activity.conversation?.conversationType === 'channel'
     || Boolean(activity.channelData?.channel?.id);

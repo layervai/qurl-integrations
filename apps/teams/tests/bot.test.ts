@@ -71,6 +71,13 @@ describe('Teams bot primitives', () => {
     });
   });
 
+  it('rejects contradictory tenant identities before deriving a persistence scope', () => {
+    expect(() => deriveScope({
+      channelData: { tenant: { id: 'tenant-a' } },
+      conversation: { tenantId: 'tenant-b' },
+    })).toThrow('tenant identities do not match');
+  });
+
   it('explains that resource commands are unavailable in group chats', async () => {
     const replies: string[] = [];
     const bot = new TeamsBot({
@@ -162,7 +169,7 @@ describe('Teams bot primitives', () => {
 
   it('renders ECS and Kubernetes connector instructions', () => {
     const base = { slug: 'prod', alias: 'prod', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: 'key' };
-    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate environment');
+    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate task-definition fields');
     expect(renderTunnelInstallMessage({ ...base, environment: 'kubernetes' })).toContain('kind: Deployment');
   });
 
@@ -409,6 +416,20 @@ describe('Teams bot primitives', () => {
     });
     await bot.handleActivity({ type: 'message', text: 'help', from: { aadObjectId: 'actor' }, serviceUrl: 'https://smba.trafficmanager.net', conversation: { id: 'personal', conversationType: 'personal' }, channelData: { tenant: { id: 'tenant' } } }, undefined, async text => { replies.push(text); });
     expect(replies[0]).toContain('qURL for Teams');
+  });
+
+  it('contains final delivery failures instead of rejecting the activity handler', async () => {
+    const errors: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {} as TeamsDataStore,
+      messages: { reply: async () => { throw new TypeError('Invalid URL'); } } as never,
+      logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: message => { errors.push(message); } },
+    });
+    await expect(bot.handleActivity({
+      type: 'message', text: 'help', from: { aadObjectId: 'actor' },
+    })).resolves.toBeUndefined();
+    expect(errors).toEqual(['Teams message delivery failed']);
   });
 
   it('does not silently reassign an existing alias with set-alias', async () => {

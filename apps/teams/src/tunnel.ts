@@ -16,10 +16,16 @@ function shellQuote(value: string): string { return `'${value.replaceAll("'", `'
 export function renderTunnelInstallMessage(args: TunnelInstallArgs): string {
   validateTunnelSlug(args.slug); if (!aliasPattern.test(args.alias)) throw new UserFacingError('connector alias is invalid'); if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65_535) throw new UserFacingError('connector port is invalid'); validateTunnelImageRef(args.image); validateTunnelService(args.service ?? '');
   const image = args.image || 'qurl/connector:configured-by-deployment';
-  const env = `QURL_BOOTSTRAP_KEY=${shellQuote(args.bootstrapKey)} QURL_CONNECTOR_ID=${shellQuote(args.slug)} QURL_LOCAL_PORT=${args.port}`;
   switch (args.environment) {
     case 'compose': return `Docker Compose service \`${args.service || 'web'}\`:\n\`\`\`yaml\nenvironment:\n  QURL_BOOTSTRAP_KEY: ${JSON.stringify(args.bootstrapKey)}\n  QURL_CONNECTOR_ID: ${JSON.stringify(args.slug)}\n  QURL_LOCAL_PORT: ${JSON.stringify(String(args.port))}\nimage: ${JSON.stringify(image)}\n\`\`\``;
-    case 'ecs-fargate': return `ECS/Fargate environment:\n\`\`\`text\n${env}\nimage=${image}\n\`\`\``;
+    case 'ecs-fargate': return `ECS/Fargate task-definition fields:\n\`\`\`json\n${JSON.stringify({
+      image,
+      environment: [
+        { name: 'QURL_BOOTSTRAP_KEY', value: args.bootstrapKey },
+        { name: 'QURL_CONNECTOR_ID', value: args.slug },
+        { name: 'QURL_LOCAL_PORT', value: String(args.port) },
+      ],
+    }, null, 2)}\n\`\`\``;
     case 'kubernetes': return `Apply a Secret and Deployment with the connector configuration:\n\`\`\`yaml\napiVersion: v1\nkind: Secret\nmetadata:\n  name: qurl-${args.slug}-bootstrap\nstringData:\n  QURL_BOOTSTRAP_KEY: ${JSON.stringify(args.bootstrapKey)}\n---\napiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - name: ${args.slug}\n          image: ${JSON.stringify(image)}\n          env:\n            - name: QURL_BOOTSTRAP_KEY\n              valueFrom:\n                secretKeyRef:\n                  name: qurl-${args.slug}-bootstrap\n                  key: QURL_BOOTSTRAP_KEY\n            - name: QURL_CONNECTOR_ID\n              value: ${JSON.stringify(args.slug)}\n            - name: QURL_LOCAL_PORT\n              value: ${JSON.stringify(String(args.port))}\n\`\`\`\nStore the Secret securely and remove this one-time bootstrap key after the connector enrolls.`;
     default: return `Run the connector:\n\`\`\`bash\ndocker run -d --restart unless-stopped -e QURL_BOOTSTRAP_KEY=${shellQuote(args.bootstrapKey)} -e QURL_CONNECTOR_ID=${shellQuote(args.slug)} -e QURL_LOCAL_PORT=${args.port} ${shellQuote(image)}\n\`\`\``;
   }

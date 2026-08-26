@@ -13,6 +13,12 @@ describe('TeamsSdkMessagePoster', () => {
     await expect(poster.sendText('https://attacker.example', 'conversation', 'hello')).rejects.toThrow('not trusted');
   });
 
+  it('turns malformed delivery fields into typed adapter errors', async () => {
+    const poster = new TeamsSdkMessagePoster({ api: { http: { post: async () => ({ data: {} }) } } } as never);
+    await expect(poster.sendText('', 'conversation', 'hello')).rejects.toMatchObject({ name: 'TeamsDeliveryError' });
+    await expect(poster.sendText('https://smba.trafficmanager.net/teams', '', 'hello')).rejects.toMatchObject({ name: 'TeamsDeliveryError' });
+  });
+
   it('uses the SDK client for an allowlisted Teams service URL', async () => {
     const calls: Array<{ readonly url: string; readonly body: unknown }> = [];
     let requestConfig: { readonly timeout?: number; readonly signal?: AbortSignal } | undefined;

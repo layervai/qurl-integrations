@@ -48,8 +48,15 @@ fixes do not become stale or conflict with a future transitive requirement.
 The production entrypoint listens on `127.0.0.1:3000` by default; `HOST` and
 `PORT` can override those values. Container deployments that receive traffic
 from a sidecar or external load balancer must explicitly set `HOST=0.0.0.0`.
+For ECS/Fargate, set `HOST` in the container's task-definition environment;
+otherwise the process is reachable only from the task itself.
 Put it behind an HTTPS/TLS terminator before exposing `/oauth/qurl/start`,
 `/oauth/qurl/callback`, or `/api/messages`.
 OAuth cookies are marked `Secure`, and the configured `TEAMS_BASE_URL` must be
 the public HTTPS origin used for the callback. The proxy should forward the
 Teams messaging route and the OAuth routes to the same server instance.
+
+The first tenant member who runs `setup <email>` and completes the verified,
+email-bound OAuth flow becomes the tenant owner. This first-authenticated-
+installer behavior is intentional; later setup attempts are owner-gated and
+cannot silently rebind the tenant to another qURL account.

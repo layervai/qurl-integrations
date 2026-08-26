@@ -270,7 +270,7 @@ export class TeamsDataStore {
 
   async allowedResourceIds(tenantId: string, scopeId: string): Promise<ReadonlySet<string>> {
     assertPresent(tenantId, scopeId);
-    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, scopePolicyPrefix(scopeId));
+    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, { sortKeyName: policyKey, sortKeyPrefix: scopePolicyPrefix(scopeId) });
     return new Set(items.filter(item => item.item_type === 'resource' || item.item_type === 'alias')
       .map(item => asString(item.resource_id)).filter((id): id is string => id !== undefined));
   }
@@ -311,7 +311,7 @@ export class TeamsDataStore {
 
   async scopeAliases(tenantId: string, scopeId: string): Promise<readonly PolicyEntry[]> {
     assertPresent(tenantId, scopeId);
-    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, scopePolicyPrefix(scopeId));
+    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId, { sortKeyName: policyKey, sortKeyPrefix: scopePolicyPrefix(scopeId) });
     return items.filter(item => item.item_type === 'alias')
       .map(item => ({ scopeId, alias: asString(item.alias) ?? '', resourceId: asString(item.resource_id) ?? '' }))
       .filter(item => item.alias !== '' && item.resourceId !== '').sort((a, b) => a.alias.localeCompare(b.alias));
@@ -349,7 +349,7 @@ export class TeamsDataStore {
     };
   }
 
-  async #queryTenant(tableName: string, tenantId: string, sortKeyPrefix?: string): Promise<readonly Record<string, unknown>[]> {
+  async #queryTenant(tableName: string, tenantId: string, sortKey?: { readonly sortKeyName: string; readonly sortKeyPrefix: string }): Promise<readonly Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
     do {
@@ -358,8 +358,8 @@ export class TeamsDataStore {
         readonly LastEvaluatedKey?: Record<string, unknown>;
       }>({ operation: 'query', input: {
         TableName: tableName,
-        KeyConditionExpression: `${tenantKey} = :tenant${sortKeyPrefix === undefined ? '' : ` AND begins_with(${policyKey}, :policyPrefix)`}`,
-        ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKeyPrefix === undefined ? {} : { ':policyPrefix': sortKeyPrefix }) },
+        KeyConditionExpression: `${tenantKey} = :tenant${sortKey === undefined ? '' : ` AND begins_with(${sortKey.sortKeyName}, :policyPrefix)`}`,
+        ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKey === undefined ? {} : { ':policyPrefix': sortKey.sortKeyPrefix }) },
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       } });
       items.push(...(output.Items ?? []));

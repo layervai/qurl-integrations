@@ -10,11 +10,23 @@ const TRUSTED_SERVICE_HOSTS = new Set([
   'smba.infra.dod.teams.microsoft.us',
 ]);
 
+export class TeamsDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TeamsDeliveryError';
+  }
+}
+
 export function validateTeamsServiceUrl(value: string): string {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new TeamsDeliveryError('Teams service URL is not trusted');
+  }
   if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash
     || !TRUSTED_SERVICE_HOSTS.has(url.hostname.toLowerCase())) {
-    throw new Error('Teams service URL is not trusted');
+    throw new TeamsDeliveryError('Teams service URL is not trusted');
   }
   return url.toString().replace(/\/$/, '');
 }
@@ -44,6 +56,7 @@ export class TeamsSdkMessagePoster implements TeamsMessagePoster {
 
   private async sendActivity(serviceUrl: string, conversationId: string, activity: ActivityLike, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error('Teams message delivery was cancelled');
+    if (!conversationId.trim()) throw new TeamsDeliveryError('Teams conversation id is missing');
     const baseUrl = validateTeamsServiceUrl(serviceUrl);
     const params = toActivityParams(activity);
     // The Teams API activity helper does not expose Axios request options.

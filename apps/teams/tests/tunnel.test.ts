@@ -24,7 +24,11 @@ describe('connector tunnel rendering', () => {
   it('shell-quotes Docker secrets and renders every deployment target', () => {
     expect(renderTunnelInstallMessage({ ...base, environment: 'docker' })).toContain("QURL_BOOTSTRAP_KEY='key'\"'\"'with space'");
     expect(renderTunnelInstallMessage({ ...base, environment: 'compose' })).toContain('QURL_BOOTSTRAP_KEY: "key\'with space"');
-    expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate environment');
+    const ecs = renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' });
+    expect(ecs).toContain('ECS/Fargate task-definition fields');
+    expect(ecs).toContain('"name": "QURL_BOOTSTRAP_KEY"');
+    expect(ecs).toContain('"value": "key\'with space"');
+    expect(ecs).not.toContain("QURL_BOOTSTRAP_KEY='key'\"'\"'with space'");
     expect(renderTunnelInstallMessage({ ...base, environment: 'kubernetes' })).toContain('kind: Deployment');
   });
 });
