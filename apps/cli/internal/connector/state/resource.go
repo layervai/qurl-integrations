@@ -3,11 +3,8 @@ package state
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
@@ -23,6 +20,8 @@ import (
 
 	"github.com/layervai/qurl-go/crid"
 	qurl "github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/resourceidentity"
 )
 
 const (
@@ -536,22 +535,7 @@ func mustCompileConnectorIDPattern() func(string) bool {
 }
 
 func validateResourceID(value string) ([]byte, error) {
-	der, err := base64.RawURLEncoding.Strict().DecodeString(value)
-	if err != nil || base64.RawURLEncoding.EncodeToString(der) != value {
-		return nil, errors.New("resource identity is not canonical unpadded base64url")
-	}
-	parsed, err := x509.ParsePKIXPublicKey(der)
-	if err != nil {
-		return nil, errors.New("resource identity is not a DER SPKI public key")
-	}
-	publicKey, ok := parsed.(*ecdsa.PublicKey)
-	if !ok || publicKey.Curve != elliptic.P256() {
-		return nil, errors.New("resource identity is not a P-256 public key")
-	}
-	if canonical, err := x509.MarshalPKIXPublicKey(publicKey); err != nil || !bytes.Equal(canonical, der) {
-		return nil, errors.New("resource identity DER is not canonical")
-	}
-	return der, nil
+	return resourceidentity.ValidateResourceID(value)
 }
 
 func validRoutingID(value string) bool {

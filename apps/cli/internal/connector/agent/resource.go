@@ -13,9 +13,8 @@ import (
 )
 
 // EnvKnockResourceID is an advanced custom-deployment override for the
-// placement-neutral knock resource returned by the platform. The name is the
-// qURL Connector operator contract shared with the standalone Connector.
-const EnvKnockResourceID = "LAYERV_KNOCK_RESOURCE_ID"
+// placement-neutral knock resource returned by the platform.
+const EnvKnockResourceID = "QURL_CONNECTOR_KNOCK_RESOURCE_ID"
 
 // ResolvedResource carries the selected Connector resource plus the creation
 // provenance authenticated by the assigned cell.
@@ -130,7 +129,7 @@ func terminalConnectorResourceDenial(err error) bool {
 }
 
 // KnockResourceID resolves the NHP knock operand for a resolved resource: the
-// LAYERV_KNOCK_RESOURCE_ID override when set (trimmed), else the
+// QURL_CONNECTOR_KNOCK_RESOURCE_ID override when set (trimmed), else the
 // platform-assigned knock resource. An empty result is a configuration error
 // the caller must fail closed on.
 func KnockResourceID(resource *qurl.ConnectorResource) (string, error) {

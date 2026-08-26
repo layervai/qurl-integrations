@@ -10,7 +10,7 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	if args.WebRef != "" {
 		webService = shellSingleQuote(args.WebRef)
 	}
-	tunnelServiceName := "qurl-connector-" + args.Slug
+	tunnelServiceName := "qurl-" + args.Slug
 	tunnelService := shellSingleQuote(tunnelServiceName)
 	// Quote the generated service key even though the current name shape does
 	// not require it. It keeps future slug/service-name widening local to the
@@ -27,15 +27,15 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	if err != nil {
 		return "", err
 	}
-	quotedAPIURL, err := yamlSingleQuoted(args.APIURL)
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
 	if err != nil {
 		return "", err
 	}
-	// The Compose heredoc must remain expandable for its validated runtime
-	// variables. Assign the complete YAML scalar through a shell quote first;
-	// parameter expansion is not recursive, so URL shell metacharacters remain
-	// literal when the heredoc expands this variable.
-	quotedAPIURLShell := shellSingleQuote(quotedAPIURL)
+	quotedEndpoint, err := yamlSingleQuoted(endpoint)
+	if err != nil {
+		return "", err
+	}
+	quotedEndpointShell := shellSingleQuote(quotedEndpoint)
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
 	// expand WEB_SERVICE, QURL_CONNECTOR_ID, AGENT_STATE_DIR, and SECRET_DIR
 	// into the generated file. Trust assumptions: WEB_SERVICE comes from
@@ -57,24 +57,22 @@ WEB_SERVICE=%s
 
 QURL_CONNECTOR_ID=%s
 CONNECTOR_SERVICE=%s
-QURL_API_URL_YAML=%s
-SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
-AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
-AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
-CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
-QURL_COMPOSE_FILE="$PWD/qurl-connector-${QURL_CONNECTOR_ID}.compose.yaml"
+QURL_ENDPOINT_YAML=%s
+SECRET_DIR="/run/secrets/qurl/${QURL_CONNECTOR_ID}"
+AGENT_STATE_DIR="/var/lib/layerv/qurl/${QURL_CONNECTOR_ID}"
+CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"
+QURL_COMPOSE_FILE="$PWD/qurl-${QURL_CONNECTOR_ID}.compose.yaml"
 
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
 # The generated config contains only client-safe public/routing metadata; 0644
-# lets the nonroot Connector (UID 65532) read the bind mount. Its bootstrap
-# credential stays separately protected in the 0600 api_key file below.
+# lets the nonroot qurl process (UID 65532) read the bind mount. Its bootstrap
+# credential stays separately protected in the owner-only enrollment-token file below.
 $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
-$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"
 %s
 %s
 
@@ -88,7 +86,7 @@ services:
   %s:
     image: %s
     user: "65532:65532"
-    restart: on-failure:5
+    restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp:rw,size=64m
@@ -97,23 +95,21 @@ services:
       - ALL
     security_opt:
       - 'no-new-privileges:true'
+    entrypoint: ['/usr/local/bin/qurl']
+    command: ['daemon', 'run', '--state-dir', '/var/lib/qurl', '--headless-config', '/etc/qurl/share.yaml', '--enrollment-token-file', '/run/secrets/qurl/enrollment-token']
     network_mode: "service:${WEB_SERVICE}"
     depends_on:
       ${WEB_SERVICE}:
         condition: service_started
     volumes:
-      - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
-      - ${AUDIT_DIR}:/var/log/layerv/qurl-connector
-      - ${SECRET_DIR}:/run/secrets/qurl-connector:ro
-      - ./qurl-proxy-${QURL_CONNECTOR_ID}.yaml:/work/qurl-proxy.yaml:ro
+      - ${AGENT_STATE_DIR}:/var/lib/qurl
+      - ${SECRET_DIR}:/run/secrets/qurl:ro
+      - ./qurl-share-${QURL_CONNECTOR_ID}.yaml:/etc/qurl/share.yaml:ro
     environment:
-      QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
-      QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log
-      QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}
-      QURL_API_URL: ${QURL_API_URL_YAML}
+      QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedAPIURLShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedEndpointShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedTunnelServiceName, quotedImage)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
@@ -128,9 +124,9 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_
 	}
 	introParts = append(introParts,
 		"If your app file is not compose.yaml, set `APP_COMPOSE_FILE` before running it.",
-		"Re-run this install to regenerate the same qURL Connector's Compose fragment when the port or service changes; do not hand-edit the generated fragment because the next install replaces it.",
-		"If Compose recreates the web service container, bring the qURL Connector service up again too.",
+		"Re-run this install to regenerate the same qURL share's Compose fragment when the port or service changes; do not hand-edit the generated fragment because the next install replaces it.",
+		"If Compose recreates the web service container, bring the qurl service up again too.",
 	)
 	intro := strings.Join(introParts, " ")
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-connector-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the qURL Connector connects, delete the enrollment-token file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After qURL connects, delete the enrollment-token file.", nil
 }

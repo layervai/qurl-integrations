@@ -6,16 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/frpgen"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 )
 
-const lifecycleIntentSchema = 1
+const (
+	lifecycleIntentSchema  = 1
+	managedSessionStopWait = 10 * time.Second
+)
 
 var lifecycleLabels = map[string][2]string{
 	"direct": {labelDirectA, labelDirectB},
@@ -173,63 +179,188 @@ func lifecycleProjection(authority Authority, labels [2]string) (CohortPlan, map
 // ManagedSessionConfig is the real FRP session input for one prepared fixed
 // identity. LocalPort is a caller-owned loopback outcome server.
 type ManagedSessionConfig struct {
-	Consumer             *Consumer
-	OperationKey         string
-	Identity             FixedIdentity
-	LocalIP              string
-	LocalPort            int
-	ClientVersion        string
-	ReplicaDiscriminator string
-	Logger               *slog.Logger
-	ReadyTimeout         time.Duration
+	Consumer      *Consumer
+	OperationKey  string
+	Identity      FixedIdentity
+	LocalIP       string
+	LocalPort     int
+	ClientVersion string
+	Logger        *slog.Logger
+	ReadyTimeout  time.Duration
 }
 
 // ManagedSession is one admitted FRP tunnel. Stop exact-retires the operation
 // and then uses recovery until the durable OP is CLOSED.
 type ManagedSession struct {
-	consumer *Consumer
-	key      string
-	sup      *supervisor.Supervisor
+	admitter *durableManagedAdmitter
+	serving  connectorshare.ServingSession
 	mu       sync.Mutex
 	stopped  bool
 }
 
-// StartManagedSession connects the real FRP supervisor to the exact durable
-// CycleKnocker. It returns only after authenticated Login and proxy readiness.
-func StartManagedSession(ctx context.Context, cfg ManagedSessionConfig) (*ManagedSession, error) { //nolint:gocritic // Config is one immutable invocation snapshot.
+// durableManagedAdmitter adapts one precommitted matched-cohort operation to
+// qurl-connector's receipt-bound runtime. It can admit only once and retires
+// only the exact opaque receipt returned by that admission.
+type durableManagedAdmitter struct {
+	consumer *Consumer
+	key      string
+	identity FixedIdentity
+
+	mu        sync.Mutex
+	live      *LiveSession
+	admission connectorshare.Admission
+	retired   bool
+}
+
+func newDurableManagedAdmitter(ctx context.Context, consumer *Consumer, key string,
+	identity *FixedIdentity,
+) (*durableManagedAdmitter, error) {
+	if identity == nil {
+		return nil, fmt.Errorf("%w: managed session identity", errInvalidAuthority)
+	}
+	record, _, err := loadOperation(ctx, consumer.Blobs, key)
+	if err != nil || record.Status != OperationPrepared || record.Label != identity.Label ||
+		record.Operation.ResourceID != identity.KnockResourceID || record.Operation.AgentID != identity.AgentID ||
+		record.Operation.OwnerID != identity.OwnerID {
+		return nil, errors.Join(fmt.Errorf("%w: managed session operation", errStateConflict), err)
+	}
+	return &durableManagedAdmitter{consumer: consumer, key: key, identity: *identity}, nil
+}
+
+// Admit creates the one exact receipt-bound native session for this operation.
+func (a *durableManagedAdmitter) Admit(ctx context.Context, knockResourceID, resourceID string) (connectorshare.Admission, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if knockResourceID != a.identity.KnockResourceID || resourceID != a.identity.ResourceID || a.live != nil || a.retired {
+		return connectorshare.Admission{}, fmt.Errorf("%w: managed session admission identity", errStateConflict)
+	}
+	live, err := a.consumer.Admit(ctx, a.key)
+	if err != nil {
+		return connectorshare.Admission{}, err
+	}
+	admission := connectorshare.Admission{
+		KnockResourceID: knockResourceID,
+		ResourceID:      resourceID,
+		RunID:           live.receipt.RunID,
+		RunAttempt:      live.receipt.RunAttempt,
+		Token:           live.ACToken,
+		ResourceHost:    live.ResourceHost,
+		SessionID:       live.receipt.SessionID,
+		SessionReceipt:  live.receipt,
+		OpenTime:        live.OpenTime,
+	}
+	if admission.RunID == "" || admission.RunAttempt == 0 || admission.SessionID == 0 ||
+		admission.OpenTime <= 0 || admission.SessionReceipt.CellID == "" ||
+		admission.SessionReceipt.SessionIssuedAtMillis <= 0 {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), managedSessionStopWait)
+		defer cancel()
+		terminal, retireErr := a.consumer.Retire(cleanupCtx, a.key, live)
+		return connectorshare.Admission{}, errors.Join(errors.New("managed session admission is incomplete"), retireErr,
+			managedTerminalError(&terminal))
+	}
+	a.live = live
+	a.admission = admission
+	return admission, nil
+}
+
+// Retire closes only the exact receipt returned by Admit.
+func (a *durableManagedAdmitter) Retire(ctx context.Context, admission connectorshare.Admission) error { //nolint:gocritic // NativeAdmitter requires a value argument.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.retired {
+		terminal, err := a.consumer.Recover(ctx, a.key)
+		return errors.Join(err, managedTerminalError(&terminal))
+	}
+	if a.live == nil || !sameManagedAdmission(&a.admission, &admission) {
+		return fmt.Errorf("%w: managed session retirement receipt", errStateConflict)
+	}
+	terminal, err := a.consumer.Retire(ctx, a.key, a.live)
+	if err != nil {
+		return err
+	}
+	for terminal.State != OperationClosed {
+		if terminal.State != OperationClosing {
+			return managedTerminalError(&terminal)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		terminal, err = a.consumer.Recover(ctx, a.key)
+		if err != nil {
+			return err
+		}
+	}
+	a.retired = true
+	a.live = nil
+	a.admission.Token = ""
+	return nil
+}
+
+func sameManagedAdmission(a, b *connectorshare.Admission) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.KnockResourceID == b.KnockResourceID && a.ResourceID == b.ResourceID && a.RunID == b.RunID &&
+		a.RunAttempt == b.RunAttempt && a.Token == b.Token && a.ResourceHost == b.ResourceHost &&
+		a.SessionID == b.SessionID && a.OpenTime == b.OpenTime &&
+		a.SessionReceipt.CellID == b.SessionReceipt.CellID && a.SessionReceipt.SessionID == b.SessionReceipt.SessionID &&
+		a.SessionReceipt.SessionIssuedAtMillis == b.SessionReceipt.SessionIssuedAtMillis &&
+		a.SessionReceipt.RunID == b.SessionReceipt.RunID && a.SessionReceipt.RunAttempt == b.SessionReceipt.RunAttempt
+}
+
+func managedTerminalError(terminal *SessionTerminal) error {
+	if terminal == nil {
+		return fmt.Errorf("%w: missing managed session terminal state", errSessionRecoveryRequired)
+	}
+	if terminal.State == OperationClosed {
+		return nil
+	}
+	return fmt.Errorf("%w: managed session terminal state %q", errSessionRecoveryRequired, terminal.State)
+}
+
+// StartManagedSession connects qurl-connector's production FRP session to one
+// exact precommitted operation. It returns only after authenticated Login and
+// proxy readiness.
+func StartManagedSession(ctx context.Context, cfg ManagedSessionConfig) (*ManagedSession, error) { //nolint:gocritic,gocyclo // Config is one immutable invocation snapshot; all fail-closed cleanup branches remain explicit.
 	if cfg.Consumer == nil || cfg.Consumer.Blobs == nil || !validText(cfg.OperationKey) || cfg.Identity.KnockResourceID == "" ||
-		cfg.LocalPort < 1 || cfg.LocalPort > 65535 {
+		cfg.Identity.ResourceID == "" || cfg.Identity.ConnectorID == "" || cfg.Identity.ConnectorRoutingID == "" ||
+		!validDNS(cfg.Identity.Selector.Host) || cfg.Identity.Selector.Port < 1 || cfg.Identity.Selector.Port > 65535 ||
+		strings.TrimSpace(cfg.LocalIP) == "" || cfg.LocalIP != strings.TrimSpace(cfg.LocalIP) || cfg.LocalPort < 1 || cfg.LocalPort > 65535 {
 		return nil, fmt.Errorf("%w: managed session input", errInvalidAuthority)
 	}
-	knocker, err := NewDurableCycleKnocker(ctx, cfg.Consumer, cfg.OperationKey, cfg.Identity.KnockResourceID, cfg.Identity.Selector)
+	admitter, err := newDurableManagedAdmitter(ctx, cfg.Consumer, cfg.OperationKey, &cfg.Identity)
 	if err != nil {
 		return nil, err
 	}
-	generated, err := frpgen.Generate(&frpgen.Route{Slug: cfg.Identity.ConnectorID, ResourceID: cfg.Identity.ResourceID,
-		ConnectorRoutingID: cfg.Identity.ConnectorRoutingID, LocalIP: cfg.LocalIP, LocalPort: cfg.LocalPort},
-		&frpgen.Options{ReplicaDiscriminator: cfg.ReplicaDiscriminator, ClientVersion: cfg.ClientVersion})
+	admission, err := admitter.Admit(ctx, cfg.Identity.KnockResourceID, cfg.Identity.ResourceID)
 	if err != nil {
 		return nil, err
 	}
-	common, proxies := generated.FRPClientConfig()
-	if err := common.Complete(); err != nil {
-		return nil, fmt.Errorf("complete fixed-canary FRP configuration: %w", err)
+	expectedResourceHost := net.JoinHostPort(cfg.Identity.Selector.Host, strconv.Itoa(cfg.Identity.Selector.Port))
+	if admission.ResourceHost != expectedResourceHost {
+		return nil, errors.Join(fmt.Errorf("%w: authenticated resource host", errStateConflict),
+			settleFailedManagedSession(nil, admitter, &admission))
 	}
-	ready := make(chan struct{})
-	var readyOnce sync.Once
-	factory, err := supervisor.NewFRPRunnerFactory(&supervisor.FRPFactoryConfig{Knocker: knocker,
-		ResourceID: cfg.Identity.KnockResourceID, Proxies: proxies, Logger: cfg.Logger,
-		OnProxyReady: func() { readyOnce.Do(func() { close(ready) }) }})
+	common, err := connectordaemon.DefaultFRPCommon(10, 60)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, settleFailedManagedSession(nil, admitter, &admission))
 	}
-	sup, err := supervisor.New(&supervisor.Config{Common: common, Knocker: knocker,
-		KnockResourceID: cfg.Identity.KnockResourceID, RunnerFactory: factory, Logger: cfg.Logger})
+	factory, err := connectorshare.NewFRPSessionFactory(connectorshare.FRPFactoryConfig{
+		Common: common,
+		Route: connectorshare.LocalHTTPRoute{
+			RouteID: cfg.Identity.ConnectorID, LocalIP: cfg.LocalIP, LocalPort: cfg.LocalPort,
+			ResourceID: cfg.Identity.ResourceID, ConnectorRoutingID: cfg.Identity.ConnectorRoutingID,
+		},
+		ClientVersion: cfg.ClientVersion,
+	})
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, settleFailedManagedSession(nil, admitter, &admission))
 	}
-	if err := sup.Start(ctx); err != nil {
-		return nil, err
+	serving, err := factory.Start(ctx, admission)
+	if err != nil {
+		return nil, errors.Join(err, settleFailedManagedSession(nil, admitter, &admission))
 	}
 	timeout := cfg.ReadyTimeout
 	if timeout <= 0 || timeout > 30*time.Second {
@@ -238,30 +369,40 @@ func StartManagedSession(ctx context.Context, cfg ManagedSessionConfig) (*Manage
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-ready:
-		return &ManagedSession{consumer: cfg.Consumer, key: cfg.OperationKey, sup: sup}, nil
-	case <-sup.Done():
-		return nil, errors.Join(fmt.Errorf("fixed-canary session stopped before readiness: %w", sup.Err()),
-			settleFailedManagedSession(cfg.Consumer, cfg.OperationKey, sup))
+	case <-serving.Ready():
+		select {
+		case <-serving.Done():
+			return nil, errors.Join(fmt.Errorf("fixed-canary session stopped at readiness: %w", serving.Err()),
+				settleFailedManagedSession(serving, admitter, &admission))
+		default:
+			return &ManagedSession{admitter: admitter, serving: serving}, nil
+		}
+	case <-serving.Done():
+		return nil, errors.Join(fmt.Errorf("fixed-canary session stopped before readiness: %w", serving.Err()),
+			settleFailedManagedSession(serving, admitter, &admission))
 	case <-ctx.Done():
-		return nil, errors.Join(ctx.Err(), settleFailedManagedSession(cfg.Consumer, cfg.OperationKey, sup))
+		return nil, errors.Join(ctx.Err(), settleFailedManagedSession(serving, admitter, &admission))
 	case <-timer.C:
 		return nil, errors.Join(errors.New("fixed-canary session readiness timed out"),
-			settleFailedManagedSession(cfg.Consumer, cfg.OperationKey, sup))
+			settleFailedManagedSession(serving, admitter, &admission))
 	}
 }
 
-func settleFailedManagedSession(consumer *Consumer, key string, sup *supervisor.Supervisor) error {
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), supervisor.StopWait)
-	stopErr := sup.Stop(stopCtx)
-	stopCancel()
-	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), supervisor.StopWait)
-	defer recoverCancel()
-	terminal, recoverErr := consumer.Recover(recoverCtx, key)
-	if recoverErr != nil || (terminal.State != OperationCanceled && terminal.State != OperationClosed) {
-		return errors.Join(stopErr, recoverErr, errSessionRecoveryRequired)
+func settleFailedManagedSession(serving connectorshare.ServingSession, admitter *durableManagedAdmitter,
+	admission *connectorshare.Admission,
+) error {
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), managedSessionStopWait)
+	var stopErr error
+	if serving != nil {
+		stopErr = serving.Stop(stopCtx)
 	}
-	return stopErr
+	stopCancel()
+	if admission == nil {
+		return errors.Join(stopErr, fmt.Errorf("%w: missing managed session admission", errStateConflict))
+	}
+	retireCtx, retireCancel := context.WithTimeout(context.Background(), managedSessionStopWait)
+	defer retireCancel()
+	return errors.Join(stopErr, admitter.Retire(retireCtx, *admission))
 }
 
 // Stop ends the real supervisor and exact-recovers the durable OP to CLOSED.
@@ -272,21 +413,13 @@ func (s *ManagedSession) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		terminal, err := s.consumer.Recover(ctx, s.key)
-		if err != nil || terminal.State != OperationClosed {
-			return errors.Join(err, errSessionRecoveryRequired)
-		}
-		return nil
+		return s.admitter.Retire(ctx, s.admitter.admission)
 	}
 	s.stopped = true
-	stopErr := s.sup.Stop(ctx)
-	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), supervisor.StopWait)
+	stopErr := s.serving.Stop(ctx)
+	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), managedSessionStopWait)
 	defer recoverCancel()
-	terminal, recoverErr := s.consumer.Recover(recoverCtx, s.key)
-	if recoverErr != nil || terminal.State != OperationClosed {
-		return errors.Join(stopErr, recoverErr, errSessionRecoveryRequired)
-	}
-	return stopErr
+	return errors.Join(stopErr, s.admitter.Retire(recoverCtx, s.admitter.admission))
 }
 
 // LifecycleOutcome is the exact customer journey result. The caller owns GET
@@ -356,24 +489,31 @@ func (l *ManagedSessionLauncher) Start(ctx context.Context, key string, identity
 	if !ok {
 		return nil, fmt.Errorf("%w: lifecycle local target", errInvalidAuthority)
 	}
-	host, port, err := supervisor.ParseResourceHost(target)
+	host, portText, err := net.SplitHostPort(target)
+	if err == nil {
+		port, parseErr := strconv.Atoi(portText)
+		if parseErr != nil || strings.TrimSpace(host) == "" || port < 1 || port > 65535 {
+			err = errors.New("local target is invalid")
+		} else {
+			return StartManagedSession(ctx, ManagedSessionConfig{Consumer: l.Consumer, OperationKey: key, Identity: identity,
+				LocalIP: host, LocalPort: port, ClientVersion: l.ClientVersion,
+				Logger: l.Logger, ReadyTimeout: l.ReadyTimeout})
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("parse lifecycle local target: %w", err)
 	}
-	return StartManagedSession(ctx, ManagedSessionConfig{Consumer: l.Consumer, OperationKey: key, Identity: identity,
-		LocalIP: host, LocalPort: port, ClientVersion: l.ClientVersion,
-		ReplicaDiscriminator: "fixed-shared-" + identity.Label,
-		Logger:               l.Logger, ReadyTimeout: l.ReadyTimeout})
+	return nil, errors.New("parse lifecycle local target: unreachable")
 }
 
-// Alive reports an autonomous supervisor exit without blocking.
+// Alive reports an autonomous serving-session exit without blocking.
 func (s *ManagedSession) Alive() error {
-	if s == nil || s.sup == nil {
+	if s == nil || s.serving == nil {
 		return errors.New("fixed-canary session is nil")
 	}
 	select {
-	case <-s.sup.Done():
-		return fmt.Errorf("fixed-canary session stopped: %w", s.sup.Err())
+	case <-s.serving.Done():
+		return fmt.Errorf("fixed-canary session stopped: %w", s.serving.Err())
 	default:
 		return nil
 	}
@@ -515,7 +655,7 @@ func stopLifecyclePair(first, second LifecycleSession) (firstErr, secondErr erro
 }
 
 func stopLifecycleSession(session LifecycleSession) error {
-	ctx, cancel := context.WithTimeout(context.Background(), supervisor.StopWait)
+	ctx, cancel := context.WithTimeout(context.Background(), managedSessionStopWait)
 	defer cancel()
 	return session.Stop(ctx)
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -19,9 +21,10 @@ func listCmd(opts *globalOpts) *cobra.Command {
 		Short: "List your published resources",
 		Long: `List the resources published under your account, one row per resource.
 
-The text table shortens each CRID from the middle so rows stay readable;
-JSON output and --quiet always carry the full CRID. Pages continue with
---cursor when there are more results.`,
+The text table always prints the full CRID. Local tunnel rows include their
+loopback target and durable desired state. Observed tunnel state is shown as
+unknown in this paged view; use qurl status <CRID> for an authoritative live
+observation. Pages continue with --cursor when there are more results.`,
 		Example: `  qurl list --status active
   qurl list --quiet | xargs -n1 qurl resolve --quiet`,
 		Args: noArgs,
@@ -39,6 +42,11 @@ JSON output and --quiet always carry the full CRID. Pages continue with
 			if err != nil {
 				return err
 			}
+			if !opts.quiet {
+				if err := enrichTunnelList(cmd.Context(), opts, page); err != nil {
+					return err
+				}
+			}
 			return opts.printer().List(page)
 		},
 	}
@@ -49,4 +57,37 @@ JSON output and --quiet always carry the full CRID. Pages continue with
 	cmd.Flags().StringVar(&resType, "type", "", "only resources of this kind: url or tunnel")
 
 	return cmd
+}
+
+func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.ResourcePage) error {
+	tunnelRows := make([]int, 0, len(page.Items))
+	for index := range page.Items {
+		if page.Items[index].Type == "tunnel" {
+			tunnelRows = append(tunnelRows, index)
+		}
+	}
+	if len(tunnelRows) == 0 {
+		return nil
+	}
+	shares, err := opts.loadLocalShares(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		opts.printer().Warnf("Local sharing state is unavailable; local targets were omitted.")
+		return nil
+	}
+	localTargets := make(map[string]string, len(shares)*2)
+	for index := range shares {
+		share := &shares[index]
+		localTargets[share.ResourceID] = share.TargetURL
+		localTargets[share.CRID] = share.TargetURL
+	}
+	for _, index := range tunnelRows {
+		if target := localTargets[page.Items[index].ResourceID]; target != "" {
+			page.Items[index].TargetURL = target
+		}
+	}
+
+	return nil
 }

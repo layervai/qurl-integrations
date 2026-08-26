@@ -2,12 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -59,6 +64,9 @@ scripts and pipelines must pass --yes.`,
 				// Idempotent delete: already-gone is the requested outcome.
 				printer.Notef(msgAlreadyGone)
 			}
+			if err := cleanupDeletedLocalShare(cmd.Context(), opts, assessment.Input); err != nil {
+				return err
+			}
 			return printer.Delete(assessment.Input, result.AlreadyGone)
 		},
 	}
@@ -66,6 +74,45 @@ scripts and pipelines must pass --yes.`,
 	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
+}
+
+// cleanupDeletedLocalShare converges local desired state after the service has
+// committed deletion. It signals an existing daemon through IPC but never
+// installs or starts one.
+func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) error {
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+			return nil
+		}
+		return err
+	}
+	_, present, err := connectorstate.ReadLocalSharesIfPresent(ctx, stateDir)
+	if err != nil || !present {
+		return err
+	}
+	registry, err := opts.openShareRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	local, err := registry.Get(ctx, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := registry.Delete(ctx, local.ResourceID); err != nil {
+		return err
+	}
+	socketPath := filepath.Join(stateDir, connectordaemon.SocketFile)
+	if _, err := os.Lstat(socketPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	_, err = (connectordaemon.IPCClient{SocketPath: socketPath}).ReloadIfRunning(ctx)
+	return err
 }
 
 // confirmDelete asks on the terminal. Without a terminal it refuses instead

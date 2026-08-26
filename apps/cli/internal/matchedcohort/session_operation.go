@@ -108,6 +108,8 @@ type LiveSession struct {
 	ACToken      string
 	ResourceHost string
 	OperationID  string
+	OpenTime     time.Duration
+	receipt      qurl.NativeSessionReceipt
 	value        any
 }
 
@@ -199,6 +201,7 @@ func (r qurlSessionRuntime) Admit(ctx context.Context, store qurl.AgentStateStor
 		SessionIssuedAtMillis: result.SessionReceipt.SessionIssuedAtMillis, RunID: result.SessionReceipt.RunID,
 		RunAttempt: result.SessionReceipt.RunAttempt}
 	return &LiveSession{ACToken: result.ACToken, ResourceHost: result.ResourceHost, OperationID: record.Operation.OperationID,
+		OpenTime: time.Duration(result.OpenTime) * time.Second, receipt: result.SessionReceipt,
 		value: &qurlLiveSession{binding: binding, privateKey: privateKey, receipt: result.SessionReceipt}}, admission, nil
 }
 

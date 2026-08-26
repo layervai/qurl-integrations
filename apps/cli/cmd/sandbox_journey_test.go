@@ -25,10 +25,9 @@ import (
 )
 
 // T6 live sandbox CRID journey: the design doc's §28.1/§28.3 manual
-// checklist, automated. This file carries the clisandbox build tag, so the
-// cli / sandbox e2e job runs it on every same-repo PR — serialized against
-// the nightly extended pass through the workflow-level cli-sandbox-e2e
-// concurrency group, because there is exactly one sandbox tenancy.
+// checklist, automated. This file carries the clisandbox build tag so the
+// private qurl-integrations-infra sandbox orchestrator can compile and run it
+// from an exact public integrations commit without storing credentials here.
 //
 // Credential contract (all four required before this suite runs anything):
 //
@@ -57,9 +56,8 @@ import (
 // own bounded 429 handling (Retry-After honored via realSleep) — the suite
 // adds no retry loops of its own.
 //
-// The commands run through runCLI with the PRODUCTION wiring — no injected
-// seams — exactly like the sandbox Connector smoke in
-// sandbox_connector_test.go, whose env-gate pattern this file follows.
+// The commands run through runCLI with the PRODUCTION wiring and no injected
+// seams. The private orchestrator requires an exact PASS and rejects SKIP.
 
 // journeyTimeout bounds the whole journey. Every API call also carries the
 // transport's own 30-second HTTP timeout; this outer bound exists so a
@@ -81,7 +79,7 @@ const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-clea
 // built by journeyDeploymentFile below, never read from the process.
 func sandboxJourneyEnv(t *testing.T) map[string]string {
 	t.Helper()
-	key := strings.TrimSpace(os.Getenv("QURL_API_KEY"))
+	key := sandboxSecret(t, "QURL_API_KEY")
 	endpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
 	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
 	relayURL := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
@@ -195,7 +193,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	// dedupes an already-published target. The download step's content
 	// assertion leans on the same stability: this page's body is known to
 	// carry journeyTargetMarker.
-	target := "https://example.com/?qurl-cli-sandbox-e2e=" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	target := "https://example.com/?qurl-private-sandbox-crid-journey=" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", journeyDescription)
 	if res.code != 0 {
 		t.Fatalf("publish exit = %d, want 0\nstderr: %s", res.code, res.stderr.String())

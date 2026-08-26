@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	qurl "github.com/layervai/qurl-go/qurl"
+
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -70,7 +72,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"keeps serving until Ctrl-C", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On macOS", "background daemon", "Linux and Windows", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
@@ -79,6 +81,20 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 		if strings.Contains(publishHelp, jargon) {
 			t.Errorf("publish help exposes implementation jargon %q:\n%s", jargon, publishHelp)
 		}
+	}
+}
+
+func TestLegacyConnectorCommandIsRemoved(t *testing.T) {
+	root := runCLI(t, &runOpts{args: []string{"--help"}})
+	if root.code != 0 {
+		t.Fatalf("root help exit = %d, stderr: %s", root.code, root.stderr.String())
+	}
+	if strings.Contains(root.stdout.String(), "  connector ") {
+		t.Fatalf("root help still exposes the removed connector command:\n%s", root.stdout.String())
+	}
+	legacy := runCLI(t, &runOpts{args: []string{"connector"}})
+	if legacy.code != 2 || !strings.Contains(legacy.stderr.String(), `unknown command "connector"`) {
+		t.Fatalf("removed connector command = exit %d, stderr %q; want usage error", legacy.code, legacy.stderr.String())
 	}
 }
 
@@ -100,13 +116,13 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 		"## Publish localhost in 60 seconds",
 		"brew install layervai/tap/qurl",
 		"qurl version",
-		"1.6.0 or newer",
+		"2.0.0 or newer",
 		"https://layerv.ai/qurl/dashboard/keys/",
 		"qurl login",
 		"python3 -m http.server 3000 --bind 127.0.0.1",
 		"qurl publish http://127.0.0.1:3000",
 		"Status:  serving",
-		"Press Ctrl-C",
+		"qurl stop <CRID>",
 		"qurl get <CRID>",
 	}
 	previous := -1
@@ -121,7 +137,7 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 		previous = at
 	}
 	if !strings.Contains(readme, "only HTTPS URLs are allowed") || !strings.Contains(readme, "brew upgrade qurl") {
-		t.Fatal("CLI README must explain how a pre-1.6.0 install recovers from the legacy HTTPS-only error")
+		t.Fatal("CLI README must explain how a legacy install recovers to the lifecycle release")
 	}
 }
 
@@ -177,23 +193,61 @@ func TestNormalizeDocumentationNewlines(t *testing.T) {
 	}
 }
 
-func TestLocalPublishRefreshRecoveryStaysActionable(t *testing.T) {
+func TestLocalPublishRecoveryIsAutomatic(t *testing.T) {
 	publish := runCLI(t, &runOpts{args: []string{"publish", "--help"}})
 	if publish.code != 0 {
 		t.Fatalf("publish help exit = %d, stderr: %s", publish.code, publish.stderr.String())
 	}
 	publishHelp := publish.stdout.String()
-	if !strings.Contains(publishHelp, "--refresh-mode") || !strings.Contains(publishHelp, "manual, auto, or disabled") {
-		t.Fatalf("publish help does not expose the one-start assignment-refresh approval:\n%s", publishHelp)
-	}
-	readme := readCLIREADME(t)
-	for _, want := range []string{
-		"Update to qURL CLI 1.6.1 or newer",
-		"rerun the same publish command once with `--refresh-mode auto`",
-	} {
-		if !strings.Contains(readme, want) {
-			t.Fatalf("CLI README does not carry the shipped local-publish refresh remedy %q", want)
+	for _, forbidden := range []string{"--refresh-mode", "explicit approval", "manual, auto, or disabled"} {
+		if strings.Contains(publishHelp, forbidden) {
+			t.Fatalf("publish help exposes removed manual recovery %q:\n%s", forbidden, publishHelp)
 		}
+	}
+	for _, want := range []string{"background daemon", "sleep, wake, and network changes"} {
+		if !strings.Contains(publishHelp, want) {
+			t.Fatalf("publish help missing automatic recovery behavior %q", want)
+		}
+	}
+}
+
+func TestBackgroundSharePlatformContract(t *testing.T) {
+	if err := requireBackgroundShareSupport("darwin"); err != nil {
+		t.Fatalf("darwin background share support: %v", err)
+	}
+	for _, goos := range []string{"linux", "windows"} {
+		err := requireBackgroundShareSupport(goos)
+		if err == nil || !strings.Contains(err.Error(), "supported only on macOS") || !strings.Contains(err.Error(), "--foreground") {
+			t.Fatalf("%s background share error = %v", goos, err)
+		}
+	}
+}
+
+func TestDaemonHubOverrideIsExactAndAllOrNone(t *testing.T) {
+	const key = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if got, present, err := exactDaemonHubOverride("", 0, ""); err != nil || present || got != (qurl.HubBootstrap{}) {
+		t.Fatalf("empty daemon Hub override = (%#v, %t, %v), want absent", got, present, err)
+	}
+	for _, test := range []struct {
+		host string
+		port int
+		key  string
+	}{
+		{host: "hub.sandbox.layerv.xyz"},
+		{port: 443},
+		{key: key},
+		{host: "hub.sandbox.layerv.xyz", port: 443},
+	} {
+		if _, _, err := exactDaemonHubOverride(test.host, test.port, test.key); err == nil || !strings.Contains(err.Error(), "must be set together") {
+			t.Fatalf("partial daemon Hub override %#v error = %v", test, err)
+		}
+	}
+	got, present, err := exactDaemonHubOverride("hub.sandbox.layerv.xyz", 443, key)
+	if err != nil || !present || got.Host != "hub.sandbox.layerv.xyz" || got.Port != 443 || got.ServerPublicKeyB64 != key {
+		t.Fatalf("exact daemon Hub override = (%#v, %t, %v)", got, present, err)
+	}
+	if _, _, err := exactDaemonHubOverride("127.0.0.1", 443, key); err == nil {
+		t.Fatal("daemon Hub override accepted an untrusted IP endpoint")
 	}
 }
 
@@ -392,7 +446,7 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "resolve", "get", "list", "delete", "connector", "login", "logout", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "resolve", "get", "list", "start", "stop", "restart", "status", "delete", "login", "logout", "whoami", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}

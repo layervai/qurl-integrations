@@ -23,7 +23,13 @@ const (
 	testResourceIDAlt = "r_dev_dash01"
 	testTargetURL     = "https://internal.example.com"
 	testTunnelSlug    = "prod-dashboard"
+	testSharingID     = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE155W1ele0q0AK_YFZnQqzfhJLxqLgHaG3B5rXzPO87WZlnYa5TWlrbIO2C6ALvLxT7zaFWm9fc8PCklq1v4arg"
+	testSharingCRID   = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
@@ -51,6 +57,106 @@ func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		t.Fatalf("encode response: %v", err)
+	}
+}
+
+func TestRestartSharingSendsBodylessSinglePost(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/resources/"+testSharingID+"/sharing/restart" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 0 || r.ContentLength != 0 || (r.Header.Get("Content-Length") != "" && r.Header.Get("Content-Length") != "0") {
+			t.Errorf("restart body=%q contentLength=%d header=%q, want no body", body, r.ContentLength, r.Header.Get("Content-Length"))
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testSharingID, "crid": testSharingCRID,
+			"desired_state": "on", "serving_epoch": 2, "connection_state": "connecting",
+		})
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "key", WithRetry(3), withDelaysForTest()).RestartSharing(context.Background(), testSharingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 1 || got.ServingEpoch != 2 {
+		t.Fatalf("attempts=%d response=%+v", attempts.Load(), got)
+	}
+}
+
+func TestRestartSharingNeverReplaysAmbiguousFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		transport roundTripFunc
+	}{
+		{
+			name: "transport error",
+			transport: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("response lost")
+			},
+		},
+		{
+			name: "retryable status",
+			transport: func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"title":"unavailable","status":503}}`)),
+				}, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var attempts atomic.Int32
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return tc.transport(req)
+			})
+			c := New("https://api.invalid", "key",
+				WithHTTPClient(&http.Client{Transport: transport}), WithRetry(3), withDelaysForTest())
+			if _, err := c.RestartSharing(context.Background(), testSharingID); err == nil {
+				t.Fatal("RestartSharing unexpectedly succeeded")
+			}
+			if attempts.Load() != 1 {
+				t.Fatalf("restart attempts=%d, want exactly one", attempts.Load())
+			}
+		})
+	}
+}
+
+func TestSharingStateRequiresCanonicalServingEpoch(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"missing":   `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","connection_state":"stopped"}`,
+		"null":      `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":null,"connection_state":"stopped"}`,
+		"string":    `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":"0","connection_state":"stopped"}`,
+		"fraction":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0.0,"connection_state":"stopped"}`,
+		"exponent":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0e0,"connection_state":"stopped"}`,
+		"negative":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":-1,"connection_state":"stopped"}`,
+		"overflow":  `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":18446744073709551616,"connection_state":"stopped"}`,
+		"duplicate": `{"resource_id":"` + testSharingID + `","crid":"` + testSharingCRID + `","desired_state":"off","serving_epoch":0,"serving_epoch":0,"connection_state":"stopped"}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":`+body+`}`)
+			}))
+			defer srv.Close()
+			if _, err := testClient(srv.URL, "key").GetSharing(context.Background(), testSharingID); err == nil {
+				t.Fatalf("GetSharing accepted %s serving_epoch", name)
+			}
+		})
 	}
 }
 

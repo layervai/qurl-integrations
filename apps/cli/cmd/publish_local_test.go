@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 )
@@ -24,8 +26,7 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 		{name: "https", args: []string{"publish", "https://localhost:3000"}, want: "cleartext http"},
 		{name: "path", args: []string{"publish", "http://127.0.0.1:3000/api"}, want: "without a path"},
 		{name: "remote id", args: []string{"publish", "https://example.com", "--id", "local-test"}, want: "--id applies only"},
-		{name: "remote refresh mode", args: []string{"publish", "https://example.com", "--refresh-mode", "auto"}, want: "--refresh-mode applies only"},
-		{name: "invalid refresh mode", args: []string{"publish", "http://127.0.0.1:3000", "--refresh-mode", "sometimes"}, want: "--refresh-mode must be manual, auto, or disabled"},
+		{name: "remote foreground", args: []string{"publish", "https://example.com", "--foreground"}, want: "--foreground applies only"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -36,7 +37,7 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 			res := runCLI(t, &runOpts{
 				args: args,
 				env:  map[string]string{},
-				connectorOpen: func(context.Context, *agent.Config) (*agent.Runtime, error) {
+				localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
 					opens++
 					return nil, errors.New("unexpected Connector open")
 				},
@@ -58,13 +59,14 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 	}
 }
 
-func TestLocalPublishThreadsOneShotRefreshApproval(t *testing.T) {
+func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	t.Parallel()
 	var gotRefreshMode string
 	res := runCLI(t, &runOpts{
-		args: []string{"publish", "http://127.0.0.1:3000", "--refresh-mode", "auto"},
-		env:  map[string]string{},
-		connectorOpen: func(_ context.Context, cfg *agent.Config) (*agent.Runtime, error) {
+		args:            []string{"publish", "http://127.0.0.1:3000"},
+		env:             map[string]string{},
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
 			gotRefreshMode = cfg.RefreshMode
 			return nil, errors.New("stop after inspecting Connector configuration")
 		},
@@ -72,8 +74,8 @@ func TestLocalPublishThreadsOneShotRefreshApproval(t *testing.T) {
 	if res.code != 1 || !strings.Contains(res.stderr.String(), "stop after inspecting") {
 		t.Fatalf("result = exit %d stderr %q", res.code, res.stderr.String())
 	}
-	if gotRefreshMode != agent.RefreshModeAuto {
-		t.Fatalf("Connector refresh mode = %q, want %q", gotRefreshMode, agent.RefreshModeAuto)
+	if gotRefreshMode != "auto" {
+		t.Fatalf("Connector refresh mode = %q, want auto", gotRefreshMode)
 	}
 	mustEmptyStdout(t, res)
 }
@@ -84,9 +86,9 @@ func TestLocalPublishRejectsInvalidExplicitConnectorIDBeforeOpen(t *testing.T) {
 	res := runCLI(t, &runOpts{
 		args: []string{"publish", "http://127.0.0.1:3000", "--id", "NOT_VALID"},
 		env:  map[string]string{},
-		connectorOpen: func(context.Context, *agent.Config) (*agent.Runtime, error) {
+		preflightTarget: func(context.Context, string, int) error {
 			opens++
-			return nil, errors.New("unexpected Connector open")
+			return errors.New("unexpected target preflight")
 		},
 	})
 	if res.code != 2 || !strings.Contains(res.stderr.String(), "invalid Connector ID") {

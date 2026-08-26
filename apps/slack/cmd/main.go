@@ -37,8 +37,8 @@ import (
 
 const (
 	listenAddr                    = ":8080"
-	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
-	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
+	envQURLConnectorImage         = "QURL_IMAGE"
+	envQURLConnectorImageFallback = "QURL_IMAGE_FALLBACK"
 	envQURLS3OriginImage          = "QURL_S3_ORIGIN_IMAGE"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
@@ -1275,11 +1275,18 @@ func readTunnelImageConfig() (string, error) {
 		return "", fmt.Errorf("%s: %w", envQURLConnectorImage, err)
 	}
 	if image != "" {
-		// An explicit image wins over QURL_CONNECTOR_IMAGE_FALLBACK so stale
+		// An explicit image wins over QURL_IMAGE_FALLBACK so stale
 		// dev/sandbox env cannot break a correctly pinned production image.
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
-		return readPinnedImageConfig(envQURLConnectorImage, image, connectorImageFallbackHint)
+		pinned, err := readPinnedImageConfig(envQURLConnectorImage, image, connectorImageFallbackHint)
+		if err != nil {
+			return "", err
+		}
+		if !strings.Contains(pinned, "@sha256:") {
+			return "", fmt.Errorf("%s must use the immutable ghcr.io/layervai/qurl@sha256:<64 lowercase hex> reference published with the CLI release", envQURLConnectorImage)
+		}
+		return pinned, nil
 	}
 
 	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))

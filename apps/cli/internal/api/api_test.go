@@ -2,7 +2,9 @@ package qurlapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -13,6 +15,283 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
+
+func TestSharingLifecycleWireContract(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	reply := func(desired DesiredState, epoch uint64, connection ConnectionState) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+				"resource_id":      srv.Key.ResourceID,
+				"crid":             srv.Key.CRID,
+				"desired_state":    desired,
+				"serving_epoch":    epoch,
+				"connection_state": connection,
+			}, nil)
+		}
+	}
+	srv.Script(http.MethodGet, path, reply(DesiredStateOff, 4, ConnectionStopped))
+	srv.Script(http.MethodPut, path, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode PUT body: %v", err)
+		}
+		if len(body) != 1 || body["desired_state"] != "on" {
+			t.Errorf("PUT body = %#v, want strict desired_state document", body)
+		}
+		reply(DesiredStateOn, 5, ConnectionConnecting)(w, r)
+	})
+	srv.Script(http.MethodPost, path+"/restart", reply(DesiredStateOn, 6, ConnectionConnecting))
+
+	client := newTestClient(t, srv, nil)
+	got, err := client.Sharing(context.Background(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DesiredState != DesiredStateOff || got.ServingEpoch != 4 || got.ConnectionState != ConnectionStopped {
+		t.Fatalf("GET sharing = %+v", got)
+	}
+	got, err = client.SetSharing(context.Background(), srv.Key.CRID, DesiredStateOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DesiredState != DesiredStateOn || got.ServingEpoch != 5 || got.ConnectionState != ConnectionConnecting {
+		t.Fatalf("PUT sharing = %+v", got)
+	}
+	got, err = client.RestartSharing(context.Background(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ServingEpoch != 6 || got.DesiredState != DesiredStateOn {
+		t.Fatalf("POST restart = %+v", got)
+	}
+}
+
+func TestSharingLifecycleFailsClosedOnInvalidState(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id":      srv.Key.ResourceID,
+			"crid":             srv.Key.CRID,
+			"desired_state":    "maybe",
+			"serving_epoch":    1,
+			"connection_state": "serving",
+		}, nil)
+	})
+	client := newTestClient(t, srv, nil)
+	if _, err := client.Sharing(context.Background(), srv.Key.CRID); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("invalid desired state error = %v", err)
+	}
+	if _, err := client.SetSharing(context.Background(), srv.Key.CRID, "maybe"); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
+		t.Fatalf("invalid desired input error = %v", err)
+	}
+}
+
+func TestSharingLifecycleRequiresCanonicalServingEpochField(t *testing.T) {
+	key := apitest.GenerateResourceKey(t)
+	base := fmt.Sprintf(`"resource_id":%q,"crid":%q,"desired_state":"off","connection_state":"stopped"`, key.ResourceID, key.CRID)
+	tests := map[string]string{
+		"missing":   base,
+		"null":      base + `,"serving_epoch":null`,
+		"string":    base + `,"serving_epoch":"0"`,
+		"fraction":  base + `,"serving_epoch":0.0`,
+		"exponent":  base + `,"serving_epoch":0e0`,
+		"negative":  base + `,"serving_epoch":-1`,
+		"overflow":  base + `,"serving_epoch":18446744073709551616`,
+		"duplicate": base + `,"serving_epoch":0,"serving_epoch":0`,
+	}
+	for name, fields := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServerWithKey(t, key)
+			srv.Script(http.MethodGet, "/v1/resources/"+key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"data":{%s}}`, fields)
+			})
+			if _, err := newTestClient(t, srv, nil).Sharing(context.Background(), key.CRID); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("Sharing() error=%v, want invalid API response", err)
+			}
+		})
+	}
+
+	t.Run("present zero stopped", func(t *testing.T) {
+		srv := apitest.NewServerWithKey(t, key)
+		srv.Script(http.MethodGet, "/v1/resources/"+key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"data":{%s,"serving_epoch":0,"future_field":{"allowed":true}}}`, base)
+		})
+		got, err := newTestClient(t, srv, nil).Sharing(context.Background(), key.CRID)
+		if err != nil || got.ServingEpoch != 0 || got.ConnectionState != ConnectionStopped {
+			t.Fatalf("Sharing()=%+v, %v, want stopped epoch zero", got, err)
+		}
+	})
+}
+
+func TestSharingLifecycleFailsClosedOnWrongResourceIdentity(t *testing.T) {
+	requestKey := apitest.GenerateResourceKey(t)
+	otherKey := apitest.GenerateResourceKey(t)
+	tests := map[string]func(map[string]any){
+		"malformed public key": func(row map[string]any) { row["resource_id"] = "not-a-public-key" },
+		"malformed CRID":       func(row map[string]any) { row["crid"] = "not-a-crid" },
+		"mismatched pair":      func(row map[string]any) { row["crid"] = otherKey.CRID },
+		"different resource": func(row map[string]any) {
+			row["resource_id"] = otherKey.ResourceID
+			row["crid"] = otherKey.CRID
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServerWithKey(t, requestKey)
+			row := map[string]any{
+				"resource_id": requestKey.ResourceID, "crid": requestKey.CRID,
+				"desired_state": "on", "serving_epoch": 1, "connection_state": "serving",
+			}
+			mutate(row)
+			srv.Script(http.MethodGet, "/v1/resources/"+requestKey.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, row, nil)
+			})
+			client := newTestClient(t, srv, nil)
+			if _, err := client.Sharing(context.Background(), requestKey.CRID); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("Sharing error = %v, want invalid API response", err)
+			}
+		})
+	}
+}
+
+func TestSharingLifecycleAcceptsPublicIDAndMatchingCRIDHandles(t *testing.T) {
+	key := apitest.GenerateResourceKey(t)
+	for _, id := range []string{key.ResourceID, key.CRID} {
+		t.Run(id[:8], func(t *testing.T) {
+			srv := apitest.NewServerWithKey(t, key)
+			srv.Script(http.MethodGet, "/v1/resources/"+id+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": key.ResourceID, "crid": key.CRID,
+					"desired_state": "on", "serving_epoch": 1, "connection_state": "serving",
+				}, nil)
+			})
+			if _, err := newTestClient(t, srv, nil).Sharing(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRestartSharingNeverReplaysRateLimit(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing/restart"
+	srv.Script(http.MethodPost, path, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		apitest.WriteProblem(t, w, http.StatusTooManyRequests, "rate_limited", "Rate limited", "result is ambiguous")
+	})
+	client := newTestClient(t, srv, nil)
+	if _, err := client.RestartSharing(context.Background(), srv.Key.CRID); err == nil {
+		t.Fatal("RestartSharing unexpectedly succeeded")
+	}
+	requests := srv.Requests()
+	if len(requests) != 1 || requests[0].Method != http.MethodPost {
+		t.Fatalf("restart requests = %#v, want exactly one POST", requests)
+	}
+}
+
+func TestRestartSharingNeverReplaysTransportError(t *testing.T) {
+	var attempts int
+	c, err := New(&Config{
+		BaseURL: "https://api.invalid", APIKey: "key", Version: "test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("response lost")
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RestartSharing(context.Background(), apitest.FixedResourceKey(t).CRID); err == nil {
+		t.Fatal("RestartSharing unexpectedly succeeded")
+	}
+	if attempts != 1 {
+		t.Fatalf("restart attempts=%d, want exactly one", attempts)
+	}
+}
+
+func TestSharingResponseInvariants(t *testing.T) {
+	valid := sharingRow{ResourceID: "resource", CRID: "crid", DesiredState: DesiredStateOn, ServingEpoch: 1, ConnectionState: ConnectionServing}
+	tests := map[string]func(*sharingRow){
+		"missing resource":   func(row *sharingRow) { row.ResourceID = "" },
+		"missing crid":       func(row *sharingRow) { row.CRID = "" },
+		"off but serving":    func(row *sharingRow) { row.DesiredState = DesiredStateOff },
+		"on but stopped":     func(row *sharingRow) { row.ConnectionState = ConnectionStopped },
+		"on with zero epoch": func(row *sharingRow) { row.ServingEpoch = 0 },
+		"unknown connection": func(row *sharingRow) { row.ConnectionState = "lost" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			row := valid
+			mutate(&row)
+			if err := validateSharingRow(row); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("validateSharingRow(%+v) error = %v", row, err)
+			}
+		})
+	}
+}
+
+func TestListRejectsTunnelWithoutDesiredState(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID,
+			"crid":        srv.Key.CRID,
+			"type":        "tunnel",
+			"status":      "active",
+		}}, map[string]any{"has_more": false})
+	})
+	client := newTestClient(t, srv, nil)
+	if _, err := client.List(context.Background(), ListOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("tunnel list error = %v, want invalid API response", err)
+	}
+}
+
+func TestListRejectsInvalidTunnelIdentity(t *testing.T) {
+	key := apitest.GenerateResourceKey(t)
+	otherKey := apitest.GenerateResourceKey(t)
+	tests := map[string]func(map[string]any){
+		"missing CRID": func(row map[string]any) {
+			delete(row, "crid")
+		},
+		"malformed CRID": func(row map[string]any) {
+			row["crid"] = "not-a-crid"
+		},
+		"missing resource identity": func(row map[string]any) {
+			delete(row, "resource_id")
+		},
+		"malformed resource identity": func(row map[string]any) {
+			row["resource_id"] = "not-a-resource-key"
+		},
+		"mismatched CRID": func(row map[string]any) {
+			row["crid"] = otherKey.CRID
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServerWithKey(t, key)
+			row := map[string]any{
+				"resource_id":   key.ResourceID,
+				"crid":          key.CRID,
+				"type":          "tunnel",
+				"status":        "active",
+				"desired_state": "off",
+				"serving_epoch": 1,
+			}
+			mutate(row)
+			srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{row}, map[string]any{"has_more": false})
+			})
+			client := newTestClient(t, srv, nil)
+			if _, err := client.List(context.Background(), ListOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("List error = %v, want invalid API response", err)
+			}
+		})
+	}
+}
 
 // testRequestID is the harness's fixed X-Request-Id value.
 const testRequestID = "unit-req"
@@ -266,7 +545,7 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 				"type": "url", "status": "active",
 				"description": "nightly export", "tags": []string{"ops", "nightly"},
 			},
-			{"resource_id": "r2", "target_url": "https://b.example", "status": "revoked"},
+			{"resource_id": "r2", "target_url": "https://b.example", "type": "url", "status": "revoked"},
 		}, map[string]any{"next_cursor": "cur2", "has_more": true})
 	})
 	client := newTestClient(t, srv, nil)
@@ -289,7 +568,7 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	}
 	// A row that carries none of it projects to zero values, never to
 	// synthesized ones — an empty description is not a description.
-	if got := page.Items[1]; got.Type != "" || got.Description != "" || got.Tags != nil {
+	if got := page.Items[1]; got.Type != "url" || got.Description != "" || got.Tags != nil {
 		t.Errorf("row without metadata gained some: %+v", got)
 	}
 }

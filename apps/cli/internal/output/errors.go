@@ -12,10 +12,8 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
 // RenderError writes the customer-facing rendering of err to w (stderr).
@@ -41,11 +39,6 @@ func renderErrorLines(p *Printer, err error) []string {
 	}
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
-	}
-	if errors.Is(err, supervisor.ErrProxyNotServing) {
-		// The underlying FRP rejection reason is server-controlled and already
-		// present in structured logs; keep terminal output fixed and bounded.
-		return []string{head + " " + msgConnectorProxyNotServing, "", "  " + p.dim(hintConnectorProxyNotServing)}
 	}
 	if lines, ok := connectorErrorLines(p, head, err); ok {
 		return lines
@@ -77,26 +70,9 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		return renderConnectorPosture(p, head, err, resourceHeadline, resourceHint, true), true
 	}
 	switch {
-	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
-		headline, hint, includeDetail = msgConnectorTokenRequired, hintConnectorTokenRequired, false
-	case errors.Is(err, agent.ErrIdentityConflict):
-		headline, hint = msgConnectorIdentityConflict, hintConnectorIdentityConflict
-	case errors.Is(err, agent.ErrRefreshApprovalRequired):
-		headline, hint = msgConnectorRefreshApproval, hintConnectorRefreshApproval
-	case errors.Is(err, agent.ErrRefreshDisabled):
-		headline, hint = msgConnectorRefreshDisabled, hintConnectorRefreshDisabled
-	case errors.Is(err, agent.ErrRefreshModeInvalid):
-		headline, hint = msgConnectorRefreshModeInvalid, hintConnectorRefreshModeInvalid
-	case errors.Is(err, agent.ErrRefreshAlreadyAttempted):
-		headline, hint = msgConnectorRefreshExhausted, hintConnectorRefreshExhausted
 	case errors.Is(err, hub.ErrConfig):
 		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
-	case supervisor.IsTooManyKnockFailures(err):
-		headline, hint = msgConnectorRetryBudget, hintConnectorRetryBudget
-	// qurl-go's assignment taxonomy comes last so the CLI's own lifecycle
-	// reading always wins: agent.ErrRefreshAlreadyAttempted, for one, is
-	// joined with the warm-open cause and therefore also matches
-	// ErrAssignmentLeaseExpired below.
+	// qurl-go's assignment taxonomy follows the local configuration posture.
 	case errors.Is(err, qurl.ErrAssignmentBootstrapConsumed):
 		headline, hint = msgConnectorTokenConsumed, hintConnectorTokenConsumed
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected):

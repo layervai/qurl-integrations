@@ -13,13 +13,15 @@ import (
 	"syscall"
 	"time"
 
+	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -63,27 +65,20 @@ type globalOpts struct {
 	// test ever sends a real access request.
 	enterPortal func(ctx context.Context, link string) (string, error)
 
-	// Connector seams. openConnectorRuntime walks the agent enroll/open
-	// ladder (production: agent.Open), resolveConnectorResource runs the
-	// assigned-cell LST, and newConnectorKnocker builds the
-	// per-cycle platform client from the opened runtime (production:
-	// knock.NewNative over the runtime's binding); tests inject fakes so cmd
-	// tests never touch the real UDP wire. tuneConnectorSupervisor, when
-	// non-nil, adjusts the supervisor config before construction — test-only,
-	// mirroring the supervisor package's own timing seams.
-	openConnectorRuntime     func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
-	resolveConnectorResource func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error)
-	newConnectorKnocker      func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
-	tuneConnectorSupervisor  func(cfg *supervisor.Config)
-	// onConnectorProxyReady is a command-test observation seam. Production
-	// leaves it nil; hermetic tests use it to wait for FRP's synchronized
-	// running-phase observation before opening a work connection.
-	onConnectorProxyReady func()
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
 	// no-op and pins the global once in TestMain instead, because its
 	// in-process tunnel server logs through the same global concurrently.
-	redirectFRPLogs func()
+	redirectFRPLogs      func()
+	loadLocalShares      func(context.Context) ([]connectorstate.LocalShare, error)
+	openShareRegistry    func(string) (localShareRegistry, error)
+	newShareDaemon       func(string, string) shareDaemonController
+	preflightTarget      func(context.Context, string, int) error
+	resolveShareStateDir func(string) (string, error)
+	resolveLocalResource localResourceResolver
+	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
+	runForegroundDaemon  func(context.Context, *globalOpts, string, string) error
+	sharingWaitLimit     time.Duration
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -93,21 +88,15 @@ type globalOpts struct {
 	errColorOn         bool
 	ascii              bool
 	profileConnectorID string
-	// profileConnectorSlug carries the deprecated v1.1.0 profile key
-	// (connector_slug), honored below profileConnectorID.
-	//
-	// Deprecated: remove at the next major.
-	profileConnectorSlug string
 }
 
 // rootOption is a test hook for injecting process context.
 type rootOption func(*globalOpts)
 
 // Main wires the real process context and runs the CLI. It returns the exit
-// code; main() is the only caller of os.Exit. SIGTERM joins the interrupt
-// set for the long-running serve command (`connector run` under an
-// orchestrator stops via SIGTERM); on Windows the extra signal is simply
-// never delivered.
+// code; main() is the only caller of os.Exit. SIGTERM joins the interrupt set
+// for the foreground daemon and supervised invocations; on Windows the extra
+// signal is simply never delivered.
 func Main(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -118,8 +107,7 @@ func Main(version string) int {
 // run executes the tree, renders any error to stderr, and maps it to the one
 // exit code. A cancellation the user caused (Ctrl-C / SIGTERM) keeps the
 // Interrupted exit code but renders no error anatomy: the interrupt was the
-// user's own act, and commands that want a farewell print their own note
-// (connector run's msgConnectorStopped).
+// user's own act.
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	err := root.ExecuteContext(ctx)
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -157,19 +145,46 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		opener := &consume.AccessOpener{LookupEnv: opts.lookupEnv}
 		opts.enterPortal = opener.Open
 	}
-	if opts.openConnectorRuntime == nil {
-		opts.openConnectorRuntime = agent.Open
-	}
-	if opts.resolveConnectorResource == nil {
-		opts.resolveConnectorResource = func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error) {
-			return agent.ResolveResourceWithResult(ctx, rt.Binding, rt.Store, connectorID)
-		}
-	}
-	if opts.newConnectorKnocker == nil {
-		opts.newConnectorKnocker = newNativeConnectorKnocker
-	}
 	if opts.redirectFRPLogs == nil {
 		opts.redirectFRPLogs = func() { redirectFRPLogsToStderr(opts) }
+	}
+	if opts.runForegroundDaemon == nil {
+		opts.runForegroundDaemon = runShareDaemon
+	}
+	if opts.loadLocalShares == nil {
+		opts.loadLocalShares = func(ctx context.Context) ([]connectorstate.LocalShare, error) {
+			dir, err := connectorstate.ResolveDir("")
+			if err != nil {
+				return nil, err
+			}
+			shares, _, err := connectorstate.ReadLocalSharesIfPresent(ctx, dir)
+			return shares, err
+		}
+	}
+	if opts.openShareRegistry == nil {
+		opts.openShareRegistry = func(dir string) (localShareRegistry, error) {
+			return connectorstate.OpenLocalShareRegistry(dir)
+		}
+	}
+	if opts.newShareDaemon == nil {
+		opts.newShareDaemon = func(stateDir, logDir string) shareDaemonController {
+			return connectordaemon.NewJobController(stateDir, logDir, opts.version, opts.resolvedEndpoint, opts.resolveHubBootstrap)
+		}
+	}
+	if opts.preflightTarget == nil {
+		opts.preflightTarget = preflightLocalTarget
+	}
+	if opts.resolveShareStateDir == nil {
+		opts.resolveShareStateDir = connectorstate.ResolveDir
+	}
+	if opts.resolveLocalResource == nil {
+		opts.resolveLocalResource = resolveLocalPublishResource
+	}
+	if opts.resolveHubBootstrap == nil {
+		opts.resolveHubBootstrap = hub.Bootstrap
+	}
+	if opts.sharingWaitLimit <= 0 {
+		opts.sharingWaitLimit = 30 * time.Second
 	}
 
 	cmd := &cobra.Command{
@@ -225,8 +240,12 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 		resolveCmd(opts),
 		getCmd(opts),
 		listCmd(opts),
+		shareStartCmd(opts),
+		shareStopCmd(opts),
+		shareRestartCmd(opts),
+		shareStatusCmd(opts),
 		deleteCmd(opts),
-		connectorCmd(opts),
+		daemonCmd(opts),
 		loginCmd(opts),
 		logoutCmd(opts),
 		whoamiCmd(opts),
@@ -267,11 +286,7 @@ func (o *globalOpts) resolveSettings() error {
 	o.outColor = output.ResolveColor(colorMode, o.lookupEnv, o.streams.OutIsTTY)
 	o.errColorOn = output.ResolveColor(colorMode, o.lookupEnv, o.streams.ErrIsTTY)
 	o.ascii = output.ResolveASCII(o.lookupEnv)
-	// Free-form profile settings the connector command resolves flag-first at
-	// its own run time (config.Resolve needs the flag value, which only the
-	// command has).
 	o.profileConnectorID = cfg.ConnectorID
-	o.profileConnectorSlug = cfg.ConnectorSlug //nolint:staticcheck // deliberate compatibility read of the deprecated v1.1.0 key; dies with it at the next major
 	o.resolved = true
 	return nil
 }
@@ -310,7 +325,7 @@ func insecureEndpointWarning(endpoint string) string {
 func skipsSettings(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c.Name() {
-		case "version", "completion", "docs", "help":
+		case "version", "completion", "docs", "help", "validate-test-resource":
 			return true
 		}
 		if strings.HasPrefix(c.Name(), "__complete") {
