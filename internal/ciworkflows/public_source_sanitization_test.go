@@ -134,7 +134,10 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 			strings.HasSuffix(rel, ".map"):
 			return nil
 		}
-		body, err := os.ReadFile(path)
+		// G304 flags reading a variable path. The variable is supplied by
+		// WalkDir over this repository's own checkout, which is the entire
+		// point of the test; there is no caller-controlled input to constrain.
+		body, err := os.ReadFile(path) //nolint:gosec // G304: scanning this repo's own tree is the test
 		if err != nil {
 			return nil //nolint:nilerr // non-source entries are not the subject of this check
 		}
