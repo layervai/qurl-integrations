@@ -940,6 +940,54 @@ func TestPublishNewMachineTakeoverRotatesEpochOnce(t *testing.T) {
 	}
 }
 
+func TestPublishRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := t.TempDir()
+	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "off"
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"))
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource:   resolvedLocalResource(srv, true),
+	})
+	if res.code != 0 {
+		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
+	}
+	posts, puts := 0, 0
+	for _, request := range srv.Requests() {
+		if request.Method == http.MethodPost {
+			posts++
+		}
+		if request.Method == http.MethodPut {
+			puts++
+		}
+	}
+	if posts != 1 || puts != 0 || daemon.ensures != 1 {
+		t.Fatalf("terminal recovery POST/PUT/ensure=%d/%d/%d, want 1/0/1", posts, puts, daemon.ensures)
+	}
+	local, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.DesiredState != "on" || local.ServingEpoch != seed.ServingEpoch+1 || local.TargetURL != seed.TargetURL {
+		t.Fatalf("terminal recovery local state = %+v", local)
+	}
+}
+
 func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()

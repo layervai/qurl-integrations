@@ -108,7 +108,6 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 			"QURL_SANDBOX_API_KEY",
 			"QURL_SANDBOX_CLEANUP_JWT",
 			"QURL_CLI_SANDBOX_CONNECTOR",
-			"-tags=clisandbox",
 			"-tags=clisoak",
 		} {
 			if bytes.Contains(data, []byte(forbidden)) {
@@ -116,15 +115,25 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 			}
 		}
 	}
+	cliWorkflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "cli.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(cliWorkflow, []byte("go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
+		t.Error("public CLI workflow does not compile the private sandbox test surface")
+	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"-tags=clisandbox", "-tags=clisoak", "CLI_SANDBOX_E2E"} {
+	for _, forbidden := range []string{"-tags=clisoak", "CLI_SANDBOX_E2E"} {
 		if bytes.Contains(makefile, []byte(forbidden)) {
 			t.Errorf("public Makefile retains private live-lane contract %q", forbidden)
 		}
+	}
+	if !bytes.Contains(makefile, []byte("go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...")) {
+		t.Error("public Makefile does not compile the private sandbox test surface")
 	}
 }
 

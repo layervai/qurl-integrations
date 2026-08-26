@@ -264,6 +264,7 @@ func activateLocalPublish(
 ) (*connectorstate.LocalShare, *qurlapi.Sharing, bool, error) {
 	existing, err := registry.Get(ctx, resource.ResourceID)
 	localMissing := errors.Is(err, os.ErrNotExist)
+	localPresent := err == nil
 	targetChanged := err == nil && (existing.TargetURL != target.canonicalOrigin || existing.LocalIP != target.localIP || existing.LocalPort != target.localPort)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, false, err
@@ -276,7 +277,8 @@ func activateLocalPublish(
 		return nil, nil, false, errors.New("qURL sharing response identity does not match the published resource")
 	}
 	var sharing *qurlapi.Sharing
-	restartRequired := targetChanged || (localMissing && prior.DesiredState == qurlapi.DesiredStateOn)
+	terminalRecovery := localPresent && existing.DesiredState == string(qurlapi.DesiredStateOff) && prior.DesiredState == qurlapi.DesiredStateOn
+	restartRequired := targetChanged || (localMissing && prior.DesiredState == qurlapi.DesiredStateOn) || terminalRecovery
 	if restartRequired {
 		sharing, err = restartSharingReconciled(ctx, client, resource.CRID, prior)
 	} else {
