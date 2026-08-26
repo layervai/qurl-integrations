@@ -325,7 +325,7 @@ func run() error {
 		postWired:             postMessage != nil,
 		blocksWired:           postMessageBlocks != nil,
 		ephemeralBlocksWired:  postEphemeralBlocks != nil,
-		assistantThreadsWired: agentAssistantThreads != nil,
+		assistantThreadsWired: true,
 		confirmFlag:           agentConfirmEnabled,
 		exclusiveAcksFlag:     agentSurfaceExclusiveAcks,
 		killed:                agentDisabled,

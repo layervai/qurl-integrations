@@ -107,6 +107,7 @@ func TestStartHappyPath(t *testing.T) {
 	}
 	if stateCookie == nil {
 		t.Fatal("state cookie not set")
+		return
 	}
 	if stateCookie.Value != state {
 		t.Errorf("cookie != state: %q vs %q", stateCookie.Value, state)
@@ -267,6 +268,7 @@ func TestClearStateCookieScopedToOAuthPath(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("clearStateCookie did not set a cookie")
+		return
 	}
 	if got.Path != "/oauth/qurl" {
 		t.Errorf("cleared cookie Path: got %q want %q", got.Path, "/oauth/qurl")
