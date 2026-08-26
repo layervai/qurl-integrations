@@ -31,20 +31,23 @@ jq -e '.commit.verification.verified == true and .commit.verification.reason == 
 main_ref=$(gh api repos/layervai/qurl-go/git/ref/heads/main)
 main_sha=$(jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' <<<"$main_ref")
 comparison=$(gh api "repos/layervai/qurl-go/compare/$source_sha...$main_sha")
+comparison_url="https://api.github.com/repos/layervai/qurl-go/compare/$source_sha...$main_sha"
 jq -e \
   --arg source "$source_sha" \
   --arg main "$main_sha" \
-  '.base_commit.sha == $source and
+  --arg comparison_url "$comparison_url" \
+  '.url == $comparison_url and
+   .base_commit.sha == $source and
    .merge_base_commit.sha == $source and
    ((.status == "identical" and
      $source == $main and
-     .head_commit == null and
      .ahead_by == 0 and
      .behind_by == 0 and
      .total_commits == 0 and
      .commits == []) or
     (.status == "ahead" and
-     .head_commit.sha == $main and
+     (.commits | type == "array" and length > 0) and
+     .commits[-1].sha == $main and
      .ahead_by > 0 and
      .behind_by == 0 and
      .total_commits == .ahead_by))' \

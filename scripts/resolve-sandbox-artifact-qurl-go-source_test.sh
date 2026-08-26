@@ -45,10 +45,12 @@ main_ref() {
 compare() {
   jq -cn --arg status "$1" --arg source "$2" --arg main "$3" \
     'if $status == "identical" then
-       {status:$status,base_commit:{sha:$source},merge_base_commit:{sha:$source},head_commit:null,
+       {url:("https://api.github.com/repos/layervai/qurl-go/compare/"+$source+"..."+$main),
+        status:$status,base_commit:{sha:$source},merge_base_commit:{sha:$source},
         ahead_by:0,behind_by:0,total_commits:0,commits:[]}
      else
-       {status:$status,base_commit:{sha:$source},merge_base_commit:{sha:$source},head_commit:{sha:$main},
+       {url:("https://api.github.com/repos/layervai/qurl-go/compare/"+$source+"..."+$main),
+        status:$status,base_commit:{sha:$source},merge_base_commit:{sha:$source},
         ahead_by:1,behind_by:0,total_commits:1,commits:[{sha:$main}]}
      end'
 }
@@ -64,8 +66,10 @@ test "$(run "$good_commit" "$good_main" "$good_compare")" = "$source_sha"
 test "$(run "$good_commit" "$(main_ref "$source_sha")" \
   "$(compare identical "$source_sha" "$source_sha")")" = "$source_sha"
 truncated_compare=$(jq -cn --arg source "$source_sha" --arg main "$main_sha" \
-  '{status:"ahead",base_commit:{sha:$source},merge_base_commit:{sha:$source},head_commit:{sha:$main},
-    ahead_by:251,behind_by:0,total_commits:251,commits:[{sha:$main}]}')
+  '{url:("https://api.github.com/repos/layervai/qurl-go/compare/"+$source+"..."+$main),
+    status:"ahead",base_commit:{sha:$source},merge_base_commit:{sha:$source},
+    ahead_by:251,behind_by:0,total_commits:251,
+    commits:([range(0;249) | {sha:"1111111111111111111111111111111111111111"}] + [{sha:$main}])}')
 test "$(run "$good_commit" "$good_main" "$truncated_compare")" = "$source_sha"
 
 assert_rejected() {
@@ -88,17 +92,23 @@ assert_rejected "non-ancestor commit" "$good_commit" "$good_main" \
 assert_rejected "drifted comparison base" "$good_commit" "$good_main" \
   "$(compare ahead 1111111111111111111111111111111111111111 "$main_sha")"
 assert_rejected "drifted comparison head" "$good_commit" "$good_main" \
-  "$(compare ahead "$source_sha" 1111111111111111111111111111111111111111)"
+  "$(jq -c '.commits[-1].sha="1111111111111111111111111111111111111111"' <<<"$good_compare")"
+assert_rejected "missing comparison head commit" "$good_commit" "$good_main" \
+  "$(jq -c '.commits=[]' <<<"$good_compare")"
+assert_rejected "truncated comparison with wrong final commit" "$good_commit" "$good_main" \
+  "$(jq -c '.commits[-1].sha="1111111111111111111111111111111111111111"' \
+    <<<"$truncated_compare")"
+assert_rejected "drifted comparison URL" "$good_commit" "$good_main" \
+  "$(jq -c '.url="https://api.github.com/repos/layervai/qurl-go/compare/wrong...wrong"' <<<"$good_compare")"
 assert_rejected "nonpositive ahead counter" "$good_commit" "$good_main" \
   "$(jq -c '.ahead_by=0 | .total_commits=0' <<<"$good_compare")"
 assert_rejected "mismatched total counter" "$good_commit" "$good_main" \
   "$(jq -c '.total_commits=2' <<<"$good_compare")"
 assert_rejected "nonzero behind counter" "$good_commit" "$good_main" \
   "$(jq -c '.behind_by=1' <<<"$good_compare")"
-fabricated_identical=$(compare identical "$source_sha" "$source_sha")
-fabricated_identical=$(jq -c --arg sha "$source_sha" '.head_commit={sha:$sha}' <<<"$fabricated_identical")
-assert_rejected "fabricated identical head" "$good_commit" "$(main_ref "$source_sha")" \
-  "$fabricated_identical"
+assert_rejected "fabricated identical commit list" "$good_commit" "$(main_ref "$source_sha")" \
+  "$(jq -c --arg sha "$source_sha" '.commits=[{sha:$sha}]' \
+    <<<"$(compare identical "$source_sha" "$source_sha")")"
 assert_rejected "malformed commit response" '{}' "$good_main" "$good_compare"
 
 echo "sandbox artifact qurl-go source resolver tests passed"
