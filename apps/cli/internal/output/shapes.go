@@ -80,6 +80,18 @@ type sharingJSON struct {
 	ServingEpoch    uint64                  `json:"serving_epoch"`
 }
 
+type resourceStatusJSON struct {
+	// Description and tags are intentionally absent: status is the compact
+	// lifecycle view, while list is the metadata inventory surface.
+	CRID       string     `json:"crid,omitempty"`
+	ResourceID string     `json:"resource_id"`
+	TargetURL  string     `json:"target_url,omitempty"`
+	Type       string     `json:"type"`
+	Status     string     `json:"status"`
+	CreatedAt  *time.Time `json:"created_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+}
+
 type downloadJSON struct {
 	CRID string `json:"crid,omitempty"`
 	File string `json:"file"`
@@ -140,6 +152,39 @@ func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		return ew.flush(tw)
+	}
+}
+
+// ResourceStatus renders the stable state of a non-Connector resource. URL
+// resources do not have desired/observed serving epochs; their lifecycle is
+// active until delete, revoke, expiry, or tombstone changes the resource row.
+func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
+	switch {
+	case p.format == FormatJSON:
+		return p.writeJSON(resourceStatusJSON{
+			CRID: resource.CRID, ResourceID: resource.ResourceID,
+			TargetURL: resource.TargetURL, Type: resource.Type, Status: resource.Status,
+			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
+		})
+	case p.quiet:
+		_, err := fmt.Fprintln(p.out, primaryID(resource.CRID, resource.ResourceID))
+		return err
+	default:
+		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
+		ew := &errWriter{w: tw}
+		ew.printf("%s\t%s\n", p.bold("CRID:"), primaryID(resource.CRID, resource.ResourceID))
+		if resource.TargetURL != "" {
+			ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
+		}
+		ew.printf("%s\t%s\n", p.bold("Type:"), resource.Type)
+		ew.printf("%s\t%s\n", p.bold("Status:"), resource.Status)
+		if resource.CreatedAt != nil {
+			ew.printf("%s\t%s\n", p.bold("Created:"), p.relativeTime(*resource.CreatedAt))
+		}
+		if resource.ExpiresAt != nil {
+			ew.printf("%s\t%s\n", p.bold("Expires:"), p.formatExpiry(*resource.ExpiresAt))
+		}
 		return ew.flush(tw)
 	}
 }
