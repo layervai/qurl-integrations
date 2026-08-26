@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.3](https://github.com/layervai/qurl-integrations/compare/v2.0.2...v2.0.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** recover revoked Connector identity ([#1276](https://github.com/layervai/qurl-integrations/issues/1276)) ([aeb1eea](https://github.com/layervai/qurl-integrations/commit/aeb1eea0b696ab4bb19a7d3da7c65b98b1ca5c2c))
+* **cli:** report status for remote URL resources ([#1274](https://github.com/layervai/qurl-integrations/issues/1274)) ([21c2474](https://github.com/layervai/qurl-integrations/commit/21c2474160e054a2f64651eb3d30351524aaac7b))
+
 ## [2.0.2](https://github.com/layervai/qurl-integrations/compare/v2.0.1...v2.0.2) (2026-08-26)
 
 
