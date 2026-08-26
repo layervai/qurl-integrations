@@ -54,8 +54,21 @@ func IsTokenLoginError(err error) bool {
 // agree, the suite stays green, and the classifier silently stops firing.
 // The snapshot is compared against the producer's own copy only when
 // QRTS_KNOCK_TOKEN_LOGIN_CONTRACT points at it, and nothing in this repo
-// sets that variable — it is a hook for a cross-repo workflow, so on this
-// repo's CI the producer side goes unchecked.
+// sets that variable. That is deliberate, not an omission: the producer
+// repository is private and this one is public, so a job here that fetched the
+// producer's copy would need a credential and would write private bytes into a
+// public CI log. The binding therefore belongs to the producer, which pulls
+// this public snapshot with no credentials at all — see the consumer-contract
+// workflow there.
+//
+// The consequence for THIS repo's CI stands: the producer side goes unchecked
+// here, and a producer-side rename surfaces as a red build over there, not a
+// red build here. Keep the env hook — it is what the producer's job and a
+// local run against a qRTS checkout both use.
+//
+// Note the NewProxy reject surface is already fenced that way. This Login
+// surface is not yet: qRTS has no committed producer fixture for it, only for
+// the recoverable NewProxy rejects.
 //
 // TestForkEmitsTheLoginFailurePrefixThisPackageMatches closes a different
 // half — each snapshot wire text really does reach this matcher through a
