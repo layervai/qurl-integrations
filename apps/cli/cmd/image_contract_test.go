@@ -184,6 +184,32 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 	}
 }
 
+func TestPRImageSmokeRunsEachImmutablePlatformManifest(t *testing.T) {
+	t.Parallel()
+	workflow, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "cli.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(workflow), "\r\n", "\n")
+	for _, want := range []string{
+		"platforms: linux/amd64,linux/arm64",
+		`candidate="localhost:5000/qurl@${IMAGE_DIGEST}"`,
+		`docker buildx imagetools inspect "$candidate" --raw`,
+		`.platform.os == $os`,
+		`.platform.architecture == $architecture`,
+		`if length == 1 then .[0].digest`,
+		`platform_candidate="localhost:5000/qurl@${platform_digest}"`,
+		`docker run --rm --platform "$platform" "$platform_candidate" version`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("PR image smoke missing immutable platform contract %q", want)
+		}
+	}
+	if strings.Contains(text, `docker run --rm --platform "$platform" "$candidate" version`) {
+		t.Error("PR image smoke runs multiple platforms through one mutable local index reference")
+	}
+}
+
 func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 	t.Parallel()
 	docs, err := os.ReadFile(filepath.Join("..", "..", "..", "RELEASING.md"))

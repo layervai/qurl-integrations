@@ -477,7 +477,20 @@ jobs:
         run: |
           candidate="localhost:5000/qurl@${IMAGE_DIGEST}"
           for platform in linux/amd64 linux/arm64; do
-            [ "$(docker run --rm --platform "$platform" "$candidate" version | awk '{print $3}')" = 'v0.0.0-image-smoke' ]
+            os="${platform%/*}"
+            architecture="${platform#*/}"
+            platform_digest="$(docker buildx imagetools inspect "$candidate" --raw | jq -er \
+              --arg os "$os" --arg architecture "$architecture" '
+                [.manifests[] | select(
+                  .platform.os == $os and
+                  .platform.architecture == $architecture
+                )] |
+                if length == 1 then .[0].digest
+                else error("expected exactly one platform manifest")
+                end
+              ')"
+            platform_candidate="localhost:5000/qurl@${platform_digest}"
+            [ "$(docker run --rm --platform "$platform" "$platform_candidate" version | awk '{print $3}')" = 'v0.0.0-image-smoke' ]
           done
           docker buildx imagetools inspect "$candidate" --format '{{json .Image}}' | jq -e '
             length == 2 and
