@@ -290,7 +290,7 @@ jobs:
           # in-toto blobs, then sign the manifest that binds their digests to
           # this tested index digest.
           QURL_EXPECTED_VCS_REVISION="$(git rev-parse HEAD)" \
-          QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations.git \
+          QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations \
             scripts/extract-qurl-image-attestations.sh "$candidate" dist/qurl-image-attestations
           cp dist/qurl-image-attestations/qurl-image-buildkit-manifest.json dist/qurl-image-buildkit-manifest.json
           cosign sign --yes "$candidate"

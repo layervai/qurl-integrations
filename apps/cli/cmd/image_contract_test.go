@@ -154,6 +154,7 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		"Resolve an existing released qurl image",
 		"steps.qurl_existing.outputs.digest || steps.qurl_image.outputs.digest",
 		"scripts/extract-qurl-image-attestations.sh",
+		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations",
 		`cosign sign --yes "$candidate"`,
 		"https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1",
 		"cosign verify-attestation --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1",
@@ -177,7 +178,11 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 	if got := strings.Count(text, "outputs: type=image,name=ghcr.io/layervai/qurl,"); got != 1 {
 		t.Errorf("release workflow publishes qurl customer image %d times, want exactly once", got)
 	}
-	for _, forbidden := range []string{"ghcr.io/layervai/qurl-connector", "/usr/local/bin/qurl-connector"} {
+	for _, forbidden := range []string{
+		"ghcr.io/layervai/qurl-connector",
+		"/usr/local/bin/qurl-connector",
+		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations.git",
+	} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("release workflow contains retired artifact %q", forbidden)
 		}
@@ -200,6 +205,7 @@ func TestPRImageSmokeRunsEachImmutablePlatformManifest(t *testing.T) {
 		`if length == 1 then .[0].digest`,
 		`platform_candidate="localhost:5000/qurl@${platform_digest}"`,
 		`docker run --rm --platform "$platform" "$platform_candidate" version`,
+		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("PR image smoke missing immutable platform contract %q", want)
@@ -207,6 +213,9 @@ func TestPRImageSmokeRunsEachImmutablePlatformManifest(t *testing.T) {
 	}
 	if strings.Contains(text, `docker run --rm --platform "$platform" "$candidate" version`) {
 		t.Error("PR image smoke runs multiple platforms through one mutable local index reference")
+	}
+	if strings.Contains(text, "QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations.git") {
+		t.Error("PR image smoke expects a non-canonical BuildKit source URL")
 	}
 }
 
