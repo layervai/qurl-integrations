@@ -34,9 +34,15 @@ import (
 // it bans.
 var (
 	sanitizeAppID = regexp.MustCompile(`(?i)app[_ -]?(?:id|client[_ -]?id)[[:space:]]*[:=][[:space:]]*["']?([0-9]+)`)
-	// (?:^|[^@\w/]) so an @layervai/<team> CODEOWNERS entry is not read as a
-	// repository reference. Teams are not repositories and are not disclosures.
-	sanitizeLayerVRepo = regexp.MustCompile(`(?i)(?:^|[^@\w/])layervai/([a-z0-9][a-z0-9-]*)`)
+	// Exclude only a preceding "@", so an @layervai/<team> CODEOWNERS entry is
+	// not read as a repository reference -- teams are not repositories and are
+	// not disclosures.
+	//
+	// A preceding "/" must NOT be excluded: github.com/layervai/<repo> is the
+	// URL form, and that is precisely how a private repository gets named in a
+	// doc or a workflow. An earlier draft excluded it and let the URL form
+	// through entirely.
+	sanitizeLayerVRepo = regexp.MustCompile(`(?i)(?:^|[^@\w])layervai/([a-z0-9][a-z0-9_-]*)`)
 	// Bare names that carry no legitimate use in this repository. Each is
 	// verified to appear zero times outside this file.
 	sanitizePrivateRepo = []string{
@@ -82,6 +88,10 @@ var sanitizePublicLayerVRepos = map[string]bool{
 	// GoReleaser and Homebrew spell the tap "layervai/tap"; Homebrew expands
 	// that to the public layervai/homebrew-tap.
 	"tap": true,
+	// ghcr.io/layervai/qurl_connector is the container namespace for the
+	// public connector image, not a repository. Underscores are captured
+	// (above) so it matches whole instead of truncating to "layervai/qurl".
+	"qurl_connector": true,
 }
 
 // sanitizeKnownReference freezes the private-repository references that
@@ -101,6 +111,8 @@ var sanitizeKnownReference = map[string]bool{
 	".github/workflows/cli-connector-resource-proof.yml|layervai/nhp":      true,
 	".github/workflows/validate-issue-templates.yml|layervai/nhp":          true,
 	".github/workflows/validate-issue-templates.yml|layervai/ops-routines": true,
+	// Contract test asserting the shape of that workflow's run URL.
+	"internal/ciworkflows/connector_resource_proof_test.go|layervai/nhp": true,
 }
 
 func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
