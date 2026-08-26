@@ -48,7 +48,7 @@ var (
 	// they do. What must never appear is a full URL with the secret path.
 	sanitizeSecretEndpoint = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)hooks` + `\.slack\.com/services/[A-Za-z0-9_-]{6,}`),
-		regexp.MustCompile(`(?i)discord\.com/api/` + `webhooks/[0-9]{6,}/[A-Za-z0-9_-]{6,}`),
+		regexp.MustCompile(`(?i)discord\.com/api/` + `webhooks/\d{6,}/[A-Za-z0-9_-]{6,}`),
 		regexp.MustCompile(`(?i)[a-z0-9]{6,}\.execute-api` + `\.[a-z0-9-]+\.amazonaws\.com`),
 	}
 )
