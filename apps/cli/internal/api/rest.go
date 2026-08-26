@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,8 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/resourceidentity"
 )
 
 // maxResponseBody mirrors the SDK's 1 MiB response cap for the direct REST
@@ -23,15 +28,117 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ResourceID  string     `json:"resource_id"`
-	CRID        string     `json:"crid"`
-	TargetURL   string     `json:"target_url"`
-	Type        string     `json:"type"`
-	Status      string     `json:"status"`
-	Description string     `json:"description"`
-	Tags        []string   `json:"tags"`
-	CreatedAt   *time.Time `json:"created_at"`
-	ExpiresAt   *time.Time `json:"expires_at"`
+	ResourceID   string       `json:"resource_id"`
+	CRID         string       `json:"crid"`
+	TargetURL    string       `json:"target_url"`
+	Type         string       `json:"type"`
+	Status       string       `json:"status"`
+	DesiredState DesiredState `json:"desired_state"`
+	ServingEpoch uint64       `json:"serving_epoch"`
+	Description  string       `json:"description"`
+	Tags         []string     `json:"tags"`
+	CreatedAt    *time.Time   `json:"created_at"`
+	ExpiresAt    *time.Time   `json:"expires_at"`
+}
+
+type sharingRow struct {
+	ResourceID      string          `json:"resource_id"`
+	CRID            string          `json:"crid"`
+	DesiredState    DesiredState    `json:"desired_state"`
+	ServingEpoch    uint64          `json:"serving_epoch"`
+	ConnectionState ConnectionState `json:"connection_state"`
+}
+
+// UnmarshalJSON requires the serving-epoch lifecycle fence to be present and
+// rejects duplicate known fields while retaining additive response fields.
+func (row *sharingRow) UnmarshalJSON(data []byte) error {
+	if row == nil {
+		return errors.New("sharing row is nil")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	first, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := first.(json.Delim); !ok || delim != '{' {
+		return errors.New("sharing row must be an object")
+	}
+	seen := make(map[string]bool, 5)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		name, ok := token.(string)
+		if !ok {
+			return errors.New("sharing row field name is invalid")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return err
+		}
+		if !isSharingField(name) {
+			continue
+		}
+		if seen[name] {
+			return fmt.Errorf("duplicate sharing field %q", name)
+		}
+		seen[name] = true
+		if err := decodeSharingField(row, name, raw); err != nil {
+			return fmt.Errorf("decode sharing field %q: %w", name, err)
+		}
+	}
+	last, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := last.(json.Delim); !ok || delim != '}' {
+		return errors.New("sharing row object is incomplete")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("sharing row has trailing JSON")
+		}
+		return fmt.Errorf("sharing row trailing JSON: %w", err)
+	}
+	if !seen["serving_epoch"] {
+		return errors.New("sharing row is missing serving_epoch")
+	}
+	return nil
+}
+
+func isSharingField(name string) bool {
+	switch name {
+	case "resource_id", "crid", "desired_state", "serving_epoch", "connection_state":
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeSharingField(row *sharingRow, name string, raw json.RawMessage) error {
+	switch name {
+	case "resource_id":
+		return json.Unmarshal(raw, &row.ResourceID)
+	case "crid":
+		return json.Unmarshal(raw, &row.CRID)
+	case "desired_state":
+		return json.Unmarshal(raw, &row.DesiredState)
+	case "connection_state":
+		return json.Unmarshal(raw, &row.ConnectionState)
+	case "serving_epoch":
+		encoded := strings.TrimSpace(string(raw))
+		if encoded == "" || strings.IndexFunc(encoded, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+			return errors.New("serving_epoch must be an unsigned decimal integer")
+		}
+		value, err := strconv.ParseUint(encoded, 10, 64)
+		if err == nil {
+			row.ServingEpoch = value
+		}
+		return err
+	default:
+		return fmt.Errorf("unsupported sharing field %q", name)
+	}
 }
 
 // envelopeMeta carries the platform's response metadata this CLI consumes.
@@ -162,19 +269,142 @@ func (c *client) List(ctx context.Context, opts ListOptions) (*ResourcePage, err
 	page := &ResourcePage{NextCursor: env.Meta.NextCursor, HasMore: env.Meta.HasMore}
 	for i := range env.Data {
 		row := &env.Data[i]
+		if strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
+			return nil, fmt.Errorf("%w: resource list row has missing type or status", qurl.ErrInvalidAPIResponse)
+		}
+		if row.Type == "tunnel" {
+			if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
+				return nil, fmt.Errorf("%w: tunnel resource list identity: %w", qurl.ErrInvalidAPIResponse, err)
+			}
+			if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
+				return nil, fmt.Errorf("%w: tunnel resource list row has invalid desired_state %q", qurl.ErrInvalidAPIResponse, row.DesiredState)
+			}
+			if row.DesiredState == DesiredStateOn && row.ServingEpoch == 0 {
+				return nil, fmt.Errorf("%w: desired-on tunnel resource list row has zero serving_epoch", qurl.ErrInvalidAPIResponse)
+			}
+		}
 		page.Items = append(page.Items, ResourceSummary{
-			CRID:        row.CRID,
-			ResourceID:  row.ResourceID,
-			TargetURL:   row.TargetURL,
-			Type:        row.Type,
-			Status:      row.Status,
-			Description: row.Description,
-			Tags:        row.Tags,
-			CreatedAt:   row.CreatedAt,
-			ExpiresAt:   row.ExpiresAt,
+			CRID:         row.CRID,
+			ResourceID:   row.ResourceID,
+			TargetURL:    row.TargetURL,
+			Type:         row.Type,
+			Status:       row.Status,
+			DesiredState: row.DesiredState,
+			ServingEpoch: row.ServingEpoch,
+			Description:  row.Description,
+			Tags:         row.Tags,
+			CreatedAt:    row.CreatedAt,
+			ExpiresAt:    row.ExpiresAt,
 		})
 	}
 	return page, nil
+}
+
+// Sharing reads one tunnel resource's durable and observed serving state.
+func (c *client) Sharing(ctx context.Context, id string) (*Sharing, error) {
+	return c.doSharing(ctx, http.MethodGet, id, nil, true)
+}
+
+// SetSharing idempotently applies desired to one tunnel resource. The body is
+// deliberately a strict single-field document; target metadata and NHP
+// session details do not belong on this management surface.
+func (c *client) SetSharing(ctx context.Context, id string, desired DesiredState) (*Sharing, error) {
+	if desired != DesiredStateOn && desired != DesiredStateOff {
+		return nil, fmt.Errorf("%w: desired_state must be on or off", qurl.ErrInvalidResourceRequest)
+	}
+	return c.doSharing(ctx, http.MethodPut, id, struct {
+		DesiredState DesiredState `json:"desired_state"`
+	}{DesiredState: desired}, true)
+}
+
+// RestartSharing rotates the serving epoch and leaves the resource desired on.
+func (c *client) RestartSharing(ctx context.Context, id string) (*Sharing, error) {
+	return c.doSharing(ctx, http.MethodPost, id, nil, false)
+}
+
+func (c *client) doSharing(ctx context.Context, method, id string, body any, allowRetry bool) (*Sharing, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
+	}
+	path := "/v1/resources/" + url.PathEscape(id) + "/sharing"
+	if method == http.MethodPost {
+		path += "/restart"
+	}
+	var reply *restReply
+	var err error
+	if allowRetry {
+		reply, err = c.doREST(ctx, method, path, body)
+	} else {
+		reply, err = c.doRESTOnce(ctx, method, path, body)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if reply.status != http.StatusOK {
+		return nil, reply.problem()
+	}
+	var env struct {
+		Data sharingRow `json:"data"`
+	}
+	if err := json.Unmarshal(reply.body, &env); err != nil {
+		return nil, fmt.Errorf("%w: decode sharing response: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	if err := validateSharingRow(env.Data); err != nil {
+		return nil, err
+	}
+	if err := validateSharingIdentity(id, env.Data); err != nil {
+		return nil, err
+	}
+	return &Sharing{
+		ResourceID: env.Data.ResourceID, CRID: env.Data.CRID,
+		DesiredState: env.Data.DesiredState, ServingEpoch: env.Data.ServingEpoch,
+		ConnectionState: env.Data.ConnectionState,
+	}, nil
+}
+
+func validateSharingIdentity(requestID string, row sharingRow) error {
+	der, err := resourceidentity.ValidateResourceID(row.ResourceID)
+	if err != nil {
+		return fmt.Errorf("%w: sharing response resource identity: %w", qurl.ErrInvalidAPIResponse, err)
+	}
+	matched, err := crid.KeyMatches(row.CRID, der)
+	if err != nil || !matched {
+		return fmt.Errorf("%w: sharing response CRID does not match resource identity", qurl.ErrInvalidAPIResponse)
+	}
+	if requestID == row.ResourceID {
+		return nil
+	}
+	matched, err = crid.KeyMatches(requestID, der)
+	if err != nil || !matched {
+		return fmt.Errorf("%w: sharing response identity does not match requested resource", qurl.ErrInvalidAPIResponse)
+	}
+	return nil
+}
+
+func validateSharingRow(row sharingRow) error {
+	if strings.TrimSpace(row.ResourceID) == "" {
+		return fmt.Errorf("%w: sharing response missing resource_id", qurl.ErrInvalidAPIResponse)
+	}
+	if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
+		return fmt.Errorf("%w: sharing response has invalid desired_state %q", qurl.ErrInvalidAPIResponse, row.DesiredState)
+	}
+	if strings.TrimSpace(row.CRID) == "" {
+		return fmt.Errorf("%w: sharing response missing crid", qurl.ErrInvalidAPIResponse)
+	}
+	switch row.ConnectionState {
+	case ConnectionStopped:
+		if row.DesiredState != DesiredStateOff {
+			return fmt.Errorf("%w: stopped sharing response must be desired off", qurl.ErrInvalidAPIResponse)
+		}
+	case ConnectionConnecting, ConnectionServing:
+		if row.DesiredState != DesiredStateOn || row.ServingEpoch == 0 {
+			return fmt.Errorf("%w: active sharing response must be desired on with a nonzero serving_epoch", qurl.ErrInvalidAPIResponse)
+		}
+	default:
+		return fmt.Errorf("%w: sharing response has invalid connection_state %q", qurl.ErrInvalidAPIResponse, row.ConnectionState)
+	}
+	return nil
 }
 
 // Delete revokes a resource by CRID or public-key identifier. qurl-go
@@ -227,11 +457,21 @@ func (c *client) doREST(ctx context.Context, method, path string, body any) (*re
 	return c.doRESTWithHeaders(ctx, method, path, body, nil)
 }
 
+// doRESTOnce preserves the normal authorization/identity headers but disables
+// transport replay for a non-idempotent request such as sharing restart.
+func (c *client) doRESTOnce(ctx context.Context, method, path string, body any) (*restReply, error) {
+	return c.doRESTRequest(ctx, method, path, body, nil, false)
+}
+
 // doRESTWithHeaders is doREST plus request-specific headers. Shared headers
 // (including authorization) still come from the same transport seam; this
 // narrow variant exists for contracts such as Idempotency-Key that cannot be
 // represented in a JSON body.
 func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, body any, headers http.Header) (*restReply, error) {
+	return c.doRESTRequest(ctx, method, path, body, headers, true)
+}
+
+func (c *client) doRESTRequest(ctx context.Context, method, path string, body any, headers http.Header, allowRetry bool) (*restReply, error) {
 	reqBody := io.Reader(http.NoBody)
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -256,7 +496,12 @@ func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, bod
 	if err := c.authorize(ctx, req); err != nil {
 		return nil, err
 	}
-	resp, err := c.transport.Do(req)
+	var resp *http.Response
+	if allowRetry {
+		resp, err = c.transport.Do(req)
+	} else {
+		resp, err = c.transport.DoOnce(req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -328,10 +573,14 @@ func (r *restReply) problem() error {
 const maxSnippet = 256
 
 func bodySnippet(body []byte) string {
-	fields := strings.Fields(string(body))
+	fields := strings.Fields(strings.ToValidUTF8(string(body), "\uFFFD"))
 	snippet := strings.Join(fields, " ")
 	if len(snippet) > maxSnippet {
-		snippet = snippet[:maxSnippet] + "..."
+		end := maxSnippet
+		for end > 0 && !utf8.RuneStart(snippet[end]) {
+			end--
+		}
+		snippet = snippet[:end] + "..."
 	}
 	return snippet
 }

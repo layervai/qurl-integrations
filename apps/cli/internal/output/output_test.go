@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,9 +19,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -469,34 +468,6 @@ func TestConnectorAssignmentOrdering(t *testing.T) {
 			t.Errorf("the contract-violation headline must not win:\n%s", buf.String())
 		}
 	})
-
-	// agent.ErrRefreshAlreadyAttempted is joined with its warm-open cause, so
-	// it can carry an assignment sentinel too. The CLI's lifecycle reading is
-	// the more specific one and must win.
-	t.Run("CLI lifecycle beats the SDK sentinel it carries", func(t *testing.T) {
-		joined := errors.Join(
-			fmt.Errorf("%w in this failure episode", agent.ErrRefreshAlreadyAttempted),
-			fmt.Errorf("warm-open after attempted refresh: %w", qurl.ErrAssignmentLeaseExpired),
-		)
-		var buf bytes.Buffer
-		RenderError(&buf, joined, false)
-		if !strings.Contains(buf.String(), msgConnectorRefreshExhausted) {
-			t.Errorf("want the refresh-exhausted headline, got:\n%s", buf.String())
-		}
-	})
-}
-
-func TestConnectorProxyNotServingRendering(t *testing.T) {
-	wrapped := fmt.Errorf("serve local Connector: %w: untrusted server detail", supervisor.ErrProxyNotServing)
-	var buf bytes.Buffer
-	RenderError(&buf, wrapped, false)
-	got := buf.String()
-	if !strings.Contains(got, msgConnectorProxyNotServing) || !strings.Contains(got, hintConnectorProxyNotServing) {
-		t.Fatalf("readiness rendering missing customer guidance:\n%s", got)
-	}
-	if strings.Contains(got, "untrusted server detail") {
-		t.Fatalf("readiness rendering leaked technical/server detail:\n%s", got)
-	}
 }
 
 // TestConnectorRequestRejectedDropsSDKRemedy is the regression guard for the
@@ -523,41 +494,6 @@ func TestConnectorRequestRejectedDropsSDKRemedy(t *testing.T) {
 	}
 }
 
-// TestConnectorServingNote pins the startup note byte-exactly at the
-// rendering seam: the CRID lands last and alone on its line (the copy
-// contract), a platform that returned no CRID gets the original one-line note
-// with no empty label, and color styles only the label — never the CRID
-// itself, which would bury escape bytes inside a value people paste.
-func TestConnectorServingNote(t *testing.T) {
-	const headline = "Starting Connector \"billing\" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.\n"
-
-	var out, errBuf bytes.Buffer
-	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-	p.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
-	want := headline + "\n  Anyone authorized can reach it with `qurl get <CRID>`.\n\nCRID: acrid\n"
-	if got := errBuf.String(); got != want {
-		t.Errorf("serving note =\n%q\nwant\n%q", got, want)
-	}
-	// The note is status, not data: a serve loop that runs until interrupted
-	// has no stdout document to put it in.
-	if out.Len() != 0 {
-		t.Errorf("serving note wrote to stdout: %q", out.String())
-	}
-
-	errBuf.Reset()
-	p.ConnectorServing("billing", "127.0.0.1:8080", "")
-	if got := errBuf.String(); got != headline {
-		t.Errorf("note without a CRID =\n%q\nwant the unchanged one-liner\n%q", got, headline)
-	}
-
-	errBuf.Reset()
-	colored := newTestPrinter(&out, &errBuf, FormatText, false, true, false)
-	colored.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
-	if got := errBuf.String(); !strings.HasSuffix(got, " acrid\n") {
-		t.Errorf("colored note must end with the bare CRID, got %q", got)
-	}
-}
-
 // TestEveryConnectorMessageIsRegistered guards the jargon gate's reach: a
 // headline or hint that renders but is missing from CustomerMessages is never
 // checked for jargon by cmd's gate.
@@ -567,7 +503,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		registered[msg] = true
 	}
 	rendered := []string{
-		msgConnectorServing, msgConnectorReachIt, labelCRID,
+		labelCRID,
 		msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification,
 		msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict,
 		msgConnectorTokenConsumed, hintConnectorTokenConsumed,
@@ -579,7 +515,6 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
 		msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid,
 		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
-		msgConnectorProxyNotServing, hintConnectorProxyNotServing,
 	}
 	for _, msg := range rendered {
 		if !registered[msg] {
@@ -660,10 +595,37 @@ func TestListJSONCarriesRowMetadata(t *testing.T) {
 	}
 }
 
-// TestListTextOmitsRowMetadata pins the deliberate table decision: the five
-// columns stay as they are, and the metadata reaches scripts through JSON
-// only. The apps/cli goldens pin the same thing from the other side (their
-// mock row carries a description that never appears in the table).
+func TestListJSONCarriesZeroTunnelEpochButNotURLLifecycleFields(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{
+		{CRID: "tunnel", ResourceID: "r1", Type: "tunnel", Status: "active", DesiredState: qurlapi.DesiredStateOff},
+		{CRID: "url", ResourceID: "r2", Type: "url", Status: "active"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Resources []map[string]any `json:"resources"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := document.Resources[0]["serving_epoch"]; !ok || got != float64(0) {
+		t.Fatalf("tunnel serving_epoch = %#v, present=%v; want explicit zero", got, ok)
+	}
+	if got := document.Resources[0]["desired_state"]; got != "off" {
+		t.Fatalf("tunnel desired_state = %#v, want off", got)
+	}
+	if _, ok := document.Resources[1]["serving_epoch"]; ok {
+		t.Fatalf("URL row emitted tunnel serving_epoch: %#v", document.Resources[1])
+	}
+	if _, ok := document.Resources[1]["desired_state"]; ok {
+		t.Fatalf("URL row emitted tunnel desired_state: %#v", document.Resources[1])
+	}
+}
+
+// TestListTextOmitsRowMetadata keeps publish metadata JSON-only while the text
+// table adds only lifecycle state needed to operate a share.
 func TestListTextOmitsRowMetadata(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
@@ -684,11 +646,33 @@ func TestListTextOmitsRowMetadata(t *testing.T) {
 			t.Errorf("text table rendered %q; the metadata columns are deliberately absent:\n%s", unwanted, got)
 		}
 	}
-	// tabwriter pads the header into columns, so compare the fields rather
-	// than the raw line: exactly the five documented columns, in order.
+	// tabwriter pads the header into columns, so compare fields.
 	header := strings.Fields(strings.SplitN(got, "\n", 2)[0])
-	if want := []string{"CRID", "TARGET", "STATUS", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
+	if want := []string{"CRID", "TARGET", "DESIRED", "OBSERVED", "CREATED", "EXPIRES"}; !slices.Equal(header, want) {
 		t.Errorf("table header = %v, want %v", header, want)
+	}
+}
+
+func TestListTextKeepsFullCRIDTargetAndTunnelStates(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
+	full := "qf4ucjgkv5qabcdefghijklmnopqrstuvwxyz0123456789abbkntl3eifq"
+	longTarget := "http://127.0.0.1:3000/a/path/longer/than/forty/characters/with-tail"
+	if err := p.List(&qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{
+		{CRID: full, ResourceID: "r1", TargetURL: longTarget, Type: "tunnel", DesiredState: qurlapi.DesiredStateOn},
+		{CRID: "remote", ResourceID: "r2", Type: "tunnel", DesiredState: qurlapi.DesiredStateOff},
+		{CRID: "serving", ResourceID: "r3", TargetURL: "http://127.0.0.1:4000", Type: "tunnel", DesiredState: qurlapi.DesiredStateOn},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{full, longTarget, "on", "off", "unknown"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("list table missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "…") {
+		t.Fatalf("list table truncated identity:\n%s", got)
 	}
 }
 

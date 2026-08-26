@@ -348,7 +348,7 @@ func TestRunPreparedLifecyclePartialParallelStartSettlesWinner(t *testing.T) {
 	}
 }
 
-func TestDurableCycleKnockerRejectsWrongAuthenticatedResourceHostAndCleansBothTransports(t *testing.T) {
+func TestManagedSessionRejectsWrongAuthenticatedResourceHostAndCleansBothTransports(t *testing.T) {
 	for _, transport := range []string{"direct", "relay"} {
 		t.Run(transport, func(t *testing.T) {
 			consumer, authority, _ := lifecycleFixture(t)
@@ -369,17 +369,12 @@ func TestDurableCycleKnockerRejectsWrongAuthenticatedResourceHostAndCleansBothTr
 					break
 				}
 			}
-			knocker, err := NewDurableCycleKnocker(context.Background(), consumer, prepared.PrimaryFirstKey,
-				identity.KnockResourceID, identity.Selector)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := knocker.BeginCycle(); err != nil {
-				t.Fatal(err)
-			}
-			result, err := knocker.Knock(context.Background())
-			if result != nil || err == nil || !errors.Is(err, errStateConflict) {
-				t.Fatalf("wrong authenticated ResourceHost = %#v, %v", result, err)
+			session, err := StartManagedSession(context.Background(), ManagedSessionConfig{
+				Consumer: consumer, OperationKey: prepared.PrimaryFirstKey, Identity: identity,
+				LocalIP: "127.0.0.1", LocalPort: 8080,
+			})
+			if session != nil || err == nil || !errors.Is(err, errStateConflict) {
+				t.Fatalf("wrong authenticated ResourceHost = %#v, %v", session, err)
 			}
 			record, _, loadErr := loadOperation(context.Background(), consumer.Blobs, prepared.PrimaryFirstKey)
 			if loadErr != nil || record.Status != OperationClosed || record.Terminal == nil ||
@@ -561,7 +556,10 @@ func (r *wrongResourceHostRuntime) Admit(_ context.Context, _ qurl.AgentStateSto
 ) (*LiveSession, SessionAdmission, error) {
 	r.admits++
 	live := &LiveSession{ACToken: "short-lived", ResourceHost: "wrong-frps.sandbox.example:6553",
-		OperationID: record.Operation.OperationID, value: struct{}{}}
+		OperationID: record.Operation.OperationID, OpenTime: time.Minute,
+		receipt: qurl.NativeSessionReceipt{CellID: record.Operation.CellID, SessionID: 44,
+			SessionIssuedAtMillis: record.Operation.PreparedAtMillis, RunID: record.Operation.RunID,
+			RunAttempt: record.Operation.RunAttempt}, value: struct{}{}}
 	r.lastLive = live
 	return live, SessionAdmission{CellID: record.Operation.CellID, SessionID: 44,
 		SessionIssuedAtMillis: record.Operation.PreparedAtMillis, RunID: record.Operation.RunID,

@@ -24,10 +24,9 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
@@ -245,78 +244,32 @@ func cliSentinelCode(err error) (int, bool) {
 	}
 }
 
-// connectorSentinelCode maps the `qurl connector run` lifecycle sentinels.
-// Each choice is documented at its case because the conditions do not all
-// share one row of the §16.5 table.
+// connectorSentinelCode maps the native local-share lifecycle sentinels.
 func connectorSentinelCode(err error) (int, bool) {
 	if code, ok := connectorResourceSentinelCode(err); ok {
 		return code, true
 	}
 	switch {
-	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
-		// A missing enrollment credential is the Auth row's "no credential"
-		// for the Connector surface: the enrollment token is the credential
-		// this command needed and did not have.
-		return Auth, true
-	case errors.Is(err, agent.ErrIdentityConflict):
-		// The command and its inputs are valid; they conflict with the
-		// identity already persisted on this machine — exactly the Conflict
-		// row's "request conflicts with current state", resolved by dropping
-		// the override or deliberately reprovisioning.
+	case errors.Is(err, connectordaemon.ErrAlreadyRunning):
 		return Conflict, true
-	case errors.Is(err, agent.ErrRefreshApprovalRequired):
-		// The manual gate is a missing-confirmation stop, the same shape as
-		// delete's --yes guard (msgNeedsYes → Usage): the remedy is re-running
-		// once with the explicit approval flag, not fixing configuration or
-		// waiting out the platform.
-		return Usage, true
-	case errors.Is(err, agent.ErrRefreshDisabled):
-		// Disabled mode is standing operator configuration forbidding the
-		// refresh this state requires; the remedy is changing that
-		// configuration, so it takes the Config row — not Usage, because an
-		// unattended restart hits it with a perfectly valid command line.
+	case errors.Is(err, connectordaemon.ErrResourceGone):
+		return NotFound, true
+	case errors.Is(err, state.ErrNoDefaultStateDir):
 		return Config, true
-	case errors.Is(err, agent.ErrRefreshModeInvalid):
-		// Only the environment path reaches this sentinel (the command
-		// validates its own flag as a usage error first), so a bad spelling
-		// here is broken standing configuration.
-		return Config, true
-	case errors.Is(err, agent.ErrRefreshAlreadyAttempted):
-		// The one self-heal this episode allows already ran and the platform
-		// still is not serving this Connector: an Unavailable posture, kin to
-		// the budget exit below, not a mistake the caller made.
-		return Unavailable, true
 	case errors.Is(err, hub.ErrConfig):
 		// The QURL_CONNECTOR_HUB_* trust triple (or a dark build missing its
 		// production pin) is configuration in the §16.5 sense even though it
 		// lives in the environment: the config files row is the closest
 		// remedy class, and Usage would wrongly blame the command line.
 		return Config, true
-	case supervisor.IsTooManyKnockFailures(err):
-		// The budget exit means the platform's access-granting path stayed
-		// unusable across the whole retry budget: the service "cannot be
-		// reached or is not serving this surface" — the Unavailable row.
-		// Matched via the predicate the supervisor exports for exactly this
-		// interpretation. Ordering note: FromError maps context.Canceled
-		// before this, so an exhaustion whose final cause was the user's own
-		// interrupt still exits 130.
-		return Unavailable, true
-	case errors.Is(err, supervisor.ErrProxyNotServing):
-		// The platform admitted the session but never installed its route:
-		// this serving surface is unavailable, not successfully published.
-		return Unavailable, true
-
-	// qurl-go's enrollment/assignment taxonomy. It is tested after the CLI's
-	// own lifecycle sentinels above so the CLI's reading wins wherever both
-	// match — agent.ErrRefreshAlreadyAttempted is joined with its warm-open
-	// cause and can therefore also carry ErrAssignmentLeaseExpired.
+	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
 		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),
 		errors.Is(err, qurl.ErrAssignmentIdentityRejected):
 		// The enrollment token is this surface's credential, and all three of
 		// these are the platform refusing the credential or the identity it
 		// vouches for — the Auth row's "the service rejected the credential",
-		// the same row agent.ErrEnrollmentTokenRequired takes for its absence.
+		// a stable authentication posture for scripts.
 		return Auth, true
 	case errors.Is(err, qurl.ErrAssignmentRequestRejected):
 		// 52205/52109 reject the request itself rather than the credential:
@@ -344,7 +297,7 @@ func connectorSentinelCode(err error) (int, bool) {
 		errors.Is(err, qurl.ErrAssignmentLeaseExpired):
 		// The platform could not place this Connector, or its assignment
 		// lapsed and could not be renewed: "cannot be reached or is not
-		// serving this surface". Kin to ErrRefreshAlreadyAttempted's row.
+		// serving this surface".
 		// ErrAssignmentLeaseExpired is matched here, before the invalid
 		// response below, because Validate wraps an expired lease with both.
 		return Unavailable, true

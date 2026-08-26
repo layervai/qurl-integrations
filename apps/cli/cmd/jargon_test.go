@@ -52,21 +52,11 @@ var forbiddenWords = []string{
 	"firewall",
 	// Customers configure a Connector by its ID (the standalone
 	// qurl-connector's term: QURL_CONNECTOR_ID / `id:`); "slug" is
-	// platform-wire vocabulary that must never resurface. The hidden
-	// deprecated --slug alias is exempt structurally (hidden flags and
-	// hidden commands are skipped below), and the one message that must
-	// name that alias is listed in jargonExemptMessages.
+	// platform-wire vocabulary that must never resurface.
 	"slug",
 }
 
-// jargonExemptMessages are the few customer strings allowed to carry a
-// banned word because they exist to steer customers OFF it: a conflict with
-// a deprecated surface can only be named by naming that surface. Every
-// entry dies with the surface it names — msgConnectorIDConflict goes at the
-// next major together with the --slug alias.
-var jargonExemptMessages = map[string]bool{
-	msgConnectorIDConflict: true,
-}
+var jargonExemptMessages = map[string]bool{}
 
 // isAlnumToken reports whether w is only [a-z0-9] (already-lowercased).
 func isAlnumToken(w string) bool {

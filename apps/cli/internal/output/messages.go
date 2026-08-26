@@ -78,68 +78,6 @@ const (
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
 
-	// msgConnectorServing announces the serve loop: the Connector ID (as the
-	// platform records it), then the local app being served. It lives here
-	// rather than in the cmd package because it is no longer a bare note —
-	// Printer.ConnectorServing renders it as a document whose styling is
-	// this package's private business.
-	msgConnectorServing = "Starting Connector %q for your local app at %s. Press Ctrl-C to stop."
-
-	// msgConnectorReachIt is that document's detail line: what the CRID
-	// printed beneath it is for. It only renders when the platform actually
-	// returned a CRID, so it can never point at a value that isn't there.
-	msgConnectorReachIt = "Anyone authorized can reach it with `qurl get <CRID>`."
-
-	// Connector lifecycle renderings. Headlines say what happened in customer
-	// language; the operator detail (which stays technical) is appended by
-	// RenderError as an indented detail block where it adds facts the
-	// headline cannot carry, and each hint is the one next step.
-
-	// msgConnectorTokenRequired renders agent.ErrEnrollmentTokenRequired.
-	msgConnectorTokenRequired = "This machine isn't enrolled as a qURL Connector yet, and no enrollment token is configured."
-
-	hintConnectorTokenRequired = "Hint: set QURL_CONNECTOR_TOKEN (or point QURL_CONNECTOR_TOKEN_FILE at a file holding the token) and run the command again. Enrollment tokens are single-use — create one in the qURL console. There is deliberately no flag for it: command-line arguments leak into shell history."
-
-	// msgConnectorIdentityConflict renders agent.ErrIdentityConflict.
-	msgConnectorIdentityConflict = "The Connector identity this command was configured with doesn't match the identity already stored on this machine."
-
-	hintConnectorIdentityConflict = "Hint: remove the LAYERV_AGENT_ID override to keep using the stored identity, or point --state-dir at a fresh directory to enroll this machine separately."
-
-	// msgConnectorRefreshApproval renders agent.ErrRefreshApprovalRequired.
-	msgConnectorRefreshApproval = "This Connector needs its qURL platform assignment refreshed, and that refresh waits for your explicit approval."
-
-	hintConnectorRefreshApproval = "Hint: review why it stopped (see your previous run's output), then run the same command once with --refresh-mode auto. That flag approves only this start; automatic restarts are deliberately not treated as approval."
-
-	// msgConnectorRefreshModeInvalid renders agent.ErrRefreshModeInvalid —
-	// the env-sourced refresh mode carries a value that is not a mode.
-	msgConnectorRefreshModeInvalid = "The Connector's refresh-mode setting isn't one of the recognized values."
-
-	// hintConnectorRefreshModeInvalid names the variable and the vocabulary.
-	hintConnectorRefreshModeInvalid = "Hint: set LAYERV_AGENT_REGISTRATION_REFRESH_MODE to manual, auto, or disabled (or pass --refresh-mode)."
-
-	// msgConnectorRefreshDisabled renders agent.ErrRefreshDisabled.
-	msgConnectorRefreshDisabled = "This Connector needs its qURL platform assignment refreshed, but refreshes are disabled by its configuration."
-
-	hintConnectorRefreshDisabled = "Hint: run once with --refresh-mode auto (or set LAYERV_AGENT_REGISTRATION_REFRESH_MODE to manual or auto), or clear the Connector's state directory and enroll this machine again with a new token."
-
-	// msgConnectorRefreshExhausted renders agent.ErrRefreshAlreadyAttempted.
-	msgConnectorRefreshExhausted = "This Connector already used its one automatic assignment refresh for this outage and still can't connect."
-
-	hintConnectorRefreshExhausted = "Hint: this usually means a network problem between this machine and the qURL platform. Check outbound connectivity and try again; if it keeps happening, contact LayerV support before clearing any Connector state."
-
-	// msgConnectorRetryBudget renders the supervisor's retry-budget exit
-	// (IsTooManyKnockFailures).
-	msgConnectorRetryBudget = "The qURL platform kept refusing or not answering this Connector's connection attempts, so it stopped rather than retry forever."
-
-	hintConnectorRetryBudget = "Hint: check this machine's outbound network access, then run the same command again. If the problem persists, the next start will ask to refresh this Connector's platform assignment (--refresh-mode auto approves it once)."
-
-	// msgConnectorProxyNotServing renders supervisor.ErrProxyNotServing. A
-	// Login succeeded, but NewProxy did not, so the route and its CRID must not
-	// be presented as a successful local publish.
-	msgConnectorProxyNotServing = "The qURL platform accepted this Connector, but its route did not start, so nothing was published."
-
-	hintConnectorProxyNotServing = "Hint: run the command again. If the route is still rejected or times out, contact LayerV support."
-
 	// msgConnectorHubConfig renders hub.ErrConfig. The detail block names the
 	// exact variable; this headline places the problem.
 	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
@@ -185,26 +123,25 @@ const (
 	// (52108).
 	msgConnectorTokenConsumed = "The enrollment token this machine presented has already been used. Enrollment tokens work exactly once."
 
-	// hintConnectorTokenConsumed leads with the fresh-token step, then guards
-	// the common second cause: a machine that already enrolled does not need a
-	// token at all, and clearing its state directory to "start clean" throws
-	// away the identity it earned.
-	hintConnectorTokenConsumed = "Hint: create a new enrollment token in the qURL console, set QURL_CONNECTOR_TOKEN to it, and run the command again. If this machine already enrolled once, it doesn't need a token — its Connector identity lives in the state directory, so check --state-dir points there instead of clearing it."
+	// The v2 CLI mints enrollment credentials through the signed-in account. It
+	// never accepts a customer-supplied bootstrap token on the command line or
+	// through a legacy environment alias.
+	hintConnectorTokenConsumed = "Hint: run the command again so qURL can mint a fresh enrollment credential. Do not delete the local state directory; if this repeats, sign in again with `qurl login` and contact LayerV support."
 
 	// msgConnectorTokenRejected renders qurl.ErrAssignmentKeyRejected (52106).
 	msgConnectorTokenRejected = "The qURL platform didn't accept this machine's enrollment token."
 
-	// hintConnectorTokenRejected names the causes the customer can actually
-	// check — the token is opaque, so none of them are visible locally.
-	hintConnectorTokenRejected = "Hint: the token may be mistyped, expired, revoked, or created for a different qURL environment than the endpoint this command is using. Create a new enrollment token in the qURL console, set QURL_CONNECTOR_TOKEN to it, and run the command again."
+	// The credential is minted by the CLI from the active account and endpoint;
+	// the customer should correct that authenticated context, not inject a token.
+	hintConnectorTokenRejected = "Hint: confirm this command uses the intended qURL endpoint, sign in again with `qurl login`, and retry. If the platform still rejects the new credential, contact LayerV support."
 
 	// msgConnectorEnrollmentRejected renders
 	// qurl.ErrAssignmentRequestRejected (52205 or 52109).
 	msgConnectorEnrollmentRejected = "The qURL platform refused this Connector's enrollment request."
 
-	// hintConnectorEnrollmentRejected names the dominant real cause: a token
-	// minted for a different Connector than the one --id names.
-	hintConnectorEnrollmentRejected = "Hint: this usually means the enrollment token was created for a different Connector than the one --id names. Create a new enrollment token for this Connector in the qURL console, set QURL_CONNECTOR_TOKEN to it, and run the command again."
+	// The dominant customer-correctable cause is an explicit identity that the
+	// active account cannot enroll. Credential minting itself is automatic.
+	hintConnectorEnrollmentRejected = "Hint: confirm --id names a Connector this account can use, or omit --id to use the stable ID qURL generates for this machine and local app. Then run the command again."
 
 	// msgConnectorEnrollmentDisabled renders
 	// qurl.ErrAssignmentRegistrationDisabled (52107).
@@ -215,12 +152,11 @@ const (
 	hintConnectorEnrollmentDisabled = "Hint: enrollment is turned off on the platform side, so no change on this machine — including a new token — will change the answer. Ask your qURL administrator to enable Connector enrollment for this account, then run the command again."
 
 	// msgConnectorIdentityRejected renders
-	// qurl.ErrAssignmentIdentityRejected (52201). Distinct from
-	// msgConnectorIdentityConflict, which is a purely local disagreement: this
-	// one is the platform refusing the identity that was presented.
+	// qurl.ErrAssignmentIdentityRejected (52201): the platform refused the
+	// identity that was presented.
 	msgConnectorIdentityRejected = "The qURL platform refused the Connector identity this machine presented."
 
-	hintConnectorIdentityRejected = "Hint: the stored identity may have been removed from your account, or LAYERV_AGENT_ID may name an identity this account doesn't own. Remove that override if you set it; otherwise enroll this machine again with a new enrollment token and a fresh --state-dir."
+	hintConnectorIdentityRejected = "Hint: the stored identity may have been removed from your account, or QURL_CONNECTOR_AGENT_ID may name an identity this account doesn't own. Remove that override if you set it, sign in again with `qurl login`, and retry. Do not edit or delete the local state files."
 
 	// msgConnectorQuotaExceeded renders qurl.ErrAssignmentQuotaExceeded
 	// (52203).
@@ -282,24 +218,6 @@ func CustomerMessages() []string {
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,
-		msgConnectorServing,
-		msgConnectorReachIt,
-		msgConnectorTokenRequired,
-		hintConnectorTokenRequired,
-		msgConnectorIdentityConflict,
-		hintConnectorIdentityConflict,
-		msgConnectorRefreshApproval,
-		hintConnectorRefreshApproval,
-		msgConnectorRefreshDisabled,
-		msgConnectorRefreshModeInvalid,
-		hintConnectorRefreshModeInvalid,
-		hintConnectorRefreshDisabled,
-		msgConnectorRefreshExhausted,
-		hintConnectorRefreshExhausted,
-		msgConnectorRetryBudget,
-		hintConnectorRetryBudget,
-		msgConnectorProxyNotServing,
-		hintConnectorProxyNotServing,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
 		msgConnectorResourceInvalidRequest,

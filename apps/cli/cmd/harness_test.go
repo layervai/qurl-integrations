@@ -6,16 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -128,16 +129,25 @@ type runOpts struct {
 	// refusing fake. Only the clisandbox-tagged live suite sets it.
 	realOpener bool
 
-	// ctx, when non-nil, replaces context.Background() so a test can cancel
-	// a long-running command (connector run's simulated INT/TERM).
-	ctx context.Context
-	// Connector seams; nil keeps the production wiring (agent.Open /
-	// knock.NewNative / package-default supervisor timings).
-	connectorOpen    func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
-	connectorResolve func(ctx context.Context, rt *agent.Runtime, connectorID string) (*agent.ResolvedResource, error)
-	newKnocker       func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
-	connectorTune    func(cfg *supervisor.Config)
-	connectorReady   func()
+	// ctx, when non-nil, replaces context.Background() so a test can cancel a
+	// foreground daemon or another long-running command.
+	ctx                  context.Context
+	localShares          []connectorstate.LocalShare
+	localSharesErr       error
+	localSharesLoads     *int
+	shareRegistry        localShareRegistry
+	shareDaemon          shareDaemonController
+	shareRegistryFactory func(string) (localShareRegistry, error)
+	shareDaemonFactory   func(string, string) shareDaemonController
+	preflightTarget      func(context.Context, string, int) error
+	shareStateDir        string
+	shareStateDirErr     error
+	localResource        localResourceResolver
+	foregroundDaemon     func(context.Context, *globalOpts, string, string) error
+	sharingWaitLimit     time.Duration
+	// platformGOOS overrides the hermetic default of darwin for tests that
+	// exercise the production platform fence.
+	platformGOOS string
 	// syncStreams serializes writes to the captured stdout/stderr buffers.
 	// The connector serve test needs it: the linked FRP client and the
 	// in-process test server log from their own goroutines through the
@@ -195,6 +205,12 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	}
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
+		// Exercise the injected LaunchAgent/daemon boundary on every host. The
+		// separate platform-contract test keeps Linux and Windows fail-closed.
+		g.backgroundShareGOOS = o.platformGOOS
+		if g.backgroundShareGOOS == "" {
+			g.backgroundShareGOOS = "darwin"
+		}
 		g.lookupEnv = func(key string) (string, bool) {
 			v, ok := env[key]
 			return v, ok
@@ -228,19 +244,40 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		default:
 			g.sleep = func(time.Duration) {} // tests never wall-clock sleep
 		}
-		if o.connectorOpen != nil {
-			g.openConnectorRuntime = o.connectorOpen
+		g.loadLocalShares = func(context.Context) ([]connectorstate.LocalShare, error) {
+			if o.localSharesLoads != nil {
+				*o.localSharesLoads++
+			}
+			return append([]connectorstate.LocalShare(nil), o.localShares...), o.localSharesErr
 		}
-		if o.connectorResolve != nil {
-			g.resolveConnectorResource = o.connectorResolve
+		if o.shareRegistryFactory != nil {
+			g.openShareRegistry = o.shareRegistryFactory
+		} else if o.shareRegistry != nil {
+			g.openShareRegistry = func(string) (localShareRegistry, error) { return o.shareRegistry, nil }
 		}
-		if o.newKnocker != nil {
-			g.newConnectorKnocker = o.newKnocker
+		if o.shareDaemonFactory != nil {
+			g.newShareDaemon = o.shareDaemonFactory
+		} else if o.shareDaemon != nil {
+			g.newShareDaemon = func(string, string) shareDaemonController { return o.shareDaemon }
 		}
-		if o.connectorTune != nil {
-			g.tuneConnectorSupervisor = o.connectorTune
+		if o.preflightTarget != nil {
+			g.preflightTarget = o.preflightTarget
 		}
-		g.onConnectorProxyReady = o.connectorReady
+		resolvedShareStateDir := o.shareStateDir
+		if resolvedShareStateDir == "" {
+			resolvedShareStateDir = filepath.Join(configDir, "connector-state")
+		}
+		g.resolveShareStateDir = func(string) (string, error) { return resolvedShareStateDir, o.shareStateDirErr }
+		if o.localResource != nil {
+			g.resolveLocalResource = o.localResource
+			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }
+		}
+		if o.foregroundDaemon != nil {
+			g.runForegroundDaemon = o.foregroundDaemon
+		}
+		if o.sharingWaitLimit > 0 {
+			g.sharingWaitLimit = o.sharingWaitLimit
+		}
 		// The FRP global logger is pinned once for the whole test binary in
 		// TestMain; a per-invocation swap would race the in-process tunnel
 		// server's own log goroutines.

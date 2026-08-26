@@ -322,7 +322,7 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
-	// ConnectorAPIURL is the qurl-connector API base including /v1. Guided
+	// ConnectorAPIURL is the qURL platform API base including /v1. Guided
 	// tunnel setup writes it into every rendered runtime definition so sandbox
 	// installs never silently fall back to production.
 	ConnectorAPIURL string
@@ -401,7 +401,7 @@ type Config struct {
 	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
-	// The public env var is QURL_CONNECTOR_IMAGE; this field keeps the
+	// The public env var is QURL_IMAGE; this field keeps the
 	// historical tunnel naming used by the install-rendering code.
 	// Empty falls back to the public client image with the `latest` tag only for
 	// explicit dev/sandbox installs; production cmd/main.go fails closed unless

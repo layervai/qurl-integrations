@@ -247,6 +247,7 @@ func requireStampsUpdatedAtNano(t *testing.T, method string, in *dynamodb.Update
 	t.Helper()
 	if in == nil {
 		t.Fatalf("%s issued no UpdateItem on workspace_state", method)
+		return
 	}
 	expr := aws.ToString(in.UpdateExpression)
 	valueRef, ok := stampValueRef(expr, in.ExpressionAttributeNames)

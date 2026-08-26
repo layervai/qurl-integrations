@@ -18,14 +18,14 @@ link only when they need one.
 
 ### 1. Install the CLI
 
-On macOS or Linux with Homebrew:
+On macOS with Homebrew:
 
 ```bash
 brew install layervai/tap/qurl
 qurl version
 ```
 
-Local publishing requires qURL CLI 1.6.0 or newer. If the version is older,
+Local lifecycle commands require qURL CLI 2.0.0 or newer. If the version is older,
 update the tap and upgrade the CLI before continuing:
 
 ```bash
@@ -74,8 +74,14 @@ Published
 CRID: <CRID>
 ```
 
-Leave that terminal open while you want the app available. Press Ctrl-C to
-stop serving it. Running the same command later reuses the same CRID.
+The command exits after the route is serving. A per-user background daemon
+keeps the share available and resumes it after login, sleep, wake, or a network
+change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
+back on. Publishing the same target later reuses the same CRID.
+
+Background lifecycle management is currently available on macOS. On Linux,
+add `--foreground`; the command then owns the share until it exits. Local app
+sharing is not supported on Windows. Remote qURL commands remain available.
 
 ### 4. Open or share it
 
@@ -95,11 +101,11 @@ prints its CRID and exits immediately.
 
 | What you see | What to do |
 |--------------|------------|
-| `only HTTPS URLs are allowed` | You have qURL CLI 1.5.0 or older. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 1.6.0 or newer. |
+| `only HTTPS URLs are allowed` or no `start`, `stop`, `restart`, and `status` commands | You have the legacy CLI. Run `brew update`, `brew upgrade qurl`, and confirm `qurl version` reports 2.0.0 or newer. |
 | No API key is configured | Run `qurl login` |
 | The key lacks `qurl:agent` | Add that scope in the dashboard, then log in with the updated key |
 | The local app cannot be reached | Check it with `curl http://127.0.0.1:3000` and use the same URL with `qurl publish` |
-| `This Connector needs its qURL platform assignment refreshed` | Update to qURL CLI 1.6.1 or newer. If the message remains because a saved assignment genuinely needs a refresh, review why the previous connection stopped, then rerun the same publish command once with `--refresh-mode auto`. |
+| `This Connector needs its qURL platform assignment refreshed` | Upgrade qURL. Current releases refresh stale assignments automatically with bounded backoff; no approval flag is required. |
 | The route is rejected or times out | Run the command once more; if it repeats, contact LayerV support |
 
 ## Install
@@ -112,6 +118,11 @@ brew install layervai/tap/qurl
 
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
+
+The CLI supports remote qURL commands on every released platform. Local
+background sharing is currently macOS-only. Linux local publish requires
+`--foreground`; `start` and `restart` cannot create a background job. Windows
+supports remote qURL commands but not local app sharing.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
@@ -181,7 +192,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
-| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish`; required by `connector run` |
+| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish` |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -202,8 +213,11 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
+| `qurl start <CRID>` | Turn on a previously published local share |
+| `qurl stop <CRID>` | Turn off a local share without deleting it |
+| `qurl restart <CRID>` | Rotate and restart a local share |
+| `qurl status <CRID>` | Show desired and platform-observed sharing state |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl connector run` | Serve a local app through the qURL platform, outbound-only |
 | `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
 | `qurl whoami` | Show which account and key identity your credential maps to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
@@ -224,7 +238,7 @@ CRID aimed at a non-production endpoint warns and proceeds.
 
 | Target | What happens |
 |--------|--------------|
-| `http://127.0.0.1:3000` | qURL serves the local app and keeps running until Ctrl-C |
+| `http://127.0.0.1:3000` | qURL starts the background share, waits for serving, prints its CRID, and exits |
 | `https://api.example.com/reports` | qURL registers the remote URL, prints its CRID, and exits |
 
 #### Local apps
@@ -233,10 +247,9 @@ CRID aimed at a non-production endpoint warns and proceeds.
 qurl publish http://127.0.0.1:3000
 ```
 
-The CRID appears only after the route is ready. If the initial route is
-rejected or does not become ready within 30 seconds, the command exits without
-printing a success CRID. Once serving, temporary connection failures use the
-Connector's normal reconnect behavior.
+The CRID appears only after the route is ready. Once the daemon owns the
+durable local share, temporary assignment, sleep/wake, and network failures
+recover automatically without a customer approval step.
 
 Restarting the same app on the same machine reuses its resource and CRID. Use
 `--id` only when you want to choose the Connector ID yourself.
@@ -244,13 +257,9 @@ Restarting the same app on the same machine reuses its resource and CRID. Use
 Local publishing accepts `http://localhost:<port>` and IPv4 or IPv6 loopback
 addresses. It intentionally rejects HTTPS, paths, queries, fragments,
 credentials, wildcard listeners, and localhost subdomains. These restrictions
-keep the one-command path unambiguous; use the advanced
-[`qurl connector run`](#qurl-connector-run) command when you need custom state
-or enrollment settings.
-
-Local publish is a long-running command, so do not wrap it in command
-substitution: the shell would wait until you stop serving. When a process
-supervisor needs only the CRID, use `--quiet` and read the first stdout line.
+keep the one-command path unambiguous. `--foreground` runs the same production
+daemon engine in the current process for CI and debugging. Scripts can use
+`--quiet` to read only the full CRID.
 
 #### Remote URLs
 
@@ -339,9 +348,9 @@ thing; browser mode needs no settings at all.
 
 ### qurl list
 
-`qurl list` prints one row per resource published under your account. The
-text table shortens each CRID from the middle so rows stay readable; JSON
-output and `--quiet` always carry the full CRID.
+`qurl list` prints one row per resource published under your account. Text,
+JSON, and `--quiet` all carry the full CRID. The text table can be wide because
+it does not shorten identifiers or local targets.
 
 | Flag | Description |
 |------|-------------|
@@ -356,10 +365,10 @@ pagination contract scripts should follow.
 
 `-o json` additionally carries each row's `type` and its publish-time
 `description` and `tags` — the metadata `qurl publish --description` and
-`--tag` set. The text table deliberately does not: its five columns
-already run past an 80-column terminal, and it shortens the CRID and
-truncates the target to get even that far. Scripts that recognize resources
-by the label their publisher gave them read the JSON document:
+`--tag` set. Tunnel rows also carry `desired_state` and an explicit
+`serving_epoch`, including epoch zero. The text table keeps publish metadata
+out of its six operational columns. Scripts that recognize resources by the
+label their publisher gave them read the JSON document:
 
 ```bash
 cursor=""
@@ -402,111 +411,39 @@ without a terminal the command refuses rather than hanging. Deleting an
 already-deleted resource succeeds idempotently and says so (JSON sets
 `already_gone`).
 
-### qurl connector run
+### qurl start / stop / restart / status
 
-`qurl connector run --id <id> --target <host:port>` is the advanced and
-backward-compatible local serving surface. It serves an app
-running on your machine through the qURL platform. Your app keeps
-listening on localhost and the Connector connects outward — your machine
-never opens a listening port to the internet — while the platform
-verifies each caller and grants access before any request is forwarded.
+Local shares are durable desired state, managed by their full CRID:
 
-`connector run` currently requires macOS or Linux. The Windows release can
-still use management commands such as `qurl get`, `qurl list`, and `qurl
-delete`, but it fails closed before creating a local Connector identity; the
-pinned native identity store does not yet claim Windows filesystem semantics.
-
-| Flag | Description |
-|------|-------------|
-| `--id` | Which Connector to run: its ID in qURL — the route name your app serves under (or `connector_id` in your profile) |
-| `--target` | The local app, as `host:port`; `:8080` means `127.0.0.1:8080` |
-| `--state-dir` | Where this machine's Connector identity lives (default: your user state directory) |
-| `--refresh-mode` | Self-healing gate after sustained failures: `manual` (default), `auto`, or `disabled` |
-
-The Connector ID is the same identity the standalone qurl-connector
-configures as `QURL_CONNECTOR_ID` (YAML `id:`), so one setting covers a
-machine that moves between the two tools. It must be 3–64 lowercase letters,
-numbers, or hyphens, start with a letter, and end with a letter or number;
-`connector run` validates this platform-owned grammar before opening state or
-making a network request. The names v1.1.0 briefly shipped still work,
-deprecated: `--slug` as a hidden alias of `--id`
-(passing both with different values is refused), and
-`QURL_CONNECTOR_SLUG` / `connector_slug` at lower precedence than their
-`id`-named counterparts. All three will be removed in the next major
-release.
-
-The first start enrolls this machine and needs a one-time enrollment
-token from the qURL console, supplied **only** via `QURL_CONNECTOR_TOKEN`
-or `QURL_CONNECTOR_TOKEN_FILE` — there is deliberately no token flag,
-because arguments leak into shell history and process lists. The token is
-used once and never stored; later starts reuse the saved identity.
-
-After enrollment, Connector resource setup and continuity checks stay on the
-same native NHP path as admission: the CLI sends an authenticated encrypted
-UDP request directly to its assigned LayerV cell, then knocks that cell for
-the tunnel session. It does not call `api.layerv.ai` for those runtime steps
-and does not fall back through a Hub, relay, or another cell. A logged-in
-`qurl publish` may call the HTTPS API once to mint the one-time enrollment
-token when the machine has no saved identity; explicit management commands
-such as `qurl list` and `qurl delete` continue to use HTTPS.
-
-The state directory also stores the authenticated Connector binding and an
-exact pending request nonce in an owner-only file. The request is saved before
-it is sent, so a restart after a lost UDP response safely replays the same
-logical operation. On later starts the saved public resource identity is sent
-as a continuity assertion; the CLI refuses an unexpected replacement instead
-of silently adopting it. Do not copy one state directory into multiple active
-Connector instances.
-
-Every start prints the Connector's CRID, so the identity a consumer needs
-is on screen rather than something to go look up:
-
-```
-Starting Connector "reports" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.
-
-  Anyone authorized can reach it with `qurl get <CRID>`.
-
-CRID: aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledfa
+```bash
+qurl stop <CRID>
+qurl start <CRID>
+qurl restart <CRID>
+qurl status <CRID>
 ```
 
-That note is prose for a person. An unattended runner should read the
-structured event instead, emitted on stderr beside the command's other
-operator events:
+`stop` disables the cloud route first and then tells an already-running local
+daemon to reconcile; it never starts the daemon. `start` is idempotent and
+requires the saved local target to be reachable. `restart` always advances the
+serving epoch so stale registrations cannot keep routing. `status` works for
+remote resources too and includes the local target only when this machine owns
+one.
 
-```
-level=INFO msg="connector: starting to serve local app" event=connector_starting connector_id=reports target=127.0.0.1:8080 crid=aea6x7mea52z…
-```
+The daemon uses one resource-bound NHP admission and FRP session per share. It
+recovers assignment, sleep/wake, and network failures automatically with
+persisted bounded backoff. Customers never need a refresh approval flag. On
+macOS the first local `publish` or `start` installs an owner-only LaunchAgent;
+the stable Homebrew `qurl` path survives upgrades, and a binary-version change
+reloads the resident daemon deliberately. Ordinary lifecycle commands reload
+desired state over the local owner-only socket without restarting healthy
+sibling shares.
 
-`event=connector_starting` is the stable name; it fires as the serve loop
-starts, not once traffic flows. On this advanced surface, `event=proxy_allow`
-preserves its admission-level meaning after an authenticated Login; `connector
-run` does not opt into local publish's terminal 30-second exact-proxy readiness
-gate, so FRP retains its existing registration and reconnect behavior. `crid`
-is omitted entirely rather than logged empty when the platform returned none,
-so its presence is meaningful. A CRID is base32 over `[a-z2-7]`, so the value
-never needs quoting and always renders as a bare `crid=<value>`.
-
-If the platform stays unreachable long enough, the command exits with
-code 11 instead of retrying forever. The next start may then need its
-platform assignment refreshed: with the default `--refresh-mode manual`
-it stops and asks for approval (exit 2) — approve by running once with
-`--refresh-mode auto`. Automatic restarts are deliberately not treated
-as approval. Stop serving with Ctrl-C or SIGTERM; teardown gets a short
-grace period and the command exits 130.
-
-Once a tunnel has been admitted, losing the connection no longer fails
-quietly. The Connector says so on stderr, keeps retrying for a bounded
-window, and then starts a fresh connection cycle rather than retrying
-invisibly:
-
-```
-level=WARN msg="connector: the tunnel connection keeps dropping and is not staying up; still retrying, and consumers will time out while it is down" event=reconnect_retrying dial_attempts=3 retrying_seconds=48.2 gives_up_after_seconds=240
-```
-
-The message states the observation and not a cause: at that layer the
-Connector only sees transport errors with no reason attached, so naming
-one would be a guess. The retry budget is finite either way, and a
-Connector that never recovers exits 11 rather than looping forever.
+`qurl list` prints every full CRID. For locally registered tunnel rows it also
+prints the canonical loopback target and durable desired state. The paged list
+does not make one live API request per row, so its observed column is
+`unknown`; use `qurl status <CRID>` for the authoritative `stopped`,
+`connecting`, or `serving` observation. If the owner-only local registry is
+unavailable, list omits local targets and emits one warning.
 
 ### qurl login / logout / whoami
 
@@ -598,7 +535,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 10 | server error | The service failed or answered outside its contract. |
 | 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
-| 130 | interrupted | The run was canceled (Ctrl-C or SIGTERM), including a graceful `connector run` stop. |
+| 130 | interrupted | The foreground daemon or another command was canceled with Ctrl-C or SIGTERM. |
 
 ### JSON output (`-o json`)
 

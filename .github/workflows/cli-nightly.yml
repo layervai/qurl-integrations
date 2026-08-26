@@ -1,7 +1,7 @@
 name: "cli: Nightly"
 
 # Deep CLI exercises too slow or too stateful for the per-PR gates in cli.yml
-# — fuzzing, an extended sandbox pass, a full GoReleaser snapshot build — plus
+# — fuzzing and a full GoReleaser snapshot build — plus
 # one no PR can gate at all: a customer-path smoke of the latest SHIPPED
 # release (PRs validate the tree; the release smoke validates what
 # `brew install layervai/tap/qurl` serves customers today).
@@ -62,36 +62,6 @@ jobs:
           done <<<"$(grep -rlE --include='*_test.go' '^func Fuzz[A-Za-z0-9_]*\(' apps/cli || true)"
           if [ "$found" -eq 0 ]; then
             echo "no fuzz targets under apps/cli yet; nothing to fuzz (this job arms when the first FuzzXxx test lands)"
-          fi
-
-  sandbox-extended:
-    name: cli-nightly / sandbox e2e extended
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Same arming variable as cli.yml's sandbox-e2e gate, and the same
-    # repo-wide serialization group: there is one sandbox tenancy, and the
-    # nightly must queue behind (never cancel) a PR-time run.
-    if: vars.CLI_SANDBOX_E2E == 'enabled'
-    concurrency:
-      group: cli-sandbox-e2e
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # Extended: -count=3 re-runs the suite to shake out flaky or stateful
-      # sandbox behaviour a single PR-time pass misses. Placeholder semantics
-      # match cli.yml's sandbox-e2e step: nothing carries the clisandbox tag
-      # yet, and the notice self-silences when the first tagged test lands.
-      - name: Run extended sandbox e2e suite
-        run: |
-          go test -tags=clisandbox -count=3 ./apps/cli/...
-          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
-            echo "::notice::cli-nightly / sandbox e2e extended: no sandbox suite yet — no file carries the clisandbox build tag"
           fi
 
   snapshot:

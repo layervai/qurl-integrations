@@ -281,29 +281,27 @@ func TestConsumerMappingPersistenceFailureDestroysLiveAuthorityAndRecovers(t *te
 	}
 }
 
-func TestDurableCycleKnockerBridgesPreparedOperationAndExactRetirement(t *testing.T) {
+func TestDurableManagedAdmitterBridgesPreparedOperationAndExactRetirement(t *testing.T) {
 	ctx := context.Background()
 	consumer, authority, request, runtime := sessionFixture(t)
 	key, record, err := consumer.Prepare(ctx, authority, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	knocker, err := NewDurableCycleKnocker(ctx, consumer, key, record.Operation.ResourceID, authority.Identities[0].Selector)
+	admitter, err := newDurableManagedAdmitter(ctx, consumer, key, &authority.Identities[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := knocker.BeginCycle(); err != nil || knocker.CycleRunID() != record.Operation.RunID {
-		t.Fatalf("BeginCycle = %q %v", knocker.CycleRunID(), err)
+	admission, err := admitter.Admit(ctx, record.Operation.ResourceID, authority.Identities[0].ResourceID)
+	if err != nil || admission.Token == "" || admission.ResourceHost == "" || admission.RunID != record.Operation.RunID ||
+		admission.RunAttempt != record.Operation.RunAttempt || admission.SessionID == 0 {
+		t.Fatalf("Admit = %#v %v", admission, err)
 	}
-	result, err := knocker.Knock(ctx)
-	if err != nil || result.ACTokens[record.Operation.ResourceID] == "" || result.ResourceHost[record.Operation.ResourceID] == "" {
-		t.Fatalf("Knock = %#v %v", result, err)
+	if _, err := admitter.Admit(ctx, record.Operation.ResourceID, authority.Identities[0].ResourceID); err == nil {
+		t.Fatal("duplicate Admit unexpectedly succeeded")
 	}
-	if _, err := knocker.Knock(ctx); !errors.Is(err, errSessionRecoveryRequired) {
-		t.Fatalf("duplicate Knock = %v", err)
-	}
-	if err := knocker.EndCycle(ctx); err != nil {
-		t.Fatalf("EndCycle = %v", err)
+	if err := admitter.Retire(ctx, admission); err != nil {
+		t.Fatalf("Retire = %v", err)
 	}
 	closed, _, err := loadOperation(ctx, consumer.Blobs, key)
 	if err != nil || closed.Status != OperationClosed || runtime.admits != 1 || runtime.retires != 1 {
@@ -311,22 +309,16 @@ func TestDurableCycleKnockerBridgesPreparedOperationAndExactRetirement(t *testin
 	}
 }
 
-func TestDurableCycleKnockerEndsUnsentOperationWithCanceledTombstone(t *testing.T) {
+func TestDurableManagedOperationRecoversUnsentOperationWithCanceledTombstone(t *testing.T) {
 	ctx := context.Background()
 	consumer, authority, request, runtime := sessionFixture(t)
-	key, record, err := consumer.Prepare(ctx, authority, request)
+	key, _, err := consumer.Prepare(ctx, authority, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	knocker, err := NewDurableCycleKnocker(ctx, consumer, key, record.Operation.ResourceID, authority.Identities[0].Selector)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := knocker.BeginCycle(); err != nil {
-		t.Fatal(err)
-	}
-	if err := knocker.EndCycle(ctx); err != nil {
-		t.Fatalf("EndCycle before Knock = %v", err)
+	terminal, err := consumer.Recover(ctx, key)
+	if err != nil || terminal.State != OperationCanceled {
+		t.Fatalf("Recover before Admit = %#v %v", terminal, err)
 	}
 	canceled, _, err := loadOperation(ctx, consumer.Blobs, key)
 	if err != nil || canceled.Status != OperationCanceled || runtime.admits != 0 || runtime.recovers != 1 {
@@ -520,7 +512,10 @@ func (f *fakeSessionRuntime) Admit(_ context.Context, _ qurl.AgentStateStore, re
 	f.admits++
 	admission := SessionAdmission{CellID: record.Operation.CellID, SessionID: 9, SessionIssuedAtMillis: 1700000000000,
 		RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt}
-	live := &LiveSession{ACToken: "short-lived-actoken", ResourceHost: f.resourceHost, OperationID: record.Operation.OperationID, value: struct{}{}}
+	receipt := qurl.NativeSessionReceipt{CellID: record.Operation.CellID, SessionID: 9,
+		SessionIssuedAtMillis: 1700000000000, RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt}
+	live := &LiveSession{ACToken: "short-lived-actoken", ResourceHost: f.resourceHost, OperationID: record.Operation.OperationID,
+		OpenTime: time.Minute, receipt: receipt, value: struct{}{}}
 	f.lastLive = live
 	if f.failMappedCommit != nil {
 		f.failMappedCommit.mu.Lock()

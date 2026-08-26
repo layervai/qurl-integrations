@@ -94,6 +94,48 @@ var sanitizePublicLayerVRepos = map[string]bool{
 	"qurl_connector": true,
 }
 
+// sanitizeReviewedArtifactNamespace permits the public customer image name
+// without treating the same owner/name text as a reviewed GitHub repository.
+// sanitizeLayerVRepo includes the slash before "layervai" in matchStart.
+func sanitizeReviewedArtifactNamespace(text string, matchStart int, repo string) bool {
+	if repo != "qurl" {
+		return false
+	}
+	for _, registry := range []string{"ghcr.io", `ghcr\.io`} {
+		if matchStart >= len(registry) && strings.EqualFold(text[matchStart-len(registry):matchStart], registry) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestReviewedArtifactNamespaceDoesNotPermitRepositoryReferences(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "public image", text: "ghcr.io/layervai/qurl@sha256:abc", want: true},
+		{name: "public image validation regex", text: `^ghcr\.io/layervai/qurl@sha256:`, want: true},
+		{name: "repository URL", text: "https://github.com/layervai/qurl", want: false},
+		{name: "bare repository", text: "layervai/qurl", want: false},
+		{name: "different image", text: "ghcr.io/layervai/private-runtime:latest", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			match := sanitizeLayerVRepo.FindStringSubmatchIndex(test.text)
+			if match == nil {
+				t.Fatalf("test input did not match repository scanner: %q", test.text)
+			}
+			repo := strings.ToLower(test.text[match[2]:match[3]])
+			if got := sanitizeReviewedArtifactNamespace(test.text, match[0], repo); got != test.want {
+				t.Fatalf("reviewed artifact namespace = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 // sanitizeKnownReference freezes the private-repository references that
 // already existed when this guard was added. They are FUNCTIONAL rather than
 // prose leaks: a workflow that dispatches to, or gates on, a private
@@ -161,8 +203,11 @@ func TestPublicSourceNamesNoPrivateLayerVMaterial(t *testing.T) {
 				t.Errorf("%s names private LayerV repository %q; describe it by role instead (for example \"the producer repository\")", rel, name)
 			}
 		}
-		for _, match := range sanitizeLayerVRepo.FindAllStringSubmatch(text, -1) {
-			repo := strings.ToLower(match[1])
+		for _, match := range sanitizeLayerVRepo.FindAllStringSubmatchIndex(text, -1) {
+			repo := strings.ToLower(text[match[2]:match[3]])
+			if sanitizeReviewedArtifactNamespace(text, match[0], repo) {
+				continue
+			}
 			if !sanitizePublicLayerVRepos[repo] && !sanitizeKnownReference[rel+"|layervai/"+repo] {
 				t.Errorf("%s refers to LayerV repository %q, which is not on the reviewed-public list in this test", rel, "layervai/"+repo)
 			}

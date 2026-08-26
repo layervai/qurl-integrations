@@ -12,8 +12,7 @@ import (
 )
 
 // The all-or-none custom-deployment override triple. Setting any one of the
-// three requires setting all three; the names are the qURL Connector operator
-// contract and must not drift from the standalone Connector's.
+// three requires setting all three.
 const (
 	// EnvHost overrides the NHP Hub DNS endpoint.
 	EnvHost = "QURL_CONNECTOR_HUB_HOST"
@@ -104,19 +103,21 @@ func Bootstrap() (qurl.HubBootstrap, error) {
 		return qurl.HubBootstrap{}, fmt.Errorf("%w: this build has no pinned production Hub key; set the all-or-none %s/%s/%s custom deployment triple", ErrConfig, EnvHost, EnvPort, EnvServerPublicKey)
 	}
 	hub := qurl.HubBootstrap{Host: host, Port: port, ServerPublicKeyB64: key}
-	if err := validateBootstrap(hub); err != nil {
+	if err := ValidateBootstrap(hub); err != nil {
 		return qurl.HubBootstrap{}, err
 	}
 	return hub, nil
 }
 
-// validateBootstrap mirrors qurl-go's native-assignment trust-root checks at
+// ValidateBootstrap mirrors qurl-go's native-assignment trust-root checks at
 // configuration load time. qurl-go remains authoritative before network I/O;
 // this early check prevents a warm persisted lease from masking a malformed
 // replacement Hub pin until a later refresh. The key checks are pin.go's,
 // shared with the release-side pin verifier, so a pin the release pipeline
 // injects is exactly a pin this path accepts.
-func validateBootstrap(hub qurl.HubBootstrap) error {
+// The share daemon also uses it to validate the non-secret Hub identity in
+// its durable LaunchAgent arguments.
+func ValidateBootstrap(hub qurl.HubBootstrap) error {
 	if !validHost(hub.Host) {
 		return fmt.Errorf("%w: %s must be a canonical lowercase DNS name below a LayerV-owned apex", ErrConfig, EnvHost)
 	}

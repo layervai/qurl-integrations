@@ -478,7 +478,9 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 		"AWS_REGION='" + testS3WebsiteRegion + "'",
 		"S3_PREFIX='" + testS3WebsitePrefix + "'",
 		"INDEX_DOCUMENT='" + testS3WebsiteIndex + "'",
+		"crid: '" + testTunnelCRID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
+		"knock_resource_id: '" + testS3WebsiteKnockResource + "'",
 		`--network "container:${ORIGIN_CONTAINER}"`,
 		"/qurl get $team-dash",
 	} {
@@ -486,7 +488,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testTunnelModalKey, testForbiddenSlackShellFence, testForbiddenSlackYAMLFence, "find_or_create", "YOUR_WEB_CONTAINER_NAME", "tunnel", "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
+	for _, forbidden := range []string{testTunnelModalKey, testForbiddenSlackShellFence, testForbiddenSlackYAMLFence, "find_or_create", "YOUR_WEB_CONTAINER_NAME", "tunnel", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -688,7 +690,24 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyPlaintextMissing(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
-	var revokeHits int
+	var revokeHits, sharingOffHits int
+	sharingPath := "/v1/resources/" + testTunnelResourceID + "/sharing"
+	ts.addCustomer(http.MethodGet, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
+		writeSharingEnvelope(t, w, "on", 7, "serving")
+	})
+	ts.addCustomer(http.MethodPost, sharingPath+"/restart", func(w http.ResponseWriter, _ *http.Request) {
+		writeSharingEnvelope(t, w, "on", 8, "connecting")
+	})
+	ts.addCustomer(http.MethodPut, sharingPath, func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			DesiredState string `json:"desired_state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.DesiredState != "off" {
+			t.Fatalf("sharing compensation = %+v, %v", input, err)
+		}
+		sharingOffHits++
+		writeSharingEnvelope(t, w, "off", 9, "stopped")
+	})
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID:      testTunnelResourceID,
@@ -729,6 +748,12 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyPlaintextMissing(t *testing.T) {
 	}
 	if len(*dmPosts) != 0 {
 		t.Fatalf("bootstrap DM posts = %+v, want none when build revokes before DM delivery", *dmPosts)
+	}
+	if sharingOffHits != 0 {
+		t.Fatalf("sharing compensation hits = %d, want 0 for prior-on reinstall", sharingOffHits)
+	}
+	if !strings.Contains(async, "existing qURL share remains enabled") {
+		t.Fatalf("async reply = %q, want explicit prior-on sharing outcome", async)
 	}
 }
 
@@ -1269,20 +1294,22 @@ func TestRenderS3WebsiteConnectorConfigYAMLPinsResourceIdentity(t *testing.T) {
 		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
 	}
 	for _, want := range []string{
-		"routes:",
-		"id: '" + testTunnelSlug + "'",
-		"type: http",
+		"version: 1",
+		"shares:",
+		"crid: '" + testTunnelCRID + "'",
+		"connector_id: '" + testTunnelSlug + "'",
 		"local_ip: 127.0.0.1",
 		"local_port: 8080",
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"knock_resource_id: '" + testS3WebsiteKnockResource + "'",
+		"target_url: 'http://127.0.0.1:8080'",
+		"desired_state: on",
+		"serving_epoch: 1",
 	} {
 		if !strings.Contains(configYAML, want) {
 			t.Fatalf("config missing %q:\n%s", want, configYAML)
 		}
-	}
-	if strings.Contains(configYAML, "knock_resource_id") {
-		t.Fatalf("config rendered runtime-only knock_resource_id:\n%s", configYAML)
 	}
 	missingResource := *testS3WebsiteArgs(tunnelEnvDocker)
 	missingResource.ResourceID = ""
@@ -1309,16 +1336,20 @@ func TestRenderDockerS3WebsiteInstructionsMentionsOriginAutoRestart(t *testing.T
 	}
 	for _, want := range []string{
 		"Docker auto-restarts it after a crash",
-		"recreate or restart the qURL Connector container",
-		"QURL_API_URL='" + testTunnelAPIURL + "'",
+		"recreate or restart qURL too",
+		"QURL_ENDPOINT='https://api.sandbox.example'",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
-		`AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"`,
-		`$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"`,
+		`CONFIG_FILE="$PWD/qurl-share-${QURL_CONNECTOR_ID}.yaml"`,
+		`-v "$AGENT_STATE_DIR:/var/lib/qurl"`,
+		`-v "$SECRET_DIR:/run/secrets/qurl:ro"`,
+		`-v "$CONFIG_FILE:/etc/qurl/share.yaml:ro"`,
+		"--restart=unless-stopped",
 		"--read-only",
 		"--tmpfs /tmp:rw,size=64m",
 		"--pids-limit=512",
-		`-v "$AUDIT_DIR:/var/log/layerv/qurl-connector"`,
-		"-e QURL_AUDIT_FILE='/var/log/layerv/qurl-connector/audit.log'",
+		"--entrypoint /usr/local/bin/qurl",
+		"daemon run",
+		"--enrollment-token-file /run/secrets/qurl/enrollment-token",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Docker instructions missing %q:\n%s", want, got)
@@ -1377,6 +1408,8 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 			ReadOnly    bool              `yaml:"read_only"`
 			Tmpfs       []string          `yaml:"tmpfs"`
 			PidsLimit   int               `yaml:"pids_limit"`
+			EntryPoint  []string          `yaml:"entrypoint"`
+			Command     []string          `yaml:"command"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal([]byte(body), &parsed); err != nil {
@@ -1397,7 +1430,7 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 			t.Fatalf("origin env %s = %q, want %q", name, got, want)
 		}
 	}
-	connector := parsed.Services["qurl-connector-"+testTunnelSlug]
+	connector := parsed.Services["qurl-"+testTunnelSlug]
 	if connector.Image != testTunnelImageRef {
 		t.Fatalf("connector image = %q, want %q", connector.Image, testTunnelImageRef)
 	}
@@ -1407,8 +1440,8 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if origin.User != ecsConnectorUser || connector.User != ecsConnectorUser {
 		t.Fatalf("Compose users = origin %q connector %q, want 65532:65532", origin.User, connector.User)
 	}
-	if origin.Restart != "on-failure:5" || connector.Restart != "on-failure:5" {
-		t.Fatalf("Compose restart policies = origin %q connector %q, want on-failure:5", origin.Restart, connector.Restart)
+	if origin.Restart != "unless-stopped" || connector.Restart != "unless-stopped" {
+		t.Fatalf("Compose restart policies = origin %q connector %q, want unlimited recovery", origin.Restart, connector.Restart)
 	}
 	if origin.ReadOnly || connector.ReadOnly != true || connector.PidsLimit != connectorPIDsLimit {
 		t.Fatalf("Compose rootfs/pids = origin read_only %v connector read_only %v pids %d", origin.ReadOnly, connector.ReadOnly, connector.PidsLimit)
@@ -1430,19 +1463,17 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 			t.Fatalf("%s security_opt = %v, want [no-new-privileges:true]", name, service.SecurityOpt)
 		}
 	}
-	if got := connector.Environment[ecsConnectorIDEnv]; got != testTunnelSlug {
-		t.Fatalf("connector QURL_CONNECTOR_ID = %q, want %q", got, testTunnelSlug)
+	if len(origin.EntryPoint) != 0 || len(origin.Command) != 0 {
+		t.Fatalf("origin unexpectedly runs qurl: entrypoint=%v command=%v", origin.EntryPoint, origin.Command)
 	}
-	if got := connector.Environment[connectorAuditFileEnv]; got != connectorAuditFilePath {
-		t.Fatalf("connector %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
+	if len(connector.EntryPoint) != 1 || connector.EntryPoint[0] != "/usr/local/bin/qurl" || len(connector.Command) < 2 || connector.Command[0] != "daemon" || connector.Command[1] != "run" {
+		t.Fatalf("qurl service runtime = entrypoint %v command %v", connector.EntryPoint, connector.Command)
 	}
 	if _, ok := connector.Environment["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("Compose connector rendered the advanced knock-resource override")
 	}
-	for _, name := range []string{"QURL_API_URL"} {
-		if got := connector.Environment[name]; got != "${QURL_API_URL_YAML}" {
-			t.Fatalf("connector %s = %q, want shell variable placeholder", name, got)
-		}
+	if got := connector.Environment["QURL_ENDPOINT"]; got != "${QURL_ENDPOINT_YAML}" {
+		t.Fatalf("qurl QURL_ENDPOINT = %q, want shell variable placeholder", got)
 	}
 	if _, ok := connector.Environment["QURL_BOOTSTRAP_URL"]; ok {
 		t.Fatal("Compose connector rendered retired bootstrap URL")
@@ -1450,18 +1481,19 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if !strings.Contains(got, "ORIGIN_SERVICE_NAME='qurl-s3-origin-"+testTunnelSlug+"'") {
 		t.Fatalf("Compose instructions missing shell-quoted origin service assignment:\n%s", got)
 	}
-	quotedAPIURL, err := yamlSingleQuoted(testTunnelAPIURL)
+	endpoint, err := qurlEndpointFromConnectorAPIURL(testTunnelAPIURL)
+	if err != nil {
+		t.Fatalf("qurlEndpointFromConnectorAPIURL: %v", err)
+	}
+	quotedAPIURL, err := yamlSingleQuoted(endpoint)
 	if err != nil {
 		t.Fatalf("yamlSingleQuoted: %v", err)
 	}
-	if !strings.Contains(got, "QURL_API_URL_YAML="+shellSingleQuote(quotedAPIURL)) {
+	if !strings.Contains(got, "QURL_ENDPOINT_YAML="+shellSingleQuote(quotedAPIURL)) {
 		t.Fatalf("Compose instructions missing shell-quoted API URL assignment:\n%s", got)
 	}
-	if !strings.Contains(got, "After a Docker daemon restart, verify both services are running") {
-		t.Fatalf("Compose instructions missing daemon-restart recovery note:\n%s", got)
-	}
-	if !strings.Contains(got, "Docker auto-restarts the S3 origin service after a crash") {
-		t.Fatalf("Compose instructions missing origin auto-restart recovery note:\n%s", got)
+	if !strings.Contains(got, "If the S3 origin service is recreated, restart qURL too") {
+		t.Fatalf("Compose instructions missing shared-network recovery note:\n%s", got)
 	}
 	assertNoS3SecretLeaks(t, got)
 }
@@ -1469,7 +1501,11 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 func TestRenderDockerComposeS3WebsiteInstructionsShellQuotesAPIURL(t *testing.T) {
 	args := *testS3WebsiteArgs(tunnelEnvCompose)
 	args.APIURL = testShellSignificantTunnelAPIURL
-	quotedYAML, err := yamlSingleQuoted(args.APIURL)
+	endpoint, err := qurlEndpointFromConnectorAPIURL(args.APIURL)
+	if err != nil {
+		t.Fatalf("qurlEndpointFromConnectorAPIURL: %v", err)
+	}
+	quotedYAML, err := yamlSingleQuoted(endpoint)
 	if err != nil {
 		t.Fatalf("yamlSingleQuoted: %v", err)
 	}
@@ -1477,10 +1513,10 @@ func TestRenderDockerComposeS3WebsiteInstructionsShellQuotesAPIURL(t *testing.T)
 	if err != nil {
 		t.Fatalf("renderDockerComposeS3WebsiteInstructions: %v", err)
 	}
-	if !strings.Contains(got, "QURL_API_URL_YAML="+shellSingleQuote(quotedYAML)) {
+	if !strings.Contains(got, "QURL_ENDPOINT_YAML="+shellSingleQuote(quotedYAML)) {
 		t.Fatalf("Compose instructions did not shell-quote the YAML API URL scalar:\n%s", got)
 	}
-	if strings.Contains(got, "QURL_API_URL: "+quotedYAML) {
+	if strings.Contains(got, "QURL_ENDPOINT: "+quotedYAML) {
 		t.Fatalf("Compose heredoc interpolated the API URL directly:\n%s", got)
 	}
 }
@@ -1504,10 +1540,7 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if !strings.Contains(instructions, "Do not share qurl-agent-state across concurrently running sidecars") {
 		t.Fatalf("ECS instructions missing qurl-agent-state sharing warning:\n%s", instructions)
 	}
-	if !strings.Contains(instructions, "qurl-audit") || !strings.Contains(instructions, "read-only root filesystem") {
-		t.Fatalf("ECS instructions missing durable audit/read-only-root guidance:\n%s", instructions)
-	}
-	for _, want := range []string{"root-directory modes 0700, 0750, and 0755", "warm-start task revision", "Deleting it first prevents replacement tasks from starting"} {
+	for _, want := range []string{"read-only qurl-bootstrap EFS access point", "warm-start revision", "delete the enrollment-token file"} {
 		if !strings.Contains(instructions, want) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, instructions)
 		}
@@ -1563,9 +1596,6 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if connector.Name != connectorContainerName || connector.Image != testTunnelImageRef {
 		t.Fatalf("connector container = %+v", connector)
 	}
-	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
-		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
-	}
 	if got := connector.LogConfiguration.Options[ecsLogRegionOption]; got != ecsLogRegionPlaceholder {
 		t.Fatalf("connector awslogs-region = %q, want task-region placeholder", got)
 	}
@@ -1577,10 +1607,8 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if _, ok := connectorEnv["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("ECS connector rendered the advanced knock-resource override")
 	}
-	for _, name := range []string{"QURL_API_URL"} {
-		if got := connectorEnv[name]; got != testTunnelAPIURL {
-			t.Fatalf("connector %s = %q, want %q", name, got, testTunnelAPIURL)
-		}
+	if got := connectorEnv["QURL_ENDPOINT"]; got != "https://api.sandbox.example" {
+		t.Fatalf("qurl QURL_ENDPOINT = %q", got)
 	}
 	if _, ok := connectorEnv["QURL_BOOTSTRAP_URL"]; ok {
 		t.Fatal("ECS connector rendered retired bootstrap URL")
@@ -1591,11 +1619,11 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if origin.ReadonlyRootFilesystem || !connector.ReadonlyRootFilesystem {
 		t.Fatalf("ECS readonlyRootFilesystem = origin %v connector %v, want false/true", origin.ReadonlyRootFilesystem, connector.ReadonlyRootFilesystem)
 	}
-	if got := connectorEnv[connectorAuditFileEnv]; got != connectorAuditFilePath {
-		t.Fatalf("connector %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
+	if len(connector.EntryPoint) != 1 || connector.EntryPoint[0] != "/usr/local/bin/qurl" || len(connector.Command) < 2 || connector.Command[0] != "daemon" || connector.Command[1] != "run" {
+		t.Fatalf("qurl runtime = entrypoint %v command %v", connector.EntryPoint, connector.Command)
 	}
-	if !ecsMountPointPresent(connector.MountPoints, "qurl-audit", connectorAuditDir, false) {
-		t.Fatalf("connector mountPoints = %+v, want writable qurl-audit mount", connector.MountPoints)
+	if !ecsMountPointPresent(connector.MountPoints, "qurl-bootstrap", "/run/secrets/qurl", true) {
+		t.Fatalf("qurl mountPoints = %+v, want read-only enrollment-token mount", connector.MountPoints)
 	}
 	for _, container := range []ecsContainerDefinition{origin, connector} {
 		if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != testCapabilityAll {
@@ -1612,8 +1640,8 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	}
 	objects := extractS3TestBlock(t, got, "kubectl apply -f - <<'QURL_K8S_YAML_EOF'\n", "\nQURL_K8S_YAML_EOF")
 	docs := strings.Split(objects, "\n---\n")
-	if len(docs) != 3 {
-		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + state PVC + audit PVC:\n%s", len(docs), objects)
+	if len(docs) != 2 {
+		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + state PVC:\n%s", len(docs), objects)
 	}
 	var configMap struct {
 		Data map[string]string `yaml:"data"`
@@ -1625,8 +1653,8 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	if err != nil {
 		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
 	}
-	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != configYAML {
-		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, configYAML)
+	if gotConfig := configMap.Data["share.yaml"]; gotConfig != configYAML {
+		t.Fatalf("ConfigMap share.yaml = %q, want %q", gotConfig, configYAML)
 	}
 	var pvc map[string]any
 	if err := yaml.Unmarshal([]byte(docs[1]), &pvc); err != nil {
@@ -1660,11 +1688,8 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	if err := yaml.Unmarshal([]byte(patch), &podSpec); err != nil {
 		t.Fatalf("Pod spec fragment YAML did not parse: %v\n%s", err, patch)
 	}
-	if len(podSpec.SecurityContext) != 0 || len(podSpec.InitContainers) != 2 || len(podSpec.Containers) != 2 || len(podSpec.Volumes) != 6 {
-		t.Fatalf("pod spec = %+v, want permissions/copy init containers, two runtime containers, and six volumes without pod fsGroup", podSpec)
-	}
-	if podSpec.InitContainers[0].Image != connectorVolumePermissionsImage {
-		t.Fatalf("permissions image = %q, want %q", podSpec.InitContainers[0].Image, connectorVolumePermissionsImage)
+	if podSpec.SecurityContext["fsGroup"] != 65532 || len(podSpec.InitContainers) != 0 || len(podSpec.Containers) != 2 || len(podSpec.Volumes) != 4 {
+		t.Fatalf("pod spec = %+v, want fsGroup, two runtime containers, and four volumes", podSpec)
 	}
 	origin, connector := podSpec.Containers[0], podSpec.Containers[1]
 	if origin.Name != testS3OriginContainer || origin.Image != defaultS3StaticConnectorImage {
@@ -1696,24 +1721,16 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	if connector.SecurityContext["readOnlyRootFilesystem"] != true {
 		t.Fatalf("connector securityContext = %+v, want readOnlyRootFilesystem", connector.SecurityContext)
 	}
-	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
-		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
+	if !strings.Contains(got, "fsGroup: 65532") || !strings.Contains(got, "defaultMode: 0440") {
+		t.Fatalf("Kubernetes instructions missing dedicated group-readable projected secret policy:\n%s", got)
 	}
-	if got := connectorEnv[connectorAuditFileEnv]; got != connectorAuditFilePath {
-		t.Fatalf("connector %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
-	}
-	if !strings.Contains(got, "qurl-go rejects group-writable identity state") || strings.Contains(got, "fsGroup:") {
-		t.Fatalf("Kubernetes instructions did not replace pod fsGroup with exact mode preparation:\n%s", got)
-	}
-	for _, want := range []string{"qurl-bootstrap-copy", "warm-start workload revision", "deleting it first prevents a replacement pod from starting"} {
+	for _, want := range []string{"--enrollment-token-file', '/run/secrets/qurl/enrollment-token'", "warm-start revision", "delete the enrollment-token Secret"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, name := range []string{"QURL_API_URL"} {
-		if got := connectorEnv[name]; got != testTunnelAPIURL {
-			t.Fatalf("connector %s = %q, want %q", name, got, testTunnelAPIURL)
-		}
+	if got := connectorEnv["QURL_ENDPOINT"]; got != "https://api.sandbox.example" {
+		t.Fatalf("qurl QURL_ENDPOINT = %q", got)
 	}
 	if _, ok := connectorEnv["QURL_BOOTSTRAP_URL"]; ok {
 		t.Fatal("Kubernetes connector rendered retired bootstrap URL")
@@ -1788,8 +1805,10 @@ func testS3WebsiteArgs(env tunnelInstallEnvironment) *s3WebsiteInstallArgs {
 		Prefix:             testS3WebsitePrefix,
 		IndexDocument:      testS3WebsiteIndex,
 		ResourceID:         testTunnelResourceID,
+		CRID:               testTunnelCRID,
 		ConnectorRoutingID: testTunnelRoutingID,
 		KnockResourceID:    testS3WebsiteKnockResource,
+		ServingEpoch:       1,
 		APIURL:             testTunnelAPIURL,
 	}
 }
@@ -1848,17 +1867,11 @@ func assertNoShellMetacharacter(t *testing.T, name, value string) {
 	}
 }
 
-// TestS3WebsiteReleaseContractRouteMatchesRenderedConfig fences the Connector
-// release contract's fixture route against the config the Slack flow actually
-// generates. The contract script's value is that a released Connector's strict
-// YAML decoder accepts our route; a strict decoder rejects unknown fields, so
-// the proof only holds while the fixture is byte-for-byte what the renderer
-// emits. Both sides read this one golden — the script feeds it to the decoder,
-// this test regenerates it — so a field OR a value can only drift by failing
-// here. Run with UPDATE_GOLDEN=1 to rewrite it after an intended change, the
-// same convention origins/s3-static-connector/test/render_test.sh uses.
-func TestS3WebsiteReleaseContractRouteMatchesRenderedConfig(t *testing.T) {
-	goldenPath := filepath.Join("..", "..", "..", "origins", "s3-static-connector", "test", "golden", "s3-website-route.yaml")
+// TestS3WebsiteHeadlessConfigMatchesReleaseFixture keeps the immutable qurl
+// image smoke fixture byte-identical to the config emitted by guided setup.
+// The image contract then feeds this file to the released strict decoder.
+func TestS3WebsiteHeadlessConfigMatchesReleaseFixture(t *testing.T) {
+	goldenPath := filepath.Join("..", "..", "..", "origins", "s3-static-connector", "test", "golden", "s3-website-share.yaml")
 	configYAML, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvDocker))
 	if err != nil {
 		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
@@ -1879,6 +1892,6 @@ func TestS3WebsiteReleaseContractRouteMatchesRenderedConfig(t *testing.T) {
 		t.Fatalf("read %s: %v", goldenPath, err)
 	}
 	if string(golden) != want {
-		t.Fatalf("release contract golden is stale.\n golden:\n%s\n rendered:\n%s\nRerun with UPDATE_GOLDEN=1 if the change is intended, and keep %s consuming this file.", golden, want, "origins/s3-static-connector/test/qurl_connector_release_contract.sh")
+		t.Fatalf("release contract golden is stale.\n golden:\n%s\n rendered:\n%s\nRerun with UPDATE_GOLDEN=1 if the change is intended, and keep %s consuming this file.", golden, want, "origins/s3-static-connector/test/qurl_image_release_contract.sh")
 	}
 }

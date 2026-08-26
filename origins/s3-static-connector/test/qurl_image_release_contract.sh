@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Validates the immutable qurl release image against the exact headless share
+# configuration emitted by the guided S3-origin flow.
+set -euo pipefail
+
+IMG="${QURL_IMAGE:-}"
+REQUIRE_IMAGE="${QURL_RELEASE_IMAGE_REQUIRED:-false}"
+IFS=' ' read -r -a PLATFORMS <<<"${PLATFORM:-linux/amd64 linux/arm64}"
+SHARE_GOLDEN="${SHARE_GOLDEN:-$(dirname "$0")/golden/s3-website-share.yaml}"
+
+fail() {
+  printf 'FAIL qurl S3-origin image contract for %s (%s): %s\n' "${IMG:-unset}" "${platform:-n/a}" "$1" >&2
+  if [ -n "${output:-}" ]; then
+    printf '%s\n' "$output" >&2
+  fi
+  exit 1
+}
+
+if [ -z "$IMG" ]; then
+  if [ "$REQUIRE_IMAGE" = "true" ]; then
+    fail 'QURL_IMAGE is required and must be the release digest'
+  fi
+  echo '::warning title=qurl release image pending::QURL_IMAGE is unset; the public release image contract is covered by CLI image smoke and the renderer fixture until a released digest is pinned.' >&2
+  exit 0
+fi
+case "$IMG" in
+  ghcr.io/layervai/qurl@sha256:[0-9a-f][0-9a-f]*) ;;
+  *) fail 'QURL_IMAGE must be ghcr.io/layervai/qurl@sha256:<lowercase digest>' ;;
+esac
+digest="${IMG##*@sha256:}"
+if [ "${#digest}" -ne 64 ] || printf '%s' "$digest" | grep -q '[^0-9a-f]'; then
+  fail 'QURL_IMAGE digest must contain exactly 64 lowercase hexadecimal characters'
+fi
+if ! docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
+  if [ "$REQUIRE_IMAGE" = "true" ]; then
+    fail 'immutable qurl image does not resolve'
+  fi
+  echo "::warning title=qurl release image pending::$IMG does not resolve; set QURL_RELEASE_IMAGE_REQUIRED=true after the first public release." >&2
+  exit 0
+fi
+if [ ! -r "$SHARE_GOLDEN" ]; then
+  fail "headless share fixture $SHARE_GOLDEN is missing"
+fi
+
+for platform in "${PLATFORMS[@]}"; do
+  output=""
+  if ! version_output="$(docker run --rm --platform "$platform" "$IMG" version 2>&1)"; then
+    output="$version_output"
+    fail 'image failed to report its qurl version'
+  fi
+  case "$version_output" in
+    'qurl version '*) ;;
+    *) output="$version_output"; fail 'image did not identify itself as qurl' ;;
+  esac
+
+  # A valid first-boot config reaches the credential gate without attempting
+  # network enrollment. Unknown/old config fields would fail earlier with a
+  # decoder error, so this exercises the released image's strict YAML surface.
+  if output="$(docker run --rm --platform "$platform" \
+      -v "$SHARE_GOLDEN:/etc/qurl/share.yaml:ro" \
+      "$IMG" daemon run --state-dir /tmp/qurl-state \
+      --headless-config /etc/qurl/share.yaml 2>&1)"; then
+    fail 'first bootstrap unexpectedly ran without an enrollment token file'
+  fi
+  case "$output" in
+    *'--enrollment-token-file is required for first headless bootstrap'*) ;;
+    *) fail 'released qurl rejected the guided headless config before the expected credential gate' ;;
+  esac
+
+  printf 'qurl S3-origin headless contract passed for %s (%s)\n' "$IMG" "$platform"
+done
