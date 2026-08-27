@@ -197,6 +197,78 @@ func TestBootstrapProductionDefaultFailsClosedUntilProvisioned(t *testing.T) {
 	}
 }
 
+func provisionedSandboxPinForTest(t *testing.T) string {
+	t.Helper()
+	scalar := bytes.Repeat([]byte{0x24}, curve25519.ScalarSize)
+	public, err := curve25519.X25519(scalar, curve25519.Basepoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB64 := base64.StdEncoding.EncodeToString(public)
+	old := defaultSandboxServerPublicKeyB64
+	defaultSandboxServerPublicKeyB64 = keyB64
+	t.Cleanup(func() { defaultSandboxServerPublicKeyB64 = old })
+	return keyB64
+}
+
+func TestBootstrapForEndpointUsesOnlyExactSandboxPin(t *testing.T) {
+	clearOverrideEnv(t)
+	keyB64 := provisionedSandboxPinForTest(t)
+
+	for _, endpoint := range []string{
+		SandboxAPIEndpoint,
+		"https://API.LAYERV.XYZ/",
+		"https://api.layerv.xyz:443",
+	} {
+		got, err := BootstrapForEndpoint(endpoint)
+		if err != nil {
+			t.Fatalf("BootstrapForEndpoint(%q): %v", endpoint, err)
+		}
+		want := qurl.HubBootstrap{Host: SandboxHost, Port: DefaultPort, ServerPublicKeyB64: keyB64}
+		if got != want {
+			t.Fatalf("BootstrapForEndpoint(%q) = %#v, want %#v", endpoint, got, want)
+		}
+	}
+}
+
+func TestBootstrapForEndpointRejectsSandboxLookalikes(t *testing.T) {
+	clearOverrideEnv(t)
+	_ = provisionedSandboxPinForTest(t)
+	oldProduction := defaultServerPublicKeyB64
+	defaultServerPublicKeyB64 = ""
+	t.Cleanup(func() { defaultServerPublicKeyB64 = oldProduction })
+
+	for _, endpoint := range []string{
+		"http://api.layerv.xyz",
+		"https://api.layerv.xyz:8443",
+		"https://api.layerv.xyz.evil",
+		"https://user@api.layerv.xyz",
+		"https://api.layerv.xyz/path",
+		"https://api.layerv.xyz?query=1",
+		"not a URL",
+	} {
+		if _, err := BootstrapForEndpoint(endpoint); err == nil || !strings.Contains(err.Error(), "no pinned production Hub key") {
+			t.Fatalf("BootstrapForEndpoint(%q) error = %v, want dark production rejection", endpoint, err)
+		}
+	}
+}
+
+func TestBootstrapForEndpointOperatorOverrideWinsInSandbox(t *testing.T) {
+	override := validTestPublicKeyB64
+	t.Setenv(EnvHost, "hub.custom.layerv.xyz")
+	t.Setenv(EnvPort, "443")
+	t.Setenv(EnvServerPublicKey, override)
+	defaultSandbox := provisionedSandboxPinForTest(t)
+
+	got, err := BootstrapForEndpoint(SandboxAPIEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Host != "hub.custom.layerv.xyz" || got.ServerPublicKeyB64 != override || got.ServerPublicKeyB64 == defaultSandbox {
+		t.Fatalf("custom override did not win: %#v", got)
+	}
+}
+
 // The production pin reaches a binary ONLY via release-build ldflags
 // injection (-X …/internal/connector/hub.defaultServerPublicKeyB64=…), never
 // via a source default. Tests compile without that ldflag, so a hardcoded pin
@@ -205,5 +277,25 @@ func TestBootstrapProductionDefaultFailsClosedUntilProvisioned(t *testing.T) {
 func TestDefaultPinRemainsUnprovisionedInSource(t *testing.T) {
 	if defaultServerPublicKeyB64 != "" {
 		t.Fatalf("defaultServerPublicKeyB64 = %q in source; the production pin must arrive only through the release build wiring (see the package comment's flip procedure)", defaultServerPublicKeyB64)
+	}
+	if defaultSandboxServerPublicKeyB64 != "" {
+		t.Fatalf("defaultSandboxServerPublicKeyB64 = %q in source; the sandbox pin must arrive only through reviewed release build wiring", defaultSandboxServerPublicKeyB64)
+	}
+}
+
+// TestReleaseInjectedSandboxPinIsUsable is skipped by ordinary source tests.
+// The release-contract gate can run it with the same -X value that GoReleaser
+// embeds, which proves the linker target and runtime selection together.
+func TestReleaseInjectedSandboxPinIsUsable(t *testing.T) {
+	clearOverrideEnv(t)
+	if defaultSandboxServerPublicKeyB64 == "" {
+		t.Skip("sandbox release pin is not injected in source builds")
+	}
+	got, err := BootstrapForEndpoint(SandboxAPIEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Host != SandboxHost || got.Port != DefaultPort || got.ServerPublicKeyB64 != defaultSandboxServerPublicKeyB64 {
+		t.Fatalf("injected sandbox bootstrap = %#v", got)
 	}
 }

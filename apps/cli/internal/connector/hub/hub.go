@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,10 @@ const (
 	// EnvServerPublicKey overrides the pinned Hub server public key
 	// (canonical padded standard base64 of a 32-byte X25519 public key).
 	EnvServerPublicKey = "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"
+	// ReleaseEnvSandboxServerPublicKey is release-pipeline input, not a
+	// runtime override. GoReleaser injects it into the sandbox-only build pin
+	// after the verifier matches its reviewed fingerprint.
+	ReleaseEnvSandboxServerPublicKey = "QURL_CONNECTOR_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64"
 )
 
 const (
@@ -30,6 +35,13 @@ const (
 	// builds. It is only usable once a production pin is provisioned; a dark
 	// build fails closed instead of resolving it.
 	DefaultHost = "hub.nhp.layerv.ai"
+	// SandboxHost is selected only when the CLI is configured for the exact
+	// sandbox API endpoint. It is never a fallback for production or custom
+	// deployments.
+	SandboxHost = "hub.nhp.layerv.xyz"
+	// SandboxAPIEndpoint is the only API endpoint that selects the reviewed
+	// sandbox Hub pin compiled into an official release.
+	SandboxAPIEndpoint = "https://api.layerv.xyz"
 	// DefaultPort is the standard NHP UDP port. Every NHP UDP endpoint is
 	// pinned to 443.
 	DefaultPort = 443
@@ -47,6 +59,11 @@ const (
 // that. See the package comment for the flip procedure.
 var defaultServerPublicKeyB64 string
 
+// defaultSandboxServerPublicKeyB64 is injected by the official release build
+// after the public value is checked against the reviewed raw-key fingerprint.
+// Source, test, and snapshot builds keep it blank.
+var defaultSandboxServerPublicKeyB64 string
+
 // ErrConfig is the identity of every Hub trust-bootstrap configuration
 // failure this package can return: a dark build with no override triple, a
 // partially set triple, or a malformed value in it. One sentinel for the
@@ -60,6 +77,22 @@ var ErrConfig = errors.New("qURL Connector Hub configuration")
 // closed when the build is dark and no override is set, when the triple is
 // partially set, or when any value is malformed.
 func Bootstrap() (qurl.HubBootstrap, error) {
+	return bootstrap(DefaultHost, defaultServerPublicKeyB64, "production")
+}
+
+// BootstrapForEndpoint resolves the same all-or-none operator override as
+// Bootstrap. Without an override, only the exact sandbox API endpoint selects
+// the sandbox Hub and its independently reviewed release pin. Every other API
+// endpoint stays on the production default, which remains dark until the
+// production Control root publishes its Hub identity.
+func BootstrapForEndpoint(apiEndpoint string) (qurl.HubBootstrap, error) {
+	if isSandboxAPIEndpoint(apiEndpoint) {
+		return bootstrap(SandboxHost, defaultSandboxServerPublicKeyB64, "sandbox")
+	}
+	return Bootstrap()
+}
+
+func bootstrap(defaultHost, defaultKey, deployment string) (qurl.HubBootstrap, error) {
 	host, hostSet := os.LookupEnv(EnvHost)
 	portRaw, portSet := os.LookupEnv(EnvPort)
 	key, keySet := os.LookupEnv(EnvServerPublicKey)
@@ -73,9 +106,9 @@ func Bootstrap() (qurl.HubBootstrap, error) {
 		return qurl.HubBootstrap{}, fmt.Errorf("%w: %s, %s, and %s must be set together", ErrConfig, EnvHost, EnvPort, EnvServerPublicKey)
 	}
 	if setCount == 0 {
-		host = DefaultHost
+		host = defaultHost
 		portRaw = strconv.Itoa(DefaultPort)
-		key = defaultServerPublicKeyB64
+		key = defaultKey
 	} else {
 		for _, required := range []struct{ name, value string }{
 			{EnvHost, host},
@@ -100,13 +133,24 @@ func Bootstrap() (qurl.HubBootstrap, error) {
 		return qurl.HubBootstrap{}, fmt.Errorf("%w: %s must be a valid port in canonical decimal form; got %q", ErrConfig, EnvPort, portRaw)
 	}
 	if key == "" && setCount == 0 {
-		return qurl.HubBootstrap{}, fmt.Errorf("%w: this build has no pinned production Hub key; set the all-or-none %s/%s/%s custom deployment triple", ErrConfig, EnvHost, EnvPort, EnvServerPublicKey)
+		return qurl.HubBootstrap{}, fmt.Errorf("%w: this build has no pinned %s Hub key; set the all-or-none %s/%s/%s custom deployment triple", ErrConfig, deployment, EnvHost, EnvPort, EnvServerPublicKey)
 	}
 	hub := qurl.HubBootstrap{Host: host, Port: port, ServerPublicKeyB64: key}
 	if err := ValidateBootstrap(hub); err != nil {
 		return qurl.HubBootstrap{}, err
 	}
 	return hub, nil
+}
+
+func isSandboxAPIEndpoint(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") ||
+		!strings.EqualFold(u.Hostname(), "api.layerv.xyz") ||
+		(u.Port() != "" && u.Port() != "443") || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	return true
 }
 
 // ValidateBootstrap mirrors qurl-go's native-assignment trust-root checks at

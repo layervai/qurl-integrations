@@ -187,7 +187,9 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		opts.resolveLocalResource = resolveLocalPublishResource
 	}
 	if opts.resolveHubBootstrap == nil {
-		opts.resolveHubBootstrap = hub.Bootstrap
+		opts.resolveHubBootstrap = func() (qurl.HubBootstrap, error) {
+			return hub.BootstrapForEndpoint(opts.resolvedEndpoint)
+		}
 	}
 	if opts.sharingWaitLimit <= 0 {
 		opts.sharingWaitLimit = 30 * time.Second

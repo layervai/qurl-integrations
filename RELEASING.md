@@ -30,6 +30,34 @@ trust root is the independent keyless signature on the exact recorded digest
 plus a signed manifest that binds that index to both platforms' BuildKit
 provenance and SPDX statements by content digest.
 
+## Sandbox Hub trust pin
+
+Official CLI releases embed the public X25519 identity of the sandbox NHP Hub.
+The CLI selects it only when its API endpoint is exactly
+`https://api.layerv.xyz`; production and custom endpoints never fall back to
+the sandbox trust root. DNS selects where to send packets, while the key proves
+the peer is the reviewed sandbox Hub before the Hub can assign a cell.
+
+The release job reads the canonical padded-base64 key from the public
+repository variable `QURL_CONNECTOR_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64`. Before
+GoReleaser starts, it decodes that value with the CLI's runtime decoder and
+compares the SHA-256 of the decoded 32 bytes with
+[`sandbox-public-key.sha256`](apps/cli/internal/connector/hub/sandbox-public-key.sha256).
+The workflow fails closed if the variable or fingerprint is absent, malformed,
+or mismatched; it never publishes an artifact that trusts an unreviewed key.
+
+The sandbox value originates at the NHP Control parameter
+`/sandbox/nhp/control/hub/identity/public-key`. Provisioning or rotating it is a
+two-repository review event: validate its canonical X25519 encoding, commit the
+raw-key fingerprint here, set the repository variable to that exact public
+value, and release only after both values match. Never substitute a cell server
+key—the Hub is a separate trust root. The production default stays fail-closed
+until the production Control root publishes and reviews its own Hub identity.
+Source, test, and snapshot builds remain dark unless the complete
+`QURL_CONNECTOR_HUB_HOST`,
+`QURL_CONNECTOR_HUB_PORT`, and `QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64`
+custom-deployment triple is supplied.
+
 ## Verify a release
 
 Requires [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)

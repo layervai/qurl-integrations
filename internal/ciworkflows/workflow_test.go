@@ -50,6 +50,13 @@ const (
 	cliReleaseVerifierStepName = "Verify the CLI release was created"
 	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
 	checkoutActionPrefix       = "actions/checkout@"
+	setupGoActionPrefix        = "actions/setup-go@"
+	cliReleaseJobID            = "release-cli"
+	hubPinVerifierStepName     = "Verify sandbox Hub pin"
+	goReleaserStepName         = "Run GoReleaser"
+	hubPinEnv                  = "QURL_CONNECTOR_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64"
+	hubPinRepositoryVariable   = "${{ vars.QURL_CONNECTOR_SANDBOX_HUB_SERVER_PUBLIC_KEY_B64 }}"
+	hubPinVerifierCommand      = "go run ./apps/cli/internal/connector/hub/cmd/verify-sandbox-pin apps/cli/internal/connector/hub/sandbox-public-key.sha256"
 	cliWorkflow                = "cli.yml"
 	cliMatrixJobID             = "matrix"
 	cliSandboxArtifactsJobID   = "sandbox-customer-artifacts"
@@ -360,7 +367,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 // asserts on.
 //
 // githubJob and step have both reached gocritic's rangeValCopy threshold — 128
-// and 136 bytes against a >= 128 default — so range over them by index and take
+// and 160 bytes against a >= 128 default — so range over them by index and take
 // a pointer, `for i := range job.Steps { current := &job.Steps[i] }`, and reach
 // a job through the *githubJob that Jobs holds: a map value cannot be
 // addressed, so a value map would force exactly the copy that finding names.
@@ -395,12 +402,13 @@ type githubJob struct {
 }
 
 type step struct {
-	ID    string `yaml:"id"`
-	If    string `yaml:"if"`
-	Name  string `yaml:"name"`
-	Run   string `yaml:"run"`
-	Shell string `yaml:"shell"`
-	Uses  string `yaml:"uses"`
+	ID    string            `yaml:"id"`
+	If    string            `yaml:"if"`
+	Name  string            `yaml:"name"`
+	Run   string            `yaml:"run"`
+	Shell string            `yaml:"shell"`
+	Uses  string            `yaml:"uses"`
+	Env   map[string]string `yaml:"env"`
 	// With carries an action step's inputs. Values are strings, bools and
 	// numbers, so it is read as `any` per key and asserted only where an input
 	// is load-bearing — a checkout's ref and credential persistence, a review's
@@ -419,6 +427,77 @@ type step struct {
 	// bootstrap assertions also use it to distinguish a bounded setup failure
 	// from the broader job timeout.
 	TimeoutMinutes any `yaml:"timeout-minutes"`
+}
+
+// TestCLIReleaseVerifiesAndInjectsTheSameHubPin closes the release half of the
+// sandbox native Connector trust chain. Runtime pins the Hub key rather than trusting
+// DNS, so the public repository variable cannot flow directly into ldflags:
+// the release tag must first verify it against the reviewed raw-key
+// fingerprint using the same decoder as runtime. Checking ordering and the
+// exact shared expression keeps a future workflow refactor from verifying one
+// value and publishing another.
+func TestCLIReleaseVerifiesAndInjectsTheSameSandboxHubPin(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	job, ok := workflow.Jobs[cliReleaseJobID]
+	if !ok {
+		t.Fatalf("%s is missing the %s job", releasePleaseWorkflow, cliReleaseJobID)
+	}
+
+	checkout, setupGo, verify, release := -1, -1, -1, -1
+	for i := range job.Steps {
+		current := &job.Steps[i]
+		switch {
+		case checkout < 0 && strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			checkout = i
+		case setupGo < 0 && strings.HasPrefix(current.Uses, setupGoActionPrefix):
+			setupGo = i
+		case current.Name == hubPinVerifierStepName:
+			verify = i
+		case current.Name == goReleaserStepName:
+			release = i
+		}
+	}
+	for name, index := range map[string]int{
+		"checkout":         checkout,
+		"setup-go":         setupGo,
+		"Hub pin verifier": verify,
+		"GoReleaser":       release,
+	} {
+		if index < 0 {
+			t.Fatalf("%s %s job is missing %s", releasePleaseWorkflow, cliReleaseJobID, name)
+		}
+	}
+	if checkout > verify || setupGo > verify || verify > release {
+		t.Fatalf("release step order is checkout=%d setup-go=%d verify=%d GoReleaser=%d; pin verification must use the checked-out tag and configured Go before publication", checkout, setupGo, verify, release)
+	}
+
+	verifyStep := &job.Steps[verify]
+	if got := strings.Join(strings.Fields(verifyStep.Run), " "); got != hubPinVerifierCommand {
+		t.Errorf("%q command = %q, want %q", hubPinVerifierStepName, got, hubPinVerifierCommand)
+	}
+	if got := verifyStep.Env[hubPinEnv]; got != hubPinRepositoryVariable {
+		t.Errorf("%q %s = %q, want %q", hubPinVerifierStepName, hubPinEnv, got, hubPinRepositoryVariable)
+	}
+	if condition := strings.TrimSpace(verifyStep.If); condition != "" {
+		t.Errorf("%q is conditional (if = %q); an unverified release must fail closed", hubPinVerifierStepName, condition)
+	}
+	if verifyStep.ContinueOnError != nil {
+		t.Errorf("%q sets continue-on-error = %#v; an unverified release must fail closed", hubPinVerifierStepName, verifyStep.ContinueOnError)
+	}
+	if got := job.Steps[release].Env[hubPinEnv]; got != hubPinRepositoryVariable {
+		t.Errorf("%q %s = %q, want the same verified value %q", goReleaserStepName, hubPinEnv, got, hubPinRepositoryVariable)
+	}
+
+	for _, path := range []string{
+		filepath.Join("..", "..", "apps", "cli", "internal", "connector", "hub", "cmd", "verify-sandbox-pin", "main.go"),
+		filepath.Join("..", "..", "apps", "cli", "internal", "connector", "hub", "sandbox-public-key.sha256"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("release pin input %s is not readable: %v", path, err)
+		}
+	}
 }
 
 // TestCLIMacOSKeychainSetupIsLive prevents the matrix from inferring whether
