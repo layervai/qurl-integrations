@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
 	"golang.org/x/mod/modfile"
@@ -12,19 +11,21 @@ import (
 const (
 	connectorModule = "github.com/layervai/qurl-connector"
 	connectorFloor  = "v0.8.3"
+	goModPath       = "../../../go.mod"
 )
 
 // TestConnectorFloorPreservesSuccessfulRecoveryHandoff keeps the released CLI
 // on a connector version that persists an authenticated assignment across the
 // recovery-to-serving process handoff. An older version can repeat the Hub
 // recovery request after a successful recovery and make local publish fail.
+// The floor rejects only older versions; qurl-connector's cross-process tests
+// own the behavioral contract for accepted current and future versions.
 // TODO(upstream-contract): Keep this floor in lockstep with qurl-connector's
 // successful-refresh handoff contract and its cross-process recovery tests.
 func TestConnectorFloorPreservesSuccessfulRecoveryHandoff(t *testing.T) {
 	t.Parallel()
 
-	goModPath := filepath.Join("..", "..", "..", "go.mod")
-	raw, err := os.ReadFile(goModPath) //nolint:gosec // G304: the path is a repository-relative test constant.
+	raw, err := os.ReadFile(goModPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", goModPath, err)
 	}
@@ -35,7 +36,7 @@ func TestConnectorFloorPreservesSuccessfulRecoveryHandoff(t *testing.T) {
 
 	for _, replacement := range parsed.Replace {
 		if replacement.Old.Path == connectorModule {
-			t.Fatalf("%s must not be replaced: released CLI must use the reviewed public module", connectorModule)
+			t.Fatalf("%s: %s must not be replaced: released CLI must use the reviewed public module", goModPath, connectorModule)
 		}
 	}
 
@@ -45,10 +46,10 @@ func TestConnectorFloorPreservesSuccessfulRecoveryHandoff(t *testing.T) {
 		}
 		version := requirement.Mod.Version
 		if !semver.IsValid(version) || semver.Compare(version, connectorFloor) < 0 {
-			t.Fatalf("%s version = %q, want %s or newer", connectorModule, version, connectorFloor)
+			t.Fatalf("%s: %s version = %q, want %s or newer", goModPath, connectorModule, version, connectorFloor)
 		}
 		return
 	}
 
-	t.Fatalf("%s is not required by the released CLI module", connectorModule)
+	t.Fatalf("%s: %s is not required by the released CLI dependency graph", goModPath, connectorModule)
 }
