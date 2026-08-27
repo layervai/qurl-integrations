@@ -790,14 +790,75 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 
 	// Read-only by construction rather than by enumeration: a new reader can be
 	// added without touching this test, but a writer cannot.
+	//
+	// Task is the one deliberate non-MCP grant. It buys context, not reach:
+	// a subagent inherits the deny-list above, so it can no more execute or
+	// fetch than its parent can. It has to be granted rather than merely left
+	// off the deny-list, because --allowed-tools is an auto-approve list and
+	// not an availability list — an unlisted builtin still needs a permission
+	// answer, and this job runs headless with no one present to give one.
+	// Widen this exception to a second builtin only with the same reasoning
+	// written down.
+	const allowedNonMCPTool = "Task"
+	grantsTask := false
 	for _, tool := range claudeArgsToolList(t, args, "--allowed-tools") {
+		if tool == allowedNonMCPTool {
+			grantsTask = true
+			continue
+		}
 		name, isGitHubMCP := strings.CutPrefix(tool, "mcp__github__")
 		if !isGitHubMCP {
-			t.Errorf("--allowed-tools grants %q, which is not a GitHub MCP read tool", tool)
+			t.Errorf("--allowed-tools grants %q, which is neither a GitHub MCP read tool nor %q", tool, allowedNonMCPTool)
 			continue
 		}
 		if !strings.HasPrefix(name, "get_") && !strings.HasPrefix(name, "list_") && !strings.HasPrefix(name, "search_") {
 			t.Errorf("--allowed-tools grants %q, which is not a get_/list_/search_ read", tool)
+		}
+	}
+	if !grantsTask {
+		t.Errorf("--allowed-tools does not grant %q, but the prompt instructs the review to delegate", allowedNonMCPTool)
+	}
+
+	assertPromptToolsAreGranted(t, review, args)
+}
+
+// assertPromptToolsAreGranted couples the prompt to the tool lists. The prompt
+// names the tools a review is told to reach for; nothing else fails if one of
+// them is dropped from --allowed-tools or added to --disallowed-tools, so the
+// review would keep being instructed to call a tool it is refused at runtime —
+// a silent, per-run capability loss that looks like a quality regression.
+func assertPromptToolsAreGranted(t *testing.T, review *step, args string) {
+	t.Helper()
+
+	prompt, ok := review.With["prompt"].(string)
+	if !ok {
+		t.Fatalf("%s prompt = %#v, want a string", claudeReviewRunStepName, review.With["prompt"])
+	}
+
+	// Bare names as the prompt spells them, mapped to the grant they require.
+	promptTools := map[string]string{
+		"search_code":       "mcp__github__search_code",
+		"get_file_contents": "mcp__github__get_file_contents",
+		"Task":              "Task",
+	}
+	allowed := make(map[string]bool)
+	for _, tool := range claudeArgsToolList(t, args, "--allowed-tools") {
+		allowed[tool] = true
+	}
+	denied := make(map[string]bool)
+	for _, tool := range claudeArgsToolList(t, args, "--disallowed-tools") {
+		denied[tool] = true
+	}
+	for bare, grant := range promptTools {
+		if !strings.Contains(prompt, bare) {
+			t.Errorf("prompt no longer mentions %q; drop it here too, or restore the instruction", bare)
+			continue
+		}
+		if !allowed[grant] {
+			t.Errorf("prompt instructs the review to use %q, but --allowed-tools does not grant %q", bare, grant)
+		}
+		if denied[grant] {
+			t.Errorf("prompt instructs the review to use %q, but --disallowed-tools denies %q", bare, grant)
 		}
 	}
 }
