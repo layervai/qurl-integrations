@@ -70,15 +70,11 @@ jobs:
     # The cap has to cover the budget plus everything around it, not just the
     # review. Worst case is a review that finishes just inside its budget and
     # then pays full price for verification: ~30s of setup, checkout and origin
-    # preparation (checkout's internal retry can add ~60s more), 900s of review
-    # (the budget below, raised from 780s),
+    # preparation (checkout's internal retry can add ~60s more), 780s of review,
     # then a publish-and-verify step whose three `timeout 30s` gh calls — the
     # pull request refresh, the comment POST, and the read-back — can burn ~92s.
-    # That reached ~16m against the 17m cap. With the budget at 900s the same
-    # worst case reaches ~18m, which is what the 19m cap below is sized for.
-    # (The 15 in #1049 was an old *job cap*; the 15 below is the *budget* —
-    # they are unrelated numbers that briefly share a value.)
-    #
+    # That reaches ~16m, so #1049's 15m cap could cancel the job mid-verify and
+    # restore the silent no-annotation failure this workflow now reports on.
     timeout-minutes: 17
     env:
       # Deliberately under the job cap, with enough headroom that the review

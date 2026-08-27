@@ -820,7 +820,7 @@ func assertPromptToolsAreGranted(t *testing.T, review *step, args, prompt string
 	t.Helper()
 
 	// Bare names as the prompt spells them, mapped to the grant they require.
-	// Task is checked by the caller, which also handles the revert direction.
+	// Delegation is not granted here, so no builtin appears in this map.
 	promptTools := map[string]string{
 		"search_code":       "mcp__github__search_code",
 		"get_file_contents": "mcp__github__get_file_contents",
