@@ -815,11 +815,22 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 			t.Errorf("--allowed-tools grants %q, which is not a get_/list_/search_ read", tool)
 		}
 	}
-	if !grantsTask {
-		t.Errorf("--allowed-tools does not grant %q, but the prompt instructs the review to delegate", allowedNonMCPTool)
+	// The grant and the instruction have to move together, in both directions:
+	// granting Task while the prompt never delegates is unused reach, and
+	// instructing delegation without the grant is a review told to call a tool
+	// it will be refused. Reverting means dropping both, and that stays green.
+	prompt, ok := review.With["prompt"].(string)
+	if !ok {
+		t.Fatalf("%s prompt = %#v, want a string", claudeReviewRunStepName, review.With["prompt"])
+	}
+	switch instructsDelegation := strings.Contains(prompt, "Task tool"); {
+	case instructsDelegation && !grantsTask:
+		t.Errorf("the prompt instructs delegation but --allowed-tools does not grant %q", allowedNonMCPTool)
+	case !instructsDelegation && grantsTask:
+		t.Errorf("--allowed-tools grants %q but the prompt never delegates; drop the grant too", allowedNonMCPTool)
 	}
 
-	assertPromptToolsAreGranted(t, review, args)
+	assertPromptToolsAreGranted(t, review, args, prompt)
 }
 
 // assertPromptToolsAreGranted couples the prompt to the tool lists. The prompt
@@ -827,19 +838,14 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 // them is dropped from --allowed-tools or added to --disallowed-tools, so the
 // review would keep being instructed to call a tool it is refused at runtime —
 // a silent, per-run capability loss that looks like a quality regression.
-func assertPromptToolsAreGranted(t *testing.T, review *step, args string) {
+func assertPromptToolsAreGranted(t *testing.T, review *step, args, prompt string) {
 	t.Helper()
 
-	prompt, ok := review.With["prompt"].(string)
-	if !ok {
-		t.Fatalf("%s prompt = %#v, want a string", claudeReviewRunStepName, review.With["prompt"])
-	}
-
 	// Bare names as the prompt spells them, mapped to the grant they require.
+	// Task is checked by the caller, which also handles the revert direction.
 	promptTools := map[string]string{
 		"search_code":       "mcp__github__search_code",
 		"get_file_contents": "mcp__github__get_file_contents",
-		"Task":              "Task",
 	}
 	allowed := make(map[string]bool)
 	for _, tool := range claudeArgsToolList(t, args, "--allowed-tools") {
