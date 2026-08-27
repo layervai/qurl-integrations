@@ -776,7 +776,7 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 	}
 
 	wantDenied := []string{
-		"Bash", "Read", "Glob", "Grep", "LS", "Edit", "Write", "MultiEdit",
+		"Bash", "Read", "Glob", "Grep", "LS", "Task", "Edit", "Write", "MultiEdit",
 		"NotebookEdit", "WebFetch", "WebSearch",
 		"mcp__github_file_ops__commit_files", "mcp__github_file_ops__delete_files",
 		"mcp__github__create_or_update_file", "mcp__github__push_files",
@@ -789,47 +789,25 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 		`claude_args --disallowed-tools`, claudeArgsToolList(t, args, "--disallowed-tools"))
 
 	// Read-only by construction rather than by enumeration: a new reader can be
-	// added without touching this test, but a writer cannot.
-	//
-	// Task is the one deliberate non-MCP grant. It buys context, not reach:
-	// a subagent inherits the deny-list above, so it can no more execute or
-	// fetch than its parent can. It has to be granted rather than merely left
-	// off the deny-list, because --allowed-tools is an auto-approve list and
-	// not an availability list — an unlisted builtin still needs a permission
-	// answer, and this job runs headless with no one present to give one.
-	// Widen this exception to a second builtin only with the same reasoning
-	// written down.
-	const allowedNonMCPTool = "Task"
-	grantsTask := false
+	// added without touching this test, but a writer cannot — and so can no
+	// builtin. Task was granted here briefly and removed: delegation is
+	// unbounded in cost, and one review was killed at its timeout before
+	// publishing anything.
 	for _, tool := range claudeArgsToolList(t, args, "--allowed-tools") {
-		if tool == allowedNonMCPTool {
-			grantsTask = true
-			continue
-		}
 		name, isGitHubMCP := strings.CutPrefix(tool, "mcp__github__")
 		if !isGitHubMCP {
-			t.Errorf("--allowed-tools grants %q, which is neither a GitHub MCP read tool nor %q", tool, allowedNonMCPTool)
+			t.Errorf("--allowed-tools grants %q, which is not a GitHub MCP read tool", tool)
 			continue
 		}
 		if !strings.HasPrefix(name, "get_") && !strings.HasPrefix(name, "list_") && !strings.HasPrefix(name, "search_") {
 			t.Errorf("--allowed-tools grants %q, which is not a get_/list_/search_ read", tool)
 		}
 	}
-	// The grant and the instruction have to move together, in both directions:
-	// granting Task while the prompt never delegates is unused reach, and
-	// instructing delegation without the grant is a review told to call a tool
-	// it will be refused. Reverting means dropping both, and that stays green.
+
 	prompt, ok := review.With["prompt"].(string)
 	if !ok {
 		t.Fatalf("%s prompt = %#v, want a string", claudeReviewRunStepName, review.With["prompt"])
 	}
-	switch instructsDelegation := strings.Contains(prompt, "Task tool"); {
-	case instructsDelegation && !grantsTask:
-		t.Errorf("the prompt instructs delegation but --allowed-tools does not grant %q", allowedNonMCPTool)
-	case !instructsDelegation && grantsTask:
-		t.Errorf("--allowed-tools grants %q but the prompt never delegates; drop the grant too", allowedNonMCPTool)
-	}
-
 	assertPromptToolsAreGranted(t, review, args, prompt)
 }
 
