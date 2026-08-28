@@ -32,7 +32,7 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 	if err != nil {
 		return nil, err
 	}
-	admitter, err := connectorshare.NewNativeAdmitter(runtime)
+	admitter, err := connectorshare.NewNativeAdmitter(ctx, runtime)
 	if err != nil {
 		return nil, errors.Join(err, runtime.Close())
 	}

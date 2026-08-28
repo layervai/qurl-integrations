@@ -41,6 +41,44 @@ type bootstrapNativeRuntime struct {
 	closed bool
 }
 
+// ownerOnlyTestShareRegistry keeps the registered-device ownership seam under
+// test on every platform. Native local state is intentionally unsupported on
+// Windows, so these client-bootstrap tests must not depend on the Unix file
+// lock implementation merely to record the authenticated owner.
+type ownerOnlyTestShareRegistry struct{ ownerID string }
+
+func (r *ownerOnlyTestShareRegistry) BindOwner(_ context.Context, ownerID string) error {
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return errors.New("test owner ID is empty")
+	}
+	if r.ownerID != "" && r.ownerID != ownerID {
+		return errors.New("test owner ID changed")
+	}
+	r.ownerID = ownerID
+	return nil
+}
+
+func (r *ownerOnlyTestShareRegistry) OwnerID(context.Context) (ownerID string, present bool, err error) {
+	return r.ownerID, r.ownerID != "", nil
+}
+
+func (*ownerOnlyTestShareRegistry) Get(context.Context, string) (*connectorstate.LocalShare, error) {
+	return nil, errors.New("unexpected test registry Get")
+}
+
+func (*ownerOnlyTestShareRegistry) Put(context.Context, *connectorstate.LocalShare) error {
+	return errors.New("unexpected test registry Put")
+}
+
+func (*ownerOnlyTestShareRegistry) SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error) {
+	return nil, errors.New("unexpected test registry SetDesired")
+}
+
+func (*ownerOnlyTestShareRegistry) Delete(context.Context, string) error {
+	return errors.New("unexpected test registry Delete")
+}
+
 func (r *bootstrapNativeRuntime) Handoff() (qurl.AgentStateStore, error) { return r.store, nil }
 func (r *bootstrapNativeRuntime) Close() error {
 	r.closed = true
@@ -68,6 +106,7 @@ func bootstrapRegisteredState(t *testing.T) *qurl.AgentState {
 func bootstrapGlobalOpts(t *testing.T, endpoint string, runtime *bootstrapNativeRuntime) *globalOpts {
 	t.Helper()
 	stateDir := t.TempDir()
+	registry := &ownerOnlyTestShareRegistry{}
 	return &globalOpts{
 		resolvedEndpoint: endpoint,
 		version:          "bootstrap-test",
@@ -77,8 +116,8 @@ func bootstrapGlobalOpts(t *testing.T, endpoint string, runtime *bootstrapNative
 		},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		openShareRegistry: func(dir string) (localShareRegistry, error) {
-			return connectorstate.OpenLocalShareRegistry(dir)
+		openShareRegistry: func(string) (localShareRegistry, error) {
+			return registry, nil
 		},
 		openNativeRuntime: func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
 			return runtime, nil

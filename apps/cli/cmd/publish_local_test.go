@@ -11,16 +11,12 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	registry := &ownerOnlyTestShareRegistry{}
 	stop := errors.New("stop after owner binding")
 	var authority connectorshare.NativeSessionOperationAuthority
 	res := runCLI(t, &runOpts{
@@ -96,10 +92,7 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	t.Parallel()
 	stateDir := t.TempDir()
-	registry, err := openOwnedTestShareRegistry(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	registry := &ownerOnlyTestShareRegistry{ownerID: "own_cli_fixture"}
 	var gotRefreshMode string
 	var recoveryCredential string
 	var sessionOperations connectorshare.NativeSessionOperationAuthority
