@@ -225,10 +225,18 @@ jobs:
       - name: Run credential-free sandbox validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
+            TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIUsesExactBinaryAndState
             TestSandboxForegroundLifecycleStateContract
+            TestSandboxNamespaceIsCanonicalAndSeparated
+            TestSandboxPublishProcessReportsEarlyExit
+            TestSandboxPublishReadinessWaitsForCompleteCRIDLine
+            TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure
+            TestSandboxStoppedRouteRefusalMatchesQuietGet
+            TestValidateSandboxCLIBinary
+            TestValidateSandboxDeviceIdentity
             TestValidateSandboxRouteFence
             TestValidateSandboxSharingTransitionRequiresAdvancedEpoch
         run: |
@@ -247,7 +255,7 @@ jobs:
           trap 'rm -f "$events"' EXIT
           if ! go test -race -tags=clisandbox -count=1 -json \
             -run "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd >"$events"; then
-            jq -r 'select(.Action == "output") | .Output' "$events"
+            jq -j 'select(.Output != null) | .Output' "$events"
             exit 1
           fi
           passed="$(jq -r --arg regex "$VALIDATOR_TEST_REGEX" \
@@ -277,7 +285,7 @@ jobs:
           trap 'rm -f "$events"' EXIT
           if ! go test -race -tags='clisandbox clisoak' -count=1 -json \
             -run "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd >"$events"; then
-            jq -r 'select(.Action == "output") | .Output' "$events"
+            jq -j 'select(.Output != null) | .Output' "$events"
             exit 1
           fi
           passed="$(jq -r --arg regex "$WARM_DAEMON_TEST_REGEX" \

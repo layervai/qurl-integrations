@@ -119,6 +119,8 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 		return sandboxRunNamespace{}, errors.New("qURL sharing run attempt exceeds uint64")
 	}
 	runtimeCode := ""
+	// TODO(upstream-contract): Keep this exact runtime enum in lockstep with
+	// the protected lifecycle orchestrator. The short namespace code is stable.
 	switch runtimeName {
 	case "host":
 		runtimeCode = "h"

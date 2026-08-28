@@ -30,6 +30,7 @@ import (
 
 	"github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectoragent "github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -44,7 +45,10 @@ const (
 	sandboxRouteFenceTimeout  = 2 * time.Minute
 	sandboxRouteFencePoll     = 500 * time.Millisecond
 	sandboxRouteFenceSettle   = 2 * time.Second
-	sandboxRouteServeGrace    = 5 * time.Second
+	// Serving after stop is a security-boundary failure, not eventual
+	// convergence. Five seconds is the intentional initial hard SLO; the
+	// private journey records the real propagation time before release.
+	sandboxRouteServeGrace = 5 * time.Second
 )
 
 type sandboxHTTPDoer interface {
@@ -235,6 +239,7 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	defer cancelRegistryRead()
 	local, err := waitSandboxLocalShareRegistry(registryCtx, stateDir, 100*time.Millisecond)
 	if err != nil {
+		fixture.process.requireRunning(t, "while waiting for the local-share registry")
 		fixture.forceStop(t)
 		t.Fatalf("read exact local-publish registry: %v", err)
 	}
@@ -261,7 +266,7 @@ func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInt
 	}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	last := "registry was not sampled"
+	var last string
 	for {
 		shares, present, err := state.ReadLocalSharesIfPresent(ctx, stateDir)
 		if err == nil && present && len(shares) == 1 {
@@ -499,6 +504,8 @@ func sandboxStoppedRouteRefusal(t *testing.T) string {
 	// TODO(upstream-contract): qurl-service currently uses this endpoint-dark
 	// response for a stopped resource. Keep the exact CLI and service contracts
 	// in lockstep if the service adds a distinct stopped-resource response.
+	// TestGoldens owns this file; TestSandboxStoppedRouteRefusalMatchesQuietGet
+	// proves the exact quiet get path used below emits the same bytes.
 	// The endpoint-scoped text is not sufficient by itself. The live gate also
 	// requires durable off/stopped state and a stable zero-hit backend window.
 	data, err := os.ReadFile(filepath.Join("testdata", "golden", "error_dark503.plain.stderr.golden"))
@@ -506,6 +513,17 @@ func sandboxStoppedRouteRefusal(t *testing.T) string {
 		t.Fatalf("read stopped-route refusal golden: %v", err)
 	}
 	return string(data)
+}
+
+func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerDark503(t))
+	res := runCLI(t, &runOpts{args: []string{
+		"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "payload"),
+	}})
+	if err := validateSandboxStoppedRouteRefusal(res, sandboxStoppedRouteRefusal(t)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertSandboxLocalRouteFenced(
