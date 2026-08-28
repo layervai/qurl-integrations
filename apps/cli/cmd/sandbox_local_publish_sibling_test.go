@@ -399,7 +399,7 @@ func validateSandboxProtectedProcessOutput(stdout, stderr string, secrets ...str
 			return errors.New("sandbox process exposed a protected credential")
 		}
 	}
-	if strings.Contains(stderr, "refresh-mode") || strings.Contains(stderr, "explicit approval") {
+	if strings.Contains(stdout+stderr, "refresh-mode") || strings.Contains(stdout+stderr, "explicit approval") {
 		return errors.New("sandbox process exposed retired assignment-approval UX")
 	}
 	return nil
@@ -732,6 +732,11 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 				t.Fatal("invalid foreground exit accepted")
 			}
 		})
+	}
+	for _, retiredUX := range []string{"explicit approval", "refresh-mode"} {
+		if err := validateSandboxProtectedProcessOutput(retiredUX, ""); err == nil {
+			t.Fatalf("retired daemon stdout %q was accepted", retiredUX)
+		}
 	}
 	if err := validateSandboxDownloadedBytes([]byte("changed"), []byte("sibling")); err == nil {
 		t.Fatal("sibling byte drift accepted")

@@ -683,12 +683,6 @@ func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRo
 	default:
 		return false, errors.New("route probe returned an unknown state")
 	}
-	if v.stableSince.IsZero() {
-		v.stableSince = now
-		v.stableHits = hits
-		v.last = fmt.Sprintf("route refusal has not stayed stable for %s", v.settleWindow)
-		return false, nil
-	}
 	if hits != v.stableHits {
 		priorHits := v.stableHits
 		if now.Sub(v.startedAt) >= v.serveGrace {
@@ -697,6 +691,11 @@ func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRo
 		v.stableSince = now
 		v.stableHits = hits
 		v.last = fmt.Sprintf("late backend hit changed the count from %d to %d", priorHits, hits)
+		return false, nil
+	}
+	if v.stableSince.IsZero() {
+		v.stableSince = now
+		v.last = fmt.Sprintf("route refusal has not stayed stable for %s", v.settleWindow)
 		return false, nil
 	}
 	stableFor := now.Sub(v.stableSince)
@@ -889,6 +888,20 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 					t.Fatal("backend serving after the teardown grace was accepted")
 				}
 			})
+		}
+	})
+
+	t.Run("first refusal after reset rejects a post-grace hit", func(t *testing.T) {
+		validator := sandboxRouteFenceValidator{settleWindow: settle, serveGrace: serveGrace}
+		if _, err := validator.observe(base, sandboxRouteRefused, 4); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validator.observe(base.Add(time.Second), sandboxRouteServed, 5); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validator.observe(base.Add(serveGrace+time.Second), sandboxRouteRefused, 6); err == nil ||
+			!strings.Contains(err.Error(), "late backend hit") {
+			t.Fatalf("post-grace hit after reset = %v, want late-hit failure", err)
 		}
 	})
 

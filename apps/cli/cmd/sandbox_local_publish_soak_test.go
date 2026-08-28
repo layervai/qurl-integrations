@@ -196,6 +196,7 @@ state_dir=$6
 {
   printf 'arg=%s\n' "$@"
   printf 'api_key=%s\n' "${QURL_API_KEY-unset}"
+  printf 'agent=%s\n' "${QURL_CONNECTOR_AGENT_ID-unset}"
   printf 'deployment=%s\n' "${QURL_DEPLOYMENT-unset}"
   printf 'run=%s/%s/%s\n' "${QURL_SHARING_RUN_ID-unset}" "${QURL_SHARING_RUN_ATTEMPT-unset}" "${QURL_SHARING_RUNTIME-unset}"
   printf 'state=%s\n' "${QURL_CONNECTOR_STATE_DIR-unset}"
@@ -217,6 +218,7 @@ while :; do sleep 0.1; done
 			"QURL_API_KEY":         "must-not-reach-daemon",
 			"QURL_ENDPOINT":        "https://api.example.test",
 			"QURL_DEPLOYMENT":      deployment,
+			state.EnvAgentID:       "must-not-reach-daemon-agent",
 			sandboxRunIDEnv:        "12345",
 			sandboxRunAttemptEnv:   "2",
 			sandboxRuntimeEnv:      "hardened_container",
@@ -252,6 +254,7 @@ while :; do sleep 0.1; done
 		"arg=--state-dir",
 		"arg=" + stateDir,
 		"api_key=unset",
+		"agent=unset",
 		"deployment=" + deployment,
 		"run=12345/2/hardened_container",
 		"state=" + stateDir,
