@@ -215,19 +215,33 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if len(validatorStep.Env) != 2 || validatorStep.Env["VALIDATOR_TEST_REGEX"] != validatorPattern || validatorStep.Env["VALIDATOR_TEST_NAMES"] != validatorNames {
 		t.Errorf("public CLI workflow validator env = %#v, want exact regex and sorted test names", validatorStep.Env)
 	}
-	for _, required := range []string{"go test -tags=clisandbox -list", "go test -race -tags=clisandbox -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, `[[ -z "$skipped" ]]`, `[[ "$passed" == "$VALIDATOR_TEST_NAMES" ]]`} {
+	validatorSkippedCheck := `if [[ -n "$skipped" ]]; then`
+	validatorPassedCheck := `if [[ "$passed" != "$VALIDATOR_TEST_NAMES" ]]; then`
+	validatorStatusCheck := `if (( validator_status != 0 )); then`
+	for _, required := range []string{"go test -tags=clisandbox -list", "go test -race -tags=clisandbox -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, validatorSkippedCheck, validatorPassedCheck, validatorStatusCheck} {
 		if strings.Count(validatorStep.Run, required) != 1 {
 			t.Errorf("public CLI workflow validator gate does not fail closed with %q", required)
 		}
+	}
+	if strings.Index(validatorStep.Run, validatorSkippedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) ||
+		strings.Index(validatorStep.Run, validatorPassedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) {
+		t.Error("public CLI workflow validator gate checks process status before PASS/SKIP diagnostics")
 	}
 	warmDaemonStep := findStep("Run exact warm-daemon process contract")
 	if len(warmDaemonStep.Env) != 2 || warmDaemonStep.Env["WARM_DAEMON_TEST_REGEX"] != "^TestExactWarmDaemonProcessContract$" || warmDaemonStep.Env["WARM_DAEMON_TEST_NAME"] != "TestExactWarmDaemonProcessContract" {
 		t.Errorf("public CLI workflow warm-daemon env = %#v, want one exact test", warmDaemonStep.Env)
 	}
-	for _, required := range []string{"go test -tags='clisandbox clisoak' -list", "go test -race -tags='clisandbox clisoak' -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, `[[ -z "$skipped" && "$passed" == "$WARM_DAEMON_TEST_NAME" ]]`} {
+	warmDaemonSkippedCheck := `if [[ -n "$skipped" ]]; then`
+	warmDaemonPassedCheck := `if [[ "$passed" != "$WARM_DAEMON_TEST_NAME" ]]; then`
+	warmDaemonStatusCheck := `if (( warm_daemon_status != 0 )); then`
+	for _, required := range []string{"go test -tags='clisandbox clisoak' -list", "go test -race -tags='clisandbox clisoak' -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, warmDaemonSkippedCheck, warmDaemonPassedCheck, warmDaemonStatusCheck} {
 		if strings.Count(warmDaemonStep.Run, required) != 1 {
 			t.Errorf("public CLI workflow warm-daemon gate does not fail closed with %q", required)
 		}
+	}
+	if strings.Index(warmDaemonStep.Run, warmDaemonSkippedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) ||
+		strings.Index(warmDaemonStep.Run, warmDaemonPassedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) {
+		t.Error("public CLI workflow warm-daemon gate checks process status before PASS/SKIP diagnostics")
 	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))

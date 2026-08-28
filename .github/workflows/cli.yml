@@ -264,20 +264,24 @@ jobs:
           go test -race -tags=clisandbox -count=1 -json \
             -run "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd >"$events" || validator_status=$?
           jq -j 'select(.Output != null) | .Output' "$events"
-          if (( validator_status != 0 )); then
-            echo "::error::credential-free validator test process failed with status $validator_status"
-            exit "$validator_status"
-          fi
           passed="$(jq -r --arg regex "$VALIDATOR_TEST_REGEX" \
             'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' "$events" | LC_ALL=C sort)"
           skipped="$(jq -r --arg regex "$VALIDATOR_TEST_REGEX" \
             'select(.Action == "skip" and ((.Test // "") | test($regex))) | .Test' "$events" | LC_ALL=C sort)"
-          [[ -z "$skipped" ]] || { echo "::error::required credential-free validators skipped"; exit 1; }
-          [[ "$passed" == "$VALIDATOR_TEST_NAMES" ]] || {
+          if [[ -n "$skipped" ]]; then
+            echo "::error::required credential-free validators skipped"
+            printf '%s\n' "$skipped"
+            exit 1
+          fi
+          if [[ "$passed" != "$VALIDATOR_TEST_NAMES" ]]; then
             echo "::error::required credential-free validators did not all report PASS"
             diff -u <(printf '%s\n' "$VALIDATOR_TEST_NAMES") <(printf '%s\n' "$passed")
             exit 1
-          }
+          fi
+          if (( validator_status != 0 )); then
+            echo "::error::credential-free validator test process failed with status $validator_status"
+            exit "$validator_status"
+          fi
 
       - name: Run exact warm-daemon process contract
         shell: bash
@@ -297,18 +301,24 @@ jobs:
           go test -race -tags='clisandbox clisoak' -count=1 -json \
             -run "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd >"$events" || warm_daemon_status=$?
           jq -j 'select(.Output != null) | .Output' "$events"
-          if (( warm_daemon_status != 0 )); then
-            echo "::error::exact warm-daemon test process failed with status $warm_daemon_status"
-            exit "$warm_daemon_status"
-          fi
           passed="$(jq -r --arg regex "$WARM_DAEMON_TEST_REGEX" \
             'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' "$events")"
           skipped="$(jq -r --arg regex "$WARM_DAEMON_TEST_REGEX" \
             'select(.Action == "skip" and ((.Test // "") | test($regex))) | .Test' "$events")"
-          [[ -z "$skipped" && "$passed" == "$WARM_DAEMON_TEST_NAME" ]] || {
-            echo "::error::exact warm-daemon contract did not report one PASS with zero skips"
+          if [[ -n "$skipped" ]]; then
+            echo "::error::required exact warm-daemon test skipped"
+            printf '%s\n' "$skipped"
             exit 1
-          }
+          fi
+          if [[ "$passed" != "$WARM_DAEMON_TEST_NAME" ]]; then
+            echo "::error::exact warm-daemon contract did not report one PASS"
+            diff -u <(printf '%s\n' "$WARM_DAEMON_TEST_NAME") <(printf '%s\n' "$passed")
+            exit 1
+          fi
+          if (( warm_daemon_status != 0 )); then
+            echo "::error::exact warm-daemon test process failed with status $warm_daemon_status"
+            exit "$warm_daemon_status"
+          fi
 
       - name: Test sandbox matched-cohort artifact contract
         shell: bash
