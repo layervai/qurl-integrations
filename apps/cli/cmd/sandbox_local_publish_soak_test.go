@@ -55,6 +55,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	warmRestartDone := false
 	epochRestartDone := false
 	requestCount := 1
+	routeDest := filepath.Join(t.TempDir(), "payload")
 
 	var warmDaemon *sandboxExactDaemonProcess
 	defer func() {
@@ -85,7 +86,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			epochRestartDone = true
 		}
 
-		if err := sandboxLocalRouteOnce(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker); err != nil {
+		if err := sandboxLocalRouteOnce(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker, routeDest); err != nil {
 			t.Fatalf("continuous customer request %d failed after %s: %v", requestCount, time.Since(started).Round(time.Second), err)
 		}
 		requestCount++

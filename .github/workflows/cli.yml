@@ -170,8 +170,10 @@ jobs:
           fi
           lifecycle_events=$(mktemp)
           trap 'rm -f "$lifecycle_events"' EXIT
-          go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd |
-            tee "$lifecycle_events"
+          lifecycle_status=0
+          go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd \
+            >"$lifecycle_events" || lifecycle_status=$?
+          jq -j 'select(.Output != null) | .Output' "$lifecycle_events"
           passed_tests="$(
             jq -r --arg regex "$LIFECYCLE_TEST_REGEX" \
               'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' \
@@ -195,6 +197,10 @@ jobs:
               <(printf '%s\n' "$LIFECYCLE_TEST_NAMES") \
               <(printf '%s\n' "$passed_tests")
             exit 1
+          fi
+          if (( lifecycle_status != 0 )); then
+            echo "::error::CRID lifecycle test process failed with status $lifecycle_status"
+            exit "$lifecycle_status"
           fi
 
       # 40 is the intentional initial floor, not the target. The v2 rebuild
@@ -225,12 +231,13 @@ jobs:
       - name: Run credential-free sandbox validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIUsesExactBinaryAndState
             TestSandboxForegroundLifecycleStateContract
             TestSandboxNamespaceIsCanonicalAndSeparated
+            TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
             TestSandboxPublishProcessReportsEarlyExit
             TestSandboxPublishReadinessWaitsForCompleteCRIDLine
             TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure

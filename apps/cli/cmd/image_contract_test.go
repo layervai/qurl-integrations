@@ -54,7 +54,7 @@ func TestCLIImageContract(t *testing.T) {
 
 func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 	t.Parallel()
-	repoRoot := filepath.Clean("../../..")
+	repoRoot := filepath.Clean(cliRepoRoot)
 	forbidden := [][]byte{
 		[]byte("ghcr.io/layervai/qurl-connector"),
 		[]byte("/usr/local/bin/qurl-connector"),
@@ -102,7 +102,7 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 
 func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	t.Parallel()
-	repoRoot := filepath.Clean("../../..")
+	repoRoot := filepath.Clean(cliRepoRoot)
 	retiredWorkflows, err := filepath.Glob(filepath.Join(repoRoot, ".github", "workflows", "cli-connector-resource-*.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +177,8 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		lifecycleListCommand,
 		`if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
 		lifecycleRunCommand,
+		`jq -j 'select(.Output != null) | .Output'`,
+		`lifecycle_status=0`,
 		`select(.Action == "pass" and ((.Test // "") | test($regex)))`,
 		`select(.Action == "skip" and ((.Test // "") | test($regex)))`,
 		`if [[ -n "$skipped_tests" ]]; then`,
@@ -197,6 +199,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
 		"TestSandboxForegroundLifecycleStateContract",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
+		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
 		"TestSandboxPublishReadinessWaitsForCompleteCRIDLine",
 		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",

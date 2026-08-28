@@ -47,7 +47,9 @@ const (
 	sandboxRouteFenceSettle   = 2 * time.Second
 	// Serving after stop is a security-boundary failure, not eventual
 	// convergence. Five seconds is the intentional initial hard SLO; the
-	// private journey records the real propagation time before release.
+	// private journey records the real propagation time before release. The
+	// deadline applies when a probe is issued, so a request that started inside
+	// the grace is not reclassified only because its round trip finished later.
 	sandboxRouteServeGrace = 5 * time.Second
 )
 
@@ -331,10 +333,10 @@ func runSandboxLocalCLI(t *testing.T, binary string, env map[string]string, stat
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	return runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, args...)
+	return runSandboxLocalCLIContext(ctx, t, binary, env, stateDir, args...)
 }
 
-func runSandboxLocalCLIContext(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir string, args ...string) *runResult {
+func runSandboxLocalCLIContext(ctx context.Context, t *testing.T, binary string, env map[string]string, stateDir string, args ...string) *runResult {
 	t.Helper()
 	commandArgs := append([]string{"--endpoint", env["QURL_ENDPOINT"]}, args...)
 	cmd := exec.CommandContext(ctx, binary, commandArgs...) //nolint:gosec // The protected test validates the fixed binary and supplies closed arguments.
@@ -420,9 +422,10 @@ func assertSandboxListRow(t *testing.T, binary string, env map[string]string, st
 func assertSandboxLocalRoute(t *testing.T, binary string, env map[string]string, stateDir, crid, marker string, limit time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(limit)
+	dest := filepath.Join(t.TempDir(), "payload")
 	var last string
 	for time.Now().Before(deadline) {
-		if err := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker); err == nil {
+		if err := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker, dest); err == nil {
 			return
 		} else {
 			last = err.Error()
@@ -432,18 +435,17 @@ func assertSandboxLocalRoute(t *testing.T, binary string, env map[string]string,
 	t.Fatalf("public qURL route for %s did not deliver the local backend bytes: %s", crid, last)
 }
 
-func sandboxLocalRouteOnce(t *testing.T, binary string, env map[string]string, stateDir, crid, marker string) error {
+func sandboxLocalRouteOnce(t *testing.T, binary string, env map[string]string, stateDir, crid, marker, dest string) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	return sandboxLocalRouteOnceContext(t, ctx, binary, env, stateDir, crid, marker)
+	return sandboxLocalRouteOnceContext(ctx, t, binary, env, stateDir, crid, marker, dest)
 }
 
-func sandboxLocalRouteOnceContext(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker string) error {
+func sandboxLocalRouteOnceContext(ctx context.Context, t *testing.T, binary string, env map[string]string, stateDir, crid, marker, dest string) error {
 	t.Helper()
 	probeState, err := probeSandboxLocalRoute(
-		t, ctx, binary, env, stateDir, crid, marker,
-		filepath.Join(t.TempDir(), "payload"), sandboxStoppedRouteRefusal(t),
+		ctx, t, binary, env, stateDir, crid, marker, dest, sandboxStoppedRouteRefusal(t),
 	)
 	if err != nil {
 		return err
@@ -461,12 +463,12 @@ const (
 	sandboxRouteRefused
 )
 
-func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker, dest, stoppedRefusal string) (sandboxRouteProbeState, error) {
+func probeSandboxLocalRoute(ctx context.Context, t *testing.T, binary string, env map[string]string, stateDir, crid, marker, dest, stoppedRefusal string) (sandboxRouteProbeState, error) {
 	t.Helper()
 	if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, fmt.Errorf("clear prior route-probe destination: %w", err)
 	}
-	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "--quiet", "get", crid, "--file", dest)
+	res := runSandboxLocalCLIContext(ctx, t, binary, env, stateDir, "--quiet", "get", crid, "--file", dest)
 	if res.code != 0 {
 		if err := validateSandboxStoppedRouteRefusal(res, stoppedRefusal); err != nil {
 			return 0, err
@@ -546,7 +548,7 @@ func assertSandboxLocalRouteFenced(
 		sandboxRouteFenceSettle,
 		sandboxRouteServeGrace,
 		func(ctx context.Context) (sandboxRouteProbeState, error) {
-			return probeSandboxLocalRoute(t, ctx, binary, env, stateDir, crid, marker, dest, stoppedRefusal)
+			return probeSandboxLocalRoute(ctx, t, binary, env, stateDir, crid, marker, dest, stoppedRefusal)
 		},
 		backendHits.Load,
 	); err != nil {
@@ -580,9 +582,10 @@ func waitSandboxRouteFence(
 			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", validator.last, ctx.Err())
 		default:
 		}
+		probeStartedAt := time.Now()
 		probeState, err := probe(ctx)
 		if err != nil {
-			if err := validator.observeProbeFailure(time.Now(), err, backendHits()); err != nil {
+			if err := validator.observeProbeFailure(probeStartedAt, err, backendHits()); err != nil {
 				return err
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -594,8 +597,7 @@ func waitSandboxRouteFence(
 			// window and remains the terminal diagnostic if it does not converge.
 		} else {
 			hits := backendHits()
-			now := time.Now()
-			settled, err := validator.observe(now, probeState, hits)
+			settled, err := validator.observe(probeStartedAt, probeState, hits)
 			if err != nil {
 				return err
 			}
@@ -606,6 +608,8 @@ func waitSandboxRouteFence(
 				if finalHits == hits {
 					return nil
 				}
+				// This read happens after the probe completed. Charge a newly
+				// observed hit at the read time, not at the probe issue time.
 				if _, err := validator.observe(time.Now(), sandboxRouteRefused, finalHits); err != nil {
 					return err
 				}
@@ -696,7 +700,7 @@ func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRo
 // successful convergence, even when the desired and observed states match.
 func validateSandboxSharingTransition(doc sandboxSharingDoc, desired, observed string, priorEpoch uint64) error {
 	if doc.DesiredState != desired || doc.ConnectionState != observed {
-		return fmt.Errorf("want %s/%s", desired, observed)
+		return fmt.Errorf("got %s/%s, want %s/%s", doc.DesiredState, doc.ConnectionState, desired, observed)
 	}
 	if doc.ServingEpoch <= priorEpoch {
 		return fmt.Errorf("serving epoch %d did not advance beyond %d", doc.ServingEpoch, priorEpoch)
@@ -925,6 +929,27 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 		}
 		if probes.Load() < 3 {
 			t.Fatalf("route fence settled without a full exact-refusal window: probes=%d", probes.Load())
+		}
+	})
+
+	t.Run("probe issued within grace may finish after grace", func(t *testing.T) {
+		var probes atomic.Uint64
+		var hits atomic.Uint64
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitSandboxRouteFence(ctx, time.Millisecond, time.Millisecond, 20*time.Millisecond, func(context.Context) (sandboxRouteProbeState, error) {
+			if probes.Add(1) == 1 {
+				time.Sleep(30 * time.Millisecond)
+				hits.Store(1)
+				return sandboxRouteServed, nil
+			}
+			return sandboxRouteRefused, nil
+		}, hits.Load)
+		if err != nil {
+			t.Fatalf("in-grace probe was charged for its round-trip time: %v", err)
+		}
+		if probes.Load() < 3 {
+			t.Fatalf("route fence settled without a complete refusal window: probes=%d", probes.Load())
 		}
 	})
 
