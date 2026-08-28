@@ -375,20 +375,31 @@ func (p *sandboxPublishProcess) interruptAndValidate(t *testing.T, secrets ...st
 }
 
 func validateSandboxForegroundExit(waitErr error, stdout, stderr, crid string, secrets ...string) error {
-	var exitErr *exec.ExitError
-	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
-		return fmt.Errorf("foreground publish exit = %v, want 130 after interrupt", waitErr)
+	if err := validateSandboxInterruptedExit(waitErr); err != nil {
+		return fmt.Errorf("foreground publish %w", err)
 	}
 	if stdout != crid+"\n" {
 		return errors.New("foreground publish did not print exactly one complete CRID line")
 	}
+	return validateSandboxProtectedProcessOutput(stdout, stderr, secrets...)
+}
+
+func validateSandboxInterruptedExit(waitErr error) error {
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
+		return fmt.Errorf("exit = %v, want 130 after interrupt", waitErr)
+	}
+	return nil
+}
+
+func validateSandboxProtectedProcessOutput(stdout, stderr string, secrets ...string) error {
 	for _, secret := range secrets {
 		if secret != "" && strings.Contains(stdout+stderr, secret) {
-			return errors.New("foreground publish exposed a protected credential")
+			return errors.New("sandbox process exposed a protected credential")
 		}
 	}
 	if strings.Contains(stderr, "refresh-mode") || strings.Contains(stderr, "explicit approval") {
-		return errors.New("foreground publish exposed retired assignment-approval UX")
+		return errors.New("sandbox process exposed retired assignment-approval UX")
 	}
 	return nil
 }
@@ -713,6 +724,7 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 		"stdout secret":       {waitErr: exit130, stdout: crid + "\napi-secret", secret: "api-secret"},
 		"stderr secret":       {waitErr: exit130, stdout: crid + "\n", stderr: "api-secret", secret: "api-secret"},
 		"retired approval UX": {waitErr: exit130, stdout: crid + "\n", stderr: "explicit approval"},
+		"retired refresh UX":  {waitErr: exit130, stdout: crid + "\n", stderr: "refresh-mode"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateSandboxForegroundExit(fixture.waitErr, fixture.stdout, fixture.stderr, crid, fixture.secret); err == nil {

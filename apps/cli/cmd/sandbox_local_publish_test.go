@@ -309,7 +309,7 @@ func runSandboxLocalCLIContext(t *testing.T, ctx context.Context, binary string,
 	commandEnv := cloneSandboxEnv(env)
 	commandEnv[state.EnvStateDirPrimary] = stateDir
 	cmd.Env = sandboxCommandEnv(commandEnv)
-	cmd.Stdin = http.NoBody
+	cmd.Stdin = nil
 	res := &runResult{}
 	cmd.Stdout = &res.stdout
 	cmd.Stderr = &res.stderr
@@ -432,7 +432,7 @@ const (
 func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker, dest, stoppedRefusal string) (sandboxRouteProbeState, error) {
 	t.Helper()
 	if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return 0, errors.New("clear prior route-probe destination")
+		return 0, fmt.Errorf("clear prior route-probe destination: %w", err)
 	}
 	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "get", crid, "--file", dest)
 	if res.code != 0 {
@@ -469,6 +469,8 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 
 func sandboxStoppedRouteRefusal(t *testing.T) string {
 	t.Helper()
+	// The endpoint-scoped text is not sufficient by itself. The live gate also
+	// requires durable off/stopped state and a stable zero-hit backend window.
 	data, err := os.ReadFile(filepath.Join("testdata", "golden", "error_dark503.plain.stderr.golden"))
 	if err != nil {
 		t.Fatalf("read stopped-route refusal golden: %v", err)

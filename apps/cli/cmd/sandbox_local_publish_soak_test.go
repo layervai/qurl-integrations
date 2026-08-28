@@ -202,7 +202,10 @@ trap 'exit 130' INT TERM
 : > "$state_dir/ready"
 while :; do sleep 0.1; done
 `
-	if err := os.WriteFile(binary, []byte(script), 0o500); err != nil {
+	if err := os.WriteFile(binary, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(binary, 0o500); err != nil { //nolint:gosec // The exact-binary fixture must be executable and non-writable.
 		t.Fatal(err)
 	}
 	fixture := &sandboxLocalFixture{
@@ -273,17 +276,15 @@ func (p *sandboxExactDaemonProcess) interruptAndValidate(t *testing.T, secrets .
 	}
 	select {
 	case waitErr := <-p.done:
-		var exitErr *exec.ExitError
-		if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
-			t.Fatalf("exact warm daemon exit = %v, want 130 after interrupt", waitErr)
+		if err := validateSandboxInterruptedExit(waitErr); err != nil {
+			t.Fatalf("exact warm daemon %v", err)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("exact warm daemon did not stop after interrupt")
 	}
-	res := &runResult{}
-	_, _ = res.stdout.WriteString(p.stdout.String())
-	_, _ = res.stderr.WriteString(p.stderr.String())
-	assertSandboxStreamsDoNotContainSecrets(t, res, secrets...)
+	if err := validateSandboxProtectedProcessOutput(p.stdout.String(), p.stderr.String(), secrets...); err != nil {
+		t.Fatalf("exact warm daemon output: %v", err)
+	}
 }
 
 func (p *sandboxExactDaemonProcess) forceStop() {

@@ -198,15 +198,25 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestValidateSandboxRouteFence",
 		"TestValidateSandboxSharingTransitionRequiresAdvancedEpoch",
 	}
-	validatorRegex := "-run '^(" + strings.Join(validatorTests, "|") + ")$'"
+	validatorPattern := "^(" + strings.Join(validatorTests, "|") + ")$"
+	validatorNames := strings.Join(validatorTests, "\n")
 	validatorStep := findStep("Run credential-free sandbox validator tests")
-	if strings.Count(validatorStep.Run, validatorRegex) != 1 {
-		t.Error("public CLI workflow does not execute the exact credential-free sandbox validator set")
+	if len(validatorStep.Env) != 2 || validatorStep.Env["VALIDATOR_TEST_REGEX"] != validatorPattern || validatorStep.Env["VALIDATOR_TEST_NAMES"] != validatorNames {
+		t.Errorf("public CLI workflow validator env = %#v, want exact regex and sorted test names", validatorStep.Env)
+	}
+	for _, required := range []string{"go test -tags=clisandbox -list", "go test -race -tags=clisandbox -count=1 -json", `select(.Action == "pass"`, `select(.Action == "skip"`, `[[ -z "$skipped" ]]`, `[[ "$passed" == "$VALIDATOR_TEST_NAMES" ]]`} {
+		if strings.Count(validatorStep.Run, required) != 1 {
+			t.Errorf("public CLI workflow validator gate does not fail closed with %q", required)
+		}
 	}
 	warmDaemonStep := findStep("Run exact warm-daemon process contract")
-	if strings.Count(warmDaemonStep.Run, "go test -race -tags='clisandbox clisoak' -count=1") != 1 ||
-		strings.Count(warmDaemonStep.Run, "-run '^TestExactWarmDaemonProcessContract$'") != 1 {
-		t.Error("public CLI workflow does not execute the exact credential-free warm-daemon process contract")
+	if len(warmDaemonStep.Env) != 2 || warmDaemonStep.Env["WARM_DAEMON_TEST_REGEX"] != "^TestExactWarmDaemonProcessContract$" || warmDaemonStep.Env["WARM_DAEMON_TEST_NAME"] != "TestExactWarmDaemonProcessContract" {
+		t.Errorf("public CLI workflow warm-daemon env = %#v, want one exact test", warmDaemonStep.Env)
+	}
+	for _, required := range []string{"go test -tags='clisandbox clisoak' -list", "go test -race -tags='clisandbox clisoak' -count=1 -json", `select(.Action == "pass"`, `select(.Action == "skip"`, `[[ -z "$skipped" && "$passed" == "$WARM_DAEMON_TEST_NAME" ]]`} {
+		if strings.Count(warmDaemonStep.Run, required) != 1 {
+			t.Errorf("public CLI workflow warm-daemon gate does not fail closed with %q", required)
+		}
 	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))

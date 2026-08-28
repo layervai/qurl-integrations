@@ -83,12 +83,18 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	endpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
 	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
 	relayURL := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
+	runID := strings.TrimSpace(os.Getenv(sandboxRunIDEnv))
+	runAttempt := strings.TrimSpace(os.Getenv(sandboxRunAttemptEnv))
+	runtimeName := strings.TrimSpace(os.Getenv(sandboxRuntimeEnv))
 	missing := []string{}
 	for name, value := range map[string]string{
 		"QURL_API_KEY":                key,
 		"QURL_ENDPOINT":               endpoint,
 		"QURL_SANDBOX_QV2_ISSUER_KEY": issuerKey,
 		"QURL_SANDBOX_QV2_RELAY_URL":  relayURL,
+		sandboxRunIDEnv:               runID,
+		sandboxRunAttemptEnv:          runAttempt,
+		sandboxRuntimeEnv:             runtimeName,
 	} {
 		if value == "" {
 			missing = append(missing, name)
@@ -101,15 +107,16 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
 			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
 			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
-			"settings are built from.", missing)
+			"settings are built from. The private orchestrator must also supply the exact run "+
+			"ID, attempt, and runtime identity.", missing)
 	}
 	return map[string]string{
 		"QURL_API_KEY":       key,
 		"QURL_ENDPOINT":      endpoint,
 		"QURL_DEPLOYMENT":    journeyDeploymentFile(t, issuerKey, relayURL),
-		sandboxRunIDEnv:      os.Getenv(sandboxRunIDEnv),
-		sandboxRunAttemptEnv: os.Getenv(sandboxRunAttemptEnv),
-		sandboxRuntimeEnv:    os.Getenv(sandboxRuntimeEnv),
+		sandboxRunIDEnv:      runID,
+		sandboxRunAttemptEnv: runAttempt,
+		sandboxRuntimeEnv:    runtimeName,
 	}
 }
 
