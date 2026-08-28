@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
 	"golang.org/x/mod/modfile"
@@ -14,9 +13,8 @@ const (
 	connectorModule = "github.com/layervai/qurl-connector"
 	connectorFloor  = "v0.8.3"
 	cliRepoRoot     = "../../.."
+	goModPath       = cliRepoRoot + "/go.mod"
 )
-
-var goModPath = filepath.Join(cliRepoRoot, "go.mod")
 
 // TestConnectorFloorPreservesSuccessfulRecoveryHandoff keeps the released CLI
 // on a connector version that persists an authenticated assignment across the
