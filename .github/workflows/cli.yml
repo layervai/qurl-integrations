@@ -260,10 +260,13 @@ jobs:
           fi
           events=$(mktemp)
           trap 'rm -f "$events"' EXIT
-          if ! go test -race -tags=clisandbox -count=1 -json \
-            -run "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd >"$events"; then
-            jq -j 'select(.Output != null) | .Output' "$events"
-            exit 1
+          validator_status=0
+          go test -race -tags=clisandbox -count=1 -json \
+            -run "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd >"$events" || validator_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          if (( validator_status != 0 )); then
+            echo "::error::credential-free validator test process failed with status $validator_status"
+            exit "$validator_status"
           fi
           passed="$(jq -r --arg regex "$VALIDATOR_TEST_REGEX" \
             'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' "$events" | LC_ALL=C sort)"
@@ -290,10 +293,13 @@ jobs:
           }
           events=$(mktemp)
           trap 'rm -f "$events"' EXIT
-          if ! go test -race -tags='clisandbox clisoak' -count=1 -json \
-            -run "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd >"$events"; then
-            jq -j 'select(.Output != null) | .Output' "$events"
-            exit 1
+          warm_daemon_status=0
+          go test -race -tags='clisandbox clisoak' -count=1 -json \
+            -run "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd >"$events" || warm_daemon_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          if (( warm_daemon_status != 0 )); then
+            echo "::error::exact warm-daemon test process failed with status $warm_daemon_status"
+            exit "$warm_daemon_status"
           fi
           passed="$(jq -r --arg regex "$WARM_DAEMON_TEST_REGEX" \
             'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' "$events")"

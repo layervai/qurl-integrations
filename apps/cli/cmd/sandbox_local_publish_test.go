@@ -353,6 +353,7 @@ func runSandboxLocalCLIContext(ctx context.Context, t *testing.T, binary string,
 			res.code = exitErr.ExitCode()
 		} else {
 			res.code = 1
+			_, _ = fmt.Fprintf(&res.stderr, "Error: execute exact qurl test artifact: %v\n", err)
 		}
 	}
 	assertSandboxStreamsDoNotContainSecrets(t, res, env["QURL_API_KEY"])
@@ -688,8 +689,13 @@ func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRo
 		return false, nil
 	}
 	stableFor := now.Sub(v.stableSince)
-	if stableFor >= v.settleWindow {
+	graceElapsed := now.Sub(v.startedAt)
+	if stableFor >= v.settleWindow && graceElapsed >= v.serveGrace {
 		return true, nil
+	}
+	if graceElapsed < v.serveGrace {
+		v.last = fmt.Sprintf("route refusal is stable but teardown grace has elapsed for %s of %s", graceElapsed, v.serveGrace)
+		return false, nil
 	}
 	v.last = fmt.Sprintf("route refusal has stayed stable for %s of %s", stableFor, v.settleWindow)
 	return false, nil
@@ -747,6 +753,19 @@ printf 'arg=%s\n' "$@"
 	if got := res.stdout.String(); got != want {
 		t.Fatalf("external CLI fixture output = %q, want %q", got, want)
 	}
+
+	nonExecutable := filepath.Join(t.TempDir(), "qurl-no-exec")
+	if err := os.WriteFile(nonExecutable, []byte("not executable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed := runSandboxLocalCLI(t, nonExecutable, map[string]string{
+		"QURL_API_KEY":  "lv_test_exact_external_binary_key",
+		"QURL_ENDPOINT": "https://sandbox.invalid",
+	}, t.TempDir(), "status", "test-crid")
+	if failed.code != 1 || failed.stderr.Len() == 0 ||
+		!strings.Contains(failed.stderr.String(), nonExecutable) {
+		t.Fatalf("unstartable exact CLI diagnostic = exit %d stderr %q", failed.code, failed.stderr.String())
+	}
 }
 
 func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
@@ -783,6 +802,27 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 			{at: base},
 			{at: base.Add(settle - time.Nanosecond)},
 			{at: base.Add(settle), settled: true},
+		} {
+			settled, err := validator.observe(observation.at, sandboxRouteRefused, 4)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settled != observation.settled {
+				t.Fatalf("observation at %s settled=%t, want %t", observation.at.Sub(base), settled, observation.settled)
+			}
+		}
+	})
+
+	t.Run("short settle window still samples through serving grace", func(t *testing.T) {
+		validator := sandboxRouteFenceValidator{settleWindow: 2 * time.Second, serveGrace: serveGrace}
+		for _, observation := range []struct {
+			at      time.Time
+			settled bool
+		}{
+			{at: base},
+			{at: base.Add(2 * time.Second)},
+			{at: base.Add(serveGrace - time.Nanosecond)},
+			{at: base.Add(serveGrace), settled: true},
 		} {
 			settled, err := validator.observe(observation.at, sandboxRouteRefused, 4)
 			if err != nil {

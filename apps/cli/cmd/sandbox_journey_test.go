@@ -128,7 +128,7 @@ func addSandboxRunIdentity(t *testing.T, env map[string]string) {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		t.Skipf("SKIPPED LOUDLY: run-scoped sandbox journey is disarmed — missing %v. "+
+		t.Fatalf("run-scoped sandbox journey is disarmed — missing %v. "+
 			"The private orchestrator must supply the exact run ID, attempt, and runtime identity.", missing)
 	}
 	for name, value := range values {

@@ -127,7 +127,7 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 	case "hardened_container":
 		runtimeCode = "c"
 	default:
-		return sandboxRunNamespace{}, errors.New("qURL sharing runtime must be host or hardened_container")
+		return sandboxRunNamespace{}, fmt.Errorf("qURL sharing runtime %q is unsupported; accepted values are host and hardened_container", runtimeName)
 	}
 	labelCode := ""
 	switch label {
