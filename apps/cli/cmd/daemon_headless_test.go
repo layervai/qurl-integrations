@@ -23,6 +23,10 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
+func testNativeSessionConfig(ownerID string) (connectorshare.NativeSessionOperationAuthority, error) {
+	return connectorshare.NativeSessionOperationAuthority{OwnerID: ownerID}, nil
+}
+
 type headlessTestFactory struct {
 	started chan struct{}
 	once    sync.Once
@@ -132,12 +136,16 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 		if config.EnrollmentCredential != credential {
 			t.Fatalf("enrollment credential = %q", config.EnrollmentCredential)
 		}
+		if config.SessionOperations.OwnerID != "own_cli_fixture" {
+			t.Fatalf("native session authority = %#v", config.SessionOperations)
+		}
 		return nil, errors.Join(errors.New("native bootstrap rejected"), qurl.ErrAssignmentKeyRejected)
 	}
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	err := runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, tokenPath)
 	if err == nil || !strings.Contains(err.Error(), "native bootstrap rejected") {
@@ -146,8 +154,14 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 	if strings.Contains(err.Error(), credential) {
 		t.Fatalf("error exposed enrollment credential: %v", err)
 	}
-	if _, statErr := os.Lstat(filepath.Join(stateDir, connectorstate.LocalSharesFile)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("local registry exists after failed native bootstrap: %v", statErr)
+	registry, openErr := connectorstate.OpenLocalShareRegistry(stateDir)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	shares, listErr := registry.List(context.Background())
+	ownerID, ownerPresent, ownerErr := registry.OwnerID(context.Background())
+	if listErr != nil || len(shares) != 0 || ownerErr != nil || !ownerPresent || ownerID != "own_cli_fixture" {
+		t.Fatalf("failed bootstrap durable state = shares %+v list %v owner %q/%v/%v", shares, listErr, ownerID, ownerPresent, ownerErr)
 	}
 }
 
@@ -185,6 +199,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -199,7 +214,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	if attempts.Load() != 3 {
 		t.Fatalf("native bootstrap attempts=%d, want 3 in one process", attempts.Load())
 	}
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +254,7 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +278,7 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -304,7 +320,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -332,6 +348,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 				version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 				resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 				resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+				resolveSessionConfig: testNativeSessionConfig,
 			}
 			err = runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, "")
 			if err == nil || !strings.Contains(err.Error(), "dedicated state volume") {
@@ -355,7 +372,8 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 func writeHeadlessConfigFixture(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "share.yaml")
-	data := `version: 1
+	data := `version: 2
+owner_id: own_cli_fixture
 shares:
   - crid: qhpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw2j2vj4uq
     resource_id: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA

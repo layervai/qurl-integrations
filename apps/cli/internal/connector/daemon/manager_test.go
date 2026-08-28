@@ -222,6 +222,9 @@ func TestManagerPersistsTerminalDisableWithRealLocalRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.BindOwner(context.Background(), "own_daemon_fixture"); err != nil {
+		t.Fatal(err)
+	}
 	key := apitest.FixedResourceKey(t)
 	share := connectorstate.LocalShare{
 		CRID: key.CRID, ResourceID: key.ResourceID, ConnectorID: "terminal-share",

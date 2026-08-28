@@ -1,15 +1,16 @@
 // Package auth resolves the qURL API credential for the CLI.
 //
-// The API key is the only durable customer credential. It is never accepted
-// as a command-line flag (argv leaks into shell history and process lists);
-// it comes from exactly three places, in this order:
+// The account API key is a bootstrap or explicit-recovery credential. Current
+// CLI commands never store it; steady-state commands use the registered device
+// identity. It is never accepted as a command-line flag (argv leaks into shell
+// history and process lists). Bootstrap resolves it from these sources:
 //
 //  1. The QURL_API_KEY_FILE environment variable — private-file hermetic mode.
 //  2. The QURL_API_KEY environment variable — inline hermetic mode. When set, the
 //     credential store is bypassed entirely: nothing is read from or written
 //     to disk, which is what CI jobs and containers want.
-//  3. The credential store: the OS keyring first, with a mode-0600 file
-//     fallback used only where the keyring is unavailable. See Chain.
+//  3. The legacy credential store, only when a caller explicitly supplies it.
+//     The current command path passes nil and uses the store only for cleanup.
 package auth
 
 import (

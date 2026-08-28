@@ -1,25 +1,28 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
-// T3 contract tests for the credential commands: login's validate-then-store
+// T3 contract tests for the credential commands: login's validate-enroll-retire
 // order, logout's every-backend removal, and whoami's key-resolution
 // precedence — asserted against the mock platform and the injected storage
 // chain (goldens own the rendered bytes).
 
-// TestLoginValidatesThenStores pins the order: GET /v1/me first, storage
-// only after the platform accepted the key.
-func TestLoginValidatesThenStores(t *testing.T) {
+// TestLoginValidatesEnrollsThenRetiresAccountKey pins the order: GET /v1/me
+// first, registered-device enrollment second, and account-key removal only
+// after both identities agree.
+func TestLoginValidatesEnrollsThenRetiresAccountKey(t *testing.T) {
 	srv := apitest.NewServer(t)
-	kr := &fakeKeyring{}
+	kr := &fakeKeyring{key: testAPIKeyStored}
 	res := runCLI(t, &runOpts{
 		args:    []string{"--endpoint", srv.URL, "login"},
 		env:     map[string]string{},
@@ -37,10 +40,10 @@ func TestLoginValidatesThenStores(t *testing.T) {
 	if got := requests[0].Header.Get("Authorization"); got != "Bearer "+testAPIKey {
 		t.Errorf("login must validate the just-typed key, sent %d bytes", len(got))
 	}
-	if kr.key != testAPIKey {
-		t.Errorf("keyring holds %q, want the validated key", kr.key)
+	if kr.key != "" {
+		t.Errorf("consumed account key must not remain in the keyring, holds %q", kr.key)
 	}
-	for _, want := range []string{apitest.MeOwnerID, "OS keyring"} {
+	for _, want := range []string{apitest.MeOwnerID, "consumed, not stored"} {
 		if !strings.Contains(res.stderr.String(), want) {
 			t.Errorf("login confirmation must mention %q, got %q", want, res.stderr.String())
 		}
@@ -52,7 +55,7 @@ func TestLoginValidatesThenStores(t *testing.T) {
 func TestLoginRejectedKeyIsNeverStored(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
-	kr := &fakeKeyring{}
+	kr := &fakeKeyring{key: testAPIKeyStored}
 	dir := t.TempDir()
 	res := runCLI(t, &runOpts{
 		args:      []string{"--endpoint", srv.URL, "login"},
@@ -65,18 +68,18 @@ func TestLoginRejectedKeyIsNeverStored(t *testing.T) {
 		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
-	if kr.key != "" {
-		t.Errorf("rejected key must not reach the keyring, holds %q", kr.key)
+	if kr.key != testAPIKeyStored {
+		t.Errorf("failed login must not remove the prior key, holds %q", kr.key)
 	}
 	if _, err := auth.NewFileStore(dir).Load(); err == nil {
 		t.Error("rejected key must not reach the file store")
 	}
 }
 
-// TestLoginFallsBackToFileAndWarns pins the fallback save: with the keyring
-// unavailable, the key lands in the 0600 credential file and the warning
-// says so.
-func TestLoginFallsBackToFileAndWarns(t *testing.T) {
+// TestLoginDoesNotWriteFileFallback pins the one-time-key boundary when the
+// OS keyring is unavailable: successful enrollment still does not save the
+// typed account key to the fallback file.
+func TestLoginDoesNotWriteFileFallback(t *testing.T) {
 	srv := apitest.NewServer(t)
 	dir := t.TempDir()
 	res := runCLI(t, &runOpts{
@@ -89,12 +92,32 @@ func TestLoginFallsBackToFileAndWarns(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	got, err := auth.NewFileStore(dir).Load()
-	if err != nil || got != testAPIKey {
-		t.Errorf("file store Load = %q, %v; want the validated key", got, err)
+	if got, err := auth.NewFileStore(dir).Load(); err == nil {
+		t.Errorf("account key must not reach the file store, found %q", got)
 	}
-	if !strings.Contains(res.stderr.String(), "mode 0600") {
-		t.Errorf("fallback save must warn about the file, got %q", res.stderr.String())
+	if strings.Contains(res.stderr.String(), "mode 0600") {
+		t.Errorf("login did not store a key and must not emit the fallback warning, got %q", res.stderr.String())
+	}
+}
+
+func TestLoginEnrollmentFailurePreservesPriorStoredKey(t *testing.T) {
+	srv := apitest.NewServer(t)
+	kr := &fakeKeyring{key: testAPIKeyStored}
+	want := errors.New("native enrollment unavailable")
+	res := runCLI(t, &runOpts{
+		args:    []string{"--endpoint", srv.URL, "login"},
+		env:     map[string]string{},
+		stdin:   strings.NewReader(testAPIKey + "\n"),
+		keyring: kr,
+		openRegisteredClient: func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+			return nil, nil, want
+		},
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), want.Error()) {
+		t.Fatalf("exit = %d, stderr = %q", res.code, res.stderr.String())
+	}
+	if kr.key != testAPIKeyStored {
+		t.Errorf("failed enrollment removed prior key: %q", kr.key)
 	}
 }
 
@@ -178,29 +201,29 @@ func TestWhoamiHermeticEnvNeverTouchesStorage(t *testing.T) {
 	}
 }
 
-// TestWhoamiUsesStoredKey covers the storage side of the precedence: no env
-// key, the keyring's key authenticates.
-func TestWhoamiUsesStoredKey(t *testing.T) {
+// TestWhoamiDoesNotUseLegacyStoredKey pins the v2 boundary: an old keyring
+// entry is not a steady-state authentication fallback.
+func TestWhoamiDoesNotUseLegacyStoredKey(t *testing.T) {
 	srv := apitest.NewServer(t)
 	res := runCLI(t, &runOpts{
 		args:    []string{"--endpoint", srv.URL, "whoami"},
 		env:     map[string]string{},
 		keyring: &fakeKeyring{key: testAPIKeyStored},
 	})
-	if res.code != 0 {
-		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	if res.code != 4 {
+		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())
 	}
-	if got := srv.Requests()[0].Header.Get("Authorization"); got != "Bearer "+testAPIKeyStored {
-		t.Errorf("whoami must use the stored key, sent %d bytes", len(got))
+	if got := len(srv.Requests()); got != 0 {
+		t.Errorf("legacy stored key reached the network in %d request(s)", got)
 	}
-	if res.stderr.Len() != 0 {
-		t.Errorf("keyring reads must not warn, got %q", res.stderr.String())
+	if !strings.Contains(res.stderr.String(), "QURL_API_KEY") {
+		t.Errorf("missing one-time bootstrap guidance: %q", res.stderr.String())
 	}
 }
 
-// TestWhoamiFileFallbackWarnsOnce covers the last rung: keyring unavailable,
-// key read from the credential file, exactly one stderr warning.
-func TestWhoamiFileFallbackWarnsOnce(t *testing.T) {
+// TestWhoamiDoesNotUseLegacyCredentialFile applies the same no-compatibility
+// rule to the old fallback file.
+func TestWhoamiDoesNotUseLegacyCredentialFile(t *testing.T) {
 	srv := apitest.NewServer(t)
 	dir := t.TempDir()
 	if err := auth.NewFileStore(dir).Save(testAPIKeyStored); err != nil {
@@ -212,14 +235,14 @@ func TestWhoamiFileFallbackWarnsOnce(t *testing.T) {
 		keyring:   &fakeKeyring{unavailable: true},
 		configDir: dir,
 	})
-	if res.code != 0 {
-		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	if res.code != 4 {
+		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())
 	}
-	if got := srv.Requests()[0].Header.Get("Authorization"); got != "Bearer "+testAPIKeyStored {
-		t.Errorf("whoami must use the file-fallback key, sent %d bytes", len(got))
+	if got := len(srv.Requests()); got != 0 {
+		t.Errorf("legacy credential file reached the network in %d request(s)", got)
 	}
-	if got := strings.Count(res.stderr.String(), "mode 0600"); got != 1 {
-		t.Errorf("file-fallback read must warn exactly once, warned %d times in %q", got, res.stderr.String())
+	if strings.Contains(res.stderr.String(), "mode 0600") {
+		t.Errorf("legacy credential file must not be read, got %q", res.stderr.String())
 	}
 }
 

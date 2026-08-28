@@ -78,7 +78,7 @@ share and turns it off when it exits.`,
 			if cmd.Flags().Changed("foreground") {
 				return exitcode.UsageError(errors.New("--foreground applies only when publishing a loopback HTTP origin"))
 			}
-			client, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -110,36 +110,37 @@ share and turns it off when it exits.`,
 }
 
 func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (retErr error) {
-	if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
-		return err
-	}
-	if !foreground {
-		if err := requireBackgroundShareSupport(opts.backgroundShareGOOS); err != nil {
-			return err
-		}
-	}
-	requestedID := resolveLocalConnectorID(opts, flagID)
-	if requestedID != "" {
-		if err := validateConnectorID(requestedID); err != nil {
-			return err
-		}
-	}
-	if err := opts.preflightTarget(ctx, target.localIP, target.localPort); err != nil {
-		return err
-	}
-	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
-	stateDir, resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment)
+	requestedID, err := validateLocalPublishRequest(ctx, opts, target, flagID, foreground)
 	if err != nil {
 		return err
 	}
-	resource := resolved.Resource
+	stateDir, err := opts.resolveShareStateDir("")
+	if err != nil {
+		return err
+	}
 	registry, err := opts.openShareRegistry(stateDir)
 	if err != nil {
 		return err
 	}
-	client, err := opts.newClient()
+	ownerID, client, err := localPublishOwner(ctx, opts, registry)
 	if err != nil {
 		return err
+	}
+	sessionOperations, err := opts.resolveSessionConfig(ownerID)
+	if err != nil {
+		return err
+	}
+	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
+	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir, sessionOperations)
+	if err != nil {
+		return err
+	}
+	resource := resolved.Resource
+	if client == nil {
+		client, err = opts.newClient(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	local, sharing, compensateOff, err := activateLocalPublish(ctx, client, registry, resource, knockResourceID, target)
 	if err != nil {
@@ -158,6 +159,49 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return compensate(err)
 	}
 	return finishLocalPublish(ctx, opts, client, registry, resolved, local, stateDir, foreground, compensate)
+}
+
+func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *publishTarget, flagID string, foreground bool) (string, error) {
+	if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
+		return "", err
+	}
+	if !foreground {
+		if err := requireBackgroundShareSupport(opts.backgroundShareGOOS); err != nil {
+			return "", err
+		}
+	}
+	requestedID := resolveLocalConnectorID(opts, flagID)
+	if requestedID != "" {
+		if err := validateConnectorID(requestedID); err != nil {
+			return "", err
+		}
+	}
+	if err := opts.preflightTarget(ctx, target.localIP, target.localPort); err != nil {
+		return "", err
+	}
+	return requestedID, nil
+}
+
+func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShareRegistry) (string, qurlapi.Client, error) {
+	ownerID, present, err := registry.OwnerID(ctx)
+	if err != nil || present {
+		return ownerID, nil, err
+	}
+	client, err := opts.newClient(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	identity, err := client.Me(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if identity == nil {
+		return "", nil, errors.New("qURL account identity response is empty")
+	}
+	if err := registry.BindOwner(ctx, identity.OwnerID); err != nil {
+		return "", nil, err
+	}
+	return identity.OwnerID, client, nil
 }
 
 type localEnrollment struct {
@@ -185,7 +229,7 @@ func (e *localEnrollment) credential(ctx context.Context, request qurl.AgentEnro
 	if err != nil {
 		return "", err
 	}
-	client, err := e.opts.newClient()
+	client, err := e.opts.newClient(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -225,22 +269,20 @@ func prepareLocalPublishResource(
 	ctx context.Context,
 	opts *globalOpts,
 	enrollment *localEnrollment,
-) (stateDir string, resolved *agent.ResolvedResource, knockResourceID string, err error) {
-	stateDir, err = opts.resolveShareStateDir("")
-	if err != nil {
-		return "", nil, "", err
-	}
+	stateDir string,
+	sessionOperations connectorshare.NativeSessionOperationAuthority,
+) (resolved *agent.ResolvedResource, knockResourceID string, err error) {
 	hubBootstrap, err := opts.resolveHubBootstrap()
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
 	origin, err := agent.ResourceSDKOrigin(opts.resolvedEndpoint)
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
 	hostname, err := os.Hostname()
 	if err != nil {
-		return "", nil, "", fmt.Errorf("read local hostname: %w", err)
+		return nil, "", fmt.Errorf("read local hostname: %w", err)
 	}
 	cfg := &connectorshare.NativeRuntimeConfig{
 		StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
@@ -248,16 +290,17 @@ func prepareLocalPublishResource(
 		EnrollmentCredentialProvider: enrollment.credential,
 		RecoveryCredentialProvider:   enrollment.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,
+		SessionOperations:            sessionOperations,
 	}
 	resolved, err = opts.resolveLocalResource(ctx, cfg, enrollment.resolveID)
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
 	knockResourceID, err = agent.KnockResourceID(resolved.Resource)
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
-	return stateDir, resolved, knockResourceID, nil
+	return resolved, knockResourceID, nil
 }
 
 func activateLocalPublish(

@@ -15,7 +15,20 @@ import (
 	frplog "github.com/fatedier/frp/pkg/util/log"
 	frpserver "github.com/fatedier/frp/server"
 	goliblog "github.com/fatedier/golib/log"
+
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
+
+func openOwnedTestShareRegistry(dir string) (*connectorstate.LocalShareRegistry, error) {
+	registry, err := connectorstate.OpenLocalShareRegistry(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.BindOwner(context.Background(), "own_cli_fixture"); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
 
 // TestMain pins FRP's process-global logger before journey-test goroutines
 // start. The in-process client and server share this logger.

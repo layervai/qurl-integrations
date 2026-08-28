@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -154,6 +156,11 @@ type runOpts struct {
 	// redirected process-global logger while the command goroutine writes
 	// too.
 	syncStreams bool
+	// openRegisteredClient overrides login's native enrollment boundary.
+	// The default returns the already-validated account mock as a registered
+	// client so command tests stay HTTP-only; dedicated API and connector tests
+	// cover the real registered-state seams.
+	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -221,6 +228,20 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		g.newCredentialStore = func(dir string, onFileRead func()) *auth.Chain {
 			return auth.NewChain(kr, auth.NewFileStore(dir), onFileRead)
 		}
+		g.openAPIClient = func(context.Context) (qurlapi.Client, error) {
+			key, err := g.apiCredential()
+			if err != nil {
+				return nil, err
+			}
+			return g.apiClient(key)
+		}
+		if o.openRegisteredClient != nil {
+			g.openRegisteredClient = o.openRegisteredClient
+		} else {
+			g.openRegisteredClient = func(_ context.Context, account qurlapi.AccountClient, _ string, identity *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+				return account, identity, nil
+			}
+		}
 		g.openBrowser = browser.open
 		switch {
 		case o.enterPortal != nil:
@@ -268,6 +289,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			resolvedShareStateDir = filepath.Join(configDir, "connector-state")
 		}
 		g.resolveShareStateDir = func(string) (string, error) { return resolvedShareStateDir, o.shareStateDirErr }
+		g.resolveSessionConfig = func(ownerID string) (connectorshare.NativeSessionOperationAuthority, error) {
+			return connectorshare.NativeSessionOperationAuthority{OwnerID: ownerID}, nil
+		}
 		if o.localResource != nil {
 			g.resolveLocalResource = o.localResource
 			g.resolveHubBootstrap = func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil }

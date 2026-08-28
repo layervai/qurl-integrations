@@ -30,11 +30,9 @@ type whoamiJSON struct {
 }
 
 type loginJSON struct {
-	OwnerID  string           `json:"owner_id"`
-	AuthType string           `json:"auth_type"`
-	APIKey   *identityKeyJSON `json:"api_key,omitempty"`
-	// Stored names the backend that took the key: "keyring" or "file".
-	Stored string `json:"stored"`
+	OwnerID        string `json:"owner_id"`
+	AuthType       string `json:"auth_type"`
+	DeviceEnrolled bool   `json:"device_enrolled"`
 }
 
 type logoutJSON struct {
@@ -111,35 +109,32 @@ func (p *Printer) keyExpiry(t *time.Time) string {
 	return p.formatExpiry(*t)
 }
 
-// Login renders a successful login: who the key is and where it was stored.
+// Login renders a successful registered-device enrollment.
 // The confirmation is a status message for humans and goes to stderr; JSON
-// emits the identity-plus-storage document on stdout; --quiet prints the
-// owner id so scripts get the same primary value whoami would give them.
-func (p *Printer) Login(id *qurlapi.Identity, stored auth.Backend) error {
+// emits the device identity document on stdout; --quiet prints the owner id
+// so scripts get the same primary value whoami would give them.
+func (p *Printer) Login(id *qurlapi.Identity) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(loginJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, APIKey: identityKey(id), Stored: string(stored)})
+		return p.writeJSON(loginJSON{OwnerID: id.OwnerID, AuthType: id.AuthType, DeviceEnrolled: true})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id.OwnerID)
 		return err
 	default:
-		return p.loginText(id, stored)
+		return p.loginText(id)
 	}
 }
 
-func (p *Printer) loginText(id *qurlapi.Identity, stored auth.Backend) error {
+func (p *Printer) loginText(id *qurlapi.Identity) error {
 	ew := &errWriter{w: p.err}
-	ew.printf("%s\n\n", fmt.Sprintf(msgLoggedInAs, p.bold(id.OwnerID)))
+	ew.printf("%s\n\n", fmt.Sprintf(msgDeviceEnrolled, p.bold(id.OwnerID)))
 	if ew.err != nil {
 		return ew.err
 	}
 	tw := tabwriter.NewWriter(p.err, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
-	if k := id.Key; k != nil {
-		twe.printf("  %s\t%s\n", p.bold("Key:"), keyLine(k))
-		twe.printf("  %s\t%s\n", p.bold("Scopes:"), strings.Join(k.Scopes, ", "))
-	}
-	twe.printf("  %s\t%s\n", p.bold("Stored:"), backendLabel(stored))
+	twe.printf("  %s\t%s\n", p.bold("Auth:"), id.AuthType)
+	twe.printf("  %s\t%s\n", p.bold("Account key:"), "consumed, not stored")
 	return twe.flush(tw)
 }
 

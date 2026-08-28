@@ -23,7 +23,7 @@ const (
 	// LocalSharesFile is the owner-only durable desired-state registry.
 	LocalSharesFile = "local_shares.json"
 
-	localSharesVersion  = 1
+	localSharesVersion  = 2
 	localSharesMaxItems = 1024
 	localSharesMaxBytes = 1 << 20
 	desiredStateOn      = "on"
@@ -50,6 +50,7 @@ type LocalShare struct {
 
 type localSharesState struct {
 	Version int                   `json:"version"`
+	OwnerID string                `json:"owner_id,omitempty"`
 	Shares  map[string]LocalShare `json:"shares"`
 }
 
@@ -58,6 +59,36 @@ type localSharesState struct {
 // Connector-state lock, so foreground commands and the daemon cannot lose one
 // another's updates.
 type LocalShareRegistry struct{ dir string }
+
+// BindOwner durably binds this native identity namespace to the account owner
+// authenticated during initial publish. The owner is non-secret, but changing
+// it would retarget every native operation, so an existing binding is
+// immutable.
+func (r *LocalShareRegistry) BindOwner(ctx context.Context, ownerID string) error {
+	ownerID = strings.TrimSpace(ownerID)
+	if !validLocalOwnerID(ownerID) {
+		return errors.New("local share account owner is invalid")
+	}
+	return r.update(ctx, func(state *localSharesState) error {
+		if state.OwnerID != "" && state.OwnerID != ownerID {
+			return errors.New("local share account owner conflicts with the native identity namespace")
+		}
+		state.OwnerID = ownerID
+		return nil
+	})
+}
+
+// OwnerID returns the durable account owner without reading an API key. A
+// warm daemon uses this value with trusted build/deployment configuration, so
+// steady-state native operations require only the device keypair.
+func (r *LocalShareRegistry) OwnerID(ctx context.Context) (ownerID string, present bool, err error) {
+	state, unlock, err := r.loadLocked(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = unlock() }()
+	return state.OwnerID, state.OwnerID != "", nil
+}
 
 // ReadLocalSharesIfPresent reads an existing registry without creating the
 // state directory or registry. Read-only commands use this path so `qurl list`
@@ -100,6 +131,9 @@ func (r *LocalShareRegistry) Put(ctx context.Context, candidate *LocalShare) err
 		return err
 	}
 	return r.update(ctx, func(state *localSharesState) error {
+		if state.OwnerID == "" {
+			return errors.New("local share account owner must be bound before a share is stored")
+		}
 		if existing, ok := state.Shares[share.ResourceID]; ok {
 			if existing.CRID != share.CRID || existing.ConnectorID != share.ConnectorID ||
 				existing.ConnectorRoutingID != share.ConnectorRoutingID || existing.KnockResourceID != share.KnockResourceID {
@@ -359,6 +393,12 @@ func validateLocalSharesState(state localSharesState) error {
 	if len(state.Shares) > localSharesMaxItems {
 		return fmt.Errorf("local share registry is limited to %d entries", localSharesMaxItems)
 	}
+	if state.OwnerID != "" && !validLocalOwnerID(state.OwnerID) {
+		return errors.New("local share registry account owner is invalid")
+	}
+	if len(state.Shares) > 0 && state.OwnerID == "" {
+		return errors.New("local share registry with shares has no account owner")
+	}
 	crids := map[string]string{}
 	connectorIDs := map[string]string{}
 	for key := range state.Shares {
@@ -379,6 +419,18 @@ func validateLocalSharesState(state localSharesState) error {
 		connectorIDs[share.ConnectorID] = key
 	}
 	return nil
+}
+
+func validLocalOwnerID(ownerID string) bool {
+	if ownerID == "" || len(ownerID) > 256 || strings.TrimSpace(ownerID) != ownerID || !utf8.ValidString(ownerID) {
+		return false
+	}
+	for _, char := range ownerID {
+		if char < 0x20 || char == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validateLocalShare(share *LocalShare) error {

@@ -20,10 +20,11 @@ func TestLoadHeadlessConfigStrictContract(t *testing.T) {
 	}{
 		{name: "valid", data: valid},
 		{name: "unknown field", data: valid + "\nfuture: true\n", want: "field future not found"},
-		{name: "duplicate key", data: strings.Replace(valid, "version: 1", "version: 1\nversion: 1", 1), want: "already defined"},
-		{name: "multiple documents", data: valid + "\n---\nversion: 1\n", want: "more than one YAML document"},
-		{name: "zero shares", data: "version: 1\nshares: []\n", want: "exactly one share"},
-		{name: "two shares", data: valid + strings.TrimPrefix(valid, "version: 1\nshares:\n"), want: "exactly one share"},
+		{name: "duplicate key", data: strings.Replace(valid, "version: 2", "version: 2\nversion: 2", 1), want: "already defined"},
+		{name: "multiple documents", data: valid + "\n---\nversion: 2\n", want: "more than one YAML document"},
+		{name: "zero shares", data: "version: 2\nowner_id: owner-one\nshares: []\n", want: "exactly one share"},
+		{name: "missing owner", data: strings.Replace(valid, "owner_id: owner-one\n", "", 1), want: "account owner"},
+		{name: "two shares", data: valid + strings.TrimPrefix(valid, "version: 2\nowner_id: owner-one\nshares:\n"), want: "exactly one share"},
 		{name: "off", data: strings.Replace(valid, "desired_state: on", "desired_state: off", 1), want: "desired_state on"},
 	}
 	for _, tc := range cases {
@@ -134,7 +135,7 @@ func testHeadlessYAML(t *testing.T) string {
 	t.Helper()
 	binding := testResourceBinding(t, "headless-app")
 	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
-	return "version: 1\nshares:\n" +
+	return "version: 2\nowner_id: owner-one\nshares:\n" +
 		"  - crid: " + binding.CRID + "\n" +
 		"    resource_id: " + binding.ResourceID + "\n" +
 		"    connector_id: " + binding.ConnectorID + "\n" +

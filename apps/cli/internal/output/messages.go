@@ -11,11 +11,11 @@ const (
 	// posture, not a user mistake.
 	msgLinksUnavailable = "Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to."
 
-	// msgNoCredential renders the missing-API-key condition.
-	msgNoCredential = "No qURL API key is configured."
+	// msgNoCredential renders the missing registered-device bootstrap condition.
+	msgNoCredential = "This machine is not enrolled with qURL."
 
-	hintNoCredential  = "Hint: set QURL_API_KEY, or run `qurl login` to store a key on this machine."
-	hintUnauthorized  = "Hint: the service rejected your API key. Check QURL_API_KEY, or ask your qURL administrator for a new key."
+	hintNoCredential  = "Hint: run `qurl login`, or set QURL_API_KEY for one-time device enrollment."
+	hintUnauthorized  = "Hint: the service rejected this device identity. Run `qurl login` with a current account API key."
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: you've reached your plan's limit. See https://layerv.ai/pricing to raise it."
 	hintRetryAfter    = "Retry after %ds."
@@ -56,14 +56,14 @@ const (
 	// into two spellings of the same label.
 	labelCRID = "CRID:"
 
-	// msgLoggedInAs opens the login confirmation; %s is the account.
-	msgLoggedInAs = "Logged in as %s."
+	// msgDeviceEnrolled opens the login confirmation; %s is the account.
+	msgDeviceEnrolled = "Enrolled this device for %s."
 
 	// msgLoggedOut confirms removal; %s lists the storage that held the key.
 	msgLoggedOut = "Logged out. Removed your qURL API key from the %s."
 
 	// msgNothingStored is logout's idempotent no-op note (still exit 0).
-	msgNothingStored = "No qURL API key is stored on this machine; nothing to remove."
+	msgNothingStored = "No legacy account API key is stored on this machine; nothing to remove."
 
 	// msgSavedTo confirms a completed download: destination, then size.
 	msgSavedTo = "Saved to %s (%d bytes)."
@@ -83,6 +83,9 @@ const (
 	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
 
 	hintConnectorHubConfig = "Hint: production builds ship this configuration built in — install an official qURL release, or for a custom deployment set QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 together."
+
+	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
+	hintConnectorSessionConfig = "Hint: update to the latest qURL CLI and sign in again. Do not add cloud or database settings, and do not edit the Connector state files."
 
 	// Native assigned-cell resource setup. These messages deliberately call
 	// the capability a Connector resource, distinct from enrollment and from
@@ -212,7 +215,7 @@ func CustomerMessages() []string {
 		labelKeyring,
 		labelCredentialFile,
 		labelCRID,
-		msgLoggedInAs,
+		msgDeviceEnrolled,
 		msgLoggedOut,
 		msgNothingStored,
 		msgSavedTo,
@@ -220,6 +223,8 @@ func CustomerMessages() []string {
 		msgPublishFoundExisting,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
+		msgConnectorSessionConfig,
+		hintConnectorSessionConfig,
 		msgConnectorResourceInvalidRequest,
 		hintConnectorResourceInvalidRequest,
 		msgConnectorResourceUnavailable,

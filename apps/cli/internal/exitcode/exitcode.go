@@ -26,6 +26,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -261,6 +262,8 @@ func connectorSentinelCode(err error) (int, bool) {
 		// production pin) is configuration in the §16.5 sense even though it
 		// lives in the environment: the config files row is the closest
 		// remedy class, and Usage would wrongly blame the command line.
+		return Config, true
+	case errors.Is(err, sessionconfig.ErrConfig):
 		return Config, true
 	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),

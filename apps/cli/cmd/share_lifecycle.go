@@ -18,6 +18,8 @@ import (
 )
 
 type localShareRegistry interface {
+	BindOwner(context.Context, string) error
+	OwnerID(context.Context) (string, bool, error)
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
@@ -57,17 +59,25 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 }
 
 func shareStatusCmd(opts *globalOpts) *cobra.Command {
+	return shareReadStateCmd(opts, "status <CRID>", "Show resource or local sharing state")
+}
+
+func shareInspectCmd(opts *globalOpts) *cobra.Command {
+	return shareReadStateCmd(opts, "inspect <CRID>", "Inspect resource or local sharing state")
+}
+
+func shareReadStateCmd(opts *globalOpts, use, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "status <CRID>",
-		Short: "Show resource or local sharing state",
+		Use:   use,
+		Short: short,
 		Long: `Show the current state of a published resource.
 
-For a remote URL, status reports the resource type, target, and active or
-revoked state. For a local app, it reports durable desired state separately
-from the platform's observed Connector state and serving epoch.`,
+For a remote URL, this command reports the resource type, target, and active or
+revoked state. For a local app, it reports durable desired state separately from
+the platform's observed Connector state and serving epoch.`,
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -135,7 +145,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := opts.preflightTarget(ctx, local.LocalIP, local.LocalPort); err != nil {
 		return err
 	}
-	client, err := opts.newClient()
+	client, err := opts.newClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -252,7 +262,7 @@ func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id str
 // optional local state. A machine that never published this CRID therefore
 // needs no Connector directory, registry, log path, or daemon controller.
 func stopShare(ctx context.Context, opts *globalOpts, id string) error {
-	client, err := opts.newClient()
+	client, err := opts.newClient(ctx)
 	if err != nil {
 		return err
 	}

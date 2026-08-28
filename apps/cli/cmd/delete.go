@@ -52,7 +52,7 @@ scripts and pipelines must pass --yes.`,
 				}
 			}
 
-			client, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}

@@ -4,19 +4,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// logoutCmd removes the stored key from every storage backend that holds it.
+// logoutCmd removes legacy stored account-key copies. Registered v2 device
+// state is intentionally outside this compatibility-cleanup command.
 func logoutCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Remove the qURL API key saved on this machine",
-		Long: `Remove the qURL API key that "qurl login" saved on this machine.
+		Short: "Remove legacy stored qURL account keys",
+		Long: `Remove account API key copies saved by older qURL CLI versions.
 
 Every place a key may sit is cleared: the OS keyring and the fallback
 credential file. Running logout when nothing is stored is fine — it simply
 says so.
 
-logout only touches stored keys: if QURL_API_KEY is set in your
-environment, commands keep using it until you unset the variable.`,
+Current qURL login does not store the account key. logout does not unset
+QURL_API_KEY and does not delete the registered native device identity.`,
 		Example: `  qurl logout
   unset QURL_API_KEY`,
 		Args: noArgs,

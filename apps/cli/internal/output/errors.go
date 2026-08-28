@@ -13,6 +13,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -72,6 +73,8 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 	switch {
 	case errors.Is(err, hub.ErrConfig):
 		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
+	case errors.Is(err, sessionconfig.ErrConfig):
+		headline, hint = msgConnectorSessionConfig, hintConnectorSessionConfig
 	// qurl-go's assignment taxonomy follows the local configuration posture.
 	case errors.Is(err, qurl.ErrAssignmentBootstrapConsumed):
 		headline, hint = msgConnectorTokenConsumed, hintConnectorTokenConsumed

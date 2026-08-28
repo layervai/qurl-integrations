@@ -88,6 +88,13 @@ jobs:
         with:
           syft-version: 'v1.42.3'
 
+      - name: Verify the production NHP Hub trust pin
+        env:
+          QURL_REQUIRE_RELEASE_HUB_PIN: '1'
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+        run: go test ./apps/cli/internal/connector/hub -run '^TestReleaseHubPinEnvironment$' -count=1
+
       # Unlike `cli / goreleaser check` (config validation only), the snapshot
       # exercises the real release pipeline without publishing: every OS/arch
       # build, archives, deb/rpm packaging, SBOM generation, and the
@@ -103,6 +110,8 @@ jobs:
         with:
           version: "~> v2"
           args: release --snapshot --clean --skip=sign
+        env:
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
 
   # Customer-path smoke of the latest SHIPPED release — the surface neither a
   # PR gate nor the snapshot build can cover, because it validates what is

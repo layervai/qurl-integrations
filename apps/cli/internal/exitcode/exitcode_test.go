@@ -21,6 +21,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -67,7 +68,8 @@ var cliSentinels = map[string]struct {
 	"state.ErrConnectorResourceStateConflict": {state.ErrConnectorResourceStateConflict, Conflict},
 	// The Hub trust triple (or a dark build's absent pin) is configuration
 	// even though it lives in the environment.
-	"hub.ErrConfig": {hub.ErrConfig, Config},
+	"hub.ErrConfig":           {hub.ErrConfig, Config},
+	"sessionconfig.ErrConfig": {sessionconfig.ErrConfig, Config},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can

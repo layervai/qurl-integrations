@@ -26,7 +26,11 @@ const (
 	// OperationCanceled is the terminal absent-operation tombstone.
 	OperationCanceled = "CANCELED"
 	// OperationClosed is the terminal admitted-session state.
-	OperationClosed               = "CLOSED"
+	OperationClosed = "CLOSED"
+	// OperationComplete is the receipt-free terminal recovery result. Recovery
+	// proves only that the exact operation is terminal; it does not replay an
+	// admission or close receipt.
+	OperationComplete             = "COMPLETE"
 	sessionOperationCleanupBudget = 30 * time.Second
 )
 
@@ -167,12 +171,11 @@ func (r qurlSessionRuntime) Prepare(ctx context.Context, store qurl.AgentStateSt
 	privateKey := binding.TakeDeviceStaticPrivateKey()
 	defer clear(privateKey)
 	return qurl.PrepareNativeSessionOperation(binding, privateKey, qurl.NativeSessionOperationInput{
-		AWSAccountID: request.AWSAccountID, AWSRegion: request.AWSRegion, CellID: request.Cohort.CellID,
+		CellID:          request.Cohort.CellID,
 		ExpiresAtMillis: request.ExpiresAt.UTC().UnixMilli(), OwnerID: request.Identity.OwnerID,
-		PreparedAtMillis: request.PreparedAt.UTC().UnixMilli(), QURLAgentKeysTable: request.Cohort.QURLAgentKeysTable,
+		PreparedAtMillis:    request.PreparedAt.UTC().UnixMilli(),
 		ProtectedResourceID: request.Identity.ResourceID, ResourceID: request.Identity.KnockResourceID,
 		RunAttempt: request.RunAttempt, RunID: request.RunID,
-		SessionControlTable: request.Cohort.SessionControlTable,
 	})
 }
 
@@ -234,7 +237,7 @@ func (qurlSessionRuntime) Retire(ctx context.Context, record OperationRecord, li
 		RunID: result.SessionReceipt.RunID, RunAttempt: result.SessionReceipt.RunAttempt, CloseEventID: result.CloseEventID}, nil
 }
 
-// Recover sends recovery-only EXT to the source-fenced endpoint.
+// Recover sends an encrypted recovery KNK to the source-fenced endpoint.
 func (r qurlSessionRuntime) Recover(ctx context.Context, store qurl.AgentStateStore, record OperationRecord) (SessionTerminal, error) { //nolint:gocritic // Record is one immutable authority snapshot.
 	options := make([]qurl.AgentRuntimeRegistrationOption, 0, 2+len(r.registrationOptions))
 	options = append(options, qurl.WithAgentRuntimeIdentity(record.Operation.AgentID), qurl.WithAgentRuntimeOfflineOpen())
@@ -250,9 +253,10 @@ func (r qurlSessionRuntime) Recover(ctx context.Context, store qurl.AgentStateSt
 	if err != nil {
 		return SessionTerminal{}, err
 	}
-	return SessionTerminal{State: result.State, WasAdmitted: result.State != OperationCanceled, CellID: result.CellID,
-		SessionID: result.SessionID, SessionIssuedAtMillis: result.SessionIssuedAtMillis, RunID: result.RunID,
-		RunAttempt: result.RunAttempt, CloseEventID: result.CloseEventID}, nil
+	if !result.Complete {
+		return SessionTerminal{}, errSessionRecoveryRequired
+	}
+	return SessionTerminal{State: OperationComplete}, nil
 }
 
 // Consumer prepares, admits, retires, and recovers durable native operations.
@@ -298,9 +302,7 @@ func (c *Consumer) Prepare(ctx context.Context, authority Authority, request Pre
 	if operation.AgentID != request.Identity.AgentID || operation.AgentPublicKeyB64 != request.Identity.AgentPublicKeyB64 ||
 		operation.OwnerID != request.Identity.OwnerID || operation.ResourceID != request.Identity.KnockResourceID ||
 		operation.ProtectedResourceID != request.Identity.ResourceID ||
-		operation.CellID != request.Cohort.CellID || operation.SessionControlTable != request.Cohort.SessionControlTable ||
-		operation.QURLAgentKeysTable != request.Cohort.QURLAgentKeysTable || operation.AWSAccountID != authority.AWSAccountID ||
-		operation.AWSRegion != authority.AWSRegion || operation.RunID != request.RunID || operation.RunAttempt != request.RunAttempt ||
+		operation.CellID != request.Cohort.CellID || operation.RunID != request.RunID || operation.RunAttempt != request.RunAttempt ||
 		operation.PreparedAtMillis != request.PreparedAt.UnixMilli() || operation.ExpiresAtMillis != request.ExpiresAt.UnixMilli() {
 		return "", OperationRecord{}, fmt.Errorf("%w: prepared operation projection", errStateConflict)
 	}
@@ -397,8 +399,8 @@ func (c *Consumer) Recover(ctx context.Context, key string) (SessionTerminal, er
 	if isTerminal(record.Status) && record.Terminal != nil {
 		return *record.Terminal, nil
 	}
-	// Recovery-first can create the server-side CANCELED tombstone. Mark that
-	// network boundary durably before the EXT for the same reason admission is
+	// Recovery-first can create a server-side terminal tombstone. Mark that
+	// network boundary durably before the KNK for the same reason admission is
 	// marked before KNK: after runner loss, a successor may recover this exact
 	// operation but may never infer that no packet was sent.
 	if record.Status == OperationPrepared {
@@ -419,7 +421,8 @@ func (c *Consumer) Recover(ctx context.Context, key string) (SessionTerminal, er
 	if err != nil {
 		return SessionTerminal{}, err
 	}
-	if terminal.State != OperationCanceled && terminal.State != OperationClosing && terminal.State != OperationClosed {
+	if terminal.State != OperationComplete && terminal.State != OperationCanceled &&
+		terminal.State != OperationClosing && terminal.State != OperationClosed {
 		return SessionTerminal{}, fmt.Errorf("%w: recovery state", errStateConflict)
 	}
 	record.Status = terminal.State
@@ -431,8 +434,8 @@ func (c *Consumer) Recover(ctx context.Context, key string) (SessionTerminal, er
 }
 
 // RecoverPrepared commits an offline operation before network I/O, then sends
-// only its authenticated recovery EXT and requires the exact absent-session
-// CANCELED terminal. Replaying the same request reads the retained terminal
+// only its authenticated recovery KNK and requires the exact operation to be
+// terminal. Replaying the same request reads the retained terminal
 // receipt and emits no second recovery packet.
 //
 //nolint:gocritic // Both values are one immutable signed authority projection.
@@ -451,8 +454,9 @@ func (c *Consumer) RecoverPrepared(ctx context.Context, authority Authority,
 		return RecoveryFirstReceipt{}, err
 	}
 	record, blob, err := loadOperation(ctx, c.Blobs, key)
-	if err != nil || record.Status != OperationCanceled || record.Terminal == nil || *record.Terminal != terminal ||
-		terminal.State != OperationCanceled || terminal.WasAdmitted || record.Operation.OperationID != prepared.Operation.OperationID ||
+	if err != nil || !isTerminal(record.Status) || record.Terminal == nil || *record.Terminal != terminal ||
+		(terminal.State != OperationComplete && terminal.State != OperationCanceled) ||
+		record.Operation.OperationID != prepared.Operation.OperationID ||
 		record.Operation.BindingSHA256 != prepared.Operation.BindingSHA256 {
 		return RecoveryFirstReceipt{}, errors.Join(err, fmt.Errorf("%w: recovery-first terminal receipt", errStateConflict))
 	}
@@ -575,6 +579,9 @@ func validOperationRecord(record OperationRecord) bool { //nolint:gocritic,gocyc
 	case OperationClosed:
 		return validAdmittedTerminal(record.Terminal, record.Operation, OperationClosed) &&
 			(record.Admission == nil || validSessionAdmission(record.Admission, record.Operation)) && hex64Pattern.MatchString(record.DispatchToken)
+	case OperationComplete:
+		return validCompleteTerminal(record.Terminal) &&
+			(record.Admission == nil || validSessionAdmission(record.Admission, record.Operation)) && hex64Pattern.MatchString(record.DispatchToken)
 	default:
 		return false
 	}
@@ -593,6 +600,12 @@ func validAdmittedTerminal(terminal *SessionTerminal, operation qurl.NativeSessi
 
 func validCanceledTerminal(terminal *SessionTerminal) bool {
 	return terminal != nil && terminal.State == OperationCanceled && !terminal.WasAdmitted && terminal.CellID == "" &&
+		terminal.SessionID == 0 && terminal.SessionIssuedAtMillis == 0 && terminal.RunID == "" && terminal.RunAttempt == 0 &&
+		terminal.CloseEventID == ""
+}
+
+func validCompleteTerminal(terminal *SessionTerminal) bool {
+	return terminal != nil && terminal.State == OperationComplete && !terminal.WasAdmitted && terminal.CellID == "" &&
 		terminal.SessionID == 0 && terminal.SessionIssuedAtMillis == 0 && terminal.RunID == "" && terminal.RunAttempt == 0 &&
 		terminal.CloseEventID == ""
 }
@@ -654,7 +667,9 @@ func authorityContainsCohort(authority Authority, cohort CohortPlan) bool { //no
 	return false
 }
 
-func isTerminal(status string) bool { return status == OperationCanceled || status == OperationClosed }
+func isTerminal(status string) bool {
+	return status == OperationCanceled || status == OperationClosed || status == OperationComplete
+}
 
 func terminalError(terminal SessionTerminal) error { //nolint:gocritic // Terminal is a small immutable receipt.
 	if terminal.State == "" {

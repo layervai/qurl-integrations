@@ -194,7 +194,7 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
-			registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,7 +262,7 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 func TestStartRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestShareStatusDoesNotStartOrReloadDaemon(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
 	t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
 	t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,8 +450,8 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	}
 }
 
-func TestStopAndStatusWorkWithoutLocalRegistryRow(t *testing.T) {
-	for _, command := range []string{"stop", "status"} {
+func TestRemoteLifecycleWorksWithoutLocalRegistryRow(t *testing.T) {
+	for _, command := range []string{"stop", "status", "inspect"} {
 		t.Run(command, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := filepath.Join(t.TempDir(), "absent-connector-state")
@@ -496,8 +496,8 @@ func TestStopAndStatusWorkWithoutLocalRegistryRow(t *testing.T) {
 	}
 }
 
-func TestStopAndStatusWorkWithoutDefaultLocalNamespace(t *testing.T) {
-	for _, command := range []string{"stop", "status"} {
+func TestRemoteLifecycleWorksWithoutDefaultLocalNamespace(t *testing.T) {
+	for _, command := range []string{"stop", "status", "inspect"} {
 		t.Run(command, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			method := http.MethodGet
@@ -538,8 +538,8 @@ func TestStopAndStatusWorkWithoutDefaultLocalNamespace(t *testing.T) {
 	}
 }
 
-func TestStopAndStatusReportCorruptExistingLocalRegistry(t *testing.T) {
-	for _, command := range []string{"stop", "status"} {
+func TestRemoteLifecycleReportsCorruptExistingLocalRegistry(t *testing.T) {
+	for _, command := range []string{"stop", "status", "inspect"} {
 		t.Run(command, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
@@ -573,7 +573,7 @@ func TestStopAndStatusReportCorruptExistingLocalRegistry(t *testing.T) {
 func TestStartFailsImmediatelyWhenServingEpochAdvances(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +614,7 @@ func TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership(t *testing.T) 
 		t.Run(stage, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
-			baseRegistry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			baseRegistry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -680,7 +680,7 @@ func TestStartCompensatesCloudOnWhenLocalSetupDoesNotReachDaemonOwnership(t *tes
 		t.Run(stage, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
-			baseRegistry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			baseRegistry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -736,7 +736,7 @@ func TestStartPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
-			baseRegistry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			baseRegistry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -789,7 +789,7 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
-			baseRegistry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			baseRegistry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -847,7 +847,7 @@ func TestRepublishPriorOnSetupFailureDoesNotDisableHealthyShare(t *testing.T) {
 func TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -883,7 +883,7 @@ func TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch(t *testing.T) {
 func TestRestartReconcilesAmbiguousAppliedPostWithoutReplay(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +941,7 @@ func TestRestartRejectsAmbiguousStateWithoutNewOnEpoch(t *testing.T) {
 		t.Run(current.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := t.TempDir()
-			registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -981,7 +981,7 @@ func TestRestartRejectsAmbiguousStateWithoutNewOnEpoch(t *testing.T) {
 func TestPublishNewMachineTakeoverRotatesEpochOnce(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1021,7 +1021,7 @@ func TestPublishNewMachineTakeoverRotatesEpochOnce(t *testing.T) {
 func TestPublishRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,7 +1069,7 @@ func TestPublishRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 func TestPublishTargetChangeReconcilesAmbiguousRestart(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1125,7 +1125,7 @@ func sharingResponse(t *testing.T, srv *apitest.Server, desired string, epoch ui
 func TestLocalPublishPollingTimeoutLeavesDaemonOwnedRecoveryOn(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1183,11 +1183,18 @@ func TestLocalPublishPollingTimeoutLeavesDaemonOwnedRecoveryOn(t *testing.T) {
 
 func TestLocalPublishWarmRuntimeFailureEmitsNoIdentityOrManagementMutation(t *testing.T) {
 	srv := apitest.NewServer(t)
+	stateDir := t.TempDir()
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := errors.New("assigned NHP cell unavailable")
 	providerPresent := false
 	res := runCLI(t, &runOpts{
 		args:            []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--id", "warm-local"},
 		env:             map[string]string{},
+		shareRegistry:   registry,
+		shareStateDir:   stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
 			providerPresent = cfg.EnrollmentCredentialProvider != nil
@@ -1228,7 +1235,7 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1453,7 +1460,7 @@ func TestDaemonServesTwoResourcesAndStopsOneIndependently(t *testing.T) {
 	routingBDigest := sha256.Sum256([]byte("routing-b"))
 	routingB := "c-" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(routingBDigest[:]))
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1533,7 +1540,7 @@ func TestDaemonServesTwoResourcesAndStopsOneIndependently(t *testing.T) {
 func TestForegroundPublishStartupFailureStopsOwnedSharing(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := t.TempDir()
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1574,7 +1581,7 @@ func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1619,7 +1626,7 @@ func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}

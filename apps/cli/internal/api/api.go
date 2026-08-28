@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -57,6 +58,14 @@ type Client interface {
 	// platform contract (no repository reads server-side), so login can
 	// validate keys with it and whoami can call it freely.
 	Me(ctx context.Context) (*Identity, error)
+}
+
+// AccountClient adds the one account-authorized bootstrap operation. The CLI
+// keeps this capability only while it consumes a user-supplied account key;
+// steady-state commands use Client from NewRegistered.
+type AccountClient interface {
+	Client
+	MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnrollmentTokenOptions) (*AgentEnrollmentToken, error)
 }
 
 // PublishOptions carries the optional publish metadata.
@@ -215,16 +224,23 @@ type Config struct {
 }
 
 type client struct {
-	sdk       *qurl.Client
-	transport *transport
-	baseURL   string
-	authorize func(context.Context, *http.Request) error
+	sdk            *qurl.Client
+	transport      *transport
+	registeredDoer qurl.HTTPDoer
+	baseURL        string
+	authorize      func(context.Context, *http.Request) error
 }
+
+// registeredClient exposes exactly Client. The concrete implementation also
+// owns the account-only agent-enrollment method for New, but wrapping the
+// narrow interface prevents a registered caller from recovering that method
+// through a type assertion.
+type registeredClient struct{ Client }
 
 // New builds the one Client implementation. The same decorated transport
 // serves both the SDK-backed calls and the direct REST calls, so headers,
 // retry, and redaction cannot diverge between them.
-func New(cfg *Config) (Client, error) {
+func New(cfg *Config) (AccountClient, error) {
 	if cfg == nil || cfg.BaseURL == "" {
 		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
 	}
@@ -243,6 +259,39 @@ func New(cfg *Config) (Client, error) {
 		baseURL:   trimBaseURL(cfg.BaseURL),
 		authorize: provider.Authorize,
 	}, nil
+}
+
+// NewRegistered builds the steady-state CLI client from the sealed native
+// agent state. The account API key is not accepted or retained on this path;
+// qurl-go loads the narrow device credential and keeps its exact route and
+// origin boundary around direct REST calls.
+func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore) (Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: context must not be nil", qurl.ErrInvalidClientConfig)
+	}
+	if cfg == nil || cfg.BaseURL == "" {
+		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
+	}
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		return nil, fmt.Errorf("%w: account API key is not valid for registered-client open", qurl.ErrInvalidClientConfig)
+	}
+	tr := newTransport(cfg)
+	sdk, err := qurl.OpenRegisteredAgent(ctx, store,
+		qurl.WithAgentClientBaseURL(cfg.BaseURL),
+		qurl.WithAgentClientHTTPClient(tr),
+	)
+	if err != nil {
+		return nil, err
+	}
+	doer, err := sdk.RegisteredAgentResourceHTTPDoer()
+	if err != nil {
+		return nil, err
+	}
+	core := &client{
+		sdk: sdk, transport: tr, registeredDoer: doer,
+		baseURL: trimBaseURL(cfg.BaseURL),
+	}
+	return &registeredClient{Client: core}, nil
 }
 
 // Resolve delegates to the SDK's ResolveResource and carries its VerifyCRID

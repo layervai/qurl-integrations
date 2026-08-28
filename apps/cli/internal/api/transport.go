@@ -39,16 +39,16 @@ type transport struct {
 }
 
 func newTransport(cfg *Config) *transport {
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				// Surface 3xx to the caller instead of forwarding the
-				// Authorization header to a different URL.
-				return http.ErrUseLastResponse
-			},
-		}
+	// Copy an injected client so the CLI can enforce its credential boundary
+	// without mutating caller-owned test or embedding state. Redirect refusal
+	// applies to every client, not only the default: net/http can otherwise
+	// forward an Authorization header to a Location selected by the server.
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	if cfg.HTTPClient != nil {
+		*httpClient = *cfg.HTTPClient
+	}
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	newRequestID := cfg.NewRequestID
 	if newRequestID == nil {
@@ -66,10 +66,12 @@ func newTransport(cfg *Config) *transport {
 }
 
 // Do sends req with the CLI headers set, retrying bounded transient responses.
-// The X-Request-Id stays constant across retries of one logical request so the
-// service can correlate them.
+// Sharing restart is never replayed because it rotates an epoch and has no
+// idempotency-key contract. The X-Request-Id stays constant across retries of
+// one logical request so the service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
-	return t.do(req, true)
+	allowRetry := req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/sharing/restart")
+	return t.do(req, allowRetry)
 }
 
 // DoOnce applies the same headers and redaction as Do but never replays the

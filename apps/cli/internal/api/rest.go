@@ -581,14 +581,21 @@ func (c *client) doRESTRequest(ctx context.Context, method, path string, body an
 			req.Header.Add(name, value)
 		}
 	}
-	if err := c.authorize(ctx, req); err != nil {
-		return nil, err
-	}
 	var resp *http.Response
-	if allowRetry {
-		resp, err = c.transport.Do(req)
+	if c.registeredDoer != nil {
+		resp, err = c.registeredDoer.Do(req)
 	} else {
-		resp, err = c.transport.DoOnce(req)
+		if c.authorize == nil {
+			return nil, fmt.Errorf("%w: API client has no request authority", qurl.ErrInvalidClientConfig)
+		}
+		if err := c.authorize(ctx, req); err != nil {
+			return nil, err
+		}
+		if allowRetry {
+			resp, err = c.transport.Do(req)
+		} else {
+			resp, err = c.transport.DoOnce(req)
+		}
 	}
 	if err != nil {
 		return nil, err

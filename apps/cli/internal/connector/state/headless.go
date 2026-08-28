@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	headlessConfigVersion  = 1
+	headlessConfigVersion  = 2
 	headlessConfigMaxBytes = 1 << 20
 	enrollmentMaxBytes     = 16 << 10
 )
@@ -33,6 +33,7 @@ const (
 // container and per-user installs converge on one registry and one runtime.
 type HeadlessConfig struct {
 	Version int          `yaml:"version"`
+	OwnerID string       `yaml:"owner_id"`
 	Shares  []LocalShare `yaml:"shares"`
 }
 
@@ -62,6 +63,9 @@ func LoadHeadlessConfig(path string) (*HeadlessConfig, error) {
 	}
 	if config.Version != headlessConfigVersion {
 		return nil, fmt.Errorf("headless share config version %d is unsupported", config.Version)
+	}
+	if !validLocalOwnerID(config.OwnerID) {
+		return nil, errors.New("headless share config account owner is invalid")
 	}
 	if len(config.Shares) != 1 {
 		return nil, errors.New("headless share config requires exactly one share")

@@ -466,9 +466,13 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "resolve", "get", "list", "start", "stop", "restart", "status", "delete", "login", "logout", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "resolve", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "logout", "whoami", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}
+	}
+	daemon := runCLI(t, &runOpts{args: []string{"daemon", "--help"}})
+	if daemon.code != 0 || !strings.Contains(daemon.stdout.String(), "run") || !strings.Contains(daemon.stdout.String(), "headless") {
+		t.Errorf("daemon help does not expose its run mode:\n%s\n%s", daemon.stdout.String(), daemon.stderr.String())
 	}
 }

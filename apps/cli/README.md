@@ -45,8 +45,9 @@ step 4. Then run:
 qurl login
 ```
 
-Paste the key at the hidden prompt. The CLI validates it before saving it in a
-secure credential store (your OS keyring when one is available).
+Paste the key at the hidden prompt. The CLI validates it, enrolls this machine,
+and then discards it. qurl stores the restricted device identity in its
+owner-only native state; it does not store the account API key.
 
 ### 3. Start your app, then publish it
 
@@ -142,42 +143,27 @@ qurl version
 
 ## Authentication
 
-Commands that contact qURL use an API key (`lv_live_…` for production,
-`lv_test_…` for test). Create one in the
-[qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the scopes for
-the commands you plan to use:
-
-| What you want to do | Scope |
-|---------------------|-------|
-| Publish a local app | `qurl:agent` |
-| Publish or delete a remote URL | `qurl:write` |
-| Resolve or open a CRID | `qurl:resolve` |
-| List resources | `qurl:read` |
+The CLI uses a registered device identity for ordinary commands. To enroll the
+device, create an account API key (`lv_live_…` for production, `lv_test_…` for
+test) in the [qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the
+`qurl:agent` scope, then run `qurl login`.
 
 There is deliberately no `--api-key` flag — command-line arguments leak into
-shell history and process lists. The CLI looks for the key in this order:
+shell history and process lists. `qurl login` reads it from a hidden prompt or
+piped standard input. Scripts and CI can set `QURL_API_KEY` or
+`QURL_API_KEY_FILE` for the same first bootstrap or for an explicit recovery.
 
-1. `QURL_API_KEY` environment variable — recommended for scripts and CI.
-   When set, nothing on disk is read or written.
-2. The key `qurl login` stored: in your OS keyring (Keychain on macOS,
-   Credential Manager on Windows, the freedesktop Secret Service on Linux),
-   or — only where no keyring is available — in `~/.config/qurl/token`, a
-   file readable by your user alone. Commands warn when the key is served
-   from that file. Other LayerV tools (the SDK, the Connector) read only
-   that file, never the keyring — so on keyring machines, give them the
-   key via `QURL_API_KEY` rather than expecting them to see `qurl login`'s.
+The CLI validates the account key, mints one one-shot agent enrollment
+credential, and registers an X25519 device identity through NHP 1.1. Only the
+restricted device identity and device REST credential enter the owner-only
+native state directory. The account API key and one-shot enrollment credential
+remain in memory and are not stored by qurl. A warm command reuses the device
+identity and does not read `QURL_API_KEY`.
 
-`qurl login` checks the key before storing it, so a mistyped key fails
-immediately. `qurl logout` removes the stored key from every place it may sit,
-and `qurl whoami` shows which account and key identity the configured
-credential maps to.
-
-The first local publish needs a login key with `qurl:agent`. The CLI uses that
-authority only to mint a Connector-bound, one-shot enrollment credential; it
-keeps the credential in memory and the native enrollment exchanges it for a
-restricted device identity. A warm start reuses that device identity and does
-not read the login key or mint another enrollment credential. Remote publish,
-resolve, and list continue to work with their existing narrower scopes.
+`qurl whoami` checks the registered device and shows its account. `qurl logout`
+removes only legacy stored account-key copies from CLI versions before this
+device-enrollment design; it does not unset `QURL_API_KEY` or delete the native
+device state.
 
 ## Configuration
 
@@ -217,9 +203,11 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl stop <CRID>` | Turn off a local share without deleting it |
 | `qurl restart <CRID>` | Rotate and restart a local share |
 | `qurl status <CRID>` | Show desired and platform-observed sharing state |
+| `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
+| `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
-| `qurl whoami` | Show which account and key identity your credential maps to |
+| `qurl login` / `qurl logout` | Enroll this device with a one-time account key / remove legacy stored account-key copies |
+| `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
@@ -411,7 +399,7 @@ without a terminal the command refuses rather than hanging. Deleting an
 already-deleted resource succeeds idempotently and says so (JSON sets
 `already_gone`).
 
-### qurl start / stop / restart / status
+### qurl start / stop / restart / status / inspect
 
 Local shares are durable desired state, managed by their full CRID:
 
@@ -420,14 +408,15 @@ qurl stop <CRID>
 qurl start <CRID>
 qurl restart <CRID>
 qurl status <CRID>
+qurl inspect <CRID>
 ```
 
 `stop` disables the cloud route first and then tells an already-running local
 daemon to reconcile; it never starts the daemon. `start` is idempotent and
 requires the saved local target to be reachable. `restart` always advances the
-serving epoch so stale registrations cannot keep routing. `status` works for
-remote resources too and includes the local target only when this machine owns
-one.
+serving epoch so stale registrations cannot keep routing. `status` and
+`inspect` use the same authoritative view. Both work for remote resources and
+include the local target only when this machine owns one.
 
 The daemon uses one resource-bound NHP admission and FRP session per share. It
 recovers assignment, sleep/wake, and network failures automatically with
@@ -447,16 +436,13 @@ unavailable, list omits local targets and emits one warning.
 
 ### qurl login / logout / whoami
 
-`qurl login` reads the key from piped stdin or a hidden interactive
-prompt — never as an argument — validates its shape, checks it against
-the qURL service, and only then stores it (OS keyring preferred, the
-`~/.config/qurl/token` fallback where no keyring exists — see
-[Authentication](#authentication)). `qurl logout` removes the stored key
-from every backend that holds it; it does not touch `QURL_API_KEY` in
-your environment. `qurl whoami` shows the account and the key's own
-identity (id, kind, scopes, expiry) — identity only, no plan or usage
-data, so it is cheap enough for scripts and shell prompts (`--quiet`
-prints just the owner id).
+`qurl login` reads the account key from piped stdin or a hidden interactive
+prompt — never as an argument — validates it, enrolls the registered device,
+checks that the device belongs to the same account, and discards the account
+key. `qurl logout` clears only legacy stored account-key copies; it does not
+touch `QURL_API_KEY` in your environment or delete native device state.
+`qurl whoami` checks the registered device and shows its account identity only,
+with no plan or usage data. `--quiet` prints just the owner id.
 
 ```bash
 op read op://team/qurl/key | qurl login

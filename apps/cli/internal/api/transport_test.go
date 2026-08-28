@@ -1,0 +1,46 @@
+package qurlapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+)
+
+func TestTransportRefusesRedirectFromInjectedHTTPClient(t *testing.T) {
+	var redirected atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	t.Cleanup(destination.Close)
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(source.Close)
+
+	injected := source.Client()
+	injected.CheckRedirect = func(*http.Request, []*http.Request) error {
+		t.Fatal("injected redirect policy was used")
+		return nil
+	}
+	transport := newTransport(&Config{HTTPClient: injected, Version: "test"})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, source.URL, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer must-not-follow")
+
+	resp, err := transport.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("status=%d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+	}
+	if redirected.Load() != 0 {
+		t.Fatalf("redirect destination received %d requests, want zero", redirected.Load())
+	}
+}

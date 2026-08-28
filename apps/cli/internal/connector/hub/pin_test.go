@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 
@@ -85,6 +86,25 @@ func TestFingerprintSHA256Hex(t *testing.T) {
 	want := "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
 	if got != want {
 		t.Fatalf("FingerprintSHA256Hex(zero key) = %q, want %q", got, want)
+	}
+}
+
+func TestReleaseHubPinEnvironment(t *testing.T) {
+	keyB64, keySet := os.LookupEnv("QURL_RELEASE_HUB_PUBLIC_KEY_B64")
+	fingerprint, fingerprintSet := os.LookupEnv("QURL_RELEASE_HUB_PUBLIC_KEY_SHA256")
+	required := os.Getenv("QURL_REQUIRE_RELEASE_HUB_PIN") == "1"
+	if !keySet && !fingerprintSet && !required {
+		t.Skip("release Hub pin inputs are not present")
+	}
+	if strings.TrimSpace(keyB64) == "" || strings.TrimSpace(fingerprint) == "" {
+		t.Fatal("release Hub public key and fingerprint must both be non-empty")
+	}
+	key, err := DecodeServerPublicKeyB64(keyB64)
+	if err != nil {
+		t.Fatalf("release Hub public key %v", err)
+	}
+	if got := FingerprintSHA256Hex(key); got != fingerprint {
+		t.Fatalf("release Hub public-key fingerprint = %q, want configured fingerprint", got)
 	}
 }
 

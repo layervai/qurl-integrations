@@ -104,7 +104,7 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 	}
 
-	client, err := opts.newClient()
+	client, err := opts.newClient(ctx)
 	if err != nil {
 		return err
 	}

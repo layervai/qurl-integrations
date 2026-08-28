@@ -193,6 +193,13 @@ jobs:
         with:
           syft-version: 'v1.42.3'
 
+      - name: Verify the production NHP Hub trust pin
+        env:
+          QURL_REQUIRE_RELEASE_HUB_PIN: '1'
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+        run: go test ./apps/cli/internal/connector/hub -run '^TestReleaseHubPinEnvironment$' -count=1
+
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
       # keeps its notes.
@@ -204,6 +211,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           # Pin which tag is being released. A combined release PR can tag
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.

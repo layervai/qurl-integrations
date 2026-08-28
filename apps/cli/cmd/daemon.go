@@ -53,18 +53,27 @@ var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) err
 	}
 }
 
-// daemonCmd is an implementation surface for the per-user LaunchAgent. It is
-// intentionally hidden: customers manage shares with publish/start/stop and
-// never need to supervise this process themselves.
+// daemonCmd exposes the long-running engine for headless deployments and
+// foreground supervision. Ordinary macOS users normally let publish/start
+// manage the per-user LaunchAgent.
 func daemonCmd(opts *globalOpts) *cobra.Command {
-	cmd := &cobra.Command{Use: "daemon", Hidden: true, Args: noArgs}
+	cmd := &cobra.Command{
+		Use:   "daemon",
+		Short: "Run the local sharing daemon",
+		Long: `Run the local sharing daemon directly.
+
+On macOS, qurl publish and qurl start normally manage the per-user daemon for
+you. Use daemon run for a headless deployment or when another service manager
+owns the process.`,
+		Args: noArgs,
+	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
 	var hubHost, hubServerPublicKeyB64 string
 	var hubPort int
 	run := &cobra.Command{
-		Use:    "run",
-		Hidden: true,
-		Args:   noArgs,
+		Use:   "run",
+		Short: "Run the daemon in the foreground",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
@@ -163,19 +172,17 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	if headless != nil {
-		if err := validateHeadlessRegistryOwnership(ctx, registry, &headless.Shares[0]); err != nil {
-			return err
-		}
+	ownerID, err := daemonOwner(ctx, registry, headless)
+	if err != nil {
+		return err
 	}
-	hubBootstrap := qurl.HubBootstrap{}
-	if hubOverride != nil {
-		hubBootstrap = *hubOverride
-	} else {
-		hubBootstrap, err = opts.resolveHubBootstrap()
-		if err != nil {
-			return err
-		}
+	sessionOperations, err := opts.resolveSessionConfig(ownerID)
+	if err != nil {
+		return err
+	}
+	hubBootstrap, err := daemonHubBootstrap(opts, hubOverride)
+	if err != nil {
+		return err
 	}
 	origin, err := agent.ResourceSDKOrigin(opts.resolvedEndpoint)
 	if err != nil {
@@ -194,6 +201,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
+			SessionOperations: sessionOperations,
 		}, common, opts.version)
 	}
 	var factory connectordaemon.SessionFactory
@@ -236,6 +244,33 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
+}
+
+func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistry, headless *connectorstate.HeadlessConfig) (string, error) {
+	if headless != nil {
+		if err := registry.BindOwner(ctx, headless.OwnerID); err != nil {
+			return "", err
+		}
+		if err := validateHeadlessRegistryOwnership(ctx, registry, &headless.Shares[0]); err != nil {
+			return "", err
+		}
+		return headless.OwnerID, nil
+	}
+	ownerID, present, err := registry.OwnerID(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !present {
+		return "", errors.New("qURL share daemon has no durable account owner")
+	}
+	return ownerID, nil
+}
+
+func daemonHubBootstrap(opts *globalOpts, override *qurl.HubBootstrap) (qurl.HubBootstrap, error) {
+	if override != nil {
+		return *override, nil
+	}
+	return opts.resolveHubBootstrap()
 }
 
 func exactDaemonHubOverride(host string, port int, serverPublicKeyB64 string) (qurl.HubBootstrap, bool, error) {

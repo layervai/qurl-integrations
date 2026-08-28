@@ -624,7 +624,7 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 		t.Fatal(err)
 	}
 	operation := *operationPtr
-	plan.Cohorts[0].CellID, plan.Cohorts[0].SessionControlTable, plan.Cohorts[0].QURLAgentKeysTable = operation.CellID, operation.SessionControlTable, operation.QURLAgentKeysTable
+	plan.Cohorts[0].CellID = operation.CellID
 	authority := Authority{Schema: plan.Schema, Environment: plan.Environment, GenerationID: plan.GenerationID,
 		OwnerSubject: plan.OwnerSubject, AWSAccountID: plan.AWSAccountID, AWSRegion: plan.AWSRegion, NHPSourceSHA: plan.NHPSourceSHA,
 		QURLGoSourceSHA:             plan.QURLGoSourceSHA,

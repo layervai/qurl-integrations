@@ -24,6 +24,53 @@ const (
 	testEnrollmentKey  = "lv_test_enrollmentsecret123456789"
 )
 
+func TestMintAgentEnrollmentTokenSendsUnboundOneShotShape(t *testing.T) {
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/api-keys" {
+			t.Errorf("request = %s %s, want POST /v1/api-keys", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Idempotency-Key"); got != testIdempotencyKey {
+			t.Errorf("Idempotency-Key = %q", got)
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 4 {
+			t.Errorf("request keys = %v, want kind/name/target/expires_in only", body)
+		}
+		if _, ok := body["claims"]; ok {
+			t.Error("unbound agent enrollment must omit claims")
+		}
+		if _, ok := body["scopes"]; ok {
+			t.Error("agent enrollment must not send caller-selected scopes")
+		}
+		assertJSONString(t, body, "kind", connectorEnrollmentKind)
+		assertJSONString(t, body, "name", "qURL CLI registered device")
+		assertJSONString(t, body, "target", agentEnrollmentTarget)
+		assertJSONString(t, body, "expires_in", connectorEnrollmentLifetime)
+		data := validEnrollmentData(expiresAt)
+		data["target"] = agentEnrollmentTarget
+		data["claims"] = []map[string]string{}
+		data["scopes"] = []string{"qurl:agent"}
+		apitest.WriteEnvelope(t, w, http.StatusCreated, data, nil)
+	}))
+	t.Cleanup(srv.Close)
+	client := newEnrollmentTestClient(t, srv.URL)
+	account, ok := client.(AccountClient)
+	if !ok {
+		t.Fatalf("New returned %T, want AccountClient", client)
+	}
+	token, err := account.MintAgentEnrollmentToken(context.Background(), MintAgentEnrollmentTokenOptions{IdempotencyKey: testIdempotencyKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.Token != testEnrollmentKey || token.KeyID != "key_enrollment_1" || !token.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("agent token = %+v", token)
+	}
+}
+
 func TestMintConnectorEnrollmentTokenSendsPinnedWireShape(t *testing.T) {
 	expiresAt := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -19,7 +19,7 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ .Env.QURL_RELEASE_HUB_PUBLIC_KEY_B64 }}
     goos:
       - linux
       - darwin
@@ -119,8 +119,11 @@ homebrew_casks:
       verified: github.com/layervai/qurl-integrations/releases/download
     manpages:
       - manpages/qurl-completion.1
+      - manpages/qurl-daemon-run.1
+      - manpages/qurl-daemon.1
       - manpages/qurl-delete.1
       - manpages/qurl-get.1
+      - manpages/qurl-inspect.1
       - manpages/qurl-list.1
       - manpages/qurl-login.1
       - manpages/qurl-logout.1

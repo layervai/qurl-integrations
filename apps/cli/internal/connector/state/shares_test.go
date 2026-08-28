@@ -14,12 +14,67 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
+func openOwnedLocalShareRegistry(dir string) (*LocalShareRegistry, error) {
+	registry, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.BindOwner(context.Background(), "owner-test"); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
+func TestLocalShareRegistryBindsOwnerBeforeShares(t *testing.T) {
+	dir := t.TempDir()
+	registry, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, present, err := registry.OwnerID(context.Background())
+	if err != nil || present || owner != "" {
+		t.Fatalf("empty owner = %q, %v, %v", owner, present, err)
+	}
+	binding := testResourceBinding(t, "owner-binding")
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+	share := LocalShare{
+		CRID: binding.CRID, ResourceID: binding.ResourceID,
+		ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID,
+		KnockResourceID: binding.KnockResourceID,
+		TargetURL:       "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
+		DesiredState: "on", ServingEpoch: 1,
+	}
+	if err := registry.Put(context.Background(), &share); err == nil {
+		t.Fatal("share was stored before its account owner was bound")
+	}
+	if err := registry.BindOwner(context.Background(), "owner-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.BindOwner(context.Background(), "owner-one"); err != nil {
+		t.Fatalf("idempotent owner binding: %v", err)
+	}
+	if err := registry.BindOwner(context.Background(), "owner-two"); err == nil {
+		t.Fatal("account owner drift was accepted")
+	}
+	if err := registry.Put(context.Background(), &share); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, present, err = reopened.OwnerID(context.Background())
+	if err != nil || !present || owner != "owner-one" {
+		t.Fatalf("durable owner = %q, %v, %v", owner, present, err)
+	}
+}
+
 func TestLocalShareRegistryJourney(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +126,7 @@ func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +157,7 @@ func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +196,7 @@ func TestLocalShareRegistryRejectsOutOfOrderAndIdentityChanges(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +254,7 @@ func TestLocalShareRegistryConcurrentResponsesConvergeToHighestEpoch(t *testing.
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
