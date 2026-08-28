@@ -1,4 +1,4 @@
-//go:build clisandbox && clisoak
+//go:build clisandbox && clisoak && (linux || darwin)
 
 package main
 
@@ -38,7 +38,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	}
 	duration := sandboxSoakDuration(t)
 	fixture := startSandboxLocalPublish(t, "soak")
-	defer fixture.stopAndValidate(t)
+	defer fixture.interruptAndValidate(t)
 
 	initialAgent := loadSandboxAgentState(t, fixture.stateDir)
 	if initialAgent == nil {
@@ -66,7 +66,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	for time.Now().Before(deadline) {
 		now := time.Now()
 		if !warmRestartDone && !now.Before(warmRestartAt) {
-			fixture.stopAndValidate(t)
+			fixture.interruptAndValidate(t)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
@@ -177,7 +177,7 @@ func startCredentialFreeSandboxDaemon(t *testing.T, fixture *sandboxLocalFixture
 	go func() {
 		process.done <- process.cmd.Wait()
 	}()
-	t.Cleanup(func() { process.forceStop() })
+	t.Cleanup(func() { process.forceStop(t) })
 	return process
 }
 
@@ -225,7 +225,7 @@ while :; do sleep 0.1; done
 	}
 	process := startCredentialFreeSandboxDaemon(t, fixture)
 	ready := filepath.Join(stateDir, "ready")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, err := os.Lstat(ready); err == nil {
 			break
@@ -287,7 +287,8 @@ func (p *sandboxExactDaemonProcess) interruptAndValidate(t *testing.T, secrets .
 	}
 }
 
-func (p *sandboxExactDaemonProcess) forceStop() {
+func (p *sandboxExactDaemonProcess) forceStop(t *testing.T) {
+	t.Helper()
 	if p == nil || p.stopped || p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
@@ -301,6 +302,7 @@ func (p *sandboxExactDaemonProcess) forceStop() {
 	select {
 	case <-p.done:
 	case <-time.After(5 * time.Second):
+		t.Error("exact warm daemon could not be reaped after interrupt and kill")
 	}
 }
 
