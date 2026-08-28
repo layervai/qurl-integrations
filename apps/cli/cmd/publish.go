@@ -370,7 +370,12 @@ func runForegroundLocalPublish(
 			timer := time.NewTimer(10 * time.Second)
 			select {
 			case stopErr := <-daemonErr:
-				retErr = errors.Join(retErr, stopErr)
+				// cancelDaemon deliberately stops a daemon that outlived an
+				// earlier publish error. Do not let that expected cancellation
+				// replace the actionable error with exit 130.
+				if !errors.Is(stopErr, context.Canceled) {
+					retErr = errors.Join(retErr, stopErr)
+				}
 			case <-timer.C:
 				retErr = errors.Join(retErr, errors.New("foreground qURL daemon did not stop within 10 seconds"))
 			}

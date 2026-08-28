@@ -24,10 +24,12 @@ const (
 	sandboxRunIDEnv          = "QURL_SHARING_RUN_ID"
 	sandboxRunAttemptEnv     = "QURL_SHARING_RUN_ATTEMPT"
 	sandboxRuntimeEnv        = "QURL_SHARING_RUNTIME"
+	sandboxQURLImageIDEnv    = "QURL_SHARING_QURL_IMAGE"
 	sandboxSecretMaxBytes    = 16 * 1024
 )
 
 var sandboxPositiveDecimal = regexp.MustCompile(`^[1-9]\d{0,19}$`)
+var sandboxImmutableImageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // sandboxSecretAfterLstatHook exists only in this tagged test binary so the
 // hermetic contract can deterministically prove a path swap is rejected.
@@ -310,4 +312,58 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxRunIdentityBindsOnlyImmutableHardenedImage(t *testing.T) {
+	const exactImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	setIdentity := func(t *testing.T, runtimeName, imageID string) {
+		t.Helper()
+		t.Setenv(sandboxRunIDEnv, "32635672597")
+		t.Setenv(sandboxRunAttemptEnv, "2")
+		t.Setenv(sandboxRuntimeEnv, runtimeName)
+		t.Setenv(sandboxQURLImageIDEnv, imageID)
+	}
+
+	t.Run("hardened-container", func(t *testing.T) {
+		setIdentity(t, "hardened_container", exactImageID)
+		got, err := sandboxRunIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[sandboxQURLImageIDEnv] != exactImageID {
+			t.Fatalf("hardened image binding = %q, want exact immutable ID", got[sandboxQURLImageIDEnv])
+		}
+	})
+
+	t.Run("host", func(t *testing.T) {
+		setIdentity(t, "host", exactImageID)
+		got, err := sandboxRunIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, present := got[sandboxQURLImageIDEnv]; present {
+			t.Fatal("host runtime inherited the hardened-container image binding")
+		}
+	})
+
+	for name, imageID := range map[string]string{
+		"missing":     "",
+		"mutable-tag": "qurl-sharing-cli:32635672597-2",
+		"whitespace":  exactImageID + " ",
+		"uppercase":   "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	} {
+		t.Run(name, func(t *testing.T) {
+			setIdentity(t, "hardened_container", imageID)
+			if got, err := sandboxRunIdentity(); err == nil || got != nil {
+				t.Fatalf("unsafe hardened image binding returned (%v, %v)", got, err)
+			}
+		})
+	}
+
+	t.Run("unsupported-runtime", func(t *testing.T) {
+		setIdentity(t, "container", exactImageID)
+		if got, err := sandboxRunIdentity(); err == nil || got != nil {
+			t.Fatalf("unsupported runtime returned (%v, %v)", got, err)
+		}
+	})
 }

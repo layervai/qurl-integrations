@@ -1567,6 +1567,51 @@ func TestForegroundPublishStartupFailureStopsOwnedSharing(t *testing.T) {
 	}
 }
 
+func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir, err := os.MkdirTemp("/tmp", "qurl-fg-timeout-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "off", 0, "stopped"))
+	srv.Script(http.MethodPut, path,
+		sharingResponse(t, srv, "on", 1, "connecting"),
+		sharingResponse(t, srv, "off", 2, "stopped"),
+	)
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", 1, "connecting"))
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--foreground"},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey},
+		shareRegistry: registry, shareStateDir: stateDir,
+		preflightTarget:  func(context.Context, string, int) error { return nil },
+		localResource:    resolvedLocalResource(srv, false),
+		foregroundDaemon: foregroundIPCTestDaemon(started, stopped),
+		sharingWaitLimit: 5 * time.Millisecond,
+	})
+	if res.code == 0 || res.code == 130 ||
+		!strings.Contains(res.stderr.String(), "wait for qURL share") ||
+		!strings.Contains(res.stderr.String(), "deadline exceeded") {
+		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("foreground daemon was not joined after serving timeout")
+	}
+	local, err := registry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.DesiredState != "off" || local.ServingEpoch != 2 {
+		t.Fatalf("foreground timeout cleanup = %+v err=%v", local, err)
+	}
+}
+
 func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir, err := os.MkdirTemp("/tmp", "qurl-fg-")

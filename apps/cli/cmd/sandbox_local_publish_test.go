@@ -807,6 +807,43 @@ printf 'arg=%s\n' "$@"
 	}
 }
 
+func TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding(t *testing.T) {
+	const exactImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	binary := filepath.Join(t.TempDir(), "qurl")
+	script := `#!/bin/sh
+printf 'image=%s\n' "${QURL_SHARING_QURL_IMAGE-unset}"
+`
+	if err := os.WriteFile(binary, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(binary, 0o500); err != nil { //nolint:gosec // The fixture must be executable and non-writable.
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, runtimeName, want string
+	}{
+		{name: "hardened-container", runtimeName: "hardened_container", want: "image=" + exactImageID + "\n"},
+		{name: "host", runtimeName: "host", want: "image=unset\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(sandboxRunIDEnv, "32635672597")
+			t.Setenv(sandboxRunAttemptEnv, "2")
+			t.Setenv(sandboxRuntimeEnv, tc.runtimeName)
+			t.Setenv(sandboxQURLImageIDEnv, exactImageID)
+			env := map[string]string{
+				"QURL_API_KEY":  "lv_test_exact_external_binary_key",
+				"QURL_ENDPOINT": "https://sandbox.invalid",
+			}
+			addSandboxRunIdentity(t, env)
+			res := runSandboxLocalCLI(t, binary, env, t.TempDir(), "status", "test-crid")
+			if res.code != 0 || res.stdout.String() != tc.want || res.stderr.Len() != 0 {
+				t.Fatalf("exact child image binding = exit %d, stdout %q, stderr %q", res.code, res.stdout.String(), res.stderr.String())
+			}
+		})
+	}
+}
+
 func TestSandboxHarnessPassesInlineAPIKeyToExactBinary(t *testing.T) {
 	const fixtureAPIKey = "lv_test_protected_input_becomes_inline_api_key"
 	apiKeyFile := filepath.Join(t.TempDir(), "api-key")

@@ -170,6 +170,9 @@ func startCredentialFreeSandboxDaemon(t *testing.T, fixture *sandboxLocalFixture
 		hub.EnvPort:              fixture.env[hub.EnvPort],
 		hub.EnvServerPublicKey:   fixture.env[hub.EnvServerPublicKey],
 	}
+	if imageID, ok := fixture.env[sandboxQURLImageIDEnv]; ok {
+		env[sandboxQURLImageIDEnv] = imageID
+	}
 	process := &sandboxExactDaemonProcess{done: make(chan error, 1)}
 	process.cmd = exec.CommandContext( //nolint:gosec // The protected test validates the exact binary and fixed arguments.
 		context.Background(),
@@ -207,6 +210,7 @@ state_dir=$6
   printf 'agent=%s\n' "${QURL_CONNECTOR_AGENT_ID-unset}"
   printf 'deployment=%s\n' "${QURL_DEPLOYMENT-unset}"
   printf 'run=%s/%s/%s\n' "${QURL_SHARING_RUN_ID-unset}" "${QURL_SHARING_RUN_ATTEMPT-unset}" "${QURL_SHARING_RUNTIME-unset}"
+  printf 'image=%s\n' "${QURL_SHARING_QURL_IMAGE-unset}"
   printf 'state=%s\n' "${QURL_CONNECTOR_STATE_DIR-unset}"
 } > "$state_dir/invocation"
 trap 'exit 130' INT TERM
@@ -230,6 +234,7 @@ while :; do sleep 0.1; done
 			sandboxRunIDEnv:        "12345",
 			sandboxRunAttemptEnv:   "2",
 			sandboxRuntimeEnv:      "hardened_container",
+			sandboxQURLImageIDEnv:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			hub.EnvHost:            "hub.example.test",
 			hub.EnvPort:            "443",
 			hub.EnvServerPublicKey: "public-key",
@@ -265,6 +270,7 @@ while :; do sleep 0.1; done
 		"agent=unset",
 		"deployment=" + deployment,
 		"run=12345/2/hardened_container",
+		"image=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"state=" + stateDir,
 		"",
 	}, "\n")

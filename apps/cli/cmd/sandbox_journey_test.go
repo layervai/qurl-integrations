@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -111,10 +112,10 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	}
 }
 
-// addSandboxRunIdentity adds the exact private-orchestrator run identity only
-// to lanes that use it for namespace separation or run-scoped receipts.
-func addSandboxRunIdentity(t *testing.T, env map[string]string) {
-	t.Helper()
+// sandboxRunIdentity reads the exact private-orchestrator run identity. A
+// hardened-container run must also bind the immutable image ID that the
+// trusted orchestrator already verified. A host run must not inherit it.
+func sandboxRunIdentity() (map[string]string, error) {
 	values := map[string]string{
 		sandboxRunIDEnv:      strings.TrimSpace(os.Getenv(sandboxRunIDEnv)),
 		sandboxRunAttemptEnv: strings.TrimSpace(os.Getenv(sandboxRunAttemptEnv)),
@@ -128,8 +129,34 @@ func addSandboxRunIdentity(t *testing.T, env map[string]string) {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		t.Fatalf("run-scoped sandbox journey is disarmed — missing %v. "+
-			"The private orchestrator must supply the exact run ID, attempt, and runtime identity.", missing)
+		return nil, fmt.Errorf("run-scoped sandbox journey is disarmed — missing %v", missing)
+	}
+	switch values[sandboxRuntimeEnv] {
+	case "host":
+		return values, nil
+	case "hardened_container":
+		imageID := os.Getenv(sandboxQURLImageIDEnv)
+		if imageID == "" {
+			return nil, fmt.Errorf("run-scoped hardened-container journey is disarmed — missing [%s]", sandboxQURLImageIDEnv)
+		}
+		if imageID != strings.TrimSpace(imageID) || !sandboxImmutableImageID.MatchString(imageID) {
+			return nil, fmt.Errorf("%s must be one exact immutable sha256 image ID", sandboxQURLImageIDEnv)
+		}
+		values[sandboxQURLImageIDEnv] = imageID
+		return values, nil
+	default:
+		return nil, fmt.Errorf("%s is unsupported; accepted values are host and hardened_container", sandboxRuntimeEnv)
+	}
+}
+
+// addSandboxRunIdentity adds the validated run identity only to lanes that use
+// it for namespace separation or run-scoped receipts. It fails before an exact
+// customer process can start when the hardened image binding is absent.
+func addSandboxRunIdentity(t *testing.T, env map[string]string) {
+	t.Helper()
+	values, err := sandboxRunIdentity()
+	if err != nil {
+		t.Fatal(err)
 	}
 	for name, value := range values {
 		env[name] = value
