@@ -832,8 +832,9 @@ printf 'image=%s\n' "${QURL_SHARING_QURL_IMAGE-unset}"
 			t.Setenv(sandboxRuntimeEnv, tc.runtimeName)
 			t.Setenv(sandboxQURLImageIDEnv, exactImageID)
 			env := map[string]string{
-				"QURL_API_KEY":  "lv_test_exact_external_binary_key",
-				"QURL_ENDPOINT": "https://sandbox.invalid",
+				"QURL_API_KEY":        "lv_test_exact_external_binary_key",
+				"QURL_ENDPOINT":       "https://sandbox.invalid",
+				sandboxQURLImageIDEnv: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			}
 			addSandboxRunIdentity(t, env)
 			res := runSandboxLocalCLI(t, binary, env, t.TempDir(), "status", "test-crid")

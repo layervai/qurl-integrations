@@ -333,7 +333,7 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	}
 }
 
-func TestRenderConnectorEnrollmentScopeRemedy(t *testing.T) {
+func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
 	}))
@@ -357,7 +357,7 @@ func TestRenderConnectorEnrollmentScopeRemedy(t *testing.T) {
 	var buf bytes.Buffer
 	RenderError(&buf, fmt.Errorf("bootstrap local Connector: %w", err), false)
 	got := buf.String()
-	if !strings.Contains(got, "qurl:agent") || !strings.Contains(got, "one-shot Connector enrollment credential") {
+	if !strings.Contains(got, "qurl:agent") || !strings.Contains(got, "one-time device enrollment credential") {
 		t.Errorf("operation-specific remedy missing:\n%s", got)
 	}
 	if strings.Contains(got, hintScope) {

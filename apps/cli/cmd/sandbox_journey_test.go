@@ -158,6 +158,10 @@ func addSandboxRunIdentity(t *testing.T, env map[string]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A host lane must not inherit a hardened-container image binding from a
+	// reused environment map. sandboxRunIdentity intentionally omits it for
+	// host runs; clear any earlier value before copying the validated result.
+	delete(env, sandboxQURLImageIDEnv)
 	for name, value := range values {
 		env[name] = value
 	}

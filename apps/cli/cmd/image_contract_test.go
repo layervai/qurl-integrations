@@ -273,6 +273,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 	validatorTests := []string{
 		"TestReadSandboxSecretFileFailsClosed",
+		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
 		"TestSandboxForegroundLifecycleStateContract",
 		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
@@ -280,6 +281,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
 		"TestSandboxPublishReadinessWaitsForCompleteCRIDLine",
+		"TestSandboxRunIdentityBindsOnlyImmutableHardenedImage",
 		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",
 		"TestSandboxStoppedRouteRefusalMatchesQuietGet",
 		"TestValidateSandboxCLIBinary",

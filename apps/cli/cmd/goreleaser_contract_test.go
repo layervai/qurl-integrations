@@ -25,9 +25,10 @@ import (
 
 type goreleaserConfig struct {
 	Builds []struct {
-		ID     string `yaml:"id"`
-		Main   string `yaml:"main"`
-		Binary string `yaml:"binary"`
+		ID     string   `yaml:"id"`
+		Main   string   `yaml:"main"`
+		Binary string   `yaml:"binary"`
+		GOOS   []string `yaml:"goos"`
 	} `yaml:"builds"`
 	Archives []struct {
 		Files []string `yaml:"files"`
@@ -67,6 +68,13 @@ func TestReleaseBuildsOnlyQURL(t *testing.T) {
 	build := cfg.Builds[0]
 	if build.ID != "qurl" || build.Main != "./apps/cli/cmd/" || build.Binary != "qurl" {
 		t.Fatalf("release build = %+v, want the qurl CLI only", build)
+	}
+}
+
+func TestReleaseBuildsOnlySupportedDeviceStatePlatforms(t *testing.T) {
+	cfg := loadGoreleaserConfig(t)
+	if got, want := cfg.Builds[0].GOOS, []string{"linux", "darwin"}; !slices.Equal(got, want) {
+		t.Fatalf("release platforms = %q, want %q; qurl-go pinned device state fails closed on other platforms", got, want)
 	}
 }
 

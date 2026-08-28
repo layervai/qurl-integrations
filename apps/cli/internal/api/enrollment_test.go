@@ -340,7 +340,7 @@ func TestMintConnectorEnrollmentTokenMapsProblemResponse(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Code != "insufficient_scope" || apiErr.RequestID != "req_test" {
 		t.Errorf("mapped error = %+v", apiErr)
 	}
-	if !apiErr.ConnectorEnrollmentScopeRequired() {
+	if !apiErr.EnrollmentScopeRequired() {
 		t.Error("enrollment scope failure lost its operation-specific remedy marker")
 	}
 }

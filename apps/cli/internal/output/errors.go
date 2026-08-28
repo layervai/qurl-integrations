@@ -204,8 +204,8 @@ func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 // condition, not a permissions problem, and says so.
 func errorHint(apiErr *qurlapi.Error) string {
 	switch {
-	case apiErr.ConnectorEnrollmentScopeRequired():
-		return hintConnectorEnrollmentScope
+	case apiErr.EnrollmentScopeRequired():
+		return hintEnrollmentScope
 	case strings.EqualFold(apiErr.Code, "revoked"):
 		return hintRevoked
 	case strings.EqualFold(apiErr.Code, "resource_tombstoned"):

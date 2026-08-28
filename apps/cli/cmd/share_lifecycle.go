@@ -59,23 +59,27 @@ func shareRestartCmd(opts *globalOpts) *cobra.Command {
 }
 
 func shareStatusCmd(opts *globalOpts) *cobra.Command {
-	return shareReadStateCmd(opts, "status <CRID>", "Show resource or local sharing state")
+	return shareReadStateCmd(opts, "status <CRID>", "Show resource or local sharing state", false)
 }
 
 func shareInspectCmd(opts *globalOpts) *cobra.Command {
-	return shareReadStateCmd(opts, "inspect <CRID>", "Inspect resource or local sharing state")
+	return shareReadStateCmd(opts, "inspect <CRID>", "Inspect resource or local sharing state", true)
 }
 
-func shareReadStateCmd(opts *globalOpts, use, short string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		Long: `Show the current state of a published resource.
+func shareReadStateCmd(opts *globalOpts, use, short string, alias bool) *cobra.Command {
+	long := `Show the current state of a published resource.
 
 For a remote URL, this command reports the resource type, target, and active or
 revoked state. For a local app, it reports durable desired state separately from
-the platform's observed Connector state and serving epoch.`,
-		Args: exactArgs(1),
+the platform's observed Connector state and serving epoch.`
+	if alias {
+		long += "\n\nInspect is an alias for status and returns the same fields."
+	}
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Long:  long,
+		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
@@ -200,7 +204,7 @@ func requireLocalShareSupport(goos string) error {
 	if goos == "darwin" || goos == "linux" {
 		return nil
 	}
-	return fmt.Errorf("local app sharing is supported on macOS and Linux only; %s supports remote qURL commands", goos)
+	return fmt.Errorf("local app sharing is supported on macOS and Linux only; unsupported platform: %s", goos)
 }
 
 func changeAuthoritativeSharing(ctx context.Context, client qurlapi.Client, id string, prior *qurlapi.Sharing, action string) (*qurlapi.Sharing, bool, error) {

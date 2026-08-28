@@ -566,6 +566,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 		EnrollmentCredentialProvider: bootstrap.enrollmentCredential,
 		RecoveryCredentialProvider:   bootstrap.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,
+		// This runtime only establishes the device credential used by the
+		// registered REST client. It never starts or changes a local share, so
+		// the owner-bound SessionOperations authority is intentionally absent.
 	})
 	if err != nil {
 		return nil, nil, err

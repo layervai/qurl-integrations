@@ -14,9 +14,9 @@ Release; the `release-cli` job then runs GoReleaser, which attaches:
 
 | Asset | What it is |
 |---|---|
-| `qurl_<version>_<os>_<arch>.tar.gz` / `.zip` | Binary + LICENSE + man pages + completions (`windows` ships as `.zip`) |
+| `qurl_<version>_<os>_<arch>.tar.gz` | Binary + LICENSE + man pages + completions for macOS and Linux |
 | `qurl_<version>_linux_<arch>.deb` / `.rpm` | Linux packages |
-| `qurl_<version>_<os>_<arch>.tar.gz.sbom.json` (`.zip.sbom.json` for windows) | Per-archive SPDX 2.3 SBOM (syft) |
+| `qurl_<version>_<os>_<arch>.tar.gz.sbom.json` | Per-archive SPDX 2.3 SBOM (syft) |
 | `checksums.txt` | SHA-256 manifest of every archive, package, and SBOM |
 | `checksums.txt.sigstore.json` | Keyless Sigstore signature bundle over `checksums.txt` |
 | `qurl-image.txt` | Exact tested multi-architecture `ghcr.io/layervai/qurl@sha256:...` image reference |

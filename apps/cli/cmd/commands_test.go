@@ -72,7 +72,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On macOS", "background daemon", "On Linux", "--foreground", "Local app sharing is not supported", "Windows", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On macOS", "background daemon", "On Linux", "--foreground", "Local app sharing is not supported", "macOS and Linux", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}

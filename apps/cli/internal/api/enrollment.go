@@ -102,7 +102,7 @@ func (c *client) MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnr
 		problem := reply.problem()
 		var apiErr *Error
 		if errors.As(problem, &apiErr) && strings.EqualFold(apiErr.Code, "insufficient_scope") {
-			apiErr.connectorEnrollmentScopeRequired = true
+			apiErr.enrollmentScopeRequired = true
 		}
 		return nil, problem
 	}
@@ -147,7 +147,7 @@ func (c *client) MintConnectorEnrollmentToken(ctx context.Context, opts MintConn
 		problem := reply.problem()
 		var apiErr *Error
 		if errors.As(problem, &apiErr) && strings.EqualFold(apiErr.Code, "insufficient_scope") {
-			apiErr.connectorEnrollmentScopeRequired = true
+			apiErr.enrollmentScopeRequired = true
 		}
 		return nil, problem
 	}

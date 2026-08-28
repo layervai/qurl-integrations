@@ -81,8 +81,8 @@ change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
 back on. Publishing the same target later reuses the same CRID.
 
 Background lifecycle management is currently available on macOS. On Linux,
-add `--foreground`; the command then owns the share until it exits. Local app
-sharing is not supported on Windows. Remote qURL commands remain available.
+add `--foreground`; the command then owns the share until it exits. qURL v2
+release binaries are available for macOS and Linux.
 
 ### 4. Open or share it
 
@@ -120,17 +120,16 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
-The CLI supports remote qURL commands on every released platform. Local
-background sharing is currently macOS-only. Linux local publish requires
-`--foreground`; `start` and `restart` cannot create a background job. Windows
-supports remote qURL commands but not local app sharing.
+The CLI supports remote qURL commands on macOS and Linux. Local background
+sharing is currently macOS-only. Linux local publish requires `--foreground`;
+`start` and `restart` cannot create a background job.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
 and install it with `dpkg -i` / `rpm -i`.
 
 **Prebuilt binaries** — download the archive for your OS and architecture
-(`linux`, `darwin`, `windows` × `amd64`, `arm64`) from the
+(`linux`, `darwin` × `amd64`, `arm64`) from the
 [releases page](https://github.com/layervai/qurl-integrations/releases),
 extract it, and put the `qurl` binary on your `PATH`. The archive carries
 the man pages and completion files alongside the binary.
