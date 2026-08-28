@@ -1,4 +1,4 @@
-//go:build clisandbox
+//go:build clisandbox && (linux || darwin)
 
 package main
 
@@ -87,6 +87,7 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 		t.Fatalf("load protected sandbox API key: %v", err)
 	}
 	cliEnv := sandboxJourneyEnv(t)
+	addSandboxRunIdentity(t, cliEnv)
 	endpoint := cliEnv["QURL_ENDPOINT"]
 	if cliEnv["QURL_API_KEY"] != apiKey {
 		t.Fatal("sandbox API key sources disagree")

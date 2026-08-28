@@ -187,6 +187,7 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 		t.Fatalf("load exact customer CLI binary: %v", err)
 	}
 	cliEnv := sandboxJourneyEnv(t)
+	addSandboxRunIdentity(t, cliEnv)
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	missing := []string{}
 	for name, value := range map[string]string{
@@ -550,6 +551,7 @@ func waitSandboxRouteFence(
 		settleWindow: settleWindow,
 		serveGrace:   serveGrace,
 		startedAt:    time.Now(),
+		stableHits:   backendHits(),
 		last:         "route fence was not sampled",
 	}
 	ticker := time.NewTicker(pollInterval)
@@ -562,7 +564,9 @@ func waitSandboxRouteFence(
 		}
 		probeState, err := probe(ctx)
 		if err != nil {
-			validator.observeProbeFailure(err, backendHits())
+			if err := validator.observeProbeFailure(time.Now(), err, backendHits()); err != nil {
+				return err
+			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("stopped local route probe did not finish before the bound: %s: %w", validator.last, ctxErr)
 			}
@@ -606,10 +610,23 @@ type sandboxRouteFenceValidator struct {
 	last         string
 }
 
-func (v *sandboxRouteFenceValidator) observeProbeFailure(err error, hits uint64) {
+func (v *sandboxRouteFenceValidator) observeProbeFailure(now time.Time, err error, hits uint64) error {
+	if v.settleWindow <= 0 || v.serveGrace <= 0 {
+		return errors.New("route-fence settle and backend-serving grace durations must be positive")
+	}
+	if v.startedAt.IsZero() {
+		v.startedAt = now
+	}
+	if hits != v.stableHits {
+		priorHits := v.stableHits
+		if now.Sub(v.startedAt) >= v.serveGrace {
+			return fmt.Errorf("stopped local route recorded a late backend hit after the %s teardown grace: %d to %d", v.serveGrace, priorHits, hits)
+		}
+		v.stableHits = hits
+	}
 	v.stableSince = time.Time{}
-	v.stableHits = hits
 	v.last = fmt.Sprintf("last route probe was not the exact stopped-resource refusal: %v", err)
+	return nil
 }
 
 func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRouteProbeState, hits uint64) (bool, error) {
@@ -799,6 +816,32 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 					t.Fatal("backend serving after the teardown grace was accepted")
 				}
 			})
+		}
+	})
+
+	t.Run("probe failure cannot hide a late backend hit", func(t *testing.T) {
+		probeErr := errors.New("non-exact response after backend access")
+		withinGrace := sandboxRouteFenceValidator{
+			settleWindow: settle,
+			serveGrace:   serveGrace,
+			startedAt:    base,
+			stableHits:   4,
+		}
+		if err := withinGrace.observeProbeFailure(base.Add(serveGrace-time.Nanosecond), probeErr, 5); err != nil {
+			t.Fatalf("backend hit within teardown grace: %v", err)
+		}
+		if withinGrace.stableHits != 5 || !withinGrace.stableSince.IsZero() {
+			t.Fatalf("probe-failure baseline = hits %d, stable since %s", withinGrace.stableHits, withinGrace.stableSince)
+		}
+
+		afterGrace := sandboxRouteFenceValidator{
+			settleWindow: settle,
+			serveGrace:   serveGrace,
+			startedAt:    base,
+			stableHits:   4,
+		}
+		if err := afterGrace.observeProbeFailure(base.Add(serveGrace), probeErr, 5); err == nil {
+			t.Fatal("probe failure hid a backend hit after the teardown grace")
 		}
 	})
 

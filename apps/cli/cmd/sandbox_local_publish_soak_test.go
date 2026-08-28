@@ -146,6 +146,7 @@ type sandboxExactDaemonProcess struct {
 	stdout, stderr lockedSandboxBuffer
 	done           chan error
 	stopped        bool
+	reaped         bool
 }
 
 func startCredentialFreeSandboxDaemon(t *testing.T, fixture *sandboxLocalFixture) *sandboxExactDaemonProcess {
@@ -217,7 +218,7 @@ while :; do sleep 0.1; done
 			"QURL_DEPLOYMENT":      deployment,
 			sandboxRunIDEnv:        "12345",
 			sandboxRunAttemptEnv:   "2",
-			sandboxRuntimeEnv:      "container",
+			sandboxRuntimeEnv:      "hardened_container",
 			hub.EnvHost:            "hub.example.test",
 			hub.EnvPort:            "443",
 			hub.EnvServerPublicKey: "public-key",
@@ -251,7 +252,7 @@ while :; do sleep 0.1; done
 		"arg=" + stateDir,
 		"api_key=unset",
 		"deployment=" + deployment,
-		"run=12345/2/container",
+		"run=12345/2/hardened_container",
 		"state=" + stateDir,
 		"",
 	}, "\n")
@@ -268,6 +269,7 @@ func (p *sandboxExactDaemonProcess) interruptAndValidate(t *testing.T, secrets .
 	p.stopped = true
 	select {
 	case err := <-p.done:
+		p.reaped = true
 		t.Fatalf("exact warm daemon exited before the requested stop: %v", err)
 	default:
 	}
@@ -276,6 +278,7 @@ func (p *sandboxExactDaemonProcess) interruptAndValidate(t *testing.T, secrets .
 	}
 	select {
 	case waitErr := <-p.done:
+		p.reaped = true
 		if err := validateSandboxInterruptedExit(waitErr); err != nil {
 			t.Fatalf("exact warm daemon %v", err)
 		}
@@ -289,18 +292,20 @@ func (p *sandboxExactDaemonProcess) interruptAndValidate(t *testing.T, secrets .
 
 func (p *sandboxExactDaemonProcess) forceStop(t *testing.T) {
 	t.Helper()
-	if p == nil || p.stopped || p.cmd == nil || p.cmd.Process == nil {
+	if p == nil || p.reaped || p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
 	_ = p.cmd.Process.Signal(os.Interrupt)
 	select {
 	case <-p.done:
+		p.reaped = true
 		return
 	case <-time.After(5 * time.Second):
 	}
 	_ = p.cmd.Process.Kill()
 	select {
 	case <-p.done:
+		p.reaped = true
 	case <-time.After(5 * time.Second):
 		t.Error("exact warm daemon could not be reaped after interrupt and kill")
 	}

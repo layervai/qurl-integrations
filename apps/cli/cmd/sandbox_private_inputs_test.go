@@ -122,10 +122,10 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 	switch runtimeName {
 	case "host":
 		runtimeCode = "h"
-	case "container":
+	case "hardened_container":
 		runtimeCode = "c"
 	default:
-		return sandboxRunNamespace{}, errors.New("qURL sharing runtime must be host or container")
+		return sandboxRunNamespace{}, errors.New("qURL sharing runtime must be host or hardened_container")
 	}
 	labelCode := ""
 	switch label {
@@ -276,7 +276,7 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 	}
 	seen := map[sandboxRunNamespace]bool{first: true}
 	for _, tc := range []struct{ runtime, label string }{
-		{"container", "smoke"}, {"host", "soak"}, {"host", "crid"}, {"host", "sibling-a"}, {"host", "sibling-b"},
+		{"hardened_container", "smoke"}, {"host", "soak"}, {"host", "crid"}, {"host", "sibling-a"}, {"host", "sibling-b"},
 	} {
 		t.Setenv(sandboxRuntimeEnv, tc.runtime)
 		got, gotErr := sandboxNamespace(tc.label)
@@ -287,10 +287,14 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 	}
 	t.Setenv(sandboxRunIDEnv, "18446744073709551615")
 	t.Setenv(sandboxRunAttemptEnv, "18446744073709551615")
-	t.Setenv(sandboxRuntimeEnv, "container")
+	t.Setenv(sandboxRuntimeEnv, "hardened_container")
 	maximal, maxErr := sandboxNamespace("soak")
 	if maxErr != nil || len(maximal.AgentID) > 64 {
 		t.Fatalf("maximal namespace = %+v, %v", maximal, maxErr)
+	}
+	t.Setenv(sandboxRuntimeEnv, "container")
+	if _, legacyErr := sandboxNamespace("smoke"); legacyErr == nil {
+		t.Fatal("legacy container runtime identity was accepted")
 	}
 	for name, value := range map[string]string{
 		"zero": "0", "leading-zero": "01", "negative": "-1", "overflow": "18446744073709551616",

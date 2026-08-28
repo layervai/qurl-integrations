@@ -71,10 +71,11 @@ const journeyTimeout = 4 * time.Minute
 // surfacing it: a label no listing carries identifies nothing.
 const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
 
-// sandboxJourneyEnv reads the suite's env contract from the real process
+// sandboxJourneyEnv reads the common suite env contract from the real process
 // environment and skips loudly — naming every missing variable — when it
-// is not fully provisioned. The returned map is the ONLY environment the
-// CLI invocations see, which is what keeps hermetic mode airtight: the
+// is not fully provisioned. Run-scoped local-publish lanes add their exact
+// run identity through addSandboxRunIdentity. The returned map is the ONLY
+// environment the CLI invocations see, which is what keeps hermetic mode airtight: the
 // deployment settings the download step needs enter it as QURL_DEPLOYMENT,
 // built by journeyDeploymentFile below, never read from the process.
 func sandboxJourneyEnv(t *testing.T) map[string]string {
@@ -83,18 +84,12 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	endpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
 	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
 	relayURL := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"))
-	runID := strings.TrimSpace(os.Getenv(sandboxRunIDEnv))
-	runAttempt := strings.TrimSpace(os.Getenv(sandboxRunAttemptEnv))
-	runtimeName := strings.TrimSpace(os.Getenv(sandboxRuntimeEnv))
 	missing := []string{}
 	for name, value := range map[string]string{
 		"QURL_API_KEY":                key,
 		"QURL_ENDPOINT":               endpoint,
 		"QURL_SANDBOX_QV2_ISSUER_KEY": issuerKey,
 		"QURL_SANDBOX_QV2_RELAY_URL":  relayURL,
-		sandboxRunIDEnv:               runID,
-		sandboxRunAttemptEnv:          runAttempt,
-		sandboxRuntimeEnv:             runtimeName,
 	} {
 		if value == "" {
 			missing = append(missing, name)
@@ -107,16 +102,37 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
 			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
 			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
-			"settings are built from. The private orchestrator must also supply the exact run "+
-			"ID, attempt, and runtime identity.", missing)
+			"settings are built from.", missing)
 	}
 	return map[string]string{
-		"QURL_API_KEY":       key,
-		"QURL_ENDPOINT":      endpoint,
-		"QURL_DEPLOYMENT":    journeyDeploymentFile(t, issuerKey, relayURL),
-		sandboxRunIDEnv:      runID,
-		sandboxRunAttemptEnv: runAttempt,
-		sandboxRuntimeEnv:    runtimeName,
+		"QURL_API_KEY":    key,
+		"QURL_ENDPOINT":   endpoint,
+		"QURL_DEPLOYMENT": journeyDeploymentFile(t, issuerKey, relayURL),
+	}
+}
+
+// addSandboxRunIdentity adds the exact private-orchestrator run identity only
+// to lanes that use it for namespace separation or run-scoped receipts.
+func addSandboxRunIdentity(t *testing.T, env map[string]string) {
+	t.Helper()
+	values := map[string]string{
+		sandboxRunIDEnv:      strings.TrimSpace(os.Getenv(sandboxRunIDEnv)),
+		sandboxRunAttemptEnv: strings.TrimSpace(os.Getenv(sandboxRunAttemptEnv)),
+		sandboxRuntimeEnv:    strings.TrimSpace(os.Getenv(sandboxRuntimeEnv)),
+	}
+	missing := []string{}
+	for name, value := range values {
+		if value == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Skipf("SKIPPED LOUDLY: run-scoped sandbox journey is disarmed — missing %v. "+
+			"The private orchestrator must supply the exact run ID, attempt, and runtime identity.", missing)
+	}
+	for name, value := range values {
+		env[name] = value
 	}
 }
 

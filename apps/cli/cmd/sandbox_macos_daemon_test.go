@@ -47,6 +47,7 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	}
 
 	cliEnv := sandboxJourneyEnv(t)
+	addSandboxRunIdentity(t, cliEnv)
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
 		value := strings.TrimSpace(os.Getenv(name))
