@@ -631,10 +631,14 @@ func validateSandboxCLIBinary(raw string) (string, error) {
 	if !ok {
 		return "", errors.New("customer CLI binary metadata is unavailable")
 	}
-	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint64(os.Geteuid()), uint64(stat.Nlink)); err != nil {
+	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint64(os.Geteuid()), sandboxUnsigned64(stat.Nlink)); err != nil {
 		return "", err
 	}
 	return resolved, nil
+}
+
+func sandboxUnsigned64[T ~uint16 | ~uint32 | ~uint64](value T) uint64 {
+	return uint64(value)
 }
 
 func validateSandboxCLIBinaryMetadata(mode os.FileMode, ownerUID uint32, effectiveUID, links uint64) error {
