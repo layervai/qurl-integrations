@@ -121,7 +121,7 @@ jobs:
   test:
     name: cli / test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30 # This job compiles separate race, coverage, and tagged CLI test variants.
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     steps:
