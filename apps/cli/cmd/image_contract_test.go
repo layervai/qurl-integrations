@@ -18,9 +18,9 @@ type cliWorkflowContract struct {
 }
 
 type cliWorkflowStep struct {
-	Name string            `yaml:"name"`
-	Env  map[string]string `yaml:"env"`
-	Run  string            `yaml:"run"`
+	Name string         `yaml:"name"`
+	Env  map[string]any `yaml:"env"`
+	Run  string         `yaml:"run"`
 }
 
 func TestCLIImageContract(t *testing.T) {
@@ -168,20 +168,26 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	lifecycleRegex := "^(" + strings.Join(lifecycleTests, "|") + ")$"
 	lifecycleNames := strings.Join(lifecycleTests, "\n")
 	lifecycleListCommand := `go test -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
-	lifecycleRunCommand := `go test -race -count=1 -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	lifecycleRunCommand := `go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
 	lifecycleStep := findStep("Run CRID lifecycle unit tests")
 	if len(lifecycleStep.Env) != 2 || lifecycleStep.Env["LIFECYCLE_TEST_REGEX"] != lifecycleRegex || lifecycleStep.Env["LIFECYCLE_TEST_NAMES"] != lifecycleNames {
 		t.Errorf("public CLI workflow lifecycle env = %#v, want exact regex and sorted test names", lifecycleStep.Env)
 	}
 	for _, required := range []string{
 		lifecycleListCommand,
-		"LC_ALL=C sort",
 		`if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
 		lifecycleRunCommand,
+		`select(.Action == "pass" and ((.Test // "") | test($regex)))`,
+		`select(.Action == "skip" and ((.Test // "") | test($regex)))`,
+		`if [[ -n "$skipped_tests" ]]; then`,
+		`if [[ "$passed_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
 	} {
 		if strings.Count(lifecycleStep.Run, required) != 1 {
 			t.Errorf("public CLI workflow does not pin the exact CRID lifecycle test set with %q", required)
 		}
+	}
+	if strings.Count(lifecycleStep.Run, "LC_ALL=C sort") != 3 {
+		t.Error("public CLI workflow does not sort declaration, PASS, and SKIP results under the C locale")
 	}
 	if strings.Index(lifecycleStep.Run, lifecycleListCommand) >= strings.Index(lifecycleStep.Run, lifecycleRunCommand) {
 		t.Error("public CLI workflow does not verify CRID lifecycle test declarations before execution")
@@ -196,6 +202,11 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	validatorStep := findStep("Run credential-free sandbox validator tests")
 	if strings.Count(validatorStep.Run, validatorRegex) != 1 {
 		t.Error("public CLI workflow does not execute the exact credential-free sandbox validator set")
+	}
+	warmDaemonStep := findStep("Run exact warm-daemon process contract")
+	if strings.Count(warmDaemonStep.Run, "go test -race -tags='clisandbox clisoak' -count=1") != 1 ||
+		strings.Count(warmDaemonStep.Run, "-run '^TestExactWarmDaemonProcessContract$'") != 1 {
+		t.Error("public CLI workflow does not execute the exact credential-free warm-daemon process contract")
 	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))

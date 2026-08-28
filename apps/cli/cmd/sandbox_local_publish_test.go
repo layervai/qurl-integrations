@@ -43,7 +43,6 @@ const (
 	sandboxRouteFenceTimeout  = 2 * time.Minute
 	sandboxRouteFencePoll     = 500 * time.Millisecond
 	sandboxRouteFenceSettle   = 2 * time.Second
-	sandboxStoppedRouteError  = "Error: Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to.\n"
 )
 
 type sandboxHTTPDoer interface {
@@ -410,7 +409,10 @@ func sandboxLocalRouteOnce(t *testing.T, binary string, env map[string]string, s
 
 func sandboxLocalRouteOnceContext(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker string) error {
 	t.Helper()
-	probeState, err := probeSandboxLocalRoute(t, ctx, binary, env, stateDir, crid, marker)
+	probeState, err := probeSandboxLocalRoute(
+		t, ctx, binary, env, stateDir, crid, marker,
+		filepath.Join(t.TempDir(), "payload"), sandboxStoppedRouteRefusal(t),
+	)
 	if err != nil {
 		return err
 	}
@@ -427,12 +429,14 @@ const (
 	sandboxRouteRefused
 )
 
-func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker string) (sandboxRouteProbeState, error) {
+func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker, dest, stoppedRefusal string) (sandboxRouteProbeState, error) {
 	t.Helper()
-	dest := filepath.Join(t.TempDir(), "payload")
+	if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, errors.New("clear prior route-probe destination")
+	}
 	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "get", crid, "--file", dest)
 	if res.code != 0 {
-		if err := validateSandboxStoppedRouteRefusal(res); err != nil {
+		if err := validateSandboxStoppedRouteRefusal(res, stoppedRefusal); err != nil {
 			return 0, err
 		}
 		if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
@@ -450,14 +454,26 @@ func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, en
 	return sandboxRouteServed, nil
 }
 
-func validateSandboxStoppedRouteRefusal(res *runResult) error {
+func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) error {
 	if res == nil {
 		return errors.New("stopped-route probe returned no command result")
 	}
-	if res.code != exitcode.Unavailable || res.stdout.Len() != 0 || res.stderr.String() != sandboxStoppedRouteError {
+	if stoppedRefusal == "" {
+		return errors.New("stopped-route refusal contract is empty")
+	}
+	if res.code != exitcode.Unavailable || res.stdout.Len() != 0 || res.stderr.String() != stoppedRefusal {
 		return fmt.Errorf("get did not return the exact stopped-resource refusal: exit=%d stdout-bytes=%d stderr=%q", res.code, res.stdout.Len(), res.stderr.String())
 	}
 	return nil
+}
+
+func sandboxStoppedRouteRefusal(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "golden", "error_dark503.plain.stderr.golden"))
+	if err != nil {
+		t.Fatalf("read stopped-route refusal golden: %v", err)
+	}
+	return string(data)
 }
 
 func assertSandboxLocalRouteFenced(
@@ -472,12 +488,14 @@ func assertSandboxLocalRouteFenced(
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxRouteFenceTimeout)
 	defer cancel()
+	dest := filepath.Join(t.TempDir(), "payload")
+	stoppedRefusal := sandboxStoppedRouteRefusal(t)
 	if err := waitSandboxRouteFence(
 		ctx,
 		sandboxRouteFencePoll,
 		sandboxRouteFenceSettle,
 		func(ctx context.Context) (sandboxRouteProbeState, error) {
-			return probeSandboxLocalRoute(t, ctx, binary, env, stateDir, crid, marker)
+			return probeSandboxLocalRoute(t, ctx, binary, env, stateDir, crid, marker, dest, stoppedRefusal)
 		},
 		backendHits.Load,
 	); err != nil {
@@ -654,6 +672,7 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 func TestValidateSandboxRouteFence(t *testing.T) {
 	base := time.Unix(1_800_000_000, 0)
 	settle := 10 * time.Second
+	stoppedRefusal := sandboxStoppedRouteRefusal(t)
 
 	t.Run("stable exact refusal settles", func(t *testing.T) {
 		validator := sandboxRouteFenceValidator{settleWindow: settle}
@@ -714,16 +733,42 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 			"dns":            sandboxRouteResult(exitcode.Unavailable, "", "Error: lookup sandbox.invalid: no such host\n"),
 			"start":          sandboxRouteResult(exitcode.General, "", "Error: fork/exec qurl: permission denied\n"),
 			"generic 503":    sandboxRouteResult(exitcode.Unavailable, "", "Error: Service Unavailable (HTTP 503)\n"),
-			"unexpected out": sandboxRouteResult(exitcode.Unavailable, "bytes", sandboxStoppedRouteError),
+			"unexpected out": sandboxRouteResult(exitcode.Unavailable, "bytes", stoppedRefusal),
 		} {
 			t.Run(name, func(t *testing.T) {
-				if err := validateSandboxStoppedRouteRefusal(res); err == nil {
+				if err := validateSandboxStoppedRouteRefusal(res, stoppedRefusal); err == nil {
 					t.Fatal("unexpected get failure accepted as stopped-route refusal")
 				}
 			})
 		}
-		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", sandboxStoppedRouteError)); err != nil {
+		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", stoppedRefusal), stoppedRefusal); err != nil {
 			t.Fatalf("exact stopped-route refusal: %v", err)
+		}
+		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", stoppedRefusal), ""); err == nil {
+			t.Fatal("empty stopped-route refusal contract accepted")
+		}
+	})
+
+	t.Run("wait settles only after final-read late hit", func(t *testing.T) {
+		var hitReads atomic.Uint64
+		started := time.Now()
+		err := waitSandboxRouteFence(
+			context.Background(),
+			time.Millisecond,
+			time.Microsecond,
+			func(context.Context) (sandboxRouteProbeState, error) { return sandboxRouteRefused, nil },
+			func() uint64 {
+				if hitReads.Add(1) >= 3 {
+					return 1
+				}
+				return 0
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hitReads.Load() < 5 || time.Since(started) < 2*time.Millisecond {
+			t.Fatalf("late final-read hit did not restart the settle loop: reads=%d elapsed=%s", hitReads.Load(), time.Since(started))
 		}
 	})
 

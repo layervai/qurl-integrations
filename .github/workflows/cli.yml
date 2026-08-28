@@ -168,7 +168,34 @@ jobs:
               <(printf '%s\n' "$actual_tests")
             exit 1
           fi
-          go test -race -count=1 -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd
+          lifecycle_events=$(mktemp)
+          trap 'rm -f "$lifecycle_events"' EXIT
+          go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd |
+            tee "$lifecycle_events"
+          passed_tests="$(
+            jq -r --arg regex "$LIFECYCLE_TEST_REGEX" \
+              'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' \
+              "$lifecycle_events" |
+              LC_ALL=C sort
+          )"
+          skipped_tests="$(
+            jq -r --arg regex "$LIFECYCLE_TEST_REGEX" \
+              'select(.Action == "skip" and ((.Test // "") | test($regex))) | .Test' \
+              "$lifecycle_events" |
+              LC_ALL=C sort
+          )"
+          if [[ -n "$skipped_tests" ]]; then
+            echo "::error::required CRID lifecycle tests skipped"
+            printf '%s\n' "$skipped_tests"
+            exit 1
+          fi
+          if [[ "$passed_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then
+            echo "::error::required CRID lifecycle tests did not all report PASS"
+            diff -u \
+              <(printf '%s\n' "$LIFECYCLE_TEST_NAMES") \
+              <(printf '%s\n' "$passed_tests")
+            exit 1
+          fi
 
       # 40 is the intentional initial floor, not the target. The v2 rebuild
       # replaces this tree, so pinning an ambition floor (85) to the old tree
@@ -199,6 +226,12 @@ jobs:
         run: >-
           go test -race -tags=clisandbox -count=1
           -run '^(TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          ./apps/cli/cmd
+
+      - name: Run exact warm-daemon process contract
+        run: >-
+          go test -race -tags='clisandbox clisoak' -count=1
+          -run '^TestExactWarmDaemonProcessContract$'
           ./apps/cli/cmd
 
       - name: Test sandbox matched-cohort artifact contract
