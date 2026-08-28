@@ -239,7 +239,7 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	crid := fixture.process.waitReady(t)
 	registryCtx, cancelRegistryRead := context.WithTimeout(context.Background(), sandboxRegistryTimeout)
 	defer cancelRegistryRead()
-	local, err := waitSandboxLocalShareRegistry(registryCtx, stateDir, 100*time.Millisecond)
+	local, err := waitSandboxLocalShareRegistry(registryCtx, stateDir, 100*time.Millisecond, fixture.process)
 	if err != nil {
 		fixture.process.requireRunning(t, "while waiting for the local-share registry")
 		fixture.forceStop(t)
@@ -262,9 +262,14 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	return fixture
 }
 
-func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInterval time.Duration) (state.LocalShare, error) {
+func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInterval time.Duration,
+	process *sandboxPublishProcess,
+) (state.LocalShare, error) {
 	if pollInterval <= 0 {
 		return state.LocalShare{}, errors.New("local-share registry poll duration must be positive")
+	}
+	if process == nil {
+		return state.LocalShare{}, errors.New("local-share registry requires the foreground publish process")
 	}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -276,6 +281,11 @@ func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInt
 		}
 		last = fmt.Sprintf("%d shares, present %t, error %v", len(shares), present, err)
 		select {
+		case <-process.done:
+			process.waitMu.Lock()
+			waitErr := process.waitErr
+			process.waitMu.Unlock()
+			return state.LocalShare{}, fmt.Errorf("foreground publish exited before persisting a local share: %v", waitErr)
 		case <-ctx.Done():
 			return state.LocalShare{}, fmt.Errorf("local-share registry did not publish exactly one row: %s: %w", last, ctx.Err())
 		case <-ticker.C:
@@ -603,17 +613,18 @@ func waitSandboxRouteFence(
 				return err
 			}
 			if settled {
-				// Close the sampling race before returning. A hit that landed after the
-				// first atomic load restarts the full settle window.
+				// Close the sampling race before returning. A hit observed after the
+				// settle window is a security-boundary failure, not a sampling artifact.
 				finalHits := backendHits()
 				if finalHits == hits {
 					return nil
 				}
 				// This read happens after the probe completed. Charge a newly
 				// observed hit at the read time, not at the probe issue time.
-				if _, err := validator.observe(time.Now(), sandboxRouteRefused, finalHits); err != nil {
-					return err
+				if _, finalErr := validator.observe(time.Now(), sandboxRouteRefused, finalHits); finalErr != nil {
+					return fmt.Errorf("stopped local route recorded a backend hit after settling: %w", finalErr)
 				}
+				return errors.New("stopped local route accepted a backend hit after settling")
 			}
 		}
 		select {
@@ -930,27 +941,33 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 		}
 	})
 
-	t.Run("wait settles only after final-read late hit", func(t *testing.T) {
+	t.Run("wait fails on final-read late hit", func(t *testing.T) {
+		var probes atomic.Uint64
 		var hitReads atomic.Uint64
-		started := time.Now()
+		var lastHitProbe atomic.Uint64
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 		err := waitSandboxRouteFence(
-			context.Background(),
+			ctx,
 			time.Millisecond,
-			time.Microsecond,
-			time.Second,
-			func(context.Context) (sandboxRouteProbeState, error) { return sandboxRouteRefused, nil },
+			time.Millisecond,
+			5*time.Millisecond,
+			func(context.Context) (sandboxRouteProbeState, error) {
+				probes.Add(1)
+				return sandboxRouteRefused, nil
+			},
 			func() uint64 {
-				if hitReads.Add(1) >= 3 {
+				hitReads.Add(1)
+				probe := probes.Load()
+				if probe > 0 && lastHitProbe.Swap(probe) == probe {
 					return 1
 				}
 				return 0
 			},
 		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if hitReads.Load() < 5 {
-			t.Fatalf("late final-read hit did not restart the settle loop: reads=%d elapsed=%s", hitReads.Load(), time.Since(started))
+		if err == nil || !strings.Contains(err.Error(), "backend hit after settling") ||
+			!strings.Contains(err.Error(), "late backend hit") || hitReads.Load() <= probes.Load()+1 {
+			t.Fatalf("final-read late hit result = %v; probes=%d reads=%d", err, probes.Load(), hitReads.Load())
 		}
 	})
 

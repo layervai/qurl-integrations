@@ -760,6 +760,12 @@ func TestSandboxPublishProcessReportsEarlyExit(t *testing.T) {
 	if _, err := process.waitReadyResult(time.Second); err == nil || !strings.Contains(err.Error(), "exited before readiness") {
 		t.Fatalf("early-exit readiness result = %v", err)
 	}
+	registryCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := waitSandboxLocalShareRegistry(registryCtx, process.stateDir, time.Hour, process); err == nil ||
+		!strings.Contains(err.Error(), "foreground publish exited before persisting a local share") {
+		t.Fatalf("early-exit local registry result = %v", err)
+	}
 }
 
 func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {

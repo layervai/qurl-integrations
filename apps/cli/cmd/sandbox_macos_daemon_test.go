@@ -47,7 +47,6 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	}
 
 	cliEnv := sandboxJourneyEnv(t)
-	addSandboxRunIdentity(t, cliEnv)
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
 		value := strings.TrimSpace(os.Getenv(name))
@@ -108,17 +107,17 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
 
 	stopped := externalSandboxLifecycle(t, binary, cliEnv, "stop", cridValue)
-	if stopped.DesiredState != "off" || stopped.ConnectionState != "stopped" || stopped.ServingEpoch <= initial.ServingEpoch {
-		t.Fatalf("stop state = %+v, want off/stopped at an advanced epoch", stopped)
+	if err := validateSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
+		t.Fatalf("stop state = %+v: %v", stopped, err)
 	}
 	started := externalSandboxLifecycle(t, binary, cliEnv, "start", cridValue)
-	if started.DesiredState != "on" || started.ConnectionState != "serving" || started.ServingEpoch < stopped.ServingEpoch {
-		t.Fatalf("start state = %+v, want on/serving without epoch regression", started)
+	if err := validateSandboxSharingTransition(started, "on", "serving", stopped.ServingEpoch); err != nil {
+		t.Fatalf("start state = %+v: %v", started, err)
 	}
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
 	restarted := externalSandboxLifecycle(t, binary, cliEnv, "restart", cridValue)
-	if restarted.DesiredState != "on" || restarted.ConnectionState != "serving" || restarted.ServingEpoch <= started.ServingEpoch {
-		t.Fatalf("restart state = %+v, want on/serving at an advanced epoch", restarted)
+	if err := validateSandboxSharingTransition(restarted, "on", "serving", started.ServingEpoch); err != nil {
+		t.Fatalf("restart state = %+v: %v", restarted, err)
 	}
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
 	if backendHits.Load() < 3 {
