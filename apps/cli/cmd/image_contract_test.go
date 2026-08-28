@@ -119,6 +119,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cliWorkflow = bytes.ReplaceAll(cliWorkflow, []byte("\r\n"), []byte("\n"))
 	if !bytes.Contains(cliWorkflow, []byte("go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
 		t.Error("public CLI workflow does not compile the private sandbox test surface")
 	}
