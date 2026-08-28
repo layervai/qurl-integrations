@@ -217,7 +217,7 @@ while :; do sleep 0.1; done
 			"QURL_DEPLOYMENT":      deployment,
 			sandboxRunIDEnv:        "12345",
 			sandboxRunAttemptEnv:   "2",
-			sandboxRuntimeEnv:      "hardened_container",
+			sandboxRuntimeEnv:      "container",
 			hub.EnvHost:            "hub.example.test",
 			hub.EnvPort:            "443",
 			hub.EnvServerPublicKey: "public-key",
@@ -251,7 +251,7 @@ while :; do sleep 0.1; done
 		"arg=" + stateDir,
 		"api_key=unset",
 		"deployment=" + deployment,
-		"run=12345/2/hardened_container",
+		"run=12345/2/container",
 		"state=" + stateDir,
 		"",
 	}, "\n")

@@ -104,6 +104,7 @@ var sandboxCleanupHTTPClient = &http.Client{
 //
 //	QURL_CLI_SANDBOX_LOCAL_PUBLISH=enabled \
 //	QURL_CLI_SANDBOX_BINARY=/absolute/path/to/qurl \
+//	QURL_SHARING_RUN_ID=123 QURL_SHARING_RUN_ATTEMPT=1 QURL_SHARING_RUNTIME=host \
 //	QURL_API_KEY=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT=... \
 //	QURL_CONNECTOR_HUB_HOST=... QURL_CONNECTOR_HUB_PORT=... \
 //	QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=... \
@@ -216,7 +217,7 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 
 	fixture := &sandboxLocalFixture{
 		binary: binary, env: cliEnv, stateDir: stateDir, cleanupJWT: cleanupJWT,
-		key: cliEnv["QURL_API_KEY"], marker: "sandbox-local-publish-" + namespace.ConnectorID,
+		key: cliEnv["QURL_API_KEY"], marker: fmt.Sprintf("sandbox-local-publish-%s-%d", namespace.ConnectorID, time.Now().UnixNano()),
 	}
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fixture.backendHits.Add(1)
@@ -227,12 +228,14 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	fixture.process = startSandboxPublishProcess(t, binary, cliEnv, namespace, stateDir, echo.URL)
 	fixture.process.registerRecoveryCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, namespace, stateDir, productionSandboxSiblingCleanupOps())
 	crid := fixture.process.waitReady(t)
-	shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
-	if err != nil || !present || len(shares) != 1 {
+	registryCtx, cancelRegistryRead := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRegistryRead()
+	local, err := waitSandboxLocalShareRegistry(registryCtx, stateDir, 100*time.Millisecond)
+	if err != nil {
 		fixture.forceStop(t)
-		t.Fatalf("read exact local-publish registry = (%d shares, present %v, %v), want one", len(shares), present, err)
+		t.Fatalf("read exact local-publish registry: %v", err)
 	}
-	fixture.local = &shares[0]
+	fixture.local = &local
 	if fixture.local.CRID != crid {
 		fixture.forceStop(t)
 		t.Fatalf("foreground publish CRID = %q, local registry CRID = %q", crid, fixture.local.CRID)
@@ -247,6 +250,27 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 		t.Fatalf("sandbox minted a non-test CRID: %v", err)
 	}
 	return fixture
+}
+
+func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInterval time.Duration) (state.LocalShare, error) {
+	if pollInterval <= 0 {
+		return state.LocalShare{}, errors.New("local-share registry poll duration must be positive")
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	last := "registry was not sampled"
+	for {
+		shares, present, err := state.ReadLocalSharesIfPresent(ctx, stateDir)
+		if err == nil && present && len(shares) == 1 {
+			return shares[0], nil
+		}
+		last = fmt.Sprintf("%d shares, present %t, error %v", len(shares), present, err)
+		select {
+		case <-ctx.Done():
+			return state.LocalShare{}, fmt.Errorf("local-share registry did not publish exactly one row: %s: %w", last, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (f *sandboxLocalFixture) stopAndValidate(t *testing.T) {
@@ -434,7 +458,7 @@ func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, en
 	if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, fmt.Errorf("clear prior route-probe destination: %w", err)
 	}
-	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "get", crid, "--file", dest)
+	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "--quiet", "get", crid, "--file", dest)
 	if res.code != 0 {
 		if err := validateSandboxStoppedRouteRefusal(res, stoppedRefusal); err != nil {
 			return 0, err
@@ -469,6 +493,9 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 
 func sandboxStoppedRouteRefusal(t *testing.T) string {
 	t.Helper()
+	// TODO(upstream-contract): qurl-service currently uses this endpoint-dark
+	// response for a stopped resource. Keep the exact CLI and service contracts
+	// in lockstep if the service adds a distinct stopped-resource response.
 	// The endpoint-scoped text is not sufficient by itself. The live gate also
 	// requires durable off/stopped state and a stable zero-hit backend window.
 	data, err := os.ReadFile(filepath.Join("testdata", "golden", "error_dark503.plain.stderr.golden"))
@@ -526,26 +553,31 @@ func waitSandboxRouteFence(
 		}
 		probeState, err := probe(ctx)
 		if err != nil {
+			validator.observeProbeFailure(err, backendHits())
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return fmt.Errorf("stopped local route probe did not finish before the bound: %w", ctxErr)
+				return fmt.Errorf("stopped local route probe did not finish before the bound: %s: %w", validator.last, ctxErr)
 			}
-			return fmt.Errorf("stopped local route probe failed without the exact refusal: %w", err)
-		}
-		hits := backendHits()
-		now := time.Now()
-		settled, err := validator.observe(now, probeState, hits)
-		if err != nil {
-			return err
-		}
-		if settled {
-			// Close the sampling race before returning. A hit that landed after the
-			// first atomic load restarts the full settle window.
-			finalHits := backendHits()
-			if finalHits == hits {
-				return nil
-			}
-			if _, err := validator.observe(time.Now(), sandboxRouteRefused, finalHits); err != nil {
+			// Route teardown can briefly reset a connection or return a gateway
+			// response before the exact stopped-resource refusal is stable. A
+			// non-exact result never counts as fencing: it resets the full settle
+			// window and remains the terminal diagnostic if it does not converge.
+		} else {
+			hits := backendHits()
+			now := time.Now()
+			settled, err := validator.observe(now, probeState, hits)
+			if err != nil {
 				return err
+			}
+			if settled {
+				// Close the sampling race before returning. A hit that landed after the
+				// first atomic load restarts the full settle window.
+				finalHits := backendHits()
+				if finalHits == hits {
+					return nil
+				}
+				if _, err := validator.observe(time.Now(), sandboxRouteRefused, finalHits); err != nil {
+					return err
+				}
 			}
 		}
 		select {
@@ -561,6 +593,12 @@ type sandboxRouteFenceValidator struct {
 	stableSince  time.Time
 	stableHits   uint64
 	last         string
+}
+
+func (v *sandboxRouteFenceValidator) observeProbeFailure(err error, hits uint64) {
+	v.stableSince = time.Time{}
+	v.stableHits = hits
+	v.last = fmt.Sprintf("last route probe was not the exact stopped-resource refusal: %v", err)
 }
 
 func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRouteProbeState, hits uint64) (bool, error) {
@@ -774,12 +812,36 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 		}
 	})
 
-	t.Run("wait fails immediately on unexpected probe error", func(t *testing.T) {
-		err := waitSandboxRouteFence(context.Background(), time.Second, time.Second, func(context.Context) (sandboxRouteProbeState, error) {
+	t.Run("wait tolerates a transient non-exact probe without accepting it", func(t *testing.T) {
+		var probes atomic.Uint64
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		err := waitSandboxRouteFence(ctx, time.Millisecond, time.Millisecond, func(context.Context) (sandboxRouteProbeState, error) {
+			if probes.Add(1) == 1 {
+				return 0, errors.New("connection reset during route teardown")
+			}
+			return sandboxRouteRefused, nil
+		}, func() uint64 { return 0 })
+		if err != nil {
+			t.Fatalf("transient route teardown error prevented exact fence: %v", err)
+		}
+		if probes.Load() < 3 {
+			t.Fatalf("route fence settled without a full exact-refusal window: probes=%d", probes.Load())
+		}
+	})
+
+	t.Run("permanent non-exact probe fails at the bound", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		err := waitSandboxRouteFence(ctx, time.Millisecond, time.Millisecond, func(context.Context) (sandboxRouteProbeState, error) {
 			return 0, errors.New("authentication failed")
 		}, func() uint64 { return 0 })
-		if err == nil || !strings.Contains(err.Error(), "without the exact refusal") {
-			t.Fatalf("unexpected probe result = %v", err)
+		if err == nil || !strings.Contains(err.Error(), "authentication failed") || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("permanent unexpected probe result = %v", err)
+		}
+		if time.Since(started) < 3*time.Millisecond {
+			t.Fatalf("permanent unexpected probe failed before the bounded convergence window")
 		}
 	})
 
