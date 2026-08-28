@@ -35,7 +35,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	}
 	duration := sandboxSoakDuration(t)
 	fixture := startSandboxLocalPublish(t, "soak")
-	defer fixture.stop(t)
+	defer fixture.stopAndValidate(t)
 
 	initialAgent := loadSandboxAgentState(t, fixture.stateDir)
 	if initialAgent == nil {
@@ -70,7 +70,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	for time.Now().Before(deadline) {
 		now := time.Now()
 		if !warmRestartDone && !now.Before(warmRestartAt) {
-			fixture.stop(t)
+			fixture.stopAndValidate(t)
 			daemonCancel, daemonDone = startCredentialFreeSandboxDaemon(t, fixture)
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)

@@ -137,6 +137,9 @@ jobs:
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
             ./apps/cli/...
 
+      # This is an independent named release gate, not an accidental repeat of
+      # the coverage run. The private lifecycle receipt binds this exact step
+      # and test set, so keep their result visible and stable on every CLI PR.
       - name: Run CRID lifecycle unit tests
         shell: bash
         env:
@@ -195,7 +198,7 @@ jobs:
       - name: Run credential-free sandbox validator tests
         run: >-
           go test -race -tags=clisandbox -count=1
-          -run '^(TestRunSandboxLocalCLIUsesExactBinaryAndState|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          -run '^(TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           ./apps/cli/cmd
 
       - name: Test sandbox matched-cohort artifact contract

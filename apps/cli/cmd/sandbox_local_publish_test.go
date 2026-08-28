@@ -34,6 +34,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 const (
@@ -42,6 +43,7 @@ const (
 	sandboxRouteFenceTimeout  = 2 * time.Minute
 	sandboxRouteFencePoll     = 500 * time.Millisecond
 	sandboxRouteFenceSettle   = 2 * time.Second
+	sandboxStoppedRouteError  = "Error: Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to.\n"
 )
 
 type sandboxHTTPDoer interface {
@@ -112,7 +114,7 @@ func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 		t.Skipf("SKIPPED LOUDLY: unified local-publish sandbox smoke is disarmed — %s != enabled", localPublishSandboxArming)
 	}
 	fixture := startSandboxLocalPublish(t, "smoke")
-	defer fixture.stop(t)
+	defer fixture.stopAndValidate(t)
 	binary, cliEnv, stateDir, local := fixture.binary, fixture.env, fixture.stateDir, fixture.local
 
 	if assessment, err := cridux.Assess(local.CRID); err != nil || assessment.Kind != cridux.KindCRID {
@@ -228,46 +230,41 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	crid := fixture.process.waitReady(t)
 	shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
 	if err != nil || !present || len(shares) != 1 {
-		fixture.stop(t)
+		fixture.forceStop(t)
 		t.Fatalf("read exact local-publish registry = (%d shares, present %v, %v), want one", len(shares), present, err)
 	}
 	fixture.local = &shares[0]
 	if fixture.local.CRID != crid {
-		fixture.stop(t)
+		fixture.forceStop(t)
 		t.Fatalf("foreground publish CRID = %q, local registry CRID = %q", crid, fixture.local.CRID)
 	}
 	loaded := loadSandboxAgentState(t, fixture.stateDir)
 	if err := validateSandboxDeviceIdentity(loaded, namespace.AgentID, ""); err != nil {
-		fixture.stop(t)
+		fixture.forceStop(t)
 		t.Fatalf("local-publish durable identity: %v", err)
 	}
 	if err := requireTestResourceIdentity(fixture.local.CRID, fixture.local.ResourceID); err != nil {
-		fixture.stop(t)
+		fixture.forceStop(t)
 		t.Fatalf("sandbox minted a non-test CRID: %v", err)
 	}
 	return fixture
 }
 
-func (f *sandboxLocalFixture) stop(t *testing.T) {
+func (f *sandboxLocalFixture) stopAndValidate(t *testing.T) {
 	t.Helper()
 	if f == nil {
 		return
 	}
 	f.stopOnce.Do(func() {
-		f.process.forceStop(t)
-		stdout, stderr := f.process.stdout.String(), f.process.stderr.String()
-		for _, secret := range []string{f.key, f.cleanupJWT} {
-			if secret != "" && strings.Contains(stdout+stderr, secret) {
-				t.Error("foreground publish exposed a protected credential")
-			}
-		}
-		if f.local != nil && stdout != f.local.CRID+"\n" {
-			t.Errorf("foreground publish stdout = %q, want exactly the full CRID and newline", stdout)
-		}
-		if strings.Contains(stderr, "refresh-mode") || strings.Contains(stderr, "explicit approval") {
-			t.Errorf("foreground publish exposed retired assignment-approval UX: %s", stderr)
-		}
+		f.process.interruptAndValidate(t, f.key, f.cleanupJWT)
 	})
+}
+
+func (f *sandboxLocalFixture) forceStop(t *testing.T) {
+	t.Helper()
+	if f != nil && f.process != nil {
+		f.process.forceStop(t)
+	}
 }
 
 type sandboxSharingDoc struct {
@@ -413,17 +410,52 @@ func sandboxLocalRouteOnce(t *testing.T, binary string, env map[string]string, s
 
 func sandboxLocalRouteOnceContext(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker string) error {
 	t.Helper()
-	dest := filepath.Join(t.TempDir(), "payload")
-	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "get", crid, "--file", dest)
-	if res.code != 0 {
-		return fmt.Errorf("get exited %d: %s", res.code, res.stderr.String())
-	}
-	payload, err := os.ReadFile(dest)
+	probeState, err := probeSandboxLocalRoute(t, ctx, binary, env, stateDir, crid, marker)
 	if err != nil {
 		return err
 	}
+	if probeState != sandboxRouteServed {
+		return errors.New("route returned the exact stopped-resource refusal while serving was expected")
+	}
+	return nil
+}
+
+type sandboxRouteProbeState uint8
+
+const (
+	sandboxRouteServed sandboxRouteProbeState = iota + 1
+	sandboxRouteRefused
+)
+
+func probeSandboxLocalRoute(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker string) (sandboxRouteProbeState, error) {
+	t.Helper()
+	dest := filepath.Join(t.TempDir(), "payload")
+	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "get", crid, "--file", dest)
+	if res.code != 0 {
+		if err := validateSandboxStoppedRouteRefusal(res); err != nil {
+			return 0, err
+		}
+		if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
+			return 0, errors.New("stopped-route refusal left a destination file")
+		}
+		return sandboxRouteRefused, nil
+	}
+	payload, err := os.ReadFile(dest)
+	if err != nil {
+		return 0, err
+	}
 	if string(payload) != marker {
-		return fmt.Errorf("payload length %d did not match unique local marker", len(payload))
+		return 0, fmt.Errorf("payload length %d did not match unique local marker", len(payload))
+	}
+	return sandboxRouteServed, nil
+}
+
+func validateSandboxStoppedRouteRefusal(res *runResult) error {
+	if res == nil {
+		return errors.New("stopped-route probe returned no command result")
+	}
+	if res.code != exitcode.Unavailable || res.stdout.Len() != 0 || res.stderr.String() != sandboxStoppedRouteError {
+		return fmt.Errorf("get did not return the exact stopped-resource refusal: exit=%d stdout-bytes=%d stderr=%q", res.code, res.stdout.Len(), res.stderr.String())
 	}
 	return nil
 }
@@ -444,8 +476,8 @@ func assertSandboxLocalRouteFenced(
 		ctx,
 		sandboxRouteFencePoll,
 		sandboxRouteFenceSettle,
-		func(ctx context.Context) error {
-			return sandboxLocalRouteOnceContext(t, ctx, binary, env, stateDir, crid, marker)
+		func(ctx context.Context) (sandboxRouteProbeState, error) {
+			return probeSandboxLocalRoute(t, ctx, binary, env, stateDir, crid, marker)
 		},
 		backendHits.Load,
 	); err != nil {
@@ -457,50 +489,93 @@ func waitSandboxRouteFence(
 	ctx context.Context,
 	pollInterval time.Duration,
 	settleWindow time.Duration,
-	probe func(context.Context) error,
+	probe func(context.Context) (sandboxRouteProbeState, error),
 	backendHits func() uint64,
 ) error {
 	if pollInterval <= 0 || settleWindow <= 0 {
 		return errors.New("route-fence poll and settle durations must be positive")
 	}
-	var stableSince time.Time
-	var stableHits uint64
-	last := "route fence was not sampled"
+	validator := sandboxRouteFenceValidator{settleWindow: settleWindow, last: "route fence was not sampled"}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", last, ctx.Err())
+			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", validator.last, ctx.Err())
 		default:
 		}
-		routeErr := probe(ctx)
+		probeState, err := probe(ctx)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("stopped local route probe did not finish before the bound: %w", ctxErr)
+			}
+			return fmt.Errorf("stopped local route probe failed without the exact refusal: %w", err)
+		}
 		hits := backendHits()
 		now := time.Now()
-		switch {
-		case routeErr == nil:
-			stableSince = time.Time{}
-			last = fmt.Sprintf("stopped local route still served its backend bytes at %d hits", hits)
-		case stableSince.IsZero():
-			stableSince = now
-			stableHits = hits
-			last = fmt.Sprintf("route is rejected but has not stayed fenced for %s", settleWindow)
-		case hits != stableHits:
-			stableSince = now
-			last = fmt.Sprintf("late backend hit advanced the count from %d to %d", stableHits, hits)
-			stableHits = hits
-		case now.Sub(stableSince) >= settleWindow:
-			return nil
-		default:
-			last = fmt.Sprintf("route has stayed rejected for %s of %s", now.Sub(stableSince).Round(time.Millisecond), settleWindow)
+		settled, err := validator.observe(now, probeState, hits)
+		if err != nil {
+			return err
 		}
-
-		timer := time.NewTimer(pollInterval)
+		if settled {
+			// Close the sampling race before returning. A hit that landed after the
+			// first atomic load restarts the full settle window.
+			finalHits := backendHits()
+			if finalHits == hits {
+				return nil
+			}
+			if _, err := validator.observe(time.Now(), sandboxRouteRefused, finalHits); err != nil {
+				return err
+			}
+		}
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", last, ctx.Err())
-		case <-timer.C:
+			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", validator.last, ctx.Err())
+		case <-ticker.C:
 		}
 	}
+}
+
+type sandboxRouteFenceValidator struct {
+	settleWindow time.Duration
+	stableSince  time.Time
+	stableHits   uint64
+	last         string
+}
+
+func (v *sandboxRouteFenceValidator) observe(now time.Time, probeState sandboxRouteProbeState, hits uint64) (bool, error) {
+	if v.settleWindow <= 0 {
+		return false, errors.New("route-fence settle duration must be positive")
+	}
+	switch probeState {
+	case sandboxRouteServed:
+		v.stableSince = time.Time{}
+		v.stableHits = hits
+		v.last = fmt.Sprintf("stopped local route still served its backend bytes at %d hits", hits)
+		return false, nil
+	case sandboxRouteRefused:
+	default:
+		return false, errors.New("route probe returned an unknown state")
+	}
+	if v.stableSince.IsZero() {
+		v.stableSince = now
+		v.stableHits = hits
+		v.last = fmt.Sprintf("route refusal has not stayed stable for %s", v.settleWindow)
+		return false, nil
+	}
+	if hits != v.stableHits {
+		priorHits := v.stableHits
+		v.stableSince = now
+		v.stableHits = hits
+		v.last = fmt.Sprintf("late backend hit changed the count from %d to %d", priorHits, hits)
+		return false, nil
+	}
+	stableFor := now.Sub(v.stableSince)
+	if stableFor >= v.settleWindow {
+		return true, nil
+	}
+	v.last = fmt.Sprintf("route refusal has stayed stable for %s of %s", stableFor, v.settleWindow)
+	return false, nil
 }
 
 // Each stop, start, and restart changes the durable lifecycle authority. The
@@ -577,74 +652,105 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 }
 
 func TestValidateSandboxRouteFence(t *testing.T) {
-	t.Run("eventual fence settles", func(t *testing.T) {
-		var attempts atomic.Uint64
-		var hits atomic.Uint64
-		started := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		err := waitSandboxRouteFence(ctx, time.Millisecond, 10*time.Millisecond, func(context.Context) error {
-			if attempts.Add(1) <= 2 {
-				hits.Add(1)
-				return nil
+	base := time.Unix(1_800_000_000, 0)
+	settle := 10 * time.Second
+
+	t.Run("stable exact refusal settles", func(t *testing.T) {
+		validator := sandboxRouteFenceValidator{settleWindow: settle}
+		for _, observation := range []struct {
+			at      time.Time
+			settled bool
+		}{
+			{at: base},
+			{at: base.Add(settle - time.Nanosecond)},
+			{at: base.Add(settle), settled: true},
+		} {
+			settled, err := validator.observe(observation.at, sandboxRouteRefused, 4)
+			if err != nil {
+				t.Fatal(err)
 			}
-			return errors.New("route rejected")
-		}, hits.Load)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if attempts.Load() < 3 || time.Since(started) < 10*time.Millisecond {
-			t.Fatalf("route fence returned without polling through its settle window: attempts=%d elapsed=%s", attempts.Load(), time.Since(started))
+			if settled != observation.settled {
+				t.Fatalf("observation at %s settled=%t, want %t", observation.at.Sub(base), settled, observation.settled)
+			}
 		}
 	})
 
-	t.Run("late backend hit restarts settle window", func(t *testing.T) {
-		var attempts atomic.Uint64
-		var hits atomic.Uint64
-		started := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		err := waitSandboxRouteFence(ctx, time.Millisecond, 10*time.Millisecond, func(context.Context) error {
-			if attempts.Add(1) == 6 {
-				hits.Add(1)
-			}
-			return errors.New("route rejected")
-		}, hits.Load)
-		if err != nil {
-			t.Fatal(err)
+	t.Run("serving and late hit restart full settle window", func(t *testing.T) {
+		validator := sandboxRouteFenceValidator{settleWindow: settle}
+		observations := []struct {
+			at    time.Time
+			state sandboxRouteProbeState
+			hits  uint64
+		}{
+			{at: base, state: sandboxRouteRefused, hits: 4},
+			{at: base.Add(9 * time.Second), state: sandboxRouteServed, hits: 5},
+			{at: base.Add(10 * time.Second), state: sandboxRouteRefused, hits: 5},
+			{at: base.Add(19 * time.Second), state: sandboxRouteRefused, hits: 6},
+			{at: base.Add(28 * time.Second), state: sandboxRouteRefused, hits: 6},
 		}
-		if attempts.Load() < 12 || time.Since(started) < 15*time.Millisecond {
-			t.Fatalf("late backend hit did not restart the settle window: attempts=%d elapsed=%s", attempts.Load(), time.Since(started))
+		for _, observation := range observations {
+			settled, err := validator.observe(observation.at, observation.state, observation.hits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settled {
+				t.Fatalf("route fence settled early at %s", observation.at.Sub(base))
+			}
+		}
+		settled, err := validator.observe(base.Add(29*time.Second), sandboxRouteRefused, 7)
+		if err != nil || settled {
+			t.Fatalf("same-time late hit = (%t, %v), want full reset", settled, err)
+		}
+		settled, err = validator.observe(base.Add(39*time.Second), sandboxRouteRefused, 7)
+		if err != nil || !settled {
+			t.Fatalf("route fence after reset window = (%t, %v), want settled", settled, err)
 		}
 	})
 
-	t.Run("continued serving reaches bound", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		defer cancel()
-		err := waitSandboxRouteFence(ctx, time.Millisecond, 3*time.Millisecond, func(context.Context) error { return nil }, func() uint64 { return 1 })
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("continued serving error = %v, want deadline exceeded", err)
+	t.Run("unexpected command failures are not refusal", func(t *testing.T) {
+		for name, res := range map[string]*runResult{
+			"missing result": nil,
+			"auth":           sandboxRouteResult(exitcode.Auth, "", "Error: Unauthorized (HTTP 401)\n"),
+			"dns":            sandboxRouteResult(exitcode.Unavailable, "", "Error: lookup sandbox.invalid: no such host\n"),
+			"start":          sandboxRouteResult(exitcode.General, "", "Error: fork/exec qurl: permission denied\n"),
+			"generic 503":    sandboxRouteResult(exitcode.Unavailable, "", "Error: Service Unavailable (HTTP 503)\n"),
+			"unexpected out": sandboxRouteResult(exitcode.Unavailable, "bytes", sandboxStoppedRouteError),
+		} {
+			t.Run(name, func(t *testing.T) {
+				if err := validateSandboxStoppedRouteRefusal(res); err == nil {
+					t.Fatal("unexpected get failure accepted as stopped-route refusal")
+				}
+			})
+		}
+		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", sandboxStoppedRouteError)); err != nil {
+			t.Fatalf("exact stopped-route refusal: %v", err)
 		}
 	})
 
-	t.Run("blocked probe observes bound", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		defer cancel()
-		var observedCancellation atomic.Bool
-		err := waitSandboxRouteFence(ctx, time.Millisecond, 3*time.Millisecond, func(ctx context.Context) error {
-			select {
-			case <-ctx.Done():
-				observedCancellation.Store(true)
-				return ctx.Err()
-			case <-time.After(250 * time.Millisecond):
-				return errors.New("probe did not receive the route-fence context")
-			}
+	t.Run("wait fails immediately on unexpected probe error", func(t *testing.T) {
+		err := waitSandboxRouteFence(context.Background(), time.Second, time.Second, func(context.Context) (sandboxRouteProbeState, error) {
+			return 0, errors.New("authentication failed")
 		}, func() uint64 { return 0 })
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("blocked probe error = %v, want deadline exceeded", err)
+		if err == nil || !strings.Contains(err.Error(), "without the exact refusal") {
+			t.Fatalf("unexpected probe result = %v", err)
 		}
-		if !observedCancellation.Load() {
-			t.Fatal("route-fence context did not reach the blocked probe")
+	})
+
+	t.Run("blocked probe observes cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		entered := make(chan struct{})
+		result := make(chan error, 1)
+		go func() {
+			result <- waitSandboxRouteFence(ctx, time.Second, time.Second, func(ctx context.Context) (sandboxRouteProbeState, error) {
+				close(entered)
+				<-ctx.Done()
+				return 0, ctx.Err()
+			}, func() uint64 { return 0 })
+		}()
+		<-entered
+		cancel()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked probe error = %v, want canceled", err)
 		}
 	})
 
@@ -656,11 +762,20 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 		"zero settle": {poll: time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := waitSandboxRouteFence(context.Background(), timing.poll, timing.settle, func(context.Context) error { return errors.New("rejected") }, func() uint64 { return 0 }); err == nil {
+			if err := waitSandboxRouteFence(context.Background(), timing.poll, timing.settle, func(context.Context) (sandboxRouteProbeState, error) {
+				return sandboxRouteRefused, nil
+			}, func() uint64 { return 0 }); err == nil {
 				t.Fatal("invalid route-fence timing accepted")
 			}
 		})
 	}
+}
+
+func sandboxRouteResult(code int, stdout, stderr string) *runResult {
+	res := &runResult{code: code}
+	_, _ = res.stdout.WriteString(stdout)
+	_, _ = res.stderr.WriteString(stderr)
+	return res
 }
 
 func assertSandboxStreamsDoNotContainSecrets(t *testing.T, res *runResult, secrets ...string) {

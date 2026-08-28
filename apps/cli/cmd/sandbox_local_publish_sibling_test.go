@@ -341,6 +341,16 @@ func (p *sandboxPublishProcess) readSharingState() (sandboxSharingDoc, error) {
 
 func (p *sandboxPublishProcess) stopAndValidate(t *testing.T, secrets ...string) sandboxSharingDoc {
 	t.Helper()
+	p.interruptAndValidate(t, secrets...)
+	stopped := p.waitForSharingState(t, "off", "stopped")
+	if stopped.ServingEpoch <= p.servingState.ServingEpoch {
+		t.Fatalf("sandbox publish %s stopped epoch = %d, want greater than serving epoch %d", p.label, stopped.ServingEpoch, p.servingState.ServingEpoch)
+	}
+	return stopped
+}
+
+func (p *sandboxPublishProcess) interruptAndValidate(t *testing.T, secrets ...string) {
+	t.Helper()
 	if p.stopped {
 		t.Fatalf("sandbox publish %s was stopped twice", p.label)
 	}
@@ -357,23 +367,18 @@ func (p *sandboxPublishProcess) stopAndValidate(t *testing.T, secrets ...string)
 	p.waitMu.Lock()
 	waitErr := p.waitErr
 	p.waitMu.Unlock()
-	var exitErr *exec.ExitError
-	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
-		t.Fatalf("sandbox publish %s exit = %v, want 130 after interrupt\nstderr: %s", p.label, waitErr, p.stderr.String())
-	}
 	stderr := p.stderr.String()
 	stdout := p.stdout.String()
-	if err := validateSandboxForegroundExit(stdout, stderr, p.crid, secrets...); err != nil {
+	if err := validateSandboxForegroundExit(waitErr, stdout, stderr, p.crid, secrets...); err != nil {
 		t.Fatalf("sandbox publish %s stop: %v\nstderr: %s", p.label, err, stderr)
 	}
-	stopped := p.waitForSharingState(t, "off", "stopped")
-	if stopped.ServingEpoch <= p.servingState.ServingEpoch {
-		t.Fatalf("sandbox publish %s stopped epoch = %d, want greater than serving epoch %d", p.label, stopped.ServingEpoch, p.servingState.ServingEpoch)
-	}
-	return stopped
 }
 
-func validateSandboxForegroundExit(stdout, stderr, crid string, secrets ...string) error {
+func validateSandboxForegroundExit(waitErr error, stdout, stderr, crid string, secrets ...string) error {
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
+		return fmt.Errorf("foreground publish exit = %v, want 130 after interrupt", waitErr)
+	}
 	if stdout != crid+"\n" {
 		return errors.New("foreground publish did not print exactly one complete CRID line")
 	}
@@ -381,6 +386,9 @@ func validateSandboxForegroundExit(stdout, stderr, crid string, secrets ...strin
 		if secret != "" && strings.Contains(stdout+stderr, secret) {
 			return errors.New("foreground publish exposed a protected credential")
 		}
+	}
+	if strings.Contains(stderr, "refresh-mode") || strings.Contains(stderr, "explicit approval") {
+		return errors.New("foreground publish exposed retired assignment-approval UX")
 	}
 	return nil
 }
@@ -688,21 +696,26 @@ func TestValidateSandboxCLIBinary(t *testing.T) {
 
 func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
-	if err := validateSandboxForegroundExit(crid+"\n", "", crid, "api-secret"); err != nil {
+	exit130 := exec.Command("sh", "-c", "exit 130").Run() //nolint:gosec // Fixed POSIX fixture for the Linux/macOS-only tagged test.
+	if err := validateSandboxForegroundExit(exit130, crid+"\n", "", crid, "api-secret"); err != nil {
 		t.Fatal(err)
 	}
 	for name, fixture := range map[string]struct {
-		stdout string
-		stderr string
-		secret string
+		waitErr error
+		stdout  string
+		stderr  string
+		secret  string
 	}{
-		"partial CRID":  {stdout: crid[:20]},
-		"extra output":  {stdout: crid + "\nextra\n"},
-		"stdout secret": {stdout: crid + "\napi-secret", secret: "api-secret"},
-		"stderr secret": {stdout: crid + "\n", stderr: "api-secret", secret: "api-secret"},
+		"success exit":        {waitErr: nil, stdout: crid + "\n"},
+		"wrong exit":          {waitErr: exec.Command("sh", "-c", "exit 1").Run(), stdout: crid + "\n"}, //nolint:gosec // Fixed POSIX fixture.
+		"partial CRID":        {waitErr: exit130, stdout: crid[:20]},
+		"extra output":        {waitErr: exit130, stdout: crid + "\nextra\n"},
+		"stdout secret":       {waitErr: exit130, stdout: crid + "\napi-secret", secret: "api-secret"},
+		"stderr secret":       {waitErr: exit130, stdout: crid + "\n", stderr: "api-secret", secret: "api-secret"},
+		"retired approval UX": {waitErr: exit130, stdout: crid + "\n", stderr: "explicit approval"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSandboxForegroundExit(fixture.stdout, fixture.stderr, crid, fixture.secret); err == nil {
+			if err := validateSandboxForegroundExit(fixture.waitErr, fixture.stdout, fixture.stderr, crid, fixture.secret); err == nil {
 				t.Fatal("invalid foreground exit accepted")
 			}
 		})

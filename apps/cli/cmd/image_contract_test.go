@@ -7,7 +7,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+type cliWorkflowContract struct {
+	Jobs map[string]struct {
+		Steps []cliWorkflowStep `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+type cliWorkflowStep struct {
+	Name string            `yaml:"name"`
+	Env  map[string]string `yaml:"env"`
+	Run  string            `yaml:"run"`
+}
 
 func TestCLIImageContract(t *testing.T) {
 	t.Parallel()
@@ -123,6 +137,23 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if !bytes.Contains(cliWorkflow, []byte("go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
 		t.Error("public CLI workflow does not compile the private sandbox test surface")
 	}
+	var workflow cliWorkflowContract
+	if err := yaml.Unmarshal(cliWorkflow, &workflow); err != nil {
+		t.Fatalf("parse public CLI workflow: %v", err)
+	}
+	findStep := func(name string) cliWorkflowStep {
+		t.Helper()
+		var matches []cliWorkflowStep
+		for _, step := range workflow.Jobs["test"].Steps {
+			if step.Name == name {
+				matches = append(matches, step)
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("public CLI workflow test job has %d %q steps, want one", len(matches), name)
+		}
+		return matches[0]
+	}
 	lifecycleTests := []string{
 		"TestDaemonServesTwoResourcesAndStopsOneIndependently",
 		"TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership",
@@ -134,34 +165,36 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestStartFailsImmediatelyWhenServingEpochAdvances",
 		"TestStartRotatesEpochAfterLocalTerminalDisable",
 	}
-	lifecycleRegex := "LIFECYCLE_TEST_REGEX: '^(" + strings.Join(lifecycleTests, "|") + ")$'"
-	lifecycleNames := "LIFECYCLE_TEST_NAMES: |-\n            " + strings.Join(lifecycleTests, "\n            ")
+	lifecycleRegex := "^(" + strings.Join(lifecycleTests, "|") + ")$"
+	lifecycleNames := strings.Join(lifecycleTests, "\n")
 	lifecycleListCommand := `go test -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
 	lifecycleRunCommand := `go test -race -count=1 -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	lifecycleStep := findStep("Run CRID lifecycle unit tests")
+	if len(lifecycleStep.Env) != 2 || lifecycleStep.Env["LIFECYCLE_TEST_REGEX"] != lifecycleRegex || lifecycleStep.Env["LIFECYCLE_TEST_NAMES"] != lifecycleNames {
+		t.Errorf("public CLI workflow lifecycle env = %#v, want exact regex and sorted test names", lifecycleStep.Env)
+	}
 	for _, required := range []string{
-		"- name: Run CRID lifecycle unit tests",
-		lifecycleRegex,
-		lifecycleNames,
 		lifecycleListCommand,
 		"LC_ALL=C sort",
 		`if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
 		lifecycleRunCommand,
 	} {
-		if bytes.Count(cliWorkflow, []byte(required)) != 1 {
+		if strings.Count(lifecycleStep.Run, required) != 1 {
 			t.Errorf("public CLI workflow does not pin the exact CRID lifecycle test set with %q", required)
 		}
 	}
-	if bytes.Index(cliWorkflow, []byte(lifecycleListCommand)) >= bytes.Index(cliWorkflow, []byte(lifecycleRunCommand)) {
+	if strings.Index(lifecycleStep.Run, lifecycleListCommand) >= strings.Index(lifecycleStep.Run, lifecycleRunCommand) {
 		t.Error("public CLI workflow does not verify CRID lifecycle test declarations before execution")
 	}
 	validatorTests := []string{
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
+		"TestSandboxForegroundLifecycleStateContract",
 		"TestValidateSandboxRouteFence",
 		"TestValidateSandboxSharingTransitionRequiresAdvancedEpoch",
 	}
 	validatorRegex := "-run '^(" + strings.Join(validatorTests, "|") + ")$'"
-	if bytes.Count(cliWorkflow, []byte("- name: Run credential-free sandbox validator tests")) != 1 ||
-		bytes.Count(cliWorkflow, []byte(validatorRegex)) != 1 {
+	validatorStep := findStep("Run credential-free sandbox validator tests")
+	if strings.Count(validatorStep.Run, validatorRegex) != 1 {
 		t.Error("public CLI workflow does not execute the exact credential-free sandbox validator set")
 	}
 
