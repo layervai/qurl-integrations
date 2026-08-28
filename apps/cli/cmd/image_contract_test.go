@@ -133,10 +133,35 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestStartFailsImmediatelyWhenServingEpochAdvances",
 		"TestStartRotatesEpochAfterLocalTerminalDisable",
 	}
-	lifecycleRegex := "-run '^(" + strings.Join(lifecycleTests, "|") + ")$'"
-	if bytes.Count(cliWorkflow, []byte("- name: Run CRID lifecycle unit tests")) != 1 ||
-		bytes.Count(cliWorkflow, []byte(lifecycleRegex)) != 1 {
-		t.Error("public CLI workflow does not run the exact credential-free CRID lifecycle unit-test set")
+	lifecycleRegex := "LIFECYCLE_TEST_REGEX: '^(" + strings.Join(lifecycleTests, "|") + ")$'"
+	lifecycleNames := "LIFECYCLE_TEST_NAMES: |-\n            " + strings.Join(lifecycleTests, "\n            ")
+	lifecycleListCommand := `go test -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	lifecycleRunCommand := `go test -race -count=1 -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	for _, required := range []string{
+		"- name: Run CRID lifecycle unit tests",
+		lifecycleRegex,
+		lifecycleNames,
+		lifecycleListCommand,
+		"LC_ALL=C sort",
+		`if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then`,
+		lifecycleRunCommand,
+	} {
+		if bytes.Count(cliWorkflow, []byte(required)) != 1 {
+			t.Errorf("public CLI workflow does not pin the exact CRID lifecycle test set with %q", required)
+		}
+	}
+	if bytes.Index(cliWorkflow, []byte(lifecycleListCommand)) >= bytes.Index(cliWorkflow, []byte(lifecycleRunCommand)) {
+		t.Error("public CLI workflow does not verify CRID lifecycle test declarations before execution")
+	}
+	validatorTests := []string{
+		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
+		"TestValidateSandboxRouteFence",
+		"TestValidateSandboxSharingTransitionRequiresAdvancedEpoch",
+	}
+	validatorRegex := "-run '^(" + strings.Join(validatorTests, "|") + ")$'"
+	if bytes.Count(cliWorkflow, []byte("- name: Run credential-free sandbox validator tests")) != 1 ||
+		bytes.Count(cliWorkflow, []byte(validatorRegex)) != 1 {
+		t.Error("public CLI workflow does not execute the exact credential-free sandbox validator set")
 	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))

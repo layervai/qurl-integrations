@@ -39,6 +39,9 @@ import (
 const (
 	localPublishSandboxArming = "QURL_CLI_SANDBOX_LOCAL_PUBLISH"
 	sandboxCleanupTimeout     = 30 * time.Second
+	sandboxRouteFenceTimeout  = 2 * time.Minute
+	sandboxRouteFencePoll     = 500 * time.Millisecond
+	sandboxRouteFenceSettle   = 2 * time.Second
 )
 
 type sandboxHTTPDoer interface {
@@ -300,6 +303,11 @@ func runSandboxLocalCLI(t *testing.T, binary string, env map[string]string, stat
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	return runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, args...)
+}
+
+func runSandboxLocalCLIContext(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir string, args ...string) *runResult {
+	t.Helper()
 	commandArgs := append([]string{"--endpoint", env["QURL_ENDPOINT"]}, args...)
 	cmd := exec.CommandContext(ctx, binary, commandArgs...) //nolint:gosec // The protected test validates the fixed binary and supplies closed arguments.
 	commandEnv := cloneSandboxEnv(env)
@@ -398,8 +406,15 @@ func assertSandboxLocalRoute(t *testing.T, binary string, env map[string]string,
 
 func sandboxLocalRouteOnce(t *testing.T, binary string, env map[string]string, stateDir, crid, marker string) error {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	return sandboxLocalRouteOnceContext(t, ctx, binary, env, stateDir, crid, marker)
+}
+
+func sandboxLocalRouteOnceContext(t *testing.T, ctx context.Context, binary string, env map[string]string, stateDir, crid, marker string) error {
+	t.Helper()
 	dest := filepath.Join(t.TempDir(), "payload")
-	res := runSandboxLocalCLI(t, binary, env, stateDir, "get", crid, "--file", dest)
+	res := runSandboxLocalCLIContext(t, ctx, binary, env, stateDir, "get", crid, "--file", dest)
 	if res.code != 0 {
 		return fmt.Errorf("get exited %d: %s", res.code, res.stderr.String())
 	}
@@ -423,30 +438,80 @@ func assertSandboxLocalRouteFenced(
 	backendHits *atomic.Uint64,
 ) {
 	t.Helper()
-	before := backendHits.Load()
-	routeErr := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker)
-	after := backendHits.Load()
-	if err := validateSandboxRouteFence(routeErr, before, after); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxRouteFenceTimeout)
+	defer cancel()
+	if err := waitSandboxRouteFence(
+		ctx,
+		sandboxRouteFencePoll,
+		sandboxRouteFenceSettle,
+		func(ctx context.Context) error {
+			return sandboxLocalRouteOnceContext(t, ctx, binary, env, stateDir, crid, marker)
+		},
+		backendHits.Load,
+	); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func validateSandboxRouteFence(routeErr error, beforeHits, afterHits uint64) error {
-	if routeErr == nil {
-		return errors.New("stopped local route still served its backend bytes")
+func waitSandboxRouteFence(
+	ctx context.Context,
+	pollInterval time.Duration,
+	settleWindow time.Duration,
+	probe func(context.Context) error,
+	backendHits func() uint64,
+) error {
+	if pollInterval <= 0 || settleWindow <= 0 {
+		return errors.New("route-fence poll and settle durations must be positive")
 	}
-	if afterHits != beforeHits {
-		return fmt.Errorf("stopped local route reached the backend: hits advanced from %d to %d", beforeHits, afterHits)
+	var stableSince time.Time
+	var stableHits uint64
+	last := "route fence was not sampled"
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", last, ctx.Err())
+		default:
+		}
+		routeErr := probe(ctx)
+		hits := backendHits()
+		now := time.Now()
+		switch {
+		case routeErr == nil:
+			stableSince = time.Time{}
+			last = fmt.Sprintf("stopped local route still served its backend bytes at %d hits", hits)
+		case stableSince.IsZero():
+			stableSince = now
+			stableHits = hits
+			last = fmt.Sprintf("route is rejected but has not stayed fenced for %s", settleWindow)
+		case hits != stableHits:
+			stableSince = now
+			last = fmt.Sprintf("late backend hit advanced the count from %d to %d", stableHits, hits)
+			stableHits = hits
+		case now.Sub(stableSince) >= settleWindow:
+			return nil
+		default:
+			last = fmt.Sprintf("route has stayed rejected for %s of %s", now.Sub(stableSince).Round(time.Millisecond), settleWindow)
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("stopped local route did not settle before the bound: %s: %w", last, ctx.Err())
+		case <-timer.C:
+		}
 	}
-	return nil
 }
 
-func validateSandboxSharingTransition(state sandboxSharingDoc, desired, observed string, priorEpoch uint64) error {
-	if state.DesiredState != desired || state.ConnectionState != observed {
+// Each stop, start, and restart changes the durable lifecycle authority. The
+// serving epoch must therefore advance. An equal epoch is stale authority, not
+// successful convergence, even when the desired and observed states match.
+func validateSandboxSharingTransition(doc sandboxSharingDoc, desired, observed string, priorEpoch uint64) error {
+	if doc.DesiredState != desired || doc.ConnectionState != observed {
 		return fmt.Errorf("want %s/%s", desired, observed)
 	}
-	if state.ServingEpoch <= priorEpoch {
-		return fmt.Errorf("serving epoch %d did not advance beyond %d", state.ServingEpoch, priorEpoch)
+	if doc.ServingEpoch <= priorEpoch {
+		return fmt.Errorf("serving epoch %d did not advance beyond %d", doc.ServingEpoch, priorEpoch)
 	}
 	return nil
 }
@@ -497,14 +562,14 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 	if err := validateSandboxSharingTransition(valid, "on", "serving", 7); err != nil {
 		t.Fatalf("valid transition: %v", err)
 	}
-	for name, state := range map[string]sandboxSharingDoc{
+	for name, observedState := range map[string]sandboxSharingDoc{
 		"wrong desired state":    {DesiredState: "off", ConnectionState: "serving", ServingEpoch: 8},
 		"wrong connection state": {DesiredState: "on", ConnectionState: "stopped", ServingEpoch: 8},
 		"equal epoch":            {DesiredState: "on", ConnectionState: "serving", ServingEpoch: 7},
 		"regressed epoch":        {DesiredState: "on", ConnectionState: "serving", ServingEpoch: 6},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSandboxSharingTransition(state, "on", "serving", 7); err == nil {
+			if err := validateSandboxSharingTransition(observedState, "on", "serving", 7); err == nil {
 				t.Fatal("invalid lifecycle transition accepted")
 			}
 		})
@@ -512,14 +577,89 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 }
 
 func TestValidateSandboxRouteFence(t *testing.T) {
-	if err := validateSandboxRouteFence(errors.New("route rejected"), 4, 4); err != nil {
-		t.Fatalf("fenced route: %v", err)
-	}
-	if err := validateSandboxRouteFence(nil, 4, 5); err == nil {
-		t.Fatal("served stopped route accepted")
-	}
-	if err := validateSandboxRouteFence(errors.New("late failure"), 4, 5); err == nil {
-		t.Fatal("backend hit from stopped route accepted")
+	t.Run("eventual fence settles", func(t *testing.T) {
+		var attempts atomic.Uint64
+		var hits atomic.Uint64
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitSandboxRouteFence(ctx, time.Millisecond, 10*time.Millisecond, func(context.Context) error {
+			if attempts.Add(1) <= 2 {
+				hits.Add(1)
+				return nil
+			}
+			return errors.New("route rejected")
+		}, hits.Load)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempts.Load() < 3 || time.Since(started) < 10*time.Millisecond {
+			t.Fatalf("route fence returned without polling through its settle window: attempts=%d elapsed=%s", attempts.Load(), time.Since(started))
+		}
+	})
+
+	t.Run("late backend hit restarts settle window", func(t *testing.T) {
+		var attempts atomic.Uint64
+		var hits atomic.Uint64
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := waitSandboxRouteFence(ctx, time.Millisecond, 10*time.Millisecond, func(context.Context) error {
+			if attempts.Add(1) == 6 {
+				hits.Add(1)
+			}
+			return errors.New("route rejected")
+		}, hits.Load)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempts.Load() < 12 || time.Since(started) < 15*time.Millisecond {
+			t.Fatalf("late backend hit did not restart the settle window: attempts=%d elapsed=%s", attempts.Load(), time.Since(started))
+		}
+	})
+
+	t.Run("continued serving reaches bound", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		err := waitSandboxRouteFence(ctx, time.Millisecond, 3*time.Millisecond, func(context.Context) error { return nil }, func() uint64 { return 1 })
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("continued serving error = %v, want deadline exceeded", err)
+		}
+	})
+
+	t.Run("blocked probe observes bound", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+		var observedCancellation atomic.Bool
+		err := waitSandboxRouteFence(ctx, time.Millisecond, 3*time.Millisecond, func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				observedCancellation.Store(true)
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+				return errors.New("probe did not receive the route-fence context")
+			}
+		}, func() uint64 { return 0 })
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("blocked probe error = %v, want deadline exceeded", err)
+		}
+		if !observedCancellation.Load() {
+			t.Fatal("route-fence context did not reach the blocked probe")
+		}
+	})
+
+	for name, timing := range map[string]struct {
+		poll   time.Duration
+		settle time.Duration
+	}{
+		"zero poll":   {settle: time.Second},
+		"zero settle": {poll: time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := waitSandboxRouteFence(context.Background(), timing.poll, timing.settle, func(context.Context) error { return errors.New("rejected") }, func() uint64 { return 0 }); err == nil {
+				t.Fatal("invalid route-fence timing accepted")
+			}
+		})
 	}
 }
 

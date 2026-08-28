@@ -138,10 +138,34 @@ jobs:
             ./apps/cli/...
 
       - name: Run CRID lifecycle unit tests
-        run: >-
-          go test -race -count=1
-          -run '^(TestDaemonServesTwoResourcesAndStopsOneIndependently|TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership|TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly|TestPublishNewMachineTakeoverRotatesEpochOnce|TestRestartReconcilesAmbiguousAppliedPostWithoutReplay|TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch|TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon|TestStartFailsImmediatelyWhenServingEpochAdvances|TestStartRotatesEpochAfterLocalTerminalDisable)$'
-          ./apps/cli/cmd
+        shell: bash
+        env:
+          LIFECYCLE_TEST_REGEX: '^(TestDaemonServesTwoResourcesAndStopsOneIndependently|TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership|TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly|TestPublishNewMachineTakeoverRotatesEpochOnce|TestRestartReconcilesAmbiguousAppliedPostWithoutReplay|TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch|TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon|TestStartFailsImmediatelyWhenServingEpochAdvances|TestStartRotatesEpochAfterLocalTerminalDisable)$'
+          LIFECYCLE_TEST_NAMES: |-
+            TestDaemonServesTwoResourcesAndStopsOneIndependently
+            TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership
+            TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly
+            TestPublishNewMachineTakeoverRotatesEpochOnce
+            TestRestartReconcilesAmbiguousAppliedPostWithoutReplay
+            TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch
+            TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon
+            TestStartFailsImmediatelyWhenServingEpochAdvances
+            TestStartRotatesEpochAfterLocalTerminalDisable
+        run: |
+          set -euo pipefail
+          actual_tests="$(
+            go test -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd |
+              sed -n '/^Test/p' |
+              LC_ALL=C sort
+          )"
+          if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then
+            echo "::error::CRID lifecycle test declarations differ from the required set"
+            diff -u \
+              <(printf '%s\n' "$LIFECYCLE_TEST_NAMES") \
+              <(printf '%s\n' "$actual_tests")
+            exit 1
+          fi
+          go test -race -count=1 -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd
 
       # 40 is the intentional initial floor, not the target. The v2 rebuild
       # replaces this tree, so pinning an ambition floor (85) to the old tree
@@ -164,6 +188,15 @@ jobs:
       # CI still compiles every tagged test so API and platform drift fail here.
       - name: Compile private sandbox test surface
         run: go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
+
+      # These tests need no service credentials or live infrastructure. They
+      # execute the exact-artifact process and lifecycle validation helpers on
+      # the Ubuntu runner where their POSIX fixture is supported.
+      - name: Run credential-free sandbox validator tests
+        run: >-
+          go test -race -tags=clisandbox -count=1
+          -run '^(TestRunSandboxLocalCLIUsesExactBinaryAndState|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          ./apps/cli/cmd
 
       - name: Test sandbox matched-cohort artifact contract
         shell: bash
