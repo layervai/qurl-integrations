@@ -631,17 +631,17 @@ func validateSandboxCLIBinary(raw string) (string, error) {
 	if !ok {
 		return "", errors.New("customer CLI binary metadata is unavailable")
 	}
-	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); err != nil {
+	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint64(os.Geteuid()), uint64(stat.Nlink)); err != nil {
 		return "", err
 	}
 	return resolved, nil
 }
 
-func validateSandboxCLIBinaryMetadata(mode os.FileMode, ownerUID, effectiveUID uint32, links uint64) error {
+func validateSandboxCLIBinaryMetadata(mode os.FileMode, ownerUID uint32, effectiveUID, links uint64) error {
 	if !mode.IsRegular() || mode.Perm()&0o111 == 0 || mode.Perm()&0o022 != 0 || links != 1 {
 		return errors.New("customer CLI binary must be one non-writable executable regular file")
 	}
-	if ownerUID != effectiveUID && ownerUID != 0 {
+	if uint64(ownerUID) != effectiveUID && ownerUID != 0 {
 		return errors.New("customer CLI binary must be owned by the current user or root")
 	}
 	return nil
