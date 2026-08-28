@@ -137,6 +137,12 @@ jobs:
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
             ./apps/cli/...
 
+      - name: Run CRID lifecycle unit tests
+        run: >-
+          go test -race -count=1
+          -run '^(TestDaemonServesTwoResourcesAndStopsOneIndependently|TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership|TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly|TestPublishNewMachineTakeoverRotatesEpochOnce|TestRestartReconcilesAmbiguousAppliedPostWithoutReplay|TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch|TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon|TestStartFailsImmediatelyWhenServingEpochAdvances|TestStartRotatesEpochAfterLocalTerminalDisable)$'
+          ./apps/cli/cmd
+
       # 40 is the intentional initial floor, not the target. The v2 rebuild
       # replaces this tree, so pinning an ambition floor (85) to the old tree
       # would be red on day one for coverage the rebuild is about to delete.

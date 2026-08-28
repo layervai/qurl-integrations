@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -90,15 +91,15 @@ var sandboxCleanupHTTPClient = &http.Client{
 // sends unique HTTP bytes through a minted qURL, exercises stop/start/restart,
 // and deletes the live share while its foreground daemon is still running.
 //
-// This is an attended, one-off smoke rather than an every-commit CI test. It
-// creates a native device in an ephemeral state directory, so the operator must
-// provide a short-lived JWT that can revoke the resulting device credential;
-// otherwise a hosted runner would leak durable device/assignment quota on every
-// invocation. The JWT must represent the same owner as QURL_API_KEY: 404 is a
+// The private orchestrator runs this tagged test with one exact customer CLI
+// artifact. It creates a native device in a fresh state directory, so the lane
+// must provide a short-lived JWT that can revoke the resulting device
+// credential. The JWT must represent the same owner as QURL_API_KEY: 404 is a
 // cleanup failure, because a wrong-owner JWT also cannot see the new key. The
 // resource and device key are both reclaimed before returning. Run explicitly:
 //
 //	QURL_CLI_SANDBOX_LOCAL_PUBLISH=enabled \
+//	QURL_CLI_SANDBOX_BINARY=/absolute/path/to/qurl \
 //	QURL_API_KEY=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT=... \
 //	QURL_CONNECTOR_HUB_HOST=... QURL_CONNECTOR_HUB_PORT=... \
 //	QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=... \
@@ -109,39 +110,41 @@ func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 	}
 	fixture := startSandboxLocalPublish(t, "smoke")
 	defer fixture.stop(t)
-	cliEnv, stateDir, local := fixture.env, fixture.stateDir, fixture.local
+	binary, cliEnv, stateDir, local := fixture.binary, fixture.env, fixture.stateDir, fixture.local
 
 	if assessment, err := cridux.Assess(local.CRID); err != nil || assessment.Kind != cridux.KindCRID {
 		t.Fatalf("local publish registry CRID = %q, want a valid full CRID: %v", local.CRID, err)
 	}
 
-	initial := waitSandboxSharingState(t, cliEnv, stateDir, local.CRID, "on", "serving", 2*time.Minute)
-	assertSandboxListRow(t, cliEnv, stateDir, local, initial.ServingEpoch)
-	assertSandboxLocalRoute(t, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+	initial := waitSandboxSharingState(t, binary, cliEnv, stateDir, local.CRID, "on", "serving", 2*time.Minute)
+	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
+	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
 
-	stopped := runSandboxLocalCLI(t, cliEnv, stateDir, "-o", "json", "stop", local.CRID)
+	stopped := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "stop", local.CRID)
 	stoppedState := decodeSandboxSharing(t, stopped)
-	if stoppedState.DesiredState != "off" || stoppedState.ConnectionState != "stopped" || stoppedState.ServingEpoch <= initial.ServingEpoch {
-		t.Fatalf("stop state = %+v, want off/stopped at an advanced epoch", stoppedState)
+	if err := validateSandboxSharingTransition(stoppedState, "off", "stopped", initial.ServingEpoch); err != nil {
+		t.Fatalf("stop state = %+v: %v", stoppedState, err)
 	}
-	started := runSandboxLocalCLI(t, cliEnv, stateDir, "-o", "json", "start", local.CRID)
-	startedState := decodeSandboxSharing(t, started)
-	if startedState.DesiredState != "on" || startedState.ConnectionState != "serving" || startedState.ServingEpoch < stoppedState.ServingEpoch {
-		t.Fatalf("start state = %+v, want on/serving without epoch regression", startedState)
-	}
-	assertSandboxLocalRoute(t, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+	assertSandboxLocalRouteFenced(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, &fixture.backendHits)
 
-	restarted := runSandboxLocalCLI(t, cliEnv, stateDir, "-o", "json", "restart", local.CRID)
-	restartedState := decodeSandboxSharing(t, restarted)
-	if restartedState.DesiredState != "on" || restartedState.ConnectionState != "serving" || restartedState.ServingEpoch <= startedState.ServingEpoch {
-		t.Fatalf("restart state = %+v, want on/serving at an advanced epoch", restartedState)
+	started := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "start", local.CRID)
+	startedState := decodeSandboxSharing(t, started)
+	if err := validateSandboxSharingTransition(startedState, "on", "serving", stoppedState.ServingEpoch); err != nil {
+		t.Fatalf("start state = %+v: %v", startedState, err)
 	}
-	assertSandboxLocalRoute(t, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+
+	restarted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "restart", local.CRID)
+	restartedState := decodeSandboxSharing(t, restarted)
+	if err := validateSandboxSharingTransition(restartedState, "on", "serving", startedState.ServingEpoch); err != nil {
+		t.Fatalf("restart state = %+v: %v", restartedState, err)
+	}
+	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
 	if fixture.backendHits.Load() < 3 {
 		t.Fatalf("local backend saw %d public-route hits, want at least one before and after lifecycle changes", fixture.backendHits.Load())
 	}
 
-	deleted := runSandboxLocalCLI(t, cliEnv, stateDir, "delete", local.CRID, "--yes")
+	deleted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "delete", local.CRID, "--yes")
 	if deleted.code != 0 {
 		t.Fatalf("delete while serving exit = %d: %s", deleted.code, deleted.stderr.String())
 	}
@@ -157,6 +160,7 @@ func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 }
 
 type sandboxLocalFixture struct {
+	binary     string
 	env        map[string]string
 	stateDir   string
 	marker     string
@@ -165,13 +169,16 @@ type sandboxLocalFixture struct {
 	cleanupJWT string
 
 	backendHits atomic.Uint64
-	cancel      context.CancelFunc
-	done        <-chan *runResult
+	process     *sandboxPublishProcess
 	stopOnce    sync.Once
 }
 
 func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	t.Helper()
+	binary, err := validateSandboxCLIBinary(os.Getenv(sandboxCLIBinaryEnv))
+	if err != nil {
+		t.Fatalf("load exact customer CLI binary: %v", err)
+	}
 	cliEnv := sandboxJourneyEnv(t)
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	missing := []string{}
@@ -192,10 +199,20 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
 		cliEnv[name] = strings.TrimSpace(os.Getenv(name))
 	}
+	namespace, err := sandboxNamespace(label)
+	if err != nil {
+		t.Fatalf("derive local-publish namespace: %v", err)
+	}
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil { //nolint:gosec // Agent state requires a private directory.
+		t.Fatalf("secure local-publish state directory: %v", err)
+	}
+	cliEnv[state.EnvStateDirPrimary] = stateDir
+	cliEnv[state.EnvAgentID] = namespace.AgentID
 
 	fixture := &sandboxLocalFixture{
-		env: cliEnv, stateDir: t.TempDir(), cleanupJWT: cleanupJWT,
-		key: cliEnv["QURL_API_KEY"], marker: fmt.Sprintf("sandbox-local-publish-%s-%d", label, time.Now().UnixNano()),
+		binary: binary, env: cliEnv, stateDir: stateDir, cleanupJWT: cleanupJWT,
+		key: cliEnv["QURL_API_KEY"], marker: "sandbox-local-publish-" + namespace.ConnectorID,
 	}
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fixture.backendHits.Add(1)
@@ -203,26 +220,23 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	}))
 	t.Cleanup(echo.Close)
 
-	connectorID := fmt.Sprintf("connector-sandbox-local-publish-%s-%d", label, time.Now().UnixNano())
-	publishCtx, cancelPublish := context.WithCancel(context.Background())
-	publishDone := make(chan *runResult, 1)
-	publishConfigDir := t.TempDir()
-	go func() {
-		publishDone <- runCLI(t, &runOpts{
-			args: []string{
-				"--endpoint", cliEnv["QURL_ENDPOINT"], "--quiet", "publish", echo.URL,
-				"--id", connectorID, "--foreground",
-			},
-			env: cliEnv, ctx: publishCtx, configDir: publishConfigDir, shareStateDir: fixture.stateDir,
-			syncStreams: true, realSleep: true,
-		})
-	}()
-	fixture.cancel, fixture.done = cancelPublish, publishDone
-	fixture.local = waitSandboxLocalShare(t, fixture.stateDir, publishDone, 2*time.Minute)
+	fixture.process = startSandboxPublishProcess(t, binary, cliEnv, namespace, stateDir, echo.URL)
+	fixture.process.registerRecoveryCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, namespace, stateDir, productionSandboxSiblingCleanupOps())
+	crid := fixture.process.waitReady(t)
+	shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
+	if err != nil || !present || len(shares) != 1 {
+		fixture.stop(t)
+		t.Fatalf("read exact local-publish registry = (%d shares, present %v, %v), want one", len(shares), present, err)
+	}
+	fixture.local = &shares[0]
+	if fixture.local.CRID != crid {
+		fixture.stop(t)
+		t.Fatalf("foreground publish CRID = %q, local registry CRID = %q", crid, fixture.local.CRID)
+	}
 	loaded := loadSandboxAgentState(t, fixture.stateDir)
-	if loaded != nil {
-		registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, loaded.DeviceAPIKeyID)
-		registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, loaded.DeviceAPIKey)
+	if err := validateSandboxDeviceIdentity(loaded, namespace.AgentID, ""); err != nil {
+		fixture.stop(t)
+		t.Fatalf("local-publish durable identity: %v", err)
 	}
 	if err := requireTestResourceIdentity(fixture.local.CRID, fixture.local.ResourceID); err != nil {
 		fixture.stop(t)
@@ -237,18 +251,18 @@ func (f *sandboxLocalFixture) stop(t *testing.T) {
 		return
 	}
 	f.stopOnce.Do(func() {
-		f.cancel()
-		select {
-		case res := <-f.done:
-			assertSandboxStreamsDoNotContainSecrets(t, res, f.key, f.cleanupJWT)
-			if f.local != nil && res.stdout.String() != f.local.CRID+"\n" {
-				t.Errorf("foreground publish stdout = %q, want exactly the full CRID and newline", res.stdout.String())
+		f.process.forceStop(t)
+		stdout, stderr := f.process.stdout.String(), f.process.stderr.String()
+		for _, secret := range []string{f.key, f.cleanupJWT} {
+			if secret != "" && strings.Contains(stdout+stderr, secret) {
+				t.Error("foreground publish exposed a protected credential")
 			}
-			if strings.Contains(res.stderr.String(), "refresh-mode") || strings.Contains(res.stderr.String(), "explicit approval") {
-				t.Errorf("foreground publish exposed retired assignment-approval UX: %s", res.stderr.String())
-			}
-		case <-time.After(15 * time.Second):
-			t.Error("foreground qurl publish did not stop after cancellation")
+		}
+		if f.local != nil && stdout != f.local.CRID+"\n" {
+			t.Errorf("foreground publish stdout = %q, want exactly the full CRID and newline", stdout)
+		}
+		if strings.Contains(stderr, "refresh-mode") || strings.Contains(stderr, "explicit approval") {
+			t.Errorf("foreground publish exposed retired assignment-approval UX: %s", stderr)
 		}
 	})
 }
@@ -282,38 +296,29 @@ func sandboxSecret(t *testing.T, name string) string {
 	return value
 }
 
-func waitSandboxLocalShare(t *testing.T, stateDir string, publishDone <-chan *runResult, limit time.Duration) *state.LocalShare {
-	t.Helper()
-	deadline := time.NewTimer(limit)
-	defer deadline.Stop()
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
-		if err != nil {
-			t.Fatalf("read local share registry: %v", err)
-		}
-		if present && len(shares) == 1 {
-			return &shares[0]
-		}
-		select {
-		case res := <-publishDone:
-			t.Fatalf("foreground publish exited before persisting a local share (exit %d): %s", res.code, res.stderr.String())
-		case <-deadline.C:
-			t.Fatal("timed out waiting for foreground publish to persist its local share")
-		case <-ticker.C:
-		}
-	}
-}
-
-func runSandboxLocalCLI(t *testing.T, env map[string]string, stateDir string, args ...string) *runResult {
+func runSandboxLocalCLI(t *testing.T, binary string, env map[string]string, stateDir string, args ...string) *runResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	return runCLI(t, &runOpts{
-		args: args, env: env, ctx: ctx, configDir: t.TempDir(), shareStateDir: stateDir,
-		realSleep: true, realOpener: true,
-	})
+	commandArgs := append([]string{"--endpoint", env["QURL_ENDPOINT"]}, args...)
+	cmd := exec.CommandContext(ctx, binary, commandArgs...) //nolint:gosec // The protected test validates the fixed binary and supplies closed arguments.
+	commandEnv := cloneSandboxEnv(env)
+	commandEnv[state.EnvStateDirPrimary] = stateDir
+	cmd.Env = sandboxCommandEnv(commandEnv)
+	cmd.Stdin = http.NoBody
+	res := &runResult{}
+	cmd.Stdout = &res.stdout
+	cmd.Stderr = &res.stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			res.code = exitErr.ExitCode()
+		} else {
+			res.code = 1
+		}
+	}
+	assertSandboxStreamsDoNotContainSecrets(t, res, env["QURL_API_KEY"])
+	return res
 }
 
 func decodeSandboxSharing(t *testing.T, res *runResult) sandboxSharingDoc {
@@ -328,12 +333,12 @@ func decodeSandboxSharing(t *testing.T, res *runResult) sandboxSharingDoc {
 	return doc
 }
 
-func waitSandboxSharingState(t *testing.T, env map[string]string, stateDir, crid, desired, observed string, limit time.Duration) sandboxSharingDoc {
+func waitSandboxSharingState(t *testing.T, binary string, env map[string]string, stateDir, crid, desired, observed string, limit time.Duration) sandboxSharingDoc {
 	t.Helper()
 	deadline := time.Now().Add(limit)
 	var last string
 	for time.Now().Before(deadline) {
-		res := runSandboxLocalCLI(t, env, stateDir, "-o", "json", "status", crid)
+		res := runSandboxLocalCLI(t, binary, env, stateDir, "-o", "json", "status", crid)
 		if res.code == 0 {
 			var doc sandboxSharingDoc
 			if err := json.Unmarshal(res.stdout.Bytes(), &doc); err == nil {
@@ -353,9 +358,9 @@ func waitSandboxSharingState(t *testing.T, env map[string]string, stateDir, crid
 	return sandboxSharingDoc{}
 }
 
-func assertSandboxListRow(t *testing.T, env map[string]string, stateDir string, local *state.LocalShare, epoch uint64) {
+func assertSandboxListRow(t *testing.T, binary string, env map[string]string, stateDir string, local *state.LocalShare, epoch uint64) {
 	t.Helper()
-	res := runSandboxLocalCLI(t, env, stateDir, "-o", "json", "list", "--status", "active", "--limit", "100")
+	res := runSandboxLocalCLI(t, binary, env, stateDir, "-o", "json", "list", "--status", "active", "--limit", "100")
 	if res.code != 0 {
 		t.Fatalf("list local share exit = %d: %s", res.code, res.stderr.String())
 	}
@@ -376,12 +381,12 @@ func assertSandboxListRow(t *testing.T, env map[string]string, stateDir string, 
 	t.Fatalf("full CRID %s not found in local share listing", local.CRID)
 }
 
-func assertSandboxLocalRoute(t *testing.T, env map[string]string, stateDir, crid, marker string, limit time.Duration) {
+func assertSandboxLocalRoute(t *testing.T, binary string, env map[string]string, stateDir, crid, marker string, limit time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(limit)
 	var last string
 	for time.Now().Before(deadline) {
-		if err := sandboxLocalRouteOnce(t, env, stateDir, crid, marker); err == nil {
+		if err := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker); err == nil {
 			return
 		} else {
 			last = err.Error()
@@ -391,10 +396,10 @@ func assertSandboxLocalRoute(t *testing.T, env map[string]string, stateDir, crid
 	t.Fatalf("public qURL route for %s did not deliver the local backend bytes: %s", crid, last)
 }
 
-func sandboxLocalRouteOnce(t *testing.T, env map[string]string, stateDir, crid, marker string) error {
+func sandboxLocalRouteOnce(t *testing.T, binary string, env map[string]string, stateDir, crid, marker string) error {
 	t.Helper()
 	dest := filepath.Join(t.TempDir(), "payload")
-	res := runSandboxLocalCLI(t, env, stateDir, "get", crid, "--file", dest)
+	res := runSandboxLocalCLI(t, binary, env, stateDir, "get", crid, "--file", dest)
 	if res.code != 0 {
 		return fmt.Errorf("get exited %d: %s", res.code, res.stderr.String())
 	}
@@ -406,6 +411,116 @@ func sandboxLocalRouteOnce(t *testing.T, env map[string]string, stateDir, crid, 
 		return fmt.Errorf("payload length %d did not match unique local marker", len(payload))
 	}
 	return nil
+}
+
+func assertSandboxLocalRouteFenced(
+	t *testing.T,
+	binary string,
+	env map[string]string,
+	stateDir string,
+	crid string,
+	marker string,
+	backendHits *atomic.Uint64,
+) {
+	t.Helper()
+	before := backendHits.Load()
+	routeErr := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker)
+	after := backendHits.Load()
+	if err := validateSandboxRouteFence(routeErr, before, after); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func validateSandboxRouteFence(routeErr error, beforeHits, afterHits uint64) error {
+	if routeErr == nil {
+		return errors.New("stopped local route still served its backend bytes")
+	}
+	if afterHits != beforeHits {
+		return fmt.Errorf("stopped local route reached the backend: hits advanced from %d to %d", beforeHits, afterHits)
+	}
+	return nil
+}
+
+func validateSandboxSharingTransition(state sandboxSharingDoc, desired, observed string, priorEpoch uint64) error {
+	if state.DesiredState != desired || state.ConnectionState != observed {
+		return fmt.Errorf("want %s/%s", desired, observed)
+	}
+	if state.ServingEpoch <= priorEpoch {
+		return fmt.Errorf("serving epoch %d did not advance beyond %d", state.ServingEpoch, priorEpoch)
+	}
+	return nil
+}
+
+func TestRunSandboxLocalCLIUsesExactBinaryAndState(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "qurl")
+	script := `#!/bin/sh
+printf 'state=%s\n' "${QURL_CONNECTOR_STATE_DIR-unset}"
+printf 'agent=%s\n' "${QURL_CONNECTOR_AGENT_ID-unset}"
+printf 'home=%s\n' "${HOME-unset}"
+printf 'arg=%s\n' "$@"
+`
+	if err := os.WriteFile(binary, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(binary, 0o500); err != nil { //nolint:gosec // The fixture must be executable and non-writable.
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	res := runSandboxLocalCLI(t, binary, map[string]string{
+		"QURL_API_KEY":           "lv_test_exact_external_binary_key",
+		"QURL_ENDPOINT":          "https://sandbox.invalid",
+		state.EnvAgentID:         "qurl-share-r17-a3-hs",
+		state.EnvStateDirPrimary: "/must-be-replaced",
+	}, stateDir, "-o", "json", "status", "test-crid")
+	if res.code != 0 {
+		t.Fatalf("external CLI fixture exit = %d: %s", res.code, res.stderr.String())
+	}
+	want := strings.Join([]string{
+		"state=" + stateDir,
+		"agent=qurl-share-r17-a3-hs",
+		"home=unset",
+		"arg=--endpoint",
+		"arg=https://sandbox.invalid",
+		"arg=-o",
+		"arg=json",
+		"arg=status",
+		"arg=test-crid",
+		"",
+	}, "\n")
+	if got := res.stdout.String(); got != want {
+		t.Fatalf("external CLI fixture output = %q, want %q", got, want)
+	}
+}
+
+func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
+	valid := sandboxSharingDoc{DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8}
+	if err := validateSandboxSharingTransition(valid, "on", "serving", 7); err != nil {
+		t.Fatalf("valid transition: %v", err)
+	}
+	for name, state := range map[string]sandboxSharingDoc{
+		"wrong desired state":    {DesiredState: "off", ConnectionState: "serving", ServingEpoch: 8},
+		"wrong connection state": {DesiredState: "on", ConnectionState: "stopped", ServingEpoch: 8},
+		"equal epoch":            {DesiredState: "on", ConnectionState: "serving", ServingEpoch: 7},
+		"regressed epoch":        {DesiredState: "on", ConnectionState: "serving", ServingEpoch: 6},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSandboxSharingTransition(state, "on", "serving", 7); err == nil {
+				t.Fatal("invalid lifecycle transition accepted")
+			}
+		})
+	}
+}
+
+func TestValidateSandboxRouteFence(t *testing.T) {
+	if err := validateSandboxRouteFence(errors.New("route rejected"), 4, 4); err != nil {
+		t.Fatalf("fenced route: %v", err)
+	}
+	if err := validateSandboxRouteFence(nil, 4, 5); err == nil {
+		t.Fatal("served stopped route accepted")
+	}
+	if err := validateSandboxRouteFence(errors.New("late failure"), 4, 5); err == nil {
+		t.Fatal("backend hit from stopped route accepted")
+	}
 }
 
 func assertSandboxStreamsDoNotContainSecrets(t *testing.T, res *runResult, secrets ...string) {

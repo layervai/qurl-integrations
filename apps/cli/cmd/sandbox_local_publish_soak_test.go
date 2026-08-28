@@ -41,8 +41,8 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	if initialAgent == nil {
 		t.Fatal("soak enrollment produced no durable agent state")
 	}
-	waitSandboxSharingState(t, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
-	assertSandboxLocalRoute(t, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker, 2*time.Minute)
+	waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
+	assertSandboxLocalRoute(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker, 2*time.Minute)
 
 	startFDs, startRSS := sandboxProcessUsage(t)
 	started := time.Now()
@@ -72,7 +72,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 		if !warmRestartDone && !now.Before(warmRestartAt) {
 			fixture.stop(t)
 			daemonCancel, daemonDone = startCredentialFreeSandboxDaemon(t, fixture)
-			waitSandboxSharingState(t, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
+			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)
@@ -80,8 +80,8 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			warmRestartDone = true
 		}
 		if !epochRestartDone && !now.Before(epochRestartAt) {
-			before := waitSandboxSharingState(t, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
-			res := runSandboxLocalCLI(t, fixture.env, fixture.stateDir, "-o", "json", "restart", fixture.local.CRID)
+			before := waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
+			res := runSandboxLocalCLI(t, fixture.binary, fixture.env, fixture.stateDir, "-o", "json", "restart", fixture.local.CRID)
 			after := decodeSandboxSharing(t, res)
 			if after.ConnectionState != "serving" || after.ServingEpoch <= before.ServingEpoch {
 				t.Fatalf("soak restart did not advance a serving epoch: before=%+v after=%+v", before, after)
@@ -89,7 +89,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			epochRestartDone = true
 		}
 
-		if err := sandboxLocalRouteOnce(t, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker); err != nil {
+		if err := sandboxLocalRouteOnce(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.marker); err != nil {
 			t.Fatalf("continuous customer request %d failed after %s: %v", requestCount, time.Since(started).Round(time.Second), err)
 		}
 		requestCount++

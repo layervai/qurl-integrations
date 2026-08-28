@@ -122,6 +122,22 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if !bytes.Contains(cliWorkflow, []byte("go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
 		t.Error("public CLI workflow does not compile the private sandbox test surface")
 	}
+	lifecycleTests := []string{
+		"TestDaemonServesTwoResourcesAndStopsOneIndependently",
+		"TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership",
+		"TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly",
+		"TestPublishNewMachineTakeoverRotatesEpochOnce",
+		"TestRestartReconcilesAmbiguousAppliedPostWithoutReplay",
+		"TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch",
+		"TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon",
+		"TestStartFailsImmediatelyWhenServingEpochAdvances",
+		"TestStartRotatesEpochAfterLocalTerminalDisable",
+	}
+	lifecycleRegex := "-run '^(" + strings.Join(lifecycleTests, "|") + ")$'"
+	if bytes.Count(cliWorkflow, []byte("- name: Run CRID lifecycle unit tests")) != 1 ||
+		bytes.Count(cliWorkflow, []byte(lifecycleRegex)) != 1 {
+		t.Error("public CLI workflow does not run the exact credential-free CRID lifecycle unit-test set")
+	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {
