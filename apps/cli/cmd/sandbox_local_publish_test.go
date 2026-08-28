@@ -286,7 +286,10 @@ func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInt
 			process.waitMu.Lock()
 			waitErr := process.waitErr
 			process.waitMu.Unlock()
-			return state.LocalShare{}, fmt.Errorf("foreground publish exited before persisting a local share: %v", waitErr)
+			if waitErr == nil {
+				return state.LocalShare{}, errors.New("foreground publish exited successfully before persisting a local share")
+			}
+			return state.LocalShare{}, fmt.Errorf("foreground publish exited before persisting a local share: %w", waitErr)
 		case <-ctx.Done():
 			return state.LocalShare{}, fmt.Errorf("local-share registry did not publish exactly one row: %s: %w", last, ctx.Err())
 		case <-ticker.C:
@@ -329,7 +332,7 @@ func sandboxSecret(t *testing.T, name string) string {
 	if path == "" {
 		return ""
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // The private orchestrator supplies the explicit secret-file path.
 	if err != nil {
 		t.Fatalf("read %s_FILE: %v", name, err)
 	}
@@ -437,11 +440,11 @@ func assertSandboxLocalRoute(t *testing.T, binary string, env map[string]string,
 	dest := filepath.Join(t.TempDir(), "payload")
 	var last string
 	for time.Now().Before(deadline) {
-		if err := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker, dest); err == nil {
+		err := sandboxLocalRouteOnce(t, binary, env, stateDir, crid, marker, dest)
+		if err == nil {
 			return
-		} else {
-			last = err.Error()
 		}
+		last = err.Error()
 		time.Sleep(time.Second)
 	}
 	t.Fatalf("public qURL route for %s did not deliver the local backend bytes: %s", crid, last)
@@ -490,7 +493,7 @@ func probeSandboxLocalRoute(ctx context.Context, t *testing.T, binary string, en
 		}
 		return sandboxRouteRefused, nil
 	}
-	payload, err := os.ReadFile(dest)
+	payload, err := os.ReadFile(dest) //nolint:gosec // The destination is an isolated route-probe file under t.TempDir.
 	if err != nil {
 		return 0, err
 	}
@@ -740,7 +743,7 @@ func (v *sandboxRouteFenceValidator) observe(probeStartedAt, probeCompletedAt ti
 // Each stop, start, and restart changes the durable lifecycle authority. The
 // serving epoch must therefore advance. An equal epoch is stale authority, not
 // successful convergence, even when the desired and observed states match.
-func validateSandboxSharingTransition(doc sandboxSharingDoc, desired, observed string, priorEpoch uint64) error {
+func validateSandboxSharingTransition(doc sandboxSharingDoc, desired, observed string, priorEpoch uint64) error { //nolint:gocritic // Passing the immutable decoded snapshot by value keeps validation isolated from later mutation.
 	if doc.DesiredState != desired || doc.ConnectionState != observed {
 		return fmt.Errorf("got %s/%s, want %s/%s", doc.DesiredState, doc.ConnectionState, desired, observed)
 	}
@@ -1244,7 +1247,7 @@ func registerSandboxResourceCleanup(t *testing.T, endpoint, connectorID, deviceA
 
 func TestRegisterSandboxDeviceCredentialCleanup(t *testing.T) {
 	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o700); err != nil {
+	if err := os.Chmod(stateDir, 0o700); err != nil { //nolint:gosec // A private directory must allow owner traversal as well as read/write.
 		t.Fatalf("secure test state directory: %v", err)
 	}
 	store, err := qurl.OpenFileAgentState(filepath.Join(stateDir, state.AgentStateFile))

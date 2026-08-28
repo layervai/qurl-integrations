@@ -150,7 +150,7 @@ func runExternalSandboxCLI(t *testing.T, binary string, env map[string]string, a
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	commandArgs := append([]string{"--endpoint", env["QURL_ENDPOINT"]}, args...)
-	cmd := exec.CommandContext(ctx, binary, commandArgs...)
+	cmd := exec.CommandContext(ctx, binary, commandArgs...) //nolint:gosec // The protected test validates the exact CLI binary before use.
 	cmd.Env = externalSandboxEnvironment(env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -275,7 +275,7 @@ func assertExternalSandboxRoute(t *testing.T, binary string, env map[string]stri
 		destination := filepath.Join(t.TempDir(), "payload")
 		result := runExternalSandboxCLI(t, binary, env, "get", cridValue, "--file", destination)
 		if result.err == nil {
-			payload, err := os.ReadFile(destination)
+			payload, err := os.ReadFile(destination) //nolint:gosec // The destination is an isolated test file under t.TempDir.
 			if err == nil && string(payload) == marker {
 				return
 			}
@@ -298,7 +298,7 @@ func assertMacOSLaunchAgentContainsNoCredential(t *testing.T, endpoint, hubHost,
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // The connector service derives the fixed per-user LaunchAgent path.
 	if err != nil {
 		t.Fatalf("read qURL LaunchAgent definition: %v", err)
 	}

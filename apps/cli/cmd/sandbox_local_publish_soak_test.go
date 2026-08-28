@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -170,7 +171,8 @@ func startCredentialFreeSandboxDaemon(t *testing.T, fixture *sandboxLocalFixture
 		hub.EnvServerPublicKey:   fixture.env[hub.EnvServerPublicKey],
 	}
 	process := &sandboxExactDaemonProcess{done: make(chan error, 1)}
-	process.cmd = exec.Command( //nolint:gosec // The protected test validates the exact binary and fixed arguments.
+	process.cmd = exec.CommandContext( //nolint:gosec // The protected test validates the exact binary and fixed arguments.
+		context.Background(),
 		fixture.binary,
 		"--endpoint", env["QURL_ENDPOINT"],
 		"daemon", "run", "--state-dir", fixture.stateDir,
@@ -248,7 +250,7 @@ while :; do sleep 0.1; done
 		time.Sleep(10 * time.Millisecond)
 	}
 	process.interruptAndValidate(t, "must-not-reach-daemon")
-	invocation, err := os.ReadFile(filepath.Join(stateDir, "invocation"))
+	invocation, err := os.ReadFile(filepath.Join(stateDir, "invocation")) //nolint:gosec // The path is inside this test's private temporary state directory.
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +340,11 @@ func sandboxProcessUsage(t *testing.T) (fds int, rssBytes int64) {
 		t.Logf("read rss usage: %v", err)
 		return fds, -1
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Logf("close process status: %v", err)
+		}
+	}()
 	rssBytes = -1
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

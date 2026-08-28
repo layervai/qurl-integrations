@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,15 +13,73 @@ import (
 )
 
 type cliWorkflowContract struct {
-	Jobs map[string]struct {
-		Steps []cliWorkflowStep `yaml:"steps"`
-	} `yaml:"jobs"`
+	Jobs map[string]cliWorkflowJob `yaml:"jobs"`
+}
+
+type cliWorkflowJob struct {
+	If              any               `yaml:"if"`
+	ContinueOnError any               `yaml:"continue-on-error"`
+	Steps           []cliWorkflowStep `yaml:"steps"`
 }
 
 type cliWorkflowStep struct {
-	Name string         `yaml:"name"`
-	Env  map[string]any `yaml:"env"`
-	Run  string         `yaml:"run"`
+	Name            string         `yaml:"name"`
+	If              any            `yaml:"if"`
+	ContinueOnError any            `yaml:"continue-on-error"`
+	Env             map[string]any `yaml:"env"`
+	Run             string         `yaml:"run"`
+}
+
+func validateRequiredCLIWorkflowGate(job cliWorkflowJob, step cliWorkflowStep, expectedJobIf string) error {
+	if job.If != expectedJobIf {
+		return fmt.Errorf("job if = %#v, want %q", job.If, expectedJobIf)
+	}
+	if job.ContinueOnError != nil {
+		return fmt.Errorf("job continue-on-error must be absent, got %#v", job.ContinueOnError)
+	}
+	if step.If != nil {
+		return fmt.Errorf("step if must be absent, got %#v", step.If)
+	}
+	if step.ContinueOnError != nil {
+		return fmt.Errorf("step continue-on-error must be absent, got %#v", step.ContinueOnError)
+	}
+	return nil
+}
+
+func TestRequiredCLIWorkflowGateRejectsBypassMutations(t *testing.T) {
+	t.Parallel()
+	const expectedJobIf = "needs.changes.outputs.cli == 'true'"
+	for _, test := range []struct {
+		name, jobIf, jobExtra, stepExtra string
+		wantErr                          bool
+	}{
+		{name: "valid", jobIf: "    if: needs.changes.outputs.cli == 'true'\n"},
+		{name: "job if removed", wantErr: true},
+		{name: "job if narrowed", jobIf: "    if: github.event_name == 'push'\n", wantErr: true},
+		{name: "job continues on error", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", jobExtra: "    continue-on-error: true\n", wantErr: true},
+		{name: "job explicit false", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", jobExtra: "    continue-on-error: false\n", wantErr: true},
+		{name: "step conditional", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", stepExtra: "        if: github.event_name == 'push'\n", wantErr: true},
+		{name: "step continues on error", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", stepExtra: "        continue-on-error: true\n", wantErr: true},
+		{name: "step explicit false", jobIf: "    if: needs.changes.outputs.cli == 'true'\n", stepExtra: "        continue-on-error: false\n", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			source := "jobs:\n  test:\n" + test.jobIf + test.jobExtra +
+				"    steps:\n      - name: required gate\n" + test.stepExtra
+			var workflow cliWorkflowContract
+			if err := yaml.Unmarshal([]byte(source), &workflow); err != nil {
+				t.Fatalf("parse workflow mutation: %v", err)
+			}
+			job := workflow.Jobs["test"]
+			if len(job.Steps) != 1 {
+				t.Fatalf("workflow mutation has %d steps, want one", len(job.Steps))
+			}
+			err := validateRequiredCLIWorkflowGate(job, job.Steps[0], expectedJobIf)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("workflow mutation error = %v, want error=%t", err, test.wantErr)
+			}
+		})
+	}
 }
 
 func TestCLIImageContract(t *testing.T) {
@@ -134,26 +193,43 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	cliWorkflow = bytes.ReplaceAll(cliWorkflow, []byte("\r\n"), []byte("\n"))
-	if !bytes.Contains(cliWorkflow, []byte("go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
+	if !bytes.Contains(cliWorkflow, []byte("go test -race -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
 		t.Error("public CLI workflow does not compile the private sandbox test surface")
 	}
 	var workflow cliWorkflowContract
 	if err := yaml.Unmarshal(cliWorkflow, &workflow); err != nil {
 		t.Fatalf("parse public CLI workflow: %v", err)
 	}
-	findStep := func(name string) cliWorkflowStep {
+	const expectedCLIJobIf = "needs.changes.outputs.cli == 'true'"
+	findStep := func(jobName, name string) cliWorkflowStep {
 		t.Helper()
+		job, ok := workflow.Jobs[jobName]
+		if !ok {
+			t.Fatalf("public CLI workflow has no %q job", jobName)
+		}
 		var matches []cliWorkflowStep
-		for _, step := range workflow.Jobs["test"].Steps {
+		for _, step := range job.Steps {
 			if step.Name == name {
 				matches = append(matches, step)
 			}
 		}
 		if len(matches) != 1 {
-			t.Fatalf("public CLI workflow test job has %d %q steps, want one", len(matches), name)
+			t.Fatalf("public CLI workflow %s job has %d %q steps, want one", jobName, len(matches), name)
 		}
 		return matches[0]
 	}
+	assertRequiredGate := func(jobName string, step cliWorkflowStep) {
+		t.Helper()
+		if err := validateRequiredCLIWorkflowGate(workflow.Jobs[jobName], step, expectedCLIJobIf); err != nil {
+			t.Errorf("public CLI workflow %s / %s is bypassable: %v", jobName, step.Name, err)
+		}
+	}
+	sandboxLintStep := findStep("lint", "golangci-lint sandbox tests")
+	const sandboxLintCommand = "go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/..."
+	if sandboxLintStep.Run != sandboxLintCommand {
+		t.Errorf("public CLI workflow sandbox lint command = %q, want %q", sandboxLintStep.Run, sandboxLintCommand)
+	}
+	assertRequiredGate("lint", sandboxLintStep)
 	lifecycleTests := []string{
 		"TestDaemonServesTwoResourcesAndStopsOneIndependently",
 		"TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership",
@@ -169,7 +245,8 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	lifecycleNames := strings.Join(lifecycleTests, "\n")
 	lifecycleListCommand := `go test -race -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
 	lifecycleRunCommand := `go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
-	lifecycleStep := findStep("Run CRID lifecycle unit tests")
+	lifecycleStep := findStep("test", "Run CRID lifecycle unit tests")
+	assertRequiredGate("test", lifecycleStep)
 	if len(lifecycleStep.Env) != 2 || lifecycleStep.Env["LIFECYCLE_TEST_REGEX"] != lifecycleRegex || lifecycleStep.Env["LIFECYCLE_TEST_NAMES"] != lifecycleNames {
 		t.Errorf("public CLI workflow lifecycle env = %#v, want exact regex and sorted test names", lifecycleStep.Env)
 	}
@@ -211,7 +288,8 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 	validatorPattern := "^(" + strings.Join(validatorTests, "|") + ")$"
 	validatorNames := strings.Join(validatorTests, "\n")
-	validatorStep := findStep("Run credential-free sandbox validator tests")
+	validatorStep := findStep("test", "Run credential-free sandbox validator tests")
+	assertRequiredGate("test", validatorStep)
 	if len(validatorStep.Env) != 2 || validatorStep.Env["VALIDATOR_TEST_REGEX"] != validatorPattern || validatorStep.Env["VALIDATOR_TEST_NAMES"] != validatorNames {
 		t.Errorf("public CLI workflow validator env = %#v, want exact regex and sorted test names", validatorStep.Env)
 	}
@@ -227,7 +305,8 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		strings.Index(validatorStep.Run, validatorPassedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) {
 		t.Error("public CLI workflow validator gate checks process status before PASS/SKIP diagnostics")
 	}
-	warmDaemonStep := findStep("Run exact warm-daemon process contract")
+	warmDaemonStep := findStep("test", "Run exact warm-daemon process contract")
+	assertRequiredGate("test", warmDaemonStep)
 	if len(warmDaemonStep.Env) != 2 || warmDaemonStep.Env["WARM_DAEMON_TEST_REGEX"] != "^TestExactWarmDaemonProcessContract$" || warmDaemonStep.Env["WARM_DAEMON_TEST_NAME"] != "TestExactWarmDaemonProcessContract" {
 		t.Errorf("public CLI workflow warm-daemon env = %#v, want one exact test", warmDaemonStep.Env)
 	}

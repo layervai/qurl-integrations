@@ -303,16 +303,15 @@ func (p *sandboxPublishProcess) waitForSharingState(t *testing.T, desired, obser
 	last := "status was not attempted"
 	for time.Now().Before(deadline) {
 		doc, err := p.readSharingState()
-		if err == nil {
-			if doc.CRID != p.crid || doc.ResourceID == "" || doc.ServingEpoch == 0 {
-				last = "status returned an incomplete resource identity"
-			} else if doc.DesiredState == desired && doc.ConnectionState == observed {
-				return doc
-			} else {
-				last = fmt.Sprintf("status is %s/%s at epoch %d", doc.DesiredState, doc.ConnectionState, doc.ServingEpoch)
-			}
-		} else {
+		switch {
+		case err != nil:
 			last = err.Error()
+		case doc.CRID != p.crid || doc.ResourceID == "" || doc.ServingEpoch == 0:
+			last = "status returned an incomplete resource identity"
+		case doc.DesiredState == desired && doc.ConnectionState == observed:
+			return doc
+		default:
+			last = fmt.Sprintf("status is %s/%s at epoch %d", doc.DesiredState, doc.ConnectionState, doc.ServingEpoch)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -386,9 +385,12 @@ func validateSandboxForegroundExit(waitErr error, stdout, stderr, crid string, s
 }
 
 func validateSandboxInterruptedExit(waitErr error) error {
+	if waitErr == nil {
+		return errors.New("exit = nil, want 130 after interrupt")
+	}
 	var exitErr *exec.ExitError
 	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
-		return fmt.Errorf("exit = %v, want 130 after interrupt", waitErr)
+		return fmt.Errorf("exit = %w, want 130 after interrupt", waitErr)
 	}
 	return nil
 }
@@ -710,7 +712,10 @@ func TestValidateSandboxCLIBinary(t *testing.T) {
 
 func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
-	exit130 := exec.Command("sh", "-c", "exit 130").Run() //nolint:gosec // Fixed POSIX fixture for the Linux/macOS-only tagged test.
+	exit130 := exec.CommandContext(context.Background(), "sh", "-c", "exit 130").Run()
+	if err := validateSandboxInterruptedExit(exit130); err != nil {
+		t.Fatalf("exit-130 fixture: %v", err)
+	}
 	if err := validateSandboxForegroundExit(exit130, crid+"\n", "", crid, "api-secret"); err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +726,7 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 		secret  string
 	}{
 		"success exit":        {waitErr: nil, stdout: crid + "\n"},
-		"wrong exit":          {waitErr: exec.Command("sh", "-c", "exit 1").Run(), stdout: crid + "\n"}, //nolint:gosec // Fixed POSIX fixture.
+		"wrong exit":          {waitErr: exec.CommandContext(context.Background(), "sh", "-c", "exit 1").Run(), stdout: crid + "\n"},
 		"partial CRID":        {waitErr: exit130, stdout: crid[:20]},
 		"extra output":        {waitErr: exit130, stdout: crid + "\nextra\n"},
 		"stdout secret":       {waitErr: exit130, stdout: crid + "\napi-secret", secret: "api-secret"},

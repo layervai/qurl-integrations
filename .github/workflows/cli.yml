@@ -118,6 +118,11 @@ jobs:
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m ./apps/cli/...
 
+      - name: golangci-lint sandbox tests
+        run: >-
+          go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+          --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
+
   test:
     name: cli / test
     runs-on: ubuntu-latest
@@ -223,7 +228,7 @@ jobs:
       # Credentialed sandbox journeys run in the private orchestrator. Public
       # CI still compiles every tagged test so API and platform drift fail here.
       - name: Compile private sandbox test surface
-        run: go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
+        run: go test -race -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
 
       # These tests need no service credentials or live infrastructure. They
       # execute the exact-artifact process and lifecycle validation helpers on
