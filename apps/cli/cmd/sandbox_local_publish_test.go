@@ -807,6 +807,61 @@ printf 'arg=%s\n' "$@"
 	}
 }
 
+func TestSandboxHarnessPassesInlineAPIKeyToExactBinary(t *testing.T) {
+	const fixtureAPIKey = "lv_test_protected_input_becomes_inline_api_key"
+	apiKeyFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(apiKeyFile, []byte(fixtureAPIKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QURL_API_KEY", "")
+	t.Setenv(sandboxAPIKeyFileEnv, apiKeyFile)
+	apiKey, err := readSandboxSecretFile(sandboxAPIKeyFileEnv, "QURL_API_KEY")
+	if err != nil {
+		t.Fatalf("read protected API key fixture: %v", err)
+	}
+
+	binaryFixture := filepath.Join(t.TempDir(), "qurl")
+	script := `#!/bin/sh
+set -eu
+if [ "${QURL_API_KEY-}" != "lv_test_protected_input_becomes_inline_api_key" ]; then
+  printf 'QURL_API_KEY missing or incorrect\n' >&2
+  exit 41
+fi
+if [ "${QURL_API_KEY_FILE+x}" = x ]; then
+  printf 'QURL_API_KEY_FILE reached customer process\n' >&2
+  exit 42
+fi
+printf 'inline API key received\n'
+`
+	if err := os.WriteFile(binaryFixture, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(binaryFixture, 0o500); err != nil { //nolint:gosec // The exact-binary fixture must be executable and non-writable.
+		t.Fatal(err)
+	}
+	t.Setenv(sandboxCLIBinaryEnv, binaryFixture)
+	binary, err := validateSandboxCLIBinary(os.Getenv(sandboxCLIBinaryEnv))
+	if err != nil {
+		t.Fatalf("validate exact customer CLI fixture: %v", err)
+	}
+
+	res := runSandboxLocalCLI(t, binary, map[string]string{
+		"QURL_API_KEY":  apiKey,
+		"QURL_ENDPOINT": "https://sandbox.invalid",
+	}, t.TempDir(), "status", "test-crid")
+	if res.code != 0 || res.stdout.String() != "inline API key received\n" || res.stderr.Len() != 0 {
+		t.Fatalf("exact customer CLI did not receive one inline API key: exit %d", res.code)
+	}
+
+	missing := runSandboxLocalCLI(t, binary, map[string]string{
+		"QURL_ENDPOINT": "https://sandbox.invalid",
+	}, t.TempDir(), "status", "test-crid")
+	if missing.code != 41 || missing.stdout.Len() != 0 || missing.stderr.String() != "QURL_API_KEY missing or incorrect\n" {
+		t.Fatalf("exact customer CLI accepted a missing inline API key: exit %d", missing.code)
+	}
+	assertSandboxStreamsDoNotContainSecrets(t, missing, fixtureAPIKey)
+}
+
 func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 	valid := sandboxSharingDoc{DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8}
 	if err := validateSandboxSharingTransition(valid, "on", "serving", 7); err != nil {

@@ -275,6 +275,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
 		"TestSandboxForegroundLifecycleStateContract",
+		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",

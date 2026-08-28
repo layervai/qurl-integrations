@@ -236,11 +236,12 @@ jobs:
       - name: Run credential-free sandbox validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIUsesExactBinaryAndState
             TestSandboxForegroundLifecycleStateContract
+            TestSandboxHarnessPassesInlineAPIKeyToExactBinary
             TestSandboxNamespaceIsCanonicalAndSeparated
             TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
             TestSandboxPublishProcessReportsEarlyExit
