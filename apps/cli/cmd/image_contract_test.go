@@ -167,7 +167,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 	lifecycleRegex := "^(" + strings.Join(lifecycleTests, "|") + ")$"
 	lifecycleNames := strings.Join(lifecycleTests, "\n")
-	lifecycleListCommand := `go test -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
+	lifecycleListCommand := `go test -race -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
 	lifecycleRunCommand := `go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd`
 	lifecycleStep := findStep("Run CRID lifecycle unit tests")
 	if len(lifecycleStep.Env) != 2 || lifecycleStep.Env["LIFECYCLE_TEST_REGEX"] != lifecycleRegex || lifecycleStep.Env["LIFECYCLE_TEST_NAMES"] != lifecycleNames {
@@ -218,7 +218,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	validatorSkippedCheck := `if [[ -n "$skipped" ]]; then`
 	validatorPassedCheck := `if [[ "$passed" != "$VALIDATOR_TEST_NAMES" ]]; then`
 	validatorStatusCheck := `if (( validator_status != 0 )); then`
-	for _, required := range []string{"go test -tags=clisandbox -list", "go test -race -tags=clisandbox -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, validatorSkippedCheck, validatorPassedCheck, validatorStatusCheck} {
+	for _, required := range []string{"go test -race -tags=clisandbox -list", "go test -race -tags=clisandbox -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, validatorSkippedCheck, validatorPassedCheck, validatorStatusCheck} {
 		if strings.Count(validatorStep.Run, required) != 1 {
 			t.Errorf("public CLI workflow validator gate does not fail closed with %q", required)
 		}
@@ -234,7 +234,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	warmDaemonSkippedCheck := `if [[ -n "$skipped" ]]; then`
 	warmDaemonPassedCheck := `if [[ "$passed" != "$WARM_DAEMON_TEST_NAME" ]]; then`
 	warmDaemonStatusCheck := `if (( warm_daemon_status != 0 )); then`
-	for _, required := range []string{"go test -tags='clisandbox clisoak' -list", "go test -race -tags='clisandbox clisoak' -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, warmDaemonSkippedCheck, warmDaemonPassedCheck, warmDaemonStatusCheck} {
+	for _, required := range []string{"go test -race -tags='clisandbox clisoak' -list", "go test -race -tags='clisandbox clisoak' -count=1 -json", `jq -j 'select(.Output != null) | .Output'`, `select(.Action == "pass"`, `select(.Action == "skip"`, warmDaemonSkippedCheck, warmDaemonPassedCheck, warmDaemonStatusCheck} {
 		if strings.Count(warmDaemonStep.Run, required) != 1 {
 			t.Errorf("public CLI workflow warm-daemon gate does not fail closed with %q", required)
 		}

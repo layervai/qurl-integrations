@@ -399,6 +399,8 @@ func validateSandboxProtectedProcessOutput(stdout, stderr string, secrets ...str
 			return errors.New("sandbox process exposed a protected credential")
 		}
 	}
+	// TODO(upstream-contract): Keep these retired assignment-approval markers
+	// in lockstep with qurl-connector's removed approval UX.
 	if strings.Contains(stdout+stderr, "refresh-mode") || strings.Contains(stdout+stderr, "explicit approval") {
 		return errors.New("sandbox process exposed retired assignment-approval UX")
 	}

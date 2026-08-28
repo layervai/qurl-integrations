@@ -157,7 +157,7 @@ jobs:
         run: |
           set -euo pipefail
           actual_tests="$(
-            go test -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd |
+            go test -race -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd |
               sed -n '/^Test/p' |
               LC_ALL=C sort
           )"
@@ -249,7 +249,7 @@ jobs:
         run: |
           set -euo pipefail
           actual_tests="$(
-            go test -tags=clisandbox -list "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd |
+            go test -race -tags=clisandbox -list "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd |
               sed -n '/^Test/p' |
               LC_ALL=C sort
           )"
@@ -290,7 +290,7 @@ jobs:
           WARM_DAEMON_TEST_NAME: TestExactWarmDaemonProcessContract
         run: |
           set -euo pipefail
-          actual_test="$(go test -tags='clisandbox clisoak' -list "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd | sed -n '/^Test/p')"
+          actual_test="$(go test -race -tags='clisandbox clisoak' -list "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd | sed -n '/^Test/p')"
           [[ "$actual_test" == "$WARM_DAEMON_TEST_NAME" ]] || {
             echo "::error::exact warm-daemon declaration is missing or ambiguous"
             exit 1

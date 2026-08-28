@@ -72,8 +72,8 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	for time.Now().Before(deadline) {
 		now := time.Now()
 		if !warmRestartDone && !now.Before(warmRestartAt) {
-			fixture.interruptAndValidate(t)
 			foregroundOwned = false
+			fixture.interruptAndValidate(t)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)

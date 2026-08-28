@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/mod/modfile"
@@ -31,14 +33,20 @@ func TestConnectorFloorPreservesSuccessfulRecoveryHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", goModPath, err)
 	}
-	parsed, err := modfile.ParseLax(goModPath, raw, nil)
+	if err := checkConnectorRequirement(goModPath, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkConnectorRequirement(path string, raw []byte) error {
+	parsed, err := modfile.Parse(path, raw, nil)
 	if err != nil {
-		t.Fatalf("parse %s: %v", goModPath, err)
+		return fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	for _, replacement := range parsed.Replace {
 		if replacement.Old.Path == connectorModule {
-			t.Fatalf("%s: %s must not be replaced: released CLI must use the reviewed public module", goModPath, connectorModule)
+			return fmt.Errorf("%s: %s must not be replaced: released CLI must use the reviewed public module", path, connectorModule)
 		}
 	}
 
@@ -48,12 +56,12 @@ func TestConnectorFloorPreservesSuccessfulRecoveryHandoff(t *testing.T) {
 		}
 		version := requirement.Mod.Version
 		if !connectorVersionAtLeast(version, connectorFloor) {
-			t.Fatalf("%s: %s version = %q, want %s or newer", goModPath, connectorModule, version, connectorFloor)
+			return fmt.Errorf("%s: %s version = %q, want %s or newer", path, connectorModule, version, connectorFloor)
 		}
-		return
+		return nil
 	}
 
-	t.Fatalf("%s: %s is not required by the released CLI dependency graph", goModPath, connectorModule)
+	return fmt.Errorf("%s: %s is not required by the released CLI dependency graph", path, connectorModule)
 }
 
 func connectorVersionAtLeast(version, floor string) bool {
@@ -94,6 +102,63 @@ func TestConnectorVersionFloor(t *testing.T) {
 			t.Parallel()
 			if got := connectorVersionAtLeast(test.version, connectorFloor); got != test.want {
 				t.Fatalf("connectorVersionAtLeast(%q, %q) = %t, want %t", test.version, connectorFloor, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckConnectorRequirement(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		goMod   string
+		wantErr string
+	}{
+		{
+			name:  "direct requirement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3\n",
+		},
+		{
+			name:  "indirect requirement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3 // indirect\n",
+		},
+		{
+			name:  "incompatible requirement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3+incompatible\n",
+		},
+		{
+			name:    "missing requirement",
+			goMod:   "module example.com/cli\n",
+			wantErr: "is not required",
+		},
+		{
+			name: "replaced requirement",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3\n" +
+				"replace " + connectorModule + " => ../qurl-connector\n",
+			wantErr: "must not be replaced",
+		},
+		{
+			name:    "older requirement",
+			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.2\n",
+			wantErr: "want v0.8.3 or newer",
+		},
+		{
+			name:    "malformed go.mod",
+			goMod:   "module (\n",
+			wantErr: "parse synthetic.mod",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkConnectorRequirement("synthetic.mod", []byte(test.goMod))
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("checkConnectorRequirement() error = %v, want text %q", err, test.wantErr)
 			}
 		})
 	}
