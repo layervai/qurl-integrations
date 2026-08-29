@@ -28,11 +28,9 @@ const (
 )
 
 // transport decorates every request — SDK-issued and direct alike — with the
-// CLI's headers and bounded transient retry. A 429 is retryable for any
-// replayable request. A 503 is retryable only when the caller supplied an
-// Idempotency-Key, which proves a replay cannot duplicate the mutation; dark
-// deployment 503s on ordinary calls remain single-shot. It implements
-// qurl.HTTPDoer.
+// CLI's headers and bounded transient retry. A 429 is retryable only for an
+// allowlisted read-like request or when the caller supplied an Idempotency-Key.
+// A 503 requires the key. It implements qurl.HTTPDoer.
 type transport struct {
 	next         *http.Client
 	userAgent    string
@@ -80,7 +78,8 @@ func newTransport(cfg *Config) *transport {
 // Do sends req with the CLI headers set, retrying bounded transient responses.
 // Direct CLI REST calls carry their explicit retry intent in the request
 // context because qurl-go's registered HTTPDoer exposes only Do. SDK-issued
-// requests have no marker and retain the normal retry behavior. The
+// requests have no marker and default fail-closed: only read-only methods or
+// requests with an Idempotency-Key can retry. The
 // X-Request-Id stays constant across retries of one logical request so the
 // service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
@@ -89,7 +88,7 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 	// request context until the upstream interface can express it directly.
 	allowRetry, explicit := req.Context().Value(requestRetryIntentKey{}).(bool)
 	if !explicit {
-		allowRetry = true
+		allowRetry = retrySafeRequest(req)
 	}
 	return t.do(req, allowRetry)
 }
@@ -138,9 +137,28 @@ func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, erro
 
 func retryableResponse(req *http.Request, resp *http.Response) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
+		return retrySafeRequest(req)
+	}
+	return resp.StatusCode == http.StatusServiceUnavailable &&
+		strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+}
+
+func retrySafeRequest(req *http.Request) bool {
+	if strings.TrimSpace(req.Header.Get("Idempotency-Key")) != "" {
 		return true
 	}
-	return resp.StatusCode == http.StatusServiceUnavailable && strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	case http.MethodPost:
+		// Resolve mints a short-lived link but does not change the resource.
+		// qurl-go owns this request and cannot carry our private context marker,
+		// so keep the one reviewed SDK write-like route explicit here. A 503
+		// still requires an Idempotency-Key in retryableResponse.
+		return strings.HasSuffix(req.URL.EscapedPath(), "/resolve")
+	default:
+		return false
+	}
 }
 
 // backoff waits out one retry delay, context-aware: cancellation during the

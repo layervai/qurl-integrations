@@ -177,7 +177,10 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		Tags:        opts.Tags,
 		Alias:       opts.Alias,
 	}
-	reply, err := c.doREST(ctx, http.MethodPost, "/v1/resources", body)
+	// Publish has no service idempotency key. A rate-limit response is usually
+	// pre-application, but the client cannot prove that a replay would not mint
+	// a duplicate resource, so it is deliberately single-shot.
+	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", body)
 	if err != nil {
 		return nil, err
 	}

@@ -192,6 +192,22 @@ QURL_API_KEY for the same one-time bootstrap.`,
 			return exitcode.UsageError(fmt.Errorf("unknown command %q — run `qurl --help` for the command list", args[0]))
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			// Task Scheduler starts `daemon run` directly. Redirect before
+			// settings resolution so a malformed profile or environment value is
+			// present in the durable log on the first background start.
+			if cmd.Name() == "run" && cmd.Parent() != nil && cmd.Parent().Name() == "daemon" {
+				stdoutPath, err := cmd.Flags().GetString("job-stdout-log")
+				if err != nil {
+					return err
+				}
+				stderrPath, err := cmd.Flags().GetString("job-stderr-log")
+				if err != nil {
+					return err
+				}
+				if err := redirectDaemonJobOutput(stdoutPath, stderrPath, opts.streams); err != nil {
+					return err
+				}
+			}
 			if skipsSettings(cmd) {
 				return nil
 			}

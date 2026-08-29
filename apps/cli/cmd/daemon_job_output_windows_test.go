@@ -125,8 +125,8 @@ func TestWindowsDaemonJobEarlyErrorUsesProtectedLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(stderr), "share daemon job version") ||
-		!strings.Contains(string(stderr), "does not match binary") {
+	if !strings.Contains(string(stderr), "invalid output format") ||
+		!strings.Contains(string(stderr), "must be") {
 		t.Fatalf("Windows daemon early error did not reach its durable log: %q", stderr)
 	}
 }
@@ -148,15 +148,20 @@ func TestWindowsDaemonJobEarlyErrorHelper(t *testing.T) {
 	streams := output.Detect()
 	root, opts := newRoot("2.1.0", streams, func(global *globalOpts) {
 		global.configDir = t.TempDir()
-		global.lookupEnv = func(string) (string, bool) { return "", false }
+		global.lookupEnv = func(name string) (string, bool) {
+			if name == "QURL_OUTPUT" {
+				return "invalid-background-value", true
+			}
+			return "", false
+		}
 	})
 	root.SetArgs([]string{
-		"daemon", "run", "--job-version", "0/mismatch",
+		"daemon", "run",
 		"--job-stdout-log", os.Args[separator+1],
 		"--job-stderr-log", os.Args[separator+2],
 	})
 	if code := run(context.Background(), root, opts); code == 0 {
-		t.Fatal("mismatched Windows daemon job version unexpectedly succeeded")
+		t.Fatal("invalid Windows daemon settings unexpectedly succeeded")
 	}
 }
 

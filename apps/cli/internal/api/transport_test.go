@@ -2,6 +2,7 @@ package qurlapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -84,5 +85,70 @@ func TestTransportExplicitNoReplayIsPathIndependent(t *testing.T) {
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	if resp.StatusCode != http.StatusTooManyRequests || requests.Load() != 1 {
 		t.Fatalf("explicit no-replay response = HTTP %d after %d requests, want HTTP 429 after one", resp.StatusCode, requests.Load())
+	}
+}
+
+func TestTransportNeverRetriesUnsafe429WithoutIdempotencyKey(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			t.Cleanup(srv.Close)
+
+			transport := newTransport(&Config{HTTPClient: srv.Client(), Version: "test", Sleep: func(time.Duration) {}})
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/resources", http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if explicit {
+				req = withRequestRetryIntent(req, true)
+			}
+			resp, err := transport.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			if resp.StatusCode != http.StatusTooManyRequests || requests.Load() != 1 {
+				t.Fatalf("unsafe response = HTTP %d after %d requests, want HTTP 429 after one", resp.StatusCode, requests.Load())
+			}
+		})
+	}
+}
+
+func TestTransportRetriesSafe429(t *testing.T) {
+	for _, test := range []struct {
+		name, method, idempotencyKey string
+	}{
+		{name: "read", method: http.MethodGet},
+		{name: "idempotent mutation", method: http.MethodPost, idempotencyKey: "publish-attempt-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			t.Cleanup(srv.Close)
+
+			transport := newTransport(&Config{HTTPClient: srv.Client(), Version: "test", Sleep: func(time.Duration) {}})
+			req, err := http.NewRequestWithContext(context.Background(), test.method, srv.URL, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Idempotency-Key", test.idempotencyKey)
+			resp, err := transport.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			if resp.StatusCode != http.StatusTooManyRequests || requests.Load() != maxAttempts {
+				t.Fatalf("safe response = HTTP %d after %d requests, want HTTP 429 after %d", resp.StatusCode, requests.Load(), maxAttempts)
+			}
+		})
 	}
 }

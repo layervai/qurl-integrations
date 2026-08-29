@@ -120,12 +120,6 @@ service manager owns the process.`,
 		Short: "Run the daemon in the foreground",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Task Scheduler starts the binary directly. Redirect before any
-			// validation that can reject a newly installed background job so the
-			// durable logs contain its first failure.
-			if err := redirectDaemonJobOutput(jobStdoutLog, jobStderrLog, opts.streams); err != nil {
-				return err
-			}
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
 			}

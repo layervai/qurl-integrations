@@ -194,6 +194,30 @@ func TestRestartSharingNeverReplaysRateLimit(t *testing.T) {
 	}
 }
 
+func TestPublishNeverReplaysRateLimit(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func(*testing.T, *apitest.Server) Client
+	}{
+		{name: "account", open: func(t *testing.T, srv *apitest.Server) Client { return newTestClient(t, srv, nil) }},
+		{name: "registered", open: func(t *testing.T, srv *apitest.Server) Client { return newRegisteredTestClient(t, srv) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.ScriptRepeat(http.MethodPost, "/v1/resources", maxAttempts, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "0")
+				apitest.WriteProblem(t, w, http.StatusTooManyRequests, "rate_limited", "Rate limited", "publish result is ambiguous")
+			})
+			if _, err := test.open(t, srv).Publish(context.Background(), "https://example.com", PublishOptions{}); err == nil {
+				t.Fatal("Publish unexpectedly succeeded")
+			}
+			if got := len(srv.Requests()); got != 1 {
+				t.Fatalf("publish requests = %d, want one", got)
+			}
+		})
+	}
+}
+
 func TestRestartSharingNeverReplaysTransportError(t *testing.T) {
 	var attempts int
 	c, err := New(&Config{
