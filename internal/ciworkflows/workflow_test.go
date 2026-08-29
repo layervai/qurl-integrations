@@ -219,7 +219,7 @@ func TestCLICustomerJourneyCallbackTracksArtifactProducer(t *testing.T) {
 		producerSteps[producer.Steps[index].Name]++
 	}
 
-	callbackPath := filepath.Join("..", "..", "scripts", "accept-cli-customer-journey-result.sh")
+	const callbackPath = "../../scripts/accept-cli-customer-journey-result.sh"
 	callback, err := os.ReadFile(callbackPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", callbackPath, err)
