@@ -9,10 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -23,10 +21,6 @@ const SocketFile = "daemon.sock"
 
 // ErrAlreadyRunning reports a live or ambiguously stale daemon socket.
 var ErrAlreadyRunning = errors.New("qURL share daemon is already running")
-
-var dialUnixSocket = func(path string, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout("unix", path, timeout)
-}
 
 var probeIPCStatus = func(c IPCClient, ctx context.Context) (*http.Response, bool, error) {
 	return c.do(ctx, http.MethodGet, "/status")
@@ -51,22 +45,14 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	if err := connectorstate.EnsureDirMode(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("secure share daemon socket directory: %w", err)
 	}
-	if err := prepareSocket(path); err != nil {
-		return err
-	}
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", path)
+	listener, cleanup, err := listenDaemonIPC(ctx, path)
 	if err != nil {
-		return fmt.Errorf("listen on share daemon socket: %w", err)
+		return err
 	}
 	defer func() {
 		retErr = errors.Join(retErr, listener.Close())
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			retErr = errors.Join(retErr, err)
-		}
+		retErr = errors.Join(retErr, cleanup())
 	}()
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("restrict share daemon socket: %w", err)
-	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
@@ -217,13 +203,8 @@ func (c IPCClient) do(ctx context.Context, method, path string) (*http.Response,
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := os.Lstat(socket); errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	} else if err != nil {
-		return nil, false, err
-	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return dialDaemonIPC(ctx, socket)
 	}}
 	defer transport.CloseIdleConnections()
 	request, err := http.NewRequestWithContext(ctx, method, "http://qurl.local"+path, http.NoBody)
@@ -232,7 +213,7 @@ func (c IPCClient) do(ctx context.Context, method, path string) (*http.Response,
 	}
 	response, err := (&http.Client{Transport: transport}).Do(request)
 	if err != nil {
-		if isUnavailableSocketError(err) {
+		if isUnavailableIPCError(err) {
 			return nil, false, nil
 		}
 		return nil, true, err
@@ -245,37 +226,8 @@ func validateSocketPath(raw string) (string, error) {
 	if !filepath.IsAbs(path) || path == string(filepath.Separator) {
 		return "", errors.New("share daemon socket path must be absolute")
 	}
-	if len(path) > 100 {
-		return "", errors.New("share daemon socket path is too long")
+	if err := validatePlatformIPCPath(path); err != nil {
+		return "", err
 	}
 	return path, nil
-}
-
-func prepareSocket(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
-		return errors.New("refuse non-socket share daemon IPC path")
-	}
-	conn, dialErr := dialUnixSocket(path, 200*time.Millisecond)
-	if dialErr == nil {
-		_ = conn.Close()
-		return ErrAlreadyRunning
-	}
-	if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
-		return fmt.Errorf("%w: existing daemon socket could not be confirmed stale: %w", ErrAlreadyRunning, dialErr)
-	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove stale share daemon socket: %w", err)
-	}
-	return nil
-}
-
-func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }

@@ -118,6 +118,11 @@ jobs:
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m ./apps/cli/...
 
+      - name: Cross-lint Windows CLI sources
+        run: |
+          command -v golangci-lint
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m ./apps/cli/...
+
       - name: golangci-lint sandbox tests
         run: >-
           go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
@@ -372,10 +377,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
-      # Switch the v2 suite will read to know it is running under CI's
-      # cross-platform harness with a real OS keyring available. Today's tests
-      # ignore it; exporting it now keeps this job's contract stable when the
-      # v2 code lands.
+      # The v2 suite uses the real platform filesystem and keyring surfaces on
+      # each hosted OS. No customer credential or external service is used.
       QURL_TEST_HARNESS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -384,6 +387,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Scan Windows CLI dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go tool govulncheck ./apps/cli/...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # The live credential-store smoke needs an unlocked keyring on every OS.
       # CI keyrings start locked on macOS and absent on Linux; Windows
@@ -483,6 +493,44 @@ jobs:
           # daemon must be unlocked inside the same session the tests run in,
           # so the wrapper cannot live in this step.
           echo "QURL_CLI_KEYRING_DBUS=1" >> "$GITHUB_ENV"
+
+      - name: Build and smoke the Windows CLI executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:RUNNER_TEMP 'qurl.exe'
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '0'
+          go build -o $binary ./apps/cli/cmd/
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $help = & $binary help | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($command in @('daemon', 'inspect', 'restart', 'start', 'status', 'stop')) {
+            if ($help -notmatch "(?m)^\s+$command\s") {
+              Write-Error "Windows qurl help is missing the $command command"
+              exit 1
+            }
+          }
+          & $binary version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $arm64Binary = Join-Path $env:RUNNER_TEMP 'qurl-arm64.exe'
+          $env:GOARCH = 'arm64'
+          go build -o $arm64Binary ./apps/cli/cmd/
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath $arm64Binary -PathType Leaf)) {
+            Write-Error 'Windows arm64 qurl build did not produce qurl-arm64.exe'
+            exit 1
+          }
+
+      - name: Run pinned Windows Task Scheduler integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QURL_WINDOWS_USER_JOB_INTEGRATION: '1'
+        run: |
+          go test -count=1 github.com/layervai/qurl-connector/pkg/service
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run tests
         shell: bash

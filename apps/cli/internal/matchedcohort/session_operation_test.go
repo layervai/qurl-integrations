@@ -63,6 +63,7 @@ func TestQURLSessionRuntimePreparesOfflineFromDurableState(t *testing.T) {
 	state := &qurl.AgentState{AgentID: "fixed-shared-direct-a", PrivateKeyB64: base64.StdEncoding.EncodeToString(private.Bytes()),
 		PublicKeyB64: publicKey, RegisteredAt: &now, SchemaVersion: 7,
 		DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", DeviceAPIKeyID: "key_AbCdEf123456",
+		EnrollmentCredentialKind: "account",
 		Assignment: &qurl.AgentAssignment{CellID: "cell-01", AssignmentGeneration: 7, EndpointRevision: 1,
 			LeaseExpiresAt: now.Add(time.Hour), Endpoint: qurl.NHPUDPEndpoint{Host: "shared.sandbox.layerv.xyz", Port: 443,
 				ServerPublicKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 32))}}}
@@ -606,6 +607,7 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 	state := &qurl.AgentState{AgentID: "agent-a", PrivateKeyB64: base64.StdEncoding.EncodeToString(private.Bytes()),
 		PublicKeyB64: base64.StdEncoding.EncodeToString(private.PublicKey().Bytes()), RegisteredAt: &registered, SchemaVersion: 7,
 		DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", DeviceAPIKeyID: "key_AbCdEf123456",
+		EnrollmentCredentialKind: "account",
 		Assignment: &qurl.AgentAssignment{CellID: plan.Cohorts[0].CellID, AssignmentGeneration: plan.Cohorts[0].AssignmentGeneration,
 			EndpointRevision: 1, LeaseExpiresAt: time.Unix(2_000_000_000, 0).UTC(), Endpoint: plan.Cohorts[0].CellEndpoint}}
 	stateStore, _ := NewDurableAgentStateStore(blobs, "generations/"+plan.GenerationID+"/shared/direct-a/agent-state")

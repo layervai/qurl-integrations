@@ -26,6 +26,8 @@ type localShareRegistry interface {
 	Delete(context.Context, string) error
 }
 
+const connectorResourceType = "tunnel"
+
 type shareDaemonController interface {
 	Ensure(context.Context) error
 	ReloadIfRunning(context.Context) (bool, error)
@@ -94,7 +96,7 @@ the platform's observed Connector state and serving epoch.`
 				if resourceErr != nil {
 					return resourceErr
 				}
-				if resource.Type == "tunnel" {
+				if resource.Type == connectorResourceType {
 					return fmt.Errorf("connector sharing state was unavailable: %w", err)
 				}
 				return opts.printer().ResourceStatus(resource)
@@ -194,17 +196,17 @@ func requireBackgroundShareSupport(goos string) error {
 	if err := requireLocalShareSupport(goos); err != nil {
 		return err
 	}
-	if goos == "darwin" {
+	if goos == "darwin" || goos == "windows" {
 		return nil
 	}
-	return fmt.Errorf("background local sharing is currently supported only on macOS; use qurl publish --foreground on %s", goos)
+	return fmt.Errorf("background local sharing is currently supported only on macOS and Windows; use qurl publish --foreground on %s", goos)
 }
 
 func requireLocalShareSupport(goos string) error {
-	if goos == "darwin" || goos == "linux" {
+	if goos == "darwin" || goos == "linux" || goos == "windows" {
 		return nil
 	}
-	return fmt.Errorf("local app sharing is supported on macOS and Linux only; unsupported platform: %s", goos)
+	return fmt.Errorf("local app sharing is supported on macOS, Linux, and Windows only; unsupported platform: %s", goos)
 }
 
 func changeAuthoritativeSharing(ctx context.Context, client qurlapi.Client, id string, prior *qurlapi.Sharing, action string) (*qurlapi.Sharing, bool, error) {
@@ -272,6 +274,12 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 	}
 	sharing, err := client.SetSharing(ctx, id, qurlapi.DesiredStateOff)
 	if err != nil {
+		if isPotentialNonConnectorSharingError(err) {
+			resource, resourceErr := client.Resource(ctx, id)
+			if resourceErr == nil && resource.Type != connectorResourceType {
+				return fmt.Errorf("stop applies only to a local qURL Connector; use `qurl delete %s --yes` to revoke this %s resource", id, resource.Type)
+			}
+		}
 		return err
 	}
 	local, stateDir, err := readLocalShareIfPresent(ctx, opts, id)
@@ -294,7 +302,7 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 	if err != nil {
 		return err
 	}
-	logDir, err := connectordaemon.DefaultLogDir()
+	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
 		return err
 	}
@@ -334,7 +342,7 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 	if err != nil {
 		return nil, nil, "", err
 	}
-	logDir, err := connectordaemon.DefaultLogDir()
+	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -354,9 +362,16 @@ func validateLocalSharing(local *connectorstate.LocalShare, sharing *qurlapi.Sha
 func waitForSharing(ctx context.Context, client qurlapi.Client, local *connectorstate.LocalShare, epoch uint64, limit time.Duration) (*qurlapi.Sharing, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
+	var last *qurlapi.Sharing
 	for {
 		sharing, err := client.Sharing(waitCtx, local.CRID)
 		if err != nil {
+			if waitCtx.Err() != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				return nil, sharingServingTimeout(local.CRID, limit, last)
+			}
 			return nil, err
 		}
 		if err := validateLocalSharing(local, sharing); err != nil {
@@ -371,14 +386,28 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 		if sharing.ServingEpoch == epoch && sharing.ConnectionState == qurlapi.ConnectionServing {
 			return sharing, nil
 		}
+		last = sharing
 		timer := time.NewTimer(200 * time.Millisecond)
 		select {
 		case <-waitCtx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("wait for qURL share %s to serve: %w", local.CRID, waitCtx.Err())
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, sharingServingTimeout(local.CRID, limit, last)
 		case <-timer.C:
 		}
 	}
+}
+
+func sharingServingTimeout(crid string, limit time.Duration, last *qurlapi.Sharing) error {
+	state := "no sharing-state response completed"
+	if last != nil {
+		state = fmt.Sprintf("last state: desired=%s, connection=%s, serving_epoch=%d",
+			last.DesiredState, last.ConnectionState, last.ServingEpoch)
+	}
+	return fmt.Errorf("qURL share %s did not start serving within %s (%s): %w",
+		crid, limit, state, context.DeadlineExceeded)
 }
 
 func preflightLocalTarget(ctx context.Context, ip string, port int) error {

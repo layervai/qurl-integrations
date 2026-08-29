@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -13,7 +12,7 @@ import (
 // clearStateEnv detaches the test from any ambient operator configuration.
 func clearStateEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME"} {
+	for _, name := range []string{EnvStateDirPrimary, EnvAgentID, "XDG_STATE_HOME", "HOME", "LOCALAPPDATA"} {
 		t.Setenv(name, "restore-after-test")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -46,6 +45,9 @@ func TestResolveDirWithoutConfiguredNamespace(t *testing.T) {
 }
 
 func TestResolveDirXDGFallback(t *testing.T) {
+	if isWindows(t) {
+		t.Skip("XDG state paths are a Unix contract")
+	}
 	clearStateEnv(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", xdg)
@@ -53,7 +55,7 @@ func TestResolveDirXDGFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(xdg, "qurl", "connector")
+	want := filepath.Join(xdg, "qurl", "connector-v2")
 	if got != want {
 		t.Fatalf("ResolveDir() = %q, want XDG state path %q", got, want)
 	}
@@ -67,7 +69,7 @@ func TestResolveDirXDGFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = filepath.Join(home, ".local", "state", "qurl", "connector")
+	want = filepath.Join(home, ".local", "state", "qurl", "connector-v2")
 	if got != want {
 		t.Fatalf("ResolveDir() = %q, want home state path %q", got, want)
 	}
@@ -84,13 +86,12 @@ func TestResolveDirTrimsAndAbsolutizes(t *testing.T) {
 }
 
 func TestEnsureDirModePinsOwnerOnly(t *testing.T) {
-	if isWindows(t) {
-		t.Skip("POSIX permission bits are not meaningful on Windows")
-	}
 	base := t.TempDir()
 	dir := filepath.Join(base, "loose")
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatal(err)
+	if !isWindows(t) {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := EnsureDirMode(dir); err != nil {
 		t.Fatal(err)
@@ -99,7 +100,7 @@ func TestEnsureDirModePinsOwnerOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if !isWindows(t) && info.Mode().Perm() != 0o700 {
 		t.Fatalf("EnsureDirMode left mode %04o, want 0700", info.Mode().Perm())
 	}
 	if err := EnsureDirMode(""); err == nil {
@@ -123,8 +124,7 @@ func isWindows(t *testing.T) bool {
 	return os.PathSeparator == '\\'
 }
 
-// openTestStore opens a Store in a fresh temp dir, skipping on platforms
-// where qurl-go's pinned local agent state is unsupported (Windows today).
+// openTestStore opens a Store in a fresh temp directory on each supported OS.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	return openTestStoreAt(t, t.TempDir())
@@ -132,14 +132,8 @@ func openTestStore(t *testing.T) *Store {
 
 func openTestStoreAt(t *testing.T, dir string) *Store {
 	t.Helper()
-	if isWindows(t) {
-		t.Skip("qurl-go pinned agent state is unsupported on Windows")
-	}
 	store, err := Open(dir)
 	if err != nil {
-		if errors.Is(err, qurl.ErrAgentStateContinuity) && strings.Contains(err.Error(), "unsupported on this platform") {
-			t.Skipf("qurl-go pinned agent state unsupported here: %v", err)
-		}
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })

@@ -23,6 +23,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -32,6 +33,12 @@ archives:
     ids:
       - qurl
     name_template: "qurl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     files:
       - LICENSE
       - manpages/*
@@ -41,7 +48,7 @@ checksum:
   name_template: "checksums.txt"
 
 # Per-archive SPDX SBOMs (syft): one `<archive>.sbom.json` per
-# tar.gz, uploaded as a release asset and listed in checksums.txt, so the
+# release archive, uploaded as a release asset and listed in checksums.txt, so the
 # checksum signature below transitively covers every SBOM document.
 sboms:
   - artifacts: archive

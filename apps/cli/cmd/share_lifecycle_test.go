@@ -1,5 +1,3 @@
-//go:build !windows
-
 package main
 
 import (
@@ -9,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +21,7 @@ import (
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
@@ -172,6 +170,47 @@ func (d *journeyDaemon) close() {
 func (d *recordingShareDaemon) ReloadIfRunning(context.Context) (bool, error) {
 	d.reloads++
 	return true, nil
+}
+
+func TestWaitForSharingReportsLastObservedStateWhenRequestUsesDeadline(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "desired_state": "on",
+			"connection_state": "connecting", "serving_epoch": 7,
+		}, nil)
+	})
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "wait-timeout-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = waitForSharing(context.Background(), client, &connectorstate.LocalShare{
+		ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID,
+	}, 7, 250*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("wait error = %v, want context deadline classification", err)
+	}
+	for _, want := range []string{"did not start serving within 250ms", "desired=on", "connection=connecting", "serving_epoch=7"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("wait error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestWaitForSharingPreservesCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: "https://cancel.invalid", APIKey: testAPIKey, Version: "wait-cancel-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = waitForSharing(ctx, client, &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, 1, time.Minute)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "did not start serving") {
+		t.Fatalf("canceled wait error = %v, want unmodified caller cancellation", err)
+	}
 }
 
 func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
@@ -417,6 +456,38 @@ func TestShareStatusPreservesInvalidInputForConnectorResource(t *testing.T) {
 	})
 	if res.code == 0 || !strings.Contains(res.stderr.String(), detail) {
 		t.Fatalf("exit=%d stderr=%s, want original Connector invalid_input", res.code, res.stderr.String())
+	}
+}
+
+func TestStopRemoteURLReportsTheSupportedLifecycleCommand(t *testing.T) {
+	srv := apitest.NewServer(t)
+	sharingPath := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodPut, sharingPath, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusBadRequest, "invalid_input", "Invalid Input", "Resource is not a qURL Connector")
+	})
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"resource": map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+			"target_url": "https://aol.com", "type": "url", "status": "active",
+		}}, nil)
+	})
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
+		env:  map[string]string{"QURL_API_KEY": testAPIKey},
+	})
+	if res.code == 0 {
+		t.Fatal("stop remote URL exit = 0, want a product-level lifecycle error")
+	}
+	for _, want := range []string{"stop applies only to a local qURL Connector", "qurl delete " + srv.Key.CRID + " --yes", "url resource"} {
+		if !strings.Contains(res.stderr.String(), want) {
+			t.Fatalf("stop remote URL stderr = %q, want %q", res.stderr.String(), want)
+		}
+	}
+	requests := srv.Requests()
+	if len(requests) != 2 || requests[0].Method != http.MethodPut || requests[0].Path != sharingPath ||
+		requests[1].Method != http.MethodGet || requests[1].Path != "/v1/resources/"+srv.Key.CRID {
+		t.Fatalf("stop remote URL requests = %#v", requests)
 	}
 }
 
@@ -1576,11 +1647,7 @@ func TestForegroundPublishStartupFailureStopsOwnedSharing(t *testing.T) {
 
 func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testing.T) {
 	srv := apitest.NewServer(t)
-	stateDir, err := os.MkdirTemp("/tmp", "qurl-fg-timeout-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	stateDir := foregroundLifecycleStateDir(t, "qurl-fg-timeout-")
 	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -1604,7 +1671,8 @@ func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testi
 		sharingWaitLimit: 5 * time.Millisecond,
 	})
 	if res.code == 0 || res.code == 130 ||
-		!strings.Contains(res.stderr.String(), "wait for qURL share") ||
+		!strings.Contains(res.stderr.String(), "did not start serving") ||
+		!strings.Contains(res.stderr.String(), "connection=connecting") ||
 		!strings.Contains(res.stderr.String(), "deadline exceeded") {
 		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 	}
@@ -1621,11 +1689,7 @@ func TestForegroundPublishServingTimeoutIsNotMaskedByDaemonCancellation(t *testi
 
 func TestForegroundPublishCancellationDrainsAndStopsOwnedSharing(t *testing.T) {
 	srv := apitest.NewServer(t)
-	stateDir, err := os.MkdirTemp("/tmp", "qurl-fg-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	stateDir := foregroundLifecycleStateDir(t, "qurl-fg-")
 	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -1703,39 +1767,59 @@ func resolvedLocalResource(srv *apitest.Server, found bool) localResourceResolve
 func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Context, *globalOpts, string, string) error {
 	return func(ctx context.Context, _ *globalOpts, stateDir, jobVersion string) error {
 		defer close(stopped)
-		socket := filepath.Join(stateDir, connectordaemon.SocketFile)
-		var listenConfig net.ListenConfig
-		listener, err := listenConfig.Listen(ctx, "unix", socket)
+		manager, err := connectordaemon.NewManager(emptyForegroundRegistry{}, emptyForegroundFactory{})
 		if err != nil {
 			return err
 		}
-		defer func() {
-			_ = listener.Close()
-			_ = os.Remove(socket)
+		runCtx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		path := filepath.Join(stateDir, connectordaemon.SocketFile)
+		done := make(chan error, 1)
+		go func() {
+			done <- (&connectordaemon.IPCServer{
+				SocketPath: path, Manager: manager, JobVersion: jobVersion,
+			}).Run(runCtx)
 		}()
-		if err := os.Chmod(socket, 0o600); err != nil {
-			return err
+		readyCtx, cancelReady := context.WithTimeout(ctx, 2*time.Second)
+		err = (connectordaemon.IPCClient{SocketPath: path}).WaitReady(readyCtx)
+		cancelReady()
+		if err != nil {
+			cancelRun()
+			return errors.Join(err, <-done)
 		}
-		server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet || r.URL.Path != "/status" {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `{"job_version":%q,"running":{}}`, jobVersion)
-		})}
-		serveDone := make(chan error, 1)
-		go func() { serveDone <- server.Serve(listener) }()
 		close(started)
-		select {
-		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			return errors.Join(ctx.Err(), server.Shutdown(shutdownCtx))
-		case err := <-serveDone:
-			return err
-		}
+		return <-done
 	}
+}
+
+type emptyForegroundRegistry struct{}
+
+func (emptyForegroundRegistry) List(context.Context) ([]connectorstate.LocalShare, error) {
+	return nil, nil
+}
+
+func (emptyForegroundRegistry) DisableTerminal(context.Context, string, uint64) (*connectorstate.LocalShare, error) {
+	return nil, errors.New("empty foreground registry has no resource")
+}
+
+type emptyForegroundFactory struct{}
+
+func (emptyForegroundFactory) Start(context.Context, *connectorstate.LocalShare) (connectordaemon.Session, error) {
+	return nil, errors.New("empty foreground factory has no resource")
+}
+
+func foregroundLifecycleStateDir(t *testing.T, pattern string) string {
+	t.Helper()
+	base := ""
+	if os.PathSeparator != '\\' {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func localShareFixture(srv *apitest.Server) connectorstate.LocalShare {

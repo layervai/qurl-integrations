@@ -74,7 +74,9 @@ key.`,
 				return fmt.Errorf("registered device belongs to account %q, not %q", deviceIdentity.OwnerID, accountIdentity.OwnerID)
 			}
 			if _, err := opts.credentialStore().RemoveAll(); err != nil {
-				return fmt.Errorf("remove consumed account API key: %w", err)
+				// Enrollment and the owner check are already durable. A legacy-key
+				// cleanup failure must not tell the user that enrollment failed.
+				opts.printer().Warnf("machine enrollment succeeded, but qurl could not remove a legacy stored account key: %v", err)
 			}
 			return opts.printer().Login(deviceIdentity)
 		},

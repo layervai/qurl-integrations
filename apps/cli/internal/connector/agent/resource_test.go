@@ -1,5 +1,3 @@
-//go:build !windows
-
 package agent
 
 import (
@@ -55,9 +53,6 @@ func openResourceTestStore(t *testing.T) *state.Store {
 	t.Helper()
 	store, err := state.Open(t.TempDir())
 	if err != nil {
-		if errors.Is(err, qurl.ErrAgentStateContinuity) {
-			t.Skipf("pinned agent state unavailable: %v", err)
-		}
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
@@ -123,9 +118,6 @@ func TestResolveResourceLostResponseReplaysExactNonceThenWarmStartPinsIdentity(t
 	dir := t.TempDir()
 	store, err := state.Open(dir)
 	if err != nil {
-		if errors.Is(err, qurl.ErrAgentStateContinuity) {
-			t.Skipf("pinned agent state unavailable: %v", err)
-		}
 		t.Fatal(err)
 	}
 	defer func() { _ = store.Close() }()

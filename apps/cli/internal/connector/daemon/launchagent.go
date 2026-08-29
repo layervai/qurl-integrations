@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -17,8 +16,8 @@ import (
 	connectorhub "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 )
 
-// LaunchAgentLabel is the stable per-user launchd service identifier.
-const LaunchAgentLabel = "ai.layerv.qurl.share-daemon"
+// DaemonJobLabel is the stable per-user background-job identifier.
+const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
 const daemonJobProtocolVersion = "1"
 
 // JobController installs, upgrades, and signals the per-user daemon job.
@@ -35,7 +34,7 @@ type JobController struct {
 	Reload        func(context.Context) (bool, error)
 }
 
-// NewJobController builds the production launchd controller.
+// NewJobController builds the production native per-user job controller.
 func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
 	controller := &JobController{
 		Manager:  connectorservice.NewUserJobManager(),
@@ -81,7 +80,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 			return err
 		}
 	}
-	// A successful launchd load transfers ownership to the durable daemon.
+	// A successful native job install transfers ownership to the durable daemon.
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
 	return nil
@@ -89,7 +88,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 
 func (c *JobController) validatedDeployment() (qurl.HubBootstrap, string, error) {
 	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
-		return qurl.HubBootstrap{}, "", errors.New("share daemon LaunchAgent controller is incomplete")
+		return qurl.HubBootstrap{}, "", errors.New("share daemon job controller is incomplete")
 	}
 	if c.Endpoint == "" || c.Endpoint != strings.TrimSpace(c.Endpoint) {
 		return qurl.HubBootstrap{}, "", errors.New("share daemon API endpoint is empty or non-canonical")
@@ -125,24 +124,24 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 			return connectorservice.UserJob{}, fmt.Errorf("resolve installed qurl command path: %w", err)
 		}
 	}
-	// Deliberately keep the PATH-resolved Homebrew shim. Resolving its symlink
-	// would persist a versioned Cellar path that breaks on the next upgrade.
-	if err := os.MkdirAll(c.LogDir, 0o700); err != nil {
-		return connectorservice.UserJob{}, fmt.Errorf("create qURL daemon log directory: %w", err)
+	// Keep the PATH-resolved installed command. On Homebrew, resolving its
+	// symlink would persist a versioned Cellar path that breaks on upgrade.
+	if err := prepareDaemonLogDir(c.LogDir); err != nil {
+		return connectorservice.UserJob{}, err
 	}
-	if err := os.Chmod(c.LogDir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
-		return connectorservice.UserJob{}, fmt.Errorf("restrict qURL daemon log directory: %w", err)
-	}
+	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
+	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
+	arguments := make([]string, 0, 18)
+	arguments = append(arguments,
+		"--endpoint", c.Endpoint,
+		"daemon", "run", "--state-dir", c.StateDir, "--job-version", jobVersion,
+		"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
+		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
+	)
+	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{
-		Label: LaunchAgentLabel, BinaryPath: binary,
-		Arguments: []string{
-			"--endpoint", c.Endpoint,
-			"daemon", "run", "--state-dir", c.StateDir, "--job-version", jobVersion,
-			"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
-			"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
-		},
-		StandardOut: filepath.Join(c.LogDir, "share-daemon.log"),
-		StandardErr: filepath.Join(c.LogDir, "share-daemon.err.log"),
+		Label: DaemonJobLabel, BinaryPath: binary,
+		Arguments: arguments, StandardOut: stdoutPath, StandardErr: stderrPath,
 		ExitTimeout: 15, Umask: 0o077, RunAtLoad: true, KeepAlive: true,
 	}, nil
 }
@@ -161,23 +160,10 @@ func (c *JobController) ReloadIfRunning(ctx context.Context) (bool, error) {
 	return c.IPC.ReloadIfRunning(ctx)
 }
 
-// Status returns launchd's loaded and running process state.
+// Status returns the native per-user job's installed and running state.
 func (c *JobController) Status() (connectorservice.ServiceStatus, error) {
 	if c == nil || c.Manager == nil {
-		return connectorservice.ServiceStatus{}, errors.New("share daemon LaunchAgent controller is incomplete")
+		return connectorservice.ServiceStatus{}, errors.New("share daemon job controller is incomplete")
 	}
-	return c.Manager.Status(LaunchAgentLabel)
-}
-
-// DefaultLogDir returns the owner-local macOS daemon log directory.
-func DefaultLogDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	home = strings.TrimSpace(home)
-	if !filepath.IsAbs(home) {
-		return "", errors.New("user home is not absolute")
-	}
-	return filepath.Join(home, "Library", "Logs", "qurl"), nil
+	return c.Manager.Status(DaemonJobLabel)
 }

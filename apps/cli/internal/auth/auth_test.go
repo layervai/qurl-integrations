@@ -101,14 +101,9 @@ func TestResolveEnvironmentFileIsStrictPrivateAndHermetic(t *testing.T) {
 	if err := os.WriteFile(path, []byte(testKeyEnv+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	protectAPIKeyTestFile(t, path)
 	store := &probeStore{key: testKeyStored}
 	key, source, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path}), store)
-	if runtime.GOOS == goosWindows {
-		if err == nil || key != "" || source != "" || store.touched {
-			t.Fatalf("unsupported Windows file credential = %q %q %v, store touched=%v", key, source, err, store.touched)
-		}
-		return
-	}
 	if err != nil || key != testKeyEnv || source != SourceEnvironmentFile || store.touched {
 		t.Fatalf("file credential = %q %q %v, store touched=%v", key, source, err, store.touched)
 	}
@@ -124,9 +119,6 @@ func TestResolveEnvironmentFileIsStrictPrivateAndHermetic(t *testing.T) {
 }
 
 func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {
-	if runtime.GOOS == goosWindows {
-		t.Skip("file-backed API keys are fail-closed on Windows")
-	}
 	directory := t.TempDir()
 	base := filepath.Join(directory, "base")
 	if err := os.WriteFile(base, []byte(testKeyEnv+"\n"), 0o600); err != nil {
@@ -152,6 +144,9 @@ func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
+			if runtime.GOOS == goosWindows && mutation.mode != 0o600 {
+				t.Skip("POSIX mode mutation is a Unix contract")
+			}
 			path := filepath.Join(directory, strings.ReplaceAll(mutation.name, " ", "-"))
 			if err := os.WriteFile(path, mutation.body, mutation.mode); err != nil {
 				t.Fatal(err)
@@ -173,7 +168,7 @@ func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {
 			switch name {
 			case "symlink":
 				if err := os.Symlink(base, path); err != nil {
-					t.Fatal(err)
+					t.Skipf("symlinks unavailable: %v", err)
 				}
 			case "hardlink":
 				if err := os.Link(base, path); err != nil {

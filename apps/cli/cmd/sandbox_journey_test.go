@@ -32,8 +32,8 @@ import (
 //
 // Credential contract (all four required before this suite runs anything):
 //
-//	QURL_API_KEY  — a sandbox API key holding the qurl:read, qurl:write, and
-//	    qurl:resolve scopes. Read through the CLI's hermetic mode: with the
+//	QURL_API_KEY  — a sandbox API key holding the qurl:agent, qurl:read,
+//	    qurl:write, and qurl:resolve scopes. Read through the CLI's hermetic mode: with the
 //	    variable set, the credential store is bypassed entirely and nothing
 //	    on disk is read or written.
 //	QURL_ENDPOINT — the sandbox qURL API base URL (a repository secret:
@@ -99,8 +99,8 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
-			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:read, qurl:write, "+
-			"and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
+			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:agent, qurl:read, "+
+			"qurl:write, and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
 			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
 			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
 			"settings are built from.", missing)
@@ -224,6 +224,14 @@ type journeyPublishDoc struct {
 	FoundExisting bool   `json:"found_existing"`
 }
 
+type journeyResourceStatusDoc struct {
+	CRID       string `json:"crid"`
+	ResourceID string `json:"resource_id"`
+	TargetURL  string `json:"target_url"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+}
+
 // journeyListDoc mirrors the list `-o json` document. HasMore — not cursor
 // presence — is the continuation signal, per the ResourcePage contract.
 type journeyListDoc struct {
@@ -236,8 +244,8 @@ type journeyListDoc struct {
 }
 
 // TestSandboxCRIDJourney walks the whole customer journey against the real
-// sandbox: publish → list (paginated) → resolve (verified, piped bare-URL) →
-// get --file (real bytes through the minted link) → delete --yes →
+// sandbox: publish → status/inspect → list (paginated) → resolve (verified,
+// piped bare-URL) → get --file (real bytes through the minted link) → delete --yes →
 // idempotent re-delete → resolve-after-delete (owner-truthful revoked exit).
 func TestSandboxCRIDJourney(t *testing.T) {
 	cliEnv := sandboxJourneyEnv(t)
@@ -284,6 +292,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 		t.Fatalf("published CRID environment = %v, want the test environment on the sandbox", environment)
 	}
 
+	assertRemoteStatusAndInspect(ctx, t, cliEnv, pub)
 	assertListFindsCRID(ctx, t, cliEnv, pub.CRID)
 	link := assertResolveJourney(ctx, t, cliEnv, pub.CRID)
 	// The link value never reaches the log: CI logs are public, and a
@@ -291,6 +300,30 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	t.Logf("resolved %s -> a verified %d-byte https link", pub.CRID, len(link))
 	assertGetDownloadsBytes(ctx, t, cliEnv, pub.CRID)
 	assertDeleteJourney(ctx, t, cliEnv, pub.CRID)
+}
+
+func assertRemoteStatusAndInspect(ctx context.Context, t *testing.T, cliEnv map[string]string, pub journeyPublishDoc) {
+	t.Helper()
+	var status journeyResourceStatusDoc
+	for _, command := range []string{"status", "inspect"} {
+		res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", command, pub.CRID)
+		if res.code != 0 {
+			t.Fatalf("%s remote URL exit = %d, want 0\nstderr: %s", command, res.code, res.stderr.String())
+		}
+		var got journeyResourceStatusDoc
+		if err := json.Unmarshal(res.stdout.Bytes(), &got); err != nil {
+			t.Fatalf("%s remote URL output %q: %v", command, res.stdout.String(), err)
+		}
+		if got.CRID != pub.CRID || got.ResourceID != pub.ResourceID || got.TargetURL != pub.TargetURL ||
+			got.Type != "url" || got.Status != "active" {
+			t.Fatalf("%s remote URL state = %+v, want published active URL %+v", command, got, pub)
+		}
+		if command == "status" {
+			status = got
+		} else if got != status {
+			t.Fatalf("inspect remote URL state = %+v, want status state %+v", got, status)
+		}
+	}
 }
 
 // listPageLimit keeps pages small enough that pagination is real without

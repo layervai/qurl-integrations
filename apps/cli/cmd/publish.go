@@ -39,11 +39,12 @@ For a local app, pass its loopback HTTP address:
 
   qurl publish http://127.0.0.1:3000
 
-On macOS, qURL starts a per-user background daemon, waits until the route is
-serving, prints the CRID, and exits. The daemon resumes desired-on shares after
-login, sleep, wake, and network changes. On Linux, use --foreground; background
-lifecycle management is not yet available. Local app sharing is not supported
-outside macOS and Linux. Running the same command later reuses the same resource and CRID.
+On macOS and Windows, qURL starts a per-user background daemon, waits until the
+route is serving, prints the CRID, and exits. The daemon resumes desired-on
+shares after login, sleep, wake, and network changes. On Linux, use
+--foreground; background lifecycle management is not yet available. Local app
+sharing is supported on macOS, Windows, and Linux. Running the same command
+later reuses the same resource and CRID.
 Use --id only when you want to choose the Connector ID yourself.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
@@ -191,9 +192,12 @@ func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShar
 	if err != nil {
 		return "", nil, err
 	}
-	identity, err := client.Me(ctx)
-	if err != nil {
-		return "", nil, err
+	identity := opts.registeredIdentity
+	if identity == nil {
+		identity, err = client.Me(ctx)
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	if identity == nil {
 		return "", nil, errors.New("qURL account identity response is empty")
@@ -378,7 +382,7 @@ func finishLocalPublish(
 	if foreground {
 		return runForegroundLocalPublish(ctx, opts, client, registry, resolved, local, stateDir)
 	}
-	logDir, err := connectordaemon.DefaultLogDir()
+	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
 		return compensate(err)
 	}

@@ -42,6 +42,13 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 	if loaded.AgentID != wantAgentID {
 		return errors.New("durable agent identity does not match the canonical run namespace")
 	}
+	if loaded.PrivateKeyB64 == "" || loaded.PublicKeyB64 == "" || loaded.RegisteredAt == nil ||
+		loaded.DeviceAPIKey == "" || loaded.DeviceAPIKeyID == "" {
+		return errors.New("durable device identity is incomplete")
+	}
+	if loaded.EnrollmentCredentialKind != "account" {
+		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account", loaded.EnrollmentCredentialKind)
+	}
 	if wantDeviceKeyID != "" && loaded.DeviceAPIKeyID != wantDeviceKeyID {
 		return errors.New("durable device credential identity changed across lifecycle restart")
 	}
@@ -49,14 +56,20 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 }
 
 func TestValidateSandboxDeviceIdentity(t *testing.T) {
-	valid := &qurl.AgentState{AgentID: "qurl-share-r1-a1-hs", DeviceAPIKeyID: "key-1"}
+	registeredAt := time.Now().UTC()
+	valid := &qurl.AgentState{
+		AgentID: "qurl-share-r1-a1-hs", PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt,
+		DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-1", EnrollmentCredentialKind: "account",
+	}
 	if err := validateSandboxDeviceIdentity(valid, valid.AgentID, valid.DeviceAPIKeyID); err != nil {
 		t.Fatalf("valid identity: %v", err)
 	}
 	for name, loaded := range map[string]*qurl.AgentState{
 		"missing":          nil,
-		"wrong agent":      {AgentID: "other", DeviceAPIKeyID: "key-1"},
-		"wrong credential": {AgentID: valid.AgentID, DeviceAPIKeyID: "key-2"},
+		"incomplete":       {AgentID: valid.AgentID},
+		"wrong agent":      {AgentID: "other"},
+		"wrong credential": {AgentID: valid.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-2", EnrollmentCredentialKind: "account"},
+		"wrong scope":      {AgentID: valid.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: valid.DeviceAPIKeyID, EnrollmentCredentialKind: "bootstrap"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateSandboxDeviceIdentity(loaded, valid.AgentID, valid.DeviceAPIKeyID); err == nil {
@@ -92,6 +105,7 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 	if cliEnv["QURL_API_KEY"] != apiKey {
 		t.Fatal("sandbox API key sources disagree")
 	}
+	delete(cliEnv, "QURL_API_KEY")
 
 	namespaceA, err := sandboxNamespace("sibling-a")
 	if err != nil {
@@ -123,24 +137,50 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 			t.Fatalf("secure sibling state directory: %v", err)
 		}
 	}
+	enrollSandboxSiblingDevice(t, binary, cliEnv, stateDirA, namespaceA, apiKey)
+	recoveryOwnsA := false
+	t.Cleanup(func() {
+		if recoveryOwnsA {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxCleanupTimeout)
+		defer cancel()
+		if err := cleanupSandboxSiblingAuthority(ctx, endpoint, cleanupJWT, namespaceA, stateDirA, productionSandboxSiblingCleanupOps()); err != nil {
+			t.Error(err)
+		}
+	})
 	processA := startSandboxPublishProcess(t, binary, cliEnv, namespaceA, stateDirA, targetA.URL)
 	processA.registerRecoveryCleanup(t, endpoint, cleanupJWT, namespaceA, stateDirA, productionSandboxSiblingCleanupOps())
+	recoveryOwnsA = true
 	cridA := processA.waitReady(t)
 	assertSandboxSiblingIdentity(t, namespaceA, stateDirA)
+	enrollSandboxSiblingDevice(t, binary, cliEnv, stateDirB, namespaceB, apiKey)
+	recoveryOwnsB := false
+	t.Cleanup(func() {
+		if recoveryOwnsB {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxCleanupTimeout)
+		defer cancel()
+		if err := cleanupSandboxSiblingAuthority(ctx, endpoint, cleanupJWT, namespaceB, stateDirB, productionSandboxSiblingCleanupOps()); err != nil {
+			t.Error(err)
+		}
+	})
 	processB := startSandboxPublishProcess(t, binary, cliEnv, namespaceB, stateDirB, targetB.URL)
 	processB.registerRecoveryCleanup(t, endpoint, cleanupJWT, namespaceB, stateDirB, productionSandboxSiblingCleanupOps())
+	recoveryOwnsB = true
 	cridB := processB.waitReady(t)
 	assertSandboxSiblingIdentity(t, namespaceB, stateDirB)
 	if cridA == cridB {
 		t.Fatalf("siblings published the same CRID %q", cridA)
 	}
 
-	assertSandboxGetBytes(t, binary, cliEnv, cridA, bodyA)
-	assertSandboxGetBytes(t, binary, cliEnv, cridB, bodyB)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirA, cridA, bodyA)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirB, cridB, bodyB)
 	firstAStopped := processA.stopAndValidate(t, apiKey, cleanupJWT)
 	processB.requireRunning(t, "after sibling A stop")
 	processB.requireSharingState(t, "on", "serving")
-	assertSandboxGetBytes(t, binary, cliEnv, cridB, bodyB)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirB, cridB, bodyB)
 
 	replacementA := startSandboxPublishProcess(t, binary, cliEnv, namespaceA, stateDirA, targetA.URL)
 	replacementCRIDA := replacementA.waitReady(t)
@@ -150,13 +190,46 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 	if replacementA.servingState.ServingEpoch <= firstAStopped.ServingEpoch {
 		t.Fatalf("replacement A serving epoch = %d, want greater than stopped epoch %d", replacementA.servingState.ServingEpoch, firstAStopped.ServingEpoch)
 	}
-	assertSandboxGetBytes(t, binary, cliEnv, cridA, bodyA)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirA, cridA, bodyA)
 	processB.requireRunning(t, "after sibling A replacement")
 	processB.requireSharingState(t, "on", "serving")
-	assertSandboxGetBytes(t, binary, cliEnv, cridB, bodyB)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirB, cridB, bodyB)
 
 	replacementA.stopAndValidate(t, apiKey, cleanupJWT)
 	processB.stopAndValidate(t, apiKey, cleanupJWT)
+}
+
+func enrollSandboxSiblingDevice(
+	t *testing.T,
+	binary string,
+	baseEnv map[string]string,
+	stateDir string,
+	namespace sandboxRunNamespace,
+	bootstrapKey string,
+) {
+	t.Helper()
+	env := cloneSandboxEnv(baseEnv)
+	env[state.EnvAgentID] = namespace.AgentID
+	login := runSandboxLocalCLIInput(t, binary, env, stateDir, bootstrapKey+"\n", "-o", "json", "login")
+	if login.code != 0 {
+		t.Fatalf("one-time sibling %s login exit = %d: %s", namespace.ConnectorID, login.code, login.stderr.String())
+	}
+	var enrolled struct {
+		OwnerID        string `json:"owner_id"`
+		AuthType       string `json:"auth_type"`
+		DeviceEnrolled bool   `json:"device_enrolled"`
+	}
+	if err := json.Unmarshal(login.stdout.Bytes(), &enrolled); err != nil {
+		t.Fatalf("decode one-time sibling %s login: %v", namespace.ConnectorID, err)
+	}
+	if enrolled.OwnerID == "" || enrolled.AuthType == "" || !enrolled.DeviceEnrolled {
+		t.Fatalf("one-time sibling %s login returned incomplete identity: %+v", namespace.ConnectorID, enrolled)
+	}
+	assertSandboxSiblingIdentity(t, namespace, stateDir)
+	whoami := runSandboxLocalCLI(t, binary, env, stateDir, "-o", "json", "whoami")
+	if whoami.code != 0 {
+		t.Fatalf("warm sibling %s whoami exit = %d: %s", namespace.ConnectorID, whoami.code, whoami.stderr.String())
+	}
 }
 
 type lockedSandboxBuffer struct {
@@ -547,21 +620,20 @@ func deleteSandboxSiblingResource(ctx context.Context, endpoint, connectorID, de
 	return nil
 }
 
-func assertSandboxGetBytes(t *testing.T, binary string, baseEnv map[string]string, crid, want string) {
+func assertSandboxGetBytes(t *testing.T, binary string, baseEnv map[string]string, stateDir, crid, want string) {
 	t.Helper()
 	destination := filepath.Join(t.TempDir(), "download")
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxProcessTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "--endpoint", baseEnv["QURL_ENDPOINT"], "--quiet", "get", crid, "--file", destination) //nolint:gosec // The protected test validates the fixed binary and CRID.
-	cmd.Env = sandboxCommandEnv(baseEnv)
+	env := cloneSandboxEnv(baseEnv)
+	env[state.EnvStateDirPrimary] = stateDir
+	cmd.Env = sandboxCommandEnv(env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("get %s failed: %v\nstdout: %s\nstderr: %s", crid, err, stdout.String(), stderr.String())
-	}
-	if secret := baseEnv["QURL_API_KEY"]; secret != "" && strings.Contains(stdout.String()+stderr.String(), secret) {
-		t.Fatal("get command exposed the protected API key")
 	}
 	got, err := os.ReadFile(destination) //nolint:gosec // destination is an exact test-owned TempDir child.
 	if err != nil {

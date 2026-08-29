@@ -637,6 +637,7 @@ func lifecycleFixture(t *testing.T) (*Consumer, Authority, *lifecycleRuntime) {
 		state := &qurl.AgentState{AgentID: identityPlan.AgentID, PrivateKeyB64: base64.StdEncoding.EncodeToString(privateKey.Bytes()),
 			PublicKeyB64: publicKey, SchemaVersion: 7, RegisteredAt: &registered,
 			DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", DeviceAPIKeyID: deviceKeyID,
+			EnrollmentCredentialKind: "account",
 			Assignment: &qurl.AgentAssignment{CellID: cohort.CellID, AssignmentGeneration: cohort.AssignmentGeneration,
 				EndpointRevision: 1, LeaseExpiresAt: time.Unix(2_000_000_000, 0).UTC(),
 				Endpoint: cohort.CellEndpoint}}

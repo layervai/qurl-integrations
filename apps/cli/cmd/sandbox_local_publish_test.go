@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -21,7 +22,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,14 +98,30 @@ var sandboxCleanupHTTPClient = &http.Client{
 	},
 }
 
-// TestSandboxLocalPublishLifecycleSmoke exercises the unified customer command against
+// TestSandboxFullCustomerLifecycleSmoke is the release-candidate contract. The
+// private lifecycle gate requires this exact test name so an older local-only
+// smoke cannot be mistaken for the full remote-plus-local customer journey.
+func TestSandboxFullCustomerLifecycleSmoke(t *testing.T) {
+	testSandboxFullCustomerLifecycleSmoke(t)
+}
+
+// TestSandboxLocalPublishLifecycleSmoke retains the scheduled smoke entrypoint.
+// Both entrypoints execute the same full journey once this source reaches main.
+func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
+	testSandboxFullCustomerLifecycleSmoke(t)
+}
+
+// testSandboxFullCustomerLifecycleSmoke exercises the unified customer command against
 // the live sandbox. Unlike the legacy Connector smoke, it starts with an
-// ordinary login key and no pre-issued enrollment token or device state. A
-// passing run validates that the login key can mint the exact one-shot credential,
+// ordinary login key and no pre-issued enrollment token or device state. It
+// pipes that key into the exact `qurl login` artifact, then removes the key from
+// every later customer command. A passing run validates that login can mint the exact one-shot credential,
 // native UDP enrollment exchanges it for a device identity, the device creates
-// the tunnel resource, and the FRP server admits the resulting route. It then
-// sends unique HTTP bytes through a minted qURL, exercises stop/start/restart,
-// and deletes the live share while its foreground daemon is still running.
+// the tunnel resource, and the FRP server admits the resulting route. The same
+// exact artifact and device then complete the remote URL publish/read/get/delete
+// journey before sending unique local HTTP bytes through a minted qURL,
+// exercising stop/start/restart, and deleting the live share while its
+// foreground daemon is still running.
 //
 // The private orchestrator runs this tagged test with one exact customer CLI
 // artifact. It creates a native device in a fresh state directory, so the lane
@@ -117,8 +136,8 @@ var sandboxCleanupHTTPClient = &http.Client{
 //	QURL_API_KEY=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT=... \
 //	QURL_CONNECTOR_HUB_HOST=... QURL_CONNECTOR_HUB_PORT=... \
 //	QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=... \
-//	go test -tags=clisandbox -count=1 -run '^TestSandboxLocalPublishLifecycleSmoke$' ./apps/cli/cmd
-func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
+//	go test -tags=clisandbox -count=1 -run '^TestSandboxFullCustomerLifecycleSmoke$' ./apps/cli/cmd
+func testSandboxFullCustomerLifecycleSmoke(t *testing.T) {
 	if os.Getenv(localPublishSandboxArming) != "enabled" {
 		t.Skipf("SKIPPED LOUDLY: unified local-publish sandbox smoke is disarmed — %s != enabled", localPublishSandboxArming)
 	}
@@ -131,45 +150,188 @@ func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 	}
 
 	initial := waitSandboxSharingState(t, binary, cliEnv, stateDir, local.CRID, "on", "serving", 2*time.Minute)
+	inspected := decodeSandboxSharing(t, runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "inspect", local.CRID))
+	if inspected != initial {
+		t.Fatalf("inspect state = %+v, want status state %+v", inspected, initial)
+	}
 	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
 	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+	t.Run("remote_url_resource_lifecycle", func(t *testing.T) {
+		assertSandboxRemoteURLDeviceJourney(t, binary, cliEnv, stateDir)
+	})
 
-	stopped := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "stop", local.CRID)
-	stoppedState := decodeSandboxSharing(t, stopped)
-	if err := validateSandboxSharingTransition(stoppedState, "off", "stopped", initial.ServingEpoch); err != nil {
-		t.Fatalf("stop state = %+v: %v", stoppedState, err)
-	}
-	assertSandboxLocalRouteFenced(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, &fixture.backendHits)
-
-	started := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "start", local.CRID)
-	startedState := decodeSandboxSharing(t, started)
-	if err := validateSandboxSharingTransition(startedState, "on", "serving", stoppedState.ServingEpoch); err != nil {
-		t.Fatalf("start state = %+v: %v", startedState, err)
-	}
-	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
-
-	restarted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "restart", local.CRID)
-	restartedState := decodeSandboxSharing(t, restarted)
-	if err := validateSandboxSharingTransition(restartedState, "on", "serving", startedState.ServingEpoch); err != nil {
-		t.Fatalf("restart state = %+v: %v", restartedState, err)
-	}
-	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
-	if fixture.backendHits.Load() < 3 {
-		t.Fatalf("local backend saw %d public-route hits, want at least one before and after lifecycle changes", fixture.backendHits.Load())
-	}
-
-	deleted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "delete", local.CRID, "--yes")
-	if deleted.code != 0 {
-		t.Fatalf("delete while serving exit = %d: %s", deleted.code, deleted.stderr.String())
-	}
-	shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
-	if err != nil || !present {
-		t.Fatalf("read local registry after delete = (present %v, %v)", present, err)
-	}
-	for _, share := range shares {
-		if share.CRID == local.CRID {
-			t.Fatalf("deleted CRID %s remains in local daemon registry", local.CRID)
+	t.Run("local_connector_lifecycle", func(t *testing.T) {
+		stopped := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "stop", local.CRID)
+		stoppedState := decodeSandboxSharing(t, stopped)
+		if err := validateSandboxSharingTransition(stoppedState, "off", "stopped", initial.ServingEpoch); err != nil {
+			t.Fatalf("stop state = %+v: %v", stoppedState, err)
 		}
+		assertSandboxLocalRouteFenced(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, &fixture.backendHits)
+
+		started := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "start", local.CRID)
+		startedState := decodeSandboxSharing(t, started)
+		if err := validateSandboxSharingTransition(startedState, "on", "serving", stoppedState.ServingEpoch); err != nil {
+			t.Fatalf("start state = %+v: %v", startedState, err)
+		}
+		assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+
+		restarted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "restart", local.CRID)
+		restartedState := decodeSandboxSharing(t, restarted)
+		if err := validateSandboxSharingTransition(restartedState, "on", "serving", startedState.ServingEpoch); err != nil {
+			t.Fatalf("restart state = %+v: %v", restartedState, err)
+		}
+		assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+		if fixture.backendHits.Load() < 3 {
+			t.Fatalf("local backend saw %d public-route hits, want at least one before and after lifecycle changes", fixture.backendHits.Load())
+		}
+
+		deleted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "delete", local.CRID, "--yes")
+		if deleted.code != 0 {
+			t.Fatalf("delete while serving exit = %d: %s", deleted.code, deleted.stderr.String())
+		}
+		shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
+		if err != nil || !present {
+			t.Fatalf("read local registry after delete = (present %v, %v)", present, err)
+		}
+		for index := range shares {
+			if shares[index].CRID == local.CRID {
+				t.Fatalf("deleted CRID %s remains in local daemon registry", local.CRID)
+			}
+		}
+	})
+}
+
+func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map[string]string, stateDir string) {
+	t.Helper()
+	target := fmt.Sprintf("https://example.com/?qurl-private-sandbox-device-journey=%d", time.Now().UnixNano())
+	published := runSandboxLocalCLI(t, binary, cliEnv, stateDir,
+		"-o", "json", "publish", target, "--description", journeyDescription)
+	if published.code != 0 {
+		t.Fatalf("device-authenticated remote publish exit = %d: %s", published.code, published.stderr.String())
+	}
+	var pub journeyPublishDoc
+	if err := json.Unmarshal(published.stdout.Bytes(), &pub); err != nil {
+		t.Fatalf("decode device-authenticated remote publish output: %v", err)
+	}
+	if pub.CRID == "" || pub.ResourceID == "" || pub.TargetURL != target || pub.FoundExisting {
+		t.Fatalf("device-authenticated remote publish = %+v, want one new URL resource", pub)
+	}
+	deleted := false
+	t.Cleanup(func() {
+		if deleted {
+			return
+		}
+		cleanup := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "delete", pub.CRID, "--yes")
+		if cleanup.code != 0 {
+			t.Errorf("cleanup device-authenticated remote resource exit = %d: %s", cleanup.code, cleanup.stderr.String())
+		}
+	})
+	if assessment, err := cridux.Assess(pub.CRID); err != nil || assessment.Kind != cridux.KindCRID {
+		t.Fatalf("device-authenticated remote publish CRID = %q, want a valid full CRID: %v", pub.CRID, err)
+	}
+
+	var status journeyResourceStatusDoc
+	for _, command := range []string{"status", "inspect"} {
+		result := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", command, pub.CRID)
+		if result.code != 0 {
+			t.Fatalf("device-authenticated remote %s exit = %d: %s", command, result.code, result.stderr.String())
+		}
+		var got journeyResourceStatusDoc
+		if err := json.Unmarshal(result.stdout.Bytes(), &got); err != nil {
+			t.Fatalf("decode device-authenticated remote %s output: %v", command, err)
+		}
+		if got.CRID != pub.CRID || got.ResourceID != pub.ResourceID || got.TargetURL != pub.TargetURL ||
+			got.Type != "url" || got.Status != "active" {
+			t.Fatalf("device-authenticated remote %s = %+v, want published active URL %+v", command, got, pub)
+		}
+		if command == "status" {
+			status = got
+		} else if got != status {
+			t.Fatalf("device-authenticated remote inspect = %+v, want status %+v", got, status)
+		}
+	}
+
+	seen := 0
+	cursor := ""
+	for page := 1; page <= listMaxPages; page++ {
+		args := []string{"-o", "json", "list", "--limit", strconv.Itoa(listPageLimit), "--status", "active"}
+		if cursor != "" {
+			args = append(args, "--cursor", cursor)
+		}
+		result := runSandboxLocalCLI(t, binary, cliEnv, stateDir, args...)
+		if result.code != 0 {
+			t.Fatalf("device-authenticated list page %d exit = %d: %s", page, result.code, result.stderr.String())
+		}
+		var document journeyListDoc
+		if err := json.Unmarshal(result.stdout.Bytes(), &document); err != nil {
+			t.Fatalf("decode device-authenticated list page %d: %v", page, err)
+		}
+		for _, resource := range document.Resources {
+			if resource.CRID == pub.CRID {
+				seen++
+				if resource.Description != journeyDescription {
+					t.Errorf("device-authenticated list description = %q, want %q", resource.Description, journeyDescription)
+				}
+			}
+		}
+		if !document.HasMore {
+			break
+		}
+		if document.NextCursor == "" {
+			t.Fatalf("device-authenticated list page %d reports more rows without a cursor", page)
+		}
+		cursor = document.NextCursor
+	}
+	if seen != 1 {
+		t.Fatalf("device-authenticated remote CRID appeared %d times in the newest active list window, want once", seen)
+	}
+
+	resolved := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "resolve", pub.CRID)
+	if resolved.code != 0 {
+		t.Fatalf("device-authenticated remote resolve exit = %d: %s", resolved.code, resolved.stderr.String())
+	}
+	link := strings.TrimSuffix(resolved.stdout.String(), "\n")
+	parsed, err := url.Parse(link)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || link+"\n" != resolved.stdout.String() {
+		t.Fatalf("device-authenticated remote resolve did not return one HTTPS link: %v", err)
+	}
+	if resolved.stderr.Len() != 0 {
+		t.Fatalf("device-authenticated remote resolve wrote unexpected stderr: %s", resolved.stderr.String())
+	}
+
+	destination := filepath.Join(t.TempDir(), "remote-url-payload")
+	downloaded := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "get", pub.CRID, "--file", destination)
+	if downloaded.code != 0 {
+		t.Fatalf("device-authenticated remote get exit = %d: %s", downloaded.code, downloaded.stderr.String())
+	}
+	payload, err := os.ReadFile(destination) //nolint:gosec // Exact test-owned destination.
+	if err != nil {
+		t.Fatalf("read device-authenticated remote download: %v", err)
+	}
+	if !strings.Contains(string(payload), journeyTargetMarker) || strings.Contains(string(payload), apitest.InterstitialTitle) {
+		t.Fatalf("device-authenticated remote get returned %d unexpected bytes", len(payload))
+	}
+
+	stopped := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "stop", pub.CRID)
+	if stopped.code == 0 || !strings.Contains(stopped.stderr.String(), "stop applies only to a local qURL Connector") ||
+		!strings.Contains(stopped.stderr.String(), "qurl delete "+pub.CRID+" --yes") {
+		t.Fatalf("remote URL stop guidance = exit %d, stderr %q", stopped.code, stopped.stderr.String())
+	}
+
+	removed := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "delete", pub.CRID, "--yes")
+	if removed.code != 0 {
+		t.Fatalf("device-authenticated remote delete exit = %d: %s", removed.code, removed.stderr.String())
+	}
+	deleted = true
+	redeleted := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "delete", pub.CRID, "--yes")
+	if redeleted.code != 0 {
+		t.Fatalf("device-authenticated remote re-delete exit = %d: %s", redeleted.code, redeleted.stderr.String())
+	}
+	revoked := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "resolve", pub.CRID)
+	if revoked.code != exitcode.NotFound || revoked.stdout.Len() != 0 ||
+		!strings.Contains(strings.ToLower(revoked.stderr.String()), "deleted") {
+		t.Fatalf("device-authenticated resolve after delete = exit %d, stdout %q, stderr %q",
+			revoked.code, revoked.stdout.String(), revoked.stderr.String())
 	}
 }
 
@@ -224,10 +386,70 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	}
 	cliEnv[state.EnvStateDirPrimary] = stateDir
 	cliEnv[state.EnvAgentID] = namespace.AgentID
+	bootstrapKey := cliEnv["QURL_API_KEY"]
+	delete(cliEnv, "QURL_API_KEY")
+	login := runSandboxLocalCLIInput(t, binary, cliEnv, stateDir, bootstrapKey+"\n", "-o", "json", "login")
+	if login.code != 0 {
+		t.Fatalf("one-time customer login exit = %d: %s", login.code, login.stderr.String())
+	}
+	var enrolled struct {
+		OwnerID        string `json:"owner_id"`
+		AuthType       string `json:"auth_type"`
+		DeviceEnrolled bool   `json:"device_enrolled"`
+	}
+	if err := json.Unmarshal(login.stdout.Bytes(), &enrolled); err != nil {
+		t.Fatalf("decode one-time customer login output: %v", err)
+	}
+	if enrolled.OwnerID == "" || enrolled.AuthType != "api_key" || !enrolled.DeviceEnrolled {
+		t.Fatalf("one-time customer login returned incomplete device identity: %+v", enrolled)
+	}
+	// logout is legacy account-key cleanup in v2. It must not orphan the
+	// durable device credential, which cannot revoke itself through the
+	// account-key management API. Exercise that boundary in the executable
+	// journey before every warm device-only operation.
+	logout := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "logout")
+	if logout.code != 0 {
+		t.Fatalf("post-enrollment logout exit = %d: %s", logout.code, logout.stderr.String())
+	}
+	var logoutResult struct {
+		Removed []string `json:"removed"`
+	}
+	if err := json.Unmarshal(logout.stdout.Bytes(), &logoutResult); err != nil {
+		t.Fatalf("decode post-enrollment logout output: %v", err)
+	}
+	if len(logoutResult.Removed) != 0 {
+		t.Fatalf("post-enrollment logout removed legacy account-key stores: %v", logoutResult.Removed)
+	}
+	whoami := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "whoami")
+	if whoami.code != 0 {
+		t.Fatalf("warm device whoami exit = %d: %s", whoami.code, whoami.stderr.String())
+	}
+	var warmIdentity struct {
+		OwnerID  string `json:"owner_id"`
+		AuthType string `json:"auth_type"`
+		APIKey   *struct {
+			KeyID  string   `json:"key_id"`
+			Kind   string   `json:"kind"`
+			Scopes []string `json:"scopes"`
+		} `json:"api_key"`
+	}
+	if err := json.Unmarshal(whoami.stdout.Bytes(), &warmIdentity); err != nil {
+		t.Fatalf("decode warm device whoami output: %v", err)
+	}
+	if warmIdentity.OwnerID != enrolled.OwnerID || warmIdentity.AuthType != "api_key" || warmIdentity.APIKey == nil ||
+		warmIdentity.APIKey.KeyID == "" || warmIdentity.APIKey.Kind != "device" ||
+		!slices.Equal(warmIdentity.APIKey.Scopes, []string{"qurl:read", "qurl:resolve", "qurl:write"}) {
+		t.Fatalf("warm device whoami identity = %+v, want enrolled owner %q and a device key", warmIdentity, enrolled.OwnerID)
+	}
+	loadedAfterLogin := loadSandboxAgentState(t, stateDir)
+	if err := validateSandboxDeviceIdentity(loadedAfterLogin, namespace.AgentID, ""); err != nil {
+		t.Fatalf("one-time customer login durable identity: %v", err)
+	}
+	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
 	fixture := &sandboxLocalFixture{
 		binary: binary, env: cliEnv, stateDir: stateDir, cleanupJWT: cleanupJWT,
-		key: cliEnv["QURL_API_KEY"], marker: fmt.Sprintf("sandbox-local-publish-%s-%d", namespace.ConnectorID, time.Now().UnixNano()),
+		key: bootstrapKey, marker: fmt.Sprintf("sandbox-local-publish-%s-%d", namespace.ConnectorID, time.Now().UnixNano()),
 	}
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fixture.backendHits.Add(1)
@@ -343,21 +565,63 @@ func sandboxSecret(t *testing.T, name string) string {
 	return value
 }
 
+func assertSandboxStateExcludesSecret(t *testing.T, root, secret string) {
+	t.Helper()
+	if secret == "" {
+		t.Fatal("cannot verify state without the one-time bootstrap secret")
+	}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
+			return fmt.Errorf("sandbox state contains an unsupported file type at %s", path)
+		}
+		raw, err := os.ReadFile(path) //nolint:gosec // Exact test-owned state path.
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(raw, []byte(secret)) {
+			return fmt.Errorf("one-time account API key remained in sandbox state file %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func runSandboxLocalCLI(t *testing.T, binary string, env map[string]string, stateDir string, args ...string) *runResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	return runSandboxLocalCLIContext(ctx, t, binary, env, stateDir, args...)
+	return runSandboxLocalCLIContextInput(ctx, t, binary, env, stateDir, "", args...)
+}
+
+func runSandboxLocalCLIInput(t *testing.T, binary string, env map[string]string, stateDir, input string, args ...string) *runResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	return runSandboxLocalCLIContextInput(ctx, t, binary, env, stateDir, input, args...)
 }
 
 func runSandboxLocalCLIContext(ctx context.Context, t *testing.T, binary string, env map[string]string, stateDir string, args ...string) *runResult {
+	t.Helper()
+	return runSandboxLocalCLIContextInput(ctx, t, binary, env, stateDir, "", args...)
+}
+
+func runSandboxLocalCLIContextInput(ctx context.Context, t *testing.T, binary string, env map[string]string, stateDir, input string, args ...string) *runResult {
 	t.Helper()
 	commandArgs := append([]string{"--endpoint", env["QURL_ENDPOINT"]}, args...)
 	cmd := exec.CommandContext(ctx, binary, commandArgs...) //nolint:gosec // The protected test validates the fixed binary and supplies closed arguments.
 	commandEnv := cloneSandboxEnv(env)
 	commandEnv[state.EnvStateDirPrimary] = stateDir
 	cmd.Env = sandboxCommandEnv(commandEnv)
-	cmd.Stdin = nil
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	res := &runResult{}
 	cmd.Stdout = &res.stdout
 	cmd.Stderr = &res.stderr
@@ -370,7 +634,7 @@ func runSandboxLocalCLIContext(ctx context.Context, t *testing.T, binary string,
 			_, _ = fmt.Fprintf(&res.stderr, "Error: execute exact qurl test artifact: %v\n", err)
 		}
 	}
-	assertSandboxStreamsDoNotContainSecrets(t, res, env["QURL_API_KEY"])
+	assertSandboxStreamsDoNotContainSecrets(t, res, env["QURL_API_KEY"], strings.TrimSpace(input))
 	return res
 }
 

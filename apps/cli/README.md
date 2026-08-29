@@ -25,6 +25,11 @@ brew install layervai/tap/qurl
 qurl version
 ```
 
+On Windows, download the Windows `.zip` from the
+[latest release](https://github.com/layervai/qurl-integrations/releases),
+extract `qurl.exe`, add its directory to your user `PATH`, and run
+`qurl version` in PowerShell.
+
 Local lifecycle commands require qURL CLI 2.0.0 or newer. If the version is older,
 update the tap and upgrade the CLI before continuing:
 
@@ -80,9 +85,9 @@ keeps the share available and resumes it after login, sleep, wake, or a network
 change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
 back on. Publishing the same target later reuses the same CRID.
 
-Background lifecycle management is currently available on macOS. On Linux,
+Background lifecycle management is available on macOS and Windows. On Linux,
 add `--foreground`; the command then owns the share until it exits. qURL v2
-release binaries are available for macOS and Linux.
+release binaries are available for macOS, Windows, and Linux.
 
 ### 4. Open or share it
 
@@ -120,16 +125,22 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
-The CLI supports remote qURL commands on macOS and Linux. Local background
-sharing is currently macOS-only. Linux local publish requires `--foreground`;
-`start` and `restart` cannot create a background job.
+The CLI supports remote qURL commands on macOS, Windows, and Linux. Local
+background sharing is available on macOS and Windows. Linux local publish
+requires `--foreground`; `start` and `restart` cannot create a background job.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
 and install it with `dpkg -i` / `rpm -i`.
 
+**Windows** — download the Windows `.zip` for your architecture from the
+[latest release](https://github.com/layervai/qurl-integrations/releases),
+extract `qurl.exe`, and put its directory on your user `PATH`. The first local
+`publish` or `start` installs an owner-only per-user Task Scheduler job. It
+does not require administrator access or store an account API key.
+
 **Prebuilt binaries** — download the archive for your OS and architecture
-(`linux`, `darwin` × `amd64`, `arm64`) from the
+(`linux`, `darwin`, `windows` × `amd64`, `arm64`) from the
 [releases page](https://github.com/layervai/qurl-integrations/releases),
 extract it, and put the `qurl` binary on your `PATH`. The archive carries
 the man pages and completion files alongside the binary.
@@ -327,9 +338,9 @@ machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
 Direct downloads use the deployment settings shipped with the CLI. On a
-deployment they don't cover — the sandbox, or a self-hosted platform —
-set `QURL_DEPLOYMENT` to the path of that deployment's settings file (ask
-whoever runs the deployment for it). Without usable settings, `get
+self-hosted or custom deployment, set `QURL_DEPLOYMENT` to the path of that
+deployment's settings file (ask whoever runs the deployment for it). Without
+usable settings, `get
 --file` fails loudly with exit code 3 rather than downloading the wrong
 thing; browser mode needs no settings at all.
 
@@ -420,11 +431,12 @@ include the local target only when this machine owns one.
 The daemon uses one resource-bound NHP admission and FRP session per share. It
 recovers assignment, sleep/wake, and network failures automatically with
 persisted bounded backoff. Customers never need a refresh approval flag. On
-macOS the first local `publish` or `start` installs an owner-only LaunchAgent;
-the stable Homebrew `qurl` path survives upgrades, and a binary-version change
-reloads the resident daemon deliberately. Ordinary lifecycle commands reload
-desired state over the local owner-only socket without restarting healthy
-sibling shares.
+macOS the first local `publish` or `start` installs an owner-only
+LaunchAgent. On Windows it installs a least-privilege per-user Task Scheduler
+job. The installed `qurl` path survives normal upgrades, and a binary-version
+change reloads the resident daemon deliberately. Ordinary lifecycle commands
+reload desired state over an owner-only Unix socket or Windows named pipe
+without restarting healthy sibling shares.
 
 `qurl list` prints every full CRID. For locally registered tunnel rows it also
 prints the canonical loopback target and durable desired state. The paged list

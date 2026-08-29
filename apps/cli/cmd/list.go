@@ -62,7 +62,7 @@ observation. Pages continue with --cursor when there are more results.`,
 func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.ResourcePage) error {
 	tunnelRows := make([]int, 0, len(page.Items))
 	for index := range page.Items {
-		if page.Items[index].Type == "tunnel" {
+		if page.Items[index].Type == connectorResourceType {
 			tunnelRows = append(tunnelRows, index)
 		}
 	}

@@ -160,7 +160,7 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 	}
 	shares, listErr := registry.List(context.Background())
 	ownerID, ownerPresent, ownerErr := registry.OwnerID(context.Background())
-	if listErr != nil || len(shares) != 0 || ownerErr != nil || !ownerPresent || ownerID != "own_cli_fixture" {
+	if listErr != nil || len(shares) != 0 || ownerErr != nil || ownerPresent || ownerID != "" {
 		t.Fatalf("failed bootstrap durable state = shares %+v list %v owner %q/%v/%v", shares, listErr, ownerID, ownerPresent, ownerErr)
 	}
 }

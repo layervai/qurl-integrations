@@ -309,8 +309,11 @@ func loadLocalShares(dir string) (localSharesState, error) {
 	if err != nil {
 		return localSharesState{}, fmt.Errorf("inspect local share registry: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !connectorResourceOwnerOK(info) || info.Mode().Perm() != connectorResourceFileMode {
-		return localSharesState{}, errors.New("local share registry must be an owner-owned non-symlink regular 0600 file")
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return localSharesState{}, errors.New("local share registry must be a non-symlink regular file")
+	}
+	if err := validateConnectorResourceFile(path, info); err != nil {
+		return localSharesState{}, fmt.Errorf("validate local share registry: %w", err)
 	}
 	if info.Size() > localSharesMaxBytes {
 		return localSharesState{}, fmt.Errorf("local share registry exceeds %d bytes", localSharesMaxBytes)
@@ -377,8 +380,11 @@ func writeLocalShares(dir string, state localSharesState) error {
 	}
 	path := filepath.Join(dir, LocalSharesFile)
 	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !connectorResourceOwnerOK(info) || info.Mode().Perm() != connectorResourceFileMode {
-			return errors.New("local share registry must remain an owner-owned non-symlink regular 0600 file")
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("local share registry must remain a non-symlink regular file")
+		}
+		if err := validateConnectorResourceFile(path, info); err != nil {
+			return fmt.Errorf("validate local share registry before write: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

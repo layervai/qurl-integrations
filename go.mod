@@ -3,6 +3,7 @@ module github.com/layervai/qurl-integrations
 go 1.26.6
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/anthropics/anthropic-sdk-go v1.63.1
 	github.com/aws/aws-sdk-go-v2 v1.43.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.38
@@ -12,8 +13,8 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.13.0
-	github.com/layervai/qurl-connector v0.8.4-0.20260828215414-6baecad67bf3
-	github.com/layervai/qurl-go v0.8.1-0.20260828203444-2c2ec1e4c222
+	github.com/layervai/qurl-connector v0.8.4
+	github.com/layervai/qurl-go v0.8.1-0.20260829030108-b7cc9df3ac5c
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

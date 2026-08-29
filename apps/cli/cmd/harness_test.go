@@ -212,8 +212,8 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	}
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
-		// Exercise the injected LaunchAgent/daemon boundary on every host. The
-		// separate platform-contract test keeps Linux and Windows fail-closed.
+		// Exercise the injected background-job/daemon boundary on every host. The
+		// separate platform-contract test keeps unsupported hosts fail-closed.
 		g.backgroundShareGOOS = o.platformGOOS
 		if g.backgroundShareGOOS == "" {
 			g.backgroundShareGOOS = "darwin"

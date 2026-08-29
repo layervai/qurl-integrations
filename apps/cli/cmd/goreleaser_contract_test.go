@@ -29,9 +29,15 @@ type goreleaserConfig struct {
 		Main   string   `yaml:"main"`
 		Binary string   `yaml:"binary"`
 		GOOS   []string `yaml:"goos"`
+		GOARCH []string `yaml:"goarch"`
 	} `yaml:"builds"`
 	Archives []struct {
-		Files []string `yaml:"files"`
+		Files           []string `yaml:"files"`
+		Formats         []string `yaml:"formats"`
+		FormatOverrides []struct {
+			GOOS    string   `yaml:"goos"`
+			Formats []string `yaml:"formats"`
+		} `yaml:"format_overrides"`
 	} `yaml:"archives"`
 	HomebrewCasks []struct {
 		Manpages    []string          `yaml:"manpages"`
@@ -71,10 +77,18 @@ func TestReleaseBuildsOnlyQURL(t *testing.T) {
 	}
 }
 
-func TestReleaseBuildsOnlySupportedDeviceStatePlatforms(t *testing.T) {
+func TestReleaseBuildsSupportedCLIPlatforms(t *testing.T) {
 	cfg := loadGoreleaserConfig(t)
-	if got, want := cfg.Builds[0].GOOS, []string{"linux", "darwin"}; !slices.Equal(got, want) {
-		t.Fatalf("release platforms = %q, want %q; qurl-go pinned device state fails closed on other platforms", got, want)
+	if got, want := cfg.Builds[0].GOOS, []string{"linux", "darwin", "windows"}; !slices.Equal(got, want) {
+		t.Fatalf("release platforms = %q, want %q", got, want)
+	}
+	if got, want := cfg.Builds[0].GOARCH, []string{"amd64", "arm64"}; !slices.Equal(got, want) {
+		t.Fatalf("release architectures = %q, want %q", got, want)
+	}
+	archive := cfg.Archives[0]
+	if !slices.Equal(archive.Formats, []string{"tar.gz"}) || len(archive.FormatOverrides) != 1 ||
+		archive.FormatOverrides[0].GOOS != "windows" || !slices.Equal(archive.FormatOverrides[0].Formats, []string{"zip"}) {
+		t.Fatalf("release archive formats = %+v, want tar.gz with a Windows zip override", archive)
 	}
 }
 
@@ -161,7 +175,7 @@ func TestArchiveShipsCaskSourcePaths(t *testing.T) {
 	// dropping either glob from the archive's files would break
 	// `brew install` without failing any build.
 	files := cfg.Archives[0].Files
-	for _, want := range []string{"manpages/*", "completions/*"} {
+	for _, want := range []string{"LICENSE", "manpages/*", "completions/*"} {
 		if !slices.Contains(files, want) {
 			t.Fatalf("archives[0].files = %q is missing %q", files, want)
 		}

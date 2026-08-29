@@ -100,6 +100,7 @@ type globalOpts struct {
 	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
 	openNativeRuntime    func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error)
 	registeredClient     qurlapi.Client
+	registeredIdentity   *qurlapi.Identity
 	nativeRuntime        registeredNativeRuntime
 
 	// Resolved in PersistentPreRunE.
@@ -137,7 +138,12 @@ func Main(version string) int {
 // user's own act.
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	err := root.ExecuteContext(ctx)
-	err = errors.Join(err, opts.closeAPIClient())
+	if closeErr := opts.closeAPIClient(); closeErr != nil {
+		// The command has already completed. Process exit releases remaining OS
+		// handles, so native-runtime teardown cannot reverse a successful remote
+		// or lifecycle operation. Keep the diagnostic without changing its exit.
+		opts.printer().Warnf("local native-state cleanup reported a problem: %v", closeErr)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		output.RenderError(opts.streams.Err, err, opts.errColor())
 	}
@@ -410,11 +416,12 @@ func (o *globalOpts) newClient(ctx context.Context) (qurlapi.Client, error) {
 		o.registeredClient = client
 		return client, nil
 	}
-	client, _, err := o.openRegisteredClient(ctx, nil, "", nil)
+	client, identity, err := o.openRegisteredClient(ctx, nil, "", nil)
 	if err != nil {
 		return nil, err
 	}
 	o.registeredClient = client
+	o.registeredIdentity = identity
 	return client, nil
 }
 
@@ -620,6 +627,7 @@ func (o *globalOpts) closeAPIClient() error {
 	err := o.nativeRuntime.Close()
 	o.nativeRuntime = nil
 	o.registeredClient = nil
+	o.registeredIdentity = nil
 	return err
 }
 

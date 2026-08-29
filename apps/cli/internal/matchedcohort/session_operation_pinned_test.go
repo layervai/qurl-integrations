@@ -67,6 +67,7 @@ func TestQURLSessionRuntimePinnedAdmissionKeepsPhysicalAssignment(t *testing.T) 
 			state := &qurl.AgentState{AgentID: "agent-conform", PrivateKeyB64: base64.StdEncoding.EncodeToString(agentPrivate),
 				PublicKeyB64: base64.StdEncoding.EncodeToString(agentPublic), SchemaVersion: 7, RegisteredAt: &registered,
 				DeviceAPIKey: pinnedTestDeviceKey, DeviceAPIKeyID: "key_DvK9mN2pQr7S",
+				EnrollmentCredentialKind: "account",
 				Assignment: &qurl.AgentAssignment{CellID: "cell0", AssignmentGeneration: 1, EndpointRevision: 1,
 					LeaseExpiresAt: now.Add(time.Minute), Endpoint: qurl.NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: 443,
 						ServerPublicKeyB64: cellKey}}}

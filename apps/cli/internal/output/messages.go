@@ -59,8 +59,10 @@ const (
 	// msgDeviceEnrolled opens the login confirmation; %s is the account.
 	msgDeviceEnrolled = "Enrolled this device for %s."
 
-	// msgLoggedOut confirms removal; %s lists the storage that held the key.
-	msgLoggedOut = "Logged out. Removed your qURL API key from the %s."
+	// msgLoggedOut confirms legacy-key removal without claiming that the
+	// durable registered device identity was deleted. %s lists the storage
+	// that held the old account key.
+	msgLoggedOut = "Removed a legacy qURL account API key from the %s. This device remains enrolled."
 
 	// msgNothingStored is logout's idempotent no-op note (still exit 0).
 	msgNothingStored = "No legacy account API key is stored on this machine; nothing to remove."

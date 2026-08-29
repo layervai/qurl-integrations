@@ -173,7 +173,7 @@ func TestUnavailableSocketClassificationFailsClosedOnAmbiguity(t *testing.T) {
 		"missing": syscall.ENOENT,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if !isUnavailableSocketError(&net.OpError{Op: "dial", Net: "unix", Err: err}) {
+			if !isUnavailableIPCError(&net.OpError{Op: "dial", Net: "unix", Err: err}) {
 				t.Fatalf("%v was not classified unavailable", err)
 			}
 		})
@@ -183,7 +183,7 @@ func TestUnavailableSocketClassificationFailsClosedOnAmbiguity(t *testing.T) {
 		"permission": os.ErrPermission,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if isUnavailableSocketError(&net.OpError{Op: "dial", Net: "unix", Err: err}) {
+			if isUnavailableIPCError(&net.OpError{Op: "dial", Net: "unix", Err: err}) {
 				t.Fatalf("ambiguous %v was classified as daemon absent", err)
 			}
 		})

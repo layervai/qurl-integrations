@@ -500,7 +500,8 @@ func validPlan(generationDigit string) Plan {
 func testAgentState(agentID string) *qurl.AgentState {
 	return &qurl.AgentState{AgentID: agentID, PrivateKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x21}, 32)),
 		PublicKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 32)), SchemaVersion: 7,
-		RegisteredAt: timePtr(time.Unix(1700000000, 0).UTC()), DeviceAPIKey: "device-secret-never-in-authority", DeviceAPIKeyID: "device-key-id"}
+		RegisteredAt: timePtr(time.Unix(1700000000, 0).UTC()), DeviceAPIKey: "device-secret-never-in-authority", DeviceAPIKeyID: "device-key-id",
+		EnrollmentCredentialKind: "account"}
 }
 
 func timePtr(value time.Time) *time.Time { return &value }

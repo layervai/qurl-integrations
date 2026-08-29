@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -61,13 +62,60 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	}
 	cliEnv[connectorstate.EnvStateDirPrimary] = stateDir
 	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
+	bootstrapKey := cliEnv["QURL_API_KEY"]
+	delete(cliEnv, "QURL_API_KEY")
+	login := runExternalSandboxCLIInput(t, binary, cliEnv, bootstrapKey+"\n", "-o", "json", "login")
+	if login.err != nil {
+		t.Fatalf("one-time macOS customer login: %v; stderr %q", login.err, login.stderr)
+	}
+	var enrolled struct {
+		OwnerID        string `json:"owner_id"`
+		AuthType       string `json:"auth_type"`
+		DeviceEnrolled bool   `json:"device_enrolled"`
+	}
+	if err := json.Unmarshal([]byte(login.stdout), &enrolled); err != nil {
+		t.Fatalf("decode one-time macOS customer login output: %v", err)
+	}
+	if enrolled.OwnerID == "" || enrolled.AuthType != "api_key" || !enrolled.DeviceEnrolled {
+		t.Fatalf("one-time macOS customer login returned incomplete device identity: %+v", enrolled)
+	}
+	loadedAfterLogin := loadSandboxAgentState(t, stateDir)
+	if loadedAfterLogin == nil {
+		t.Fatal("one-time macOS customer login did not persist a device identity")
+	}
+	if err := validateSandboxDeviceIdentity(loadedAfterLogin, loadedAfterLogin.AgentID, ""); err != nil {
+		t.Fatalf("one-time macOS customer login durable identity: %v", err)
+	}
+	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
+	registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, loadedAfterLogin.DeviceAPIKeyID)
+	whoami := runExternalSandboxCLI(t, binary, cliEnv, "-o", "json", "whoami")
+	if whoami.err != nil {
+		t.Fatalf("warm macOS device whoami: %v; stderr %q", whoami.err, whoami.stderr)
+	}
+	var warmIdentity struct {
+		OwnerID  string `json:"owner_id"`
+		AuthType string `json:"auth_type"`
+		APIKey   *struct {
+			KeyID  string   `json:"key_id"`
+			Kind   string   `json:"kind"`
+			Scopes []string `json:"scopes"`
+		} `json:"api_key"`
+	}
+	if err := json.Unmarshal([]byte(whoami.stdout), &warmIdentity); err != nil {
+		t.Fatalf("decode warm macOS device whoami output: %v", err)
+	}
+	if warmIdentity.OwnerID != enrolled.OwnerID || warmIdentity.AuthType != "api_key" || warmIdentity.APIKey == nil ||
+		warmIdentity.APIKey.KeyID == "" || warmIdentity.APIKey.Kind != "device" ||
+		!slices.Equal(warmIdentity.APIKey.Scopes, []string{"qurl:read", "qurl:resolve", "qurl:write"}) {
+		t.Fatalf("warm macOS device whoami = %+v, want enrolled owner %q and a device key", warmIdentity, enrolled.OwnerID)
+	}
 
 	jobManager := connectorservice.NewUserJobManager()
-	if err := jobManager.Remove(connectordaemon.LaunchAgentLabel); err != nil {
+	if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
 		t.Fatalf("remove pre-existing qURL LaunchAgent: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := jobManager.Remove(connectordaemon.LaunchAgentLabel); err != nil {
+		if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
 			t.Errorf("remove qURL LaunchAgent after journey: %v", err)
 		}
 	})
@@ -90,18 +138,17 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	local := waitExternalSandboxShare(t, stateDir, cridValue, 2*time.Minute)
 	loaded := loadSandboxAgentState(t, stateDir)
 	if loaded != nil {
-		registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, loaded.DeviceAPIKeyID)
 		registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, loaded.DeviceAPIKey)
 	}
 	if err := requireTestResourceIdentity(local.CRID, local.ResourceID); err != nil {
 		t.Fatalf("sandbox minted a non-test CRID: %v", err)
 	}
 
-	status, err := jobManager.Status(connectordaemon.LaunchAgentLabel)
+	status, err := jobManager.Status(connectordaemon.DaemonJobLabel)
 	if err != nil || !status.Installed || !status.Running {
 		t.Fatalf("qURL LaunchAgent after publish = %+v, %v; want installed and running", status, err)
 	}
-	assertMacOSLaunchAgentContainsNoCredential(t, cliEnv["QURL_ENDPOINT"], cliEnv[hub.EnvHost], cliEnv[hub.EnvServerPublicKey], cliEnv["QURL_API_KEY"], cleanupJWT)
+	assertMacOSLaunchAgentContainsNoCredential(t, cliEnv["QURL_ENDPOINT"], cliEnv[hub.EnvHost], cliEnv[hub.EnvServerPublicKey], bootstrapKey, cleanupJWT)
 
 	initial := waitExternalSandboxState(t, binary, cliEnv, cridValue, "on", "serving", 2*time.Minute)
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
@@ -147,16 +194,27 @@ type externalCLIResult struct {
 
 func runExternalSandboxCLI(t *testing.T, binary string, env map[string]string, args ...string) externalCLIResult {
 	t.Helper()
+	return runExternalSandboxCLIInput(t, binary, env, "", args...)
+}
+
+func runExternalSandboxCLIInput(t *testing.T, binary string, env map[string]string, input string, args ...string) externalCLIResult {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	commandArgs := append([]string{"--endpoint", env["QURL_ENDPOINT"]}, args...)
 	cmd := exec.CommandContext(ctx, binary, commandArgs...) //nolint:gosec // The protected test validates the exact CLI binary before use.
 	cmd.Env = externalSandboxEnvironment(env)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		err = ctx.Err()
+	}
+	if secret := strings.TrimSpace(input); secret != "" && strings.Contains(stdout.String()+stderr.String(), secret) {
+		t.Fatal("macOS customer command exposed the one-time API key")
 	}
 	return externalCLIResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
 }
@@ -168,6 +226,8 @@ func externalSandboxEnvironment(overrides map[string]string) []string {
 			values[key] = value
 		}
 	}
+	delete(values, "QURL_API_KEY")
+	delete(values, "QURL_API_KEY_FILE")
 	for key, value := range overrides {
 		values[key] = value
 	}
@@ -205,6 +265,16 @@ func TestExternalSandboxEnvironmentUsesOneAPIKeySource(t *testing.T) {
 	}
 	if got["QURL_ENDPOINT"] != "https://sandbox.example" {
 		t.Fatal("customer process lost its exact endpoint override")
+	}
+	withoutCredential := map[string]string{}
+	for _, entry := range externalSandboxEnvironment(map[string]string{"QURL_ENDPOINT": "https://sandbox.example"}) {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			withoutCredential[key] = value
+		}
+	}
+	if withoutCredential["QURL_API_KEY"] != "" || withoutCredential["QURL_API_KEY_FILE"] != "" {
+		t.Fatal("warm customer process inherited the one-time API key")
 	}
 }
 
@@ -294,7 +364,7 @@ func assertMacOSLaunchAgentContainsNoCredential(t *testing.T, endpoint, hubHost,
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, err := connectorservice.UserJobPlistPath(home, connectordaemon.LaunchAgentLabel)
+	path, err := connectorservice.UserJobPlistPath(home, connectordaemon.DaemonJobLabel)
 	if err != nil {
 		t.Fatal(err)
 	}

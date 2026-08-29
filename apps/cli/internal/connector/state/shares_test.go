@@ -1,5 +1,3 @@
-//go:build !windows
-
 package state
 
 import (
@@ -95,7 +93,7 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+	if !info.Mode().IsRegular() || (!isWindows(t) && info.Mode().Perm() != 0o600) {
 		t.Fatalf("registry mode = %v", info.Mode())
 	}
 	updated, err := registry.SetDesired(context.Background(), binding.CRID, "on", 2)
@@ -323,7 +321,7 @@ func TestLocalShareRegistryRefusesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(dir, LocalSharesFile)); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	registry, err := OpenLocalShareRegistry(dir)
 	if err != nil {

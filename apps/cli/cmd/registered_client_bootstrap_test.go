@@ -17,8 +17,10 @@ import (
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 type bootstrapAgentStateStore struct{ state *qurl.AgentState }
@@ -37,14 +39,13 @@ func (*bootstrapAgentStateStore) SaveAgentState(context.Context, *qurl.AgentStat
 }
 
 type bootstrapNativeRuntime struct {
-	store  qurl.AgentStateStore
-	closed bool
+	store    qurl.AgentStateStore
+	closed   bool
+	closeErr error
 }
 
-// ownerOnlyTestShareRegistry keeps the registered-device ownership seam under
-// test on every platform. Native local state is intentionally unsupported on
-// Windows, so these client-bootstrap tests must not depend on the Unix file
-// lock implementation merely to record the authenticated owner.
+// ownerOnlyTestShareRegistry keeps the registered-device ownership seam
+// hermetic and independent of filesystem state on every platform.
 type ownerOnlyTestShareRegistry struct{ ownerID string }
 
 func (r *ownerOnlyTestShareRegistry) BindOwner(_ context.Context, ownerID string) error {
@@ -82,7 +83,7 @@ func (*ownerOnlyTestShareRegistry) Delete(context.Context, string) error {
 func (r *bootstrapNativeRuntime) Handoff() (qurl.AgentStateStore, error) { return r.store, nil }
 func (r *bootstrapNativeRuntime) Close() error {
 	r.closed = true
-	return nil
+	return r.closeErr
 }
 
 func bootstrapRegisteredState(t *testing.T) *qurl.AgentState {
@@ -96,7 +97,7 @@ func bootstrapRegisteredState(t *testing.T) *qurl.AgentState {
 		AgentID: "agent-durable-01", PrivateKeyB64: base64.StdEncoding.EncodeToString(private.Bytes()),
 		PublicKeyB64: base64.StdEncoding.EncodeToString(private.PublicKey().Bytes()), SchemaVersion: 7,
 		RegisteredAt: &now, DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-		DeviceAPIKeyID: "key_AbCdEf123456",
+		DeviceAPIKeyID: "key_AbCdEf123456", EnrollmentCredentialKind: "bootstrap",
 		Assignment: &qurl.AgentAssignment{CellID: "cell-01", AssignmentGeneration: 7, EndpointRevision: 1,
 			LeaseExpiresAt: now.Add(time.Hour), Endpoint: qurl.NHPUDPEndpoint{Host: "cell0.nhp.layerv.ai", Port: 443,
 				ServerPublicKeyB64: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 32))}},
@@ -216,5 +217,43 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	}
 	if len(srv.Requests()) != 1 || srv.Requests()[0].Header.Get("Authorization") != "Bearer "+bootstrapRegisteredState(t).DeviceAPIKey {
 		t.Fatalf("warm open requests = %+v", srv.Requests())
+	}
+}
+
+func TestLocalPublishReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "identity-cache-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIdentity := &qurlapi.Identity{OwnerID: apitest.MeOwnerID}
+	opts := &globalOpts{openRegisteredClient: func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+		return client, wantIdentity, nil
+	}}
+	registry := &ownerOnlyTestShareRegistry{}
+	ownerID, gotClient, err := localPublishOwner(context.Background(), opts, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownerID != wantIdentity.OwnerID || gotClient != client || registry.ownerID != wantIdentity.OwnerID {
+		t.Fatalf("local publish owner/client/registry = %q/%T/%q", ownerID, gotClient, registry.ownerID)
+	}
+	if requests := srv.Requests(); len(requests) != 0 {
+		t.Fatalf("local publish repeated /v1/me after registered open: %+v", requests)
+	}
+}
+
+func TestRunKeepsCompletedCommandSuccessfulWhenNativeRuntimeCloseFails(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	streams := &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}
+	root, opts := newRoot("close-test", streams)
+	runtime := &bootstrapNativeRuntime{closeErr: errors.New("close failure")}
+	opts.nativeRuntime = runtime
+	root.SetArgs([]string{"help"})
+	if code := run(context.Background(), root, opts); code != 0 {
+		t.Fatalf("completed help exit = %d, stderr = %q", code, stderr.String())
+	}
+	if !runtime.closed || !strings.Contains(stderr.String(), "local native-state cleanup reported a problem") {
+		t.Fatalf("runtime closed=%t stderr=%q", runtime.closed, stderr.String())
 	}
 }

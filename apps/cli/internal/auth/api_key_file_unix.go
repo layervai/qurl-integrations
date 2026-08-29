@@ -10,7 +10,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func validateAPIKeyFilePlatform(info os.FileInfo) error {
+func validAPIKeyEnvironmentFileMode(mode os.FileMode) bool {
+	permissions := mode.Perm()
+	return permissions == 0o400 || permissions == 0o600
+}
+
+func validateAPIKeyFilePathPlatform(_ string, info os.FileInfo) error {
+	return validateUnixAPIKeyFile(info)
+}
+
+func validateOpenAPIKeyFilePlatform(_ *os.File, info os.FileInfo) error {
+	return validateUnixAPIKeyFile(info)
+}
+
+func validateUnixAPIKeyFile(info os.FileInfo) error {
 	value, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || value.Nlink != 1 || (value.Uid != 0 && value.Uid != uint32(os.Geteuid())) {
 		return errors.New("API-key file is not singly linked and owned by root or the effective user")

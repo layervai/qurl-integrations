@@ -13,7 +13,7 @@ import (
 
 const (
 	connectorModule = "github.com/layervai/qurl-connector"
-	connectorFloor  = "v0.8.3"
+	connectorFloor  = "v0.8.4"
 	cliRepoRoot     = "../../.."
 	goModPath       = cliRepoRoot + "/go.mod"
 )
@@ -76,9 +76,9 @@ func connectorVersionAtLeast(version, floor string) bool {
 		return false
 	}
 	// A pseudo-version after the floor release has the floor as its canonical
-	// parent (for example, v0.8.4-0... is based on v0.8.3). Comparing that
+	// parent (for example, v0.8.5-0... is based on v0.8.4). Comparing that
 	// parent accepts later unreleased fixes without accepting a pseudo-version
-	// based on the older v0.8.2 line.
+	// based on the older v0.8.3 line.
 	return semver.Compare(base, floor) >= 0
 }
 
@@ -88,11 +88,14 @@ func TestConnectorVersionFloor(t *testing.T) {
 		version string
 		want    bool
 	}{
-		{version: "v0.8.3", want: true},
 		{version: "v0.8.4", want: true},
-		{version: "v0.8.4-rc.1", want: true},
-		{version: "v0.8.4-0.20260828010203-abcdefabcdef", want: true},
+		{version: "v0.8.5", want: true},
+		{version: "v0.8.5-rc.1", want: true},
+		{version: "v0.8.5-0.20260828010203-abcdefabcdef", want: true},
 		{version: "v0.8.2"},
+		{version: "v0.8.3"},
+		{version: "v0.8.4-rc.1"},
+		{version: "v0.8.4-0.20260828010203-abcdefabcdef"},
 		{version: "v0.8.3-rc.1"},
 		{version: "v0.8.3-0.20260828010203-abcdefabcdef"},
 		{version: "v0.0.0-20260828010203-abcdefabcdef"},
@@ -116,15 +119,15 @@ func TestCheckConnectorRequirement(t *testing.T) {
 	}{
 		{
 			name:  "direct requirement",
-			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3\n",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.4\n",
 		},
 		{
 			name:  "indirect requirement",
-			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3 // indirect\n",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.4 // indirect\n",
 		},
 		{
 			name:  "incompatible requirement",
-			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3+incompatible\n",
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.4+incompatible\n",
 		},
 		{
 			name:    "missing requirement",
@@ -133,14 +136,14 @@ func TestCheckConnectorRequirement(t *testing.T) {
 		},
 		{
 			name: "replaced requirement",
-			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3\n" +
+			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.4\n" +
 				"replace " + connectorModule + " => ../qurl-connector\n",
 			wantErr: "must not be replaced",
 		},
 		{
 			name:    "older requirement",
-			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.2\n",
-			wantErr: "want v0.8.3 or newer",
+			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.3\n",
+			wantErr: "want v0.8.4 or newer",
 		},
 		{
 			name:    "malformed go.mod",

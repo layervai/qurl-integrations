@@ -1,5 +1,3 @@
-//go:build !windows
-
 package state
 
 import (
@@ -66,7 +64,7 @@ func TestConnectorResourceTransactionPersistsExactRequestAndWarmContinuity(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != connectorResourceFileMode || !info.Mode().IsRegular() {
+	if (!isWindows(t) && info.Mode().Perm() != connectorResourceFileMode) || !info.Mode().IsRegular() {
 		t.Fatalf("state mode = %v, want regular 0600", info.Mode())
 	}
 	if err := tx.Close(); err != nil {
@@ -166,6 +164,9 @@ func TestConnectorResourceTransactionLockIsCrossHandleAndContextBounded(t *testi
 
 func TestConnectorResourceLockRejectsUnsafeEntries(t *testing.T) {
 	t.Run("wrong permissions", func(t *testing.T) {
+		if isWindows(t) {
+			t.Skip("POSIX mode rejection is a Unix contract")
+		}
 		store := openTestStore(t)
 		path := filepath.Join(store.Dir(), connectorResourcesLock)
 		if err := os.WriteFile(path, nil, 0o644); err != nil { //nolint:gosec // intentionally unsafe mode exercises rejection.
@@ -245,6 +246,9 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 	}
 
 	t.Run("wrong permissions", func(t *testing.T) {
+		if isWindows(t) {
+			t.Skip("POSIX mode rejection is a Unix contract")
+		}
 		store := openTestStore(t)
 		path := filepath.Join(store.Dir(), ConnectorResourcesFile)
 		if err := os.WriteFile(path, []byte(valid), 0o644); err != nil { //nolint:gosec // intentionally unsafe mode proves the fail-closed read.
@@ -264,7 +268,7 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(store.Dir(), ConnectorResourcesFile)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || (!isWindows(t) && !strings.Contains(err.Error(), "non-symlink")) {
 			t.Fatalf("symlink error = %v", err)
 		}
 	})
@@ -556,6 +560,9 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 }
 
 func TestConnectorResourceCommitContradictionReportsAndRecoversFromDiscardFailure(t *testing.T) {
+	if isWindows(t) {
+		t.Skip("POSIX read-only mode injection is a Unix contract")
+	}
 	store := openTestStore(t)
 	tx, err := store.BeginConnectorResource(context.Background(), "stable-api")
 	if err != nil {

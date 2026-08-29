@@ -1,11 +1,10 @@
-//go:build !windows
-
 package daemon
 
 import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,8 +37,9 @@ func (*recordingJobManager) Status(string) (connectorservice.ServiceStatus, erro
 	return connectorservice.ServiceStatus{Installed: true, Running: true}, nil
 }
 
-func TestJobControllerPersistsStableHomebrewShim(t *testing.T) {
+func TestJobControllerPersistsStableInstalledCommandPath(t *testing.T) {
 	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
@@ -47,7 +47,7 @@ func TestJobControllerPersistsStableHomebrewShim(t *testing.T) {
 		if name != "qurl" {
 			return "", errors.New("unexpected lookup")
 		}
-		return "/opt/homebrew/bin/qurl", nil
+		return binaryPath, nil
 	}
 	probes := 0
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
@@ -62,8 +62,8 @@ func TestJobControllerPersistsStableHomebrewShim(t *testing.T) {
 	if err := controller.Ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// A Homebrew Cellar target change is intentionally invisible because the
-	// persisted ProgramArguments keep the PATH-resolved shim.
+	// An installation target change is intentionally invisible because the
+	// persisted definition keeps the PATH-resolved stable command path.
 	if err := controller.Ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -71,10 +71,18 @@ func TestJobControllerPersistsStableHomebrewShim(t *testing.T) {
 		t.Fatalf("LaunchAgent definition checks/reloads = %d/%d, want two idempotent definition checks and one IPC reload", len(manager.jobs), reloads)
 	}
 	for _, job := range manager.jobs {
-		if job.BinaryPath != "/opt/homebrew/bin/qurl" {
-			t.Fatalf("binary path = %q, want stable Homebrew shim", job.BinaryPath)
+		if job.BinaryPath != binaryPath {
+			t.Fatalf("binary path = %q, want stable installed command %q", job.BinaryPath, binaryPath)
 		}
-		if got := job.Arguments; len(got) != 14 || got[0] != "--endpoint" || got[1] != "https://api.sandbox.layerv.xyz" || got[2] != "daemon" || got[3] != "run" || got[4] != "--state-dir" || got[6] != "--job-version" || got[7] != "1/2.4.0" || got[8] != "--hub-host" || got[9] != "hub.sandbox.layerv.xyz" || got[10] != "--hub-port" || got[11] != "443" || got[12] != "--hub-server-public-key-b64" || got[13] != testHubKey {
+		wantArguments := make([]string, 0, 18)
+		wantArguments = append(wantArguments,
+			"--endpoint", "https://api.sandbox.layerv.xyz", "daemon", "run", "--state-dir", filepath.Join(dir, "state"),
+			"--job-version", "1/2.4.0", "--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
+			"--hub-server-public-key-b64", testHubKey,
+		)
+		wantArguments = append(wantArguments, daemonJobLogArguments(
+			filepath.Join(dir, "logs", "share-daemon.log"), filepath.Join(dir, "logs", "share-daemon.err.log"))...)
+		if got := job.Arguments; !slices.Equal(got, wantArguments) {
 			t.Fatalf("ProgramArguments = %#v", got)
 		}
 		if job.Umask != 0o077 {
@@ -85,10 +93,11 @@ func TestJobControllerPersistsStableHomebrewShim(t *testing.T) {
 
 func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.T) {
 	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
-	controller.LookPath = func(string) (string, error) { return "/opt/homebrew/bin/qurl", nil }
+	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
 		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
 	}
@@ -107,10 +116,11 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 
 func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testing.T) {
 	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
-	controller.LookPath = func(string) (string, error) { return "/opt/homebrew/bin/qurl", nil }
+	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
 	controller.Reload = func(context.Context) (bool, error) { t.Fatal("reload called without IPC"); return false, nil }
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)

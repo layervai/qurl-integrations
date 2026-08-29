@@ -121,6 +121,22 @@ func TestLoginEnrollmentFailurePreservesPriorStoredKey(t *testing.T) {
 	}
 }
 
+func TestLoginCleanupFailureDoesNotReverseSuccessfulEnrollment(t *testing.T) {
+	srv := apitest.NewServer(t)
+	kr := &fakeKeyring{key: testAPIKeyStored, deleteErr: errors.New("delete refused")}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "login"}, env: map[string]string{},
+		stdin: strings.NewReader(testAPIKey + "\n"), keyring: kr,
+	})
+	if res.code != 0 {
+		t.Fatalf("completed enrollment exit = %d, stderr = %q", res.code, res.stderr.String())
+	}
+	if kr.key != testAPIKeyStored || !strings.Contains(res.stderr.String(), "enrollment succeeded") ||
+		!strings.Contains(res.stderr.String(), "legacy stored account key") {
+		t.Fatalf("cleanup warning/key = %q/%q", res.stderr.String(), kr.key)
+	}
+}
+
 // TestLogoutRemovesEveryBackend pins logout: both backends cleared and
 // reported, and the repeat run is the idempotent exit-0 note.
 func TestLogoutRemovesEveryBackend(t *testing.T) {

@@ -10,11 +10,6 @@ import (
 
 const apiKeyEnvironmentFileMaxBytes = 4 << 10
 
-func validAPIKeyEnvironmentFileMode(mode os.FileMode) bool {
-	permissions := mode.Perm()
-	return permissions == 0o400 || permissions == 0o600
-}
-
 func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo // One exact owner-only file and byte fence stays together.
 	if path == "" || path != strings.TrimSpace(path) || strings.ContainsAny(path, "\x00\r\n") ||
 		!filepath.IsAbs(path) || filepath.Clean(path) != path {
@@ -25,7 +20,7 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 		before.Size() <= 1 || before.Size() > apiKeyEnvironmentFileMaxBytes {
 		return "", fmt.Errorf("%w: %s is not one bounded owner-private regular file", ErrInvalidKey, EnvAPIKeyFile)
 	}
-	if err := validateAPIKeyFilePlatform(before); err != nil {
+	if err := validateAPIKeyFilePathPlatform(path, before); err != nil {
 		return "", fmt.Errorf("%w: %s has unsafe ownership or link authority", ErrInvalidKey, EnvAPIKeyFile)
 	}
 	file, err := openAPIKeyFileNoFollow(path)
@@ -36,7 +31,7 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) || !validAPIKeyEnvironmentFileMode(opened.Mode()) ||
 		opened.Mode() != before.Mode() || opened.Size() != before.Size() || !opened.ModTime().Equal(before.ModTime()) ||
-		validateAPIKeyFilePlatform(opened) != nil {
+		validateOpenAPIKeyFilePlatform(file, opened) != nil {
 		return "", fmt.Errorf("%w: %s changed while opening", ErrInvalidKey, EnvAPIKeyFile)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, apiKeyEnvironmentFileMaxBytes+1))
@@ -48,7 +43,7 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 	if openedErr != nil || lstatErr != nil || !os.SameFile(opened, openedAfter) || !os.SameFile(before, after) ||
 		openedAfter.Mode() != opened.Mode() || openedAfter.Size() != opened.Size() || !openedAfter.ModTime().Equal(opened.ModTime()) ||
 		after.Mode() != before.Mode() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) ||
-		validateAPIKeyFilePlatform(openedAfter) != nil || validateAPIKeyFilePlatform(after) != nil {
+		validateOpenAPIKeyFilePlatform(file, openedAfter) != nil || validateAPIKeyFilePathPlatform(path, after) != nil {
 		return "", fmt.Errorf("%w: %s changed while reading", ErrInvalidKey, EnvAPIKeyFile)
 	}
 	if raw[len(raw)-1] != '\n' || bytesContainWhitespaceOrControl(raw[:len(raw)-1]) {

@@ -54,20 +54,21 @@ var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) err
 }
 
 // daemonCmd exposes the long-running engine for headless deployments and
-// foreground supervision. Ordinary macOS users normally let publish/start
-// manage the per-user LaunchAgent.
+// foreground supervision. Ordinary macOS and Windows users normally let
+// publish/start manage the native per-user background job.
 func daemonCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run the local sharing daemon",
 		Long: `Run the local sharing daemon directly.
 
-On macOS, qurl publish and qurl start normally manage the per-user daemon for
-you. Use daemon run for a headless deployment or when another service manager
-owns the process.`,
+On macOS and Windows, qurl publish and qurl start normally manage the per-user
+daemon for you. Use daemon run for a headless deployment or when another
+service manager owns the process.`,
 		Args: noArgs,
 	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
+	var jobStdoutLog, jobStderrLog string
 	var hubHost, hubServerPublicKeyB64 string
 	var hubPort int
 	run := &cobra.Command{
@@ -88,6 +89,9 @@ owns the process.`,
 			if jobVersion == "" {
 				jobVersion = expected
 			}
+			if err := redirectDaemonJobOutput(jobStdoutLog, jobStderrLog, opts.streams); err != nil {
+				return err
+			}
 			hubBootstrap, hasHubOverride, err := exactDaemonHubOverride(hubHost, hubPort, hubServerPublicKeyB64)
 			if err != nil {
 				return err
@@ -103,10 +107,12 @@ owns the process.`,
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "declarative headless share configuration")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "first-bootstrap enrollment credential file")
+	run.Flags().StringVar(&jobStdoutLog, "job-stdout-log", "", "native background-job stdout log")
+	run.Flags().StringVar(&jobStderrLog, "job-stderr-log", "", "native background-job stderr log")
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64"} {
+	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-stdout-log", "job-stderr-log"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -208,9 +214,13 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	var closeFactory func() error
 	if headless != nil {
 		// Native bootstrap succeeds before the share becomes runnable. This avoids
-		// persisting a desired-on row after a bad/missing one-time credential.
+		// persisting owner or desired-on state after a bad/missing one-time
+		// credential.
 		factory, err = openHeadlessSessionFactory(ctx, openFactory)
 		enrollmentCredential = ""
+		if err == nil {
+			err = registry.BindOwner(ctx, headless.OwnerID)
+		}
 		if err == nil {
 			err = registry.Put(ctx, &headless.Shares[0])
 		}
@@ -248,8 +258,12 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 
 func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistry, headless *connectorstate.HeadlessConfig) (string, error) {
 	if headless != nil {
-		if err := registry.BindOwner(ctx, headless.OwnerID); err != nil {
+		ownerID, present, err := registry.OwnerID(ctx)
+		if err != nil {
 			return "", err
+		}
+		if present && ownerID != headless.OwnerID {
+			return "", errors.New("headless share config belongs to a different durable account owner; use a dedicated state volume")
 		}
 		if err := validateHeadlessRegistryOwnership(ctx, registry, &headless.Shares[0]); err != nil {
 			return "", err

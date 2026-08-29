@@ -345,11 +345,8 @@ func loadConnectorResources(dir string) (connectorResourcesState, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return connectorResourcesState{}, errors.New("connector resource state must be a non-symlink regular file")
 	}
-	if !connectorResourceOwnerOK(info) {
-		return connectorResourcesState{}, errors.New("connector resource state must be owned by the current user")
-	}
-	if info.Mode().Perm() != connectorResourceFileMode {
-		return connectorResourcesState{}, fmt.Errorf("connector resource state has mode %04o, want %04o", info.Mode().Perm(), connectorResourceFileMode)
+	if err := validateConnectorResourceFile(path, info); err != nil {
+		return connectorResourcesState{}, err
 	}
 	if info.Size() > connectorResourcesMaxBytes {
 		return connectorResourcesState{}, fmt.Errorf("connector resource state exceeds %d bytes", connectorResourcesMaxBytes)
@@ -584,11 +581,8 @@ func validateConnectorResourcesWriteTarget(path string) error {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("connector resource state must be a non-symlink regular file")
 		}
-		if info.Mode().Perm() != connectorResourceFileMode {
-			return fmt.Errorf("connector resource state has mode %04o, want %04o", info.Mode().Perm(), connectorResourceFileMode)
-		}
-		if !connectorResourceOwnerOK(info) {
-			return errors.New("connector resource state must be owned by the current user")
+		if err := validateConnectorResourceFile(path, info); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect Connector resource state before write: %w", err)
@@ -602,7 +596,7 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 		return fmt.Errorf("generate Connector resource state temporary name: %w", err)
 	}
 	tmpPath := filepath.Join(dir, "."+ConnectorResourcesFile+".tmp-"+hex.EncodeToString(suffix))
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, connectorResourceFileMode) //nolint:gosec // G302,G304: fixed 0600 in the pinned owner-only state dir.
+	tmp, err := createConnectorResourceTemp(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create Connector resource state temporary file: %w", err)
 	}
@@ -620,9 +614,6 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 		}
 		retErr = errors.Join(retErr, removeErr, syncDir(dir))
 	}()
-	if err := tmp.Chmod(connectorResourceFileMode); err != nil {
-		return fmt.Errorf("set Connector resource state temporary permissions: %w", err)
-	}
 	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write Connector resource state temporary file: %w", err)
 	}
@@ -633,7 +624,7 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 		return fmt.Errorf("close Connector resource state temporary file: %w", err)
 	}
 	closed = true
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := commitConnectorResourceRename(tmpPath, path); err != nil {
 		return fmt.Errorf("commit Connector resource state rename: %w", err)
 	}
 	committed = true
