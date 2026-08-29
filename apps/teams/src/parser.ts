@@ -1,3 +1,4 @@
+import { isChannelAlias } from './alias.js';
 import type { SetupMode } from './interfaces.js';
 import { normalizeTunnelEnvironment, validateTunnelSlug } from './tunnel.js';
 import { UserFacingError } from './user-facing-error.js';
@@ -22,7 +23,6 @@ export interface TeamsCommand {
   readonly args: readonly string[];
 }
 
-const aliasPattern = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const mentionPattern = /^<@([A-Za-z0-9._:-]{1,200})>$/;
 const MAX_FEEDBACK_LENGTH = 2_000;
 const MAX_DISPLAY_NAME_LENGTH = 200;
@@ -52,7 +52,7 @@ function lookup(value: string): string {
 
 function alias(value: string): string {
   const result = value.trim().replace(/^\$/, '');
-  if (!aliasPattern.test(result)) throw new UserFacingError('invalid alias');
+  if (!isChannelAlias(result)) throw new UserFacingError('invalid alias');
   return result;
 }
 

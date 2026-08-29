@@ -168,6 +168,81 @@ describe('Teams bot primitives', () => {
     expect(replies).toEqual(['The qURL command could not be completed. Check the command syntax and try again.']);
   });
 
+  it('refuses to bind a channel alias the alias commands could never parse back', async () => {
+    // protect-url without as: falls back to qURL-side identifiers, which are
+    // under no channel-alias constraint. Binding one strands it: set-alias and
+    // unset-alias both reject it, so only revoking the resource clears it.
+    const bound: string[] = [];
+    const data = {
+      checkAdmin: async () => ({ isAdmin: true }),
+      lookupScopeAlias: async () => undefined,
+      bindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { bound.push(alias); },
+      exposeResource: async () => undefined,
+    } as unknown as TeamsDataStore;
+    const activity = { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } };
+
+    for (const resource of [
+      { resourceId: '7f3a-report-svc', type: 'url' },
+      { resourceId: 'RES_01', type: 'url', slug: 'Payroll_API' },
+      { resourceId: 'trailing-', type: 'url', alias: 'UPPER' },
+    ]) {
+      const bot = new TeamsBot({
+        qurl: { listResources: async () => ({ resources: [resource] }) } as unknown as QurlClient,
+        data,
+        messages: {} as never,
+      });
+      await expect(bot.execute(activity, 'tenant-1', 'channel-1', true,
+        parseCommand(`protect-url $${resource.resourceId}`)), resource.resourceId)
+        .rejects.toThrow('no channel-safe alias');
+    }
+    expect(bound).toEqual([]);
+  });
+
+  it('falls back to the first upstream identifier that is a usable channel alias', async () => {
+    const bound: string[] = [];
+    const bot = new TeamsBot({
+      qurl: { listResources: async () => ({ resources: [{ resourceId: 'RES_01', type: 'url', slug: 'payroll-api' }] }) } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { bound.push(alias); },
+        exposeResource: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand('protect-url $RES_01'));
+    // The unusable resourceId is skipped for the slug, and the bound alias
+    // round-trips through the alias commands.
+    expect(bound).toEqual(['payroll-api']);
+    expect(parseCommand('unset-alias $payroll-api')).toMatchObject({ verb: 'unset-alias', resource: 'payroll-api' });
+  });
+
+  it('answers unset-alias from channel policy alone, without any qURL call', async () => {
+    let qurlCalls = 0;
+    let tenantClientBuilds = 0;
+    const bot = new TeamsBot({
+      qurlForTenant: {
+        forTenant: async () => {
+          tenantClientBuilds += 1;
+          return { listResources: async () => { qurlCalls += 1; return { resources: [] }; } } as unknown as QurlClient;
+        },
+      },
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        unbindScopeAlias: async () => undefined,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
+      .resolves.toContain('Removed alias `$docs`');
+    // Building the tenant client costs a DynamoDB read plus a KMS decrypt, and
+    // resources() pages the whole catalogue. unset-alias needs neither.
+    expect(tenantClientBuilds).toBe(0);
+    expect(qurlCalls).toBe(0);
+  });
+
   it('renders ECS and Kubernetes connector instructions', () => {
     const base = { slug: 'prod', alias: 'prod', port: 8080, image: 'registry.example/qurl:1', bootstrapKey: 'key' };
     expect(renderTunnelInstallMessage({ ...base, environment: 'ecs-fargate' })).toContain('ECS/Fargate task-definition fields');

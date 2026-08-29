@@ -12,6 +12,7 @@ export * from './token-client.js';
 export * from './activity.js';
 export * from './bot.js';
 export * from './connector.js';
+export * from './alias.js';
 export * from './parser.js';
 export * from './qurl-client.js';
 export * from './setup-link.js';
