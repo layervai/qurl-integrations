@@ -154,6 +154,16 @@ describe('Teams HTTP body limits', () => {
     expect(server).toBeDefined();
   });
 
+  it('does not advertise the Express version to callers', async () => {
+    const expressApp = express();
+    const app = { initialize: async () => undefined } as unknown as App;
+    await createTeamsServer({
+      baseUrl: 'https://teams.example', expressApp, app,
+      tokenClient: {} as never, callback: {} as never, state: {} as never,
+    });
+    expect(expressApp.get('x-powered-by')).toBe(false);
+  });
+
   it('enforces the configured body limit on the Teams message route', async () => {
     const expressApp = express();
     const app = {

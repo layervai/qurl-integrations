@@ -107,9 +107,8 @@ export class HttpProviderBinder implements ProviderBinder {
       return { status: 'already_bound' };
     }
     await this.#data.saveTenantCredential(request.teamsTenantId, credential);
-    return credential.keyId === undefined
-      ? { status: 'bound' }
-      : { status: 'bound', bindingReference: credential.keyId };
+    // parseBinding rejects a response without key_id, so keyId is always set.
+    return { status: 'bound', bindingReference: credential.keyId };
   }
 
   async existingBindingResult(request: ProviderBindingRequest): Promise<ProviderBindingResult> {

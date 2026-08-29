@@ -146,6 +146,7 @@ export async function createTeamsServer(options: TeamsServerOptions): Promise<Se
   // TODO(upstream-contract): verify this parser-ordering contract on every
   // @microsoft/teams.apps upgrade; the route-level SDK parser must continue
   // respecting an already parsed body.
+  options.expressApp.disable('x-powered-by');
   options.expressApp.use(express.json({ limit: options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES }));
   installOAuthRoutes(options);
   await options.app.initialize();

@@ -49,6 +49,10 @@ function redactValue(value: unknown, protectedValues: readonly string[], seen: W
         return {
           name: value.name,
           message: redactText(value.message, protectedValues),
+          // A stack carries frames and paths, not values, and is still passed
+          // through the same redaction as the message. Dropping it leaves the
+          // generic operator-facing failures with nothing to triage from.
+          ...(typeof value.stack === 'string' ? { stack: redactText(value.stack, protectedValues) } : {}),
           ...(value.cause === undefined ? {} : { cause: redactValue(value.cause, protectedValues, seen) }),
         };
       }
