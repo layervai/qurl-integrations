@@ -19,10 +19,9 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
@@ -58,27 +57,10 @@ var cliSentinels = map[string]struct {
 	"consume.ErrLinkVerification":       {consume.ErrLinkVerification, VerificationFailed},
 	"consume.ErrAccessDenied":           {consume.ErrAccessDenied, Forbidden},
 	"consume.ErrAccessBusy":             {consume.ErrAccessBusy, Unavailable},
+	"daemon.ErrAlreadyRunning":          {connectordaemon.ErrAlreadyRunning, Conflict},
+	"daemon.ErrResourceGone":            {connectordaemon.ErrResourceGone, NotFound},
+	"state.ErrNoDefaultStateDir":        {state.ErrNoDefaultStateDir, Config},
 
-	// `qurl connector run` lifecycle sentinels. Each choice is argued at its
-	// case in connectorSentinelCode; the rows here are the tripwire's pin.
-	// The missing enrollment credential is the Auth row for this surface.
-	"agent.ErrEnrollmentTokenRequired": {agent.ErrEnrollmentTokenRequired, Auth},
-	// Valid inputs conflicting with this machine's persisted identity: the
-	// Conflict row, resolved by dropping the override or reprovisioning.
-	"agent.ErrIdentityConflict": {agent.ErrIdentityConflict, Conflict},
-	// The manual refresh gate is a missing confirmation (msgNeedsYes's shape):
-	// re-run once with --refresh-mode auto.
-	"agent.ErrRefreshApprovalRequired": {agent.ErrRefreshApprovalRequired, Usage},
-	// Standing configuration forbids the required refresh; remedy is a
-	// configuration change, so Config — an unattended restart hits this with
-	// a valid command line.
-	"agent.ErrRefreshDisabled": {agent.ErrRefreshDisabled, Config},
-	// Reached only via the LAYERV_AGENT_REGISTRATION_REFRESH_MODE env path
-	// (the flag validates as Usage in the command): broken standing config.
-	"agent.ErrRefreshModeInvalid": {agent.ErrRefreshModeInvalid, Config},
-	// The episode's one self-heal already ran and the platform still is not
-	// serving this Connector: an Unavailable posture, kin to the budget exit.
-	"agent.ErrRefreshAlreadyAttempted": {agent.ErrRefreshAlreadyAttempted, Unavailable},
 	// A same-Connector response contradiction is a fail-closed verification
 	// failure; a cross-Connector alias is valid identity in conflicting state.
 	"state.ErrConnectorResourceVerification":  {state.ErrConnectorResourceVerification, VerificationFailed},
@@ -86,11 +68,6 @@ var cliSentinels = map[string]struct {
 	// The Hub trust triple (or a dark build's absent pin) is configuration
 	// even though it lives in the environment.
 	"hub.ErrConfig": {hub.ErrConfig, Config},
-	// The knock-budget exit: the platform's access-granting path stayed
-	// unusable across the whole retry budget — the Unavailable row.
-	"supervisor.ErrTooManyKnockFailures": {supervisor.ErrTooManyKnockFailures, Unavailable},
-	// Authenticated Login without a running route is still not serving.
-	"supervisor.ErrProxyNotServing": {supervisor.ErrProxyNotServing, Unavailable},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can
@@ -114,7 +91,7 @@ var sdkSentinels = map[string]struct {
 	"crid.ErrNonCanonical":                       {crid.ErrNonCanonical, InvalidInput},
 	"crid.ErrForbiddenVersion":                   {crid.ErrForbiddenVersion, InvalidInput},
 
-	// The enrollment/assignment taxonomy `qurl connector run` can surface.
+	// The enrollment/assignment taxonomy a local publish can surface.
 	// Each choice is argued at its case in connectorSentinelCode.
 	// The enrollment token is this surface's credential: refusing it, or the
 	// identity it vouches for, is the Auth row.

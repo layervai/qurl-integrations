@@ -1,14 +1,21 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 // T3 contract tests: the implemented commands against the mock qURL API,
@@ -59,6 +66,7 @@ func TestListContractHeadersAndPagination(t *testing.T) {
 			"crid":        srv.Key.CRID,
 			"target_url":  "https://example.com/data",
 			"status":      "active",
+			"type":        "url",
 		}}, map[string]any{"next_cursor": "page3", "has_more": true})
 	})
 
@@ -199,7 +207,10 @@ func TestResolveDark503TypedUX(t *testing.T) {
 
 func TestDeleteContract(t *testing.T) {
 	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"}})
+	res := runCLI(t, &runOpts{
+		args:             []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+		shareStateDirErr: connectorstate.ErrNoDefaultStateDir,
+	})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -364,6 +375,129 @@ func TestListZeroItemPageWithMoreDoesNotSayNotFound(t *testing.T) {
 	}
 }
 
+func TestListUsesPagedDesiredStateAndLocalTargetWithoutSharingFanout(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id":   srv.Key.ResourceID,
+			"crid":          srv.Key.CRID,
+			"type":          "tunnel",
+			"status":        "active",
+			"desired_state": "on",
+			"serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "list"},
+		localShares: []connectorstate.LocalShare{{
+			ResourceID: srv.Key.ResourceID,
+			CRID:       srv.Key.CRID,
+			TargetURL:  "http://127.0.0.1:3000",
+		}},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "http://127.0.0.1:3000", "on", "unknown"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("list output missing %q:\n%s", want, res.stdout.String())
+		}
+	}
+	if strings.Contains(res.stdout.String(), "…") {
+		t.Fatalf("list truncated the CRID:\n%s", res.stdout.String())
+	}
+}
+
+func TestListDoesNotIssuePerTunnelSharingReads(t *testing.T) {
+	srv := apitest.NewServer(t)
+	key2 := apitest.GenerateResourceKey(t)
+	resource2 := key2.ResourceID
+	crid2 := key2.CRID
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{
+			{"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel", "status": "active", "desired_state": "on", "serving_epoch": 7},
+			{"resource_id": resource2, "crid": crid2, "type": "tunnel", "status": "active", "desired_state": "off", "serving_epoch": 8},
+		}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "list"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "on", crid2, "off", "unknown"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("list output missing %q:\n%s", want, res.stdout.String())
+		}
+	}
+	if strings.Contains(res.stderr.String(), "observed state") || strings.Contains(res.stderr.String(), "sharing") {
+		t.Fatalf("list emitted per-row sharing warning despite no fanout:\n%s", res.stderr.String())
+	}
+}
+
+func TestListWarnsAndOmitsTargetsWhenLocalStateIsUnavailable(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args:           []string{"--endpoint", srv.URL, "list"},
+		localSharesErr: errors.New("corrupt local registry"),
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "on", "unknown"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Errorf("list output missing %q:\n%s", want, res.stdout.String())
+		}
+	}
+	if strings.Contains(res.stdout.String(), "127.0.0.1") {
+		t.Fatalf("list fabricated a local target:\n%s", res.stdout.String())
+	}
+	if got := strings.Count(res.stderr.String(), "Local sharing state is unavailable; local targets were omitted."); got != 1 {
+		t.Fatalf("warning count=%d stderr=%q", got, res.stderr.String())
+	}
+	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {
+		t.Fatalf("list requests=%#v, want only authoritative list", requests)
+	}
+}
+
+func TestEnrichTunnelListReturnsParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	streams := &output.Streams{Out: io.Discard, Err: io.Discard}
+	opts := &globalOpts{streams: streams, resolvedFormat: output.FormatText, loadLocalShares: func(context.Context) ([]connectorstate.LocalShare, error) {
+		return nil, errors.New("local read interrupted")
+	}}
+	page := &qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{{Type: "tunnel"}}}
+	if err := enrichTunnelList(ctx, opts, page); !errors.Is(err, context.Canceled) {
+		t.Fatalf("enrichTunnelList()=%v, want parent cancellation", err)
+	}
+}
+
+func TestListQuietSkipsLocalRegistryAndSharingReads(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 1,
+		}}, map[string]any{"has_more": false})
+	})
+	loads := 0
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "--quiet", "list"}, localSharesLoads: &loads})
+	if res.code != 0 || res.stdout.String() != srv.Key.CRID+"\n" {
+		t.Fatalf("quiet list: code=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
+	}
+	if loads != 0 {
+		t.Fatalf("local registry loads = %d, want zero", loads)
+	}
+	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {
+		t.Fatalf("quiet list requests = %#v, want only resource list", requests)
+	}
+}
+
 func TestDeleteNonInteractiveRequiresYes(t *testing.T) {
 	srv := apitest.NewServer(t)
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "delete", srv.Key.CRID}})
@@ -400,6 +534,22 @@ func TestDeleteInteractiveConfirmAndCancel(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr.String(), "Canceled") {
 		t.Errorf("expected cancel note, got %q", res.stderr.String())
+	}
+}
+
+func TestDeleteInteractiveReadErrorIsSurfaced(t *testing.T) {
+	srv := apitest.NewServer(t)
+	want := errors.New("confirmation input failed")
+	res := runCLI(t, &runOpts{
+		args:  []string{"--endpoint", srv.URL, "delete", srv.Key.CRID},
+		stdin: iotest.ErrReader(want),
+		inTTY: true,
+	})
+	if res.code != 1 || !strings.Contains(res.stderr.String(), want.Error()) {
+		t.Fatalf("delete input error = exit %d stderr %q", res.code, res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Fatal("delete input error must not send a request")
 	}
 }
 

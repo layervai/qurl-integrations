@@ -44,18 +44,15 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-# Per-archive SPDX SBOMs (syft). qurl-connector ships an SPDX SBOM with its
-# customer image (docker-publish.yml, buildx `sbom: true`); this is the same
-# supply-chain surface for the CLI's archives — one `<archive>.sbom.json` per
+# Per-archive SPDX SBOMs (syft): one `<archive>.sbom.json` per
 # tar.gz/zip, uploaded as a release asset and listed in checksums.txt, so the
 # checksum signature below transitively covers every SBOM document.
 sboms:
   - artifacts: archive
 
-# Keyless Sigstore signature over the checksum manifest — qurl-connector's
-# proven cosign model (docker-publish.yml signs the image digest once, not
-# per-tag) adapted from image digests to blobs: sign ONCE over checksums.txt,
-# which enumerates the SHA-256 of every archive, deb/rpm, and SBOM, instead
+# Keyless Sigstore signature over the checksum manifest. Sign once over
+# checksums.txt, which enumerates the SHA-256 of every archive, deb/rpm, and
+# SBOM, instead
 # of per-artifact signatures. cosign exchanges the release-cli job's OIDC
 # token (id-token: write in .github/workflows/release-please.yml) for a
 # short-lived Fulcio certificate whose SAN names this repo + workflow + ref,
@@ -122,8 +119,6 @@ homebrew_casks:
       verified: github.com/layervai/qurl-integrations/releases/download
     manpages:
       - manpages/qurl-completion.1
-      - manpages/qurl-connector-run.1
-      - manpages/qurl-connector.1
       - manpages/qurl-delete.1
       - manpages/qurl-get.1
       - manpages/qurl-list.1
@@ -131,6 +126,10 @@ homebrew_casks:
       - manpages/qurl-logout.1
       - manpages/qurl-publish.1
       - manpages/qurl-resolve.1
+      - manpages/qurl-restart.1
+      - manpages/qurl-start.1
+      - manpages/qurl-status.1
+      - manpages/qurl-stop.1
       - manpages/qurl-version.1
       - manpages/qurl-whoami.1
       - manpages/qurl.1

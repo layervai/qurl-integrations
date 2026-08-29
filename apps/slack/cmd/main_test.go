@@ -57,7 +57,7 @@ func newFakeProvider() *auth.DDBProvider {
 const (
 	validStateSecret          = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
 	defaultSlackBotScopesCSV  = "commands,chat:write,im:write,users:read"
-	testConnectorImageRepo    = "ghcr.io/layervai/qurl-connector"
+	testConnectorImageRepo    = "ghcr.io/layervai/qurl"
 	testConnectorVersionImage = testConnectorImageRepo + ":v1.2.3"
 	testConnectorLatestImage  = testConnectorImageRepo + ":latest"
 )
@@ -225,15 +225,15 @@ func TestReadTunnelImageConfig(t *testing.T) {
 			wantImage: "",
 		},
 		{
-			name:      "version-tagged image wins",
-			image:     testConnectorVersionImage,
-			fallback:  "unexpected",
-			wantImage: testConnectorVersionImage,
+			name:        "version-tagged production image is rejected",
+			image:       testConnectorVersionImage,
+			fallback:    "unexpected",
+			wantErrText: "must use the immutable ghcr.io/layervai/qurl@sha256",
 		},
 		{
 			name:      "digest-pinned image wins",
-			image:     "localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
-			wantImage: "localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
+			image:     testConnectorImageRepo + "@sha256:" + strings.Repeat("a", 64),
+			wantImage: testConnectorImageRepo + "@sha256:" + strings.Repeat("a", 64),
 		},
 		{
 			name:        "invalid image rejected",
@@ -263,13 +263,13 @@ func TestReadTunnelImageConfig(t *testing.T) {
 		},
 		{
 			name:              "malformed reference routes to malformed-reference message",
-			image:             "ghcr.io//qurl-connector:v1",
+			image:             "ghcr.io//qurl:v1",
 			wantErrText:       connectorImageErrMalformedRef,
 			wantErrAbsentText: connectorImageFallbackHint,
 		},
 		{
 			name:        "uppercase repository path routes to malformed-reference message",
-			image:       "ghcr.io/LayerV/qurl-connector:v1",
+			image:       "ghcr.io/LayerV/qurl:v1",
 			wantErrText: connectorImageErrMalformedRef,
 		},
 		{

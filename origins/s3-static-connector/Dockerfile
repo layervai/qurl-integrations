@@ -29,7 +29,7 @@ ENV LISTEN_ADDR=127.0.0.1:8080 \
 # CACHE_DEFAULT_TTL is intentionally unset: cache per the object's Cache-Control
 # (nginx default). Set it only to force a fallback TTL for metadata-less objects.
 
-# Unprivileged uid matches the qurl-connector sidecar (65532). Both listeners
+# Unprivileged uid matches the qurl sidecar (65532). Both listeners
 # bind loopback only (set in the rendered configs); no ports are EXPOSEd —
 # the connector reaches nginx over the shared network namespace.
 # No Docker HEALTHCHECK: the connector/orchestrator owns liveness and this image

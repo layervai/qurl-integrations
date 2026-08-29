@@ -69,6 +69,17 @@ func newTransport(cfg *Config) *transport {
 // The X-Request-Id stays constant across retries of one logical request so the
 // service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
+	return t.do(req, true)
+}
+
+// DoOnce applies the same headers and redaction as Do but never replays the
+// request, including after a 429. It is reserved for writes whose service
+// contract has no idempotency key.
+func (t *transport) DoOnce(req *http.Request) (*http.Response, error) {
+	return t.do(req, false)
+}
+
+func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, error) {
 	req.Header.Set("User-Agent", t.userAgent)
 	req.Header.Set("X-Request-Id", t.newRequestID())
 
@@ -78,7 +89,7 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !retryableResponse(req, resp) || attempt >= maxAttempts {
+		if !allowRetry || !retryableResponse(req, resp) || attempt >= maxAttempts {
 			t.verbosef("< HTTP %d", resp.StatusCode)
 			return resp, nil
 		}

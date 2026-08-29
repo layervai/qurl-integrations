@@ -24,6 +24,11 @@ import (
 // command tree.
 
 type goreleaserConfig struct {
+	Builds []struct {
+		ID     string `yaml:"id"`
+		Main   string `yaml:"main"`
+		Binary string `yaml:"binary"`
+	} `yaml:"builds"`
 	Archives []struct {
 		Files []string `yaml:"files"`
 	} `yaml:"archives"`
@@ -51,7 +56,18 @@ func loadGoreleaserConfig(t *testing.T) goreleaserConfig {
 	if n := len(cfg.Archives); n != 1 {
 		t.Fatalf("expected exactly 1 archive in .goreleaser.yml, got %d", n)
 	}
+	if n := len(cfg.Builds); n != 1 {
+		t.Fatalf("expected exactly 1 customer build in .goreleaser.yml, got %d", n)
+	}
 	return cfg
+}
+
+func TestReleaseBuildsOnlyQURL(t *testing.T) {
+	cfg := loadGoreleaserConfig(t)
+	build := cfg.Builds[0]
+	if build.ID != "qurl" || build.Main != "./apps/cli/cmd/" || build.Binary != "qurl" {
+		t.Fatalf("release build = %+v, want the qurl CLI only", build)
+	}
 }
 
 func TestCaskManpagesMatchGeneratedManTree(t *testing.T) {

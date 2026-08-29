@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/layervai/qurl-integrations/compare/slack-v0.3.1...slack-v0.4.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266))
+
+### Features
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266)) ([16916c9](https://github.com/layervai/qurl-integrations/commit/16916c94937b36a63a8022946d64e7ce47053016))
+
 ## [0.3.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.3.0...slack-v0.3.1) (2026-08-20)
 
 

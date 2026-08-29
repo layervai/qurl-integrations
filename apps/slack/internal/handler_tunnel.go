@@ -21,10 +21,12 @@ import (
 )
 
 const (
-	// Production deploys must set QURL_CONNECTOR_IMAGE to a specific non-latest
+	// Production deploys must set QURL_IMAGE to a specific non-latest
 	// release tag or digest. cmd/main.go requires an explicit dev/sandbox opt-in
 	// before allowing this floating fallback to render.
-	defaultTunnelImage            = "ghcr.io/layervai/qurl-connector:latest"
+	defaultTunnelImage            = "ghcr.io/layervai/qurl:latest"
+	sharingDesiredOn              = "on"
+	sharingDesiredOff             = "off"
 	defaultTunnelLocalPort        = 8080
 	tunnelBootstrapTTL            = "1h"
 	tunnelBootstrapSkew           = 2 * time.Minute
@@ -51,9 +53,6 @@ const (
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
 	connectorAPIVersionPath    = "/v1"
-	connectorAuditDir          = "/var/log/layerv/qurl-connector"
-	connectorAuditFilePath     = connectorAuditDir + "/audit.log"
-	connectorAuditFileEnv      = "QURL_AUDIT_FILE"
 	connectorPIDsLimit         = 512
 	connectorTmpfsCompose      = "/tmp:rw,size=64m"
 	// Pinned multi-arch Docker Official Image used only to prepare exact PVC
@@ -161,8 +160,10 @@ type tunnelInstallArgs struct {
 	// Server-issued connector contract. These fields are populated only after
 	// CreateResource succeeds; parsers never accept them from Slack input.
 	ResourceID         string
+	CRID               string
 	ConnectorRoutingID string
 	KnockResourceID    string
+	ServingEpoch       uint64
 	// APIURL is the canonical /v1 base used for qURL resource CRUD. Native NHP
 	// enrollment and knocks use qurl-go's assigned-cell UDP lifecycle instead of
 	// a public HTTP registration or bootstrap endpoint.
@@ -640,6 +641,7 @@ type tunnelInstallBuild struct {
 	client        *client.Client
 	resource      *client.Resource
 	key           *client.APIKey
+	disableOnFail bool
 	message       string
 	secretMessage string
 }
@@ -659,16 +661,26 @@ type tunnelInstallBuild struct {
 // invariant is protected across panics between key mint and the successful
 // return. On success the caller delivers build.message and, if delivery is not
 // confirmed, revokes build.key via [revokeBootstrapKeyAfterInstallFailure].
+//
+//nolint:gocyclo // Keeping the ordered mutation and compensation transaction visible prevents cleanup ownership from drifting between stages.
 func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, attemptID string) (*tunnelInstallBuild, string, error) {
 	var c *client.Client
 	var mintedKey *client.APIKey
+	var resourceID string
+	sharingNeedsCleanup := false
 	buildComplete := false
 	defer func() {
 		if rec := recover(); rec != nil {
 			if mintedKey != nil && !buildComplete {
 				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, mintedKey, "build_panic")
 			}
+			if sharingNeedsCleanup && !buildComplete {
+				disableSharingAfterInstallFailure(h.baseCtx, log, c, resourceID, "build_panic")
+			}
 			panic(rec)
+		}
+		if sharingNeedsCleanup && !buildComplete {
+			disableSharingAfterInstallFailure(h.baseCtx, log, c, resourceID, "build_failed")
 		}
 	}()
 
@@ -706,6 +718,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: resource response missing connector contract", "error", err)
 		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No enrollment token was minted. Please retry or contact support.", err
 	}
+	resourceID = resource.ResourceID
 
 	// Bind/verify the channel shortcut before minting the enrollment token so an
 	// alias conflict fails without creating a secret. After the resource exists,
@@ -718,10 +731,29 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, aliasStatus, err
 	}
 
+	previousSharing, err := c.GetSharing(ctx, resource.ResourceID)
+	if err != nil {
+		log.Error("tunnel install: read sharing state failed", "error", err, "resource_id", resource.ResourceID)
+		return nil, sanitizeAPIError(err, "Failed to read qURL Connector sharing state"), err
+	}
+	restarted, err := restartSharingForInstall(ctx, c, resource.ResourceID, previousSharing)
+	if err != nil {
+		log.Error("tunnel install: enable sharing failed", "error", err, "resource_id", resource.ResourceID)
+		return nil, sanitizeAPIError(err, "Failed to enable qURL Connector sharing"), err
+	}
+	// Preserve the authoritative prior intent on later setup failure. A
+	// prior-on daemon receives the stale-session terminal signal and reacquires
+	// the rotated epoch, so turning it off here would create an outage without
+	// revoking that device. A prior-off install owns the new on transition and
+	// compensates it back off if no usable install is delivered.
+	sharingNeedsCleanup = previousSharing.DesiredState == sharingDesiredOff
+	resolvedArgs.CRID = restarted.CRID
+	resolvedArgs.ServingEpoch = restarted.ServingEpoch
+
 	preparedMessage, err := h.prepareTunnelInstallMessage(&resolvedArgs)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		return nil, "qURL Connector setup could not render the install instructions. No enrollment token was minted. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("qURL Connector setup could not render the install instructions. No enrollment token was minted. Please retry or contact support.", previousSharing), err
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
@@ -737,7 +769,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// build ahead of the kind-first producer), so carry the server's
 		// invalid_fields through — it names the rejected key.
 		log.Error("tunnel install: enrollment token mint failed", withAPIErrorAttrs(err, "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)...)
-		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), err
+		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
 	if !credentialConfirmsKindFirst(key) {
@@ -761,34 +793,94 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// ignored the request shape — it may well have minted something
 		// longer-lived. Nor does the copy claim the revoke succeeded; that is
 		// best-effort (tunnel_bootstrap_cleanup_failed).
-		return nil, "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated.", errKindFirstUnconfirmed
+		return nil, sharingInstallFailureMessage("The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated.", previousSharing), errKindFirstUnconfirmed
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "missing_plaintext")
-		return nil, "The qURL API did not return an enrollment token. Please retry or contact support.", errMissingBootstrapPlaintext
+		return nil, sharingInstallFailureMessage("The qURL API did not return an enrollment token. Please retry or contact support.", previousSharing), errMissingBootstrapPlaintext
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "shell_validation_failed")
-		return nil, "The qURL API returned an enrollment token in an unexpected format. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("The qURL API returned an enrollment token in an unexpected format. Please retry or contact support.", previousSharing), err
 	}
 
 	msg, err := preparedMessage.render(&resolvedArgs, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
 		log.Error("tunnel install: render failed after enrollment token mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
-		return nil, "qURL Connector setup could not render the install instructions. The temporary enrollment token was revoked. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("qURL Connector setup could not render the install instructions. The temporary enrollment token was revoked. Please retry or contact support.", previousSharing), err
 	}
 	secretMsg, err := renderTunnelBootstrapSecretMessage(&resolvedArgs, key, h.now())
 	if err != nil {
 		log.Error("tunnel install: secret message render failed after enrollment token mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "secret_message_render_failed")
-		return nil, "qURL Connector setup could not render the enrollment-token DM. The temporary enrollment token was revoked. Please retry or contact support.", err
+		return nil, sharingInstallFailureMessage("qURL Connector setup could not render the enrollment-token DM. The temporary enrollment token was revoked. Please retry or contact support.", previousSharing), err
 	}
 
 	buildComplete = true
-	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, secretMessage: secretMsg}, "", nil
+	return &tunnelInstallBuild{client: c, resource: resource, key: key, disableOnFail: sharingNeedsCleanup, message: msg, secretMessage: secretMsg}, "", nil
+}
+
+func sharingInstallFailureMessage(message string, previous *client.SharingState) string {
+	if previous != nil && previous.DesiredState == sharingDesiredOn {
+		return message + " Your existing qURL share remains enabled."
+	}
+	return message + " This setup newly enabled sharing, so qURL is turning it back off."
+}
+
+func disableSharingAfterInstallFailure(ctx context.Context, log *slog.Logger, c *client.Client, resourceID, reason string) {
+	if c == nil || strings.TrimSpace(resourceID) == "" {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("tunnel install: panic compensating newly enabled sharing", "recover", rec, "resource_id", resourceID, "reason", reason)
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cleanupCtx, cancel := context.WithTimeout(ctx, tunnelBootstrapCleanupTimeout)
+	defer cancel()
+	if _, err := c.SetSharing(cleanupCtx, resourceID, sharingDesiredOff); err != nil {
+		log.Error("tunnel install: failed to compensate newly enabled sharing", "error", err, "resource_id", resourceID, "reason", reason)
+	}
+}
+
+func restartSharingForInstall(ctx context.Context, c *client.Client, resourceID string, previous *client.SharingState) (*client.SharingState, error) {
+	restarted, err := c.RestartSharing(ctx, resourceID)
+	if err == nil {
+		return restarted, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, errors.Join(err, ctxErr)
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode != http.StatusTooManyRequests && apiErr.StatusCode < http.StatusInternalServerError {
+		// A deterministic client rejection cannot have applied the restart. Do
+		// not adopt a concurrent actor's later epoch as if this request owned it.
+		return nil, err
+	}
+	// Restart has no service-backed idempotency key, so its POST is sent only
+	// once. A lost response, throttle, or server failure may still mean the
+	// epoch advanced. Adopt a newer authoritative on-state; never hide the
+	// ambiguity by replaying the POST.
+	current, reconcileErr := c.GetSharing(ctx, resourceID)
+	if reconcileErr != nil {
+		return nil, errors.Join(
+			fmt.Errorf("qURL sharing restart result is ambiguous: %w", err),
+			fmt.Errorf("read authoritative sharing state: %w", reconcileErr),
+		)
+	}
+	if previous != nil && current.DesiredState == sharingDesiredOn && current.ServingEpoch > previous.ServingEpoch {
+		return current, nil
+	}
+	return nil, fmt.Errorf("qURL sharing restart result is ambiguous and authoritative state did not advance: %w", err)
 }
 
 // processTunnelInstall is the async-worker body for qURL Connector setup. It
@@ -812,6 +904,9 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 			log.Error("tunnel install: panic in setup worker", "recover", rec, "stack", string(debug.Stack()))
 			if panicCleanup != nil {
 				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "unexpected_panic")
+				if panicCleanup.disableOnFail {
+					disableSharingAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.resource.ResourceID, "unexpected_panic")
+				}
 			}
 			h.postTunnelInstallUnexpectedFailureNotice(log, req)
 		}
@@ -846,6 +941,9 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
 		log.Error("tunnel install: Slack DM delivery failed after enrollment token mint; revoking token before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
+		if build.disableOnFail {
+			disableSharingAfterInstallFailure(h.baseCtx, log, build.client, build.resource.ResourceID, "dm_delivery_failed")
+		}
 		panicCleanup = nil
 		message := "Slack could not deliver the qURL Connector enrollment token by DM, so the temporary token was revoked and the install instructions were not posted."
 		if errors.Is(err, ErrSlackMissingScope) {
@@ -873,6 +971,9 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after enrollment token mint; revoking token because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
+		if build.disableOnFail {
+			disableSharingAfterInstallFailure(h.baseCtx, log, build.client, build.resource.ResourceID, "response_url_delivery_failed")
+		}
 		panicCleanup = nil
 		// Intentionally notify both places: the DM reaches admins who saw the key
 		// first, while response_url covers the command surface if DM delivery fails.
@@ -889,6 +990,9 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	// surfacing the anomaly as unexpected.
 	log.Error("tunnel install: unknown Slack follow-up delivery state after enrollment token mint; revoking token", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "delivery_state", uint8(delivery))
 	safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "unknown_response_url_delivery_state")
+	if build.disableOnFail {
+		disableSharingAfterInstallFailure(h.baseCtx, log, build.client, build.resource.ResourceID, "unknown_response_url_delivery_state")
+	}
 	panicCleanup = nil
 	return agentProtectConnectorAuditUnexpectedFailureResult
 }
@@ -1232,9 +1336,9 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 func tunnelBootstrapRetirementNote(environment tunnelInstallEnvironment) string {
 	switch environment {
 	case tunnelEnvECSFargate:
-		return "Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager enrollment-token secret."
+		return "Validate the warm-start task revision above before deleting the enrollment-token file from the qurl-bootstrap EFS access point."
 	case tunnelEnvKubernetes:
-		return "Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes enrollment-token Secret."
+		return "Validate the warm-start workload revision above before deleting the Kubernetes enrollment-token Secret."
 	case tunnelEnvDocker, tunnelEnvCompose:
 	default:
 	}
@@ -1283,7 +1387,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 	if !usingDefaultImage {
 		return ""
 	}
-	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Production must set `QURL_CONNECTOR_IMAGE` to a specific non-latest release tag or digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`."
+	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Production must set `QURL_IMAGE` to the immutable digest from the CLI release asset, for example `ghcr.io/layervai/qurl@sha256:<digest>`."
 }
 
 func tunnelInstallRateLimitMessage(err error) string {
@@ -1375,37 +1479,33 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	if args == nil {
 		return "", errors.New("tunnel install args are missing")
 	}
-	quotedSlug, err := yamlSingleQuoted(args.Slug)
-	if err != nil {
+	if err := validateTunnelRouteIdentity(args); err != nil {
 		return "", err
 	}
-	// Empty metadata is retained only for parser/renderer unit tests. Production
-	// buildTunnelInstall validates the full producer triple before this renderer
-	// runs, so a one-shot enrollment token is never reused for resources. Only the
-	// two persisted route identities belong in YAML; qurl-connector rehydrates
-	// knock_resource_id from the authenticated resource response on every start.
-	identityYAML := ""
-	if args.ResourceID != "" || args.ConnectorRoutingID != "" || args.KnockResourceID != "" {
-		// Revalidate at the renderer boundary even though production validates
-		// before minting; renderers are also called directly by tests and tools.
-		if err := validateTunnelRouteIdentity(args); err != nil {
+	if strings.TrimSpace(args.CRID) == "" || args.ServingEpoch == 0 {
+		return "", errors.New("tunnel lifecycle CRID and serving epoch are required")
+	}
+	values := []string{args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		var err error
+		quoted[i], err = yamlSingleQuoted(strings.TrimSpace(value))
+		if err != nil {
 			return "", err
 		}
-		identityValues := []string{args.ResourceID, args.ConnectorRoutingID}
-		quotedIdentity := make([]string, len(identityValues))
-		for i, value := range identityValues {
-			quotedIdentity[i], err = yamlSingleQuoted(strings.TrimSpace(value))
-			if err != nil {
-				return "", err
-			}
-		}
-		identityYAML = fmt.Sprintf("\n    resource_id: %s\n    connector_routing_id: %s", quotedIdentity[0], quotedIdentity[1])
 	}
-	return fmt.Sprintf(`routes:
-  - id: %s
-    type: http
+	return fmt.Sprintf(`version: 1
+shares:
+  - crid: %s
+    resource_id: %s
+    connector_id: %s
+    connector_routing_id: %s
+    knock_resource_id: %s
+    target_url: %s
     local_ip: 127.0.0.1
-    local_port: %d%s`, quotedSlug, args.LocalPort, identityYAML), nil
+    local_port: %d
+    desired_state: on
+    serving_epoch: %d`, quoted[0], quoted[1], quoted[2], quoted[3], quoted[4], quoted[5], args.LocalPort, args.ServingEpoch), nil
 }
 
 func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
@@ -1461,6 +1561,13 @@ func ValidateConnectorAPIURL(raw string) error {
 	return nil
 }
 
+func qurlEndpointFromConnectorAPIURL(raw string) (string, error) {
+	if err := ValidateConnectorAPIURL(raw); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(strings.TrimSpace(raw), "/v1"), nil
+}
+
 func renderPortablePipefailShell() string {
 	return `if (set -o pipefail) 2>/dev/null; then
   set -o pipefail
@@ -1499,7 +1606,14 @@ esac`, varName, placeholder, targetDescription, allowedCharClass, allowedDescrip
 }
 
 func renderBootstrapKeyPromptShell() string {
-	return `if [ -z "${QURL_BOOTSTRAP_KEY:-}" ]; then
+	return `# Disable allexport before copying the inherited value into a fresh,
+# non-exported shell variable. dash retains an imported variable's export bit
+# even across unset/reassignment, so the runtime variable intentionally uses a
+# different name. No child process starts before the inherited name is unset.
+set +a
+QURL_BOOTSTRAP_KEY_VALUE=${QURL_BOOTSTRAP_KEY-}
+unset QURL_BOOTSTRAP_KEY
+if [ -z "${QURL_BOOTSTRAP_KEY_VALUE:-}" ]; then
   if [ ! -t 0 ]; then
     echo "Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal." >&2
     exit 1
@@ -1510,7 +1624,7 @@ func renderBootstrapKeyPromptShell() string {
     stty -echo
     trap 'if [ -n "$STTY_STATE" ]; then stty "$STTY_STATE" 2>/dev/null || true; fi' INT TERM EXIT
   fi
-  if ! IFS= read -r QURL_BOOTSTRAP_KEY; then
+  if ! IFS= read -r QURL_BOOTSTRAP_KEY_VALUE; then
     if [ -n "$STTY_STATE" ]; then
       stty "$STTY_STATE"
       trap - INT TERM EXIT
@@ -1525,7 +1639,7 @@ func renderBootstrapKeyPromptShell() string {
   fi
   printf '\n' >&2
 fi
-if [ -z "$QURL_BOOTSTRAP_KEY" ]; then
+if [ -z "$QURL_BOOTSTRAP_KEY_VALUE" ]; then
   echo "Enrollment token is required." >&2
   exit 1
 fi`
@@ -1536,16 +1650,16 @@ func renderBootstrapKeyFileInstallShell(targetPath string) string {
 	// printf may be external, which would briefly expose the secret in argv.
 	// Keep this aligned with validateBootstrapAPIKeyForShell: the key is streamed
 	// through an unquoted heredoc, so that validator owns heredoc-expansion safety.
-	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
+	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY_VALUE}
 $SUDO sh -c 'set -eu
 umask 077
 head -c "$2" > "$1"
 chown 65532:65532 "$1"
 chmod 0400 "$1"
 ' _ %s "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF
-$QURL_BOOTSTRAP_KEY
+$QURL_BOOTSTRAP_KEY_VALUE
 QURL_BOOTSTRAP_KEY_EOF
-unset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN`, targetPath)
+unset QURL_BOOTSTRAP_KEY_VALUE QURL_BOOTSTRAP_KEY_LEN`, targetPath)
 }
 
 func renderBootstrapKeyToCommandShell(command string) string {
@@ -1555,11 +1669,11 @@ func renderBootstrapKeyToCommandShell(command string) string {
 	// implementations used in our install targets: bash, dash, and BusyBox ash.
 	// Keep this aligned with validateBootstrapAPIKeyForShell: the key is streamed
 	// through an unquoted heredoc, so that validator owns heredoc-expansion safety.
-	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}
+	return fmt.Sprintf(`QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY_VALUE}
 head -c "$QURL_BOOTSTRAP_KEY_LEN" <<QURL_BOOTSTRAP_KEY_EOF | %s
-$QURL_BOOTSTRAP_KEY
+$QURL_BOOTSTRAP_KEY_VALUE
 QURL_BOOTSTRAP_KEY_EOF
-unset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN`, command)
+unset QURL_BOOTSTRAP_KEY_VALUE QURL_BOOTSTRAP_KEY_LEN`, command)
 }
 
 func tunnelBootstrapTTLLabel() string {

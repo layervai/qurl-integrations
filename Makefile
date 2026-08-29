@@ -153,13 +153,12 @@ endef
 
 # cli.yml's quality gates for the host OS, so a contributor can run them
 # before pushing. Adding or removing a gate there means updating this target
-# too. What it deliberately cannot mirror: the three-OS matrix (only the host
-# OS runs here; CI provisions an ephemeral platform keyring while this target
-# uses the host's configured keyring) and the sandbox
-# gate's vars.CLI_SANDBOX_E2E arming plus repo-wide serialization — the tagged
-# test command itself still runs. `goreleaser check` needs goreleaser on PATH,
-# like release-snapshot above. The 40 floor mirrors cli.yml's coverage gate;
-# raise both together once the v2 code lands.
+# too. It cannot mirror the three-OS matrix: only the host OS runs here, and CI
+# provisions an ephemeral platform keyring while this target uses the host's
+# configured keyring. Credentialed sandbox smoke/soak now runs only in the
+# private orchestrator against the exact public source SHA. `goreleaser check`
+# needs goreleaser on PATH, like release-snapshot above. The 40 floor mirrors
+# cli.yml's coverage gate; raise both together once the v2 code lands.
 check-cli:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./apps/cli/...
 	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./apps/cli/...
@@ -170,9 +169,9 @@ check-cli:
 		exit 1; \
 	fi
 	go vet ./apps/cli/...
+	go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...
 	go tool govulncheck ./apps/cli/...
 	QURL_TEST_HARNESS=1 go test -count=1 ./apps/cli/...
-	go test -tags=clisandbox -count=1 ./apps/cli/...
 	goreleaser check
 
 # Kept verbose for local debugging — discord.yml adds --silent.

@@ -152,18 +152,11 @@ jobs:
     # canceled during cache upload.
     timeout-minutes: 30
     env:
-      # The customer-facing Connector release image cannot be published until
-      # the underlying platform reaches production, so the digest pinned in
-      # qurl_connector_release_contract.sh may not resolve yet. While "false",
-      # an unresolvable pin degrades to the emitter-side golden fence in
-      # `slack / test` (TestS3WebsiteReleaseContractRouteMatchesRenderedConfig,
-      # which keeps the route golden byte-identical to what the Slack flow
-      # generates) plus a loud warning — never a silent pass. This is the one
-      # line to flip to "true" once a public release exists, which makes a
-      # missing image fail closed again; the script implements the behaviour.
-      # Mirrors the *_PRODUCER_FIXTURE_REQUIRED knobs in
-      # layervai/qurl-connector's cross-repo-contracts.yml.
-      CONNECTOR_RELEASE_IMAGE_REQUIRED: "false"
+      # Until the first qurl image release is digest-pinned here, the script
+      # emits a loud warning and the public CLI image smoke plus byte-identical
+      # guided-config fixture remain the active gates. Flip this to true when
+      # QURL_IMAGE is set to the immutable release digest.
+      QURL_RELEASE_IMAGE_REQUIRED: "false"
       # PRs #1158 and #1231 add security assertions the currently pinned
       # immutable origin predates. Waive only that exact digest so the producer
       # fixes can merge and publish; behavior_test.sh rejects a malformed or
@@ -192,10 +185,10 @@ jobs:
 
       # The script owns the pin, the resolvability preflight, the warn-vs-fail
       # decision, and the linux/amd64 + linux/arm64 sweep, so a local run
-      # behaves exactly like CI. It reads CONNECTOR_RELEASE_IMAGE_REQUIRED from
+      # behaves exactly like CI. It reads QURL_RELEASE_IMAGE_REQUIRED from
       # the job env above.
-      - name: Verify released Connector S3 route
-        run: bash origins/s3-static-connector/test/qurl_connector_release_contract.sh
+      - name: Verify released qurl S3 headless config
+        run: bash origins/s3-static-connector/test/qurl_image_release_contract.sh
 
       - name: Verify Slack-pinned S3 origin (linux/amd64)
         env:

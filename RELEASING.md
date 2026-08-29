@@ -19,12 +19,16 @@ Release; the `release-cli` job then runs GoReleaser, which attaches:
 | `qurl_<version>_<os>_<arch>.tar.gz.sbom.json` (`.zip.sbom.json` for windows) | Per-archive SPDX 2.3 SBOM (syft) |
 | `checksums.txt` | SHA-256 manifest of every archive, package, and SBOM |
 | `checksums.txt.sigstore.json` | Keyless Sigstore signature bundle over `checksums.txt` |
+| `qurl-image.txt` | Exact tested multi-architecture `ghcr.io/layervai/qurl@sha256:...` image reference |
+| `qurl-image-buildkit-manifest.json` | Signed binding from that index to both platforms' BuildKit provenance and SPDX statement digests |
 
-The trust chain is deliberately single-rooted, following
-qurl-connector's sign-the-digest-once model: the signature covers
-`checksums.txt`, and `checksums.txt` enumerates the SHA-256 of every
-other asset. Verify the signature, then verify your download against the
-manifest — nothing else needs its own signature.
+The downloadable binary/package trust chain is deliberately single-rooted:
+the signature covers `checksums.txt`, and `checksums.txt` enumerates every
+archive, package, and archive SBOM. The OCI image is published after
+GoReleaser, so `qurl-image.txt` is intentionally not in that manifest. Its
+trust root is the independent keyless signature on the exact recorded digest
+plus a signed manifest that binds that index to both platforms' BuildKit
+provenance and SPDX statements by content digest.
 
 ## Verify a release
 
@@ -74,6 +78,50 @@ check out — treat any of those as "do not install".
 
 The bundle embeds the signature, certificate, and Rekor inclusion
 proof, so step 1 also works offline (`--offline`).
+
+## Verify the qurl container image
+
+Download `qurl-image.txt` from the same CLI release. It contains one immutable
+reference such as `ghcr.io/layervai/qurl@sha256:...`; guided Docker, Compose,
+Kubernetes, ECS, and S3-origin installs render this digest rather than a tag.
+Verify the exact reference before deploying it:
+
+```bash
+image="$(cat qurl-image.txt)"
+printf '%s\n' "$image" | grep -Eq '^ghcr\.io/layervai/qurl@sha256:[0-9a-f]{64}$' || {
+  echo "unexpected qurl image reference" >&2
+  exit 1
+}
+
+identity='https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main'
+issuer='https://token.actions.githubusercontent.com'
+
+cosign verify \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" \
+  "$image"
+cosign verify-attestation \
+  --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" \
+  "$image"
+```
+
+Both commands must succeed. The release workflow first smokes both
+`linux/amd64` and `linux/arm64` manifests, promotes that same digest, attaches
+BuildKit SLSA/SPDX statements to each platform, validates the exact OCI
+manifest subjects and each statement's type and nonempty predicate, signs a
+manifest of their exact blob digests against the
+index, signs the index itself, and then runs these verification commands. The
+release's `qurl-image-buildkit-manifest.json` is the human-readable predicate
+for that signed binding. Do not replace the digest from `qurl-image.txt` with
+the mutable release tag.
+
+Recovery reruns never rebuild over an existing `vX.Y.Z` image tag. They resolve
+the already-published digest, re-run both platform smokes, require its BuildKit
+provenance to name the checked-out release commit and canonical repository,
+and finish signing/uploading that same digest. An ambiguous registry lookup
+fails closed instead of treating the tag as absent.
 
 ## SBOMs
 

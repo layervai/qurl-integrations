@@ -1,5 +1,38 @@
 # Changelog
 
+## [2.0.3](https://github.com/layervai/qurl-integrations/compare/v2.0.2...v2.0.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** recover revoked Connector identity ([#1276](https://github.com/layervai/qurl-integrations/issues/1276)) ([aeb1eea](https://github.com/layervai/qurl-integrations/commit/aeb1eea0b696ab4bb19a7d3da7c65b98b1ca5c2c))
+* **cli:** report status for remote URL resources ([#1274](https://github.com/layervai/qurl-integrations/issues/1274)) ([21c2474](https://github.com/layervai/qurl-integrations/commit/21c2474160e054a2f64651eb3d30351524aaac7b))
+
+## [2.0.2](https://github.com/layervai/qurl-integrations/compare/v2.0.1...v2.0.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** bind and validate CRID lifecycle continuity ([#1272](https://github.com/layervai/qurl-integrations/issues/1272)) ([6d25194](https://github.com/layervai/qurl-integrations/commit/6d25194d824a9dcf8e1b7d5748d30909dd47dd9e))
+
+## [2.0.1](https://github.com/layervai/qurl-integrations/compare/v2.0.0...v2.0.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** pin qurl-go and stabilize release smoke ([#1270](https://github.com/layervai/qurl-integrations/issues/1270)) ([8243c04](https://github.com/layervai/qurl-integrations/commit/8243c04cd967a112c2883d1e5b23ead93491fb21))
+
+## [2.0.0](https://github.com/layervai/qurl-integrations/compare/v1.8.0...v2.0.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266))
+
+### Features
+
+* **cli:** ship CRID lifecycle commands ([#1266](https://github.com/layervai/qurl-integrations/issues/1266)) ([16916c9](https://github.com/layervai/qurl-integrations/commit/16916c94937b36a63a8022946d64e7ce47053016))
+
 ## [1.8.0](https://github.com/layervai/qurl-integrations/compare/v1.7.0...v1.8.0) (2026-08-25)
 
 

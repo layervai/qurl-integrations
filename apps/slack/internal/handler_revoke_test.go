@@ -100,6 +100,7 @@ func TestHandleRevoke_NonAdmin(t *testing.T) {
 func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Handler {
 	t.Helper()
 	ts := newAdminTestServers(t)
+	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
 		if body != "" {
@@ -107,6 +108,18 @@ func newRevokeHandlerWithDeleteStatus(t *testing.T, status int, body string) *Ha
 		}
 	})
 	return newAdminTestHandler(t, ts)
+}
+
+func addRevokeResourceRead(t *testing.T, ts *adminTestServers, resourceID, resourceType string) {
+	t.Helper()
+	ts.addCustomer(http.MethodGet, "/v1/resources/"+resourceID, func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			"resource_id": resourceID,
+			"type":        resourceType,
+			"slug":        testRevokeAlias,
+			"status":      client.StatusActive,
+		})
+	})
 }
 
 func TestRevokeResource_Success(t *testing.T) {
@@ -375,6 +388,7 @@ func TestHandleList_NoRevokeButtonForNonAdmin(t *testing.T) {
 func TestHandleListRevokeClick_Revokes(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
 	var hits atomic.Int32
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -487,6 +501,7 @@ func TestRevokeResource_PurgesChannelBindings(t *testing.T) {
 	// A SECOND channel exposes the revoked resource via allowed_resource_ids only
 	// (no alias) — proves the sweep is team-wide and clears the SS surface too.
 	ts.seedChannelExposure(t, testAdminTeamID, otherChannelID, testRevokeResourceID)
+	addRevokeResourceRead(t, ts, testRevokeResourceID, client.ResourceTypeURL)
 	ts.addCustomer(http.MethodDelete, "/v1/resources/"+testRevokeResourceID, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})

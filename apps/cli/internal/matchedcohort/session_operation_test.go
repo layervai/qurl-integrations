@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,21 @@ import (
 
 	qurl "github.com/layervai/qurl-go/qurl"
 )
+
+func testProtectedResourceID(t *testing.T, discriminator byte) string {
+	t.Helper()
+	scalar := make([]byte, 32)
+	scalar[len(scalar)-1] = discriminator
+	private, err := ecdh.P256().NewPrivateKey(scalar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(private.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(der)
+}
 
 func TestConsumerPrepareCommitsExactOperationBeforeAdmission(t *testing.T) {
 	ctx := context.Background()
@@ -56,14 +72,16 @@ func TestQURLSessionRuntimePreparesOfflineFromDurableState(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := PrepareOperationRequest{AWSAccountID: "111122223333", AWSRegion: "us-east-2",
-		Identity: FixedIdentity{AgentID: state.AgentID, OwnerID: "auth0|canary-owner", KnockResourceID: "resource-a"},
-		Cohort:   CohortPlan{CellID: "cell-01", SessionControlTable: "sandbox-session-control", QURLAgentKeysTable: "control-agent-keys"},
-		RunID:    "0123456789abcdef", RunAttempt: 7, PreparedAt: now, ExpiresAt: now.Add(20 * time.Minute)}
+		Identity: FixedIdentity{AgentID: state.AgentID, OwnerID: "auth0|canary-owner",
+			ResourceID: testProtectedResourceID(t, 1), KnockResourceID: "resource-a"},
+		Cohort: CohortPlan{CellID: "cell-01", SessionControlTable: "sandbox-session-control", QURLAgentKeysTable: "control-agent-keys"},
+		RunID:  "0123456789abcdef", RunAttempt: 7, PreparedAt: now, ExpiresAt: now.Add(20 * time.Minute)}
 	operation, err := (qurlSessionRuntime{}).Prepare(ctx, store, request)
 	if err != nil {
 		t.Fatalf("offline Prepare: %v", err)
 	}
 	if operation.AgentID != state.AgentID || operation.AgentPublicKeyB64 != publicKey || operation.ResourceID != "resource-a" ||
+		operation.ProtectedResourceID != request.Identity.ResourceID ||
 		operation.OwnerID != request.Identity.OwnerID || operation.OperationID == "" || operation.BindingSHA256 == "" {
 		t.Fatalf("offline operation = %#v", operation)
 	}
@@ -210,6 +228,24 @@ func TestConsumerRejectsPreparedOperationTimeDriftBeforeCommitOrRecovery(t *test
 	}
 }
 
+func TestConsumerRejectsPreparedOperationProtectedResourceDriftBeforeCommit(t *testing.T) {
+	consumer, authority, request, runtime := sessionFixture(t)
+	runtime.operation.ProtectedResourceID = runtime.operation.ResourceID
+	blobs := consumer.Blobs.(*memoryBlobs)
+	blobs.mu.Lock()
+	before := len(blobs.values)
+	blobs.mu.Unlock()
+	if _, _, err := consumer.Prepare(context.Background(), authority, request); err == nil {
+		t.Fatal("protected-resource drift was accepted")
+	}
+	blobs.mu.Lock()
+	after := len(blobs.values)
+	blobs.mu.Unlock()
+	if runtime.prepares != 1 || runtime.recovers != 0 || after != before {
+		t.Fatalf("protected-resource drift changed durable or recovery state: before=%d after=%d runtime=%#v", before, after, runtime)
+	}
+}
+
 func TestConsumerRecoveryFirstResumesDispatchAndClassifiesLostCommit(t *testing.T) {
 	ctx := context.Background()
 	consumer, authority, request, runtime := sessionFixture(t)
@@ -265,7 +301,7 @@ func TestConsumerMappingPersistenceFailureDestroysLiveAuthorityAndRecovers(t *te
 	consumer, authority, request, runtime := sessionFixture(t)
 	blobs := consumer.Blobs.(*memoryBlobs)
 	runtime.failMappedCommit = blobs
-	runtime.recovery = []SessionTerminal{{State: OperationClosed, WasAdmitted: true, CellID: "cell-01", SessionID: 9,
+	runtime.recovery = []SessionTerminal{{State: OperationClosed, WasAdmitted: true, CellID: request.Cohort.CellID, SessionID: 9,
 		SessionIssuedAtMillis: 1700000000000, RunID: request.RunID, RunAttempt: request.RunAttempt, CloseEventID: "close-1"}}
 	key, _, err := consumer.Prepare(ctx, authority, request)
 	if err != nil {
@@ -281,29 +317,27 @@ func TestConsumerMappingPersistenceFailureDestroysLiveAuthorityAndRecovers(t *te
 	}
 }
 
-func TestDurableCycleKnockerBridgesPreparedOperationAndExactRetirement(t *testing.T) {
+func TestDurableManagedAdmitterBridgesPreparedOperationAndExactRetirement(t *testing.T) {
 	ctx := context.Background()
 	consumer, authority, request, runtime := sessionFixture(t)
 	key, record, err := consumer.Prepare(ctx, authority, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	knocker, err := NewDurableCycleKnocker(ctx, consumer, key, record.Operation.ResourceID, authority.Identities[0].Selector)
+	admitter, err := newDurableManagedAdmitter(ctx, consumer, key, &authority.Identities[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := knocker.BeginCycle(); err != nil || knocker.CycleRunID() != record.Operation.RunID {
-		t.Fatalf("BeginCycle = %q %v", knocker.CycleRunID(), err)
+	admission, err := admitter.Admit(ctx, record.Operation.ResourceID, authority.Identities[0].ResourceID)
+	if err != nil || admission.Token == "" || admission.ResourceHost == "" || admission.RunID != record.Operation.RunID ||
+		admission.RunAttempt != record.Operation.RunAttempt || admission.SessionID == 0 {
+		t.Fatalf("Admit = %#v %v", admission, err)
 	}
-	result, err := knocker.Knock(ctx)
-	if err != nil || result.ACTokens[record.Operation.ResourceID] == "" || result.ResourceHost[record.Operation.ResourceID] == "" {
-		t.Fatalf("Knock = %#v %v", result, err)
+	if _, err := admitter.Admit(ctx, record.Operation.ResourceID, authority.Identities[0].ResourceID); err == nil {
+		t.Fatal("duplicate Admit unexpectedly succeeded")
 	}
-	if _, err := knocker.Knock(ctx); !errors.Is(err, errSessionRecoveryRequired) {
-		t.Fatalf("duplicate Knock = %v", err)
-	}
-	if err := knocker.EndCycle(ctx); err != nil {
-		t.Fatalf("EndCycle = %v", err)
+	if err := admitter.Retire(ctx, admission); err != nil {
+		t.Fatalf("Retire = %v", err)
 	}
 	closed, _, err := loadOperation(ctx, consumer.Blobs, key)
 	if err != nil || closed.Status != OperationClosed || runtime.admits != 1 || runtime.retires != 1 {
@@ -311,22 +345,16 @@ func TestDurableCycleKnockerBridgesPreparedOperationAndExactRetirement(t *testin
 	}
 }
 
-func TestDurableCycleKnockerEndsUnsentOperationWithCanceledTombstone(t *testing.T) {
+func TestDurableManagedOperationRecoversUnsentOperationWithCanceledTombstone(t *testing.T) {
 	ctx := context.Background()
 	consumer, authority, request, runtime := sessionFixture(t)
-	key, record, err := consumer.Prepare(ctx, authority, request)
+	key, _, err := consumer.Prepare(ctx, authority, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	knocker, err := NewDurableCycleKnocker(ctx, consumer, key, record.Operation.ResourceID, authority.Identities[0].Selector)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := knocker.BeginCycle(); err != nil {
-		t.Fatal(err)
-	}
-	if err := knocker.EndCycle(ctx); err != nil {
-		t.Fatalf("EndCycle before Knock = %v", err)
+	terminal, err := consumer.Recover(ctx, key)
+	if err != nil || terminal.State != OperationCanceled {
+		t.Fatalf("Recover before Admit = %#v %v", terminal, err)
 	}
 	canceled, _, err := loadOperation(ctx, consumer.Blobs, key)
 	if err != nil || canceled.Status != OperationCanceled || runtime.admits != 0 || runtime.recovers != 1 {
@@ -393,14 +421,14 @@ func TestConsumerMappedCrashRecoveryRequiresClosedTerminal(t *testing.T) {
 	record, blob, _ := loadOperation(ctx, consumer.Blobs, key)
 	record.Status = OperationMapped
 	record.DispatchToken = strings.Repeat("e", 64)
-	record.Admission = &SessionAdmission{CellID: "cell-01", SessionID: 9, SessionIssuedAtMillis: 1700000000000,
+	record.Admission = &SessionAdmission{CellID: record.Operation.CellID, SessionID: 9, SessionIssuedAtMillis: 1700000000000,
 		RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt}
 	if _, err := commitOperation(ctx, consumer.Blobs, key, blob, record); err != nil {
 		t.Fatal(err)
 	}
 	runtime.recovery = []SessionTerminal{
-		{State: OperationClosing, WasAdmitted: true, CellID: "cell-01", SessionID: 9, CloseEventID: "close-1"},
-		{State: OperationClosed, WasAdmitted: true, CellID: "cell-01", SessionID: 9, CloseEventID: "close-1"},
+		{State: OperationClosing, WasAdmitted: true, CellID: record.Operation.CellID, SessionID: 9, CloseEventID: "close-1"},
+		{State: OperationClosed, WasAdmitted: true, CellID: record.Operation.CellID, SessionID: 9, CloseEventID: "close-1"},
 	}
 	first, err := consumer.Recover(ctx, key)
 	if err != nil || first.State != OperationClosing {
@@ -520,7 +548,10 @@ func (f *fakeSessionRuntime) Admit(_ context.Context, _ qurl.AgentStateStore, re
 	f.admits++
 	admission := SessionAdmission{CellID: record.Operation.CellID, SessionID: 9, SessionIssuedAtMillis: 1700000000000,
 		RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt}
-	live := &LiveSession{ACToken: "short-lived-actoken", ResourceHost: f.resourceHost, OperationID: record.Operation.OperationID, value: struct{}{}}
+	receipt := qurl.NativeSessionReceipt{CellID: record.Operation.CellID, SessionID: 9,
+		SessionIssuedAtMillis: 1700000000000, RunID: record.Operation.RunID, RunAttempt: record.Operation.RunAttempt}
+	live := &LiveSession{ACToken: "short-lived-actoken", ResourceHost: f.resourceHost, OperationID: record.Operation.OperationID,
+		OpenTime: time.Minute, receipt: receipt, value: struct{}{}}
 	f.lastLive = live
 	if f.failMappedCommit != nil {
 		f.failMappedCommit.mu.Lock()
@@ -563,23 +594,36 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 	ctx := context.Background()
 	blobs := newMemoryBlobs()
 	plan := validPlan("6")
+	plan.AWSAccountID, plan.AWSRegion, plan.OwnerSubject = "111122223333", "us-east-2", "auth0|canary-owner"
+	for index := range plan.Identities {
+		plan.Identities[index].OwnerID = plan.OwnerSubject
+	}
+	private, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x21}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := time.Unix(1_700_000_000, 0).UTC()
+	state := &qurl.AgentState{AgentID: "agent-a", PrivateKeyB64: base64.StdEncoding.EncodeToString(private.Bytes()),
+		PublicKeyB64: base64.StdEncoding.EncodeToString(private.PublicKey().Bytes()), RegisteredAt: &registered, SchemaVersion: 7,
+		DeviceAPIKey: "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", DeviceAPIKeyID: "key_AbCdEf123456",
+		Assignment: &qurl.AgentAssignment{CellID: plan.Cohorts[0].CellID, AssignmentGeneration: plan.Cohorts[0].AssignmentGeneration,
+			EndpointRevision: 1, LeaseExpiresAt: time.Unix(2_000_000_000, 0).UTC(), Endpoint: plan.Cohorts[0].CellEndpoint}}
 	stateStore, _ := NewDurableAgentStateStore(blobs, "generations/"+plan.GenerationID+"/shared/direct-a/agent-state")
-	if err := stateStore.SaveAgentState(ctx, testAgentState("agent-a")); err != nil {
+	if err := stateStore.SaveAgentState(ctx, state); err != nil {
 		t.Fatal(err)
 	}
 	stateRef, _ := stateStore.Reference(ctx)
-	publicKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
-	operationJSON := `{"agent_id":"agent-a","agent_key_schema_version":2,"agent_public_key_b64":"` + publicKey +
-		`","auth_service_id":"agent","aws_account_id":"111122223333","aws_region":"us-east-2","binding_schema":1,"binding_sha256":"73add3ded83c588697131214c3e362ecc651512afa9c2ff4bad7d790a43593d8","cell_id":"cell-01","connector_id_claim":"","enrollment_credential_kind":"account","expires_at_ms":1800001210000,"operation_id":"3b2a3a9eabea3af78d8c317ea710e7f0601580163e25c98d50d5e2e17b68f3cc","owner_id":"auth0|canary-owner","prepared_at_ms":1800000009000,"qurl_agent_keys_table":"control-agent-keys","resource_id":"resource-a","run_attempt":7,"run_id":"0123456789abcdef","schema":1,"session_control_table":"sandbox-session-control"}`
-	var operation qurl.NativeSessionOperation
-	if err := json.Unmarshal([]byte(operationJSON), &operation); err != nil {
+	publicKey := state.PublicKeyB64
+	preparedAt := time.UnixMilli(1_800_000_009_000).UTC()
+	seedRequest := PrepareOperationRequest{AWSAccountID: plan.AWSAccountID, AWSRegion: plan.AWSRegion,
+		Identity: FixedIdentity{AgentID: state.AgentID, OwnerID: plan.OwnerSubject,
+			ResourceID: testProtectedResourceID(t, 1), KnockResourceID: "resource-a"}, Cohort: plan.Cohorts[0],
+		RunID: "0123456789abcdef", RunAttempt: 7, PreparedAt: preparedAt, ExpiresAt: preparedAt.Add(20 * time.Minute)}
+	operationPtr, err := (qurlSessionRuntime{}).Prepare(ctx, stateStore, seedRequest)
+	if err != nil {
 		t.Fatal(err)
 	}
-	plan.AWSAccountID, plan.AWSRegion = operation.AWSAccountID, operation.AWSRegion
-	plan.OwnerSubject = operation.OwnerID
-	for index := range plan.Identities {
-		plan.Identities[index].OwnerID = operation.OwnerID
-	}
+	operation := *operationPtr
 	plan.Cohorts[0].CellID, plan.Cohorts[0].SessionControlTable, plan.Cohorts[0].QURLAgentKeysTable = operation.CellID, operation.SessionControlTable, operation.QURLAgentKeysTable
 	authority := Authority{Schema: plan.Schema, Environment: plan.Environment, GenerationID: plan.GenerationID,
 		OwnerSubject: plan.OwnerSubject, AWSAccountID: plan.AWSAccountID, AWSRegion: plan.AWSRegion, NHPSourceSHA: plan.NHPSourceSHA,
@@ -589,7 +633,7 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 		identity := FixedIdentity{Label: identityPlan.Label, OwnerID: identityPlan.OwnerID,
 			AgentID: identityPlan.AgentID, AgentPublicKeyB64: publicKey, AgentKeySchemaVersion: 2,
 			EnrollmentCredentialKind: "account", DeviceAPIKeyID: "device-" + identityPlan.AgentID,
-			ConnectorID: identityPlan.ConnectorID, ResourceID: "resource-" + identityPlan.AgentID, CRID: "crid-" + identityPlan.AgentID,
+			ConnectorID: identityPlan.ConnectorID, ResourceID: testProtectedResourceID(t, byte(index+1)), CRID: "crid-" + identityPlan.AgentID,
 			ConnectorRoutingID: "route-" + identityPlan.AgentID, KnockResourceID: "knock-" + identityPlan.AgentID,
 			Selector: identityPlan.Selector,
 			AgentState: StateReference{Key: "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/agent-state",
@@ -597,7 +641,8 @@ func sessionFixture(t *testing.T) (*Consumer, Authority, PrepareOperationRequest
 			ConnectorState: StateReference{Key: "generations/" + plan.GenerationID + "/shared/" + identityPlan.Label + "/connector-state",
 				VersionID: "version", SHA256: strings.Repeat("b", 64)}}
 		if index == 0 {
-			identity.AgentID, identity.OwnerID, identity.AgentPublicKeyB64, identity.KnockResourceID, identity.AgentState = operation.AgentID, operation.OwnerID, operation.AgentPublicKeyB64, operation.ResourceID, stateRef
+			identity.AgentID, identity.OwnerID, identity.AgentPublicKeyB64, identity.ResourceID, identity.KnockResourceID, identity.AgentState =
+				operation.AgentID, operation.OwnerID, operation.AgentPublicKeyB64, operation.ProtectedResourceID, operation.ResourceID, stateRef
 		}
 		authority.Identities = append(authority.Identities, identity)
 	}

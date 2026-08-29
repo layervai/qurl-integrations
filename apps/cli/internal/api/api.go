@@ -40,6 +40,16 @@ type Client interface {
 	Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error)
 	// List returns a page of the caller's resources.
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
+	// Resource returns one owner-visible resource by CRID or public resource ID.
+	Resource(ctx context.Context, id string) (*ResourceSummary, error)
+	// Sharing returns the durable desired state and current platform-observed
+	// connection state of one tunnel resource.
+	Sharing(ctx context.Context, id string) (*Sharing, error)
+	// SetSharing idempotently changes a tunnel resource's desired state.
+	SetSharing(ctx context.Context, id string, desired DesiredState) (*Sharing, error)
+	// RestartSharing rotates the serving epoch and leaves the resource desired
+	// on, including when it was previously off.
+	RestartSharing(ctx context.Context, id string) (*Sharing, error)
 	// Delete revokes the resource identified by id. Deletion is idempotent:
 	// a resource that is already gone is success, reported via AlreadyGone.
 	Delete(ctx context.Context, id string) (*DeleteResult, error)
@@ -136,15 +146,50 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	CRID        string
-	ResourceID  string
-	TargetURL   string
-	Type        string
-	Status      string
-	Description string
-	Tags        []string
-	CreatedAt   *time.Time
-	ExpiresAt   *time.Time
+	CRID            string
+	ResourceID      string
+	TargetURL       string
+	Type            string
+	Status          string
+	DesiredState    DesiredState
+	ServingEpoch    uint64
+	ConnectionState ConnectionState
+	Description     string
+	Tags            []string
+	CreatedAt       *time.Time
+	ExpiresAt       *time.Time
+}
+
+// DesiredState is the durable customer intent for a tunnel resource.
+type DesiredState string
+
+const (
+	// DesiredStateOn requests that the platform admit the tunnel.
+	DesiredStateOn DesiredState = "on"
+	// DesiredStateOff requests that the platform reject the tunnel.
+	DesiredStateOff DesiredState = "off"
+)
+
+// ConnectionState is the control plane's observation of the current serving
+// epoch. It is never inferred from desired state.
+type ConnectionState string
+
+const (
+	// ConnectionStopped means the desired state is off.
+	ConnectionStopped ConnectionState = "stopped"
+	// ConnectionConnecting means the current epoch has not reached serving.
+	ConnectionConnecting ConnectionState = "connecting"
+	// ConnectionServing means the current epoch is registered and routable.
+	ConnectionServing ConnectionState = "serving"
+)
+
+// Sharing is the owner-facing lifecycle projection for one tunnel resource.
+type Sharing struct {
+	ResourceID      string
+	CRID            string
+	DesiredState    DesiredState
+	ServingEpoch    uint64
+	ConnectionState ConnectionState
 }
 
 // Config configures New. Zero hooks get production defaults.

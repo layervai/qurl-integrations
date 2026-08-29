@@ -1,13 +1,11 @@
-// Package state owns the CLI qURL Connector's on-disk native agent state:
+// Package state owns qurl's on-disk native agent state:
 // where the state directory lives, the qurl-go file-backed agent state
 // envelope opened inside it, and the assignment-refresh marker breadcrumb
 // written next to it.
 //
 // Only the plaintext file provider is supported: qurl-go's OpenFileAgentState
 // pins the state directory, requires owner-only permissions, and validates
-// continuity across every lifecycle operation. Cloud key-management providers
-// for a sealed envelope are deliberately not part of this port; deployments
-// that need one run the standalone qURL Connector.
+// continuity across every lifecycle operation.
 package state
 
 import (
@@ -22,44 +20,39 @@ import (
 )
 
 const (
-	// AgentStateFile is the qurl-go-owned plaintext credential envelope
-	// inside the state directory. The name is shared with the standalone
-	// qURL Connector so an explicitly pointed-at state volume keeps working.
+	// AgentStateFile is the qurl-go-owned plaintext credential envelope inside
+	// the state directory.
 	AgentStateFile = "agent_state.json"
 
 	// EnvStateDirPrimary is the preferred state-directory override. It uses
 	// the QURL_CONNECTOR_* prefix the rest of the Connector env surface
 	// shares.
 	EnvStateDirPrimary = "QURL_CONNECTOR_STATE_DIR"
-	// EnvStateDir is the legacy state-directory override, honored for
-	// compatibility with existing volume mounts at lower precedence than
-	// EnvStateDirPrimary.
-	EnvStateDir = "LAYERV_AGENT_STATE_DIR"
 	// EnvAgentID optionally pins the stable agent identity. qurl-go
 	// generates and persists a UUID when it is empty.
-	EnvAgentID = "LAYERV_AGENT_ID"
+	EnvAgentID = "QURL_CONNECTOR_AGENT_ID"
 
 	// xdgStateSubdir is the per-application directory appended to the XDG
 	// state base (or ~/.local/state) for the default user path. It is
-	// deliberately distinct from the standalone Connector's default so the
-	// two tools never mutate one identity by accident; pointing both at one
-	// directory remains an explicit env-override decision.
 	xdgStateSubdir = "qurl/connector"
 
 	dirMode os.FileMode = 0o700
 )
+
+// ErrNoDefaultStateDir means no explicit state override, absolute XDG state
+// root, or HOME exists. Read-only remote commands treat this as an absent local
+// share namespace; commands that need to create local state surface it.
+var ErrNoDefaultStateDir = errors.New("no default qurl sharing state directory")
 
 // ResolveDir resolves the native-agent state directory. Resolution order,
 // most specific first:
 //
 //  1. explicit override argument (a future --state-dir flag)
 //  2. QURL_CONNECTOR_STATE_DIR
-//  3. LAYERV_AGENT_STATE_DIR (legacy, compatibility)
-//  4. $XDG_STATE_HOME/qurl/connector, else ~/.local/state/qurl/connector
+//  3. $XDG_STATE_HOME/qurl/connector, else $HOME/.local/state/qurl/connector
 //
-// Unlike the standalone Connector there is no root-owned system default: the
-// CLI is a user tool, and the service-install deployment shape that default
-// serves is not part of this port. When no override is set and no home
+// There is no root-owned system default: qurl is a per-user tool. When no
+// override is set and no home
 // directory is available, ResolveDir fails with a clear error naming the
 // override instead of silently writing under the working directory.
 func ResolveDir(override string) (string, error) {
@@ -69,13 +62,10 @@ func ResolveDir(override string) (string, error) {
 	if dir := absCleanDir(os.Getenv(EnvStateDirPrimary)); dir != "" {
 		return dir, nil
 	}
-	if dir := absCleanDir(os.Getenv(EnvStateDir)); dir != "" {
-		return dir, nil
-	}
 	if xdg := xdgStateDir(); xdg != "" {
 		return xdg, nil
 	}
-	return "", fmt.Errorf("no usable state directory: no home directory is available; set %s", EnvStateDirPrimary)
+	return "", fmt.Errorf("%w: set %s", ErrNoDefaultStateDir, EnvStateDirPrimary)
 }
 
 // absCleanDir trims raw and returns its absolute, cleaned form, or "" when
@@ -97,11 +87,8 @@ func xdgStateDir() string {
 	if base := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); base != "" && filepath.IsAbs(base) {
 		return filepath.Join(base, xdgStateSubdir)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	if home = strings.TrimSpace(home); home == "" {
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" || !filepath.IsAbs(home) {
 		return ""
 	}
 	return filepath.Join(home, ".local", "state", xdgStateSubdir)
@@ -126,11 +113,25 @@ func EnsureDirMode(dir string) error {
 	if dir == "" {
 		return errors.New("state directory path is empty")
 	}
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return fmt.Errorf("create state directory %s: %w", dir, err)
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dir, dirMode); err != nil {
+			return fmt.Errorf("create state directory %s: %w", dir, err)
+		}
+		info, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect state directory %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !connectorResourceOwnerOK(info) {
+		return fmt.Errorf("state directory %s must be an owner-owned non-symlink directory", dir)
 	}
 	if err := os.Chmod(dir, dirMode); err != nil {
 		return fmt.Errorf("restrict state directory %s to owner-only %#o: %w", dir, dirMode, err)
+	}
+	current, err := os.Lstat(dir)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !connectorResourceOwnerOK(current) || current.Mode().Perm() != dirMode || !os.SameFile(info, current) {
+		return fmt.Errorf("state directory %s changed while establishing owner-only access", dir)
 	}
 	return nil
 }
@@ -142,14 +143,10 @@ func ConfiguredAgentID() string {
 }
 
 // Store owns the qurl-go file-backed agent state envelope for the process
-// lifetime plus the refresh-marker breadcrumb beside it. Call Handoff at each
-// SDK lifecycle boundary and retain the Store until every returned client and
-// runtime binding has finished; Close releases the pinned state directory.
-//
-// The mutex keeps Close from releasing the pinned directory while a marker
-// mutation or handoff validation is in flight (a supervisor's healthy-knock
-// callback clears the marker concurrently with shutdown), so safety does not
-// rely only on call order.
+// lifetime. Call Handoff at each SDK lifecycle boundary and retain the Store
+// until every returned client and runtime binding has finished; Close releases
+// the pinned state directory. The mutex keeps Close from racing a handoff or
+// continuity validation.
 type Store struct {
 	mu   sync.RWMutex
 	dir  string
