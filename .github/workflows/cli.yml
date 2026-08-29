@@ -75,6 +75,9 @@ jobs:
               # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
+              # The callback path is intentionally CLI-impacting: any trust or
+              # schema change must mint a fresh artifact and pass the complete
+              # exact-artifact journey, not only the generic scripts workflow.
               - 'apps/cli/**'
               - 'go.mod'
               - 'go.sum'

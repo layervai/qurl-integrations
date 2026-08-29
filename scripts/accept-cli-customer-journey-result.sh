@@ -124,6 +124,10 @@ expected_event=push
 if [[ "$source_kind" == pull_request ]]; then
   expected_event=pull_request
 fi
+# The CLI workflow dispatches this journey only after every local quality gate
+# has passed. A first delivery therefore belongs to an in-progress run. A
+# completed successful run is accepted for an explicit callback replay; a
+# failed, cancelled, queued, or unrelated run cannot mint a journey check.
 jq -e --arg repository "$repository" --arg sha "$source_sha" --arg event "$expected_event" \
   --argjson attempt "$producer_run_attempt" '
   .repository.full_name == $repository and
@@ -163,6 +167,9 @@ jq -e '
 # create checks under the same GitHub Actions App identity; required review of
 # workflow permission changes is part of this trusted-insider boundary. A
 # replay can create another check with the same key; the gate selects newest.
+# Payload fields also form the workflow concurrency key before this script can
+# authenticate them. A sender that can exploit that is already inside this
+# repository-write trusted boundary; the closed envelope still rejects it here.
 external_id="layerv.qurl-cli-customer-journey.v1:${source_sha}:${producer_run_id}:${producer_run_attempt}"
 details_url="${server_url}/${repository}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
 title="Exact CLI artifact customer journey passed"
@@ -194,6 +201,12 @@ jq -n \
   }
 ' >"$request"
 
-github_api "record the exact customer-journey check" --method POST \
-  "repos/${repository}/check-runs" --input "$request" >/dev/null
+# Check creation is not idempotent. Do not use the read retry wrapper: if the
+# server creates the check but the response is lost, a retry would create a
+# duplicate from one callback run. A replay is safe because it has a distinct
+# workflow run and the exact waiter selects the newest matching external ID.
+if ! gh api --method POST "repos/${repository}/check-runs" --input "$request" >/dev/null; then
+  echo "::error::GitHub API failed to record the exact customer-journey check" >&2
+  exit 1
+fi
 echo "Accepted the exact CLI artifact customer-journey result for ${source_sha}."

@@ -10,6 +10,9 @@ on:
 permissions: {}
 
 concurrency:
+  # GitHub evaluates this key before the job can authenticate the envelope.
+  # Only a repository writer can send this dispatch, which is already inside
+  # the trusted-insider boundary documented and enforced by the script.
   group: qurl-cli-customer-journey-result-${{ github.event.client_payload.source_sha }}-${{ github.event.client_payload.producer_run_id }}-${{ github.event.client_payload.producer_run_attempt }}
   cancel-in-progress: false
 

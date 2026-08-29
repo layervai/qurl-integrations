@@ -31,6 +31,9 @@ call_count=$(wc -l <"$FAKE_GH_CALLS" | tr -d '[:space:]')
 if ((call_count <= ${FAKE_FAIL_FIRST_CALLS:-0})); then
   exit 1
 fi
+if [[ "$method" == POST && "${FAKE_FAIL_POST:-0}" == 1 ]]; then
+  exit 1
+fi
 case "$path" in
   repos/layervai/qurl-integrations/actions/runs/555/attempts/2)
     jq -n \
@@ -170,6 +173,7 @@ done <<'CASES'
 forged sender login	.sender.login = "attacker"
 forged sender ID	.sender.id = 0
 non-bot sender	.sender.type = "User"
+wrong action	.action = "wrong"
 wrong schema	.client_payload.schema = "wrong"
 wrong envelope repository	.repository.full_name = "example/wrong"
 extra payload field	.client_payload.extra = true
@@ -274,6 +278,17 @@ fi
   exit 1
 }
 
+write_event "$work/event.json"
+: >"$work/gh-calls"
+if run_subject FAKE_RUN_STATUS=completed FAKE_RUN_CONCLUSION=cancelled >/dev/null 2>&1; then
+  echo "cancelled CLI producer run was accepted" >&2
+  exit 1
+fi
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
+  echo "cancelled producer did not fail at producer validation" >&2
+  exit 1
+}
+
 for producer_case in \
   'wrong producer repository:FAKE_RUN_REPOSITORY=example/wrong' \
   'fork producer repository:FAKE_RUN_HEAD_REPOSITORY=attacker/qurl-integrations' \
@@ -337,6 +352,11 @@ run_subject FAKE_RUN_EVENT=push >/dev/null
   echo "current-main result did not validate producer, artifact job, main ref, and check creation" >&2
   exit 1
 }
+jq -e '
+  .head_sha == "17d077fbc5a50d54894d5521be623fe03420de14" and
+  .external_id == "layerv.qurl-cli-customer-journey.v1:17d077fbc5a50d54894d5521be623fe03420de14:555:2" and
+  .details_url == "https://github.com/layervai/qurl-integrations/actions/runs/888/attempts/3"
+' "$work/check-request" >/dev/null
 
 write_event "$work/event.json"
 jq '.client_payload.source_kind = "main" | .client_payload.pull_request_number = 0' \
@@ -352,6 +372,10 @@ fi
   exit 1
 }
 
+write_event "$work/event.json"
+jq '.client_payload.source_kind = "main" | .client_payload.pull_request_number = 0' \
+  "$work/event.json" >"$work/main-event.json"
+mv "$work/main-event.json" "$work/event.json"
 rm -f "$work/check-request"
 : >"$work/gh-calls"
 if ! run_subject FAKE_RUN_EVENT=push FAKE_MAIN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null; then
@@ -360,6 +384,17 @@ if ! run_subject FAKE_RUN_EVENT=push FAKE_MAIN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fi
 [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 && ! -e "$work/check-request" ]] || {
   echo "stale main was not ignored before check creation" >&2
+  exit 1
+}
+
+write_event "$work/event.json"
+: >"$work/gh-calls"
+if run_subject FAKE_FAIL_POST=1 >/dev/null 2>&1; then
+  echo "failed check creation was accepted" >&2
+  exit 1
+fi
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 4 ]] || {
+  echo "non-idempotent check creation was retried" >&2
   exit 1
 }
 
