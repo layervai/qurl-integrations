@@ -210,7 +210,7 @@ func TestManagerStopsRetryingPermanentMissingResource(t *testing.T) {
 }
 
 func TestManagerPersistsTerminalDisableWithRealLocalRegistry(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only state directory.
 		t.Fatal(err)
 	}

@@ -131,6 +131,11 @@ func setWindowsConnectorTestACL(t *testing.T, path string, includeWorld bool) {
 	}
 }
 
+func secureConnectorStateFixtureFile(t *testing.T, path string) {
+	t.Helper()
+	setWindowsConnectorTestACL(t, path, false)
+}
+
 func windowsConnectorTestAccess(sid *windows.SID, mask windows.ACCESS_MASK) windows.EXPLICIT_ACCESS {
 	return windows.EXPLICIT_ACCESS{
 		AccessPermissions: mask,

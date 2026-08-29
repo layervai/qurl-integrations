@@ -74,6 +74,7 @@ func TestLocalShareRegistryRejectsOldVersionWithSafeRecovery(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"version":1,"owner_id":"owner-old","shares":{}}`), connectorResourceFileMode); err != nil {
 		t.Fatal(err)
 	}
+	secureConnectorStateFixtureFile(t, path)
 	_, _, err := ReadLocalSharesIfPresent(context.Background(), dir)
 	if !errors.Is(err, ErrLocalShareVersionUnsupported) {
 		t.Fatalf("old registry error = %v, want version sentinel", err)

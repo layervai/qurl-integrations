@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+func secureConnectorStateFixtureFile(*testing.T, string) {}
+
 func TestOpenConnectorResourceStateRefusesFinalSymlink(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "target")
 	if err := os.WriteFile(target, []byte("state"), connectorResourceFileMode); err != nil {

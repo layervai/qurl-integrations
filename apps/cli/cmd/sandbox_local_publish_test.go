@@ -42,13 +42,15 @@ import (
 )
 
 const (
-	localPublishSandboxArming = "QURL_CLI_SANDBOX_LOCAL_PUBLISH"
-	sandboxCleanupTimeout     = 30 * time.Second
-	sandboxRegistryTimeout    = 30 * time.Second
-	sandboxRouteFenceTimeout  = 2 * time.Minute
-	sandboxRouteFencePoll     = 500 * time.Millisecond
-	sandboxRouteFenceSettle   = 2 * time.Second
-	sandboxRouteProbeTimeout  = 15 * time.Second
+	localPublishSandboxArming           = "QURL_CLI_SANDBOX_LOCAL_PUBLISH"
+	sandboxRemoteURLLifecyclePhase      = "remote_url_resource_lifecycle"
+	sandboxLocalConnectorLifecyclePhase = "local_connector_lifecycle"
+	sandboxCleanupTimeout               = 30 * time.Second
+	sandboxRegistryTimeout              = 30 * time.Second
+	sandboxRouteFenceTimeout            = 2 * time.Minute
+	sandboxRouteFencePoll               = 500 * time.Millisecond
+	sandboxRouteFenceSettle             = 2 * time.Second
+	sandboxRouteProbeTimeout            = 15 * time.Second
 	// Serving after stop is a security-boundary failure, not eventual
 	// convergence. Five seconds is the intentional initial hard SLO; the
 	// private journey records the real propagation time before release. The
@@ -111,6 +113,18 @@ func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 	testSandboxFullCustomerLifecycleSmoke(t)
 }
 
+// TestSandboxFullCustomerLifecyclePhaseContract gives the credential-free CI
+// lane a fail-fast contract for the two customer journeys that the protected
+// release gate must execute. The protected runner also validates the emitted
+// subtest results, so listing this test cannot replace either live journey.
+func TestSandboxFullCustomerLifecyclePhaseContract(t *testing.T) {
+	want := []string{"remote_url_resource_lifecycle", "local_connector_lifecycle"}
+	got := []string{sandboxRemoteURLLifecyclePhase, sandboxLocalConnectorLifecyclePhase}
+	if !slices.Equal(got, want) {
+		t.Fatalf("full customer lifecycle phases = %q, want %q", got, want)
+	}
+}
+
 // testSandboxFullCustomerLifecycleSmoke exercises the unified customer command against
 // the live sandbox. Unlike the legacy Connector smoke, it starts with an
 // ordinary login key and no pre-issued enrollment token or device state. It
@@ -156,11 +170,11 @@ func testSandboxFullCustomerLifecycleSmoke(t *testing.T) {
 	}
 	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
 	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
-	t.Run("remote_url_resource_lifecycle", func(t *testing.T) {
+	t.Run(sandboxRemoteURLLifecyclePhase, func(t *testing.T) {
 		assertSandboxRemoteURLDeviceJourney(t, binary, cliEnv, stateDir)
 	})
 
-	t.Run("local_connector_lifecycle", func(t *testing.T) {
+	t.Run(sandboxLocalConnectorLifecyclePhase, func(t *testing.T) {
 		stopped := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "stop", local.CRID)
 		stoppedState := decodeSandboxSharing(t, stopped)
 		if err := validateSandboxSharingTransition(stoppedState, "off", "stopped", initial.ServingEpoch); err != nil {

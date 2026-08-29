@@ -239,6 +239,7 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.data), connectorResourceFileMode); err != nil {
 				t.Fatal(err)
 			}
+			secureConnectorStateFixtureFile(t, path)
 			if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || !strings.Contains(err.Error(), "invalid Connector resource state") {
 				t.Fatalf("corrupt state error = %v", err)
 			}
@@ -279,6 +280,7 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		if err := os.WriteFile(path, make([]byte, connectorResourcesMaxBytes+1), connectorResourceFileMode); err != nil {
 			t.Fatal(err)
 		}
+		secureConnectorStateFixtureFile(t, path)
 		if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Fatalf("oversize error = %v", err)
 		}

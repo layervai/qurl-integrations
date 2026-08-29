@@ -51,12 +51,21 @@ func installResourceResolver(t *testing.T, resolver func(context.Context, *qurl.
 
 func openResourceTestStore(t *testing.T) *state.Store {
 	t.Helper()
-	store, err := state.Open(t.TempDir())
+	store, err := state.Open(resourceTestStateDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+func resourceTestStateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := state.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func pendingRequestFromDisk(t *testing.T, store *state.Store, connectorID string) map[string]any {
@@ -115,7 +124,7 @@ func TestResolveResourcePersistsBeforeDispatchAndCommitsCompleteBinding(t *testi
 }
 
 func TestResolveResourceLostResponseReplaysExactNonceThenWarmStartPinsIdentity(t *testing.T) {
-	dir := t.TempDir()
+	dir := resourceTestStateDir(t)
 	store, err := state.Open(dir)
 	if err != nil {
 		t.Fatal(err)
