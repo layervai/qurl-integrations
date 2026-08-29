@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -79,7 +80,7 @@ func TestLocalShareRegistryRejectsOldVersionWithSafeRecovery(t *testing.T) {
 	if !errors.Is(err, ErrLocalShareVersionUnsupported) {
 		t.Fatalf("old registry error = %v, want version sentinel", err)
 	}
-	for _, want := range []string{path, "does not migrate old state", "revoke any device key", "move or remove the complete state directory", "qurl login"} {
+	for _, want := range []string{strconv.Quote(path), "does not migrate old state", "revoke any device key", "move or remove the complete state directory", "qurl login"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("old registry error = %q, want %q", err, want)
 		}
