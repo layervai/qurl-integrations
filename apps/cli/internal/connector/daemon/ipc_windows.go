@@ -111,6 +111,8 @@ func currentWindowsIPCUserSID() (*windows.SID, error) {
 func validateWindowsDaemonPipeServer(conn net.Conn) error {
 	// TODO(upstream-contract): go-winio's pipe connection must expose Fd() as
 	// the underlying Windows handle so the client can verify the server owner.
+	// TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown dials a real
+	// pipe on Windows and pins this exact runtime contract.
 	handleConn, ok := conn.(interface{ Fd() uintptr })
 	if !ok || handleConn.Fd() == 0 {
 		return errors.New("named-pipe connection does not expose a valid Windows handle")

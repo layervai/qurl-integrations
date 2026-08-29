@@ -556,6 +556,36 @@ jobs:
           }
           Remove-Item -LiteralPath $eventsPath -Force
 
+      - name: Run pinned Windows named-pipe owner integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testName = 'TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown'
+          $testPattern = '^TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown$'
+          $testPackage = './apps/cli/internal/connector/daemon'
+          $declared = @(
+            & go test -list $testPattern $testPackage |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
+            Write-Error "exact Windows named-pipe owner integration declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-windows-named-pipe-events.jsonl'
+          & go test -count=1 -json -run $testPattern $testPackage |
+            Tee-Object -FilePath $eventsPath
+          $testStatus = $LASTEXITCODE
+          if ($testStatus -ne 0) { exit $testStatus }
+          $events = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json })
+          $skipped = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' })
+          $passed = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' })
+          if ($skipped.Count -ne 0 -or $passed.Count -ne 1) {
+            Write-Error 'required Windows named-pipe owner integration must report one PASS and no SKIP'
+            exit 1
+          }
+          Remove-Item -LiteralPath $eventsPath -Force
+
       - name: Compile private sandbox test surface on Windows
         if: runner.os == 'Windows'
         shell: pwsh

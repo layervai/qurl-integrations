@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"log/slog"
@@ -105,6 +106,57 @@ func TestWindowsDaemonJobOutputRejectsUntrustedLogACL(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "grants another principal access") {
 		t.Fatalf("untrusted Windows daemon log ACL error = %v", err)
+	}
+}
+
+func TestWindowsDaemonJobEarlyErrorUsesProtectedLog(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "early error logs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdoutPath := filepath.Join(dir, "stdout.log")
+	stderrPath := filepath.Join(dir, "stderr.log")
+	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestWindowsDaemonJobEarlyErrorHelper$", "--", stdoutPath, stderrPath) //nolint:gosec // Exact test binary and test-owned paths.
+	command.Env = append(os.Environ(), "QURL_WINDOWS_DAEMON_EARLY_ERROR_HELPER=1")
+	if raw, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("run Windows early-error helper: %v: %s", err, raw)
+	}
+	stderr, err := os.ReadFile(stderrPath) //nolint:gosec // Test-owned exact path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stderr), "share daemon job version") ||
+		!strings.Contains(string(stderr), "does not match binary") {
+		t.Fatalf("Windows daemon early error did not reach its durable log: %q", stderr)
+	}
+}
+
+func TestWindowsDaemonJobEarlyErrorHelper(t *testing.T) {
+	if os.Getenv("QURL_WINDOWS_DAEMON_EARLY_ERROR_HELPER") != "1" {
+		t.Skip("subprocess helper; driven by TestWindowsDaemonJobEarlyErrorUsesProtectedLog")
+	}
+	separator := -1
+	for index, argument := range os.Args {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 >= len(os.Args) {
+		t.Fatal("Windows early-error helper arguments are incomplete")
+	}
+	streams := output.Detect()
+	root, opts := newRoot("2.1.0", streams, func(global *globalOpts) {
+		global.configDir = t.TempDir()
+		global.lookupEnv = func(string) (string, bool) { return "", false }
+	})
+	root.SetArgs([]string{
+		"daemon", "run", "--job-version", "0/mismatch",
+		"--job-stdout-log", os.Args[separator+1],
+		"--job-stderr-log", os.Args[separator+2],
+	})
+	if code := run(context.Background(), root, opts); code == 0 {
+		t.Fatal("mismatched Windows daemon job version unexpectedly succeeded")
 	}
 }
 

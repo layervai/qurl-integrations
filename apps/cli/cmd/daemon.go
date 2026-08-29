@@ -76,6 +76,12 @@ service manager owns the process.`,
 		Short: "Run the daemon in the foreground",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Task Scheduler starts the binary directly. Redirect before any
+			// validation that can reject a newly installed background job so the
+			// durable logs contain its first failure.
+			if err := redirectDaemonJobOutput(jobStdoutLog, jobStderrLog, opts.streams); err != nil {
+				return err
+			}
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
 			}
@@ -88,9 +94,6 @@ service manager owns the process.`,
 			}
 			if jobVersion == "" {
 				jobVersion = expected
-			}
-			if err := redirectDaemonJobOutput(jobStdoutLog, jobStderrLog, opts.streams); err != nil {
-				return err
 			}
 			hubBootstrap, hasHubOverride, err := exactDaemonHubOverride(hubHost, hubPort, hubServerPublicKeyB64)
 			if err != nil {
@@ -105,8 +108,8 @@ service manager owns the process.`,
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
-	run.Flags().StringVar(&headlessConfig, "headless-config", "", "declarative headless share configuration")
-	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "first-bootstrap enrollment credential file")
+	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
+	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
 	run.Flags().StringVar(&jobStdoutLog, "job-stdout-log", "", "native background-job stdout log")
 	run.Flags().StringVar(&jobStderrLog, "job-stderr-log", "", "native background-job stderr log")
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")

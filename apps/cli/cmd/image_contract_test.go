@@ -327,8 +327,9 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		t.Error("public CLI workflow warm-daemon gate checks process status before PASS/SKIP diagnostics")
 	}
 	windowsTaskStep := findStep("matrix", "Run pinned Windows Task Scheduler integration")
+	windowsPipeStep := findStep("matrix", "Run pinned Windows named-pipe owner integration")
 	windowsCompileStep := findStep("matrix", "Compile private sandbox test surface on Windows")
-	for _, step := range []cliWorkflowStep{windowsTaskStep, windowsCompileStep} {
+	for _, step := range []cliWorkflowStep{windowsTaskStep, windowsPipeStep, windowsCompileStep} {
 		if workflow.Jobs["matrix"].If != expectedCLIJobIf || workflow.Jobs["matrix"].ContinueOnError != nil ||
 			step.If != "runner.os == 'Windows'" || step.ContinueOnError != nil {
 			t.Errorf("public CLI workflow Windows gate %q is bypassable", step.Name)
@@ -348,6 +349,19 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	} {
 		if strings.Count(windowsTaskStep.Run, required) != 1 {
 			t.Errorf("Windows Task Scheduler integration does not fail closed with %q", required)
+		}
+	}
+	for _, required := range []string{
+		"$testName = 'TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown'",
+		"$testPattern = '^TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown$'",
+		"go test -list $testPattern $testPackage",
+		"go test -count=1 -json -run $testPattern $testPackage",
+		"$_.Action -eq 'skip'",
+		"$_.Action -eq 'pass'",
+		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
+	} {
+		if strings.Count(windowsPipeStep.Run, required) != 1 {
+			t.Errorf("Windows named-pipe owner integration does not fail closed with %q", required)
 		}
 	}
 	if !strings.Contains(windowsCompileStep.Run, "go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...") {

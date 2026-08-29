@@ -76,6 +76,9 @@ func newTransport(cfg *Config) *transport {
 // idempotency-key contract. The X-Request-Id stays constant across retries of
 // one logical request so the service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
+	// TODO(upstream-contract): qurl-go's registered HTTPDoer exposes only Do,
+	// not DoOnce. Keep this exact service path aligned with doSharing until the
+	// upstream interface can carry the no-replay intent directly.
 	allowRetry := req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/sharing/restart")
 	return t.do(req, allowRetry)
 }

@@ -255,6 +255,26 @@ would travel unencrypted; loopback endpoints are exempt.
 Run `qurl <command> --help` for the full help text; installed man pages
 cover the same surface (`man qurl`, `man qurl-publish`, …).
 
+### qurl daemon run
+
+`qurl daemon run` lets another service manager own the long-running process.
+With no headless flags, it serves the local shares already stored under
+`--state-dir`.
+
+Generated Docker, Kubernetes, and other headless deployment instructions can
+also supply `--headless-config <share.yaml>`. This is a non-secret, read-only
+version 2 YAML file for exactly one share. Use the generated file as-is; its
+resource and routing identifiers bind the deployment to that share.
+
+The first start of a new state volume also requires
+`--enrollment-token-file <path>`. This file contains a one-time enrollment
+credential, not an account API key. It must be a read-only regular file or a
+Kubernetes projected-secret link, and only its owner or the process's dedicated
+group can read it. After qurl creates durable device state, remove the flag and
+secret mount from the next deployment revision, verify that the warm start
+connects, and delete the one-time secret. A warm start does not read or require
+that file.
+
 Commands that take a CRID assess it locally first: a likely typo (bad
 checksum, wrong alphabet) is warned about and still forwarded — the server
 is the only authoritative validator. Sending a **test-environment CRID to

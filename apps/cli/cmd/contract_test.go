@@ -727,13 +727,15 @@ func TestRegisteredClientWarnsOnceForCleartextRemoteEndpoint(t *testing.T) {
 	}
 }
 
-func TestDaemonRunHidesJobSupervisionDetails(t *testing.T) {
+func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--help"}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	if !strings.Contains(res.stdout.String(), "--state-dir") {
-		t.Fatalf("daemon run help lost the supported state directory input: %q", res.stdout.String())
+	for _, public := range []string{"--state-dir", "--headless-config", "--enrollment-token-file"} {
+		if !strings.Contains(res.stdout.String(), public) {
+			t.Errorf("daemon run help lost supported public input %q", public)
+		}
 	}
 	for _, hidden := range []string{"--job-version", "--job-stdout-log", "--job-stderr-log"} {
 		if strings.Contains(res.stdout.String(), hidden) {
