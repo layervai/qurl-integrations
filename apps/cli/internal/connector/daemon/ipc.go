@@ -37,6 +37,11 @@ var probeIPCStatus = func(c IPCClient, ctx context.Context) (*http.Response, boo
 	return c.do(ctx, http.MethodGet, "/status")
 }
 
+// The Unix socket path becomes visible between bind and the immediate chmod
+// to 0600. WaitReady may retry that one closed startup state, but ordinary
+// status and reload calls still fail closed on it.
+var errIPCSocketRestrictionPending = errors.New("share daemon socket restriction is not complete")
+
 // IPCServer exposes daemon status and reconciliation over an owner-only socket.
 type IPCServer struct {
 	SocketPath string
@@ -178,12 +183,16 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 		return err
 	}
 	delay := 10 * time.Millisecond
+	restrictionRetries := 8
 	for {
 		response, running, err := probeIPCStatus(c, ctx)
 		if err != nil {
-			return err
+			if !errors.Is(err, errIPCSocketRestrictionPending) || restrictionRetries == 0 {
+				return err
+			}
+			restrictionRetries--
 		}
-		if response != nil {
+		if err == nil && response != nil {
 			_ = response.Body.Close()
 			if !running {
 				return errors.New("share daemon readiness returned a response without a running socket")
@@ -193,7 +202,7 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 			}
 			return nil
 		}
-		if running {
+		if err == nil && running {
 			return errors.New("share daemon readiness reported a running socket without a response")
 		}
 		timer := time.NewTimer(delay)

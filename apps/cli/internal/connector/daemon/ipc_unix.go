@@ -78,8 +78,11 @@ func validateUnixIPCSocket(path string) error {
 	if err != nil {
 		return fmt.Errorf("inspect share daemon socket: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 || !unixIPCPathOwnerOK(info) || info.Mode().Perm() != 0o600 {
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 || !unixIPCPathOwnerOK(info) {
 		return errors.New("share daemon socket must be an owner-owned non-symlink socket with mode 0600")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("%w: share daemon socket must be an owner-owned non-symlink socket with mode 0600", errIPCSocketRestrictionPending)
 	}
 	return nil
 }

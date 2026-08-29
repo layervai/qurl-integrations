@@ -300,6 +300,30 @@ func TestWaitReadyReturnsAmbiguousProbeErrorImmediately(t *testing.T) {
 	}
 }
 
+func TestWaitReadyRetriesOnlyPendingSocketRestriction(t *testing.T) {
+	oldProbe := probeIPCStatus
+	t.Cleanup(func() { probeIPCStatus = oldProbe })
+	calls := 0
+	probeIPCStatus = func(IPCClient, context.Context) (*http.Response, bool, error) {
+		calls++
+		if calls == 1 {
+			return nil, true, errIPCSocketRestrictionPending
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"job_version":"test","running":{}}`)),
+		}, true, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := (IPCClient{SocketPath: "/tmp/qurl-ipc-test.sock"}).WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady() = %v, want startup restriction retry", err)
+	}
+	if calls != 2 {
+		t.Fatalf("startup restriction probes = %d, want two", calls)
+	}
+}
+
 func TestWaitReadyClosesNonSuccessProbeBodies(t *testing.T) {
 	oldProbe := probeIPCStatus
 	t.Cleanup(func() { probeIPCStatus = oldProbe })
