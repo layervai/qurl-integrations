@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -39,7 +40,9 @@ func TestWindowsDaemonJobOutputUsesExactLogFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(stdout), "daemon stdout\n") || !strings.Contains(string(stderr), "daemon stderr\n") {
+	if !strings.Contains(string(stdout), "daemon stdout\n") ||
+		!strings.Contains(string(stderr), "daemon standard log") ||
+		!strings.Contains(string(stderr), `msg="daemon structured log"`) {
 		t.Fatalf("Windows daemon logs = stdout %q stderr %q", stdout, stderr)
 	}
 }
@@ -100,7 +103,8 @@ func TestWindowsDaemonJobOutputHelper(t *testing.T) {
 		t.Fatalf("Windows standard handles were not redirected: stdout=%v/%v stderr=%v/%v", stdoutHandle, stdoutErr, stderrHandle, stderrErr)
 	}
 	_, _ = fmt.Fprintln(streams.Out, "daemon stdout")
-	slog.Error("daemon stderr")
+	log.Print("daemon standard log")
+	slog.Error("daemon structured log")
 }
 
 func TestWindowsDaemonJobOutputRejectsPartialOrAliasedPaths(t *testing.T) {
