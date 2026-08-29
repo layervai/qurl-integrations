@@ -39,14 +39,25 @@ class CleanupDynamo implements DynamoClient {
   }
 }
 
+// Models the resource_scopes GSI from modules/qurl-teams-ddb: the hash key
+// selects the rows server-side, and the KEYS_ONLY projection returns only the
+// base-table and index keys -- notably no resource_id to filter on.
 class PurgeDynamo implements DynamoClient {
   readonly requests: DynamoRequest[] = [];
   async send<T>(request: DynamoRequest): Promise<T> {
     this.requests.push(request);
     if (request.operation !== 'query') return {} as T;
+    const values = request.input.ExpressionAttributeValues as Record<string, string> | undefined;
+    if (request.input.IndexName !== 'resource_scopes' || values?.[':resourceKey'] !== 'tenant#target') {
+      return { Items: [] } as T;
+    }
+    const row = (policyKey: string, scopeItemTypeKey: string) => ({
+      teams_tenant_id: 'tenant', policy_key: policyKey,
+      tenant_resource_key: 'tenant#target', scope_item_type_key: scopeItemTypeKey,
+    });
     return request.input.ExclusiveStartKey === undefined
-      ? { Items: [{ policy_key: 'scope%23one%23resource%23target', resource_id: 'target' }, { policy_key: 'scope%23one%23resource%23other', resource_id: 'other' }], LastEvaluatedKey: { teams_tenant_id: 'tenant', policy_key: 'next' } } as T
-      : { Items: [{ policy_key: 'scope%23two%23alias%23target', resource_id: 'target' }] } as T;
+      ? { Items: [row('scope%23one%23resource%23target', 'one#resource#target')], LastEvaluatedKey: { teams_tenant_id: 'tenant', policy_key: 'next' } } as T
+      : { Items: [row('scope%23two%23alias%23target', 'two#alias#target')] } as T;
   }
 }
 
@@ -131,15 +142,27 @@ describe('Teams DynamoDB data paths', () => {
     expect(deletes.map(request => request.input.TableName)).toEqual(['principals', 'principals', 'policy', 'policy', 'conversations', 'credentials']);
   });
 
-  it('purges matching resource policies across query pages', async () => {
+  it('purges resource policies through the resource_scopes index across pages', async () => {
     const client = new PurgeDynamo();
     const store = new TeamsDataStore({ client, tenantPrincipalsTable: 'principals', channelPoliciesTable: 'policy', personalConversationsTable: 'conversations', tenantCredentialsTable: 'credentials' });
     await store.purgeResourceFromTenant('tenant', 'target');
+
+    // Every read goes to the GSI: revoke must never scan the tenant partition.
+    const queries = client.requests.filter(request => request.operation === 'query');
+    expect(queries).toHaveLength(2);
+    for (const query of queries) {
+      expect(query.input.IndexName).toBe('resource_scopes');
+      expect(query.input.KeyConditionExpression).toBe('tenant_resource_key = :resourceKey');
+      expect((query.input.ExpressionAttributeValues as Record<string, string>)[':resourceKey']).toBe('tenant#target');
+    }
+
     const deletes = client.requests.filter(request => request.operation === 'delete');
     expect(deletes).toHaveLength(2);
     expect(deletes.map(request => (request.input.Key as Record<string, string>).policy_key)).toEqual([
       'scope%23one%23resource%23target',
       'scope%23two%23alias%23target',
     ]);
+    // Deletes address the base table, not the index.
+    expect(deletes.map(request => request.input.TableName)).toEqual(['policy', 'policy']);
   });
 });

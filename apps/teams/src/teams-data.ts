@@ -114,6 +114,10 @@ function aliasPolicyKey(scopeId: string, alias: string): string {
 function scopePolicyPrefix(scopeId: string): string {
   return `scope#${keyPart(scopeId)}#`;
 }
+// The channel-policies GSI provisioned by modules/qurl-teams-ddb. Its keys are
+// the two encoded attributes #policyItem materializes on every row, and its
+// KEYS_ONLY projection returns the base-table keys needed to delete a row.
+const resourceScopesIndex = 'resource_scopes';
 function resourceIndexKey(tenantId: string, resourceId: string): string {
   return `${keyPart(tenantId)}#${keyPart(resourceId)}`;
 }
@@ -227,11 +231,18 @@ export class TeamsDataStore {
 
   async purgeResourceFromTenant(tenantId: string, resourceId: string): Promise<void> {
     assertPresent(tenantId, resourceId);
-    // As above, this best-effort cleanup is safe to rerun after a partial
-    // failure; each row deletion is independently idempotent.
-    const items = await this.#queryTenant(this.#channelPoliciesTable, tenantId);
+    // The resource_scopes hash key already narrows to exactly this tenant and
+    // resource, so every returned row is one to delete -- no tenant-wide read
+    // and no client-side filter. A GSI cannot be read consistently, so a row
+    // written moments earlier may not be indexed yet; as above, this cleanup
+    // is best effort and safe to rerun after a partial failure.
+    const items = await this.#queryAll({
+      TableName: this.#channelPoliciesTable,
+      IndexName: resourceScopesIndex,
+      KeyConditionExpression: 'tenant_resource_key = :resourceKey',
+      ExpressionAttributeValues: { ':resourceKey': resourceIndexKey(tenantId, resourceId) },
+    });
     for (const item of items) {
-      if (asString(item.resource_id) !== resourceId) continue;
       const policyKeyValue = asString(item.policy_key);
       if (policyKeyValue) await this.#delete(this.#channelPoliciesTable, policyDdbKey(tenantId, policyKeyValue));
     }
@@ -307,11 +318,6 @@ export class TeamsDataStore {
     }
   }
 
-  async setScopeAlias(tenantId: string, scopeId: string, alias: string, resourceId: string): Promise<void> {
-    assertPresent(tenantId, scopeId, alias, resourceId);
-    await this.#client.send({ operation: 'put', input: { TableName: this.#channelPoliciesTable, Item: this.#policyItem(tenantId, scopeId, 'alias', alias, resourceId) } });
-  }
-
   async unbindScopeAlias(tenantId: string, scopeId: string, alias: string): Promise<void> {
     assertPresent(tenantId, scopeId, alias);
     try {
@@ -367,30 +373,31 @@ export class TeamsDataStore {
     };
   }
 
-  async #queryTenant(tableName: string, tenantId: string, sortKey?: { readonly sortKeyName: string; readonly sortKeyPrefix: string }): Promise<readonly Record<string, unknown>[]> {
+  #queryTenant(tableName: string, tenantId: string, sortKey?: { readonly sortKeyName: string; readonly sortKeyPrefix: string }): Promise<readonly Record<string, unknown>[]> {
+    return this.#queryAll({
+      TableName: tableName,
+      KeyConditionExpression: `${tenantKey} = :tenant${sortKey === undefined ? '' : ` AND begins_with(${sortKey.sortKeyName}, :policyPrefix)`}`,
+      ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKey === undefined ? {} : { ':policyPrefix': sortKey.sortKeyPrefix }) },
+    });
+  }
+
+  async #queryAll(input: Record<string, unknown>): Promise<readonly Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let exclusiveStartKey: Record<string, unknown> | undefined;
     do {
       const output = await this.#client.send<{
         readonly Items?: readonly Record<string, unknown>[];
         readonly LastEvaluatedKey?: Record<string, unknown>;
-      }>({ operation: 'query', input: {
-        TableName: tableName,
-        KeyConditionExpression: `${tenantKey} = :tenant${sortKey === undefined ? '' : ` AND begins_with(${sortKey.sortKeyName}, :policyPrefix)`}`,
-        ExpressionAttributeValues: { ':tenant': tenantId, ...(sortKey === undefined ? {} : { ':policyPrefix': sortKey.sortKeyPrefix }) },
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      } });
+      }>({ operation: 'query', input: { ...input, ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}) } });
       items.push(...(output.Items ?? []));
       exclusiveStartKey = output.LastEvaluatedKey;
     } while (exclusiveStartKey && Object.keys(exclusiveStartKey).length > 0);
     return items;
   }
 
+  // Unconditional: a delete of an absent key succeeds in DynamoDB, which is
+  // what makes the teardown paths above safe to rerun after a partial failure.
   async #delete(tableName: string, key: Record<string, string>): Promise<void> {
-    try {
-      await this.#client.send({ operation: 'delete', input: { TableName: tableName, Key: key } });
-    } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw error;
-    }
+    await this.#client.send({ operation: 'delete', input: { TableName: tableName, Key: key } });
   }
 }
