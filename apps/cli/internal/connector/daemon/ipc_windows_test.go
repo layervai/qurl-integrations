@@ -112,6 +112,34 @@ func TestWindowsNamedPipeCollisionDoesNotHideAccessDenied(t *testing.T) {
 	}
 }
 
+func TestWindowsListenAccessDeniedRequiresVerifiedCurrentUserDaemon(t *testing.T) {
+	left, right := net.Pipe()
+	defer func() { _ = right.Close() }()
+	err := classifyWindowsListenAccessDenied(
+		context.Background(),
+		`C:\Users\Builder\qurl\`+SocketFile,
+		windows.ERROR_ACCESS_DENIED,
+		func(context.Context, string) (net.Conn, error) { return left, nil },
+	)
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("verified current-user access denial = %v, want ErrAlreadyRunning", err)
+	}
+
+	verifyErr := errors.New("pipe owner could not be verified")
+	err = classifyWindowsListenAccessDenied(
+		context.Background(),
+		`C:\Users\Builder\qurl\`+SocketFile,
+		windows.ERROR_ACCESS_DENIED,
+		func(context.Context, string) (net.Conn, error) { return nil, verifyErr },
+	)
+	if errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("unverified access denial was classified as already running: %v", err)
+	}
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || !errors.Is(err, verifyErr) {
+		t.Fatalf("unverified access denial did not preserve both causes: %v", err)
+	}
+}
+
 func windowsEmptyManager(t *testing.T) *Manager {
 	t.Helper()
 	manager, err := NewManager(

@@ -18,7 +18,7 @@ import (
 
 const windowsDaemonPipePrefix = `\\.\pipe\layerv-qurl-share-daemon-`
 
-func listenDaemonIPC(_ context.Context, path string) (net.Listener, func() error, error) {
+func listenDaemonIPC(ctx context.Context, path string) (net.Listener, func() error, error) {
 	pipeName := windowsDaemonPipeName(path)
 	security, err := currentWindowsIPCSecurityDescriptor()
 	if err != nil {
@@ -32,7 +32,7 @@ func listenDaemonIPC(_ context.Context, path string) (net.Listener, func() error
 	})
 	if err != nil {
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return nil, nil, fmt.Errorf("listen on share daemon Windows named pipe: the pipe is held by a process this user cannot inspect: %w", err)
+			return nil, nil, classifyWindowsListenAccessDenied(ctx, path, err, dialDaemonIPC)
 		}
 		if windowsNamedPipeCollision(err) {
 			return nil, nil, fmt.Errorf("%w: Windows named pipe is already live: %w", ErrAlreadyRunning, err)
@@ -40,6 +40,28 @@ func listenDaemonIPC(_ context.Context, path string) (net.Listener, func() error
 		return nil, nil, fmt.Errorf("listen on share daemon Windows named pipe: %w", err)
 	}
 	return listener, func() error { return nil }, nil
+}
+
+func classifyWindowsListenAccessDenied(
+	ctx context.Context,
+	path string,
+	listenErr error,
+	probe func(context.Context, string) (net.Conn, error),
+) error {
+	conn, verifyErr := probe(ctx, path)
+	if verifyErr != nil {
+		return fmt.Errorf(
+			"listen on share daemon Windows named pipe: access was denied and the existing pipe could not be verified as a current-user daemon: %w",
+			errors.Join(listenErr, verifyErr),
+		)
+	}
+	if closeErr := conn.Close(); closeErr != nil {
+		return errors.Join(
+			fmt.Errorf("%w: verified current-user Windows named pipe is already live: %w", ErrAlreadyRunning, listenErr),
+			fmt.Errorf("close Windows named-pipe verification connection: %w", closeErr),
+		)
+	}
+	return fmt.Errorf("%w: verified current-user Windows named pipe is already live: %w", ErrAlreadyRunning, listenErr)
 }
 
 func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
