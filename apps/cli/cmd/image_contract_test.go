@@ -368,16 +368,16 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 }
 
-func TestReleaseHubPinWorkflowsRequireExactNonSkippedTest(t *testing.T) {
+func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 	t.Parallel()
 	type workflowTarget struct {
 		file, job string
+		release   bool
 	}
 	targets := []workflowTarget{
-		{file: "release-please.yml", job: "release-cli"},
+		{file: "release-please.yml", job: "release-cli", release: true},
 		{file: "cli-nightly.yml", job: "snapshot"},
 	}
-	var canonical string
 	for _, target := range targets {
 		data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", target.file))
 		if err != nil {
@@ -410,16 +410,32 @@ func TestReleaseHubPinWorkflowsRequireExactNonSkippedTest(t *testing.T) {
 			"-count=1 -json",
 			`select(.Action == "pass" and .Test == $test)`,
 			`select(.Action == "skip" and .Test == $test)`,
-			`if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
 		} {
 			if strings.Count(step.Run, required) != 1 {
 				t.Errorf("%s production Hub-pin gate does not fail closed with %q", target.file, required)
 			}
 		}
-		if canonical == "" {
-			canonical = step.Run
-		} else if step.Run != canonical {
-			t.Errorf("%s production Hub-pin gate differs from the release gate", target.file)
+		requiredMode, hasRequiredMode := step.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]
+		if target.release {
+			if !hasRequiredMode || requiredMode != "1" {
+				t.Errorf("%s release Hub-pin gate is not required", target.file)
+			}
+			if strings.Count(step.Run, `if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`) != 1 {
+				t.Errorf("%s release Hub-pin gate does not reject SKIP", target.file)
+			}
+			continue
+		}
+		if hasRequiredMode {
+			t.Errorf("%s dark nightly Hub-pin gate forces release mode", target.file)
+		}
+		for _, required := range []string{
+			`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+			`if [[ "$skipped" != "$test_name" || -n "$passed" ]]; then`,
+			`elif [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
+		} {
+			if strings.Count(step.Run, required) != 1 {
+				t.Errorf("%s nightly Hub-pin gate does not pin dark and configured results with %q", target.file, required)
+			}
 		}
 	}
 }

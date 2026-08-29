@@ -12,10 +12,10 @@
 // Pin flip procedure (reference): once the production Hub trust root is
 // provisioned, the release workflow injects the pin at build time via
 // -ldflags "-X <this package>.defaultServerPublicKeyB64=<base64 key>",
-// gated on a committed SHA-256 fingerprint of the raw key
-// (FingerprintSHA256Hex is the spelling contract) and verified by a
-// release-side check that decodes the candidate with exactly this package's
-// DecodeServerPublicKeyB64 before any artifact is published. A key the
+// gated on an independently provisioned repository-secret SHA-256 fingerprint
+// of the raw key (FingerprintSHA256Hex is the spelling contract) and verified
+// by a release-side check that decodes the candidate with exactly this
+// package's DecodeServerPublicKeyB64 before any artifact is published. A key the
 // release pipeline accepts is exactly a key this package will accept, and a
 // key this package would reject at startup can never be published. Source
 // and unflagged builds stay dark; TestDefaultPinRemainsUnprovisionedInSource

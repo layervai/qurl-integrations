@@ -50,9 +50,11 @@ type bootstrapNativeRuntime struct {
 type ownerOnlyTestShareRegistry struct {
 	ownerID          string
 	bindRaceWinnerID string
+	bindCalls        int
 }
 
 func (r *ownerOnlyTestShareRegistry) BindOwner(_ context.Context, ownerID string) error {
+	r.bindCalls++
 	ownerID = strings.TrimSpace(ownerID)
 	if ownerID == "" {
 		return errors.New("test owner ID is empty")
@@ -273,6 +275,18 @@ func TestBindRegisteredDeviceOwnerReportsConcurrentRaceWinner(t *testing.T) {
 	}
 }
 
+func TestBindRegisteredDeviceOwnerDoesNotRewriteExistingBinding(t *testing.T) {
+	registry := &ownerOnlyTestShareRegistry{ownerID: "owner-existing"}
+	if err := bindRegisteredDeviceOwner(
+		context.Background(), registry, "/state/connector-v2", "key-device", "owner-existing",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if registry.bindCalls != 0 {
+		t.Fatalf("warm owner binding called BindOwner %d time(s), want zero", registry.bindCalls)
+	}
+}
+
 func TestRegisteredAccountBootstrap_LegacyCleanupFailureWarnsAfterEnrollment(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	deleteErr := errors.New("locked compatibility keyring")
@@ -318,6 +332,32 @@ func TestLocalPublishReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T
 	}
 	if requests := srv.Requests(); len(requests) != 0 {
 		t.Fatalf("local publish repeated /v1/me after registered open: %+v", requests)
+	}
+}
+
+func TestWhoamiReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "whoami-cache-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIdentity := &qurlapi.Identity{OwnerID: apitest.MeOwnerID}
+	var stdout, stderr bytes.Buffer
+	root, opts := newRoot("test", &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}, func(g *globalOpts) {
+		g.openAPIClient = nil
+		g.openRegisteredClient = func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+			return client, wantIdentity, nil
+		}
+	})
+	root.SetArgs([]string{"whoami"})
+	if code := run(context.Background(), root, opts); code != 0 {
+		t.Fatalf("whoami exit = %d, stderr = %q", code, stderr.String())
+	}
+	if requests := srv.Requests(); len(requests) != 0 {
+		t.Fatalf("whoami repeated /v1/me after registered open: %+v", requests)
+	}
+	if !strings.Contains(stdout.String(), apitest.MeOwnerID) {
+		t.Fatalf("whoami stdout = %q, want owner %q", stdout.String(), apitest.MeOwnerID)
 	}
 }
 

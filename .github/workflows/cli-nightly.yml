@@ -90,7 +90,6 @@ jobs:
 
       - name: Verify the production NHP Hub trust pin
         env:
-          QURL_REQUIRE_RELEASE_HUB_PIN: '1'
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
@@ -109,8 +108,13 @@ jobs:
           jq -j 'select(.Output != null) | .Output' "$events"
           passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
           skipped="$(jq -r --arg test "$test_name" 'select(.Action == "skip" and .Test == $test) | .Test' "$events")"
-          if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
-            echo "::error::required production Hub-pin test must report one PASS and no SKIP"
+          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            if [[ "$skipped" != "$test_name" || -n "$passed" ]]; then
+              echo "::error::dark nightly Hub-pin test must report one SKIP and no PASS"
+              exit 1
+            fi
+          elif [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
+            echo "::error::configured nightly Hub-pin test must report one PASS and no SKIP"
             exit 1
           fi
           if (( test_status != 0 )); then

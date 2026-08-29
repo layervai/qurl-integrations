@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/spf13/cobra"
 )
 
@@ -28,9 +30,15 @@ anything.`,
 			if err != nil {
 				return err
 			}
-			id, err := client.Me(cmd.Context())
-			if err != nil {
-				return err
+			id := opts.registeredIdentity
+			if id == nil {
+				id, err = client.Me(cmd.Context())
+				if err != nil {
+					return err
+				}
+			}
+			if id == nil {
+				return errors.New("qURL account identity response is empty")
 			}
 			return opts.printer().WhoAmI(id)
 		},

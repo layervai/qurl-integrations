@@ -505,6 +505,9 @@ func bindRegisteredDeviceOwner(
 			currentOwner: boundOwner, requestedOwner: deviceOwner,
 		}
 	}
+	if bound {
+		return nil
+	}
 	if err := registry.BindOwner(ctx, deviceOwner); err != nil {
 		if !errors.Is(err, connectorstate.ErrLocalShareOwnerConflict) {
 			return err
