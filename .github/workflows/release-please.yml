@@ -420,7 +420,11 @@ jobs:
             echo "::error::GoReleaser did not generate the qurl Homebrew cask" >&2
             exit 1
           }
-          [ "$(grep -Ec "^[[:space:]]*version \"${release_version}\"$" "$generated")" = 1 ] || {
+          version_lines=$(awk -v want="version \"${release_version}\"" '
+            { line=$0; sub(/^[[:space:]]*/, "", line); if (line == want) count++ }
+            END { print count + 0 }
+          ' "$generated")
+          [ "$version_lines" = 1 ] || {
             echo "::error::generated Homebrew cask does not name the exact CLI version" >&2
             exit 1
           }

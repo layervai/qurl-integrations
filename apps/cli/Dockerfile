@@ -12,6 +12,8 @@ COPY apps/cli/ ./apps/cli/
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
+# This is a public X25519 trust root. It is safe in image history and build
+# provenance; it is stored as a CI secret only to control release readiness.
 ARG HUB_TRUST_ROOT_B64=
 RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -trimpath -mod=readonly \

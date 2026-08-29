@@ -481,6 +481,10 @@ serving epoch so stale registrations cannot keep routing. `status` and
 `inspect` use the same authoritative view. Both work for remote resources and
 include the local target only when this machine owns one.
 
+CLI v2 requires the owner-facing resource-detail route
+`GET /v1/resources/{id}`. Custom deployments must provide that route; the CLI
+does not fall back to an account-wide list scan after a detail-route failure.
+
 The daemon uses one resource-bound NHP admission and FRP session per share. It
 recovers assignment, sleep/wake, and network failures automatically with
 persisted bounded backoff. Customers never need a refresh approval flag. On

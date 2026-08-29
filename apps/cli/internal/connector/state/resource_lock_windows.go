@@ -51,9 +51,6 @@ func acquireConnectorResourcesLock(ctx context.Context, dir string) (func() erro
 	}
 	overlapped := &windows.Overlapped{}
 	timer := time.NewTimer(connectorResourcesLockRetry)
-	if !timer.Stop() {
-		<-timer.C
-	}
 	defer timer.Stop()
 	for {
 		err = windows.LockFileEx(handle,

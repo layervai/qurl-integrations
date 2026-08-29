@@ -127,21 +127,23 @@ func TestReleaseLinkerTargetProducesRunnableNativeTrustPin(t *testing.T) {
 		t.Fatal(err)
 	}
 	const linkerTarget = "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64"
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelBuild()
 	// #nosec G204 -- every argument is a test-owned constant or a value generated above in this process.
-	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-mod=readonly", "-ldflags", "-X "+linkerTarget+"="+keyB64, "-o", binary, "./apps/cli/cmd/")
+	build := exec.CommandContext(buildCtx, "go", "build", "-trimpath", "-mod=readonly", "-ldflags", "-X "+linkerTarget+"="+keyB64, "-o", binary, "./apps/cli/cmd/")
 	build.Dir = root
 	build.Env = append(os.Environ(), "GOWORK=off")
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build release-pin executable: %v\n%s", err, output)
+		t.Fatalf("build release-pin executable: %v (context: %v)\n%s", err, buildCtx.Err(), output)
 	}
 
+	verifyCtx, cancelVerify := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelVerify()
 	// #nosec G204 -- binary is the exact test-owned output path built above.
-	verify := exec.CommandContext(ctx, binary, "version", "--verify-release-native-trust")
+	verify := exec.CommandContext(verifyCtx, binary, "version", "--verify-release-native-trust")
 	output, err := verify.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run release-pin executable: %v\n%s", err, output)
+		t.Fatalf("run release-pin executable: %v (context: %v)\n%s", err, verifyCtx.Err(), output)
 	}
 	if got := strings.TrimSpace(string(output)); got != wantFingerprint {
 		t.Fatalf("release-pin executable fingerprint = %q, want %q", got, wantFingerprint)
