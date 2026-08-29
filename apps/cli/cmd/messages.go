@@ -33,9 +33,9 @@ const (
 	// no CRID (older deployments).
 	msgNoCRIDReturned = "The service did not return a CRID for this resource; use the resource ID shown above until it does."
 
-	// msgInsecureEndpoint warns that a plain-http non-loopback endpoint
-	// sends the API key unencrypted. Loopback endpoints never warn.
-	msgInsecureEndpoint = "your API key would travel unencrypted: %s uses plain http on a non-local address — use https"
+	// msgInsecureEndpoint warns that a plain-http non-loopback endpoint sends
+	// an authorization credential unencrypted. Loopback endpoints never warn.
+	msgInsecureEndpoint = "your authorization credential would travel unencrypted: %s uses plain http on a non-local address — use https"
 
 	// msgTTLClamped reports the service granting a shorter link lifetime
 	// than requested.

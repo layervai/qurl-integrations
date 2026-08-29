@@ -73,6 +73,23 @@ func redirectDaemonJobOutput(stdoutPath, stderrPath string, streams *output.Stre
 }
 
 func openProtectedWindowsDaemonLog(path string) (*os.File, error) { //nolint:gocognit,gocyclo // Keep one fail-closed handle and ACL decision tree.
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("read current Windows background-job identity: %w", err)
+	}
+	if user == nil || user.User.Sid == nil {
+		return nil, errors.New("read current Windows background-job identity: token has no user SID")
+	}
+	userSID := user.User.Sid.String()
+	createDescriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf(
+		"O:%sG:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", userSID, userSID, userSID))
+	if err != nil {
+		return nil, fmt.Errorf("build protected Windows background-job log ACL: %w", err)
+	}
+	security := &windows.SecurityAttributes{
+		Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: createDescriptor,
+	}
 	path16, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -80,7 +97,7 @@ func openProtectedWindowsDaemonLog(path string) (*os.File, error) { //nolint:goc
 	handle, err := windows.CreateFile(path16,
 		windows.FILE_APPEND_DATA|windows.READ_CONTROL|windows.SYNCHRONIZE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING,
+		security, windows.OPEN_ALWAYS,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return nil, err
@@ -95,14 +112,6 @@ func openProtectedWindowsDaemonLog(path string) (*os.File, error) { //nolint:goc
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
 		info.NumberOfLinks != 1 {
 		return closeOnError(errors.New("windows background-job log must be a non-reparse, single-link file"))
-	}
-	token := windows.GetCurrentProcessToken()
-	user, err := token.GetTokenUser()
-	if err != nil {
-		return closeOnError(fmt.Errorf("read current Windows background-job identity: %w", err))
-	}
-	if user == nil || user.User.Sid == nil {
-		return closeOnError(errors.New("read current Windows background-job identity: token has no user SID"))
 	}
 	adminSID, adminErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	systemSID, systemErr := windows.CreateWellKnownSid(windows.WinLocalSystemSid)

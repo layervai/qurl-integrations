@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -698,6 +699,45 @@ func TestInsecureEndpointWarning(t *testing.T) {
 	for endpoint, wantWarn := range cases {
 		if got := insecureEndpointWarning(endpoint) != ""; got != wantWarn {
 			t.Errorf("insecureEndpointWarning(%q) warned=%t, want %t", endpoint, got, wantWarn)
+		}
+	}
+}
+
+func TestRegisteredClientWarnsOnceForCleartextRemoteEndpoint(t *testing.T) {
+	var stderr bytes.Buffer
+	opts := &globalOpts{
+		resolvedEndpoint: "http://api.example.com",
+		resolvedFormat:   output.FormatText,
+		streams:          &output.Streams{Out: io.Discard, Err: &stderr},
+	}
+	opts.openAPIClient = func(context.Context) (qurlapi.Client, error) {
+		// Repeat the gate here to model a recovery path that also opens an account
+		// client, then return an inert loopback client without sending a request.
+		opts.warnInsecureEndpoint()
+		return qurlapi.New(&qurlapi.Config{BaseURL: "http://127.0.0.1", APIKey: testAPIKey})
+	}
+	if _, err := opts.newClient(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stderr.String(), "Warning:"); got != 1 {
+		t.Fatalf("cleartext registered-client warnings = %d, want one; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "authorization credential would travel unencrypted") {
+		t.Fatalf("registered-client warning does not cover its device credential: %q", stderr.String())
+	}
+}
+
+func TestDaemonRunHidesJobSupervisionDetails(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--help"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), "--state-dir") {
+		t.Fatalf("daemon run help lost the supported state directory input: %q", res.stdout.String())
+	}
+	for _, hidden := range []string{"--job-version", "--job-stdout-log", "--job-stderr-log"} {
+		if strings.Contains(res.stdout.String(), hidden) {
+			t.Errorf("daemon run help exposes internal supervision flag %q", hidden)
 		}
 	}
 }

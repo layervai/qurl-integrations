@@ -70,11 +70,8 @@ key.`,
 			if client == nil || deviceIdentity == nil {
 				return errors.New("registered-device enrollment returned no client identity")
 			}
-			if deviceIdentity.OwnerID != accountIdentity.OwnerID {
-				return fmt.Errorf("registered device belongs to account %q, not %q", deviceIdentity.OwnerID, accountIdentity.OwnerID)
-			}
 			if _, err := opts.credentialStore().RemoveAll(); err != nil {
-				// Enrollment and the owner check are already durable. A legacy-key
+				// Enrollment and the device-owner binding are already durable. A legacy-key
 				// cleanup failure must not tell the user that enrollment failed.
 				opts.printer().Warnf("machine enrollment succeeded, but qurl could not remove a legacy stored account key: %v", err)
 			}

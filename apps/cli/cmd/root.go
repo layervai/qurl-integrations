@@ -102,6 +102,7 @@ type globalOpts struct {
 	registeredClient     qurlapi.Client
 	registeredIdentity   *qurlapi.Identity
 	nativeRuntime        registeredNativeRuntime
+	warnedCleartextAuth  bool
 
 	// Resolved in PersistentPreRunE.
 	resolved           bool
@@ -344,8 +345,8 @@ func (o *globalOpts) printer() *output.Printer {
 	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
 }
 
-// insecureEndpointWarning returns a warning when the endpoint would carry
-// the bearer credential over cleartext http to a non-loopback host. Loopback
+// insecureEndpointWarning returns a warning when the endpoint would carry an
+// authorization credential over cleartext http to a non-loopback host. Loopback
 // is exempt: local mocks and harnesses are legitimately plain http. The
 // transport already refuses redirects so the credential cannot follow a
 // Location elsewhere; this closes the sibling misconfiguration.
@@ -362,6 +363,21 @@ func insecureEndpointWarning(endpoint string) string {
 		return ""
 	}
 	return fmt.Sprintf(msgInsecureEndpoint, endpoint)
+}
+
+// warnInsecureEndpoint emits at most one warning per CLI invocation. Both the
+// one-time account bootstrap and the steady-state registered-device client
+// call it, and recovery can use both paths during one invocation.
+func (o *globalOpts) warnInsecureEndpoint() {
+	if o.warnedCleartextAuth {
+		return
+	}
+	warning := insecureEndpointWarning(o.resolvedEndpoint)
+	if warning == "" {
+		return
+	}
+	o.warnedCleartextAuth = true
+	o.printer().Warnf("%s", warning)
 }
 
 // skipsSettings reports whether cmd (or an ancestor) must answer without
@@ -405,6 +421,7 @@ func (o *globalOpts) credentialStore() *auth.Chain {
 // is consulted only when the native state is missing or the Hub explicitly
 // rejects the stored device credential. A warm command does not read it.
 func (o *globalOpts) newClient(ctx context.Context) (qurlapi.Client, error) {
+	o.warnInsecureEndpoint()
 	if o.registeredClient != nil {
 		return o.registeredClient, nil
 	}
@@ -445,9 +462,7 @@ func (o *globalOpts) apiCredential() (string, error) {
 // directly (the key it validates is the one just typed, never a stored one);
 // everything else goes through newClient.
 func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
-	if warning := insecureEndpointWarning(o.resolvedEndpoint); warning != "" {
-		o.printer().Warnf("%s", warning)
-	}
+	o.warnInsecureEndpoint()
 	return qurlapi.New(&qurlapi.Config{
 		BaseURL:      o.resolvedEndpoint,
 		APIKey:       key,

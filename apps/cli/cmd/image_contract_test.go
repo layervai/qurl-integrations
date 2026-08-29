@@ -392,9 +392,11 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			t.Fatalf("%s has no %s job", target.file, target.job)
 		}
 		var matches []cliWorkflowStep
-		for _, step := range job.Steps {
+		pinStepIndex := -1
+		for index, step := range job.Steps {
 			if step.Name == "Verify the production NHP Hub trust pin" {
 				matches = append(matches, step)
+				pinStepIndex = index
 			}
 		}
 		if len(matches) != 1 {
@@ -428,9 +430,11 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				t.Errorf("%s release Hub-pin verifier has no key source", target.file)
 			}
 			var goreleaserSteps []cliWorkflowStep
-			for _, candidate := range job.Steps {
+			goreleaserStepIndex := -1
+			for index, candidate := range job.Steps {
 				if candidate.Name == "Run GoReleaser" {
 					goreleaserSteps = append(goreleaserSteps, candidate)
+					goreleaserStepIndex = index
 				}
 			}
 			if len(goreleaserSteps) != 1 {
@@ -439,6 +443,9 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			goreleaserPin, goreleaserPinPresent := goreleaserSteps[0].Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
 			if !goreleaserPinPresent || goreleaserPin != pinSource {
 				t.Errorf("%s GoReleaser step does not consume the exact verified Hub-pin source", target.file)
+			}
+			if pinStepIndex >= goreleaserStepIndex {
+				t.Errorf("%s production Hub-pin gate must run before GoReleaser (pin=%d goreleaser=%d)", target.file, pinStepIndex, goreleaserStepIndex)
 			}
 			continue
 		}
