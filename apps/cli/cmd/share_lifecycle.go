@@ -368,6 +368,7 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 	waitCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	var last *qurlapi.Sharing
+	var lastPollErr error
 	for {
 		sharing, err := client.Sharing(waitCtx, local.CRID)
 		if err != nil {
@@ -377,21 +378,26 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 				}
 				return nil, errors.Join(sharingServingTimeout(local.CRID, limit, last), err)
 			}
-			return nil, err
+			if !retryableSharingPollError(err) {
+				return nil, err
+			}
+			lastPollErr = err
+		} else {
+			lastPollErr = nil
+			if err := validateLocalSharing(local, sharing); err != nil {
+				return nil, err
+			}
+			if sharing.ServingEpoch < epoch {
+				return nil, fmt.Errorf("qURL sharing state regressed to serving epoch %d below %d", sharing.ServingEpoch, epoch)
+			}
+			if sharing.ServingEpoch > epoch {
+				return nil, fmt.Errorf("qURL sharing state advanced to serving epoch %d while waiting for %d", sharing.ServingEpoch, epoch)
+			}
+			if sharing.ServingEpoch == epoch && sharing.ConnectionState == qurlapi.ConnectionServing {
+				return sharing, nil
+			}
+			last = sharing
 		}
-		if err := validateLocalSharing(local, sharing); err != nil {
-			return nil, err
-		}
-		if sharing.ServingEpoch < epoch {
-			return nil, fmt.Errorf("qURL sharing state regressed to serving epoch %d below %d", sharing.ServingEpoch, epoch)
-		}
-		if sharing.ServingEpoch > epoch {
-			return nil, fmt.Errorf("qURL sharing state advanced to serving epoch %d while waiting for %d", sharing.ServingEpoch, epoch)
-		}
-		if sharing.ServingEpoch == epoch && sharing.ConnectionState == qurlapi.ConnectionServing {
-			return sharing, nil
-		}
-		last = sharing
 		timer := time.NewTimer(200 * time.Millisecond)
 		select {
 		case <-waitCtx.Done():
@@ -399,9 +405,29 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, sharingServingTimeout(local.CRID, limit, last)
+			return nil, errors.Join(sharingServingTimeout(local.CRID, limit, last), lastPollErr)
 		case <-timer.C:
 		}
+	}
+}
+
+func retryableSharingPollError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *qurlapi.Error
+	if !errors.As(err, &apiErr) {
+		// Sharing returns typed errors for completed HTTP responses. An
+		// untyped failure here is a transport failure during a bounded poll.
+		return true
+	}
+	switch apiErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
 }
 

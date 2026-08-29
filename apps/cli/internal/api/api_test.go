@@ -900,13 +900,28 @@ func TestMeFailureCodes(t *testing.T) {
 }
 
 func TestRedact(t *testing.T) {
-	in := "key lv_live_abc123DEF456ghi789jkl and Bearer lv_test_zzz999yyy888xxx777www here"
-	got := Redact(in)
-	if strings.Contains(got, "abc123DEF") || strings.Contains(got, "zzz999") {
-		t.Fatalf("secrets survived: %q", got)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "alphanumeric API key and bearer",
+			in:   "key lv_live_abc123DEF456ghi789jkl and Bearer lv_test_zzz999yyy888xxx777www here",
+			want: "key lv_*** and Bearer *** here",
+		},
+		{
+			name: "complete URL-safe API key alphabet",
+			in:   "key lv_live_Ab3-QRSTUVWXYZ0123456789_abcdefghijklmno here",
+			want: "key lv_*** here",
+		},
 	}
-	if !strings.Contains(got, "lv_***") {
-		t.Errorf("marker missing: %q", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := Redact(test.in); got != test.want {
+				t.Fatalf("Redact() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

@@ -8,7 +8,7 @@ import "regexp"
 // error that echoes a credential back cannot leak it into a terminal
 // scrollback or a pasted bug report.
 var (
-	apiKeyPattern = regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9]+`)
+	apiKeyPattern = regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9_-]+`)
 	bearerPattern = regexp.MustCompile(`(?i)bearer\s+[^\s"']+`)
 )
 

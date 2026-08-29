@@ -238,6 +238,54 @@ func TestWaitForSharingPreservesFinalPollErrorAtDeadline(t *testing.T) {
 	}
 }
 
+func TestWaitForSharingRetriesTransientReadButNotAuthenticationFailure(t *testing.T) {
+	t.Run("service unavailable then serving", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+		srv.Script(http.MethodGet, path,
+			func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			},
+			sharingResponse(t, srv, "on", 7, "serving"),
+		)
+		client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "wait-retry-test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sharing, err := waitForSharing(context.Background(), client, &connectorstate.LocalShare{
+			ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID,
+		}, 7, time.Second)
+		if err != nil || sharing == nil || sharing.ConnectionState != qurlapi.ConnectionServing {
+			t.Fatalf("wait result = %+v, %v", sharing, err)
+		}
+		if got := len(srv.Requests()); got != 2 {
+			t.Fatalf("sharing requests = %d, want 2", got)
+		}
+	})
+
+	t.Run("unauthorized fails immediately", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+		srv.Script(http.MethodGet, path, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		})
+		client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "wait-auth-test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = waitForSharing(context.Background(), client, &connectorstate.LocalShare{
+			ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID,
+		}, 7, time.Second)
+		var apiErr *qurlapi.Error
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("wait error = %v, want HTTP 401", err)
+		}
+		if got := len(srv.Requests()); got != 1 {
+			t.Fatalf("sharing requests = %d, want 1", got)
+		}
+	})
+}
+
 func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 	tests := []struct {
 		name            string
