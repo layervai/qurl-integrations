@@ -93,6 +93,10 @@ jobs:
               - 'scripts/resolve-sandbox-artifact-qurl-go-source_test.sh'
               - 'scripts/extract-qurl-image-attestations.sh'
               - 'scripts/test-accept-cli-customer-journey-result.sh'
+              - 'scripts/test-wait-for-cli-customer-journey-check.sh'
+              - 'scripts/test-wait-for-exact-cli-main-run.sh'
+              - 'scripts/wait-for-cli-customer-journey-check.sh'
+              - 'scripts/wait-for-exact-cli-main-run.sh'
 
   lint:
     name: cli / lint
@@ -805,6 +809,42 @@ jobs:
             --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
             "$candidate" >/dev/null
 
+  dispatch-customer-journey:
+    name: cli / dispatch exact customer journey
+    needs: [changes, lint, test, govulncheck, matrix, sandbox-customer-artifacts, goreleaser-check, image-smoke]
+    if: needs.changes.outputs.cli == 'true'
+    permissions: {}
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@b384fb104357360047df76c5cc7c060f6cabd183 # v0.12.0
+    with:
+      target_repo: qurl-integrations-infra
+      event_type: qurl-cli-customer-journey
+      client_payload: >-
+        {"schema":"layerv.qurl-cli-customer-journey.v1","source_sha":"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}","source_kind":"${{ github.event_name == 'pull_request' && 'pull_request' || 'main' }}","pull_request_number":${{ github.event_name == 'pull_request' && github.event.pull_request.number || 0 }},"producer_run_id":${{ github.run_id }},"producer_run_attempt":${{ github.run_attempt }}}
+    secrets:
+      app_id: ${{ secrets.DEPLOY_DISPATCHER_APP_ID }}
+      app_private_key: ${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}
+
+  customer-journey:
+    name: cli / exact packaged customer journey
+    runs-on: ubuntu-latest
+    needs: [changes, dispatch-customer-journey]
+    if: needs.changes.outputs.cli == 'true' && needs.dispatch-customer-journey.result == 'success'
+    timeout-minutes: 155
+    permissions:
+      checks: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require the exact packaged CLI customer journey
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: scripts/wait-for-cli-customer-journey-check.sh "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
   required:
     name: cli / required
     runs-on: ubuntu-latest
@@ -812,7 +852,7 @@ jobs:
     permissions: {}
     # Every CLI quality gate must be listed here; cli / required only
     # validates jobs in this needs set. display_names below is annotation-only.
-    needs: [changes, lint, test, govulncheck, matrix, sandbox-customer-artifacts, goreleaser-check, image-smoke]
+    needs: [changes, lint, test, govulncheck, matrix, sandbox-customer-artifacts, goreleaser-check, image-smoke, dispatch-customer-journey, customer-journey]
     if: always()
     steps:
       - name: Verify CLI CI result
@@ -862,6 +902,12 @@ jobs:
                 ;;
               image-smoke)
                 echo "cli / image smoke"
+                ;;
+              dispatch-customer-journey)
+                echo "cli / dispatch exact customer journey"
+                ;;
+              customer-journey)
+                echo "cli / exact packaged customer journey"
                 ;;
               *)
                 echo "$1"

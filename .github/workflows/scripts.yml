@@ -76,6 +76,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-verify-cli-release.sh
 
+      - name: Test exact CLI customer-journey check waiter
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-wait-for-cli-customer-journey-check.sh
+
+      - name: Test exact CLI main-run waiter
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-wait-for-exact-cli-main-run.sh
+
       - name: Check Chrome/Edge extension lockstep
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-extension-lockstep.sh

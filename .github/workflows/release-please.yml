@@ -76,7 +76,68 @@ concurrency:
 permissions: {}
 
 jobs:
+  cli-main-ci:
+    name: Gate exact CLI main CI before release
+    runs-on: ubuntu-latest
+    timeout-minutes: 220
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      run_id: ${{ steps.gate.outputs.run_id }}
+      run_attempt: ${{ steps.gate.outputs.run_attempt }}
+    steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI release gates must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: source
+        name: Resolve the exact release source
+        env:
+          CLI_TAG: ${{ inputs.cli_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            source_sha=$GITHUB_SHA
+          else
+            [[ "$CLI_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+              echo "::error::cli_tag must be one bare semantic-version tag" >&2
+              exit 1
+            }
+            source_sha=$(git rev-parse --verify "${CLI_TAG}^{commit}")
+            git merge-base --is-ancestor "$source_sha" origin/main || {
+              echo "::error::CLI release tag is not reachable from current main" >&2
+              exit 1
+            }
+          fi
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release source did not resolve to one exact commit" >&2
+            exit 1
+          }
+          echo "sha=$source_sha" >>"$GITHUB_OUTPUT"
+
+      - id: gate
+        name: Require successful exact CLI main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          selection=$(scripts/wait-for-exact-cli-main-run.sh '${{ steps.source.outputs.sha }}')
+          echo "run_id=$(jq -r .run_id <<<"$selection")" >>"$GITHUB_OUTPUT"
+          echo "run_attempt=$(jq -r .run_attempt <<<"$selection")" >>"$GITHUB_OUTPUT"
+          jq -r '"Exact CLI main CI passed: " + .url' <<<"$selection"
+
   release-please:
+    needs: cli-main-ci
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -115,7 +176,7 @@ jobs:
         run: scripts/verify-cli-release.sh
 
   release-cli:
-    needs: release-please
+    needs: [cli-main-ci, release-please]
     if: >-
       !cancelled() && (
         needs.release-please.outputs.cli_release_created == 'true' ||
@@ -158,6 +219,15 @@ jobs:
         with:
           ref: ${{ env.CLI_TAG }}
           fetch-depth: 0
+
+      - name: Verify the gated source matches the release tag
+        env:
+          GATED_SOURCE_SHA: ${{ needs.cli-main-ci.outputs.source_sha }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$GATED_SOURCE_SHA" ] || {
+            echo "::error::release tag does not match the exact source that passed CLI main CI" >&2
+            exit 1
+          }
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

@@ -53,6 +53,8 @@ const (
 	cliWorkflow                = "cli.yml"
 	cliMatrixJobID             = "matrix"
 	cliSandboxArtifactsJobID   = "sandbox-customer-artifacts"
+	cliJourneyDispatchJobID    = "dispatch-customer-journey"
+	cliJourneyWaitJobID        = "customer-journey"
 	cliMacOSKeychainSetupStep  = "Set up macOS keychain"
 	cliLinuxKeyringSetupStep   = "Set up Linux keyring (gnome-keyring over D-Bus)"
 	cliMatrixTestStep          = "Run tests"
@@ -224,12 +226,137 @@ func TestCLICustomerJourneyCallbackTracksArtifactProducer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s: %v", callbackPath, err)
 	}
+	callbackSource := string(callback)
 	for _, literal := range append([]string{producer.Name}, wantSteps...) {
 		if literal != producer.Name && producerSteps[literal] != 1 {
 			t.Errorf("CLI artifact producer has %d steps named %q, want 1", producerSteps[literal], literal)
 		}
-		if count := strings.Count(string(callback), literal); count != 1 {
+		if count := strings.Count(callbackSource, literal); count != 1 {
 			t.Errorf("customer-journey callback contains %q %d times, want 1", literal, count)
+		}
+	}
+	workflowPath := ".github/workflows/" + cliWorkflow
+	if count := strings.Count(callbackSource, workflowPath); count != 2 {
+		t.Errorf("customer-journey callback contains workflow path %q %d times, want 2", workflowPath, count)
+	}
+}
+
+// TestCLIExactArtifactCustomerJourneyIsRequired binds the public CLI run to
+// the protected sandbox orchestrator without moving credentials or internal
+// topology into this repository. The called dispatcher stamps the caller
+// identity, and the waiter accepts only the callback for this exact source,
+// workflow run, and run attempt.
+func TestCLIExactArtifactCustomerJourneyIsRequired(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliWorkflow)
+	dispatch := workflow.Jobs[cliJourneyDispatchJobID]
+	if dispatch == nil {
+		t.Fatalf("%s is missing %q", cliWorkflow, cliJourneyDispatchJobID)
+	}
+	if dispatch.Name != "cli / dispatch exact customer journey" ||
+		dispatch.If != "needs.changes.outputs.cli == 'true'" {
+		t.Errorf("journey dispatch name/if = %q / %q", dispatch.Name, dispatch.If)
+	}
+	const dispatcher = "layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@b384fb104357360047df76c5cc7c060f6cabd183"
+	if dispatch.Uses != dispatcher {
+		t.Errorf("journey dispatcher = %q, want %q", dispatch.Uses, dispatcher)
+	}
+	assertJobPermissions(t, cliJourneyDispatchJobID, dispatch.Permissions, map[string]string{})
+	wantDispatchNeeds := []string{
+		"changes", "goreleaser-check", "govulncheck", "image-smoke", "lint",
+		"matrix", "sandbox-customer-artifacts", "test",
+	}
+	gotDispatchNeeds := parseWorkflowNeeds(t, cliJourneyDispatchJobID, dispatch.Needs)
+	slices.Sort(gotDispatchNeeds)
+	if !slices.Equal(gotDispatchNeeds, wantDispatchNeeds) {
+		t.Errorf("journey dispatch needs = %v, want %v", gotDispatchNeeds, wantDispatchNeeds)
+	}
+
+	wait := workflow.Jobs[cliJourneyWaitJobID]
+	if wait == nil {
+		t.Fatalf("%s is missing %q", cliWorkflow, cliJourneyWaitJobID)
+	}
+	if wait.Name != "cli / exact packaged customer journey" ||
+		wait.If != "needs.changes.outputs.cli == 'true' && needs.dispatch-customer-journey.result == 'success'" {
+		t.Errorf("journey waiter name/if = %q / %q", wait.Name, wait.If)
+	}
+	if timeout, ok := wait.TimeoutMinutes.(int); !ok || timeout != 155 {
+		t.Errorf("journey waiter timeout = %#v, want 155", wait.TimeoutMinutes)
+	}
+	assertJobPermissions(t, cliJourneyWaitJobID, wait.Permissions, map[string]string{
+		"checks": "read", "contents": "read",
+	})
+	if needs := parseWorkflowNeeds(t, cliJourneyWaitJobID, wait.Needs); !slices.Equal(needs, []string{"changes", cliJourneyDispatchJobID}) {
+		t.Errorf("journey waiter needs = %v", needs)
+	}
+	var checkout, require *step
+	for index := range wait.Steps {
+		current := &wait.Steps[index]
+		if strings.HasPrefix(current.Uses, checkoutActionPrefix) {
+			checkout = current
+		}
+		if current.Name == "Require the exact packaged CLI customer journey" {
+			require = current
+		}
+	}
+	if checkout == nil || checkout.With["persist-credentials"] != false ||
+		checkout.With["ref"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" {
+		t.Errorf("journey waiter checkout is not exact and credential-free: %#v", checkout)
+	}
+	if require == nil || !strings.Contains(require.Run, "scripts/wait-for-cli-customer-journey-check.sh") ||
+		require.ContinueOnError != nil {
+		t.Errorf("journey waiter does not fail closed through the checked-in script: %#v", require)
+	}
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
+	if err != nil {
+		t.Fatalf("read %s: %v", cliWorkflow, err)
+	}
+	var caller struct {
+		Jobs map[string]struct {
+			With    map[string]any    `yaml:"with"`
+			Secrets map[string]string `yaml:"secrets"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &caller); err != nil {
+		t.Fatalf("decode %s caller contract: %v", cliWorkflow, err)
+	}
+	call := caller.Jobs[cliJourneyDispatchJobID]
+	if call.With["target_repo"] != "qurl-integrations-infra" ||
+		call.With["event_type"] != "qurl-cli-customer-journey" {
+		t.Errorf("journey dispatch target is not exact: %#v", call.With)
+	}
+	payload, ok := call.With["client_payload"].(string)
+	if !ok {
+		t.Fatalf("journey client_payload = %#v, want string", call.With["client_payload"])
+	}
+	for _, required := range []string{
+		"layerv.qurl-cli-customer-journey.v1", "source_sha", "source_kind",
+		"pull_request_number", "producer_run_id", "producer_run_attempt",
+		"github.event.pull_request.head.sha", "github.run_id", "github.run_attempt",
+	} {
+		if !strings.Contains(payload, required) {
+			t.Errorf("journey client_payload is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"amazonaws.com", "account_id", "us-east", "api.layerv", "secret"} {
+		if strings.Contains(strings.ToLower(payload), forbidden) {
+			t.Errorf("public journey payload contains internal detail %q", forbidden)
+		}
+	}
+	wantSecrets := map[string]string{
+		"app_id":          "${{ secrets.DEPLOY_DISPATCHER_APP_ID }}",
+		"app_private_key": "${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}",
+	}
+	if !maps.Equal(call.Secrets, wantSecrets) {
+		t.Errorf("journey dispatcher secrets = %#v, want exact narrow App credentials", call.Secrets)
+	}
+
+	required := workflow.Jobs[requiredJobID]
+	for _, need := range []string{cliJourneyDispatchJobID, cliJourneyWaitJobID} {
+		if !slices.Contains(parseWorkflowNeeds(t, requiredJobID, required.Needs), need) {
+			t.Errorf("cli / required can pass without %q", need)
 		}
 	}
 }
@@ -920,6 +1047,84 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 		"contents":      "write",
 		"pull-requests": "write",
 	})
+}
+
+// TestCLIReleaseWaitsForExactMainCI keeps publication behind the exact
+// packaged customer journey. The CLI workflow owns that journey and reports
+// success only after its exact-artifact result returns. The release workflow
+// must wait for that exact push run before release-please can create a tag or
+// release-cli can upload or publish customer artifacts.
+func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	gate, ok := workflow.Jobs["cli-main-ci"]
+	if !ok {
+		t.Fatal("release-please.yml is missing the exact CLI main-CI gate")
+	}
+	if gate.Name != "Gate exact CLI main CI before release" {
+		t.Errorf("cli-main-ci.name = %q", gate.Name)
+	}
+	if timeout, ok := gate.TimeoutMinutes.(int); !ok || timeout != 220 {
+		t.Errorf("cli-main-ci timeout = %#v, want 220", gate.TimeoutMinutes)
+	}
+	assertJobPermissions(t, "cli-main-ci", gate.Permissions, map[string]string{
+		"actions":  "read",
+		"contents": "read",
+	})
+
+	steps := map[string]*step{}
+	for index := range gate.Steps {
+		current := &gate.Steps[index]
+		steps[current.Name] = current
+	}
+	for _, name := range []string{
+		"Require the canonical release branch",
+		"Resolve the exact release source",
+		"Require successful exact CLI main CI",
+	} {
+		if steps[name] == nil {
+			t.Fatalf("cli-main-ci is missing %q", name)
+		}
+	}
+	if !strings.Contains(steps["Require successful exact CLI main CI"].Run,
+		"scripts/wait-for-exact-cli-main-run.sh") {
+		t.Error("cli-main-ci does not invoke the exact CLI main-run waiter")
+	}
+	if steps["Require successful exact CLI main CI"].ContinueOnError != nil {
+		t.Error("exact CLI main-CI gate allows failure")
+	}
+
+	releasePlease := workflow.Jobs[releasePleaseJobID]
+	if releasePlease == nil || !slices.Contains(parseWorkflowNeeds(t, releasePleaseJobID, releasePlease.Needs), "cli-main-ci") {
+		t.Error("release-please can run without the exact CLI main-CI gate")
+	}
+	releaseCLI := workflow.Jobs["release-cli"]
+	if releaseCLI == nil {
+		t.Fatal("release-please.yml is missing release-cli")
+	}
+	for _, need := range []string{"cli-main-ci", releasePleaseJobID} {
+		if !slices.Contains(parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs), need) {
+			t.Errorf("release-cli.needs does not include %q", need)
+		}
+	}
+	matchedSource := false
+	for index := range releaseCLI.Steps {
+		current := &releaseCLI.Steps[index]
+		if current.Name == "Verify the gated source matches the release tag" {
+			matchedSource = strings.Contains(current.Run,
+				"release tag does not match the exact source that passed CLI main CI")
+			if current.ContinueOnError != nil {
+				t.Error("release source-binding step allows failure")
+			}
+		}
+	}
+	if !matchedSource {
+		t.Error("release-cli does not bind its tag to the exact gated source")
+	}
+
+	assertExecutableRepoScript(t, "scripts/wait-for-exact-cli-main-run.sh")
+	assertExecutableRepoScript(t, "scripts/wait-for-cli-customer-journey-check.sh")
 }
 
 // TestCLIReleaseValidatesTheCaskBeforePublication keeps every local
