@@ -15,10 +15,9 @@ import (
 )
 
 // loginCmd validates a qURL account API key and consumes it to enroll this
-// machine. The
-// key is never accepted as a command-line argument or flag: argv leaks into
-// shell history and process lists. It is read from a pipe or typed at a
-// hidden prompt.
+// machine. The key is never accepted as a command-line argument or flag: argv
+// leaks into shell history and process lists. It is read from a pipe or typed
+// at a hidden prompt.
 //
 // Order matters and is pinned by tests: the key is validated first, then an
 // X25519 device identity is registered through NHP, then the resulting device
@@ -70,6 +69,8 @@ key.`,
 			if client == nil || deviceIdentity == nil {
 				return errors.New("registered-device enrollment returned no client identity")
 			}
+			opts.registeredClient = client
+			opts.registeredIdentity = deviceIdentity
 			if _, err := opts.credentialStore().RemoveAll(); err != nil {
 				// Enrollment and the device-owner binding are already durable. A legacy-key
 				// cleanup failure must not tell the user that enrollment failed.

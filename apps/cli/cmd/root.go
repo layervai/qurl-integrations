@@ -139,14 +139,14 @@ func Main(version string) int {
 // user's own act.
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	err := root.ExecuteContext(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		output.RenderError(opts.streams.Err, err, opts.errColor())
+	}
 	if closeErr := opts.closeAPIClient(); closeErr != nil {
 		// The command has already completed. Process exit releases remaining OS
 		// handles, so native-runtime teardown cannot reverse a successful remote
 		// or lifecycle operation. Keep the diagnostic without changing its exit.
 		opts.printer().Warnf("local native-state cleanup reported a problem: %v", closeErr)
-	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		output.RenderError(opts.streams.Err, err, opts.errColor())
 	}
 	return exitcode.FromError(err)
 }

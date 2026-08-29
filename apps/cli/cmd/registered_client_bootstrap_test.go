@@ -363,6 +363,51 @@ func TestLocalPublishReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T
 	}
 }
 
+func TestLocalPublishWarmOwnerCachesClientBeforeEnrollment(t *testing.T) {
+	srv := apitest.NewServer(t)
+	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	srv.Script(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"api_key":    "lv_test_enrollmentsecret123456789",
+			"key_id":     "key_enrollment_warm",
+			"kind":       "enrollment_token",
+			"target":     "connector",
+			"claims":     []map[string]string{{"type": "connector", "id": "warm-local"}},
+			"status":     "active",
+			"expires_at": expiresAt,
+		}, nil)
+	})
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "warm-owner-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIdentity := &qurlapi.Identity{OwnerID: apitest.MeOwnerID}
+	opens := 0
+	opts := &globalOpts{openRegisteredClient: func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+		opens++
+		return client, wantIdentity, nil
+	}}
+	registry := &ownerOnlyTestShareRegistry{ownerID: wantIdentity.OwnerID}
+	ownerID, gotClient, err := localPublishOwner(context.Background(), opts, registry, "/state/connector-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownerID != wantIdentity.OwnerID || gotClient != client || opens != 1 {
+		t.Fatalf("warm owner/client/opens = %q/%T/%d", ownerID, gotClient, opens)
+	}
+	enrollment := &localEnrollment{opts: opts, target: &publishTarget{}, requestedID: "warm-local"}
+	if _, err := enrollment.credential(context.Background(), qurl.AgentEnrollmentCredentialRequest{AgentID: "agent-warm"}); err != nil {
+		t.Fatal(err)
+	}
+	if opens != 1 {
+		t.Fatalf("enrollment reopened registered runtime %d time(s), want one total", opens)
+	}
+	requests := srv.Requests()
+	if len(requests) != 1 || requests[0].Method != http.MethodPost || requests[0].Path != "/v1/api-keys" {
+		t.Fatalf("warm enrollment requests = %+v, want one token mint and no /v1/me", requests)
+	}
+}
+
 func TestLocalPublishOwnerRaceReturnsSafeRecovery(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "owner-race-test"})
@@ -424,5 +469,21 @@ func TestRunKeepsCompletedCommandSuccessfulWhenNativeRuntimeCloseFails(t *testin
 	}
 	if !runtime.closed || !strings.Contains(stderr.String(), "local native-state cleanup reported a problem") {
 		t.Fatalf("runtime closed=%t stderr=%q", runtime.closed, stderr.String())
+	}
+}
+
+func TestRunRendersCommandErrorBeforeNativeRuntimeCloseWarning(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	streams := &output.Streams{In: strings.NewReader(""), Out: &stdout, Err: &stderr}
+	root, opts := newRoot("close-test", streams)
+	opts.nativeRuntime = &bootstrapNativeRuntime{closeErr: errors.New("close failure")}
+	root.SetArgs([]string{"not-a-command"})
+	if code := run(context.Background(), root, opts); code == 0 {
+		t.Fatalf("invalid command exit = %d, stderr = %q", code, stderr.String())
+	}
+	commandError := strings.Index(stderr.String(), "unknown command")
+	cleanupWarning := strings.Index(stderr.String(), "local native-state cleanup reported a problem")
+	if commandError < 0 || cleanupWarning <= commandError {
+		t.Fatalf("command error/cleanup warning order = %d/%d in %q", commandError, cleanupWarning, stderr.String())
 	}
 }

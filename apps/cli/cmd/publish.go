@@ -131,25 +131,17 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return err
 	}
 	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
-	// A cold publish can keep the registered REST client runtime open while
-	// resource discovery opens the same native state directory. This overlap is
-	// required in normal operation because a background daemon can also share
-	// the directory with CLI commands. qurl-go releases the first runtime's
-	// setup lock before OpenNativeRuntime returns; the completed-state fast path
-	// used by the second runtime takes no setup lock or packet. Later state
-	// mutations use operation leases, and qurl-connector separately locks its
-	// session-operation journals across processes.
+	// The registered REST client is open and cached before resource discovery
+	// can request a Connector enrollment credential. Resource discovery can
+	// therefore reuse it without a nested native-runtime open. The separate
+	// resource runtime uses the completed-state fast path for the same state
+	// directory; later mutations use operation leases, and qurl-connector locks
+	// its session-operation journals across processes.
 	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir, sessionOperations)
 	if err != nil {
 		return err
 	}
 	resource := resolved.Resource
-	if client == nil {
-		client, err = opts.newClient(ctx)
-		if err != nil {
-			return err
-		}
-	}
 	local, sharing, compensateOff, err := activateLocalPublish(ctx, client, registry, resource, knockResourceID, target)
 	if err != nil {
 		return err
@@ -192,12 +184,15 @@ func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *
 
 func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShareRegistry, stateDir string) (string, qurlapi.Client, error) {
 	ownerID, present, err := registry.OwnerID(ctx)
-	if err != nil || present {
-		return ownerID, nil, err
+	if err != nil {
+		return "", nil, err
 	}
 	client, err := opts.newClient(ctx)
 	if err != nil {
 		return "", nil, err
+	}
+	if present {
+		return ownerID, client, nil
 	}
 	identity := opts.registeredIdentity
 	if identity == nil {

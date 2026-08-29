@@ -1288,7 +1288,7 @@ func TestLocalPublishWarmRuntimeFailureEmitsNoIdentityOrManagementMutation(t *te
 	providerPresent := false
 	res := runCLI(t, &runOpts{
 		args:            []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--id", "warm-local"},
-		env:             map[string]string{},
+		env:             map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry:   registry,
 		shareStateDir:   stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },

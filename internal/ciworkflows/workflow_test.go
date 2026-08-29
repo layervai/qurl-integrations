@@ -960,6 +960,7 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 	for _, fragment := range []string{
 		"generated=dist/homebrew/Casks/qurl.rb",
 		"GoReleaser did not generate the qurl Homebrew cask",
+		`grep -Ec "^[[:space:]]*version`,
 		"generated Homebrew cask does not name the exact CLI version",
 		"generated Homebrew cask does not bind all four release archives",
 	} {
