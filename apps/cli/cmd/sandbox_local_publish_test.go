@@ -1749,3 +1749,30 @@ func TestSandboxCleanupReclaimsResourceBeforeDeviceCredential(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxResourceCleanupIsSafeBeforePublish(t *testing.T) {
+	const connectorID = "connector-not-created"
+	var lookups atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" || r.URL.Query().Get("slug") != connectorID {
+			http.Error(w, "unexpected cleanup request", http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer device-token" {
+			t.Errorf("resource lookup authorization = %q, want device credential", got)
+		}
+		lookups.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": []connectorResourceRow{}}); err != nil {
+			t.Errorf("encode empty resource lookup: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	t.Run("cleanup registered before publish", func(t *testing.T) {
+		registerSandboxResourceCleanup(t, server.URL, connectorID, "device-token")
+	})
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("resource cleanup lookups = %d, want 1", got)
+	}
+}

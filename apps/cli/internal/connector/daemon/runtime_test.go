@@ -1,17 +1,92 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
+
+type lockedLogBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(data)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+type failingResourceAdmitter struct{ err error }
+
+func (a *failingResourceAdmitter) Admit(context.Context, string, string) (connectorshare.Admission, error) {
+	return connectorshare.Admission{}, a.err
+}
+
+func (*failingResourceAdmitter) Retire(context.Context, connectorshare.Admission) error { return nil }
+func (*failingResourceAdmitter) MarkServingHealthy() error                              { return nil }
+func (*failingResourceAdmitter) Close() error                                           { return nil }
+
+func TestNativeSessionFactoryLogsClassifiedRetryWithoutStoppingSession(t *testing.T) {
+	const secret = "lv_live_SUPERSECRETVALUE0000001"
+	attemptErr := errors.New("classified native attempt failure from Bearer " + secret)
+	admitter := &failingResourceAdmitter{err: attemptErr}
+	common, err := DefaultFRPCommon(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewNativeSessionFactory(admitter, common, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	share := daemonShare("retry", 1, "on")
+	session, err := factory.Start(context.Background(), &share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(logs.String(), "classified native attempt failure") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	got := logs.String()
+	for _, want := range []string{"share daemon session attempt failed; retrying", share.CRID, "classified native attempt failure", "Bearer ***", "retry_in="} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("retry log %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("retry log contains a credential: %q", got)
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.Stop(stopCtx); err != nil {
+		t.Fatalf("stop retrying session: %v", err)
+	}
+}
 
 type closeTrackingFactory struct {
 	delegate *fakeFactory

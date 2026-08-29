@@ -129,6 +129,7 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	defer backend.Close()
 
 	connectorID := fmt.Sprintf("sandbox-macos-daemon-%d", time.Now().UnixNano())
+	registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, loadedAfterLogin.DeviceAPIKey)
 	publish := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL, "--id", connectorID)
 	cridValue := strings.TrimSpace(publish.stdout)
 	if publish.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
@@ -136,10 +137,6 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	}
 
 	local := waitExternalSandboxShare(t, stateDir, cridValue, 2*time.Minute)
-	loaded := loadSandboxAgentState(t, stateDir)
-	if loaded != nil {
-		registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, loaded.DeviceAPIKey)
-	}
 	if err := requireTestResourceIdentity(local.CRID, local.ResourceID); err != nil {
 		t.Fatalf("sandbox minted a non-test CRID: %v", err)
 	}

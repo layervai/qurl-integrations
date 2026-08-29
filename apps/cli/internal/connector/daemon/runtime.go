@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -257,6 +259,10 @@ func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.
 			// A failed marker clear is deliberately retried on the next serving
 			// cycle. It must not tear down a healthy route or its siblings.
 			_ = f.admitter.MarkServingHealthy()
+		},
+		OnRetry: func(err error, wait time.Duration) {
+			slog.WarnContext(ctx, "share daemon session attempt failed; retrying",
+				"crid", local.CRID, "retry_in", wait, "error", qurlapi.Redact(err.Error()))
 		},
 	})
 	if err != nil {
