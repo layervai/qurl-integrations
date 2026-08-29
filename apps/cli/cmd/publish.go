@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -457,7 +456,7 @@ func runForegroundLocalPublish(
 	cancelDaemon = cancel
 	daemonErr = make(chan error, 1)
 	go func() { daemonErr <- opts.runForegroundDaemon(daemonCtx, opts, stateDir, jobVersion) }()
-	ipc := connectordaemon.IPCClient{SocketPath: filepath.Join(stateDir, connectordaemon.SocketFile)}
+	ipc := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
 	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- ipc.WaitReady(readyCtx) }()

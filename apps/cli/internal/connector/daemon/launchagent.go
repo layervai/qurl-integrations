@@ -38,7 +38,7 @@ type JobController struct {
 func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
 	controller := &JobController{
 		Manager:  connectorservice.NewUserJobManager(),
-		IPC:      IPCClient{SocketPath: filepath.Join(stateDir, SocketFile)},
+		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
 		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
 		Endpoint: endpoint, ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}

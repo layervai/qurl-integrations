@@ -77,6 +77,8 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 
 func validatePlatformIPCPath(string) error { return nil }
 
+func platformStateSocketPath(path string) string { return path }
+
 func isUnavailableIPCError(err error) bool {
 	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
 }

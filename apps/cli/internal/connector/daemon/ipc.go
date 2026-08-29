@@ -16,8 +16,19 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
-// SocketFile is the fixed owner-only IPC socket name below the state directory.
+// SocketFile is the fixed logical IPC socket name. Unix uses it directly below
+// short state directories and includes it in the identity of a bounded path
+// for long state directories.
 const SocketFile = "daemon.sock"
+
+// StateSocketPath returns the stable platform IPC address for one state
+// namespace. Unix keeps the socket below short state paths and uses a bounded,
+// owner-only per-user runtime path when the state path cannot fit sockaddr_un.
+// Windows hashes this path into its named-pipe address as before.
+func StateSocketPath(stateDir string) string {
+	path := filepath.Join(strings.TrimSpace(stateDir), SocketFile)
+	return platformStateSocketPath(path)
+}
 
 // ErrAlreadyRunning reports a live or ambiguously stale daemon socket.
 var ErrAlreadyRunning = errors.New("qURL share daemon is already running")

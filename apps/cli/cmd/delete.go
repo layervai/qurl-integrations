@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -105,7 +104,7 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 	if err := registry.Delete(ctx, local.ResourceID); err != nil {
 		return err
 	}
-	socketPath := filepath.Join(stateDir, connectordaemon.SocketFile)
+	socketPath := connectordaemon.StateSocketPath(stateDir)
 	if _, err := os.Lstat(socketPath); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {

@@ -4,12 +4,21 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
+)
+
+const (
+	maxUnixSocketPathBytes = 100
+	unixIPCRuntimeRoot     = "/tmp"
 )
 
 var dialUnixSocket = func(path string, timeout time.Duration) (net.Conn, error) {
@@ -43,10 +52,23 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 }
 
 func validatePlatformIPCPath(path string) error {
-	if len(path) > 100 {
+	if len(path) > maxUnixSocketPathBytes {
 		return errors.New("share daemon socket path is too long")
 	}
 	return nil
+}
+
+func platformStateSocketPath(path string) string {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) || len(path) <= maxUnixSocketPathBytes {
+		return path
+	}
+	digest := sha256.Sum256([]byte(path))
+	return filepath.Join(
+		unixIPCRuntimeRoot,
+		"layerv-qurl-"+strconv.Itoa(os.Getuid()),
+		hex.EncodeToString(digest[:16])+".sock",
+	)
 }
 
 func prepareSocket(path string) error {

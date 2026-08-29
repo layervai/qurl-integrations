@@ -1774,7 +1774,7 @@ func foregroundIPCTestDaemon(started, stopped chan struct{}) func(context.Contex
 		}
 		runCtx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
-		path := filepath.Join(stateDir, connectordaemon.SocketFile)
+		path := connectordaemon.StateSocketPath(stateDir)
 		done := make(chan error, 1)
 		go func() {
 			done <- (&connectordaemon.IPCServer{
