@@ -75,18 +75,24 @@ jobs:
               # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
+              # The callback path is intentionally CLI-impacting: any trust or
+              # schema change must mint a fresh artifact and pass the complete
+              # exact-artifact journey, not only the generic scripts workflow.
               - 'apps/cli/**'
               - 'go.mod'
               - 'go.sum'
               - '.golangci.yml'
               - '.goreleaser.yml'
               - '.github/workflows/cli.yml'
+              - '.github/workflows/qurl-cli-customer-journey-result.yml'
               - '.github/workflows/release-please.yml'
+              - 'scripts/accept-cli-customer-journey-result.sh'
               - 'scripts/build-sandbox-matched-cohort-pr-artifacts.sh'
               - 'scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh'
               - 'scripts/resolve-sandbox-artifact-qurl-go-source.sh'
               - 'scripts/resolve-sandbox-artifact-qurl-go-source_test.sh'
               - 'scripts/extract-qurl-image-attestations.sh'
+              - 'scripts/test-accept-cli-customer-journey-result.sh'
 
   lint:
     name: cli / lint
