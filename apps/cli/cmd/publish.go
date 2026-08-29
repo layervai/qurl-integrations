@@ -489,10 +489,12 @@ func withoutExpectedDaemonCancellation(err error) error {
 		}
 		return errors.Join(kept...)
 	}
-	// Remove only the exact sentinel returned by the daemon for the shutdown
-	// that this function requested. A wrapped cancellation can carry a real
-	// daemon failure and must remain visible to the caller.
-	if err == context.Canceled { //nolint:errorlint // Exact identity is the security boundary described above.
+	// This filter runs only after this function canceled the daemon context.
+	// Platform IPC can wrap that expected cancellation. Remove the whole
+	// single-cause cancellation chain so it cannot mask the publish failure
+	// that caused shutdown. Multi-cause errors were split above, so any
+	// independent daemon failure remains joined and visible.
+	if errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err

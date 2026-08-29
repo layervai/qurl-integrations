@@ -52,9 +52,13 @@ func TestForegroundPublishKeepsDaemonFailureJoinedWithExpectedCancellation(t *te
 	if got := withoutExpectedDaemonCancellation(errors.Join(context.Canceled)); got != nil {
 		t.Fatalf("filtered expected cancellation = %v, want nil", got)
 	}
-	wrappedCancellation := fmt.Errorf("reconcile share failed: %w", context.Canceled)
-	if got := withoutExpectedDaemonCancellation(wrappedCancellation); !errors.Is(got, context.Canceled) || got.Error() != wrappedCancellation.Error() {
-		t.Fatalf("filtered wrapped daemon failure = %v, want %v", got, wrappedCancellation)
+	wrappedCancellation := fmt.Errorf("stop platform IPC: %w", context.Canceled)
+	if got := withoutExpectedDaemonCancellation(wrappedCancellation); got != nil {
+		t.Fatalf("filtered wrapped expected cancellation = %v, want nil", got)
+	}
+	got = withoutExpectedDaemonCancellation(errors.Join(wrappedCancellation, daemonFailure))
+	if !errors.Is(got, daemonFailure) || errors.Is(got, context.Canceled) {
+		t.Fatalf("filtered wrapped cancellation plus daemon failure = %v, want only %v", got, daemonFailure)
 	}
 }
 
