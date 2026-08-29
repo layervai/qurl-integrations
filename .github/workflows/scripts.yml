@@ -105,3 +105,9 @@ jobs:
       - name: Test validated-base resolver
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-resolve-validated-base.sh
+
+      # The callback turns a trusted protected-journey result into a check on
+      # one exact CLI producer commit. Exercise sender, run, and PR-head fences.
+      - name: Test CLI customer-journey result receiver
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-accept-cli-customer-journey-result.sh

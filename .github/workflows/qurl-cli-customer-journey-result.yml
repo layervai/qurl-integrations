@@ -1,0 +1,35 @@
+name: qURL CLI Customer Journey Result
+
+# This workflow is loaded only from the trusted default branch. It accepts a
+# closed, non-secret result envelope from the dedicated operations App, then
+# records that result against the exact CLI source commit named in the envelope.
+on:
+  repository_dispatch:
+    types: [qurl-cli-customer-journey-result]
+
+permissions: {}
+
+concurrency:
+  group: qurl-cli-customer-journey-result-${{ github.event.client_payload.source_sha }}-${{ github.event.client_payload.producer_run_id }}-${{ github.event.client_payload.producer_run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    name: Accept exact CLI customer-journey result
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Validate and record the exact CLI customer journey
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/accept-cli-customer-journey-result.sh "$GITHUB_EVENT_PATH"
