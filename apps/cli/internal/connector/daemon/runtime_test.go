@@ -248,6 +248,41 @@ func TestDeferredSessionFactoryRetriesFailedInitialization(t *testing.T) {
 	}
 }
 
+func TestDeferredSessionFactoryKeepsSuccessfulRuntimeContextUntilClose(t *testing.T) {
+	delegate := newCloseTrackingFactory()
+	var runtimeCtx context.Context
+	factory, err := NewDeferredSessionFactory(func(ctx context.Context) (SessionFactory, error) {
+		runtimeCtx = ctx
+		return delegate, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := daemonShare("context-lifetime", 1, "on")
+	session, err := factory.Start(context.Background(), &share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeCtx == nil || runtimeCtx.Err() != nil {
+		t.Fatalf("successful runtime context = %v, want live context", runtimeCtx)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := session.Stop(stopCtx); err != nil {
+		stopCancel()
+		t.Fatal(err)
+	}
+	stopCancel()
+	if err := factory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(runtimeCtx.Err(), context.Canceled) {
+		t.Fatalf("runtime context after Close = %v, want canceled", runtimeCtx.Err())
+	}
+	if delegate.closes.Load() != 1 {
+		t.Fatalf("successful delegate closes=%d, want 1", delegate.closes.Load())
+	}
+}
+
 func TestDeferredSessionFactorySerializesConcurrentInitialization(t *testing.T) {
 	delegate := newCloseTrackingFactory()
 	entered := make(chan struct{})

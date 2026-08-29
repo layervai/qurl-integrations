@@ -44,17 +44,18 @@ type NativeSessionFactory struct {
 type DeferredSessionFactory struct {
 	initialize func(context.Context) (SessionFactory, error)
 
-	mu           sync.Mutex
-	delegate     SessionFactory
-	initializing bool
-	ready        chan struct{}
-	initCancel   context.CancelFunc
-	closed       bool
-	closing      bool
-	closeDone    chan struct{}
-	closeErr     error
-	activeStarts int
-	cond         *sync.Cond
+	mu             sync.Mutex
+	delegate       SessionFactory
+	delegateCancel context.CancelFunc
+	initializing   bool
+	ready          chan struct{}
+	initCancel     context.CancelFunc
+	closed         bool
+	closing        bool
+	closeDone      chan struct{}
+	closeErr       error
+	activeStarts   int
+	cond           *sync.Cond
 }
 
 // NewDeferredSessionFactory delays native runtime initialization until needed.
@@ -104,16 +105,24 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		f.mu.Unlock()
 
 		delegate, err := initialize(initCtx)
-		cancel()
 		if err == nil && delegate == nil {
 			err = errors.New("deferred share session factory initialized without a delegate")
+		}
+		if err == nil {
+			err = initCtx.Err()
 		}
 
 		f.mu.Lock()
 		closed := f.closed
 		if err == nil && !closed {
 			f.delegate = delegate
+			// The successful native runtime owns this context for its full
+			// lifetime. Canceling the one-shot initialization context here would
+			// close the admitter before the first resource admission.
+			f.delegateCancel = cancel
 			f.initialize = nil
+		} else {
+			cancel()
 		}
 		f.initCancel = nil
 		if closed && delegate != nil {
@@ -194,8 +203,13 @@ func (f *DeferredSessionFactory) Close() error {
 	}
 	delegate := f.delegate
 	f.delegate = nil
+	delegateCancel := f.delegateCancel
+	f.delegateCancel = nil
 	priorErr := f.closeErr
 	f.mu.Unlock()
+	if delegateCancel != nil {
+		delegateCancel()
+	}
 	closeErr := closeSessionFactory(delegate)
 	f.mu.Lock()
 	f.closeErr = errors.Join(priorErr, closeErr)
