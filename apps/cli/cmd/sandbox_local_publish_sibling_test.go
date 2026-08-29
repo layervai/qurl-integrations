@@ -51,6 +51,8 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 		// Both kinds are owner-scoped by the qurl-go native session-operation
 		// contract. The CLI uses a one-shot agent enrollment token, which NHP
 		// records as bootstrap without making it connector-scoped.
+	case qurl.RegistrationKeyKindConnectorBootstrap, qurl.RegistrationKeyKindAgent:
+		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account or bootstrap", loaded.EnrollmentCredentialKind)
 	default:
 		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account or bootstrap", loaded.EnrollmentCredentialKind)
 	}
