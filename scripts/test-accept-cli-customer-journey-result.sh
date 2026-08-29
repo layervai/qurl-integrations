@@ -34,9 +34,31 @@ case "$path" in
       --arg path "${FAKE_RUN_PATH:-.github/workflows/cli.yml}" \
       '{repository:{full_name:$repository},head_repository:{full_name:$head_repository},head_sha:$sha,path:$path,event:$event,run_attempt:2,status:$status,conclusion:(if $conclusion == "" then null else $conclusion end)}'
     ;;
+  repos/layervai/qurl-integrations/actions/runs/555/attempts/2/jobs\?per_page=100)
+    jq -n \
+      --arg name "${FAKE_JOB_NAME:-cli / sandbox matched-cohort artifacts}" \
+      --arg status "${FAKE_JOB_STATUS:-completed}" \
+      --arg conclusion "${FAKE_JOB_CONCLUSION:-success}" \
+      --arg step_conclusion "${FAKE_JOB_STEP_CONCLUSION:-success}" '
+      {
+        total_count:1,
+        jobs:[{
+          name:$name,status:$status,conclusion:$conclusion,
+          steps:[
+            {name:"Build exact sandbox customer artifacts",conclusion:$step_conclusion},
+            {name:"Upload exact sandbox customer binaries",conclusion:"success"},
+            {name:"Upload exact sandbox customer source receipt",conclusion:"success"}
+          ]
+        }]
+      }'
+    ;;
   repos/layervai/qurl-integrations/pulls/1279)
-    jq -n --arg sha "${FAKE_PR_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
-      '{number:1279,state:"open",head:{repo:{full_name:"layervai/qurl-integrations"},sha:$sha},base:{repo:{full_name:"layervai/qurl-integrations"}}}'
+    jq -n \
+      --arg sha "${FAKE_PR_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
+      --arg state "${FAKE_PR_STATE:-open}" \
+      --arg head_repository "${FAKE_PR_HEAD_REPOSITORY:-layervai/qurl-integrations}" \
+      --arg base_repository "${FAKE_PR_BASE_REPOSITORY:-layervai/qurl-integrations}" \
+      '{number:1279,state:$state,head:{repo:{full_name:$head_repository},sha:$sha},base:{repo:{full_name:$base_repository}}}'
     ;;
   repos/layervai/qurl-integrations/git/ref/heads/main)
     jq -n --arg sha "${FAKE_MAIN_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
@@ -120,7 +142,7 @@ expect_envelope_rejected() {
   jq "$mutation" "$work/event.json" >"$work/mutated-event.json"
   mv "$work/mutated-event.json" "$work/event.json"
   : >"$work/gh-calls"
-  if run_subject >/dev/null 2>&1; then
+  if run_subject </dev/null >/dev/null 2>&1; then
     echo "$label was accepted" >&2
     exit 1
   fi
@@ -153,17 +175,59 @@ if run_subject GITHUB_REPOSITORY=example/not-the-repository >/dev/null 2>&1; the
 fi
 [[ ! -s "$work/gh-calls" ]] || { echo "repository guard reached GitHub API calls" >&2; exit 1; }
 
+for preflight_override in GH_TOKEN= GITHUB_RUN_ID=not-a-number GITHUB_RUN_ATTEMPT=0; do
+  write_event "$work/event.json"
+  : >"$work/gh-calls"
+  if run_subject "$preflight_override" >/dev/null 2>&1; then
+    echo "preflight accepted $preflight_override" >&2
+    exit 1
+  fi
+  [[ ! -s "$work/gh-calls" ]] || { echo "preflight guard reached GitHub API calls" >&2; exit 1; }
+done
+
 write_event "$work/event.json"
+mv "$work/event.json" "$work/missing-event.json"
 : >"$work/gh-calls"
-if run_subject FAKE_PR_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; then
-  echo "stale pull-request head was accepted" >&2
+if run_subject >/dev/null 2>&1; then
+  echo "missing event file was accepted" >&2
   exit 1
 fi
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
-  echo "stale head did not fail before check creation" >&2
+mv "$work/missing-event.json" "$work/event.json"
+[[ ! -s "$work/gh-calls" ]] || { echo "missing-file guard reached GitHub API calls" >&2; exit 1; }
+
+mv "$work/event.json" "$work/real-event.json"
+ln -s "$work/real-event.json" "$work/event.json"
+: >"$work/gh-calls"
+if run_subject >/dev/null 2>&1; then
+  echo "symlinked event file was accepted" >&2
   exit 1
+fi
+rm "$work/event.json"
+mv "$work/real-event.json" "$work/event.json"
+[[ ! -s "$work/gh-calls" ]] || { echo "symlink guard reached GitHub API calls" >&2; exit 1; }
+
+expect_stale_pr_ignored() {
+  local label=$1 override=$2
+  write_event "$work/event.json"
+  rm -f "$work/check-request"
+  : >"$work/gh-calls"
+  if ! run_subject "$override" >/dev/null; then
+    echo "$label produced a callback failure" >&2
+    exit 1
+  fi
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 && ! -e "$work/check-request" ]] || {
+    echo "$label was not ignored before check creation" >&2
+    exit 1
+  }
 }
 
+expect_stale_pr_ignored "stale pull-request head" \
+  FAKE_PR_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expect_stale_pr_ignored "closed pull request" FAKE_PR_STATE=closed
+expect_stale_pr_ignored "fork pull-request head" FAKE_PR_HEAD_REPOSITORY=attacker/qurl-integrations
+expect_stale_pr_ignored "crossed pull-request base" FAKE_PR_BASE_REPOSITORY=attacker/qurl-integrations
+
+write_event "$work/event.json"
 : >"$work/gh-calls"
 if run_subject FAKE_RUN_STATUS=completed FAKE_RUN_CONCLUSION=failure >/dev/null 2>&1; then
   echo "failed CLI producer run was accepted" >&2
@@ -194,23 +258,69 @@ for producer_case in \
   }
 done
 
+write_event "$work/event.json"
+: >"$work/gh-calls"
+if run_subject FAKE_RUN_STATUS=queued >/dev/null 2>&1; then
+  echo "queued CLI producer run was accepted" >&2
+  exit 1
+fi
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+  echo "queued producer did not fail at producer validation" >&2
+  exit 1
+}
+
+for artifact_case in \
+  'missing artifact job:FAKE_JOB_NAME=cli / wrong artifact job' \
+  'running artifact job:FAKE_JOB_STATUS=in_progress' \
+  'failed artifact job:FAKE_JOB_CONCLUSION=failure' \
+  'failed artifact step:FAKE_JOB_STEP_CONCLUSION=failure'; do
+  label=${artifact_case%%:*}
+  override=${artifact_case#*:}
+  write_event "$work/event.json"
+  : >"$work/gh-calls"
+  if run_subject "$override" >/dev/null 2>&1; then
+    echo "$label was accepted" >&2
+    exit 1
+  fi
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
+    echo "$label did not fail at artifact producer validation" >&2
+    exit 1
+  }
+done
+
+write_event "$work/event.json"
 jq '.client_payload.source_kind = "main" | .client_payload.pull_request_number = 0' \
   "$work/event.json" >"$work/main-event.json"
 mv "$work/main-event.json" "$work/event.json"
 : >"$work/gh-calls"
 run_subject FAKE_RUN_EVENT=push >/dev/null
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 ]] || {
-  echo "current-main result did not validate producer, main ref, and check creation" >&2
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 4 ]] || {
+  echo "current-main result did not validate producer, artifact job, main ref, and check creation" >&2
   exit 1
 }
 
+write_event "$work/event.json"
+jq '.client_payload.source_kind = "main" | .client_payload.pull_request_number = 0' \
+  "$work/event.json" >"$work/main-event.json"
+mv "$work/main-event.json" "$work/event.json"
 : >"$work/gh-calls"
-if run_subject FAKE_RUN_EVENT=push FAKE_MAIN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; then
-  echo "stale main result was accepted" >&2
+if run_subject >/dev/null 2>&1; then
+  echo "main result bound to a pull-request producer was accepted" >&2
   exit 1
 fi
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
-  echo "stale main did not fail before check creation" >&2
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+  echo "crossed main producer did not fail at producer validation" >&2
+  exit 1
+}
+
+rm -f "$work/check-request"
+: >"$work/gh-calls"
+if ! run_subject FAKE_RUN_EVENT=push FAKE_MAIN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null; then
+  echo "stale main result produced a callback failure" >&2
+  exit 1
+fi
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 && ! -e "$work/check-request" ]] || {
+  echo "stale main was not ignored before check creation" >&2
   exit 1
 }
 

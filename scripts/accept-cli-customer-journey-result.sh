@@ -24,9 +24,12 @@ server_url=${GITHUB_SERVER_URL:-https://github.com}
 # GitHub authenticates repository_dispatch senders. Accept only the dedicated
 # operations App identity and one closed payload schema. The payload contains
 # no endpoint, credential, account, region, or private-repository detail.
-jq -e '
+# TODO(upstream-contract): Keep the sender identity and result schema in
+# lockstep with the protected result producer. The schema uses nine of
+# repository_dispatch's ten allowed top-level client_payload fields.
+jq -e --arg repository "$repository" '
   .action == "qurl-cli-customer-journey-result" and
-  .repository.full_name == "layervai/qurl-integrations" and
+  .repository.full_name == $repository and
   .sender.login == "ops-routines-reader[bot]" and
   # Public bot-account user ID from the webhook sender, not a GitHub App ID.
   .sender.id == 277190418 and
@@ -98,6 +101,23 @@ jq -e --arg repository "$repository" --arg sha "$source_sha" --arg event "$expec
   exit 1
 }
 
+# TODO(upstream-contract): Keep the exact producer job and step names in
+# lockstep with .github/workflows/cli.yml and the protected artifact consumer.
+producer_jobs=$(gh api --method GET \
+  "repos/${repository}/actions/runs/${producer_run_id}/attempts/${producer_run_attempt}/jobs?per_page=100")
+jq -e '
+  .total_count <= 100 and (.jobs | length) == .total_count and
+  ([.jobs[] | select(.name == "cli / sandbox matched-cohort artifacts")] | length) == 1 and
+  ([.jobs[] | select(.name == "cli / sandbox matched-cohort artifacts")][0] as $job |
+    $job.status == "completed" and $job.conclusion == "success" and
+    (["Build exact sandbox customer artifacts", "Upload exact sandbox customer binaries",
+      "Upload exact sandbox customer source receipt"] |
+     all(. as $step | [$job.steps[] | select(.name == $step and .conclusion == "success")] | length == 1)))
+' <<<"$producer_jobs" >/dev/null || {
+  echo "::error::customer-journey result does not bind the exact successful CLI artifact producer" >&2
+  exit 1
+}
+
 if [[ "$source_kind" == pull_request ]]; then
   pull_request=$(gh api --method GET "repos/${repository}/pulls/${pull_request_number}")
   jq -e --arg repository "$repository" --arg sha "$source_sha" --argjson number "$pull_request_number" '
@@ -105,20 +125,21 @@ if [[ "$source_kind" == pull_request ]]; then
     .head.repo.full_name == $repository and .head.sha == $sha and
     .base.repo.full_name == $repository
   ' <<<"$pull_request" >/dev/null || {
-    echo "::error::customer-journey result is not for the current head of the named open pull request" >&2
-    exit 1
+    echo "::notice::Ignoring a customer-journey result for a superseded or closed pull request head"
+    exit 0
   }
 else
   main_ref=$(gh api --method GET "repos/${repository}/git/ref/heads/main")
   jq -e --arg sha "$source_sha" '.ref == "refs/heads/main" and .object.type == "commit" and .object.sha == $sha' \
     <<<"$main_ref" >/dev/null || {
-    echo "::error::customer-journey result is not for current main" >&2
-    exit 1
+    echo "::notice::Ignoring a customer-journey result for superseded main"
+    exit 0
   }
 fi
 
-# This is the polling gate's exact correlation key. A replay can create another
-# check run with the same key; the gate selects the newest exact result.
+# TODO(upstream-contract): Keep this check name and external-ID schema in
+# lockstep with the polling gate. A replay can create another check run with
+# the same key; the gate selects the newest exact result.
 external_id="layerv.qurl-cli-customer-journey.v1:${source_sha}:${producer_run_id}:${producer_run_attempt}"
 details_url="${server_url}/${repository}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
 title="Exact CLI artifact customer journey passed"
