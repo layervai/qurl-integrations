@@ -241,26 +241,45 @@ jobs:
       - name: Verify the draft CLI carries the exact production Hub trust pin
         env:
           GH_TOKEN: ${{ github.token }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
           gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'qurl_*_linux_amd64.tar.gz' --dir "$work"
-          mapfile -t archives < <(find "$work" -maxdepth 1 -type f -name 'qurl_*_linux_amd64.tar.gz')
-          if (( ${#archives[@]} != 1 )); then
-            echo "::error::expected one released linux/amd64 qurl archive, found ${#archives[@]}" >&2
+            --pattern 'qurl_*_darwin_*.tar.gz' \
+            --pattern 'qurl_*_linux_*.tar.gz' \
+            --pattern 'qurl_*_windows_*.zip' \
+            --dir "$work"
+          mapfile -t archives < <(find "$work" -maxdepth 1 -type f \( -name 'qurl_*.tar.gz' -o -name 'qurl_*.zip' \) | LC_ALL=C sort)
+          if (( ${#archives[@]} != 6 )); then
+            echo "::error::expected all six released qurl archives, found ${#archives[@]}" >&2
             exit 1
           fi
-          mkdir "$work/extracted"
-          tar -xzf "${archives[0]}" -C "$work/extracted"
-          binary="$work/extracted/qurl"
-          if [[ ! -x "$binary" ]]; then
+          native_binary=
+          for index in "${!archives[@]}"; do
+            archive="${archives[$index]}"
+            extracted="$work/extracted-$index"
+            mkdir "$extracted"
+            case "$archive" in
+              *.zip) unzip -q "$archive" -d "$extracted"; binary="$extracted/qurl.exe" ;;
+              *.tar.gz) tar -xzf "$archive" -C "$extracted"; binary="$extracted/qurl" ;;
+              *) echo "::error::unexpected qurl archive: $archive" >&2; exit 1 ;;
+            esac
+            if [[ ! -f "$binary" ]] || ! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"; then
+              echo "::error::$(basename "$archive") does not carry the exact verified production Hub trust root" >&2
+              exit 1
+            fi
+            if [[ "$archive" == *_linux_amd64.tar.gz ]]; then
+              native_binary=$binary
+            fi
+          done
+          if [[ -z "$native_binary" || ! -x "$native_binary" ]]; then
             echo "::error::released linux/amd64 archive has no executable qurl binary" >&2
             exit 1
           fi
-          fingerprint=$("$binary" version --verify-release-native-trust)
+          fingerprint=$("$native_binary" version --verify-release-native-trust)
           if [[ "$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
             echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
             exit 1

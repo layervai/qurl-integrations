@@ -502,9 +502,17 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			if !ok || strings.TrimSpace(fingerprintSource) == "" {
 				t.Errorf("%s released CLI Hub-pin verifier has no fingerprint source", target.file)
 			}
+			artifactPinSource, ok := releaseVerifier.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+			if !ok || strings.TrimSpace(artifactPinSource) == "" {
+				t.Errorf("%s released CLI Hub-pin verifier has no public-key source", target.file)
+			}
 			for _, required := range []string{
 				`gh release download "$CLI_TAG"`,
-				`--pattern 'qurl_*_linux_amd64.tar.gz'`,
+				`--pattern 'qurl_*_darwin_*.tar.gz'`,
+				`--pattern 'qurl_*_linux_*.tar.gz'`,
+				`--pattern 'qurl_*_windows_*.zip'`,
+				`if (( ${#archives[@]} != 6 ))`,
+				`grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
 				`version --verify-release-native-trust`,
 				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
 			} {
