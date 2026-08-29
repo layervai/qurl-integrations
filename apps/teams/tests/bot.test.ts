@@ -230,7 +230,7 @@ describe('Teams bot primitives', () => {
       },
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
-        unbindScopeAlias: async () => undefined,
+        unbindScopeAlias: async () => true,
       } as unknown as TeamsDataStore,
       messages: {} as never,
     });
@@ -241,6 +241,57 @@ describe('Teams bot primitives', () => {
     // resources() pages the whole catalogue. unset-alias needs neither.
     expect(tenantClientBuilds).toBe(0);
     expect(qurlCalls).toBe(0);
+  });
+
+  it('rejects a connector id that is too long to be a channel alias before any write', async () => {
+    // Connector ids may be 64 characters; channel aliases may be 63. Without
+    // alias:, the id becomes the alias, so the gap would strand an unremovable
+    // row -- and the old ordering only noticed at render time, after the
+    // resource, alias, and exposure writes and after minting a bootstrap key.
+    const slug = `a${'b'.repeat(62)}c`;
+    expect(slug).toHaveLength(64);
+    const writes: string[] = [];
+    const bot = new TeamsBot({
+      qurl: {
+        listResources: async () => { writes.push('listResources'); return { resources: [] }; },
+        createResource: async () => { writes.push('createResource'); return { resourceId: 'res-1' }; },
+        createEnrollmentToken: async () => { writes.push('createEnrollmentToken'); return { keyId: 'k', apiKey: 'bootstrap' }; },
+      } as unknown as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        personalConversationRef: async () => ({ serviceUrl: 'https://smba.trafficmanager.net/teams', conversationId: 'c1' }),
+        lookupScopeAlias: async () => undefined,
+        bindScopeAlias: async () => { writes.push('bindScopeAlias'); },
+        exposeResource: async () => { writes.push('exposeResource'); },
+      } as unknown as TeamsDataStore,
+      messages: { sendText: async () => undefined, reply: async () => undefined },
+      connectorImage: 'registry.example/qurl:1',
+    });
+
+    await expect(bot.execute({ type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } },
+      'tenant-1', 'channel-1', true, parseCommand(`protect-connector ${slug}`)))
+      .rejects.toThrow('not a usable channel alias');
+    expect(writes).toEqual([]);
+    // An explicit alias: is the documented way through.
+    expect(parseCommand(`protect-connector ${slug} alias:$web`)).toMatchObject({ flags: { alias: 'web' } });
+  });
+
+  it('tells an admin when unset-alias matched nothing', async () => {
+    const bot = (removed: boolean) => new TeamsBot({
+      qurl: {} as QurlClient,
+      data: {
+        checkAdmin: async () => ({ isAdmin: true }),
+        unbindScopeAlias: async () => removed,
+      } as unknown as TeamsDataStore,
+      messages: {} as never,
+    });
+    const activity = { type: 'message', id: 'activity-1', from: { aadObjectId: 'actor-1', id: 'delivery-1' } };
+    await expect(bot(true).execute(activity, 'tenant-1', 'channel-1', true, parseCommand('unset-alias $docs')))
+      .resolves.toContain('Removed alias `$docs`');
+    // Reporting a removal that never happened lets an admin believe channel
+    // access was revoked when the row is still there.
+    await expect(bot(false).execute(activity, 'tenant-1', 'channel-1', true, parseCommand('unset-alias $typo')))
+      .resolves.toBe('No alias `$typo` is bound in this channel.');
   });
 
   it('renders ECS and Kubernetes connector instructions', () => {
@@ -577,7 +628,7 @@ describe('Teams bot primitives', () => {
       qurl: { listResources: async () => ({ resources: [{ resourceId: 'resource-1' }] }) } as unknown as QurlClient,
       data: {
         checkAdmin: async () => ({ isAdmin: true }),
-        unbindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { unbound = alias; },
+        unbindScopeAlias: async (_tenantId: string, _scopeId: string, alias: string) => { unbound = alias; return true; },
       } as unknown as TeamsDataStore,
       messages: {} as never,
     });

@@ -318,12 +318,15 @@ export class TeamsDataStore {
     }
   }
 
-  async unbindScopeAlias(tenantId: string, scopeId: string, alias: string): Promise<void> {
+  /** Returns whether an alias row was actually removed. */
+  async unbindScopeAlias(tenantId: string, scopeId: string, alias: string): Promise<boolean> {
     assertPresent(tenantId, scopeId, alias);
     try {
       await this.#client.send({ operation: 'delete', input: { TableName: this.#channelPoliciesTable, Key: policyDdbKey(tenantId, aliasPolicyKey(scopeId, alias)), ConditionExpression: `attribute_exists(${policyKey})` } });
+      return true;
     } catch (error) {
       if (!isConditionalCheckFailed(error)) throw error;
+      return false;
     }
   }
 

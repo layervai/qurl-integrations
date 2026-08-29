@@ -113,7 +113,10 @@ export class TeamsBot {
       return `Open this qURL setup link in your browser:\n${link.url.toString()}`;
     }
     if (command.verb === 'feedback') {
-      if (!this.#options.feedback) throw new Error('Feedback is not enabled');
+      // The production runtime does not wire a feedback handler, so the verb is
+      // no longer advertised in help. Someone who types it anyway gets a plain
+      // answer rather than a generic failure plus an error-level log entry.
+      if (!this.#options.feedback) throw new UserFacingError('Feedback is not enabled for this qURL installation.');
       await this.#options.feedback({ tenantId, actorId, message: command.text ?? '' }); return 'Thanks. The qURL team received your feedback.';
     }
     if (ADMIN_COMMANDS.has(command.verb)) {
@@ -159,8 +162,12 @@ export class TeamsBot {
     if (command.verb === 'aliases') return this.aliases(tenantId, scopeId);
     if (command.verb === 'unset-alias') {
       const alias = command.resource ?? '';
-      await this.#options.data.unbindScopeAlias(tenantId, scopeId, alias);
-      return `Removed alias \`$${alias}\` from this channel. The resource remains protected.`;
+      // Reply on what actually happened: an admin who mistypes an alias must
+      // not be told channel access was removed when no row was touched.
+      const removed = await this.#options.data.unbindScopeAlias(tenantId, scopeId, alias);
+      return removed
+        ? `Removed alias \`$${alias}\` from this channel. The resource remains protected.`
+        : `No alias \`$${alias}\` is bound in this channel.`;
     }
     const qurl = await this.#qurl(tenantId);
     if (command.verb === 'protect-connector') return this.protectConnector(qurl, activity, tenantId, scopeId, command, signal);
@@ -316,13 +323,21 @@ export class TeamsBot {
   async protectConnector(qurl: QurlClient, activity: TeamsActivity, tenantId: string, scopeId: string, command: TeamsCommand, signal?: AbortSignal): Promise<string> {
     const slug = command.resource ?? command.args[0] ?? '';
     validateTunnelSlug(slug);
+    // A connector id may be 64 characters; a channel alias may be 63. Without
+    // alias:, the id becomes the alias, so the wider grammar would otherwise
+    // strand an unremovable row here exactly as #channelAliasFor describes --
+    // and it would do so after the resource, alias, and exposure writes, since
+    // renderTunnelInstallMessage only rejects it at the very end.
+    const alias = command.flags.alias ?? slug;
+    if (!isChannelAlias(alias)) {
+      throw new UserFacingError('This connector id is not a usable channel alias. Re-run with `alias:$alias`.');
+    }
     const ref = await this.#options.data.personalConversationRef(tenantId, activity.from?.aadObjectId?.trim().toLowerCase() ?? '');
     if (!ref) throw new UserFacingError('Open a personal chat with the bot before protecting a connector.');
     const resources = await this.resources(qurl, signal);
     const operationKey = [tenantId, scopeId, activity.from?.id ?? '', slug, this.#activityIdempotencyField(activity)];
     const resource = resources.find(item => item.type === 'tunnel' && item.slug === slug)
       ?? await qurl.createResource({ type: 'tunnel', slug, findOrCreate: true, idempotencyKey: idempotencyKey(...operationKey, 'resource') }, signal);
-    const alias = command.flags.alias ?? slug;
     await this.#bindAlias(tenantId, scopeId, alias, resource.resourceId);
     await this.#options.data.exposeResource(tenantId, scopeId, resource.resourceId);
     let token: QurlApiKey | undefined;
@@ -350,7 +365,6 @@ export function helpMessage(): string {
     '- `get $<id|alias> [dm:true] [reason:"..."]`',
     '- `list`',
     '- `aliases`',
-    '- `feedback <message>`',
     '',
     'Admin commands:',
     '- `protect-url url:https://internal.example.com as:$docs`',
