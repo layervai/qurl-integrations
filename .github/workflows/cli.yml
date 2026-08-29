@@ -213,17 +213,14 @@ jobs:
             exit "$lifecycle_status"
           fi
 
-      # 40 is the intentional initial floor, not the target. The v2 rebuild
-      # replaces this tree, so pinning an ambition floor (85) to the old tree
-      # would be red on day one for coverage the rebuild is about to delete.
-      # Raise this — and the mirrored floor in Makefile `check-cli` — once the
-      # v2 code lands. The pre-v2 tree measured 71.9% when this gate shipped.
+      # The v2 CLI currently measures above 72%. Keep a small platform and
+      # toolchain margin while making material regressions fail the PR.
       - name: Check coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${COVERAGE}%"
-          if ! awk -v c="$COVERAGE" 'BEGIN { exit !(c+0 >= 40) }' </dev/null; then
-            echo "::error::Coverage ${COVERAGE}% is below 40% threshold"
+          if ! awk -v c="$COVERAGE" 'BEGIN { exit !(c+0 >= 70) }' </dev/null; then
+            echo "::error::Coverage ${COVERAGE}% is below 70% threshold"
             exit 1
           fi
 

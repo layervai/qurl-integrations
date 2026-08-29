@@ -581,13 +581,12 @@ func (c *client) doRESTRequest(ctx context.Context, method, path string, body an
 			req.Header.Add(name, value)
 		}
 	}
+	req = withRequestRetryIntent(req, allowRetry)
 	var resp *http.Response
 	if c.registeredDoer != nil {
 		// The registered doer owns request authorization and delegates to the
-		// shared transport. Its no-replay rule for restart is enforced in
-		// transport.Do from the exact request method and path; allowRetry is the
-		// account-client control below and must not be treated as a second retry
-		// layer here.
+		// shared transport. The request context carries this caller's retry
+		// intent through qurl-go's Do-only registered transport seam.
 		resp, err = c.registeredDoer.Do(req)
 	} else {
 		if c.authorize == nil {

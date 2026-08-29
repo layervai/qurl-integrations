@@ -41,6 +41,12 @@ type transport struct {
 	verbose      func(format string, args ...any)
 }
 
+type requestRetryIntentKey struct{}
+
+func withRequestRetryIntent(req *http.Request, allowRetry bool) *http.Request {
+	return req.WithContext(context.WithValue(req.Context(), requestRetryIntentKey{}, allowRetry))
+}
+
 func newTransport(cfg *Config) *transport {
 	// Copy an injected client so the CLI can enforce its credential boundary
 	// without mutating caller-owned test or embedding state. Redirect refusal
@@ -72,14 +78,19 @@ func newTransport(cfg *Config) *transport {
 }
 
 // Do sends req with the CLI headers set, retrying bounded transient responses.
-// Sharing restart is never replayed because it rotates an epoch and has no
-// idempotency-key contract. The X-Request-Id stays constant across retries of
-// one logical request so the service can correlate them.
+// Direct CLI REST calls carry their explicit retry intent in the request
+// context because qurl-go's registered HTTPDoer exposes only Do. SDK-issued
+// requests have no marker and retain the normal retry behavior. The
+// X-Request-Id stays constant across retries of one logical request so the
+// service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
 	// TODO(upstream-contract): qurl-go's registered HTTPDoer exposes only Do,
-	// not DoOnce. Keep this exact service path aligned with doSharing until the
-	// upstream interface can carry the no-replay intent directly.
-	allowRetry := req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/sharing/restart")
+	// not DoOnce. Keep carrying the caller's explicit intent through the
+	// request context until the upstream interface can express it directly.
+	allowRetry, explicit := req.Context().Value(requestRetryIntentKey{}).(bool)
+	if !explicit {
+		allowRetry = true
+	}
 	return t.do(req, allowRetry)
 }
 

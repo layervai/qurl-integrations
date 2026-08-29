@@ -28,6 +28,7 @@ type windowsDaemonLogACLHeader struct {
 // the local read-only header view tied to the exact x/sys layout at compile
 // time so a dependency change cannot corrupt the security decision.
 var _ [unsafe.Sizeof(windows.ACL{})]byte = [unsafe.Sizeof(windowsDaemonLogACLHeader{})]byte{}
+var _ [unsafe.Offsetof(windows.ACL{}.AceCount)]byte = [unsafe.Offsetof(windowsDaemonLogACLHeader{}.ACECount)]byte{}
 
 func redirectDaemonJobOutput(stdoutPath, stderrPath string, streams *output.Streams) error {
 	stdoutPath = strings.TrimSpace(stdoutPath)

@@ -334,7 +334,7 @@ func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistr
 		return "", err
 	}
 	if !present {
-		return "", errors.New("qURL share daemon has no durable account owner")
+		return "", errors.New("qURL share daemon has no durable account owner; run `qurl login` and publish a local app first, or use --headless-config with --enrollment-token-file")
 	}
 	return ownerID, nil
 }

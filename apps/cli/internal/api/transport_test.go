@@ -62,3 +62,27 @@ func TestTransportRefusesRedirectFromInjectedHTTPClient(t *testing.T) {
 		t.Fatalf("redirect destination received %d requests, want zero", redirected.Load())
 	}
 }
+
+func TestTransportExplicitNoReplayIsPathIndependent(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+
+	transport := newTransport(&Config{HTTPClient: srv.Client(), Version: "test", Sleep: func(time.Duration) {}})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/not-a-special-path", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := transport.Do(withRequestRetryIntent(req, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	if resp.StatusCode != http.StatusTooManyRequests || requests.Load() != 1 {
+		t.Fatalf("explicit no-replay response = HTTP %d after %d requests, want HTTP 429 after one", resp.StatusCode, requests.Load())
+	}
+}

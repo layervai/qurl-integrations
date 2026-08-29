@@ -135,9 +135,11 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	// A cold publish can keep the registered REST client runtime open while
 	// resource discovery opens the same native state directory. This overlap is
 	// required in normal operation because a background daemon can also share
-	// the directory with CLI commands. qurl-go serializes identity setup and
-	// state mutations with its cross-process setup lock and operation leases;
-	// qurl-connector adds a cross-process lock for session-operation journals.
+	// the directory with CLI commands. qurl-go releases the first runtime's
+	// setup lock before OpenNativeRuntime returns; the completed-state fast path
+	// used by the second runtime takes no setup lock or packet. Later state
+	// mutations use operation leases, and qurl-connector separately locks its
+	// session-operation journals across processes.
 	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir, sessionOperations)
 	if err != nil {
 		return err

@@ -157,15 +157,15 @@ endef
 # provisions an ephemeral platform keyring while this target uses the host's
 # configured keyring. Credentialed sandbox smoke/soak now runs only in the
 # private orchestrator against the exact public source SHA. `goreleaser check`
-# needs goreleaser on PATH, like release-snapshot above. The 40 floor mirrors
-# cli.yml's coverage gate; raise both together once the v2 code lands.
+# needs goreleaser on PATH, like release-snapshot above. The 70 floor mirrors
+# cli.yml's coverage gate and leaves a small margin below the measured v2 CLI.
 check-cli:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./apps/cli/...
 	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./apps/cli/...
 	@COVERAGE=$$(go tool cover -func=coverage.out | grep ^total: | awk '{print $$3}' | tr -d '%'); \
 	echo "Total coverage: $${COVERAGE}%"; \
-	if ! awk -v c="$$COVERAGE" 'BEGIN { exit !(c+0 >= 40) }' </dev/null; then \
-		echo "FAIL: Coverage $${COVERAGE}% is below 40% threshold"; \
+	if ! awk -v c="$$COVERAGE" 'BEGIN { exit !(c+0 >= 70) }' </dev/null; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below 70% threshold"; \
 		exit 1; \
 	fi
 	go vet ./apps/cli/...
