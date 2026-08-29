@@ -42,6 +42,17 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	}
 }
 
+func TestForegroundPublishKeepsDaemonFailureJoinedWithExpectedCancellation(t *testing.T) {
+	daemonFailure := errors.New("daemon shutdown failed")
+	got := withoutExpectedDaemonCancellation(errors.Join(context.Canceled, daemonFailure))
+	if !errors.Is(got, daemonFailure) || errors.Is(got, context.Canceled) {
+		t.Fatalf("filtered daemon error = %v, want only %v", got, daemonFailure)
+	}
+	if got := withoutExpectedDaemonCancellation(errors.Join(context.Canceled)); got != nil {
+		t.Fatalf("filtered expected cancellation = %v, want nil", got)
+	}
+}
+
 func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

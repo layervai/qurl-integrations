@@ -424,11 +424,9 @@ func runForegroundLocalPublish(
 			select {
 			case stopErr := <-daemonErr:
 				// cancelDaemon deliberately stops a daemon that outlived an
-				// earlier publish error. Do not let that expected cancellation
-				// replace the actionable error with exit 130.
-				if !errors.Is(stopErr, context.Canceled) {
-					retErr = errors.Join(retErr, stopErr)
-				}
+				// earlier publish error. Remove only the expected cancellation;
+				// a joined shutdown or manager failure must remain actionable.
+				retErr = errors.Join(retErr, withoutExpectedDaemonCancellation(stopErr))
 			case <-timer.C:
 				retErr = errors.Join(retErr, errors.New("foreground qURL daemon did not stop within 10 seconds"))
 			}
@@ -476,6 +474,25 @@ func runForegroundLocalPublish(
 	retErr = <-daemonErr
 	joined = true
 	return retErr
+}
+
+func withoutExpectedDaemonCancellation(err error) error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		kept := make([]error, 0, len(joined.Unwrap()))
+		for _, cause := range joined.Unwrap() {
+			if cause = withoutExpectedDaemonCancellation(cause); cause != nil {
+				kept = append(kept, cause)
+			}
+		}
+		return errors.Join(kept...)
+	}
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare) error {

@@ -46,6 +46,9 @@ const connectorRefreshModeAuto = "auto"
 var errNativeSessionOwnerVerification = errors.New("registered Connector owner verification failed")
 
 var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, version string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	// TODO(upstream-contract): OpenNativeRuntime must not execute session
+	// operations. qurl-connector consumes that authority only when
+	// NewNativeAdmitter takes the runtime, after this owner check.
 	runtime, err := openShareNativeRuntime(ctx, cfg)
 	if err != nil {
 		return nil, err
