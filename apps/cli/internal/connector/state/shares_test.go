@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -64,6 +65,23 @@ func TestLocalShareRegistryBindsOwnerBeforeShares(t *testing.T) {
 	owner, present, err = reopened.OwnerID(context.Background())
 	if err != nil || !present || owner != "owner-one" {
 		t.Fatalf("durable owner = %q, %v, %v", owner, present, err)
+	}
+}
+
+func TestLocalShareRegistryRejectsOldVersionWithSafeRecovery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, LocalSharesFile)
+	if err := os.WriteFile(path, []byte(`{"version":1,"owner_id":"owner-old","shares":{}}`), connectorResourceFileMode); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := ReadLocalSharesIfPresent(context.Background(), dir)
+	if !errors.Is(err, ErrLocalShareVersionUnsupported) {
+		t.Fatalf("old registry error = %v, want version sentinel", err)
+	}
+	for _, want := range []string{path, "does not migrate old state", "revoke any device key", "move or remove the complete state directory", "qurl login"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("old registry error = %q, want %q", err, want)
+		}
 	}
 }
 

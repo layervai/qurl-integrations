@@ -26,6 +26,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 type recordingShareDaemon struct {
@@ -476,8 +477,8 @@ func TestStopRemoteURLReportsTheSupportedLifecycleCommand(t *testing.T) {
 		args: []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
 		env:  map[string]string{"QURL_API_KEY": testAPIKey},
 	})
-	if res.code == 0 {
-		t.Fatal("stop remote URL exit = 0, want a product-level lifecycle error")
+	if res.code != exitcode.InvalidInput {
+		t.Fatalf("stop remote URL exit = %d, want %d", res.code, exitcode.InvalidInput)
 	}
 	for _, want := range []string{"stop applies only to a local qURL Connector", "qurl delete " + srv.Key.CRID + " --yes", "url resource"} {
 		if !strings.Contains(res.stderr.String(), want) {

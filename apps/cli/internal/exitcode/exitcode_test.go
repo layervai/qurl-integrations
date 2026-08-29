@@ -53,14 +53,16 @@ var cliSentinels = map[string]struct {
 	// two settings sentinels share the Hub triple's Config row; the local
 	// link check shares CRID verification's fail-closed row; a platform
 	// deny is Forbidden and a platform defer is Unavailable.
-	"consume.ErrAccessNotConfigured":    {consume.ErrAccessNotConfigured, Config},
-	"consume.ErrAccessSettingsMismatch": {consume.ErrAccessSettingsMismatch, Config},
-	"consume.ErrLinkVerification":       {consume.ErrLinkVerification, VerificationFailed},
-	"consume.ErrAccessDenied":           {consume.ErrAccessDenied, Forbidden},
-	"consume.ErrAccessBusy":             {consume.ErrAccessBusy, Unavailable},
-	"daemon.ErrAlreadyRunning":          {connectordaemon.ErrAlreadyRunning, Conflict},
-	"daemon.ErrResourceGone":            {connectordaemon.ErrResourceGone, NotFound},
-	"state.ErrNoDefaultStateDir":        {state.ErrNoDefaultStateDir, Config},
+	"consume.ErrAccessNotConfigured":        {consume.ErrAccessNotConfigured, Config},
+	"consume.ErrAccessSettingsMismatch":     {consume.ErrAccessSettingsMismatch, Config},
+	"consume.ErrLinkVerification":           {consume.ErrLinkVerification, VerificationFailed},
+	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},
+	"consume.ErrAccessBusy":                 {consume.ErrAccessBusy, Unavailable},
+	"daemon.ErrAlreadyRunning":              {connectordaemon.ErrAlreadyRunning, Conflict},
+	"daemon.ErrResourceGone":                {connectordaemon.ErrResourceGone, NotFound},
+	"state.ErrNoDefaultStateDir":            {state.ErrNoDefaultStateDir, Config},
+	"state.ErrLocalShareOwnerConflict":      {state.ErrLocalShareOwnerConflict, Conflict},
+	"state.ErrLocalShareVersionUnsupported": {state.ErrLocalShareVersionUnsupported, Config},
 
 	// A same-Connector response contradiction is a fail-closed verification
 	// failure; a cross-Connector alias is valid identity in conflicting state.
@@ -224,6 +226,9 @@ func TestTypedWrappers(t *testing.T) {
 	if got := FromError(UsageError(errors.New("bad flag"))); got != Usage {
 		t.Errorf("UsageError = %d, want %d", got, Usage)
 	}
+	if got := FromError(InvalidInputError("unsupported operand", errors.New("service detail"))); got != InvalidInput {
+		t.Errorf("InvalidInputError = %d, want %d", got, InvalidInput)
+	}
 	if got := FromError(NotImplemented("later")); got != General {
 		t.Errorf("NotImplemented = %d, want %d", got, General)
 	}
@@ -237,6 +242,9 @@ func TestTypedWrappers(t *testing.T) {
 	}
 	if UsageError(nil) != nil {
 		t.Error("UsageError(nil) must be nil")
+	}
+	if InvalidInputError("bad operand", nil) == nil {
+		t.Error("InvalidInputError with a message must not be nil")
 	}
 }
 

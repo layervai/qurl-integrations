@@ -36,7 +36,17 @@ func validateConnectorResourceFile(_ string, info os.FileInfo) error {
 }
 
 func createConnectorResourceTemp(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, connectorResourceFileMode) //nolint:gosec // fixed owner-only mode in a pinned owner-only directory.
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, connectorResourceFileMode) //nolint:gosec // fixed owner-only mode in a pinned owner-only directory.
+	if err != nil {
+		return nil, err
+	}
+	// O_CREATE applies the process umask. Force the exact reader contract so
+	// an unusually restrictive umask cannot create state that qurl itself
+	// refuses on the next read.
+	if err := file.Chmod(connectorResourceFileMode); err != nil {
+		return nil, errors.Join(err, file.Close(), os.Remove(path))
+	}
+	return file, nil
 }
 
 func commitConnectorResourceRename(from, to string) error { return os.Rename(from, to) }

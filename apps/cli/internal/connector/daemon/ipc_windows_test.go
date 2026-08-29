@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +32,17 @@ func TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown(t *testing.T) {
 	if err := client.WaitReady(readyCtx); err != nil {
 		t.Fatal(err)
 	}
+	conn, err := dialDaemonIPC(readyCtx, path)
+	if err != nil {
+		t.Fatalf("dial owner-verified Windows daemon pipe: %v", err)
+	}
+	if err := validateWindowsDaemonPipeServer(conn); err != nil {
+		_ = conn.Close()
+		t.Fatalf("validate current-user Windows daemon pipe: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
 	status, running, err := client.Status(context.Background())
 	if err != nil || !running || status.JobVersion != "1/windows-test" {
 		t.Fatalf("status = %+v running=%v err=%v", status, running, err)
@@ -48,6 +60,15 @@ func TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown(t *testing.T) {
 	}
 	if running, err := client.ReloadIfRunning(context.Background()); err != nil || running {
 		t.Fatalf("post-shutdown reload running=%v err=%v", running, err)
+	}
+}
+
+func TestWindowsDaemonPipeValidationFailsClosedWithoutHandle(t *testing.T) {
+	left, right := net.Pipe()
+	defer func() { _ = left.Close() }()
+	defer func() { _ = right.Close() }()
+	if err := validateWindowsDaemonPipeServer(left); err == nil || !strings.Contains(err.Error(), "valid Windows handle") {
+		t.Fatalf("handle-free connection validation = %v, want fail-closed", err)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
@@ -46,12 +47,19 @@ type bootstrapNativeRuntime struct {
 
 // ownerOnlyTestShareRegistry keeps the registered-device ownership seam
 // hermetic and independent of filesystem state on every platform.
-type ownerOnlyTestShareRegistry struct{ ownerID string }
+type ownerOnlyTestShareRegistry struct {
+	ownerID          string
+	bindRaceWinnerID string
+}
 
 func (r *ownerOnlyTestShareRegistry) BindOwner(_ context.Context, ownerID string) error {
 	ownerID = strings.TrimSpace(ownerID)
 	if ownerID == "" {
 		return errors.New("test owner ID is empty")
+	}
+	if r.bindRaceWinnerID != "" {
+		r.ownerID = r.bindRaceWinnerID
+		return connectorstate.ErrLocalShareOwnerConflict
 	}
 	if r.ownerID != "" && r.ownerID != ownerID {
 		return errors.New("test owner ID changed")
@@ -217,6 +225,76 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	}
 	if len(srv.Requests()) != 1 || srv.Requests()[0].Header.Get("Authorization") != "Bearer "+bootstrapRegisteredState(t).DeviceAPIKey {
 		t.Fatalf("warm open requests = %+v", srv.Requests())
+	}
+}
+
+func TestOpenNativeRegisteredClient_AccountSwitchHasSafeRecovery(t *testing.T) {
+	srv := apitest.NewServer(t)
+	state := bootstrapRegisteredState(t)
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}
+	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+	requested := &qurlapi.Identity{OwnerID: "owner-other-account"}
+
+	_, _, err := opts.openNativeRegisteredClient(context.Background(), nil, "", requested)
+	var conflict *deviceAccountConflictError
+	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrCredentialConflict) {
+		t.Fatalf("account-switch error = %v, want typed credential conflict", err)
+	}
+	for _, want := range []string{
+		apitest.MeKeyID,
+		apitest.MeOwnerID,
+		requested.OwnerID,
+		"qURL console",
+		"move or remove the complete state directory",
+		"do not edit individual state files",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("account-switch error = %q, want %q", err, want)
+		}
+	}
+	if !runtime.closed {
+		t.Fatal("account-switch rejection did not close the native runtime")
+	}
+}
+
+func TestBindRegisteredDeviceOwnerReportsConcurrentRaceWinner(t *testing.T) {
+	registry := &ownerOnlyTestShareRegistry{bindRaceWinnerID: "owner-race-winner"}
+	err := bindRegisteredDeviceOwner(
+		context.Background(), registry, "/state/connector-v2", "key-device", "owner-requested",
+	)
+	var conflict *deviceAccountConflictError
+	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrCredentialConflict) {
+		t.Fatalf("concurrent owner error = %v, want typed credential conflict", err)
+	}
+	for _, want := range []string{"owner-race-winner", "owner-requested", "key-device", "/state/connector-v2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("concurrent owner error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestRegisteredAccountBootstrap_LegacyCleanupFailureWarnsAfterEnrollment(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	deleteErr := errors.New("locked compatibility keyring")
+	keyring := &fakeKeyring{key: testAPIKeyStored, deleteErr: deleteErr}
+	opts := &globalOpts{
+		streams:        &output.Streams{Out: &stdout, Err: &stderr},
+		resolvedFormat: output.FormatText,
+		now:            time.Now,
+		configDir:      t.TempDir(),
+		newCredentialStore: func(dir string, onFileRead func()) *auth.Chain {
+			return auth.NewChain(keyring, auth.NewFileStore(dir), onFileRead)
+		},
+	}
+	bootstrap := &registeredAccountBootstrap{opts: opts, lazy: true, used: true}
+	bootstrap.retireLegacyKey()
+	if !strings.Contains(stderr.String(), "machine enrollment succeeded") ||
+		!strings.Contains(stderr.String(), "legacy stored account key") ||
+		!strings.Contains(stderr.String(), deleteErr.Error()) {
+		t.Fatalf("cleanup warning = %q", stderr.String())
+	}
+	if keyring.key != testAPIKeyStored {
+		t.Fatal("failed compatibility-key cleanup claimed or performed removal")
 	}
 }
 

@@ -86,6 +86,29 @@ func UsageError(err error) error {
 	return &usageError{err: err}
 }
 
+// invalidInputError keeps a customer-specific message while retaining the
+// underlying service problem for diagnostics and request-id rendering.
+type invalidInputError struct {
+	message string
+	cause   error
+}
+
+func (e *invalidInputError) Error() string { return e.message }
+func (e *invalidInputError) Unwrap() error { return e.cause }
+
+// UserMessage returns the operation-specific text that must win over the
+// wrapped generic service problem during terminal rendering.
+func (e *invalidInputError) UserMessage() string { return e.message }
+
+// InvalidInputError marks a valid command whose operand is not supported by
+// that operation. It maps to the stable InvalidInput exit code.
+func InvalidInputError(message string, cause error) error {
+	if cause == nil {
+		cause = errors.New(message)
+	}
+	return &invalidInputError{message: message, cause: cause}
+}
+
 // notImplementedError marks a feature absent from this build (exit 1, by the
 // table's General row: the command is valid, the capability just is not
 // shipped yet).
@@ -127,6 +150,10 @@ func FromError(err error) int {
 	var usage *usageError
 	if errors.As(err, &usage) {
 		return Usage
+	}
+	var invalidInput *invalidInputError
+	if errors.As(err, &invalidInput) {
+		return InvalidInput
 	}
 	var notImpl *notImplementedError
 	if errors.As(err, &notImpl) {
@@ -255,6 +282,10 @@ func connectorSentinelCode(err error) (int, bool) {
 		return Conflict, true
 	case errors.Is(err, connectordaemon.ErrResourceGone):
 		return NotFound, true
+	case errors.Is(err, state.ErrLocalShareOwnerConflict):
+		return Conflict, true
+	case errors.Is(err, state.ErrLocalShareVersionUnsupported):
+		return Config, true
 	case errors.Is(err, state.ErrNoDefaultStateDir):
 		return Config, true
 	case errors.Is(err, hub.ErrConfig):

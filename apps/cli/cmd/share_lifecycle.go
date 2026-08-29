@@ -15,6 +15,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 type localShareRegistry interface {
@@ -277,7 +278,10 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 		if isPotentialNonConnectorSharingError(err) {
 			resource, resourceErr := client.Resource(ctx, id)
 			if resourceErr == nil && resource.Type != connectorResourceType {
-				return fmt.Errorf("stop applies only to a local qURL Connector; use `qurl delete %s --yes` to revoke this %s resource", id, resource.Type)
+				return exitcode.InvalidInputError(
+					fmt.Sprintf("stop applies only to a local qURL Connector; use `qurl delete %s --yes` to revoke this %s resource", id, resource.Type),
+					err,
+				)
 			}
 		}
 		return err

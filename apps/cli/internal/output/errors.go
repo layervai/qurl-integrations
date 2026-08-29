@@ -45,6 +45,16 @@ func renderErrorLines(p *Printer, err error) []string {
 		return lines
 	}
 
+	var userMessage interface{ UserMessage() string }
+	if errors.As(err, &userMessage) {
+		lines := []string{head + " " + userMessage.UserMessage()}
+		var apiErr *qurlapi.Error
+		if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+			lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+		}
+		return lines
+	}
+
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErrorLines(p, head, apiErr)

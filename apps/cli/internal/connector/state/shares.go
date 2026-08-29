@@ -30,6 +30,15 @@ const (
 	desiredStateOff     = "off"
 )
 
+var (
+	// ErrLocalShareOwnerConflict marks an attempt to retarget one durable
+	// native identity namespace to a different account.
+	ErrLocalShareOwnerConflict = errors.New("local share account owner conflicts with the native identity namespace")
+	// ErrLocalShareVersionUnsupported marks a registry written with another
+	// schema version. v2 deliberately does not migrate prerelease state.
+	ErrLocalShareVersionUnsupported = errors.New("local share registry version is unsupported")
+)
+
 // LocalShare is the non-secret local half of one tunnel resource. The qURL
 // service remains authoritative for desired state and serving epoch; this
 // owner-only registry retains the loopback target needed to resume a desired-on
@@ -71,7 +80,7 @@ func (r *LocalShareRegistry) BindOwner(ctx context.Context, ownerID string) erro
 	}
 	return r.update(ctx, func(state *localSharesState) error {
 		if state.OwnerID != "" && state.OwnerID != ownerID {
-			return errors.New("local share account owner conflicts with the native identity namespace")
+			return fmt.Errorf("%w: bound to %q, requested %q", ErrLocalShareOwnerConflict, state.OwnerID, ownerID)
 		}
 		state.OwnerID = ownerID
 		return nil
@@ -91,8 +100,9 @@ func (r *LocalShareRegistry) OwnerID(ctx context.Context) (ownerID string, prese
 }
 
 // ReadLocalSharesIfPresent reads an existing registry without creating the
-// state directory or registry. Read-only commands use this path so `qurl list`
-// and help never bootstrap the local daemon/runtime as a side effect.
+// state directory or registry. Resource reads use it only after registered
+// authentication so a remote-only result never creates local share rows or a
+// daemon control surface as a side effect.
 func ReadLocalSharesIfPresent(ctx context.Context, dir string) ([]LocalShare, bool, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -337,6 +347,9 @@ func loadLocalShares(dir string) (localSharesState, error) {
 	}
 	state, err := decodeLocalShares(data)
 	if err != nil {
+		if errors.Is(err, ErrLocalShareVersionUnsupported) {
+			return localSharesState{}, fmt.Errorf("%w at %q; this CLI does not migrate old state: revoke any device key stored with it in the qURL console, then move or remove the complete state directory and run `qurl login` again", err, path)
+		}
 		return localSharesState{}, fmt.Errorf("decode local share registry: %w", err)
 	}
 	return state, nil
@@ -393,7 +406,10 @@ func writeLocalShares(dir string, state localSharesState) error {
 }
 
 func validateLocalSharesState(state localSharesState) error {
-	if state.Version != localSharesVersion || state.Shares == nil {
+	if state.Version != localSharesVersion {
+		return fmt.Errorf("%w: got %d, want %d", ErrLocalShareVersionUnsupported, state.Version, localSharesVersion)
+	}
+	if state.Shares == nil {
 		return errors.New("local share registry has an unsupported shape")
 	}
 	if len(state.Shares) > localSharesMaxItems {

@@ -175,6 +175,16 @@ removes only legacy stored account-key copies from CLI versions before this
 device-enrollment design; it does not unset `QURL_API_KEY` or delete the native
 device state.
 
+Authenticated commands need the owner-only native state directory to remain
+writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
+credentials, but it is not a steady-state bypass for that durable identity.
+
+One native state directory belongs to one account. To switch accounts, first
+revoke the registered device key in the qURL dashboard. Then move or remove the
+complete state directory and run `qurl login` with the other account. Do not
+edit or delete individual state files; qurl rejects cross-account reuse and
+prints the exact directory and device-key ID needed for this recovery.
+
 ## Configuration
 
 Every setting resolves through the same precedence chain:

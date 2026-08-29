@@ -470,6 +470,59 @@ type registeredAccountBootstrap struct {
 	used     bool
 }
 
+type deviceAccountConflictError struct {
+	stateDir       string
+	deviceKeyID    string
+	currentOwner   string
+	requestedOwner string
+}
+
+func (e *deviceAccountConflictError) Error() string {
+	device := "the registered device"
+	if e.deviceKeyID != "" {
+		device = fmt.Sprintf("registered device key %q", e.deviceKeyID)
+	}
+	return fmt.Sprintf(
+		"%s in %q belongs to account %q, not %q; to switch accounts, first revoke that device key in the qURL console, then move or remove the complete state directory and run `qurl login` again; do not edit individual state files",
+		device, e.stateDir, e.currentOwner, e.requestedOwner,
+	)
+}
+
+func (*deviceAccountConflictError) Unwrap() error { return auth.ErrCredentialConflict }
+
+func bindRegisteredDeviceOwner(
+	ctx context.Context,
+	registry localShareRegistry,
+	stateDir, deviceKeyID, deviceOwner string,
+) error {
+	boundOwner, bound, err := registry.OwnerID(ctx)
+	if err != nil {
+		return err
+	}
+	if bound && boundOwner != deviceOwner {
+		return &deviceAccountConflictError{
+			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			currentOwner: boundOwner, requestedOwner: deviceOwner,
+		}
+	}
+	if err := registry.BindOwner(ctx, deviceOwner); err != nil {
+		if !errors.Is(err, connectorstate.ErrLocalShareOwnerConflict) {
+			return err
+		}
+		// Another process can bind the registry between OwnerID and
+		// BindOwner. Re-read it so the recovery message identifies the
+		// account that actually won the durable race.
+		if latestOwner, present, readErr := registry.OwnerID(ctx); readErr == nil && present {
+			boundOwner = latestOwner
+		}
+		return &deviceAccountConflictError{
+			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			currentOwner: boundOwner, requestedOwner: deviceOwner,
+		}
+	}
+	return nil
+}
+
 func newRegisteredAccountBootstrap(opts *globalOpts, client qurlapi.AccountClient, key string, identity *qurlapi.Identity) *registeredAccountBootstrap {
 	return &registeredAccountBootstrap{opts: opts, client: client, key: key, identity: identity, lazy: client == nil}
 }
@@ -523,14 +576,16 @@ func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (st
 	return key, err
 }
 
-func (b *registeredAccountBootstrap) retireLegacyKey() error {
+func (b *registeredAccountBootstrap) retireLegacyKey() {
 	if !b.lazy || !b.used {
-		return nil
+		return
 	}
 	if _, err := b.opts.credentialStore().Delete(); err != nil {
-		return fmt.Errorf("remove consumed account API key: %w", err)
+		// Registration is already durable. Match explicit login: a stale
+		// compatibility-key cleanup failure must not turn enrollment into a
+		// false command failure.
+		b.opts.printer().Warnf("machine enrollment succeeded, but qurl could not remove a legacy stored account key: %v", err)
 	}
-	return nil
 }
 
 // openNativeRegisteredClient opens or creates the machine identity through
@@ -603,19 +658,24 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err != nil {
 		return nil, nil, err
 	}
+	deviceKeyID := ""
+	if deviceIdentity.Key != nil {
+		deviceKeyID = deviceIdentity.Key.KeyID
+	}
 	if bootstrap.identity != nil && bootstrap.identity.OwnerID != deviceIdentity.OwnerID {
-		return nil, nil, fmt.Errorf("registered device belongs to account %q, not %q", deviceIdentity.OwnerID, bootstrap.identity.OwnerID)
+		return nil, nil, &deviceAccountConflictError{
+			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			currentOwner: deviceIdentity.OwnerID, requestedOwner: bootstrap.identity.OwnerID,
+		}
 	}
 	registry, err := o.openShareRegistry(stateDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := registry.BindOwner(ctx, deviceIdentity.OwnerID); err != nil {
+	if err := bindRegisteredDeviceOwner(ctx, registry, stateDir, deviceKeyID, deviceIdentity.OwnerID); err != nil {
 		return nil, nil, err
 	}
-	if err := bootstrap.retireLegacyKey(); err != nil {
-		return nil, nil, err
-	}
+	bootstrap.retireLegacyKey()
 	o.nativeRuntime = nativeRuntime
 	return client, deviceIdentity, nil
 }

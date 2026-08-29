@@ -40,7 +40,14 @@ func listenDaemonIPC(_ context.Context, path string) (net.Listener, func() error
 }
 
 func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
-	return winio.DialPipeContext(ctx, windowsDaemonPipeName(path))
+	conn, err := winio.DialPipeAccess(ctx, windowsDaemonPipeName(path), uint32(windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWindowsDaemonPipeServer(conn); err != nil {
+		return nil, errors.Join(fmt.Errorf("verify share daemon Windows named-pipe server: %w", err), conn.Close())
+	}
+	return conn, nil
 }
 
 func validatePlatformIPCPath(string) error { return nil }
@@ -56,16 +63,54 @@ func windowsDaemonPipeName(path string) string {
 }
 
 func currentWindowsIPCSecurityDescriptor() (string, error) {
+	userSID, err := currentWindowsIPCUserSID()
+	if err != nil {
+		return "", err
+	}
+	sid := userSID.String()
+	return fmt.Sprintf("O:%sG:%sD:P(A;;GA;;;%s)(A;;GA;;;SY)(A;;GA;;;BA)", sid, sid, sid), nil
+}
+
+func currentWindowsIPCUserSID() (*windows.SID, error) {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return "", fmt.Errorf("read current Windows IPC user: %w", err)
+		return nil, fmt.Errorf("read current Windows IPC user: %w", err)
 	}
 	if user == nil || user.User.Sid == nil {
-		return "", errors.New("read current Windows IPC user: token has no user SID")
+		return nil, errors.New("read current Windows IPC user: token has no user SID")
 	}
-	sid := user.User.Sid.String()
-	return fmt.Sprintf("O:%sG:%sD:P(A;;GA;;;%s)(A;;GA;;;SY)(A;;GA;;;BA)", sid, sid, sid), nil
+	return user.User.Sid, nil
+}
+
+func validateWindowsDaemonPipeServer(conn net.Conn) error {
+	handleConn, ok := conn.(interface{ Fd() uintptr })
+	if !ok || handleConn.Fd() == 0 {
+		return errors.New("named-pipe connection does not expose a valid Windows handle")
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(handleConn.Fd()),
+		windows.SE_KERNEL_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return fmt.Errorf("read named-pipe owner: %w", err)
+	}
+	if descriptor == nil {
+		return errors.New("read named-pipe owner: security descriptor is nil")
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return fmt.Errorf("read named-pipe owner SID: %w", err)
+	}
+	current, err := currentWindowsIPCUserSID()
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(current) {
+		return errors.New("named-pipe server is not owned by the current user")
+	}
+	return nil
 }
 
 func windowsNamedPipeCollision(err error) bool {

@@ -858,12 +858,13 @@ func TestSandboxPublishProcessReportsEarlyExit(t *testing.T) {
 
 func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 	for _, fixture := range []struct {
-		name   string
-		script string
-		wait   time.Duration
-		want   string
+		name        string
+		script      string
+		wait        time.Duration
+		waitForExit bool
+		want        string
 	}{
-		{name: "enrolled then early exit", script: "#!/bin/sh\nexit 7\n", wait: time.Second, want: "exited before readiness"},
+		{name: "enrolled then early exit", script: "#!/bin/sh\nexit 7\n", wait: time.Second, waitForExit: true, want: "exited before readiness"},
 		{name: "enrolled then readiness timeout", script: "#!/bin/sh\nexec sleep 60\n", wait: 50 * time.Millisecond, want: "did not become ready"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -906,6 +907,13 @@ func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 					return nil
 				},
 			})
+			if fixture.waitForExit {
+				select {
+				case <-process.done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("early-exit recovery fixture did not terminate")
+				}
+			}
 			if _, err := process.waitReadyResult(fixture.wait); err == nil || !strings.Contains(err.Error(), fixture.want) {
 				t.Fatalf("readiness result = %v, want %q", err, fixture.want)
 			}
@@ -959,8 +967,15 @@ func writeSandboxSiblingStateFixture(t *testing.T, stateDir, agentID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registeredAt := time.Unix(1700000000, 0).UTC()
 	if err := store.SaveAgentState(context.Background(), &qurl.AgentState{
-		AgentID: agentID, DeviceAPIKeyID: "device-key-id", DeviceAPIKey: "device-secret",
+		AgentID:                  agentID,
+		PrivateKeyB64:            "private",
+		PublicKeyB64:             "public",
+		RegisteredAt:             &registeredAt,
+		DeviceAPIKeyID:           "device-key-id",
+		DeviceAPIKey:             "device-secret",
+		EnrollmentCredentialKind: "account",
 	}); err != nil {
 		_ = store.Close()
 		t.Fatal(err)

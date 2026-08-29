@@ -20,6 +20,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -330,6 +331,19 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	// Fields render sorted.
 	if strings.Index(rendered, "alias:") > strings.Index(rendered, "target_url:") {
 		t.Errorf("invalid fields not sorted:\n%s", rendered)
+	}
+
+	buf.Reset()
+	custom := exitcode.InvalidInputError("stop applies only to a local qURL Connector", &qurlapi.Error{
+		StatusCode: http.StatusBadRequest,
+		Title:      "Invalid Input",
+		RequestID:  "req_stop",
+	})
+	RenderError(&buf, custom, false)
+	rendered = buf.String()
+	if !strings.Contains(rendered, "stop applies only to a local qURL Connector") ||
+		!strings.Contains(rendered, "Request ID: req_stop") || strings.Contains(rendered, "Invalid Input") {
+		t.Errorf("custom invalid-input rendering = %q", rendered)
 	}
 }
 
