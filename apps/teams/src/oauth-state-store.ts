@@ -58,6 +58,25 @@ function oldItem(error: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * Read expires_at off the item carried by ConditionalCheckFailedException.
+ *
+ * The document client's unmarshalling middleware runs on a resolved output
+ * only, so a thrown exception keeps the raw service shape and this attribute
+ * arrives as `{ N: '1000' }` rather than a number. DeleteCommand's outputKeyNodes
+ * do not list Item either. A plain number is still accepted so the reader does
+ * not depend on which of the two shapes a caller's client produces.
+ */
+function expiresAtFromOldItem(item: Record<string, unknown>): number | undefined {
+  const raw = item.expires_at;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+  if (raw !== null && typeof raw === 'object' && 'N' in raw) {
+    const numeric = Number((raw as { readonly N: unknown }).N);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
+  return undefined;
+}
+
 /** DynamoDB implementation of the one-shot OAuth state contract. */
 export class DynamoOAuthStatePersistence implements OAuthStatePersistence {
   readonly #client: DynamoClient;
@@ -122,8 +141,10 @@ export class DynamoOAuthStatePersistence implements OAuthStatePersistence {
     } catch (error) {
       if (!conditionalFailure(error)) throw error;
       const item = oldItem(error);
-      const stored = item ? stateFromItem(item) : undefined;
-      if (stored && stored.expiresAtEpochSeconds <= nowEpochSeconds) return { status: 'expired' };
+      // Only the expiry distinguishes expired from missing/already-consumed;
+      // the rest of the row is deliberately discarded on this path.
+      const expiresAt = item === undefined ? undefined : expiresAtFromOldItem(item);
+      if (expiresAt !== undefined && expiresAt <= nowEpochSeconds) return { status: 'expired' };
       return { status: 'missing' };
     }
   }
