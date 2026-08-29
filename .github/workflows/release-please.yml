@@ -245,6 +245,10 @@ jobs:
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
+          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" || -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            echo "::error::release Hub trust-pin secrets are empty" >&2
+            exit 1
+          fi
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
           gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \

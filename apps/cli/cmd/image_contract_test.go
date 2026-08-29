@@ -507,6 +507,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				t.Errorf("%s released CLI Hub-pin verifier has no public-key source", target.file)
 			}
 			for _, required := range []string{
+				`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" || -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
 				`gh release download "$CLI_TAG"`,
 				`--pattern 'qurl_*_darwin_*.tar.gz'`,
 				`--pattern 'qurl_*_linux_*.tar.gz'`,
