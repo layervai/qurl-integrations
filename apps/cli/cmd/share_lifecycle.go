@@ -267,7 +267,8 @@ func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id str
 
 // stopShare commits the authoritative cloud-off transition before consulting
 // optional local state. A machine that never published this CRID therefore
-// needs no Connector directory, registry, log path, or daemon controller.
+// needs no matching local share, log path, or daemon controller. Registered
+// device state and its owner-bound registry are still required for authentication.
 func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 	client, err := opts.newClient(ctx)
 	if err != nil {

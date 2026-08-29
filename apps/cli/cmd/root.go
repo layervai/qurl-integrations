@@ -661,6 +661,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err != nil {
 		return nil, nil, err
 	}
+	if deviceIdentity == nil {
+		return nil, nil, errors.New("qURL account identity response is empty")
+	}
 	deviceKeyID := ""
 	if deviceIdentity.Key != nil {
 		deviceKeyID = deviceIdentity.Key.KeyID

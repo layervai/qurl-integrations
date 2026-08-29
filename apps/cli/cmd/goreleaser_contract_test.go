@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra/doc"
@@ -25,11 +26,12 @@ import (
 
 type goreleaserConfig struct {
 	Builds []struct {
-		ID     string   `yaml:"id"`
-		Main   string   `yaml:"main"`
-		Binary string   `yaml:"binary"`
-		GOOS   []string `yaml:"goos"`
-		GOARCH []string `yaml:"goarch"`
+		ID      string   `yaml:"id"`
+		Main    string   `yaml:"main"`
+		Binary  string   `yaml:"binary"`
+		GOOS    []string `yaml:"goos"`
+		GOARCH  []string `yaml:"goarch"`
+		LDFlags []string `yaml:"ldflags"`
 	} `yaml:"builds"`
 	Archives []struct {
 		Files           []string `yaml:"files"`
@@ -74,6 +76,14 @@ func TestReleaseBuildsOnlyQURL(t *testing.T) {
 	build := cfg.Builds[0]
 	if build.ID != "qurl" || build.Main != "./apps/cli/cmd/" || build.Binary != "qurl" {
 		t.Fatalf("release build = %+v, want the qurl CLI only", build)
+	}
+}
+
+func TestReleaseBuildEmbedsProductionHubPin(t *testing.T) {
+	cfg := loadGoreleaserConfig(t)
+	const pinAssignment = `-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ index .Env "QURL_RELEASE_HUB_PUBLIC_KEY_B64" }}`
+	if count := strings.Count(strings.Join(cfg.Builds[0].LDFlags, "\n"), pinAssignment); count != 1 {
+		t.Fatalf("release ldflags contain production Hub-pin assignment %d time(s), want one", count)
 	}
 }
 

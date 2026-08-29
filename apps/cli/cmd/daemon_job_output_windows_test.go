@@ -77,7 +77,7 @@ func createProtectedWindowsDaemonLogForTest(t *testing.T, path string) {
 
 func TestWindowsDaemonJobOutputHelper(t *testing.T) {
 	if os.Getenv("QURL_WINDOWS_DAEMON_OUTPUT_HELPER") != "1" {
-		return
+		t.Skip("subprocess helper; driven by TestWindowsDaemonJobOutputUsesExactLogFiles")
 	}
 	separator := -1
 	for index, argument := range os.Args {

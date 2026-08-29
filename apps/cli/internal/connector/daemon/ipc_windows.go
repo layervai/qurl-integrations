@@ -31,8 +31,11 @@ func listenDaemonIPC(_ context.Context, path string) (net.Listener, func() error
 		OutputBufferSize:   64 << 10,
 	})
 	if err != nil {
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, nil, fmt.Errorf("listen on share daemon Windows named pipe: the pipe is held by a process this user cannot inspect: %w", err)
+		}
 		if windowsNamedPipeCollision(err) {
-			return nil, nil, fmt.Errorf("%w: Windows named pipe is live or inaccessible: %w", ErrAlreadyRunning, err)
+			return nil, nil, fmt.Errorf("%w: Windows named pipe is already live: %w", ErrAlreadyRunning, err)
 		}
 		return nil, nil, fmt.Errorf("listen on share daemon Windows named pipe: %w", err)
 	}
@@ -84,6 +87,8 @@ func currentWindowsIPCUserSID() (*windows.SID, error) {
 }
 
 func validateWindowsDaemonPipeServer(conn net.Conn) error {
+	// TODO(upstream-contract): go-winio's pipe connection must expose Fd() as
+	// the underlying Windows handle so the client can verify the server owner.
 	handleConn, ok := conn.(interface{ Fd() uintptr })
 	if !ok || handleConn.Fd() == 0 {
 		return errors.New("named-pipe connection does not expose a valid Windows handle")
@@ -116,6 +121,5 @@ func validateWindowsDaemonPipeServer(conn net.Conn) error {
 func windowsNamedPipeCollision(err error) bool {
 	return errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) ||
 		errors.Is(err, windows.ERROR_ALREADY_EXISTS) ||
-		errors.Is(err, windows.ERROR_PIPE_BUSY) ||
-		errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		errors.Is(err, windows.ERROR_PIPE_BUSY)
 }

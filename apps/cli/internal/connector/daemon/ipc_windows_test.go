@@ -101,6 +101,17 @@ func TestWindowsIPCSecurityDescriptorAndUnavailableClassification(t *testing.T) 
 	}
 }
 
+func TestWindowsNamedPipeCollisionDoesNotHideAccessDenied(t *testing.T) {
+	for _, collision := range []error{windows.STATUS_OBJECT_NAME_COLLISION, windows.ERROR_ALREADY_EXISTS, windows.ERROR_PIPE_BUSY} {
+		if !windowsNamedPipeCollision(collision) {
+			t.Fatalf("Windows named-pipe collision %v was not classified", collision)
+		}
+	}
+	if windowsNamedPipeCollision(windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("Windows named-pipe access denial was hidden as an already-running daemon")
+	}
+}
+
 func windowsEmptyManager(t *testing.T) *Manager {
 	t.Helper()
 	manager, err := NewManager(

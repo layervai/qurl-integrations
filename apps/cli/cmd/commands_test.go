@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,15 +249,19 @@ func TestLocalSharePlatformContractFailsBeforeStateOrNetwork(t *testing.T) {
 }
 
 func TestWindowsLocalShareCommandsReachRuntimeSeams(t *testing.T) {
+	seamErr := errors.New("Windows runtime seam reached")
 	for _, args := range [][]string{
 		{"publish", "http://127.0.0.1:3000", "--foreground"},
 		{"start", exampleCRID},
 		{"restart", exampleCRID},
 		{"daemon", "run"},
 	} {
-		res := runCLI(t, &runOpts{args: args, platformGOOS: "windows"})
-		if strings.Contains(res.stderr.String(), "unsupported platform") {
-			t.Fatalf("Windows %v stopped at the platform gate: exit %d stderr %q", args, res.code, res.stderr.String())
+		res := runCLI(t, &runOpts{
+			args: args, platformGOOS: "windows", shareStateDirErr: seamErr,
+			preflightTarget: func(context.Context, string, int) error { return nil },
+		})
+		if res.code != 1 || !strings.Contains(res.stderr.String(), seamErr.Error()) {
+			t.Fatalf("Windows %v did not reach the state/runtime seam: exit %d stderr %q", args, res.code, res.stderr.String())
 		}
 	}
 }

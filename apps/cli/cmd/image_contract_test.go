@@ -423,6 +423,23 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			if strings.Count(step.Run, `if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`) != 1 {
 				t.Errorf("%s release Hub-pin gate does not reject SKIP", target.file)
 			}
+			pinSource, pinSourcePresent := step.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+			if !pinSourcePresent || strings.TrimSpace(pinSource) == "" {
+				t.Errorf("%s release Hub-pin verifier has no key source", target.file)
+			}
+			var goreleaserSteps []cliWorkflowStep
+			for _, candidate := range job.Steps {
+				if candidate.Name == "Run GoReleaser" {
+					goreleaserSteps = append(goreleaserSteps, candidate)
+				}
+			}
+			if len(goreleaserSteps) != 1 {
+				t.Fatalf("%s has %d GoReleaser steps, want one", target.file, len(goreleaserSteps))
+			}
+			goreleaserPin, goreleaserPinPresent := goreleaserSteps[0].Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+			if !goreleaserPinPresent || goreleaserPin != pinSource {
+				t.Errorf("%s GoReleaser step does not consume the exact verified Hub-pin source", target.file)
+			}
 			continue
 		}
 		if hasRequiredMode {

@@ -323,15 +323,41 @@ func TestLocalPublishReusesRegisteredIdentityWithoutSecondMeRequest(t *testing.T
 		return client, wantIdentity, nil
 	}}
 	registry := &ownerOnlyTestShareRegistry{}
-	ownerID, gotClient, err := localPublishOwner(context.Background(), opts, registry)
+	ownerID, gotClient, err := localPublishOwner(context.Background(), opts, registry, "/state/connector-v2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ownerID != wantIdentity.OwnerID || gotClient != client || registry.ownerID != wantIdentity.OwnerID {
 		t.Fatalf("local publish owner/client/registry = %q/%T/%q", ownerID, gotClient, registry.ownerID)
 	}
+	if registry.bindCalls != 1 {
+		t.Fatalf("local publish bound owner %d time(s), want one", registry.bindCalls)
+	}
 	if requests := srv.Requests(); len(requests) != 0 {
 		t.Fatalf("local publish repeated /v1/me after registered open: %+v", requests)
+	}
+}
+
+func TestLocalPublishOwnerRaceReturnsSafeRecovery(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "owner-race-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIdentity := &qurlapi.Identity{OwnerID: "owner-requested", Key: &qurlapi.KeyIdentity{KeyID: "key-device"}}
+	opts := &globalOpts{openRegisteredClient: func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
+		return client, wantIdentity, nil
+	}}
+	registry := &ownerOnlyTestShareRegistry{bindRaceWinnerID: "owner-race-winner"}
+	_, _, err = localPublishOwner(context.Background(), opts, registry, "/state/connector-v2")
+	var conflict *deviceAccountConflictError
+	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrCredentialConflict) {
+		t.Fatalf("local-publish owner race error = %v, want typed credential conflict", err)
+	}
+	for _, want := range []string{"owner-race-winner", "owner-requested", "key-device", "/state/connector-v2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("local-publish owner race error = %q, want %q", err, want)
+		}
 	}
 }
 

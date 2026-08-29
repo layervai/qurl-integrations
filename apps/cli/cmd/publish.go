@@ -123,7 +123,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
-	ownerID, client, err := localPublishOwner(ctx, opts, registry)
+	ownerID, client, err := localPublishOwner(ctx, opts, registry, stateDir)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func validateLocalPublishRequest(ctx context.Context, opts *globalOpts, target *
 	return requestedID, nil
 }
 
-func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShareRegistry) (string, qurlapi.Client, error) {
+func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShareRegistry, stateDir string) (string, qurlapi.Client, error) {
 	ownerID, present, err := registry.OwnerID(ctx)
 	if err != nil || present {
 		return ownerID, nil, err
@@ -202,7 +202,11 @@ func localPublishOwner(ctx context.Context, opts *globalOpts, registry localShar
 	if identity == nil {
 		return "", nil, errors.New("qURL account identity response is empty")
 	}
-	if err := registry.BindOwner(ctx, identity.OwnerID); err != nil {
+	deviceKeyID := ""
+	if identity.Key != nil {
+		deviceKeyID = identity.Key.KeyID
+	}
+	if err := bindRegisteredDeviceOwner(ctx, registry, stateDir, deviceKeyID, identity.OwnerID); err != nil {
 		return "", nil, err
 	}
 	return identity.OwnerID, client, nil
