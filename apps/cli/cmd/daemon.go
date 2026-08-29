@@ -68,7 +68,7 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, origin, version, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
 	expectedOwner = strings.TrimSpace(expectedOwner)
 	if expectedOwner == "" {
-		return nil
+		return fmt.Errorf("%w: session-operation owner authority is empty", errNativeSessionOwnerVerification)
 	}
 	if readIdentity == nil {
 		return fmt.Errorf("%w: identity reader is unavailable", errNativeSessionOwnerVerification)

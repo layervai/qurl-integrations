@@ -22,7 +22,7 @@ func TestVerifyNativeSessionOwner(t *testing.T) {
 		{name: "empty response", expected: "owner-one", identityEmpty: true, wantErr: "identity response is empty", wantRead: true},
 		{name: "read failure", expected: "owner-one", readFailure: true, wantErr: "read identity", wantRead: true},
 		{name: "reader unavailable", expected: "owner-one", readerMissing: true, wantErr: "reader is unavailable"},
-		{name: "no session authority", expected: " ", authenticated: "owner-two"},
+		{name: "no session authority", expected: " ", authenticated: "owner-two", wantErr: "owner authority is empty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
