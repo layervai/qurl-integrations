@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,11 +44,31 @@ func redirectDaemonJobOutput(stdoutPath, stderrPath string, streams *output.Stre
 		_ = stdout.Close()
 		return fmt.Errorf("open Windows background-job stderr log: %w", err)
 	}
+	closeLogs := func(cause error) error {
+		return errors.Join(cause, stdout.Close(), stderr.Close())
+	}
+	originalStdout, err := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
+	if err != nil {
+		return closeLogs(fmt.Errorf("read Windows process stdout handle: %w", err))
+	}
+	if _, err := windows.GetStdHandle(windows.STD_ERROR_HANDLE); err != nil {
+		return closeLogs(fmt.Errorf("read Windows process stderr handle: %w", err))
+	}
+	if err := windows.SetStdHandle(windows.STD_OUTPUT_HANDLE, windows.Handle(stdout.Fd())); err != nil {
+		return closeLogs(fmt.Errorf("redirect Windows process stdout handle: %w", err))
+	}
+	if err := windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(stderr.Fd())); err != nil {
+		restoreErr := windows.SetStdHandle(windows.STD_OUTPUT_HANDLE, originalStdout)
+		return closeLogs(errors.Join(fmt.Errorf("redirect Windows process stderr handle: %w", err), restoreErr))
+	}
 	// The background process owns these handles until process exit. Task
 	// Scheduler starts the qurl binary directly so /End stops the real daemon.
 	os.Stdout, os.Stderr = stdout, stderr
 	streams.Out, streams.Err = stdout, stderr
 	streams.OutIsTTY, streams.ErrIsTTY = false, false
+	// SetDefault also redirects the standard log package, whose default writer
+	// captured the original os.Stderr before this background-job setup ran.
+	slog.SetDefault(slog.New(slog.NewTextHandler(stderr, nil)))
 	return nil
 }
 

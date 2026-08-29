@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,8 +94,13 @@ func TestWindowsDaemonJobOutputHelper(t *testing.T) {
 	if err := redirectDaemonJobOutput(os.Args[separator+1], os.Args[separator+2], streams); err != nil {
 		t.Fatal(err)
 	}
+	stdoutHandle, stdoutErr := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
+	stderrHandle, stderrErr := windows.GetStdHandle(windows.STD_ERROR_HANDLE)
+	if stdoutErr != nil || stderrErr != nil || stdoutHandle != windows.Handle(os.Stdout.Fd()) || stderrHandle != windows.Handle(os.Stderr.Fd()) {
+		t.Fatalf("Windows standard handles were not redirected: stdout=%v/%v stderr=%v/%v", stdoutHandle, stdoutErr, stderrHandle, stderrErr)
+	}
 	_, _ = fmt.Fprintln(streams.Out, "daemon stdout")
-	_, _ = fmt.Fprintln(streams.Err, "daemon stderr")
+	slog.Error("daemon stderr")
 }
 
 func TestWindowsDaemonJobOutputRejectsPartialOrAliasedPaths(t *testing.T) {

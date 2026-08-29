@@ -19,6 +19,19 @@ const sandboxSecretMaxBytes = 16 * 1024
 // hermetic contract can deterministically prove a path swap is rejected.
 var sandboxSecretAfterLstatHook func(string)
 
+func sandboxSecret(t *testing.T, name string) string {
+	t.Helper()
+	fileEnv := name + "_FILE"
+	if strings.TrimSpace(os.Getenv(fileEnv)) != "" {
+		value, err := readSandboxSecretFile(fileEnv, name)
+		if err != nil {
+			t.Fatalf("read protected sandbox secret %s: %v", fileEnv, err)
+		}
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(name))
+}
+
 func readSandboxSecretFile(fileEnv, inlineEnv string) (string, error) {
 	if strings.TrimSpace(os.Getenv(inlineEnv)) != "" {
 		return "", fmt.Errorf("%s is forbidden; use the protected %s file", inlineEnv, fileEnv)

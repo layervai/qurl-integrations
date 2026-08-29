@@ -163,6 +163,15 @@ shell history and process lists. `qurl login` reads it from a hidden prompt or
 piped standard input. Scripts and CI can set `QURL_API_KEY` or
 `QURL_API_KEY_FILE` for the same first bootstrap or for an explicit recovery.
 
+`QURL_API_KEY_FILE` must be an exact absolute path. Its contents must be the
+key bytes followed by one LF byte, with no BOM, CR, spaces, or second newline.
+On Unix, create it with `printf '%s\n' "$QURL_API_KEY" > "$path"`. In
+PowerShell, use this command to write UTF-8 without a BOM or CRLF:
+
+```powershell
+[IO.File]::WriteAllText($path, $key + "`n", [Text.UTF8Encoding]::new($false))
+```
+
 On Windows, `QURL_API_KEY_FILE` must name a file that is owned by the current
 user and has a protected, owner-only ACL. Create the file inside an owner-only
 temporary directory, remove ACL inheritance from the file, and remove the file
@@ -186,6 +195,10 @@ device state.
 Authenticated commands need the owner-only native state directory to remain
 writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
 credentials, but it is not a steady-state bypass for that durable identity.
+Each authenticated command also opens the pinned NHP device runtime before it
+calls the qURL REST API. A Hub outage therefore makes read-only commands such
+as `qurl list` unavailable too; the CLI reports the native connection or trust
+configuration error. An account API key does not bypass this boundary.
 
 One native state directory belongs to one account. To switch accounts, first
 revoke the registered device key in the qURL dashboard. Then move or remove the

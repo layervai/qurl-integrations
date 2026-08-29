@@ -39,6 +39,9 @@ var (
 	ErrInvalidKey = errors.New("cli: the configured value does not look like a qURL API key")
 	// ErrCredentialConflict rejects ambiguous inline and file authority.
 	ErrCredentialConflict = errors.New("cli: QURL_API_KEY and QURL_API_KEY_FILE cannot both be set")
+	// ErrDeviceAccountConflict rejects reuse of one durable device state
+	// directory across different qURL accounts.
+	ErrDeviceAccountConflict = errors.New("cli: registered device state belongs to a different qURL account")
 )
 
 // Source names where a resolved credential came from.

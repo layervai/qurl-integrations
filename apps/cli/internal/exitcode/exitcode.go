@@ -261,7 +261,7 @@ func cliSentinelCode(err error) (int, bool) {
 		return Unavailable, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
-	case errors.Is(err, auth.ErrCredentialConflict):
+	case errors.Is(err, auth.ErrCredentialConflict), errors.Is(err, auth.ErrDeviceAccountConflict):
 		return Conflict, true
 	case errors.Is(err, config.ErrInvalidProfileName),
 		errors.Is(err, config.ErrConfigFile),

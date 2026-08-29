@@ -35,19 +35,20 @@ var cliSentinels = map[string]struct {
 	err  error
 	code int
 }{
-	"auth.ErrNoCredential":         {auth.ErrNoCredential, Auth},
-	"auth.ErrInvalidKey":           {auth.ErrInvalidKey, Auth},
-	"auth.ErrCredentialConflict":   {auth.ErrCredentialConflict, Conflict},
-	"config.ErrInvalidProfileName": {config.ErrInvalidProfileName, Config},
-	"config.ErrConfigFile":         {config.ErrConfigFile, Config},
-	"config.ErrSecretInConfig":     {config.ErrSecretInConfig, Config},
-	"cridux.ErrUnusableID":         {cridux.ErrUnusableID, InvalidInput},
-	"cridux.ErrTestIDOnProduction": {cridux.ErrTestIDOnProduction, Usage},
-	"consume.ErrPipedNeedsFile":    {consume.ErrPipedNeedsFile, Usage},
-	"consume.ErrFileExists":        {consume.ErrFileExists, Conflict},
-	"consume.ErrLinkExpired":       {consume.ErrLinkExpired, NotFound},
-	"consume.ErrLinkFetch":         {consume.ErrLinkFetch, ServerError},
-	"consume.ErrUnopenableLink":    {consume.ErrUnopenableLink, ServerError},
+	"auth.ErrNoCredential":          {auth.ErrNoCredential, Auth},
+	"auth.ErrInvalidKey":            {auth.ErrInvalidKey, Auth},
+	"auth.ErrCredentialConflict":    {auth.ErrCredentialConflict, Conflict},
+	"auth.ErrDeviceAccountConflict": {auth.ErrDeviceAccountConflict, Conflict},
+	"config.ErrInvalidProfileName":  {config.ErrInvalidProfileName, Config},
+	"config.ErrConfigFile":          {config.ErrConfigFile, Config},
+	"config.ErrSecretInConfig":      {config.ErrSecretInConfig, Config},
+	"cridux.ErrUnusableID":          {cridux.ErrUnusableID, InvalidInput},
+	"cridux.ErrTestIDOnProduction":  {cridux.ErrTestIDOnProduction, Usage},
+	"consume.ErrPipedNeedsFile":     {consume.ErrPipedNeedsFile, Usage},
+	"consume.ErrFileExists":         {consume.ErrFileExists, Conflict},
+	"consume.ErrLinkExpired":        {consume.ErrLinkExpired, NotFound},
+	"consume.ErrLinkFetch":          {consume.ErrLinkFetch, ServerError},
+	"consume.ErrUnopenableLink":     {consume.ErrUnopenableLink, ServerError},
 
 	// Platform access flow (direct downloads through the SDK opener). The
 	// two settings sentinels share the Hub triple's Config row; the local

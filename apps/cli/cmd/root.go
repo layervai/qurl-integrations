@@ -483,12 +483,12 @@ func (e *deviceAccountConflictError) Error() string {
 		device = fmt.Sprintf("registered device key %q", e.deviceKeyID)
 	}
 	return fmt.Sprintf(
-		"%s in %q belongs to account %q, not %q; to switch accounts, first revoke that device key in the qURL console, then move or remove the complete state directory and run `qurl login` again; do not edit individual state files",
+		"%s in %q belongs to account %q, not %q; to switch accounts, first revoke that device key in the qURL dashboard, then move or remove the complete state directory and run `qurl login` again; do not edit individual state files",
 		device, e.stateDir, e.currentOwner, e.requestedOwner,
 	)
 }
 
-func (*deviceAccountConflictError) Unwrap() error { return auth.ErrCredentialConflict }
+func (*deviceAccountConflictError) Unwrap() error { return auth.ErrDeviceAccountConflict }
 
 func bindRegisteredDeviceOwner(
 	ctx context.Context,

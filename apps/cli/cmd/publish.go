@@ -132,6 +132,12 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 		return err
 	}
 	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
+	// A cold publish can keep the registered REST client runtime open while
+	// resource discovery opens the same native state directory. This overlap is
+	// required in normal operation because a background daemon can also share
+	// the directory with CLI commands. qurl-go serializes identity setup and
+	// state mutations with its cross-process setup lock and operation leases;
+	// qurl-connector adds a cross-process lock for session-operation journals.
 	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir, sessionOperations)
 	if err != nil {
 		return err

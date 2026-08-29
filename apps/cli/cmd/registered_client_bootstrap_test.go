@@ -239,14 +239,14 @@ func TestOpenNativeRegisteredClient_AccountSwitchHasSafeRecovery(t *testing.T) {
 
 	_, _, err := opts.openNativeRegisteredClient(context.Background(), nil, "", requested)
 	var conflict *deviceAccountConflictError
-	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrCredentialConflict) {
+	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrDeviceAccountConflict) || errors.Is(err, auth.ErrCredentialConflict) {
 		t.Fatalf("account-switch error = %v, want typed credential conflict", err)
 	}
 	for _, want := range []string{
 		apitest.MeKeyID,
 		apitest.MeOwnerID,
 		requested.OwnerID,
-		"qURL console",
+		"qURL dashboard",
 		"move or remove the complete state directory",
 		"do not edit individual state files",
 	} {
@@ -265,7 +265,7 @@ func TestBindRegisteredDeviceOwnerReportsConcurrentRaceWinner(t *testing.T) {
 		context.Background(), registry, "/state/connector-v2", "key-device", "owner-requested",
 	)
 	var conflict *deviceAccountConflictError
-	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrCredentialConflict) {
+	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrDeviceAccountConflict) || errors.Is(err, auth.ErrCredentialConflict) {
 		t.Fatalf("concurrent owner error = %v, want typed credential conflict", err)
 	}
 	for _, want := range []string{"owner-race-winner", "owner-requested", "key-device", "/state/connector-v2"} {
@@ -351,7 +351,7 @@ func TestLocalPublishOwnerRaceReturnsSafeRecovery(t *testing.T) {
 	registry := &ownerOnlyTestShareRegistry{bindRaceWinnerID: "owner-race-winner"}
 	_, _, err = localPublishOwner(context.Background(), opts, registry, "/state/connector-v2")
 	var conflict *deviceAccountConflictError
-	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrCredentialConflict) {
+	if !errors.As(err, &conflict) || !errors.Is(err, auth.ErrDeviceAccountConflict) || errors.Is(err, auth.ErrCredentialConflict) {
 		t.Fatalf("local-publish owner race error = %v, want typed credential conflict", err)
 	}
 	for _, want := range []string{"owner-race-winner", "owner-requested", "key-device", "/state/connector-v2"} {
