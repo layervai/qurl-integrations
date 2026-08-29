@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -16,6 +17,7 @@ import (
 	"github.com/layervai/qurl-go/crid"
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
@@ -25,12 +27,33 @@ import (
 
 var openShareNativeRuntime = connectorshare.OpenNativeRuntime
 
+type nativeRegisteredIdentityReader func(context.Context, *connectorshare.NativeRuntime, string, string) (*qurlapi.Identity, error)
+
+func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.NativeRuntime, origin, version string) (*qurlapi.Identity, error) {
+	store, err := runtime.Handoff()
+	if err != nil {
+		return nil, err
+	}
+	client, err := qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: origin, Version: version}, store)
+	if err != nil {
+		return nil, err
+	}
+	return client.Me(ctx)
+}
+
 const connectorRefreshModeAuto = "auto"
 
-var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, version string) (connectordaemon.SessionFactory, error) {
+var errNativeSessionOwnerVerification = errors.New("registered Connector owner verification failed")
+
+var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, version string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
 	runtime, err := openShareNativeRuntime(ctx, cfg)
 	if err != nil {
 		return nil, err
+	}
+	if verifyOwner {
+		if err := verifyNativeSessionOwner(ctx, runtime, cfg.ClientBaseURL, version, cfg.SessionOperations.OwnerID, readNativeRegisteredIdentity); err != nil {
+			return nil, errors.Join(err, runtime.Close())
+		}
 	}
 	admitter, err := connectorshare.NewNativeAdmitter(ctx, runtime)
 	if err != nil {
@@ -40,6 +63,27 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 		return nil, errors.Join(errors.New("qURL daemon FRP configuration is invalid"), admitter.Close())
 	}
 	return connectordaemon.NewNativeSessionFactory(admitter, common, version)
+}
+
+func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, origin, version, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
+	expectedOwner = strings.TrimSpace(expectedOwner)
+	if expectedOwner == "" {
+		return nil
+	}
+	if readIdentity == nil {
+		return fmt.Errorf("%w: identity reader is unavailable", errNativeSessionOwnerVerification)
+	}
+	identity, err := readIdentity(ctx, runtime, origin, version)
+	if err != nil {
+		return fmt.Errorf("verify registered Connector owner: %w", err)
+	}
+	if identity == nil || strings.TrimSpace(identity.OwnerID) == "" {
+		return fmt.Errorf("%w: qURL account identity response is empty", errNativeSessionOwnerVerification)
+	}
+	if identity.OwnerID != expectedOwner {
+		return fmt.Errorf("%w: configured owner %q does not match authenticated owner %q", errNativeSessionOwnerVerification, expectedOwner, identity.OwnerID)
+	}
+	return nil
 }
 
 var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) error {
@@ -185,6 +229,18 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
+	verifyOwner := false
+	if headless != nil {
+		_, ownerBound, readErr := registry.OwnerID(ctx)
+		if readErr != nil {
+			return readErr
+		}
+		// The headless YAML is declarative input, not an authority. Authenticate
+		// its owner through the registered device before the first durable bind.
+		// Once bound, daemonOwner enforces exact continuity without adding a REST
+		// dependency to every warm daemon restart.
+		verifyOwner = !ownerBound
+	}
 	sessionOperations, err := opts.resolveSessionConfig(ownerID)
 	if err != nil {
 		return err
@@ -211,7 +267,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
-		}, common, opts.version)
+		}, common, opts.version, verifyOwner)
 	}
 	var factory connectordaemon.SessionFactory
 	var closeFactory func() error
@@ -353,13 +409,17 @@ func openHeadlessSessionFactory(ctx context.Context, open func(context.Context) 
 		if ctx.Err() != nil {
 			return nil, errors.Join(err, ctx.Err())
 		}
-		if connectorshare.IsPermanentNativeOpenError(err) {
+		if isPermanentHeadlessNativeOpenError(err) {
 			return nil, err
 		}
 		if err := waitHeadlessNativeRetry(ctx, headlessNativeRetryDelay(attempt)); err != nil {
 			return nil, err
 		}
 	}
+}
+
+func isPermanentHeadlessNativeOpenError(err error) bool {
+	return errors.Is(err, errNativeSessionOwnerVerification) || connectorshare.IsPermanentNativeOpenError(err)
 }
 
 func headlessNativeRetryDelay(attempt int) time.Duration {

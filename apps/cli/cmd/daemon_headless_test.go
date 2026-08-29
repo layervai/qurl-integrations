@@ -185,7 +185,10 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+		if !verifyOwner {
+			t.Fatal("first headless bootstrap did not request authenticated owner verification")
+		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
 		}
@@ -268,7 +271,10 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	originalBuilder := buildNativeSessionFactory
 	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 	factory := &headlessTestFactory{started: make(chan struct{})}
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+		if verifyOwner {
+			t.Fatal("warm headless restart repeated authenticated owner verification")
+		}
 		if cfg.EnrollmentCredential != "" {
 			t.Fatalf("warm restart retained enrollment credential %q", cfg.EnrollmentCredential)
 		}
@@ -340,7 +346,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			originalBuilder := buildNativeSessionFactory
 			t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 			var opens atomic.Int32
-			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, string) (connectordaemon.SessionFactory, error) {
+			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, string, bool) (connectordaemon.SessionFactory, error) {
 				opens.Add(1)
 				return &headlessTestFactory{started: make(chan struct{})}, nil
 			}
