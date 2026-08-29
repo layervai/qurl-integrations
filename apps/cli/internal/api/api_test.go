@@ -200,7 +200,7 @@ func TestPublishNeverReplaysRateLimit(t *testing.T) {
 		open func(*testing.T, *apitest.Server) Client
 	}{
 		{name: "account", open: func(t *testing.T, srv *apitest.Server) Client { return newTestClient(t, srv, nil) }},
-		{name: "registered", open: func(t *testing.T, srv *apitest.Server) Client { return newRegisteredTestClient(t, srv) }},
+		{name: "registered", open: newRegisteredTestClient},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			srv := apitest.NewServer(t)

@@ -655,7 +655,7 @@ func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 		"Do not replace the digest from",
 		"release publication also fails closed",
 		"draft Linux binary and from both tested container platforms",
-		"The GitHub\nRelease stays draft",
+		"Release stays draft and the Homebrew tap stays on its prior version",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("RELEASING.md missing image trust guidance %q", want)
