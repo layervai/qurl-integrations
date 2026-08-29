@@ -197,6 +197,43 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 	}
 }
 
+// TestCLICustomerJourneyCallbackTracksArtifactProducer keeps the inbound
+// result validator tied to the exact public artifact producer it authenticates.
+// A job or step rename must fail the required workflow-contract check instead
+// of surfacing only after a protected journey has completed.
+func TestCLICustomerJourneyCallbackTracksArtifactProducer(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliWorkflow)
+	producer := workflow.Jobs[cliSandboxArtifactsJobID]
+	if producer == nil || producer.Name != "cli / sandbox matched-cohort artifacts" {
+		t.Fatalf("CLI artifact producer name drifted: %#v", producer)
+	}
+	wantSteps := []string{
+		"Build exact sandbox customer artifacts",
+		"Upload exact sandbox customer binaries",
+		"Upload exact sandbox customer source receipt",
+	}
+	producerSteps := map[string]int{}
+	for index := range producer.Steps {
+		producerSteps[producer.Steps[index].Name]++
+	}
+
+	callbackPath := filepath.Join("..", "..", "scripts", "accept-cli-customer-journey-result.sh")
+	callback, err := os.ReadFile(callbackPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", callbackPath, err)
+	}
+	for _, literal := range append([]string{producer.Name}, wantSteps...) {
+		if literal != producer.Name && producerSteps[literal] != 1 {
+			t.Errorf("CLI artifact producer has %d steps named %q, want 1", producerSteps[literal], literal)
+		}
+		if count := strings.Count(string(callback), literal); count != 1 {
+			t.Errorf("customer-journey callback contains %q %d times, want 1", literal, count)
+		}
+	}
+}
+
 type requiredWorkflowSpec struct {
 	name                 string
 	path                 string

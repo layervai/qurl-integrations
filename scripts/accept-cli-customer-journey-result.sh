@@ -60,7 +60,7 @@ jq -e --arg repository "$repository" '
     "schema", "source_kind", "source_sha"
   ]) and
   .client_payload.schema == "layerv.qurl-cli-customer-journey-result.v1" and
-  (.client_payload.source_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+  (.client_payload.source_sha | type == "string" and length == 40 and test("^[0-9a-f]{40}$")) and
   (.client_payload.source_kind == "main" or .client_payload.source_kind == "pull_request") and
   (.client_payload.pull_request_number | type == "number" and floor == . and . >= 0) and
   (.client_payload.producer_run_id | type == "number" and floor == . and . > 0) and
@@ -100,11 +100,16 @@ conclusion=${fields[7]}
 if [[ "$source_kind" == pull_request ]]; then
   pull_request=$(github_api "read the named pull request" --method GET \
     "repos/${repository}/pulls/${pull_request_number}")
-  jq -e --arg repository "$repository" --arg sha "$source_sha" --argjson number "$pull_request_number" '
-    .number == $number and .state == "open" and
-    .head.repo.full_name == $repository and .head.sha == $sha and
+  jq -e --arg repository "$repository" --argjson number "$pull_request_number" '
+    .number == $number and
+    .head.repo.full_name == $repository and
     .base.repo.full_name == $repository
   ' <<<"$pull_request" >/dev/null || {
+    echo "::error::customer-journey result does not bind a same-repository pull request" >&2
+    exit 1
+  }
+  jq -e --arg sha "$source_sha" '.state == "open" and .head.sha == $sha' \
+    <<<"$pull_request" >/dev/null || {
     echo "::notice::Ignoring a customer-journey result for a superseded or closed pull request head"
     exit 0
   }
@@ -114,6 +119,9 @@ else
   jq -e --arg sha "$source_sha" '.ref == "refs/heads/main" and .object.type == "commit" and .object.sha == $sha' \
     <<<"$main_ref" >/dev/null || {
     echo "::notice::Ignoring a customer-journey result for superseded main"
+    # Only the current tip receives a check. A later main push owns its own
+    # exact artifact and journey; accepting an ancestor result would let an
+    # older callback satisfy a newer release decision.
     exit 0
   }
 fi
@@ -149,10 +157,14 @@ jq -e --arg repository "$repository" --arg sha "$source_sha" --arg event "$expec
 # lockstep with .github/workflows/cli.yml and the protected artifact consumer.
 producer_jobs=$(github_api "read the exact CLI producer jobs" --method GET \
   "repos/${repository}/actions/runs/${producer_run_id}/attempts/${producer_run_attempt}/jobs?per_page=100")
+jq -e '.total_count <= 100 and (.jobs | length) == .total_count' <<<"$producer_jobs" >/dev/null || {
+  echo "::error::exact CLI producer job response is truncated or inconsistent" >&2
+  exit 1
+}
 jq -e '
-  .total_count <= 100 and (.jobs | length) == .total_count and
-  ([.jobs[] | select(.name == "cli / sandbox matched-cohort artifacts")] | length) == 1 and
-  ([.jobs[] | select(.name == "cli / sandbox matched-cohort artifacts")][0] as $job |
+  ([.jobs[] | select(.name == "cli / sandbox matched-cohort artifacts")]) as $matches |
+  ($matches | length) == 1 and
+  ($matches[0] as $job |
     $job.status == "completed" and $job.conclusion == "success" and
     (["Build exact sandbox customer artifacts", "Upload exact sandbox customer binaries",
       "Upload exact sandbox customer source receipt"] |

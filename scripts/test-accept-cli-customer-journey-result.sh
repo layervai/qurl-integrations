@@ -137,7 +137,8 @@ jq -e '
   .external_id == "layerv.qurl-cli-customer-journey.v1:17d077fbc5a50d54894d5521be623fe03420de14:555:2" and
   .details_url == "https://github.com/layervai/qurl-integrations/actions/runs/888/attempts/3" and
   .status == "completed" and .conclusion == "success" and
-  (.output.summary | contains("producer run 555, attempt 2"))
+  (.output.summary | contains("producer run 555, attempt 2")) and
+  (.output.summary | contains("Result authority: run 777, attempt 1."))
 ' "$work/check-request" >/dev/null
 
 write_event "$work/event.json"
@@ -245,8 +246,23 @@ expect_stale_pr_ignored() {
 expect_stale_pr_ignored "stale pull-request head" \
   FAKE_PR_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 expect_stale_pr_ignored "closed pull request" FAKE_PR_STATE=closed
-expect_stale_pr_ignored "fork pull-request head" FAKE_PR_HEAD_REPOSITORY=attacker/qurl-integrations
-expect_stale_pr_ignored "crossed pull-request base" FAKE_PR_BASE_REPOSITORY=attacker/qurl-integrations
+
+expect_pr_trust_rejected() {
+  local label=$1 override=$2
+  write_event "$work/event.json"
+  : >"$work/gh-calls"
+  if run_subject "$override" >/dev/null 2>&1; then
+    echo "$label was accepted as benign staleness" >&2
+    exit 1
+  fi
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+    echo "$label did not fail at pull-request trust validation" >&2
+    exit 1
+  }
+}
+
+expect_pr_trust_rejected "fork pull-request head" FAKE_PR_HEAD_REPOSITORY=attacker/qurl-integrations
+expect_pr_trust_rejected "crossed pull-request base" FAKE_PR_BASE_REPOSITORY=attacker/qurl-integrations
 
 write_event "$work/event.json"
 : >"$work/gh-calls"
@@ -289,6 +305,14 @@ fi
   exit 1
 }
 
+write_event "$work/event.json"
+: >"$work/gh-calls"
+run_subject FAKE_RUN_STATUS=completed FAKE_RUN_CONCLUSION=success >/dev/null
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 4 ]] || {
+  echo "completed successful producer replay did not create a check" >&2
+  exit 1
+}
+
 for producer_case in \
   'wrong producer repository:FAKE_RUN_REPOSITORY=example/wrong' \
   'fork producer repository:FAKE_RUN_HEAD_REPOSITORY=attacker/qurl-integrations' \
@@ -326,7 +350,6 @@ for artifact_case in \
   'running artifact job:FAKE_JOB_STATUS=in_progress' \
   'failed artifact job:FAKE_JOB_CONCLUSION=failure' \
   'failed artifact step:FAKE_JOB_STEP_CONCLUSION=failure' \
-  'truncated artifact jobs:FAKE_JOB_TOTAL_COUNT=2' \
   'duplicate artifact jobs:FAKE_JOB_COPIES=2'; do
   label=${artifact_case%%:*}
   override=${artifact_case#*:}
@@ -338,6 +361,24 @@ for artifact_case in \
   fi
   [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 ]] || {
     echo "$label did not fail at artifact producer validation" >&2
+    exit 1
+  }
+done
+
+for pagination_case in \
+  'inconsistent artifact page:FAKE_JOB_TOTAL_COUNT=2' \
+  'artifact page exceeds bound:FAKE_JOB_TOTAL_COUNT=101'; do
+  label=${pagination_case%%:*}
+  override=${pagination_case#*:}
+  write_event "$work/event.json"
+  : >"$work/gh-calls"
+  if output=$(run_subject "$override" 2>&1); then
+    echo "$label was accepted" >&2
+    exit 1
+  fi
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 && \
+    "$output" == *"producer job response is truncated or inconsistent"* ]] || {
+    echo "$label did not fail at the pagination boundary: $output" >&2
     exit 1
   }
 done
