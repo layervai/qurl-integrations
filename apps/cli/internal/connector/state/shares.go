@@ -73,18 +73,24 @@ type LocalShareRegistry struct{ dir string }
 // authenticated during initial publish. The owner is non-secret, but changing
 // it would retarget every native operation, so an existing binding is
 // immutable.
-func (r *LocalShareRegistry) BindOwner(ctx context.Context, ownerID string) error {
+func (r *LocalShareRegistry) BindOwner(ctx context.Context, ownerID string) (retErr error) {
 	ownerID = strings.TrimSpace(ownerID)
 	if !validLocalOwnerID(ownerID) {
 		return errors.New("local share account owner is invalid")
 	}
-	return r.update(ctx, func(state *localSharesState) error {
-		if state.OwnerID != "" && state.OwnerID != ownerID {
-			return fmt.Errorf("%w: bound to %q, requested %q", ErrLocalShareOwnerConflict, state.OwnerID, ownerID)
-		}
-		state.OwnerID = ownerID
+	state, unlock, err := r.loadLocked(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	if state.OwnerID != "" && state.OwnerID != ownerID {
+		return fmt.Errorf("%w: bound to %q, requested %q", ErrLocalShareOwnerConflict, state.OwnerID, ownerID)
+	}
+	if state.OwnerID == ownerID {
 		return nil
-	})
+	}
+	state.OwnerID = ownerID
+	return writeLocalShares(r.dir, state)
 }
 
 // OwnerID returns the durable account owner without reading an API key. A

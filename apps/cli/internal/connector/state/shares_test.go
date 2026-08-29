@@ -50,8 +50,19 @@ func TestLocalShareRegistryBindsOwnerBeforeShares(t *testing.T) {
 	if err := registry.BindOwner(context.Background(), "owner-one"); err != nil {
 		t.Fatal(err)
 	}
+	beforeIdempotentBind, err := os.Stat(filepath.Join(dir, LocalSharesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := registry.BindOwner(context.Background(), "owner-one"); err != nil {
 		t.Fatalf("idempotent owner binding: %v", err)
+	}
+	afterIdempotentBind, err := os.Stat(filepath.Join(dir, LocalSharesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeIdempotentBind, afterIdempotentBind) {
+		t.Fatal("idempotent owner binding replaced the durable registry file")
 	}
 	if err := registry.BindOwner(context.Background(), "owner-two"); err == nil {
 		t.Fatal("account owner drift was accepted")

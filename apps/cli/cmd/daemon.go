@@ -225,22 +225,15 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	ownerID, err := daemonOwner(ctx, registry, headless)
+	ownerID, ownerBound, err := daemonOwner(ctx, registry, headless)
 	if err != nil {
 		return err
 	}
-	verifyOwner := false
-	if headless != nil {
-		_, ownerBound, readErr := registry.OwnerID(ctx)
-		if readErr != nil {
-			return readErr
-		}
-		// The headless YAML is declarative input, not an authority. Authenticate
-		// its owner through the registered device before the first durable bind.
-		// Once bound, daemonOwner enforces exact continuity without adding a REST
-		// dependency to every warm daemon restart.
-		verifyOwner = !ownerBound
-	}
+	// The headless YAML is declarative input, not an authority. Authenticate
+	// its owner through the registered device before the first durable bind.
+	// Once bound, daemonOwner enforces exact continuity without adding a REST
+	// dependency to every warm daemon restart.
+	verifyOwner := headless != nil && !ownerBound
 	sessionOperations, err := opts.resolveSessionConfig(ownerID)
 	if err != nil {
 		return err
@@ -277,7 +270,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		// credential.
 		factory, err = openHeadlessSessionFactory(ctx, openFactory)
 		enrollmentCredential = ""
-		if err == nil {
+		if err == nil && !ownerBound {
 			err = registry.BindOwner(ctx, headless.OwnerID)
 		}
 		if err == nil {
@@ -315,28 +308,28 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	return server.Run(ctx)
 }
 
-func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistry, headless *connectorstate.HeadlessConfig) (string, error) {
+func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistry, headless *connectorstate.HeadlessConfig) (ownerID string, bound bool, err error) {
 	if headless != nil {
 		ownerID, present, err := registry.OwnerID(ctx)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if present && ownerID != headless.OwnerID {
-			return "", errors.New("headless share config belongs to a different durable account owner; use a dedicated state volume")
+			return "", false, errors.New("headless share config belongs to a different durable account owner; use a dedicated state volume")
 		}
 		if err := validateHeadlessRegistryOwnership(ctx, registry, &headless.Shares[0]); err != nil {
-			return "", err
+			return "", false, err
 		}
-		return headless.OwnerID, nil
+		return headless.OwnerID, present, nil
 	}
 	ownerID, present, err := registry.OwnerID(ctx)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if !present {
-		return "", errors.New("qURL share daemon has no durable account owner; run `qurl login` and publish a local app first, or use --headless-config with --enrollment-token-file")
+		return "", false, errors.New("qURL share daemon has no durable account owner; run `qurl login` and publish a local app first, or use --headless-config with --enrollment-token-file")
 	}
-	return ownerID, nil
+	return ownerID, true, nil
 }
 
 func daemonHubBootstrap(opts *globalOpts, override *qurl.HubBootstrap) (qurl.HubBootstrap, error) {

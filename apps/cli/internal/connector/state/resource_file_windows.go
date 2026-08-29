@@ -21,6 +21,12 @@ type windowsConnectorACLHeader struct {
 	Sbz2     uint16
 }
 
+// The DACL buffer is returned as windows.ACL, whose fields are private. Keep
+// the local read-only header view tied to the exact x/sys layout at compile
+// time so a dependency change cannot corrupt the security decision.
+var _ [unsafe.Sizeof(windows.ACL{})]byte = [unsafe.Sizeof(windowsConnectorACLHeader{})]byte{}
+var _ [unsafe.Offsetof(windows.ACL{}.AceCount)]byte = [unsafe.Offsetof(windowsConnectorACLHeader{}.ACECount)]byte{}
+
 func currentWindowsConnectorSecurity() (*windows.SID, *windows.SECURITY_DESCRIPTOR, error) {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
