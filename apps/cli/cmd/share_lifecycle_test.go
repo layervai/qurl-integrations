@@ -173,6 +173,16 @@ func (d *recordingShareDaemon) ReloadIfRunning(context.Context) (bool, error) {
 	return true, nil
 }
 
+type sharingErrorClient struct {
+	qurlapi.Client
+	err error
+}
+
+func (c sharingErrorClient) Sharing(ctx context.Context, _ string) (*qurlapi.Sharing, error) {
+	<-ctx.Done()
+	return nil, c.err
+}
+
 func TestWaitForSharingReportsLastObservedStateWhenRequestUsesDeadline(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
@@ -211,6 +221,20 @@ func TestWaitForSharingPreservesCallerCancellation(t *testing.T) {
 	_, err = waitForSharing(ctx, client, &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, 1, time.Minute)
 	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "did not start serving") {
 		t.Fatalf("canceled wait error = %v, want unmodified caller cancellation", err)
+	}
+}
+
+func TestWaitForSharingPreservesFinalPollErrorAtDeadline(t *testing.T) {
+	pollErr := errors.New("final sharing poll failed")
+	_, err := waitForSharing(
+		context.Background(),
+		sharingErrorClient{err: pollErr},
+		&connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"},
+		1,
+		10*time.Millisecond,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, pollErr) {
+		t.Fatalf("wait error = %v, want deadline and final poll causes", err)
 	}
 }
 

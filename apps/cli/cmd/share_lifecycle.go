@@ -373,9 +373,9 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 		if err != nil {
 			if waitCtx.Err() != nil {
 				if ctx.Err() != nil {
-					return nil, ctx.Err()
+					return nil, errors.Join(ctx.Err(), err)
 				}
-				return nil, sharingServingTimeout(local.CRID, limit, last)
+				return nil, errors.Join(sharingServingTimeout(local.CRID, limit, last), err)
 			}
 			return nil, err
 		}

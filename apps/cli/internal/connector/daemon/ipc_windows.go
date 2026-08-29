@@ -31,18 +31,15 @@ func listenDaemonIPC(ctx context.Context, path string) (net.Listener, func() err
 		OutputBufferSize:   64 << 10,
 	})
 	if err != nil {
-		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-			return nil, nil, classifyWindowsListenAccessDenied(ctx, path, err, dialDaemonIPC)
-		}
-		if windowsNamedPipeCollision(err) {
-			return nil, nil, fmt.Errorf("%w: Windows named pipe is already live: %w", ErrAlreadyRunning, err)
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) || windowsNamedPipeCollision(err) {
+			return nil, nil, classifyWindowsExistingPipe(ctx, path, err, dialDaemonIPC)
 		}
 		return nil, nil, fmt.Errorf("listen on share daemon Windows named pipe: %w", err)
 	}
 	return listener, func() error { return nil }, nil
 }
 
-func classifyWindowsListenAccessDenied(
+func classifyWindowsExistingPipe(
 	ctx context.Context,
 	path string,
 	listenErr error,
@@ -51,7 +48,7 @@ func classifyWindowsListenAccessDenied(
 	conn, verifyErr := probe(ctx, path)
 	if verifyErr != nil {
 		return fmt.Errorf(
-			"listen on share daemon Windows named pipe: access was denied and the existing pipe could not be verified as a current-user daemon: %w",
+			"listen on share daemon Windows named pipe: the existing pipe could not be verified as a current-user daemon: %w",
 			errors.Join(listenErr, verifyErr),
 		)
 	}
