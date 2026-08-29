@@ -51,7 +51,12 @@ type goreleaserConfig struct {
 	HomebrewCasks []struct {
 		Manpages    []string          `yaml:"manpages"`
 		Completions map[string]string `yaml:"completions"`
+		SkipUpload  bool              `yaml:"skip_upload"`
 	} `yaml:"homebrew_casks"`
+	Release struct {
+		Draft            bool `yaml:"draft"`
+		UseExistingDraft bool `yaml:"use_existing_draft"`
+	} `yaml:"release"`
 }
 
 func loadGoreleaserConfig(t *testing.T) goreleaserConfig {
@@ -83,6 +88,16 @@ func TestReleaseBuildsOnlyQURL(t *testing.T) {
 	build := cfg.Builds[0]
 	if build.ID != "qurl" || build.Main != "./apps/cli/cmd/" || build.Binary != "qurl" {
 		t.Fatalf("release build = %+v, want the qurl CLI only", build)
+	}
+}
+
+func TestReleaseStaysDraftAndDefersHomebrewPublication(t *testing.T) {
+	cfg := loadGoreleaserConfig(t)
+	if !cfg.Release.Draft || !cfg.Release.UseExistingDraft {
+		t.Fatalf("release draft contract = draft:%t use_existing_draft:%t, want both true", cfg.Release.Draft, cfg.Release.UseExistingDraft)
+	}
+	if !cfg.HomebrewCasks[0].SkipUpload {
+		t.Fatal("GoReleaser can publish the Homebrew cask before release verification")
 	}
 }
 

@@ -139,7 +139,7 @@ while [ "$attempt" -le "$attempts" ]; do
 done
 
 if [ -n "$found" ]; then
-    printf '%s %s is released as %s; nothing was dropped.\n' "$CLI_PACKAGE" "$version" "$tag"
+    printf '%s %s exists as %s; nothing was dropped.\n' "$CLI_PACKAGE" "$version" "$tag"
     exit 0
 fi
 

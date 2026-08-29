@@ -3,10 +3,11 @@ name: Release Please
 # Release flow for the monorepo:
 #
 #   1. release-please maintains per-component release PRs (see
-#      release-please-config.json). Merging one creates the tag and the
+#      release-please-config.json). Merging one creates the tag and a draft
 #      GitHub Release.
-#   2. CLI releases additionally run GoReleaser to attach binaries, publish
-#      the Homebrew tap formula, and build deb/rpm packages.
+#   2. CLI releases additionally run GoReleaser to attach binaries and build
+#      deb/rpm packages. The workflow verifies every artifact, publishes the
+#      release, and only then updates the Homebrew tap.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -21,14 +22,13 @@ name: Release Please
 # release PR can put several components' tags on one commit, and GoReleaser
 # must not guess which one is the CLI's.
 #
-# Failure/recovery semantics: if release-cli fails, the tag and the GitHub
-# Release already exist without binaries (the installer 404s on that version
-# until assets land; a normal minutes-long window like this also exists on
-# every release while GoReleaser uploads). Recover with "Re-run failed jobs"
-# on the failed run, or run this workflow via workflow_dispatch with cli_tag
-# set to the affected tag. Do NOT "Re-run all jobs": release-please then
-# sees the release already exists and skips release-cli. Asset re-uploads
-# are idempotent (release.replace_existing_artifacts in .goreleaser.yml).
+# Failure/recovery semantics: until every verification succeeds, the tag and a
+# draft GitHub Release exist but no new CLI release is public and the Homebrew
+# tap stays on its prior version. Recover with "Re-run failed jobs" on the
+# failed run, or run this workflow via workflow_dispatch with cli_tag set to
+# the affected tag. Do NOT "Re-run all jobs": release-please then sees the
+# release already exists and skips release-cli. Asset re-uploads are idempotent
+# (release.replace_existing_artifacts in .goreleaser.yml).
 #
 # The other failure mode, and the worse one, is a release release-please
 # never made. What it looks like: this workflow runs green, main carries an
@@ -232,14 +232,13 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           # Pin which tag is being released. A combined release PR can tag
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.
           GORELEASER_CURRENT_TAG: ${{ env.CLI_TAG }}
 
-      - name: Verify the released CLI carries the exact production Hub trust pin
+      - name: Verify the draft CLI carries the exact production Hub trust pin
         env:
           GH_TOKEN: ${{ github.token }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
@@ -263,7 +262,7 @@ jobs:
           fi
           fingerprint=$("$binary" version --verify-release-native-trust)
           if [[ "$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
-            echo "::error::released CLI does not carry the exact verified production Hub trust pin" >&2
+            echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
             exit 1
           fi
 
@@ -411,13 +410,71 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             dist/checksums.txt
 
+      - name: Publish the verified CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --verify-tag
+          is_draft="$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          [ "$is_draft" = false ] || {
+            echo "::error::verified CLI release remained a draft" >&2
+            exit 1
+          }
+
+      - name: Publish the verified Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tap_repo=layervai/homebrew-tap
+          tap_branch=main
+          cask_path=Casks/qurl.rb
+          generated=dist/homebrew/Casks/qurl.rb
+          release_version="${CLI_TAG#v}"
+          [ "v${release_version}" = "$CLI_TAG" ]
+          [ -f "$generated" ] || {
+            echo "::error::GoReleaser did not generate the qurl Homebrew cask" >&2
+            exit 1
+          }
+          [ "$(grep -Fxc "  version \"${release_version}\"" "$generated")" = 1 ] || {
+            echo "::error::generated Homebrew cask does not name the exact CLI version" >&2
+            exit 1
+          }
+          [ "$(grep -Fc "releases/download/${CLI_TAG}/" "$generated")" = 4 ] || {
+            echo "::error::generated Homebrew cask does not bind all four release archives" >&2
+            exit 1
+          }
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          gh api "repos/${tap_repo}/contents/${cask_path}?ref=${tap_branch}" > "$work/current.json"
+          current_sha="$(jq -er '.sha | select(test("^[0-9a-f]{40}$"))' "$work/current.json")"
+          jq -er .content "$work/current.json" | base64 --decode > "$work/current.rb"
+          if cmp -s "$generated" "$work/current.rb"; then
+            echo "Homebrew cask already names ${CLI_TAG}."
+            exit 0
+          fi
+
+          content="$(base64 -w 0 < "$generated")"
+          jq -n \
+            --arg message "qurl ${CLI_TAG}" \
+            --arg content "$content" \
+            --arg sha "$current_sha" \
+            --arg branch "$tap_branch" \
+            '{message:$message,content:$content,sha:$sha,branch:$branch}' |
+            gh api --method PUT "repos/${tap_repo}/contents/${cask_path}" --input - |
+            jq -e '.commit.sha | test("^[0-9a-f]{40}$")' >/dev/null
+
       - name: Post recovery instructions on failure
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           {
             echo "## CLI release incomplete"
             echo ""
-            echo "Tag and GitHub Release \`${CLI_TAG}\` exist, but GoReleaser did not finish attaching assets — \`scripts/install.sh\` 404s on this version and the Homebrew tap was not updated."
+            echo "The release job did not finish. Before publication, \`${CLI_TAG}\` remains a draft and the Homebrew tap stays on its prior version. If publication succeeded but the final tap update failed, the verified GitHub Release is public and Homebrew remains on its prior version."
             echo ""
-            echo "Recovery: fix the cause, then re-run via workflow_dispatch with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs** on this run. Do NOT use 'Re-run all jobs' (release-please will skip this job because the release already exists). Re-uploads are idempotent."
+            echo "Recovery: for a draft release, fix the cause, then re-run via workflow_dispatch with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs** on this run. Do NOT use 'Re-run all jobs' (release-please will skip this job because the release already exists). Re-uploads are idempotent. If only the Homebrew update failed after publication, rerun the exact cask compare-and-swap after fixing the tap access problem."
           } >> "$GITHUB_STEP_SUMMARY"

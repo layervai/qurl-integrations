@@ -472,17 +472,17 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			var releaseVerifierSteps []cliWorkflowStep
 			releaseVerifierStepIndex := -1
 			for index, candidate := range job.Steps {
-				if candidate.Name == "Verify the released CLI carries the exact production Hub trust pin" {
+				if candidate.Name == "Verify the draft CLI carries the exact production Hub trust pin" {
 					releaseVerifierSteps = append(releaseVerifierSteps, candidate)
 					releaseVerifierStepIndex = index
 				}
 			}
 			if len(releaseVerifierSteps) != 1 {
-				t.Fatalf("%s has %d released CLI Hub-pin verifiers, want one", target.file, len(releaseVerifierSteps))
+				t.Fatalf("%s has %d draft CLI Hub-pin verifiers, want one", target.file, len(releaseVerifierSteps))
 			}
 			releaseVerifier := releaseVerifierSteps[0]
 			if releaseVerifier.If != nil || releaseVerifier.ContinueOnError != nil || releaseVerifierStepIndex <= goreleaserStepIndex {
-				t.Errorf("%s released CLI Hub-pin verifier is bypassable or precedes GoReleaser", target.file)
+				t.Errorf("%s draft CLI Hub-pin verifier is bypassable or precedes GoReleaser", target.file)
 			}
 			fingerprintSource, ok := releaseVerifier.Env["QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"].(string)
 			if !ok || strings.TrimSpace(fingerprintSource) == "" {
@@ -495,8 +495,40 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
 			} {
 				if strings.Count(releaseVerifier.Run, required) != 1 {
-					t.Errorf("%s released CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
+					t.Errorf("%s draft CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
 				}
+			}
+			publishIndex, signatureIndex, imageIndex, caskIndex := -1, -1, -1, -1
+			for index, candidate := range job.Steps {
+				switch candidate.Name {
+				case "Verify release signature (self-test)":
+					signatureIndex = index
+				case "Promote and sign tested qurl image":
+					imageIndex = index
+				case "Publish the verified CLI release":
+					publishIndex = index
+					for _, required := range []string{`gh release edit "$CLI_TAG"`, "--draft=false", "--verify-tag"} {
+						if strings.Count(candidate.Run, required) != 1 {
+							t.Errorf("%s verified release publisher does not fail closed with %q", target.file, required)
+						}
+					}
+				case "Publish the verified Homebrew cask":
+					caskIndex = index
+					for _, required := range []string{"dist/homebrew/Casks/qurl.rb", `releases/download/${CLI_TAG}/`, `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`} {
+						if strings.Count(candidate.Run, required) != 1 {
+							t.Errorf("%s verified Homebrew publisher does not bind %q", target.file, required)
+						}
+					}
+				}
+			}
+			if publishIndex <= releaseVerifierStepIndex || publishIndex <= signatureIndex || publishIndex <= imageIndex {
+				t.Errorf("%s publishes before every artifact gate (publish=%d archive=%d signature=%d image=%d)", target.file, publishIndex, releaseVerifierStepIndex, signatureIndex, imageIndex)
+			}
+			if caskIndex <= publishIndex {
+				t.Errorf("%s publishes Homebrew before the verified GitHub Release (cask=%d release=%d)", target.file, caskIndex, publishIndex)
+			}
+			if _, present := goreleaserSteps[0].Env["HOMEBREW_TAP_GITHUB_TOKEN"]; present {
+				t.Errorf("%s exposes the tap token to GoReleaser before verification", target.file)
 			}
 			continue
 		}
@@ -622,7 +654,8 @@ func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 		"https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1",
 		"Do not replace the digest from",
 		"release publication also fails closed",
-		"released Linux binary and from both published container platforms",
+		"draft Linux binary and from both tested container platforms",
+		"The GitHub\nRelease stays draft",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("RELEASING.md missing image trust guidance %q", want)

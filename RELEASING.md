@@ -28,13 +28,16 @@ CLI release publication also fails closed until both production NHP Hub trust
 pin secrets are populated: the canonical public key and the independent
 SHA-256 fingerprint of its raw 32-byte value. The release job verifies the
 pair before GoReleaser runs. It then checks the exact fingerprint from the
-released Linux binary and from both published container platforms. Do not
-bypass this gate or publish a dark CLI build.
+draft Linux binary and from both tested container platforms. The GitHub
+Release stays draft and the Homebrew tap stays on its prior version until all
+artifact, image, and signature checks pass. Do not bypass this gate or publish
+a dark CLI build.
 
 ## What a CLI release ships
 
-Merging the CLI's release-please PR tags `vX.Y.Z` and creates the GitHub
-Release; the `release-cli` job then runs GoReleaser, which attaches:
+Merging the CLI's release-please PR tags `vX.Y.Z` and creates a draft GitHub
+Release. The `release-cli` job runs GoReleaser, verifies the result, publishes
+the GitHub Release, and then updates Homebrew. The release attaches:
 
 | Asset | What it is |
 |---|---|

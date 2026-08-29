@@ -113,10 +113,13 @@ changelog:
 #    sanity instead.
 homebrew_casks:
   - name: qurl
+    # Generate the exact cask in dist, but publish it only after every release
+    # artifact and signature check passes. The release workflow performs the
+    # final compare-and-swap update of the tap.
+    skip_upload: true
     repository:
       owner: layervai
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
     homepage: "https://layerv.ai"
     description: "qURL CLI - manage secure links from the command line"
@@ -176,6 +179,10 @@ release:
   # is the current default — pinned because the handshake breaks if the
   # default ever changes.
   mode: keep-existing
+  # release-please creates a draft and the exact tag. Keep that release draft
+  # while GoReleaser uploads and the workflow verifies its artifacts.
+  draft: true
+  use_existing_draft: true
   # Make re-runs idempotent: without this, re-running the release-cli job
   # after a partial upload 422s on the assets that did make it.
   replace_existing_artifacts: true

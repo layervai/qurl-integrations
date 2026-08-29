@@ -29,7 +29,7 @@ git -C "$fixture" init -q -b main
 # The baseline is the real shape: one bare-tagged CLI plus a component-tagged
 # sibling, keys mirrored into the manifest.
 write_fixture() {
-  local cli_extra="$1" extra_pkg="${2-}"
+  local cli_extra="$1" extra_pkg="${2-}" draft="${3-true}" force_tag="${4-true}"
   cat >"$fixture/release-please-config.json" <<JSON
 {
   "packages": {
@@ -39,7 +39,9 @@ write_fixture() {
     },
     "apps/cli": {
       "release-type": "go",
-      "include-component-in-tag": false${cli_extra}
+      "include-component-in-tag": false,
+      "draft": ${draft},
+      "force-tag-creation": ${force_tag}${cli_extra}
     }
   }
 }
@@ -74,7 +76,7 @@ run_case() {
 # --- the shape the repo actually has: every invariant satisfied
 
 write_fixture ""
-run_case clean 0 'apps/cli declares no component'
+run_case clean 0 'creates a tagged draft release'
 
 # --- the invariant this PR added: a component on the bare-tagged CLI is what
 #     made release-please skip its release while still exiting 0
@@ -82,6 +84,15 @@ run_case clean 0 'apps/cli declares no component'
 write_fixture ',
       "component": "cli"'
 run_case cli-component 1 'apps/cli must not declare a component'
+
+# --- CLI assets must remain unavailable until the release job verifies the
+#     exact archives, images, signatures, and embedded production trust pin.
+
+write_fixture "" "" false true
+run_case cli-not-draft 1 'must create a draft release and its exact tag'
+
+write_fixture "" "" true false
+run_case cli-tag-not-forced 1 'must create a draft release and its exact tag'
 
 # --- the two pre-existing invariants, which had no negative test either
 
