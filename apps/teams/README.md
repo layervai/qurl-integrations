@@ -55,6 +55,48 @@ and `nanoid` to audited versions. Review these overrides when upgrading
 dependencies, especially the `nanoid` major-version constraint, so security
 fixes do not become stale or conflict with a future transitive requirement.
 
+## Configuration
+
+Every variable below is read in `src/server.ts`. The required ones are read
+through a helper that throws `<NAME> is required` on an empty or missing value,
+so the process fails at startup rather than mid-request. Provisioning the
+backing resources (tables, KMS key, app registration) lives in the
+`qurl-integrations-infra` repository; this table is the contract the process
+itself enforces.
+
+| Variable | Required | Notes |
+|---|---|---|
+| `TEAMS_BASE_URL` | yes | Public HTTPS origin serving the OAuth routes. The callback is derived as `<origin>/oauth/qurl/callback`. Origin only — no path, query, fragment, or credentials. |
+| `QURL_ENDPOINT` | yes | qURL API HTTPS origin, same origin-only rule. |
+| `AWS_REGION` | yes | Region for the DynamoDB and KMS clients. |
+| `TEAMS_APP_ID` | yes | Bot Framework app (client) id. |
+| `TEAMS_APP_PASSWORD` | yes | Bot Framework client secret. |
+| `TEAMS_SERVICE_URL` | no | Pins the outbound Bot Framework service URL. Validated against the trusted-host allowlist in `src/teams-sdk.ts`; unset lets the SDK use the inbound Activity's own service URL. |
+| `QURL_CONNECTOR_IMAGE` | yes | Connector image reference embedded in the generated install instructions. Validated by `validateTunnelImageRef`. |
+| `QURL_TEAMS_TENANT_PRINCIPALS_TABLE` | yes | Owner and admin rows. |
+| `QURL_TEAMS_CHANNEL_POLICIES_TABLE` | yes | Channel alias and resource-visibility rows. Must carry the `resource_scopes` GSI (`tenant_resource_key` / `scope_item_type_key`, KEYS_ONLY) — `revoke` queries it directly, so a table without it fails at revoke time rather than at startup. |
+| `QURL_TEAMS_PERSONAL_CONVERSATIONS_TABLE` | yes | Personal-chat references used by `dm:true` and connector bootstrap delivery. |
+| `QURL_TEAMS_TENANT_CREDENTIALS_TABLE` | yes | Encrypted tenant qURL API keys. Keyed by `tenant_id`, not `teams_tenant_id` — see the note in `src/teams-data.ts`. |
+| `QURL_TEAMS_TENANT_CREDENTIALS_KMS_KEY_ARN` | yes | KMS key for the tenant credential envelope. The encryption context binds each ciphertext to its tenant, so this key must stay stable across deploys or stored credentials become undecryptable. |
+| `OAUTH_STATE_TABLE` | yes | One-shot OAuth state. Rows carry a numeric `expires_at` in epoch seconds; expiry is enforced in the consume condition, so a table TTL on that attribute is cleanup, not the security control. |
+| `AUTH0_DOMAIN` | yes | OIDC issuer. Compared as an exact string against the ID token's `iss`, including the root slash. |
+| `AUTH0_CLIENT_ID` | yes | Confidential client id; also the expected ID-token audience. |
+| `AUTH0_CLIENT_SECRET` | yes | Confidential client secret. |
+| `AUTH0_CLIENT_SECRET_FALLBACK` | no | Second secret accepted during a rotation window. Remove it once the primary is cut over. |
+| `AUTH0_AUDIENCE` | yes | Access-token audience requested for the qURL API. |
+| `HOST` | no | Listen address, default `127.0.0.1`. See the deployment note below. |
+| `PORT` | no | Listen port, default `3000`. Rejected unless an integer in 1-65535. |
+
+### Known limitations
+
+- The OAuth routes (`/oauth/qurl/start`, `/oauth/qurl/callback`) carry no
+  application-level rate limit. They are unauthenticated public entrypoints and
+  each request performs one DynamoDB operation, so the ingress in front of this
+  service is expected to provide that limit. The `qurl-teams-ddb` module already
+  provisions an `operation-receipts` table with a `receipt_rate_key` sort key
+  and TTL, which is where an application-level limiter would keep its counters
+  if the ingress-level control turns out not to be enough.
+
 ## Deployment
 
 The production entrypoint listens on `127.0.0.1:3000` by default; `HOST` and
