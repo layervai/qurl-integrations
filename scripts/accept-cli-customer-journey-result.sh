@@ -11,13 +11,13 @@ repository=${GITHUB_REPOSITORY:-}
 server_url=${GITHUB_SERVER_URL:-https://github.com}
 
 [[ "$repository" == "layervai/qurl-integrations" ]] || {
-  echo "customer-journey results are accepted only by the canonical repository" >&2
+  echo "::error::customer-journey results are accepted only by the canonical repository" >&2
   exit 1
 }
-[[ -n "${GH_TOKEN:-}" ]] || { echo "GH_TOKEN is required" >&2; exit 1; }
-[[ -f "$event_path" && ! -L "$event_path" ]] || { echo "event payload must be a regular file" >&2; exit 1; }
+[[ -n "${GH_TOKEN:-}" ]] || { echo "::error::GH_TOKEN is required" >&2; exit 1; }
+[[ -f "$event_path" && ! -L "$event_path" ]] || { echo "::error::event payload must be a regular file" >&2; exit 1; }
 [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] || {
-  echo "callback workflow run identity is invalid" >&2
+  echo "::error::callback workflow run identity is invalid" >&2
   exit 1
 }
 
@@ -28,14 +28,15 @@ jq -e '
   .action == "qurl-cli-customer-journey-result" and
   .repository.full_name == "layervai/qurl-integrations" and
   .sender.login == "ops-routines-reader[bot]" and
+  # Public bot-account user ID from the webhook sender, not a GitHub App ID.
   .sender.id == 277190418 and
   .sender.type == "Bot" and
   (.client_payload | type == "object") and
-  ((.client_payload | keys | sort) == ([
+  ((.client_payload | keys) == [
     "conclusion", "orchestrator_run_attempt", "orchestrator_run_id",
     "producer_run_attempt", "producer_run_id", "pull_request_number",
     "schema", "source_kind", "source_sha"
-  ] | sort)) and
+  ]) and
   .client_payload.schema == "layerv.qurl-cli-customer-journey-result.v1" and
   (.client_payload.source_sha | type == "string" and test("^[0-9a-f]{40}$")) and
   (.client_payload.source_kind == "main" or .client_payload.source_kind == "pull_request") and
@@ -50,7 +51,7 @@ jq -e '
    else .client_payload.pull_request_number > 0
    end)
 ' "$event_path" >/dev/null || {
-  echo "repository-dispatch customer-journey result is not trusted or is malformed" >&2
+  echo "::error::repository-dispatch customer-journey result is not trusted or is malformed" >&2
   exit 1
 }
 
@@ -62,7 +63,7 @@ mapfile -t fields < <(jq -r '
   .conclusion
 ' "$event_path")
 if ((${#fields[@]} != 8)); then
-  echo "customer-journey result fields are incomplete" >&2
+  echo "::error::customer-journey result fields are incomplete" >&2
   exit 1
 fi
 source_sha=${fields[0]}
@@ -74,7 +75,8 @@ orchestrator_run_id=${fields[5]}
 orchestrator_run_attempt=${fields[6]}
 conclusion=${fields[7]}
 
-producer_run=$(gh api --method GET "repos/${repository}/actions/runs/${producer_run_id}")
+producer_run=$(gh api --method GET \
+  "repos/${repository}/actions/runs/${producer_run_id}/attempts/${producer_run_attempt}")
 expected_event=push
 if [[ "$source_kind" == pull_request ]]; then
   expected_event=pull_request
@@ -92,7 +94,7 @@ jq -e --arg repository "$repository" --arg sha "$source_sha" --arg event "$expec
     (.status == "completed" and .conclusion == "success")
   )
 ' <<<"$producer_run" >/dev/null || {
-  echo "customer-journey result does not bind an eligible exact CLI producer run" >&2
+  echo "::error::customer-journey result does not bind an eligible exact CLI producer run" >&2
   exit 1
 }
 
@@ -103,18 +105,20 @@ if [[ "$source_kind" == pull_request ]]; then
     .head.repo.full_name == $repository and .head.sha == $sha and
     .base.repo.full_name == $repository
   ' <<<"$pull_request" >/dev/null || {
-    echo "customer-journey result is not for the current head of the named open pull request" >&2
+    echo "::error::customer-journey result is not for the current head of the named open pull request" >&2
     exit 1
   }
 else
   main_ref=$(gh api --method GET "repos/${repository}/git/ref/heads/main")
   jq -e --arg sha "$source_sha" '.ref == "refs/heads/main" and .object.type == "commit" and .object.sha == $sha' \
     <<<"$main_ref" >/dev/null || {
-    echo "customer-journey result is not for current main" >&2
+    echo "::error::customer-journey result is not for current main" >&2
     exit 1
   }
 fi
 
+# This is the polling gate's exact correlation key. A replay can create another
+# check run with the same key; the gate selects the newest exact result.
 external_id="layerv.qurl-cli-customer-journey.v1:${source_sha}:${producer_run_id}:${producer_run_attempt}"
 details_url="${server_url}/${repository}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
 title="Exact CLI artifact customer journey passed"

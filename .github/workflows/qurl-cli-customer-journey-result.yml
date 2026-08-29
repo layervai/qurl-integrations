@@ -29,6 +29,8 @@ jobs:
           persist-credentials: false
           ref: ${{ github.sha }}
 
+      # If the callback App changes, update and test its public bot login and
+      # bot-account user ID in the acceptance script before rotating it.
       - name: Validate and record the exact CLI customer journey
         env:
           GH_TOKEN: ${{ github.token }}

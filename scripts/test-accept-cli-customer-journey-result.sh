@@ -23,19 +23,24 @@ while (($#)); do
 done
 printf '%s\t%s\n' "$method" "$path" >>"$FAKE_GH_CALLS"
 case "$path" in
-  repos/layervai/qurl-integrations/actions/runs/555)
+  repos/layervai/qurl-integrations/actions/runs/555/attempts/2)
     jq -n \
       --arg status "${FAKE_RUN_STATUS:-in_progress}" \
       --arg conclusion "${FAKE_RUN_CONCLUSION:-}" \
       --arg event "${FAKE_RUN_EVENT:-pull_request}" \
-      '{repository:{full_name:"layervai/qurl-integrations"},head_repository:{full_name:"layervai/qurl-integrations"},head_sha:"17d077fbc5a50d54894d5521be623fe03420de14",path:".github/workflows/cli.yml",event:$event,run_attempt:2,status:$status,conclusion:(if $conclusion == "" then null else $conclusion end)}'
+      --arg repository "${FAKE_RUN_REPOSITORY:-layervai/qurl-integrations}" \
+      --arg head_repository "${FAKE_RUN_HEAD_REPOSITORY:-layervai/qurl-integrations}" \
+      --arg sha "${FAKE_RUN_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
+      --arg path "${FAKE_RUN_PATH:-.github/workflows/cli.yml}" \
+      '{repository:{full_name:$repository},head_repository:{full_name:$head_repository},head_sha:$sha,path:$path,event:$event,run_attempt:2,status:$status,conclusion:(if $conclusion == "" then null else $conclusion end)}'
     ;;
   repos/layervai/qurl-integrations/pulls/1279)
     jq -n --arg sha "${FAKE_PR_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
       '{number:1279,state:"open",head:{repo:{full_name:"layervai/qurl-integrations"},sha:$sha},base:{repo:{full_name:"layervai/qurl-integrations"}}}'
     ;;
   repos/layervai/qurl-integrations/git/ref/heads/main)
-    jq -n '{ref:"refs/heads/main",object:{type:"commit",sha:"17d077fbc5a50d54894d5521be623fe03420de14"}}'
+    jq -n --arg sha "${FAKE_MAIN_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
+      '{ref:"refs/heads/main",object:{type:"commit",sha:$sha}}'
     ;;
   repos/layervai/qurl-integrations/check-runs)
     [[ "$method" == POST && -f "$input" ]]
@@ -98,13 +103,55 @@ jq -e '
   (.output.summary | contains("producer run 555, attempt 2"))
 ' "$work/check-request" >/dev/null
 
-write_event "$work/event.json" attacker
+write_event "$work/event.json"
+jq '.client_payload.conclusion = "failure"' "$work/event.json" >"$work/failure-event.json"
+mv "$work/failure-event.json" "$work/event.json"
 : >"$work/gh-calls"
-if run_subject >/dev/null 2>&1; then
-  echo "forged dispatch sender was accepted" >&2
+run_subject >/dev/null
+jq -e '
+  .conclusion == "failure" and
+  (.output.title | contains("failed")) and
+  (.output.summary | contains("failed"))
+' "$work/check-request" >/dev/null
+
+expect_envelope_rejected() {
+  local label=$1 mutation=$2
+  write_event "$work/event.json"
+  jq "$mutation" "$work/event.json" >"$work/mutated-event.json"
+  mv "$work/mutated-event.json" "$work/event.json"
+  : >"$work/gh-calls"
+  if run_subject >/dev/null 2>&1; then
+    echo "$label was accepted" >&2
+    exit 1
+  fi
+  [[ ! -s "$work/gh-calls" ]] || {
+    echo "$label reached GitHub API calls" >&2
+    exit 1
+  }
+}
+
+while IFS=$'\t' read -r label mutation; do
+  expect_envelope_rejected "$label" "$mutation"
+done <<'CASES'
+forged sender login	.sender.login = "attacker"
+forged sender ID	.sender.id = 0
+non-bot sender	.sender.type = "User"
+wrong schema	.client_payload.schema = "wrong"
+extra payload field	.client_payload.extra = true
+missing payload field	del(.client_payload.schema)
+invalid source SHA	.client_payload.source_sha = "abc"
+main source with PR number	.client_payload.source_kind = "main" | .client_payload.pull_request_number = 1279
+PR source without PR number	.client_payload.pull_request_number = 0
+invalid conclusion	.client_payload.conclusion = "neutral"
+CASES
+
+write_event "$work/event.json"
+: >"$work/gh-calls"
+if run_subject GITHUB_REPOSITORY=example/not-the-repository >/dev/null 2>&1; then
+  echo "non-canonical repository was accepted" >&2
   exit 1
 fi
-[[ ! -s "$work/gh-calls" ]] || { echo "forged sender reached GitHub API calls" >&2; exit 1; }
+[[ ! -s "$work/gh-calls" ]] || { echo "repository guard reached GitHub API calls" >&2; exit 1; }
 
 write_event "$work/event.json"
 : >"$work/gh-calls"
@@ -127,6 +174,26 @@ fi
   exit 1
 }
 
+for producer_case in \
+  'wrong producer repository:FAKE_RUN_REPOSITORY=example/wrong' \
+  'fork producer repository:FAKE_RUN_HEAD_REPOSITORY=attacker/qurl-integrations' \
+  'wrong producer SHA:FAKE_RUN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  'wrong producer workflow:FAKE_RUN_PATH=.github/workflows/not-cli.yml' \
+  'wrong producer event:FAKE_RUN_EVENT=push'; do
+  label=${producer_case%%:*}
+  override=${producer_case#*:}
+  write_event "$work/event.json"
+  : >"$work/gh-calls"
+  if run_subject "$override" >/dev/null 2>&1; then
+    echo "$label was accepted" >&2
+    exit 1
+  fi
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+    echo "$label did not fail at producer validation" >&2
+    exit 1
+  }
+done
+
 jq '.client_payload.source_kind = "main" | .client_payload.pull_request_number = 0' \
   "$work/event.json" >"$work/main-event.json"
 mv "$work/main-event.json" "$work/event.json"
@@ -134,6 +201,16 @@ mv "$work/main-event.json" "$work/event.json"
 run_subject FAKE_RUN_EVENT=push >/dev/null
 [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 ]] || {
   echo "current-main result did not validate producer, main ref, and check creation" >&2
+  exit 1
+}
+
+: >"$work/gh-calls"
+if run_subject FAKE_RUN_EVENT=push FAKE_MAIN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1; then
+  echo "stale main result was accepted" >&2
+  exit 1
+fi
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
+  echo "stale main did not fail before check creation" >&2
   exit 1
 }
 
