@@ -76,8 +76,55 @@ concurrency:
 permissions: {}
 
 jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      cli_release_created: ${{ steps.release.outputs['apps/cli--release_created'] }}
+      cli_tag: ${{ steps.release.outputs['apps/cli--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Checked out after the release step, not before: release-please works
+      # entirely over the API and never reads the workspace, so ordering it
+      # this way keeps this change provably unable to affect the release
+      # itself. Default fetch-depth is enough — the verifier reads one file at
+      # this push's commit and asks the API about the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The header above describes what this catches. It is silent on ordinary
+      # pushes: the manifest names the last released CLI version and that
+      # release exists. It fails the run only when the manifest names a version
+      # nothing released — the state that otherwise reports green and then
+      # blocks every component's next release PR.
+      #
+      # Deliberately not `if: always()`. A release-please step that already
+      # failed has reddened the run; this exists for the case where it
+      # succeeded and released nothing.
+      - name: Verify the CLI release was created
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/verify-cli-release.sh
+
+  # Release PR maintenance must stay fast for every monorepo component. Run
+  # the long exact-artifact gate only when release-please created a CLI
+  # release, or when an operator explicitly recovers one existing CLI tag.
   cli-main-ci:
     name: Gate exact CLI main CI before release
+    needs: release-please
+    if: >-
+      !cancelled() && (
+        needs.release-please.outputs.cli_release_created == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 220
     permissions:
@@ -136,49 +183,10 @@ jobs:
           echo "run_attempt=$(jq -r .run_attempt <<<"$selection")" >>"$GITHUB_OUTPUT"
           jq -r '"Exact CLI main CI passed: " + .url' <<<"$selection"
 
-  release-please:
-    needs: cli-main-ci
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: write
-    outputs:
-      cli_release_created: ${{ steps.release.outputs['apps/cli--release_created'] }}
-      cli_tag: ${{ steps.release.outputs['apps/cli--tag_name'] }}
-    steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        id: release
-        with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-      # Checked out after the release step, not before: release-please works
-      # entirely over the API and never reads the workspace, so ordering it
-      # this way keeps this change provably unable to affect the release
-      # itself. Default fetch-depth is enough — the verifier reads one file at
-      # this push's commit and asks the API about the release.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # The header above describes what this catches. It is silent on ordinary
-      # pushes: the manifest names the last released CLI version and that
-      # release exists. It fails the run only when the manifest names a version
-      # nothing released — the state that otherwise reports green and then
-      # blocks every component's next release PR.
-      #
-      # Deliberately not `if: always()`. A release-please step that already
-      # failed has reddened the run; this exists for the case where it
-      # succeeded and released nothing.
-      - name: Verify the CLI release was created
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-cli-release.sh
-
   release-cli:
     needs: [cli-main-ci, release-please]
     if: >-
-      !cancelled() && (
+      !cancelled() && needs.cli-main-ci.result == 'success' && (
         needs.release-please.outputs.cli_release_created == 'true' ||
         github.event_name == 'workflow_dispatch'
       )

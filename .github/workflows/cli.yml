@@ -628,6 +628,8 @@ jobs:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || needs.changes.outputs.cli == 'true'
     permissions:
       contents: read
+    outputs:
+      producer_run_attempt: ${{ steps.producer.outputs.run_attempt }}
     steps:
       # Artifacts from a fork must never become executable input to the
       # protected NHP journey that consumes this producer in the next PR.
@@ -648,6 +650,16 @@ jobs:
             exit 1
           fi
 
+      - id: producer
+        name: Bind the artifact-producing run attempt
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::artifact producer run attempt must be a positive integer" >&2
+            exit 1
+          }
+          echo "run_attempt=$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -667,7 +679,7 @@ jobs:
           QURL_GO_SOURCE_SHA=$(scripts/resolve-sandbox-artifact-qurl-go-source.sh)
           scripts/build-sandbox-matched-cohort-pr-artifacts.sh \
             "$RUNNER_TEMP/sandbox-matched-cohort-pr-artifacts" \
-            "$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "${{ steps.producer.outputs.run_attempt }}" \
             "$QURL_GO_SOURCE_SHA"
 
       - name: Upload exact sandbox customer binaries
@@ -819,7 +831,7 @@ jobs:
       target_repo: qurl-integrations-infra
       event_type: qurl-cli-customer-journey
       client_payload: >-
-        {"schema":"layerv.qurl-cli-customer-journey.v1","source_sha":"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}","source_kind":"${{ github.event_name == 'pull_request' && 'pull_request' || 'main' }}","pull_request_number":${{ github.event_name == 'pull_request' && github.event.pull_request.number || 0 }},"producer_run_id":${{ github.run_id }},"producer_run_attempt":${{ github.run_attempt }}}
+        {"schema":"layerv.qurl-cli-customer-journey.v1","source_sha":"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}","source_kind":"${{ github.event_name == 'pull_request' && 'pull_request' || 'main' }}","pull_request_number":${{ github.event_name == 'pull_request' && github.event.pull_request.number || 0 }},"producer_run_id":${{ github.run_id }},"producer_run_attempt":${{ needs.sandbox-customer-artifacts.outputs.producer_run_attempt }}}
     secrets:
       app_id: ${{ secrets.DEPLOY_DISPATCHER_APP_ID }}
       app_private_key: ${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}
@@ -827,7 +839,7 @@ jobs:
   customer-journey:
     name: cli / exact packaged customer journey
     runs-on: ubuntu-latest
-    needs: [changes, dispatch-customer-journey]
+    needs: [changes, sandbox-customer-artifacts, dispatch-customer-journey]
     if: needs.changes.outputs.cli == 'true' && needs.dispatch-customer-journey.result == 'success'
     timeout-minutes: 155
     permissions:
@@ -843,7 +855,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: scripts/wait-for-cli-customer-journey-check.sh "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          PRODUCER_RUN_ATTEMPT: ${{ needs.sandbox-customer-artifacts.outputs.producer_run_attempt }}
+        run: scripts/wait-for-cli-customer-journey-check.sh "$SOURCE_SHA" "$GITHUB_RUN_ID" "$PRODUCER_RUN_ATTEMPT"
 
   required:
     name: cli / required

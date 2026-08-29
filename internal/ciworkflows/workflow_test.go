@@ -111,6 +111,7 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 	}
 	requiredNames := []string{
 		"Require the trusted artifact producer",
+		"Bind the artifact-producing run attempt",
 		"Build exact sandbox customer artifacts",
 		"Upload exact sandbox customer binaries",
 		"Upload exact sandbox customer source receipt",
@@ -125,6 +126,15 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 	if indices[requiredNames[0]] != 0 || !strings.Contains(guard.Run, "pull_request|push") ||
 		!strings.Contains(guard.Run, "layervai/qurl-integrations") || !strings.Contains(guard.Run, "does not accept a fork") {
 		t.Errorf("trusted producer guard is not the first exact fail-closed step")
+	}
+	producer := steps[requiredNames[1]]
+	if producer.ID != "producer" ||
+		!strings.Contains(producer.Run, `[[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]`) ||
+		!strings.Contains(producer.Run, `echo "run_attempt=$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"`) {
+		t.Errorf("artifact producer does not bind one validated run attempt: %#v", producer)
+	}
+	if job.Outputs["producer_run_attempt"] != "${{ steps.producer.outputs.run_attempt }}" {
+		t.Errorf("artifact producer output = %#v", job.Outputs)
 	}
 
 	checkoutIndex := -1
@@ -141,9 +151,9 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 		t.Errorf("artifact checkout does not bind the exact caller head without credentials: %#v", checkout)
 	}
 
-	build := steps[requiredNames[1]]
+	build := steps[requiredNames[2]]
 	if !strings.Contains(build.Run, "scripts/build-sandbox-matched-cohort-pr-artifacts.sh") ||
-		!strings.Contains(build.Run, `"$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"`) ||
+		!strings.Contains(build.Run, `"$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "${{ steps.producer.outputs.run_attempt }}"`) ||
 		!strings.Contains(build.Run, `"$QURL_GO_SOURCE_SHA"`) {
 		t.Errorf("artifact build does not bind the exact repository/head/run identity")
 	}
@@ -156,8 +166,8 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 	}
 
 	for label, current := range map[string]*step{
-		"binaries": steps[requiredNames[2]],
-		"receipt":  steps[requiredNames[3]],
+		"binaries": steps[requiredNames[3]],
+		"receipt":  steps[requiredNames[4]],
 	} {
 		if current.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
 			current.With["if-no-files-found"] != "error" || current.With["retention-days"] != 30 ||
@@ -165,8 +175,8 @@ func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
 			t.Errorf("%s artifact upload is not exact: %#v", label, current.With)
 		}
 	}
-	if steps[requiredNames[2]].With["name"] != "sandbox-matched-cohort-binaries" ||
-		steps[requiredNames[3]].With["name"] != "sandbox-matched-cohort-source-receipt" {
+	if steps[requiredNames[3]].With["name"] != "sandbox-matched-cohort-binaries" ||
+		steps[requiredNames[4]].With["name"] != "sandbox-matched-cohort-source-receipt" {
 		t.Errorf("customer artifact names are not exact")
 	}
 
@@ -287,7 +297,7 @@ func TestCLIExactArtifactCustomerJourneyIsRequired(t *testing.T) {
 	assertJobPermissions(t, cliJourneyWaitJobID, wait.Permissions, map[string]string{
 		"checks": "read", "contents": "read",
 	})
-	if needs := parseWorkflowNeeds(t, cliJourneyWaitJobID, wait.Needs); !slices.Equal(needs, []string{"changes", cliJourneyDispatchJobID}) {
+	if needs := parseWorkflowNeeds(t, cliJourneyWaitJobID, wait.Needs); !slices.Equal(needs, []string{"changes", cliSandboxArtifactsJobID, cliJourneyDispatchJobID}) {
 		t.Errorf("journey waiter needs = %v", needs)
 	}
 	var checkout, require *step
@@ -307,6 +317,11 @@ func TestCLIExactArtifactCustomerJourneyIsRequired(t *testing.T) {
 	if require == nil || !strings.Contains(require.Run, "scripts/wait-for-cli-customer-journey-check.sh") ||
 		require.ContinueOnError != nil {
 		t.Errorf("journey waiter does not fail closed through the checked-in script: %#v", require)
+	}
+	if require.Env["PRODUCER_RUN_ATTEMPT"] != "${{ needs.sandbox-customer-artifacts.outputs.producer_run_attempt }}" ||
+		!strings.Contains(require.Run, `"$PRODUCER_RUN_ATTEMPT"`) ||
+		strings.Contains(require.Run, `"$GITHUB_RUN_ATTEMPT"`) {
+		t.Errorf("journey waiter is not bound to the artifact-producing attempt: %#v", require)
 	}
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
@@ -334,7 +349,8 @@ func TestCLIExactArtifactCustomerJourneyIsRequired(t *testing.T) {
 	for _, required := range []string{
 		"layerv.qurl-cli-customer-journey.v1", "source_sha", "source_kind",
 		"pull_request_number", "producer_run_id", "producer_run_attempt",
-		"github.event.pull_request.head.sha", "github.run_id", "github.run_attempt",
+		"github.event.pull_request.head.sha", "github.run_id",
+		"needs.sandbox-customer-artifacts.outputs.producer_run_attempt",
 	} {
 		if !strings.Contains(payload, required) {
 			t.Errorf("journey client_payload is missing %q", required)
@@ -547,7 +563,8 @@ type githubJob struct {
 	// Env carries the job-level environment. Values are strings and numbers,
 	// so it is read as `any` per key and asserted only where one is
 	// load-bearing — the Claude review's minute budget.
-	Env map[string]any `yaml:"env"`
+	Env     map[string]any    `yaml:"env"`
+	Outputs map[string]string `yaml:"outputs"`
 	// TimeoutMinutes is the job's own cap. See step.TimeoutMinutes for why
 	// both are `any` rather than int.
 	TimeoutMinutes any    `yaml:"timeout-minutes"`
@@ -570,6 +587,7 @@ type step struct {
 	// is load-bearing — a checkout's ref and credential persistence, a review's
 	// tool deny-list.
 	With map[string]any `yaml:"with"`
+	Env  map[string]any `yaml:"env"`
 	// ContinueOnError accepts a bool or an expression, so it is read as `any`
 	// and asserted absent rather than compared: either spelling would turn a
 	// failing guard into a green one.
@@ -1052,8 +1070,9 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 // TestCLIReleaseWaitsForExactMainCI keeps publication behind the exact
 // packaged customer journey. The CLI workflow owns that journey and reports
 // success only after its exact-artifact result returns. The release workflow
-// must wait for that exact push run before release-please can create a tag or
-// release-cli can upload or publish customer artifacts.
+// must gate release-cli before it can upload or publish customer artifacts.
+// Normal release-please PR maintenance must not wait for this long CLI-only
+// gate.
 func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	t.Parallel()
 
@@ -1094,10 +1113,20 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	if steps["Require successful exact CLI main CI"].ContinueOnError != nil {
 		t.Error("exact CLI main-CI gate allows failure")
 	}
+	if needs := parseWorkflowNeeds(t, "cli-main-ci", gate.Needs); !slices.Equal(needs, []string{releasePleaseJobID}) {
+		t.Errorf("cli-main-ci needs = %v, want release-please", needs)
+	}
+	wantGateIf := "!cancelled() && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )"
+	if got := strings.Join(strings.Fields(gate.If), " "); got != wantGateIf {
+		t.Errorf("cli-main-ci.if = %q, want %q", got, wantGateIf)
+	}
 
 	releasePlease := workflow.Jobs[releasePleaseJobID]
-	if releasePlease == nil || !slices.Contains(parseWorkflowNeeds(t, releasePleaseJobID, releasePlease.Needs), "cli-main-ci") {
-		t.Error("release-please can run without the exact CLI main-CI gate")
+	if releasePlease == nil {
+		t.Fatal("release-please.yml is missing release-please")
+	}
+	if needs := parseWorkflowNeeds(t, releasePleaseJobID, releasePlease.Needs); len(needs) != 0 {
+		t.Errorf("release-please PR maintenance is coupled to %v", needs)
 	}
 	releaseCLI := workflow.Jobs["release-cli"]
 	if releaseCLI == nil {
@@ -1107,6 +1136,10 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 		if !slices.Contains(parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs), need) {
 			t.Errorf("release-cli.needs does not include %q", need)
 		}
+	}
+	wantReleaseIf := "!cancelled() && needs.cli-main-ci.result == 'success' && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )"
+	if got := strings.Join(strings.Fields(releaseCLI.If), " "); got != wantReleaseIf {
+		t.Errorf("release-cli.if = %q, want %q", got, wantReleaseIf)
 	}
 	matchedSource := false
 	for index := range releaseCLI.Steps {

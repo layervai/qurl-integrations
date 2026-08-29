@@ -10,6 +10,7 @@ source_sha=$1
 repository=${GITHUB_REPOSITORY:-}
 wait_seconds=${QURL_CLI_MAIN_WAIT_SECONDS:-12600}
 poll_seconds=${QURL_CLI_MAIN_POLL_SECONDS:-15}
+max_api_failures=${QURL_CLI_MAIN_MAX_API_FAILURES:-4}
 
 [[ "$repository" == "layervai/qurl-integrations" ]] || {
   echo "::error::CLI main runs can be read only in the canonical repository" >&2
@@ -21,15 +22,30 @@ poll_seconds=${QURL_CLI_MAIN_POLL_SECONDS:-15}
   echo "::error::CLI main wait and poll durations must be positive integers" >&2
   exit 1
 }
+if [[ ! "$max_api_failures" =~ ^[1-9][0-9]*$ ]] || ((max_api_failures > 10)); then
+  echo "::error::CLI main maximum API failures must be between 1 and 10" >&2
+  exit 1
+fi
 ((wait_seconds <= 14400 && poll_seconds <= 60 && poll_seconds <= wait_seconds)) || {
   echo "::error::CLI main wait or poll duration is outside its bound" >&2
   exit 1
 }
 
 max_polls=$((wait_seconds / poll_seconds + 1))
+consecutive_api_failures=0
 for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
-  response=$(gh api --method GET "repos/${repository}/actions/workflows/cli.yml/runs" \
-    -f "head_sha=${source_sha}" -f event=push -f per_page=100)
+  if ! response=$(gh api --method GET "repos/${repository}/actions/workflows/cli.yml/runs" \
+    -f "head_sha=${source_sha}" -f event=push -f per_page=100); then
+    consecutive_api_failures=$((consecutive_api_failures + 1))
+    if ((consecutive_api_failures >= max_api_failures)); then
+      echo "::error::GitHub API failed ${consecutive_api_failures} consecutive CLI main polls" >&2
+      exit 1
+    fi
+    echo "::warning::GitHub API CLI main poll failed; retrying (${consecutive_api_failures}/${max_api_failures})" >&2
+    sleep "$poll_seconds"
+    continue
+  fi
+  consecutive_api_failures=0
   run=$(jq -c --arg repository "$repository" --arg sha "$source_sha" '
     [(.workflow_runs // [])[] | select(
       .repository.full_name == $repository and

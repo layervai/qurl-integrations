@@ -36,6 +36,10 @@ case "$SCENARIO" in
   wrong_sha) status=completed; conclusion=success; head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   malformed) printf '{not-json\n'; exit 0 ;;
   api_failure) exit 1 ;;
+  api_failure_then_success)
+    if ((count == 1)); then exit 1; fi
+    status=completed; conclusion=success
+    ;;
   *) echo "unknown scenario" >&2; exit 2 ;;
 esac
 
@@ -65,6 +69,7 @@ run_case() {
     GITHUB_REPOSITORY=layervai/qurl-integrations \
     QURL_CLI_MAIN_WAIT_SECONDS=1 \
     QURL_CLI_MAIN_POLL_SECONDS=1 \
+    QURL_CLI_MAIN_MAX_API_FAILURES=2 \
     FAKE_CALL_COUNT="$work/calls" \
     EXPECTED_SHA="$sha" \
     SCENARIO="$scenario" \
@@ -89,5 +94,8 @@ run_case ambiguous 1
 run_case wrong_sha 1
 run_case malformed 1
 run_case api_failure 1
+[[ $(cat "$work/calls") == 2 ]]
+run_case api_failure_then_success 0
+[[ $(cat "$work/calls") == 2 ]]
 
 echo "wait-for-exact-cli-main-run tests passed"

@@ -457,7 +457,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 		requiredMode, hasRequiredMode := step.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]
 		if target.release {
 			releaseGate := strings.Join(strings.Fields(fmt.Sprint(job.If)), " ")
-			const expectedReleaseGate = "!cancelled() && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub spells this function cancelled().
+			const expectedReleaseGate = "!cancelled() && needs.cli-main-ci.result == 'success' && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub spells this function cancelled().
 			if releaseGate != expectedReleaseGate {
 				t.Errorf("%s release-cli gate = %q, want %q", target.file, releaseGate, expectedReleaseGate)
 			}
