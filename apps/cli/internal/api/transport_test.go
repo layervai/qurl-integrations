@@ -152,3 +152,39 @@ func TestTransportRetriesSafe429(t *testing.T) {
 		})
 	}
 }
+
+func TestTransportRetriesSafe503ButNeverUnkeyedMutation(t *testing.T) {
+	for _, test := range []struct {
+		name, method, idempotencyKey string
+		wantRequests                 int32
+	}{
+		{name: "read", method: http.MethodGet, wantRequests: maxAttempts},
+		{name: "idempotent mutation", method: http.MethodPost, idempotencyKey: "publish-attempt-1", wantRequests: maxAttempts},
+		{name: "unkeyed mutation", method: http.MethodPost, wantRequests: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(srv.Close)
+
+			transport := newTransport(&Config{HTTPClient: srv.Client(), Version: "test", Sleep: func(time.Duration) {}})
+			req, err := http.NewRequestWithContext(context.Background(), test.method, srv.URL, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Idempotency-Key", test.idempotencyKey)
+			resp, err := transport.Do(withRequestRetryIntent(req, true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = resp.Body.Close() })
+			if resp.StatusCode != http.StatusServiceUnavailable || requests.Load() != test.wantRequests {
+				t.Fatalf("response = HTTP %d after %d requests, want HTTP 503 after %d", resp.StatusCode, requests.Load(), test.wantRequests)
+			}
+		})
+	}
+}

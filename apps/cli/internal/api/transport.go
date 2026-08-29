@@ -139,8 +139,15 @@ func retryableResponse(req *http.Request, resp *http.Response) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return retrySafeRequest(req)
 	}
-	return resp.StatusCode == http.StatusServiceUnavailable &&
-		strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+	}
 }
 
 func retrySafeRequest(req *http.Request) bool {

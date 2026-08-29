@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
@@ -413,6 +414,9 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 
 func retryableSharingPollError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, qurl.ErrInvalidAPIResponse) {
 		return false
 	}
 	var apiErr *qurlapi.Error

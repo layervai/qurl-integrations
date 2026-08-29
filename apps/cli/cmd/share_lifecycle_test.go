@@ -284,6 +284,28 @@ func TestWaitForSharingRetriesTransientReadButNotAuthenticationFailure(t *testin
 			t.Fatalf("sharing requests = %d, want 1", got)
 		}
 	})
+
+	t.Run("invalid success response fails immediately", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+		srv.Script(http.MethodGet, path, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":`))
+		})
+		client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "wait-invalid-test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = waitForSharing(context.Background(), client, &connectorstate.LocalShare{
+			ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID,
+		}, 7, time.Second)
+		if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+			t.Fatalf("wait error = %v, want invalid API response", err)
+		}
+		if got := len(srv.Requests()); got != 1 {
+			t.Fatalf("sharing requests = %d, want 1", got)
+		}
+	})
 }
 
 func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
