@@ -290,6 +290,9 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 		return nil, err
 	}
 	if reply.status != http.StatusOK {
+		// The v2 CLI requires the owner-facing detail route. A 404 is
+		// authoritative; do not hide a missing route with an account-wide list
+		// scan or retain compatibility with an unreleased edge contract.
 		return nil, reply.problem()
 	}
 	var env struct {
