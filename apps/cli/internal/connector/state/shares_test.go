@@ -171,8 +171,8 @@ func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
 	if err := registry.Put(context.Background(), &share); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.SetDesired(context.Background(), share.CRID, "off", 6); err == nil {
-		t.Fatal("stale epoch was accepted")
+	if updated, err := registry.SetDesired(context.Background(), share.CRID, "off", 6); err == nil || updated != nil {
+		t.Fatalf("stale epoch result = %+v, %v; want nil row and an error", updated, err)
 	}
 	share.TargetURL = "http://192.0.2.1:3000"
 	share.LocalIP = "192.0.2.1"
@@ -202,11 +202,11 @@ func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T
 	if err := registry.Put(context.Background(), &share); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.DisableTerminal(context.Background(), share.ResourceID, 6); err == nil {
-		t.Fatal("terminal disable accepted an older session epoch")
+	if disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 6); err == nil || disabled != nil {
+		t.Fatalf("older terminal disable result = %+v, %v; want nil row and an error", disabled, err)
 	}
-	if _, err := registry.DisableTerminal(context.Background(), share.ResourceID, 8); err == nil {
-		t.Fatal("terminal disable advanced the authoritative epoch")
+	if disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 8); err == nil || disabled != nil {
+		t.Fatalf("newer terminal disable result = %+v, %v; want nil row and an error", disabled, err)
 	}
 	disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 7)
 	if err != nil {

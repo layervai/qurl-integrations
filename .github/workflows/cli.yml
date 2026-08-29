@@ -100,6 +100,8 @@ jobs:
     timeout-minutes: 20
     needs: changes
     if: needs.changes.outputs.cli == 'true'
+    env:
+      GOLANGCI_LINT_VERSION: v2.12.2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -109,12 +111,12 @@ jobs:
           cache: true
 
       - name: Verify golangci-lint config
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 config verify
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"${GOLANGCI_LINT_VERSION}" config verify
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m ./apps/cli/...
 
@@ -124,9 +126,7 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m ./apps/cli/...
 
       - name: golangci-lint sandbox tests
-        run: >-
-          go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
-          --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
+        run: golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
 
   test:
     name: cli / test

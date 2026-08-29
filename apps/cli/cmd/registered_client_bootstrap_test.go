@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -195,10 +194,12 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 	if client == nil || deviceIdentity.OwnerID != accountIdentity.OwnerID {
 		t.Fatalf("registered identity = %#v", deviceIdentity)
 	}
-	wantDigest := sha256.Sum256([]byte("qurl-cli-agent-enrollment-v1\x00agent-durable-01"))
-	wantIdempotency := hex.EncodeToString(wantDigest[:])
-	if len(idempotencyKeys) != 2 || idempotencyKeys[0] != wantIdempotency || idempotencyKeys[1] != wantIdempotency {
-		t.Fatalf("idempotency keys = %q, want two exact deterministic values", idempotencyKeys)
+	if len(idempotencyKeys) != 2 || idempotencyKeys[0] != idempotencyKeys[1] {
+		t.Fatalf("idempotency keys = %q, want one attempt-scoped value reused twice", idempotencyKeys)
+	}
+	decodedIdempotency, err := hex.DecodeString(idempotencyKeys[0])
+	if err != nil || len(decodedIdempotency) != 32 {
+		t.Fatalf("idempotency key = %q, want 32 random bytes in hex: %v", idempotencyKeys[0], err)
 	}
 	for _, request := range srv.Requests() {
 		if strings.Contains(request.Header.Get("Authorization"), "one-shot-agent-enrollment") {

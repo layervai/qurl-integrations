@@ -19,6 +19,7 @@ type cliWorkflowContract struct {
 type cliWorkflowJob struct {
 	If              any               `yaml:"if"`
 	ContinueOnError any               `yaml:"continue-on-error"`
+	Env             map[string]any    `yaml:"env"`
 	Steps           []cliWorkflowStep `yaml:"steps"`
 }
 
@@ -27,10 +28,12 @@ type cliWorkflowStep struct {
 	If              any            `yaml:"if"`
 	ContinueOnError any            `yaml:"continue-on-error"`
 	Env             map[string]any `yaml:"env"`
+	With            map[string]any `yaml:"with"`
+	Uses            string         `yaml:"uses"`
 	Run             string         `yaml:"run"`
 }
 
-func validateRequiredCLIWorkflowGate(job cliWorkflowJob, step cliWorkflowStep, expectedJobIf string) error {
+func validateRequiredCLIWorkflowGate(job cliWorkflowJob, step *cliWorkflowStep, expectedJobIf string) error {
 	if job.If != expectedJobIf {
 		return fmt.Errorf("job if = %#v, want %q", job.If, expectedJobIf)
 	}
@@ -74,7 +77,7 @@ func TestRequiredCLIWorkflowGateRejectsBypassMutations(t *testing.T) {
 			if len(job.Steps) != 1 {
 				t.Fatalf("workflow mutation has %d steps, want one", len(job.Steps))
 			}
-			err := validateRequiredCLIWorkflowGate(job, job.Steps[0], expectedJobIf)
+			err := validateRequiredCLIWorkflowGate(job, &job.Steps[0], expectedJobIf)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("workflow mutation error = %v, want error=%t", err, test.wantErr)
 			}
@@ -222,12 +225,23 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 	assertRequiredGate := func(jobName string, step cliWorkflowStep) {
 		t.Helper()
-		if err := validateRequiredCLIWorkflowGate(workflow.Jobs[jobName], step, expectedCLIJobIf); err != nil {
+		if err := validateRequiredCLIWorkflowGate(workflow.Jobs[jobName], &step, expectedCLIJobIf); err != nil {
 			t.Errorf("public CLI workflow %s / %s is bypassable: %v", jobName, step.Name, err)
 		}
 	}
 	sandboxLintStep := findStep("lint", "golangci-lint sandbox tests")
-	const sandboxLintCommand = "go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/..."
+	if got := workflow.Jobs["lint"].Env["GOLANGCI_LINT_VERSION"]; got != "v2.12.2" {
+		t.Errorf("public CLI workflow linter version = %#v, want one job-level v2.12.2 pin", got)
+	}
+	configLintStep := findStep("lint", "Verify golangci-lint config")
+	const configLintCommand = `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"${GOLANGCI_LINT_VERSION}" config verify`
+	if configLintStep.Run != configLintCommand {
+		t.Errorf("public CLI workflow config lint command = %q, want %q", configLintStep.Run, configLintCommand)
+	}
+	if got := findStep("lint", "golangci-lint").With["version"]; got != "${{ env.GOLANGCI_LINT_VERSION }}" {
+		t.Errorf("public CLI workflow linter action version = %#v, want job-level pin expression", got)
+	}
+	const sandboxLintCommand = "golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/..."
 	if sandboxLintStep.Run != sandboxLintCommand {
 		t.Errorf("public CLI workflow sandbox lint command = %q, want %q", sandboxLintStep.Run, sandboxLintCommand)
 	}

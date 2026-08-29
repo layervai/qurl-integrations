@@ -501,6 +501,10 @@ func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 	if d := retryDelay(resp, 1); d != maxRetryAfter {
 		t.Errorf("capped delay = %v, want %v", d, maxRetryAfter)
 	}
+	resp.Header.Set("Retry-After", "9223372037")
+	if d := retryDelay(resp, 1); d != maxRetryAfter {
+		t.Errorf("overflowing duration delay = %v, want %v", d, maxRetryAfter)
+	}
 }
 
 // TestDeleteIsIdempotent pins the delete contract: 204 and 404 are both

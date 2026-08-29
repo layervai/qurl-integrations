@@ -201,12 +201,11 @@ func replayableBody(req *http.Request) (func() (io.ReadCloser, error), bool) {
 // back to a small linear backoff otherwise.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
-			d := time.Duration(secs) * time.Second
-			if d > maxRetryAfter {
+		if secs, err := strconv.ParseUint(v, 10, 64); err == nil {
+			if secs > uint64(maxRetryAfter/time.Second) {
 				return maxRetryAfter
 			}
-			return d
+			return time.Duration(secs) * time.Second
 		}
 	}
 	return time.Duration(attempt) * 500 * time.Millisecond

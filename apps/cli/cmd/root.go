@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -493,12 +493,13 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 // registration or recovery attempt. It loads the key lazily unless login
 // supplies it explicitly.
 type registeredAccountBootstrap struct {
-	opts     *globalOpts
-	client   qurlapi.AccountClient
-	key      string
-	identity *qurlapi.Identity
-	lazy     bool
-	used     bool
+	opts                     *globalOpts
+	client                   qurlapi.AccountClient
+	key                      string
+	identity                 *qurlapi.Identity
+	enrollmentIdempotencyKey string
+	lazy                     bool
+	used                     bool
 }
 
 type deviceAccountConflictError struct {
@@ -592,9 +593,18 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 	if err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256([]byte("qurl-cli-agent-enrollment-v1\x00" + request.AgentID))
+	if b.enrollmentIdempotencyKey == "" {
+		var nonce [32]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return "", fmt.Errorf("create device enrollment request identity: %w", err)
+		}
+		// Scope the key to this enrollment attempt. Repeated provider calls and
+		// HTTP retries reuse it, but a new process can never receive a cached,
+		// expired one-shot token solely because an operator pinned the agent ID.
+		b.enrollmentIdempotencyKey = hex.EncodeToString(nonce[:])
+	}
 	token, err := client.MintAgentEnrollmentToken(ctx, qurlapi.MintAgentEnrollmentTokenOptions{
-		IdempotencyKey: hex.EncodeToString(digest[:]),
+		IdempotencyKey: b.enrollmentIdempotencyKey,
 	})
 	if err != nil {
 		return "", err

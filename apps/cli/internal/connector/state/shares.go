@@ -201,7 +201,10 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 		updated = share
 		return nil
 	})
-	return &updated, err
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 // DisableTerminal records a fail-closed local stop after the resource's
@@ -228,7 +231,10 @@ func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epo
 		updated = share
 		return nil
 	})
-	return &updated, err
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 // Get resolves one row by public resource ID or CRID.
