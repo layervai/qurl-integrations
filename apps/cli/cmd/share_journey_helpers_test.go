@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,14 +12,26 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	frplog "github.com/fatedier/frp/pkg/util/log"
 	frpserver "github.com/fatedier/frp/server"
 	goliblog "github.com/fatedier/golib/log"
+	golibmux "github.com/fatedier/golib/net/mux"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
+
+type cmdFRPSTestService struct {
+	service *frpserver.Service
+	done    <-chan struct{}
+}
+
+var cmdFRPSTestServices struct {
+	sync.Mutex
+	items []cmdFRPSTestService
+}
 
 func openOwnedTestShareRegistry(dir string) (*connectorstate.LocalShareRegistry, error) {
 	registry, err := connectorstate.OpenLocalShareRegistry(dir)
@@ -38,7 +52,41 @@ func TestMain(m *testing.M) {
 		goliblog.WithLevel(goliblog.WarnLevel),
 		goliblog.WithOutput(goliblog.NewConsoleWriter(goliblog.ConsoleConfig{}, io.Discard)),
 	)
-	os.Exit(m.Run())
+	code := m.Run()
+	if err := closeCmdFRPSTestServices(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "close journey FRP servers: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+func closeCmdFRPSTestServices() error {
+	cmdFRPSTestServices.Lock()
+	services := append([]cmdFRPSTestService(nil), cmdFRPSTestServices.items...)
+	cmdFRPSTestServices.items = nil
+	cmdFRPSTestServices.Unlock()
+	if len(services) == 0 {
+		return nil
+	}
+
+	// golib's mux starts one classifier goroutine per accepted connection but
+	// does not expose a join. All test clients have stopped when m.Run returns.
+	// Its read deadline is therefore the strict upper bound for any classifier
+	// that could still be sending to a listener while Service.Close closes it.
+	time.Sleep(golibmux.DefaultTimeout + 100*time.Millisecond)
+	for _, server := range services {
+		if err := server.service.Close(); err != nil {
+			return err
+		}
+	}
+	for _, server := range services {
+		select {
+		case <-server.done:
+		case <-time.After(2 * time.Second):
+			return errors.New("FRP server did not stop")
+		}
+	}
+	return nil
 }
 
 type cmdProxyRecorder struct {
@@ -121,6 +169,12 @@ func startCmdFRPS(t *testing.T, bindPort, vhostPort int, subDomainHost, pluginUR
 	if err != nil {
 		t.Fatalf("construct journey server on 127.0.0.1:%d: %v", bindPort, err)
 	}
-	go service.Run(context.Background())
-	t.Cleanup(func() { _ = service.Close() })
+	done := make(chan struct{})
+	go func() {
+		service.Run(context.Background())
+		close(done)
+	}()
+	cmdFRPSTestServices.Lock()
+	cmdFRPSTestServices.items = append(cmdFRPSTestServices.items, cmdFRPSTestService{service: service, done: done})
+	cmdFRPSTestServices.Unlock()
 }
