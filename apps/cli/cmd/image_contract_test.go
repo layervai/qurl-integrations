@@ -282,6 +282,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
 		"TestSandboxPublishReadinessWaitsForCompleteCRIDLine",
+		"TestSandboxResourceCleanupIsSafeBeforePublish",
 		"TestSandboxRunIdentityBindsOnlyImmutableHardenedImage",
 		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",
 		"TestSandboxStoppedRouteRefusalMatchesQuietGet",
