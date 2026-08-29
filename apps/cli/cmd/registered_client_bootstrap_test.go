@@ -114,7 +114,7 @@ func bootstrapRegisteredState(t *testing.T) *qurl.AgentState {
 
 func bootstrapGlobalOpts(t *testing.T, endpoint string, runtime *bootstrapNativeRuntime) *globalOpts {
 	t.Helper()
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	registry := &ownerOnlyTestShareRegistry{}
 	return &globalOpts{
 		resolvedEndpoint: endpoint,

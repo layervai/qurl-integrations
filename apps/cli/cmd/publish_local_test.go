@@ -15,7 +15,7 @@ import (
 
 func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	srv := apitest.NewServer(t)
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	registry := &ownerOnlyTestShareRegistry{}
 	stop := errors.New("stop after owner binding")
 	var authority connectorshare.NativeSessionOperationAuthority
@@ -91,7 +91,7 @@ func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) 
 
 func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	t.Parallel()
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	registry := &ownerOnlyTestShareRegistry{ownerID: "own_cli_fixture"}
 	var gotRefreshMode string
 	var recoveryCredential string

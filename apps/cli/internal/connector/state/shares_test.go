@@ -25,7 +25,7 @@ func openOwnedLocalShareRegistry(dir string) (*LocalShareRegistry, error) {
 }
 
 func TestLocalShareRegistryBindsOwnerBeforeShares(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	registry, err := OpenLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestLocalShareRegistryBindsOwnerBeforeShares(t *testing.T) {
 }
 
 func TestLocalShareRegistryRejectsOldVersionWithSafeRecovery(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	path := filepath.Join(dir, LocalSharesFile)
 	if err := os.WriteFile(path, []byte(`{"version":1,"owner_id":"owner-old","shares":{}}`), connectorResourceFileMode); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestLocalShareRegistryRejectsOldVersionWithSafeRecovery(t *testing.T) {
 }
 
 func TestLocalShareRegistryJourney(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 }
 
 func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
 }
 
 func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T
 }
 
 func TestLocalShareRegistryRejectsOutOfOrderAndIdentityChanges(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestLocalShareRegistryRejectsOutOfOrderAndIdentityChanges(t *testing.T) {
 }
 
 func TestLocalShareRegistryConcurrentResponsesConvergeToHighestEpoch(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestDecodeLocalSharesRequiresUpdatedAt(t *testing.T) {
 }
 
 func TestLocalShareRegistryRefusesSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}

@@ -380,7 +380,7 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	if err != nil {
 		t.Fatalf("derive local-publish namespace: %v", err)
 	}
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	if err := os.Chmod(stateDir, 0o700); err != nil { //nolint:gosec // Agent state requires a private directory.
 		t.Fatalf("secure local-publish state directory: %v", err)
 	}
@@ -1031,7 +1031,7 @@ printf 'arg=%s\n' "$@"
 	if err := os.Chmod(binary, 0o500); err != nil { //nolint:gosec // The fixture must be executable and non-writable.
 		t.Fatal(err)
 	}
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	res := runSandboxLocalCLI(t, binary, map[string]string{
 		"QURL_API_KEY":           "lv_test_exact_external_binary_key",
 		"QURL_ENDPOINT":          "https://sandbox.invalid",
@@ -1603,7 +1603,7 @@ func registerSandboxResourceCleanup(t *testing.T, endpoint, connectorID, deviceA
 }
 
 func TestRegisterSandboxDeviceCredentialCleanup(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	if err := os.Chmod(stateDir, 0o700); err != nil { //nolint:gosec // A private directory must allow owner traversal as well as read/write.
 		t.Fatalf("secure test state directory: %v", err)
 	}

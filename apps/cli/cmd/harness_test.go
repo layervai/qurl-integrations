@@ -38,6 +38,19 @@ const testAPIKey = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 // testAPIKey, for asserting which credential source a command actually used.
 const testAPIKeyStored = "lv_test_storedstoredstoredstoredstoredstored0123456"
 
+// connectorStateTestDir creates a state namespace through the same
+// owner-only setup path that a real CLI invocation uses. Windows temp
+// directories inherit a broad ACL, so passing t.TempDir() itself would test
+// the intentional fail-closed path instead of a normal installation.
+func connectorStateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "connector-state")
+	if err := connectorstate.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // fixedNow is the harness clock: one day after the mock server's canned
 // created_at timestamps, so relative times render deterministically.
 var fixedNow = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)

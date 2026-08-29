@@ -95,7 +95,7 @@ func TestHiddenTestCRIDValidatorIsStrictAndCredentialFree(t *testing.T) {
 }
 
 func TestLoadHeadlessBootstrapWarmStartDoesNotRequireToken(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
 	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestLoadHeadlessBootstrapWarmStartDoesNotRequireToken(t *testing.T) {
 }
 
 func TestLoadHeadlessBootstrapFirstStartRequiresReadOnlyToken(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
 	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
 	if err := os.WriteFile(tokenPath, []byte("one-time-value\n"), 0o400); err != nil {
@@ -123,7 +123,7 @@ func TestLoadHeadlessBootstrapFirstStartRequiresReadOnlyToken(t *testing.T) {
 }
 
 func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
 	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
 	const credential = "secret-one-time-value"
@@ -314,7 +314,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 		{name: "additional resource", extra: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			stateDir := t.TempDir()
+			stateDir := connectorStateTestDir(t)
 			configPath := writeHeadlessConfigFixture(t)
 			config, err := connectorstate.LoadHeadlessConfig(configPath)
 			if err != nil {

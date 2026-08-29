@@ -124,10 +124,22 @@ func isWindows(t *testing.T) bool {
 	return os.PathSeparator == '\\'
 }
 
+// secureStateTestDir creates the test namespace through the production state
+// setup path. This is required on Windows, where t.TempDir() correctly retains
+// an inherited ACL that the production store must reject.
+func secureStateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // openTestStore opens a Store in a fresh temp directory on each supported OS.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	return openTestStoreAt(t, t.TempDir())
+	return openTestStoreAt(t, secureStateTestDir(t))
 }
 
 func openTestStoreAt(t *testing.T, dir string) *Store {

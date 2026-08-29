@@ -195,7 +195,7 @@ func startCredentialFreeSandboxDaemon(t *testing.T, fixture *sandboxLocalFixture
 }
 
 func TestExactWarmDaemonProcessContract(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	deployment := filepath.Join(t.TempDir(), "deployment.json")
 	if err := os.WriteFile(deployment, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)

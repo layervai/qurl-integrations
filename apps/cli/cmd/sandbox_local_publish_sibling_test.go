@@ -874,7 +874,7 @@ func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 			namespace := sandboxRunNamespace{
 				AgentID: "qurl-share-r1-a1-ha", ConnectorID: "connector-sandbox-local-publish-recovery",
 			}
-			stateDir := t.TempDir()
+			stateDir := connectorStateTestDir(t)
 			writeSandboxSiblingStateFixture(t, stateDir, namespace.AgentID)
 			binary := filepath.Join(t.TempDir(), "qurl")
 			if err := os.WriteFile(binary, []byte(fixture.script), 0o600); err != nil {
@@ -922,7 +922,7 @@ func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 }
 
 func TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	namespace := sandboxRunNamespace{AgentID: "qurl-share-r1-a1-ha", ConnectorID: "connector-recovery"}
 	writeSandboxSiblingStateFixture(t, stateDir, namespace.AgentID)
 	revoked := false

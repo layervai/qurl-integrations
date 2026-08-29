@@ -500,7 +500,7 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := secureStateTestDir(t)
 			store := openTestStoreAt(t, dir)
 			prepared := tc.prepare(t, store)
 			tx, err := store.BeginConnectorResource(context.Background(), prepared.connectorID)

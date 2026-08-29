@@ -62,7 +62,7 @@ func TestWindowsConnectorResourceStateRejectsUnsafeACLAndHardlink(t *testing.T) 
 }
 
 func TestWindowsLocalShareRegistryRejectsBroadACL(t *testing.T) {
-	registry, err := openOwnedLocalShareRegistry(t.TempDir())
+	registry, err := openOwnedLocalShareRegistry(secureStateTestDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
