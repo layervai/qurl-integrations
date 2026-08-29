@@ -489,7 +489,10 @@ func withoutExpectedDaemonCancellation(err error) error {
 		}
 		return errors.Join(kept...)
 	}
-	if errors.Is(err, context.Canceled) {
+	// Remove only the exact sentinel returned by the daemon for the shutdown
+	// that this function requested. A wrapped cancellation can carry a real
+	// daemon failure and must remain visible to the caller.
+	if err == context.Canceled { //nolint:errorlint // Exact identity is the security boundary described above.
 		return nil
 	}
 	return err

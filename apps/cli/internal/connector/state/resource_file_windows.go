@@ -172,15 +172,18 @@ func createConnectorResourceTemp(path string) (*os.File, error) {
 		return nil, err
 	}
 	if err := validateWindowsConnectorFileHandle(handle); err != nil {
-		_ = windows.CloseHandle(handle)
-		return nil, err
+		return nil, discardWindowsConnectorTemp(path, handle, err)
 	}
 	file := os.NewFile(uintptr(handle), path)
 	if file == nil {
-		_ = windows.CloseHandle(handle)
-		return nil, errors.New("create Connector state Windows temporary file handle")
+		return nil, discardWindowsConnectorTemp(path, handle,
+			errors.New("create Connector state Windows temporary file handle"))
 	}
 	return file, nil
+}
+
+func discardWindowsConnectorTemp(path string, handle windows.Handle, cause error) error {
+	return errors.Join(cause, windows.CloseHandle(handle), os.Remove(path))
 }
 
 func commitConnectorResourceRename(from, to string) error { return windows.Rename(from, to) }

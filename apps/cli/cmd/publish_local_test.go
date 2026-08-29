@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -50,6 +51,10 @@ func TestForegroundPublishKeepsDaemonFailureJoinedWithExpectedCancellation(t *te
 	}
 	if got := withoutExpectedDaemonCancellation(errors.Join(context.Canceled)); got != nil {
 		t.Fatalf("filtered expected cancellation = %v, want nil", got)
+	}
+	wrappedCancellation := fmt.Errorf("reconcile share failed: %w", context.Canceled)
+	if got := withoutExpectedDaemonCancellation(wrappedCancellation); !errors.Is(got, context.Canceled) || got.Error() != wrappedCancellation.Error() {
+		t.Fatalf("filtered wrapped daemon failure = %v, want %v", got, wrappedCancellation)
 	}
 }
 

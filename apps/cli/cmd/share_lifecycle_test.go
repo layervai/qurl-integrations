@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base32"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -306,6 +308,32 @@ func TestWaitForSharingRetriesTransientReadButNotAuthenticationFailure(t *testin
 			t.Fatalf("sharing requests = %d, want 1", got)
 		}
 	})
+}
+
+func TestSharingPollDoesNotRetryPermanentTransportFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "DNS name not found",
+			err:  &net.DNSError{Err: "no such host", Name: "missing.invalid", IsNotFound: true},
+		},
+		{
+			name: "TLS certificate rejected",
+			err:  &tls.CertificateVerificationError{Err: errors.New("unknown certificate authority")},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			wrapped := fmt.Errorf("sharing request failed: %w", test.err)
+			if retryableSharingPollError(wrapped) {
+				t.Fatalf("retryableSharingPollError(%v) = true, want false", wrapped)
+			}
+		})
+	}
 }
 
 func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {

@@ -4,9 +4,11 @@ package state
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -91,6 +93,32 @@ func TestWindowsConnectorResourceLockCannotBeReplacedWhileHeld(t *testing.T) {
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("released Windows Connector resource lock could not be removed: %v", err)
+	}
+}
+
+func TestDiscardWindowsConnectorTempClosesAndRemovesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "connector-resources.tmp")
+	_, sd, err := currentWindowsConnectorSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	security := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+	}
+	handle, err := openWindowsConnectorFile(path,
+		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.CREATE_NEW, security)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("reject temporary file")
+	if err := discardWindowsConnectorTemp(path, handle, cause); !errors.Is(err, cause) {
+		t.Fatalf("discard error = %v, want cause %v", err, cause)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("discarded temporary file still exists: %v", err)
 	}
 }
 

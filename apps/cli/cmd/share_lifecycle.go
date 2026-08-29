@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -417,6 +418,14 @@ func retryableSharingPollError(err error) bool {
 		return false
 	}
 	if errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		return false
+	}
+	var certificateErr *tls.CertificateVerificationError
+	if errors.As(err, &certificateErr) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 		return false
 	}
 	var apiErr *qurlapi.Error
