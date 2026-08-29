@@ -643,6 +643,9 @@ func (o *globalOpts) openNativeRegisteredClient(
 	accountKey string,
 	accountIdentity *qurlapi.Identity,
 ) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
+	if o.nativeRuntime != nil {
+		return nil, nil, errors.New("registered-device runtime is already open")
+	}
 	stateDir, err := o.resolveShareStateDir("")
 	if err != nil {
 		return nil, nil, err

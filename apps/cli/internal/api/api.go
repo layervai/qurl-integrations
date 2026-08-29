@@ -217,9 +217,11 @@ type Config struct {
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
-	// HTTPClient is the underlying HTTP client; nil means a client with a
-	// 30-second timeout that refuses redirects (credentials must not follow
-	// a Location header to another origin).
+	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
+	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero
+	// timeout is preserved. A retryable logical request can span multiple
+	// attempts and bounded backoffs. Redirects are always refused because
+	// credentials must not follow a Location header to another origin.
 	HTTPClient *http.Client
 }
 

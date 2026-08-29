@@ -922,6 +922,59 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 	})
 }
 
+// TestCLIReleaseValidatesTheCaskBeforePublication keeps every local
+// GoReleaser/cask assertion on the recoverable side of the publication line.
+// The tap update stays last because it needs the public release URLs, but a
+// missing or malformed generated cask must leave the GitHub Release draft.
+func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, releasePleaseWorkflow)
+	job, ok := workflow.Jobs["release-cli"]
+	if !ok {
+		t.Fatal("release-please.yml is missing the release-cli job")
+	}
+	const (
+		validateName = "Validate generated Homebrew cask"
+		releaseName  = "Publish the verified CLI release"
+		tapName      = "Publish the verified Homebrew cask"
+	)
+	indices := map[string]int{}
+	steps := map[string]*step{}
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		if current.Name == validateName || current.Name == releaseName || current.Name == tapName {
+			indices[current.Name] = index
+			steps[current.Name] = current
+		}
+	}
+	for _, name := range []string{validateName, releaseName, tapName} {
+		if steps[name] == nil {
+			t.Fatalf("release-cli is missing %q", name)
+		}
+	}
+	if indices[validateName] >= indices[releaseName] || indices[releaseName] >= indices[tapName] {
+		t.Fatalf("release-cli step order validate/release/tap = %d/%d/%d",
+			indices[validateName], indices[releaseName], indices[tapName])
+	}
+	for _, fragment := range []string{
+		"generated=dist/homebrew/Casks/qurl.rb",
+		"GoReleaser did not generate the qurl Homebrew cask",
+		"generated Homebrew cask does not name the exact CLI version",
+		"generated Homebrew cask does not bind all four release archives",
+	} {
+		if !strings.Contains(steps[validateName].Run, fragment) {
+			t.Errorf("%q does not enforce %q", validateName, fragment)
+		}
+		if strings.Contains(steps[tapName].Run, fragment) && fragment != "generated=dist/homebrew/Casks/qurl.rb" {
+			t.Errorf("%q still defers local validation %q until after publication", tapName, fragment)
+		}
+	}
+	if !strings.Contains(steps[releaseName].Run, "--draft=false --verify-tag") {
+		t.Errorf("%q no longer publishes the verified draft", releaseName)
+	}
+}
+
 func assertExecutableRepoScript(t *testing.T, name string) {
 	t.Helper()
 

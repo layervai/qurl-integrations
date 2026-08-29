@@ -231,6 +231,30 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	}
 }
 
+func TestOpenNativeRegisteredClient_RefusesRuntimeReplacement(t *testing.T) {
+	srv := apitest.NewServer(t)
+	existing := &bootstrapNativeRuntime{}
+	candidate := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	opts := bootstrapGlobalOpts(t, srv.URL, candidate)
+	opts.nativeRuntime = existing
+	opened := false
+	opts.openNativeRuntime = func(context.Context, connectorshare.NativeRuntimeConfig) (registeredNativeRuntime, error) {
+		opened = true
+		return candidate, nil
+	}
+
+	_, _, err := opts.openNativeRegisteredClient(context.Background(), nil, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "runtime is already open") {
+		t.Fatalf("second registered open error = %v", err)
+	}
+	if opened {
+		t.Fatal("second registered open constructed a replacement runtime")
+	}
+	if existing.closed || candidate.closed {
+		t.Fatalf("refused replacement closed existing/candidate = %t/%t", existing.closed, candidate.closed)
+	}
+}
+
 func TestOpenNativeRegisteredClient_AccountSwitchHasSafeRecovery(t *testing.T) {
 	srv := apitest.NewServer(t)
 	state := bootstrapRegisteredState(t)

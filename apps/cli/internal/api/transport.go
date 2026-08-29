@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	// defaultHTTPClientTimeout bounds every API request when an embedding
-	// client does not provide an explicit timeout.
+	// defaultHTTPClientTimeout bounds each HTTP attempt when an embedding
+	// client does not provide an explicit nonzero timeout.
 	defaultHTTPClientTimeout = 30 * time.Second
 	// maxAttempts bounds the transient retry loop: one initial attempt plus
 	// two retries.
@@ -199,6 +199,8 @@ func replayableBody(req *http.Request) (func() (io.ReadCloser, error), bool) {
 
 // retryDelay honors a parseable Retry-After seconds value (capped) and falls
 // back to a small linear backoff otherwise.
+// TODO(upstream-contract): qURL API responses use the delta-seconds form. If
+// the service adopts HTTP-date, parse it here and in restReply.problem.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
 		if secs, err := strconv.ParseUint(v, 10, 64); err == nil {

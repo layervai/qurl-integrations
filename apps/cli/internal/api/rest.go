@@ -95,7 +95,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 	if delim, ok := last.(json.Delim); !ok || delim != '}' {
 		return errors.New("sharing row object is incomplete")
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("sharing row has trailing JSON")
 		}
@@ -358,7 +358,7 @@ func (c *client) SetSharing(ctx context.Context, id string, desired DesiredState
 	}
 	return c.doSharing(ctx, http.MethodPut, id, struct {
 		DesiredState DesiredState `json:"desired_state"`
-	}{DesiredState: desired}, true)
+	}{DesiredState: desired}, false)
 }
 
 // RestartSharing rotates the serving epoch and leaves the resource desired on.
@@ -469,7 +469,7 @@ func (c *client) Delete(ctx context.Context, id string) (*DeleteResult, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
 	}
-	reply, err := c.doREST(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil)
+	reply, err := c.doRESTOnce(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -502,7 +502,9 @@ func (c *client) doREST(ctx context.Context, method, path string, body any) (*re
 }
 
 // doRESTOnce preserves the normal authorization/identity headers but disables
-// transport replay for a non-idempotent request such as sharing restart.
+// transport replay for a write with no service idempotency key. This includes
+// writes whose desired state is idempotent but whose lost response is still
+// ambiguous to the caller.
 func (c *client) doRESTOnce(ctx context.Context, method, path string, body any) (*restReply, error) {
 	return c.doRESTRequest(ctx, method, path, body, nil, false)
 }
@@ -617,6 +619,8 @@ func (r *restReply) problem() error {
 	if e.Code == "" && e.Title == "" && e.Detail == "" {
 		e.Detail = bodySnippet(r.body)
 	}
+	// TODO(upstream-contract): qURL API responses use Retry-After seconds, not
+	// HTTP-date. Keep this paired with retryDelay if the service changes form.
 	if v := strings.TrimSpace(r.header.Get("Retry-After")); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
 			e.RetryAfter = secs

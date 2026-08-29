@@ -125,8 +125,12 @@ jobs:
           command -v golangci-lint
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m ./apps/cli/...
 
+      # The pinned action above installs the exact binary used by both raw
+      # cross-platform invocations.
       - name: golangci-lint sandbox tests
-        run: golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
+        run: |
+          command -v golangci-lint
+          golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
 
   test:
     name: cli / test

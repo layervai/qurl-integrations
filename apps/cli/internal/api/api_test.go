@@ -238,6 +238,48 @@ func TestRestartSharingNeverReplaysTransportError(t *testing.T) {
 	}
 }
 
+func TestManagementMutationsDeclareExplicitNoReplay(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(*testing.T, Client) error
+	}{
+		{name: "set sharing", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.SetSharing(context.Background(), apitest.FixedResourceKey(t).CRID, DesiredStateOn)
+			return err
+		}},
+		{name: "delete", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.Delete(context.Background(), apitest.FixedResourceKey(t).CRID)
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			attempts := 0
+			client, err := New(&Config{
+				BaseURL: "https://api.invalid", APIKey: "key", Version: "test",
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					attempts++
+					allowRetry, explicit := req.Context().Value(requestRetryIntentKey{}).(bool)
+					if !explicit || allowRetry {
+						t.Errorf("retry intent explicit/allowed = %t/%t, want true/false", explicit, allowRetry)
+					}
+					return nil, errors.New("response lost")
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.call(t, client); err == nil {
+				t.Fatal("management mutation unexpectedly succeeded")
+			}
+			if attempts != 1 {
+				t.Fatalf("management mutation attempts = %d, want one", attempts)
+			}
+		})
+	}
+}
+
 func TestSharingResponseInvariants(t *testing.T) {
 	valid := sharingRow{ResourceID: "resource", CRID: "crid", DesiredState: DesiredStateOn, ServingEpoch: 1, ConnectionState: ConnectionServing}
 	tests := map[string]func(*sharingRow){

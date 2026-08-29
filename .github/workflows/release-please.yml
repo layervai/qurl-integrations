@@ -410,6 +410,25 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             dist/checksums.txt
 
+      - name: Validate generated Homebrew cask
+        run: |
+          set -euo pipefail
+          generated=dist/homebrew/Casks/qurl.rb
+          release_version="${CLI_TAG#v}"
+          [ "v${release_version}" = "$CLI_TAG" ]
+          [ -f "$generated" ] || {
+            echo "::error::GoReleaser did not generate the qurl Homebrew cask" >&2
+            exit 1
+          }
+          [ "$(grep -Fxc "  version \"${release_version}\"" "$generated")" = 1 ] || {
+            echo "::error::generated Homebrew cask does not name the exact CLI version" >&2
+            exit 1
+          }
+          [ "$(grep -Fc "releases/download/${CLI_TAG}/" "$generated")" = 4 ] || {
+            echo "::error::generated Homebrew cask does not bind all four release archives" >&2
+            exit 1
+          }
+
       - name: Publish the verified CLI release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -431,20 +450,6 @@ jobs:
           tap_branch=main
           cask_path=Casks/qurl.rb
           generated=dist/homebrew/Casks/qurl.rb
-          release_version="${CLI_TAG#v}"
-          [ "v${release_version}" = "$CLI_TAG" ]
-          [ -f "$generated" ] || {
-            echo "::error::GoReleaser did not generate the qurl Homebrew cask" >&2
-            exit 1
-          }
-          [ "$(grep -Fxc "  version \"${release_version}\"" "$generated")" = 1 ] || {
-            echo "::error::generated Homebrew cask does not name the exact CLI version" >&2
-            exit 1
-          }
-          [ "$(grep -Fc "releases/download/${CLI_TAG}/" "$generated")" = 4 ] || {
-            echo "::error::generated Homebrew cask does not bind all four release archives" >&2
-            exit 1
-          }
 
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT

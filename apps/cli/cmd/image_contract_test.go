@@ -241,7 +241,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if got := findStep("lint", "golangci-lint").With["version"]; got != "${{ env.GOLANGCI_LINT_VERSION }}" {
 		t.Errorf("public CLI workflow linter action version = %#v, want job-level pin expression", got)
 	}
-	const sandboxLintCommand = "golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/..."
+	const sandboxLintCommand = "command -v golangci-lint\ngolangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...\n"
 	if sandboxLintStep.Run != sandboxLintCommand {
 		t.Errorf("public CLI workflow sandbox lint command = %q, want %q", sandboxLintStep.Run, sandboxLintCommand)
 	}
@@ -512,13 +512,20 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 					t.Errorf("%s draft CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
 				}
 			}
-			publishIndex, signatureIndex, imageIndex, caskIndex := -1, -1, -1, -1
+			publishIndex, signatureIndex, imageIndex, caskValidationIndex, caskIndex := -1, -1, -1, -1, -1
 			for index, candidate := range job.Steps {
 				switch candidate.Name {
 				case "Verify release signature (self-test)":
 					signatureIndex = index
 				case "Promote and sign tested qurl image":
 					imageIndex = index
+				case "Validate generated Homebrew cask":
+					caskValidationIndex = index
+					for _, required := range []string{"dist/homebrew/Casks/qurl.rb", `releases/download/${CLI_TAG}/`, "generated Homebrew cask does not bind all four release archives"} {
+						if strings.Count(candidate.Run, required) != 1 {
+							t.Errorf("%s Homebrew pre-publication gate does not bind %q", target.file, required)
+						}
+					}
 				case "Publish the verified CLI release":
 					publishIndex = index
 					for _, required := range []string{`gh release edit "$CLI_TAG"`, "--draft=false", "--verify-tag"} {
@@ -528,15 +535,18 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 					}
 				case "Publish the verified Homebrew cask":
 					caskIndex = index
-					for _, required := range []string{"dist/homebrew/Casks/qurl.rb", `releases/download/${CLI_TAG}/`, `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`} {
+					for _, required := range []string{"dist/homebrew/Casks/qurl.rb", `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`} {
 						if strings.Count(candidate.Run, required) != 1 {
 							t.Errorf("%s verified Homebrew publisher does not bind %q", target.file, required)
 						}
 					}
 				}
 			}
-			if publishIndex <= releaseVerifierStepIndex || publishIndex <= signatureIndex || publishIndex <= imageIndex {
-				t.Errorf("%s publishes before every artifact gate (publish=%d archive=%d signature=%d image=%d)", target.file, publishIndex, releaseVerifierStepIndex, signatureIndex, imageIndex)
+			if caskValidationIndex <= releaseVerifierStepIndex || caskValidationIndex <= signatureIndex || caskValidationIndex <= imageIndex {
+				t.Errorf("%s validates the generated cask before every artifact gate (cask=%d archive=%d signature=%d image=%d)", target.file, caskValidationIndex, releaseVerifierStepIndex, signatureIndex, imageIndex)
+			}
+			if publishIndex <= caskValidationIndex {
+				t.Errorf("%s publishes before the generated cask passes its local gate (publish=%d cask=%d)", target.file, publishIndex, caskValidationIndex)
 			}
 			if caskIndex <= publishIndex {
 				t.Errorf("%s publishes Homebrew before the verified GitHub Release (cask=%d release=%d)", target.file, caskIndex, publishIndex)

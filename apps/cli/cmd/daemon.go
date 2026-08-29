@@ -112,7 +112,6 @@ service manager owns the process.`,
 		Args: noArgs,
 	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
-	var jobStdoutLog, jobStderrLog string
 	var hubHost, hubServerPublicKeyB64 string
 	var hubPort int
 	run := &cobra.Command{
@@ -148,8 +147,10 @@ service manager owns the process.`,
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
-	run.Flags().StringVar(&jobStdoutLog, "job-stdout-log", "", "native background-job stdout log")
-	run.Flags().StringVar(&jobStderrLog, "job-stderr-log", "", "native background-job stderr log")
+	// root.go's persistent pre-run hook reads these before settings resolution,
+	// so a first-start rejection reaches the native supervisor's durable log.
+	run.Flags().String("job-stdout-log", "", "native background-job stdout log")
+	run.Flags().String("job-stderr-log", "", "native background-job stderr log")
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
