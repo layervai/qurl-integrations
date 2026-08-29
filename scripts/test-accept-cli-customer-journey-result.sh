@@ -7,6 +7,11 @@ work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 mkdir -p "$work/bin"
 
+cat >"$work/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+
 cat >"$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -22,6 +27,10 @@ while (($#)); do
   esac
 done
 printf '%s\t%s\n' "$method" "$path" >>"$FAKE_GH_CALLS"
+call_count=$(wc -l <"$FAKE_GH_CALLS" | tr -d '[:space:]')
+if ((call_count <= ${FAKE_FAIL_FIRST_CALLS:-0})); then
+  exit 1
+fi
 case "$path" in
   repos/layervai/qurl-integrations/actions/runs/555/attempts/2)
     jq -n \
@@ -32,17 +41,20 @@ case "$path" in
       --arg head_repository "${FAKE_RUN_HEAD_REPOSITORY:-layervai/qurl-integrations}" \
       --arg sha "${FAKE_RUN_SHA:-17d077fbc5a50d54894d5521be623fe03420de14}" \
       --arg path "${FAKE_RUN_PATH:-.github/workflows/cli.yml}" \
-      '{repository:{full_name:$repository},head_repository:{full_name:$head_repository},head_sha:$sha,path:$path,event:$event,run_attempt:2,status:$status,conclusion:(if $conclusion == "" then null else $conclusion end)}'
+      --argjson attempt "${FAKE_RUN_ATTEMPT:-2}" \
+      '{repository:{full_name:$repository},head_repository:{full_name:$head_repository},head_sha:$sha,path:$path,event:$event,run_attempt:$attempt,status:$status,conclusion:(if $conclusion == "" then null else $conclusion end)}'
     ;;
   repos/layervai/qurl-integrations/actions/runs/555/attempts/2/jobs\?per_page=100)
     jq -n \
       --arg name "${FAKE_JOB_NAME:-cli / sandbox matched-cohort artifacts}" \
       --arg status "${FAKE_JOB_STATUS:-completed}" \
       --arg conclusion "${FAKE_JOB_CONCLUSION:-success}" \
-      --arg step_conclusion "${FAKE_JOB_STEP_CONCLUSION:-success}" '
+      --arg step_conclusion "${FAKE_JOB_STEP_CONCLUSION:-success}" \
+      --argjson copies "${FAKE_JOB_COPIES:-1}" \
+      --argjson total "${FAKE_JOB_TOTAL_COUNT:-${FAKE_JOB_COPIES:-1}}" '
       {
-        total_count:1,
-        jobs:[{
+        total_count:$total,
+        jobs:[range(0;$copies) | {
           name:$name,status:$status,conclusion:$conclusion,
           steps:[
             {name:"Build exact sandbox customer artifacts",conclusion:$step_conclusion},
@@ -75,15 +87,15 @@ case "$path" in
     ;;
 esac
 SH
-chmod +x "$work/bin/gh"
+chmod +x "$work/bin/gh" "$work/bin/sleep"
 
 write_event() {
-  local output=$1 sender=${2:-ops-routines-reader[bot]}
-  jq -n --arg sender "$sender" '
+  local output=$1
+  jq -n '
     {
       action:"qurl-cli-customer-journey-result",
       repository:{full_name:"layervai/qurl-integrations"},
-      sender:{login:$sender,id:277190418,type:"Bot"},
+      sender:{login:"ops-routines-reader[bot]",id:277190418,type:"Bot"},
       client_payload:{
         schema:"layerv.qurl-cli-customer-journey-result.v1",
         source_sha:"17d077fbc5a50d54894d5521be623fe03420de14",
@@ -159,12 +171,17 @@ forged sender login	.sender.login = "attacker"
 forged sender ID	.sender.id = 0
 non-bot sender	.sender.type = "User"
 wrong schema	.client_payload.schema = "wrong"
+wrong envelope repository	.repository.full_name = "example/wrong"
 extra payload field	.client_payload.extra = true
 missing payload field	del(.client_payload.schema)
 invalid source SHA	.client_payload.source_sha = "abc"
 main source with PR number	.client_payload.source_kind = "main" | .client_payload.pull_request_number = 1279
 PR source without PR number	.client_payload.pull_request_number = 0
 invalid conclusion	.client_payload.conclusion = "neutral"
+zero producer run	.client_payload.producer_run_id = 0
+string producer attempt	.client_payload.producer_run_attempt = "2"
+negative orchestrator run	.client_payload.orchestrator_run_id = -1
+zero orchestrator attempt	.client_payload.orchestrator_run_attempt = 0
 CASES
 
 write_event "$work/event.json"
@@ -215,7 +232,7 @@ expect_stale_pr_ignored() {
     echo "$label produced a callback failure" >&2
     exit 1
   fi
-  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 && ! -e "$work/check-request" ]] || {
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 && ! -e "$work/check-request" ]] || {
     echo "$label was not ignored before check creation" >&2
     exit 1
   }
@@ -229,11 +246,30 @@ expect_stale_pr_ignored "crossed pull-request base" FAKE_PR_BASE_REPOSITORY=atta
 
 write_event "$work/event.json"
 : >"$work/gh-calls"
+run_subject FAKE_FAIL_FIRST_CALLS=2 >/dev/null
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 6 ]] || {
+  echo "transient GitHub API failures were not retried exactly" >&2
+  exit 1
+}
+
+write_event "$work/event.json"
+: >"$work/gh-calls"
+if run_subject FAKE_FAIL_FIRST_CALLS=99 >/dev/null 2>&1; then
+  echo "persistent GitHub API failure was accepted" >&2
+  exit 1
+fi
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 ]] || {
+  echo "persistent GitHub API failure did not stop after 3 attempts" >&2
+  exit 1
+}
+
+write_event "$work/event.json"
+: >"$work/gh-calls"
 if run_subject FAKE_RUN_STATUS=completed FAKE_RUN_CONCLUSION=failure >/dev/null 2>&1; then
   echo "failed CLI producer run was accepted" >&2
   exit 1
 fi
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
   echo "failed producer did not fail at producer validation" >&2
   exit 1
 }
@@ -243,6 +279,7 @@ for producer_case in \
   'fork producer repository:FAKE_RUN_HEAD_REPOSITORY=attacker/qurl-integrations' \
   'wrong producer SHA:FAKE_RUN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   'wrong producer workflow:FAKE_RUN_PATH=.github/workflows/not-cli.yml' \
+  'wrong producer attempt:FAKE_RUN_ATTEMPT=3' \
   'wrong producer event:FAKE_RUN_EVENT=push'; do
   label=${producer_case%%:*}
   override=${producer_case#*:}
@@ -252,7 +289,7 @@ for producer_case in \
     echo "$label was accepted" >&2
     exit 1
   fi
-  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
     echo "$label did not fail at producer validation" >&2
     exit 1
   }
@@ -264,7 +301,7 @@ if run_subject FAKE_RUN_STATUS=queued >/dev/null 2>&1; then
   echo "queued CLI producer run was accepted" >&2
   exit 1
 fi
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
   echo "queued producer did not fail at producer validation" >&2
   exit 1
 }
@@ -273,7 +310,9 @@ for artifact_case in \
   'missing artifact job:FAKE_JOB_NAME=cli / wrong artifact job' \
   'running artifact job:FAKE_JOB_STATUS=in_progress' \
   'failed artifact job:FAKE_JOB_CONCLUSION=failure' \
-  'failed artifact step:FAKE_JOB_STEP_CONCLUSION=failure'; do
+  'failed artifact step:FAKE_JOB_STEP_CONCLUSION=failure' \
+  'truncated artifact jobs:FAKE_JOB_TOTAL_COUNT=2' \
+  'duplicate artifact jobs:FAKE_JOB_COPIES=2'; do
   label=${artifact_case%%:*}
   override=${artifact_case#*:}
   write_event "$work/event.json"
@@ -282,7 +321,7 @@ for artifact_case in \
     echo "$label was accepted" >&2
     exit 1
   fi
-  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
+  [[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 ]] || {
     echo "$label did not fail at artifact producer validation" >&2
     exit 1
   }
@@ -308,7 +347,7 @@ if run_subject >/dev/null 2>&1; then
   echo "main result bound to a pull-request producer was accepted" >&2
   exit 1
 fi
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 ]] || {
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 2 ]] || {
   echo "crossed main producer did not fail at producer validation" >&2
   exit 1
 }
@@ -319,7 +358,7 @@ if ! run_subject FAKE_RUN_EVENT=push FAKE_MAIN_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   echo "stale main result produced a callback failure" >&2
   exit 1
 fi
-[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 3 && ! -e "$work/check-request" ]] || {
+[[ $(wc -l <"$work/gh-calls" | tr -d '[:space:]') == 1 && ! -e "$work/check-request" ]] || {
   echo "stale main was not ignored before check creation" >&2
   exit 1
 }

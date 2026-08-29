@@ -21,6 +21,25 @@ server_url=${GITHUB_SERVER_URL:-https://github.com}
   exit 1
 }
 
+github_api() {
+  local description=$1
+  shift
+  local attempt output status=1
+  for attempt in 1 2 3; do
+    if output=$(gh api "$@"); then
+      printf '%s\n' "$output"
+      return 0
+    else
+      status=$?
+    fi
+    if ((attempt < 3)); then
+      sleep $((attempt * 2))
+    fi
+  done
+  echo "::error::GitHub API failed to ${description} after 3 attempts" >&2
+  return "$status"
+}
+
 # GitHub authenticates repository_dispatch senders. Accept only the dedicated
 # operations App identity and one closed payload schema. The payload contains
 # no endpoint, credential, account, region, or private-repository detail.
@@ -60,9 +79,9 @@ jq -e --arg repository "$repository" '
 
 mapfile -t fields < <(jq -r '
   .client_payload |
-  .source_sha, .source_kind, (.pull_request_number | tostring),
-  (.producer_run_id | tostring), (.producer_run_attempt | tostring),
-  (.orchestrator_run_id | tostring), (.orchestrator_run_attempt | tostring),
+  .source_sha, .source_kind, (.pull_request_number | floor | tostring),
+  (.producer_run_id | floor | tostring), (.producer_run_attempt | floor | tostring),
+  (.orchestrator_run_id | floor | tostring), (.orchestrator_run_attempt | floor | tostring),
   .conclusion
 ' "$event_path")
 if ((${#fields[@]} != 8)); then
@@ -78,7 +97,28 @@ orchestrator_run_id=${fields[5]}
 orchestrator_run_attempt=${fields[6]}
 conclusion=${fields[7]}
 
-producer_run=$(gh api --method GET \
+if [[ "$source_kind" == pull_request ]]; then
+  pull_request=$(github_api "read the named pull request" --method GET \
+    "repos/${repository}/pulls/${pull_request_number}")
+  jq -e --arg repository "$repository" --arg sha "$source_sha" --argjson number "$pull_request_number" '
+    .number == $number and .state == "open" and
+    .head.repo.full_name == $repository and .head.sha == $sha and
+    .base.repo.full_name == $repository
+  ' <<<"$pull_request" >/dev/null || {
+    echo "::notice::Ignoring a customer-journey result for a superseded or closed pull request head"
+    exit 0
+  }
+else
+  main_ref=$(github_api "read current main" --method GET \
+    "repos/${repository}/git/ref/heads/main")
+  jq -e --arg sha "$source_sha" '.ref == "refs/heads/main" and .object.type == "commit" and .object.sha == $sha' \
+    <<<"$main_ref" >/dev/null || {
+    echo "::notice::Ignoring a customer-journey result for superseded main"
+    exit 0
+  }
+fi
+
+producer_run=$(github_api "read the exact CLI producer attempt" --method GET \
   "repos/${repository}/actions/runs/${producer_run_id}/attempts/${producer_run_attempt}")
 expected_event=push
 if [[ "$source_kind" == pull_request ]]; then
@@ -103,7 +143,7 @@ jq -e --arg repository "$repository" --arg sha "$source_sha" --arg event "$expec
 
 # TODO(upstream-contract): Keep the exact producer job and step names in
 # lockstep with .github/workflows/cli.yml and the protected artifact consumer.
-producer_jobs=$(gh api --method GET \
+producer_jobs=$(github_api "read the exact CLI producer jobs" --method GET \
   "repos/${repository}/actions/runs/${producer_run_id}/attempts/${producer_run_attempt}/jobs?per_page=100")
 jq -e '
   .total_count <= 100 and (.jobs | length) == .total_count and
@@ -118,28 +158,11 @@ jq -e '
   exit 1
 }
 
-if [[ "$source_kind" == pull_request ]]; then
-  pull_request=$(gh api --method GET "repos/${repository}/pulls/${pull_request_number}")
-  jq -e --arg repository "$repository" --arg sha "$source_sha" --argjson number "$pull_request_number" '
-    .number == $number and .state == "open" and
-    .head.repo.full_name == $repository and .head.sha == $sha and
-    .base.repo.full_name == $repository
-  ' <<<"$pull_request" >/dev/null || {
-    echo "::notice::Ignoring a customer-journey result for a superseded or closed pull request head"
-    exit 0
-  }
-else
-  main_ref=$(gh api --method GET "repos/${repository}/git/ref/heads/main")
-  jq -e --arg sha "$source_sha" '.ref == "refs/heads/main" and .object.type == "commit" and .object.sha == $sha' \
-    <<<"$main_ref" >/dev/null || {
-    echo "::notice::Ignoring a customer-journey result for superseded main"
-    exit 0
-  }
-fi
-
 # TODO(upstream-contract): Keep this check name and external-ID schema in
-# lockstep with the polling gate. A replay can create another check run with
-# the same key; the gate selects the newest exact result.
+# lockstep with the polling gate. Same-repository pull-request workflows can
+# create checks under the same GitHub Actions App identity; required review of
+# workflow permission changes is part of this trusted-insider boundary. A
+# replay can create another check with the same key; the gate selects newest.
 external_id="layerv.qurl-cli-customer-journey.v1:${source_sha}:${producer_run_id}:${producer_run_attempt}"
 details_url="${server_url}/${repository}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
 title="Exact CLI artifact customer journey passed"
@@ -171,5 +194,6 @@ jq -n \
   }
 ' >"$request"
 
-gh api --method POST "repos/${repository}/check-runs" --input "$request" >/dev/null
+github_api "record the exact customer-journey check" --method POST \
+  "repos/${repository}/check-runs" --input "$request" >/dev/null
 echo "Accepted the exact CLI artifact customer-journey result for ${source_sha}."
