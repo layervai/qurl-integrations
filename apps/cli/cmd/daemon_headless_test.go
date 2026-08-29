@@ -18,6 +18,7 @@ import (
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -185,9 +186,13 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
 		if !verifyOwner {
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
+		}
+		if apiConfig == nil || apiConfig.BaseURL != "https://api.example.com" || apiConfig.Version != "test" ||
+			apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
+			t.Fatalf("headless registered-client config = %+v, want endpoint, version, and observability hooks", apiConfig)
 		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
@@ -199,7 +204,8 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	}
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
-		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
+		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
+		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
 		resolveSessionConfig: testNativeSessionConfig,
@@ -271,7 +277,7 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	originalBuilder := buildNativeSessionFactory
 	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 	factory := &headlessTestFactory{started: make(chan struct{})}
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
 		if verifyOwner {
 			t.Fatal("warm headless restart repeated authenticated owner verification")
 		}
@@ -346,7 +352,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			originalBuilder := buildNativeSessionFactory
 			t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 			var opens atomic.Int32
-			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, string, bool) (connectordaemon.SessionFactory, error) {
+			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool) (connectordaemon.SessionFactory, error) {
 				opens.Add(1)
 				return &headlessTestFactory{started: make(chan struct{})}, nil
 			}

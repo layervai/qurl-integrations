@@ -27,14 +27,14 @@ import (
 
 var openShareNativeRuntime = connectorshare.OpenNativeRuntime
 
-type nativeRegisteredIdentityReader func(context.Context, *connectorshare.NativeRuntime, string, string) (*qurlapi.Identity, error)
+type nativeRegisteredIdentityReader func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config) (*qurlapi.Identity, error)
 
-func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.NativeRuntime, origin, version string) (*qurlapi.Identity, error) {
+func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.NativeRuntime, config *qurlapi.Config) (*qurlapi.Identity, error) {
 	store, err := runtime.Handoff()
 	if err != nil {
 		return nil, err
 	}
-	client, err := qurlapi.NewRegistered(ctx, &qurlapi.Config{BaseURL: origin, Version: version}, store)
+	client, err := qurlapi.NewRegistered(ctx, config, store)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,10 @@ const connectorRefreshModeAuto = "auto"
 
 var errNativeSessionOwnerVerification = errors.New("registered Connector owner verification failed")
 
-var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, version string, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	if apiConfig == nil {
+		return nil, errors.New("qURL daemon registered-client configuration is missing")
+	}
 	// TODO(upstream-contract): OpenNativeRuntime must not execute session
 	// operations. qurl-connector consumes that authority only when
 	// NewNativeAdmitter takes the runtime, after this owner check.
@@ -54,7 +57,7 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 		return nil, err
 	}
 	if verifyOwner {
-		if err := verifyNativeSessionOwner(ctx, runtime, cfg.ClientBaseURL, version, cfg.SessionOperations.OwnerID, readNativeRegisteredIdentity); err != nil {
+		if err := verifyNativeSessionOwner(ctx, runtime, apiConfig, cfg.SessionOperations.OwnerID, readNativeRegisteredIdentity); err != nil {
 			return nil, errors.Join(err, runtime.Close())
 		}
 	}
@@ -65,10 +68,10 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 	if common == nil {
 		return nil, errors.Join(errors.New("qURL daemon FRP configuration is invalid"), admitter.Close())
 	}
-	return connectordaemon.NewNativeSessionFactory(admitter, common, version)
+	return connectordaemon.NewNativeSessionFactory(admitter, common, apiConfig.Version)
 }
 
-func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, origin, version, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
+func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, apiConfig *qurlapi.Config, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
 	expectedOwner = strings.TrimSpace(expectedOwner)
 	if expectedOwner == "" {
 		return fmt.Errorf("%w: session-operation owner authority is empty", errNativeSessionOwnerVerification)
@@ -76,7 +79,7 @@ func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.Nativ
 	if readIdentity == nil {
 		return fmt.Errorf("%w: identity reader is unavailable", errNativeSessionOwnerVerification)
 	}
-	identity, err := readIdentity(ctx, runtime, origin, version)
+	identity, err := readIdentity(ctx, runtime, apiConfig)
 	if err != nil {
 		return fmt.Errorf("verify registered Connector owner: %w", err)
 	}
@@ -253,12 +256,16 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		return err
 	}
 	openFactory := func(initCtx context.Context) (connectordaemon.SessionFactory, error) {
+		apiConfig := &qurlapi.Config{
+			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
+			Sleep: opts.sleep, NewRequestID: opts.newRequestID,
+		}
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
-		}, common, opts.version, verifyOwner)
+		}, common, apiConfig, verifyOwner)
 	}
 	var factory connectordaemon.SessionFactory
 	var closeFactory func() error

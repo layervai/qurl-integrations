@@ -121,6 +121,68 @@ func TestIPCServerRefusesSymlinkSocketDirectory(t *testing.T) {
 	}
 }
 
+func TestIPCClientRefusesInsecureSocketDirectoryWithoutChangingIt(t *testing.T) {
+	base := shortTempDir(t)
+	dir := filepath.Join(base, "permissive")
+	if err := os.Mkdir(dir, 0o755); err != nil { // #nosec G301 -- test creates an intentionally insecure directory.
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- test pins the intentionally insecure mode despite umask.
+		t.Fatal(err)
+	}
+	err := (IPCClient{SocketPath: filepath.Join(dir, SocketFile)}).WaitReady(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink directory with mode 0700") {
+		t.Fatalf("client accepted insecure socket directory: %v", err)
+	}
+	info, statErr := os.Lstat(dir)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("client changed insecure socket directory mode to %#o", info.Mode().Perm())
+	}
+}
+
+func TestIPCClientRefusesSymlinkSocketDirectory(t *testing.T) {
+	base := shortTempDir(t)
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "state")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	err := (IPCClient{SocketPath: filepath.Join(link, SocketFile)}).WaitReady(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink directory with mode 0700") {
+		t.Fatalf("client accepted symlink socket directory: %v", err)
+	}
+}
+
+func TestIPCClientRefusesPermissiveSocket(t *testing.T) {
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, SocketFile)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(path)
+	})
+	if err := os.Chmod(path, 0o666); err != nil { // #nosec G302 -- test creates an intentionally insecure socket.
+		t.Fatal(err)
+	}
+	conn, err := dialDaemonIPC(context.Background(), path)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "owner-owned non-symlink socket with mode 0600") {
+		t.Fatalf("client accepted permissive socket: %v", err)
+	}
+}
+
 func TestIPCServerRefusesRegularFileAtSocketPath(t *testing.T) {
 	dir := shortTempDir(t)
 	path := filepath.Join(dir, SocketFile)

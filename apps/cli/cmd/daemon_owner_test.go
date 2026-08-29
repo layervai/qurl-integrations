@@ -29,7 +29,7 @@ func TestVerifyNativeSessionOwner(t *testing.T) {
 			read := false
 			var readIdentity nativeRegisteredIdentityReader
 			if !tt.readerMissing {
-				readIdentity = func(context.Context, *connectorshare.NativeRuntime, string, string) (*qurlapi.Identity, error) {
+				readIdentity = func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config) (*qurlapi.Identity, error) {
 					read = true
 					if tt.readFailure {
 						return nil, errors.New("read identity")
@@ -40,7 +40,7 @@ func TestVerifyNativeSessionOwner(t *testing.T) {
 					return &qurlapi.Identity{OwnerID: tt.authenticated}, nil
 				}
 			}
-			err := verifyNativeSessionOwner(context.Background(), nil, "https://api.example.test", "test", tt.expected, readIdentity)
+			err := verifyNativeSessionOwner(context.Background(), nil, &qurlapi.Config{BaseURL: "https://api.example.test", Version: "test"}, tt.expected, readIdentity)
 			if read != tt.wantRead {
 				t.Fatalf("identity read=%t, want %t", read, tt.wantRead)
 			}

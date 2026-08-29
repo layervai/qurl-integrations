@@ -48,7 +48,45 @@ func listenDaemonIPC(ctx context.Context, path string) (net.Listener, func() err
 }
 
 func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err := validateUnixIPCParent(path); err != nil {
+		return nil, err
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUnixIPCSocket(path); err != nil {
+		return nil, errors.Join(err, conn.Close())
+	}
+	return conn, nil
+}
+
+func validateUnixIPCParent(path string) error {
+	dir := filepath.Dir(path)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect share daemon socket directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !unixIPCPathOwnerOK(info) || info.Mode().Perm() != 0o700 {
+		return errors.New("share daemon socket directory must be an owner-owned non-symlink directory with mode 0700")
+	}
+	return nil
+}
+
+func validateUnixIPCSocket(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect share daemon socket: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 || !unixIPCPathOwnerOK(info) || info.Mode().Perm() != 0o600 {
+		return errors.New("share daemon socket must be an owner-owned non-symlink socket with mode 0600")
+	}
+	return nil
+}
+
+func unixIPCPathOwnerOK(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
 }
 
 func validatePlatformIPCPath(path string) error {
