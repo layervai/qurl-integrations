@@ -100,6 +100,21 @@ func TestReadOnlyProjectedFilesAndCredentialSafety(t *testing.T) {
 	if _, err := ReadEnrollmentCredential(large); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversize credential error = %v", err)
 	}
+
+	unsafeParent := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(unsafeParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credential := filepath.Join(unsafeParent, "credential")
+	if err := os.WriteFile(credential, []byte("secret"), 0o400); err != nil { // #nosec G306 -- secure file inside an intentionally unsafe parent.
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeParent, 0o777); err != nil { // #nosec G302 -- intentionally unsafe parent fixture.
+		t.Fatal(err)
+	}
+	if _, err := ReadEnrollmentCredential(credential); err == nil || !strings.Contains(err.Error(), "parent directory") {
+		t.Fatalf("writable parent error = %v", err)
+	}
 }
 
 func TestProjectedFileSwapFailsClosed(t *testing.T) {

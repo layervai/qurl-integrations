@@ -385,6 +385,7 @@ func newTestClient(t *testing.T, srv *apitest.Server, sleeps *[]time.Duration) C
 
 func TestPublishSendsPinnedWireShape(t *testing.T) {
 	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(false)
 	client := newTestClient(t, srv, nil)
 
 	// The mock enforces the pinned contract (type=url + target_url required),
@@ -410,6 +411,20 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	}
 	if res.FoundExisting == nil || !*res.FoundExisting {
 		t.Errorf("replayed publish FoundExisting = %v, want known true", res.FoundExisting)
+	}
+}
+
+func TestPublishPreservesOmittedFoundExistingAsUnknown(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.OmitPublishFoundExisting()
+	client := newTestClient(t, srv, nil)
+
+	res, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FoundExisting != nil {
+		t.Errorf("omitted FoundExisting = %v, want unknown", *res.FoundExisting)
 	}
 }
 

@@ -8,3 +8,5 @@ import "os"
 // ownership shape is unavailable, so bearer credentials fail closed while the
 // non-secret config reader remains usable.
 func sensitiveFileReadableByProcess(os.FileInfo) bool { return false }
+
+func validatePinnedFileParent(string) error { return nil }

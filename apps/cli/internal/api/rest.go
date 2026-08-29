@@ -149,7 +149,7 @@ type envelopeMeta struct {
 	RequestID     string `json:"request_id"`
 	NextCursor    string `json:"next_cursor"`
 	HasMore       bool   `json:"has_more"`
-	FoundExisting bool   `json:"found_existing"`
+	FoundExisting *bool  `json:"found_existing"`
 }
 
 // publishRequest is the pinned publish wire shape: type is required and
@@ -197,7 +197,6 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
 		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
-	foundExisting := env.Meta.FoundExisting
 	return &Published{
 		CRID:          env.Data.CRID,
 		ResourceID:    env.Data.ResourceID,
@@ -205,7 +204,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		Status:        env.Data.Status,
 		CreatedAt:     env.Data.CreatedAt,
 		ExpiresAt:     env.Data.ExpiresAt,
-		FoundExisting: &foundExisting,
+		FoundExisting: env.Meta.FoundExisting,
 	}, nil
 }
 
@@ -332,6 +331,8 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 		if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
 			return nil, fmt.Errorf("%w: tunnel %s has invalid desired_state %q", qurl.ErrInvalidAPIResponse, source, row.DesiredState)
 		}
+		// TODO(upstream-contract): keep this desired-state/epoch invariant in
+		// lockstep with the qurl-service tunnel resource contract.
 		if row.DesiredState == DesiredStateOn && row.ServingEpoch == 0 {
 			return nil, fmt.Errorf("%w: desired-on tunnel %s has zero serving_epoch", qurl.ErrInvalidAPIResponse, source)
 		}
@@ -436,6 +437,8 @@ func validateSharingRow(row sharingRow) error {
 	if strings.TrimSpace(row.CRID) == "" {
 		return fmt.Errorf("%w: sharing response missing crid", qurl.ErrInvalidAPIResponse)
 	}
+	// TODO(upstream-contract): keep these durable and observed state
+	// combinations in lockstep with qurl-service sharing responses.
 	switch row.ConnectionState {
 	case ConnectionStopped:
 		if row.DesiredState != DesiredStateOff {

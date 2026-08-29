@@ -35,7 +35,7 @@ type Server struct {
 	resolveCRID          string
 	resolveQURL          string
 	downloadPayload      []byte
-	publishFoundExisting bool
+	publishFoundExisting *bool
 	publishOmitCRID      bool
 }
 
@@ -98,10 +98,12 @@ func NewServer(t *testing.T) *Server {
 // golden tests pass FixedResourceKey for deterministic identifiers.
 func NewServerWithKey(t *testing.T, key *ResourceKey) *Server {
 	t.Helper()
+	foundExisting := false
 	s := &Server{
-		t:       t,
-		Key:     key,
-		scripts: map[string][]http.HandlerFunc{},
+		t:                    t,
+		Key:                  key,
+		scripts:              map[string][]http.HandlerFunc{},
+		publishFoundExisting: &foundExisting,
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.Close)
@@ -138,7 +140,15 @@ func (s *Server) SetResolveCRID(value string) {
 func (s *Server) SetPublishFoundExisting(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.publishFoundExisting = v
+	s.publishFoundExisting = &v
+}
+
+// OmitPublishFoundExisting makes publish responses omit the optional
+// meta.found_existing field, which means the creation provenance is unknown.
+func (s *Server) OmitPublishFoundExisting() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishFoundExisting = nil
 }
 
 // SetPublishOmitCRID makes publish answer without a crid, the shape an
@@ -265,8 +275,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	meta := map[string]any{}
 	s.mu.Lock()
-	if s.publishFoundExisting {
-		meta["found_existing"] = true
+	if s.publishFoundExisting != nil {
+		meta["found_existing"] = *s.publishFoundExisting
 	}
 	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()

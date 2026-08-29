@@ -97,7 +97,11 @@ func resolveResourceWithRequestObserver(
 		// response taxonomy: success means the SDK completed authentication, and
 		// Commit atomically discards the completed request while accepting no
 		// identity.
-		return nil, fmt.Errorf("connector %q: verify authenticated resource binding: %w", connectorID, tx.Commit(nil))
+		commitErr := tx.Commit(nil)
+		if commitErr == nil {
+			commitErr = errors.New("connector resource transaction accepted an absent binding")
+		}
+		return nil, fmt.Errorf("connector %q: verify authenticated resource binding: %w", connectorID, commitErr)
 	}
 	resource := resolution.Resource
 	if err := tx.Commit(&state.ConnectorResourceBinding{

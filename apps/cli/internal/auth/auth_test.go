@@ -116,6 +116,10 @@ func TestResolveEnvironmentFileIsStrictPrivateAndHermetic(t *testing.T) {
 	if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKey: testKeyStored, EnvAPIKeyFile: path}), store); !errors.Is(err, ErrCredentialConflict) {
 		t.Fatalf("inline and file conflict = %v", err)
 	}
+	key, source, err = Resolve(lookupFrom(map[string]string{EnvAPIKey: " ", EnvAPIKeyFile: path}), store)
+	if err != nil || key != testKeyEnv || source != SourceEnvironmentFile {
+		t.Fatalf("blank inline with file credential = %q %q %v", key, source, err)
+	}
 }
 
 func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {

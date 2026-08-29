@@ -125,6 +125,9 @@ func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, 
 	if path == "" {
 		return nil, errors.New("file path is empty")
 	}
+	if err := validatePinnedFileParent(path); err != nil {
+		return nil, err
+	}
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err

@@ -81,7 +81,8 @@ func Resolve(lookup func(string) (string, bool), store CredentialStore) (string,
 	if lookup != nil {
 		inline, inlineSet := lookup(EnvAPIKey)
 		path, fileSet := lookup(EnvAPIKeyFile)
-		if inlineSet && fileSet {
+		inline = strings.TrimSpace(inline)
+		if inlineSet && inline != "" && fileSet {
 			return "", "", ErrCredentialConflict
 		}
 		if fileSet {
@@ -91,8 +92,8 @@ func Resolve(lookup func(string) (string, bool), store CredentialStore) (string,
 			}
 			return key, SourceEnvironmentFile, nil
 		}
-		if inlineSet && strings.TrimSpace(inline) != "" {
-			return strings.TrimSpace(inline), SourceEnvironment, nil
+		if inlineSet && inline != "" {
+			return inline, SourceEnvironment, nil
 		}
 	}
 	if store == nil {
