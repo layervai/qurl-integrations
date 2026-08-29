@@ -6,7 +6,25 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestTransportBoundsInjectedHTTPClientWithoutTimeout(t *testing.T) {
+	injected := &http.Client{}
+	transport := newTransport(&Config{HTTPClient: injected, Version: "test"})
+	if transport.next.Timeout != defaultHTTPClientTimeout {
+		t.Fatalf("injected client timeout = %s, want %s", transport.next.Timeout, defaultHTTPClientTimeout)
+	}
+	if injected.Timeout != 0 {
+		t.Fatalf("caller-owned client timeout mutated to %s", injected.Timeout)
+	}
+
+	const explicit = 7 * time.Second
+	transport = newTransport(&Config{HTTPClient: &http.Client{Timeout: explicit}, Version: "test"})
+	if transport.next.Timeout != explicit {
+		t.Fatalf("explicit injected client timeout = %s, want %s", transport.next.Timeout, explicit)
+	}
+}
 
 func TestTransportRefusesRedirectFromInjectedHTTPClient(t *testing.T) {
 	var redirected atomic.Int32

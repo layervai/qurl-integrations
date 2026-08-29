@@ -326,6 +326,33 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		strings.Index(warmDaemonStep.Run, warmDaemonPassedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) {
 		t.Error("public CLI workflow warm-daemon gate checks process status before PASS/SKIP diagnostics")
 	}
+	windowsTaskStep := findStep("matrix", "Run pinned Windows Task Scheduler integration")
+	windowsCompileStep := findStep("matrix", "Compile private sandbox test surface on Windows")
+	for _, step := range []cliWorkflowStep{windowsTaskStep, windowsCompileStep} {
+		if workflow.Jobs["matrix"].If != expectedCLIJobIf || workflow.Jobs["matrix"].ContinueOnError != nil ||
+			step.If != "runner.os == 'Windows'" || step.ContinueOnError != nil {
+			t.Errorf("public CLI workflow Windows gate %q is bypassable", step.Name)
+		}
+	}
+	if got := windowsTaskStep.Env["QURL_WINDOWS_USER_JOB_INTEGRATION"]; got != "1" {
+		t.Errorf("Windows Task Scheduler integration arming = %#v, want 1", got)
+	}
+	for _, required := range []string{
+		"$testName = 'TestWindowsUserJobIntegration'",
+		"$testPattern = '^TestWindowsUserJobIntegration$'",
+		"go test -list $testPattern $testPackage",
+		"go test -count=1 -json -run $testPattern $testPackage",
+		"$_.Action -eq 'skip'",
+		"$_.Action -eq 'pass'",
+		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
+	} {
+		if strings.Count(windowsTaskStep.Run, required) != 1 {
+			t.Errorf("Windows Task Scheduler integration does not fail closed with %q", required)
+		}
+	}
+	if !strings.Contains(windowsCompileStep.Run, "go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...") {
+		t.Error("Windows matrix does not compile the private sandbox test surface")
+	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {
@@ -338,6 +365,62 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 	if !bytes.Contains(makefile, []byte("go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...")) {
 		t.Error("public Makefile does not compile the private sandbox test surface")
+	}
+}
+
+func TestReleaseHubPinWorkflowsRequireExactNonSkippedTest(t *testing.T) {
+	t.Parallel()
+	type workflowTarget struct {
+		file, job string
+	}
+	targets := []workflowTarget{
+		{file: "release-please.yml", job: "release-cli"},
+		{file: "cli-nightly.yml", job: "snapshot"},
+	}
+	var canonical string
+	for _, target := range targets {
+		data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", target.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var workflow cliWorkflowContract
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			t.Fatalf("parse %s: %v", target.file, err)
+		}
+		job, ok := workflow.Jobs[target.job]
+		if !ok {
+			t.Fatalf("%s has no %s job", target.file, target.job)
+		}
+		var matches []cliWorkflowStep
+		for _, step := range job.Steps {
+			if step.Name == "Verify the production NHP Hub trust pin" {
+				matches = append(matches, step)
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("%s has %d production Hub-pin steps, want one", target.file, len(matches))
+		}
+		step := matches[0]
+		if step.If != nil || step.ContinueOnError != nil || job.ContinueOnError != nil {
+			t.Errorf("%s production Hub-pin gate is bypassable", target.file)
+		}
+		for _, required := range []string{
+			"go test ./apps/cli/internal/connector/hub -list",
+			"go test ./apps/cli/internal/connector/hub -run",
+			"-count=1 -json",
+			`select(.Action == "pass" and .Test == $test)`,
+			`select(.Action == "skip" and .Test == $test)`,
+			`if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
+		} {
+			if strings.Count(step.Run, required) != 1 {
+				t.Errorf("%s production Hub-pin gate does not fail closed with %q", target.file, required)
+			}
+		}
+		if canonical == "" {
+			canonical = step.Run
+		} else if step.Run != canonical {
+			t.Errorf("%s production Hub-pin gate differs from the release gate", target.file)
+		}
 	}
 }
 

@@ -163,6 +163,14 @@ shell history and process lists. `qurl login` reads it from a hidden prompt or
 piped standard input. Scripts and CI can set `QURL_API_KEY` or
 `QURL_API_KEY_FILE` for the same first bootstrap or for an explicit recovery.
 
+On Windows, `QURL_API_KEY_FILE` must name a file that is owned by the current
+user and has a protected, owner-only ACL. Create the file inside an owner-only
+temporary directory, remove ACL inheritance from the file, and remove the file
+immediately after `qurl login`. The CLI rejects an inherited or broadly
+readable ACL with the exact failing ACL condition. For most Windows CI jobs,
+use the one-command `QURL_API_KEY` environment value instead; qurl consumes it
+only for enrollment and does not store it.
+
 The CLI validates the account key, mints one one-shot agent enrollment
 credential, and registers an X25519 device identity through NHP 1.1. Only the
 restricted device identity and device REST credential enter the owner-only

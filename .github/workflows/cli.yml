@@ -530,7 +530,37 @@ jobs:
         env:
           QURL_WINDOWS_USER_JOB_INTEGRATION: '1'
         run: |
-          go test -count=1 github.com/layervai/qurl-connector/pkg/service
+          $testName = 'TestWindowsUserJobIntegration'
+          $testPattern = '^TestWindowsUserJobIntegration$'
+          $testPackage = 'github.com/layervai/qurl-connector/pkg/service'
+          $declared = @(
+            & go test -list $testPattern $testPackage |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
+            Write-Error "exact Windows Task Scheduler integration declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-windows-user-job-events.jsonl'
+          & go test -count=1 -json -run $testPattern $testPackage |
+            Tee-Object -FilePath $eventsPath
+          $testStatus = $LASTEXITCODE
+          if ($testStatus -ne 0) { exit $testStatus }
+          $events = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json })
+          $skipped = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' })
+          $passed = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' })
+          if ($skipped.Count -ne 0 -or $passed.Count -ne 1) {
+            Write-Error 'required Windows Task Scheduler integration must report one PASS and no SKIP'
+            exit 1
+          }
+          Remove-Item -LiteralPath $eventsPath -Force
+
+      - name: Compile private sandbox test surface on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run tests

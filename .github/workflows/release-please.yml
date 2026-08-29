@@ -198,7 +198,29 @@ jobs:
           QURL_REQUIRE_RELEASE_HUB_PIN: '1'
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
-        run: go test ./apps/cli/internal/connector/hub -run '^TestReleaseHubPinEnvironment$' -count=1
+        run: |
+          set -euo pipefail
+          test_name=TestReleaseHubPinEnvironment
+          test_pattern='^TestReleaseHubPinEnvironment$'
+          actual_test="$(go test ./apps/cli/internal/connector/hub -list "$test_pattern" | sed -n '/^Test/p')"
+          if [[ "$actual_test" != "$test_name" ]]; then
+            echo "::error::exact production Hub-pin test declaration is missing or ambiguous"
+            exit 1
+          fi
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          test_status=0
+          go test ./apps/cli/internal/connector/hub -run "$test_pattern" -count=1 -json >"$events" || test_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
+          skipped="$(jq -r --arg test "$test_name" 'select(.Action == "skip" and .Test == $test) | .Test' "$events")"
+          if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
+            echo "::error::required production Hub-pin test must report one PASS and no SKIP"
+            exit 1
+          fi
+          if (( test_status != 0 )); then
+            exit "$test_status"
+          fi
 
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and

@@ -13,6 +13,9 @@ import (
 )
 
 const (
+	// defaultHTTPClientTimeout bounds every API request when an embedding
+	// client does not provide an explicit timeout.
+	defaultHTTPClientTimeout = 30 * time.Second
 	// maxAttempts bounds the transient retry loop: one initial attempt plus
 	// two retries.
 	maxAttempts = 3
@@ -43,9 +46,12 @@ func newTransport(cfg *Config) *transport {
 	// without mutating caller-owned test or embedding state. Redirect refusal
 	// applies to every client, not only the default: net/http can otherwise
 	// forward an Authorization header to a Location selected by the server.
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{Timeout: defaultHTTPClientTimeout}
 	if cfg.HTTPClient != nil {
 		*httpClient = *cfg.HTTPClient
+		if httpClient.Timeout == 0 {
+			httpClient.Timeout = defaultHTTPClientTimeout
+		}
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse

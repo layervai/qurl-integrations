@@ -21,7 +21,7 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 		return "", fmt.Errorf("%w: %s is not one bounded owner-private regular file", ErrInvalidKey, EnvAPIKeyFile)
 	}
 	if err := validateAPIKeyFilePathPlatform(path, before); err != nil {
-		return "", fmt.Errorf("%w: %s has unsafe ownership or link authority", ErrInvalidKey, EnvAPIKeyFile)
+		return "", fmt.Errorf("%w: %s has unsafe ownership or link authority: %w", ErrInvalidKey, EnvAPIKeyFile, err)
 	}
 	file, err := openAPIKeyFileNoFollow(path)
 	if err != nil {
