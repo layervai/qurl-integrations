@@ -165,8 +165,10 @@ piped standard input. Scripts and CI can set `QURL_API_KEY` or
 
 `QURL_API_KEY_FILE` must be an exact absolute path. Its contents must be the
 key bytes followed by one LF byte, with no BOM, CR, spaces, or second newline.
-On Unix, create it with `printf '%s\n' "$QURL_API_KEY" > "$path"`. In
-PowerShell, use this command to write UTF-8 without a BOM or CRLF:
+On Unix, the file must be owned by you, have mode `0400` or `0600`, and have
+exactly one hard link. Create it with
+`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`. In PowerShell, use
+this command to write UTF-8 without a BOM or CRLF:
 
 ```powershell
 [IO.File]::WriteAllText($path, $key + "`n", [Text.UTF8Encoding]::new($false))

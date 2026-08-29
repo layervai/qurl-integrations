@@ -12,8 +12,10 @@ COPY apps/cli/ ./apps/cli/
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
+ARG HUB_TRUST_ROOT_B64=
 RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-    go build -trimpath -mod=readonly -ldflags="-s -w -X main.version=${VERSION}" \
+    go build -trimpath -mod=readonly \
+    -ldflags="-s -w -X main.version=${VERSION} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${HUB_TRUST_ROOT_B64}" \
     -o /out/qurl ./apps/cli/cmd/
 
 # The customer image has one executable: qurl. The CA bundle is data required

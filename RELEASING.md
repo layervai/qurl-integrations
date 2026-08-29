@@ -24,6 +24,13 @@ the released command surface and its real Task Scheduler integration. Unit
 tests, compiled tagged tests, source receipts, and artifact attestations support
 this gate; they do not replace the live journey.
 
+CLI release publication also fails closed until both production NHP Hub trust
+pin secrets are populated: the canonical public key and the independent
+SHA-256 fingerprint of its raw 32-byte value. The release job verifies the
+pair before GoReleaser runs. It then checks the exact fingerprint from the
+released Linux binary and from both published container platforms. Do not
+bypass this gate or publish a dark CLI build.
+
 ## What a CLI release ships
 
 Merging the CLI's release-please PR tags `vX.Y.Z` and creates the GitHub

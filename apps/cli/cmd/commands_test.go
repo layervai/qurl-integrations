@@ -44,6 +44,17 @@ func TestVersionOutputShape(t *testing.T) {
 	}
 }
 
+func TestReleaseNativeTrustVerifierIsHiddenAndFailsClosedInDarkBuild(t *testing.T) {
+	help := runCLI(t, &runOpts{args: []string{"version", "--help"}})
+	if help.code != 0 || strings.Contains(help.stdout.String(), "verify-release-native-trust") {
+		t.Fatalf("version help exposed the release verifier: code=%d stdout=%q stderr=%q", help.code, help.stdout.String(), help.stderr.String())
+	}
+	result := runCLI(t, &runOpts{args: []string{"version", "--verify-release-native-trust"}})
+	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "no pinned production Hub key") {
+		t.Fatalf("dark release verifier = code=%d stdout=%q stderr=%q", result.code, result.stdout.String(), result.stderr.String())
+	}
+}
+
 // TestHelpLeadsWithTheOneCommandLocalJourney protects the first-run UX. The
 // command reference can stay precise without making a new user read Connector
 // internals before seeing the ordinary localhost path.
@@ -143,6 +154,19 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 	}
 	if !strings.Contains(readme, "only HTTPS URLs are allowed") || !strings.Contains(readme, "brew upgrade qurl") {
 		t.Fatal("CLI README must explain how a legacy install recovers to the lifecycle release")
+	}
+}
+
+func TestREADMEAPIKeyFileRecipeMatchesUnixSecurityContract(t *testing.T) {
+	readme := readCLIREADME(t)
+	for _, want := range []string{
+		"have mode `0400` or `0600`",
+		"exactly one hard link",
+		`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`,
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("CLI README API-key file recipe missing %q", want)
+		}
 	}
 }
 

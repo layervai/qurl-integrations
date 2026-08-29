@@ -91,6 +91,8 @@ func TestCLIImageContract(t *testing.T) {
 	dockerfile := string(data)
 	for _, want := range []string{
 		"FROM scratch",
+		"ARG HUB_TRUST_ROOT_B64=",
+		"-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${HUB_TRUST_ROOT_B64}",
 		"COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
 		"COPY --from=build /out/qurl /usr/local/bin/qurl",
 		"USER 65532:65532",
@@ -434,6 +436,11 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 		}
 		requiredMode, hasRequiredMode := step.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]
 		if target.release {
+			releaseGate := strings.Join(strings.Fields(fmt.Sprint(job.If)), " ")
+			const expectedReleaseGate = "!cancelled() && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub spells this function cancelled().
+			if releaseGate != expectedReleaseGate {
+				t.Errorf("%s release-cli gate = %q, want %q", target.file, releaseGate, expectedReleaseGate)
+			}
 			if !hasRequiredMode || requiredMode != "1" {
 				t.Errorf("%s release Hub-pin gate is not required", target.file)
 			}
@@ -461,6 +468,35 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			}
 			if pinStepIndex >= goreleaserStepIndex {
 				t.Errorf("%s production Hub-pin gate must run before GoReleaser (pin=%d goreleaser=%d)", target.file, pinStepIndex, goreleaserStepIndex)
+			}
+			var releaseVerifierSteps []cliWorkflowStep
+			releaseVerifierStepIndex := -1
+			for index, candidate := range job.Steps {
+				if candidate.Name == "Verify the released CLI carries the exact production Hub trust pin" {
+					releaseVerifierSteps = append(releaseVerifierSteps, candidate)
+					releaseVerifierStepIndex = index
+				}
+			}
+			if len(releaseVerifierSteps) != 1 {
+				t.Fatalf("%s has %d released CLI Hub-pin verifiers, want one", target.file, len(releaseVerifierSteps))
+			}
+			releaseVerifier := releaseVerifierSteps[0]
+			if releaseVerifier.If != nil || releaseVerifier.ContinueOnError != nil || releaseVerifierStepIndex <= goreleaserStepIndex {
+				t.Errorf("%s released CLI Hub-pin verifier is bypassable or precedes GoReleaser", target.file)
+			}
+			fingerprintSource, ok := releaseVerifier.Env["QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"].(string)
+			if !ok || strings.TrimSpace(fingerprintSource) == "" {
+				t.Errorf("%s released CLI Hub-pin verifier has no fingerprint source", target.file)
+			}
+			for _, required := range []string{
+				`gh release download "$CLI_TAG"`,
+				`--pattern 'qurl_*_linux_amd64.tar.gz'`,
+				`version --verify-release-native-trust`,
+				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
+			} {
+				if strings.Count(releaseVerifier.Run, required) != 1 {
+					t.Errorf("%s released CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
+				}
 			}
 			continue
 		}
@@ -490,6 +526,7 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		"timeout-minutes: 40",
 		`[ "$GITHUB_REF" = refs/heads/main ]`,
 		"platforms: linux/amd64,linux/arm64",
+		"HUB_TRUST_ROOT_B64=${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}",
 		"provenance: mode=max",
 		"sbom: true",
 		`candidate="${IMAGE_NAME}@${IMAGE_DIGEST}"`,
@@ -502,6 +539,8 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		`if length == 1 then .[0].digest`,
 		`platform_candidate="${image_name}@${platform_digest}"`,
 		`docker run --rm --platform "$platform" "$platform_candidate" version`,
+		`docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust`,
+		`QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}`,
 		"scripts/extract-qurl-image-attestations.sh",
 		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations",
 		`cosign sign --yes "$candidate"`,
@@ -582,6 +621,8 @@ func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 		"`qurl-image.txt` is intentionally not in that manifest",
 		"https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1",
 		"Do not replace the digest from",
+		"release publication also fails closed",
+		"released Linux binary and from both published container platforms",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("RELEASING.md missing image trust guidance %q", want)

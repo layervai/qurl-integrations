@@ -614,24 +614,20 @@ func TestResourceRejectsDetailIdentityMismatch(t *testing.T) {
 	}
 }
 
-func TestResourceFallsBackToListOnlyForUnstructuredRoute404(t *testing.T) {
+func TestResourceDoesNotScanAfterUnstructuredNotFound(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
 	client := newTestClient(t, srv, nil)
 
-	resource, err := client.Resource(context.Background(), srv.Key.CRID)
-	if err != nil {
-		t.Fatal(err)
+	_, err := client.Resource(context.Background(), srv.Key.CRID)
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("unstructured not-found err = %v", err)
 	}
-	if resource.CRID != srv.Key.CRID || resource.ResourceID != srv.Key.ResourceID || resource.Type != "url" {
-		t.Fatalf("list fallback resource = %+v", resource)
-	}
-	requests := srv.Requests()
-	if len(requests) != 2 || requests[0].Path != "/v1/resources/"+srv.Key.CRID ||
-		requests[1].Path != "/v1/resources" || requests[1].Query != "limit=100" {
-		t.Fatalf("resource fallback requests = %#v", requests)
+	if requests := srv.Requests(); len(requests) != 1 {
+		t.Fatalf("unstructured not-found triggered list fallback: %#v", requests)
 	}
 }
 

@@ -152,6 +152,17 @@ func provisionedDefaultPinForTest(t *testing.T) string {
 func TestBootstrapUsesProvisionedDefaultPin(t *testing.T) {
 	clearOverrideEnv(t)
 	keyB64 := provisionedDefaultPinForTest(t)
+	fingerprint, err := EmbeddedProductionPinFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := DecodeServerPublicKeyB64(keyB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := FingerprintSHA256Hex(key); fingerprint != want {
+		t.Fatalf("embedded production pin fingerprint = %q, want %q", fingerprint, want)
+	}
 	got, err := Bootstrap()
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +205,9 @@ func TestBootstrapProductionDefaultFailsClosedUntilProvisioned(t *testing.T) {
 	t.Cleanup(func() { defaultServerPublicKeyB64 = old })
 	if _, err := Bootstrap(); err == nil || !strings.Contains(err.Error(), "no pinned production Hub key") {
 		t.Fatalf("Bootstrap error = %v", err)
+	}
+	if _, err := EmbeddedProductionPinFingerprint(); err == nil || !strings.Contains(err.Error(), "no pinned production Hub key") {
+		t.Fatalf("EmbeddedProductionPinFingerprint error = %v", err)
 	}
 }
 

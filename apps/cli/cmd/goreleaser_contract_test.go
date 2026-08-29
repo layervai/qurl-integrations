@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"maps"
 	"os"
 	"os/exec"
@@ -9,9 +12,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra/doc"
+	"golang.org/x/crypto/curve25519"
 	"gopkg.in/yaml.v3"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 )
 
 // .goreleaser.yml's Homebrew cask enumerates man pages and completion files
@@ -84,6 +91,45 @@ func TestReleaseBuildEmbedsProductionHubPin(t *testing.T) {
 	const pinAssignment = `-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ index .Env "QURL_RELEASE_HUB_PUBLIC_KEY_B64" }}`
 	if count := strings.Count(strings.Join(cfg.Builds[0].LDFlags, "\n"), pinAssignment); count != 1 {
 		t.Fatalf("release ldflags contain production Hub-pin assignment %d time(s), want one", count)
+	}
+}
+
+func TestReleaseLinkerTargetProducesRunnableNativeTrustPin(t *testing.T) {
+	scalar := bytes.Repeat([]byte{0x42}, curve25519.ScalarSize)
+	public, err := curve25519.X25519(scalar, curve25519.Basepoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyB64 := base64.StdEncoding.EncodeToString(public)
+	wantFingerprint := hub.FingerprintSHA256Hex(public)
+
+	binary := filepath.Join(t.TempDir(), "qurl")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	root, err := filepath.Abs(cliRepoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const linkerTarget = "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	// #nosec G204 -- every argument is a test-owned constant or a value generated above in this process.
+	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-mod=readonly", "-ldflags", "-X "+linkerTarget+"="+keyB64, "-o", binary, "./apps/cli/cmd/")
+	build.Dir = root
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build release-pin executable: %v\n%s", err, output)
+	}
+
+	// #nosec G204 -- binary is the exact test-owned output path built above.
+	verify := exec.CommandContext(ctx, binary, "version", "--verify-release-native-trust")
+	output, err := verify.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run release-pin executable: %v\n%s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != wantFingerprint {
+		t.Fatalf("release-pin executable fingerprint = %q, want %q", got, wantFingerprint)
 	}
 }
 

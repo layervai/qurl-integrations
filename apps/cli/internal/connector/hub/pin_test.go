@@ -112,8 +112,9 @@ func TestReleaseHubPinEnvironment(t *testing.T) {
 }
 
 func releaseHubPinInputs(keyB64, fingerprint string, required bool) (normalizedKeyB64, normalizedFingerprint string, skip bool, err error) {
-	keyB64 = strings.TrimSpace(keyB64)
-	fingerprint = strings.TrimSpace(fingerprint)
+	if keyB64 != strings.TrimSpace(keyB64) || fingerprint != strings.TrimSpace(fingerprint) {
+		return "", "", false, errors.New("release Hub public key and fingerprint must not have surrounding whitespace")
+	}
 	if keyB64 == "" && fingerprint == "" && !required {
 		return "", "", true, nil
 	}
@@ -135,8 +136,12 @@ func TestReleaseHubPinInputs(t *testing.T) {
 		{name: "key only required", key: "key", required: true, wantErr: true},
 		{name: "fingerprint only optional", fingerprint: "fingerprint", wantErr: true},
 		{name: "fingerprint only required", fingerprint: "fingerprint", required: true, wantErr: true},
-		{name: "configured optional", key: " key ", fingerprint: " fingerprint "},
+		{name: "configured optional", key: "key", fingerprint: "fingerprint"},
 		{name: "configured required", key: "key", fingerprint: "fingerprint", required: true},
+		{name: "key leading whitespace", key: " key", fingerprint: "fingerprint", wantErr: true},
+		{name: "key trailing whitespace", key: "key ", fingerprint: "fingerprint", wantErr: true},
+		{name: "fingerprint leading whitespace", key: "key", fingerprint: " fingerprint", wantErr: true},
+		{name: "fingerprint trailing whitespace", key: "key", fingerprint: "fingerprint\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

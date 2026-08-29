@@ -290,17 +290,7 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 		return nil, err
 	}
 	if reply.status != http.StatusOK {
-		problem := reply.problem()
-		var apiErr *Error
-		// Some deployed edges predate the owner-facing single-resource GET
-		// route and answer that path with an unstructured 404. Only that exact
-		// route-level absence may use the paged list compatibility path. A
-		// structured not_found response is an authoritative missing resource
-		// and must not trigger an account-wide scan.
-		if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "" {
-			return nil, problem
-		}
-		return c.findResourceInList(ctx, id)
+		return nil, reply.problem()
 	}
 	var env struct {
 		Data *struct {
@@ -323,46 +313,6 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 		}
 	}
 	return summarizeResourceRow(row, "resource detail")
-}
-
-func (c *client) findResourceInList(ctx context.Context, id string) (*ResourceSummary, error) {
-	const (
-		pageLimit       = 100
-		maximumPageRead = 100
-	)
-	cursor := ""
-	seen := map[string]struct{}{}
-	for pageNumber := 0; pageNumber < maximumPageRead; pageNumber++ {
-		page, err := c.List(ctx, ListOptions{Limit: pageLimit, Cursor: cursor})
-		if err != nil {
-			return nil, err
-		}
-		for i := range page.Items {
-			item := &page.Items[i]
-			if item.CRID != id && item.ResourceID != id {
-				continue
-			}
-			if item.CRID != "" {
-				if err := resourceidentity.ValidatePair(item.CRID, item.ResourceID); err != nil {
-					return nil, fmt.Errorf("%w: resource list lookup identity: %w", qurl.ErrInvalidAPIResponse, err)
-				}
-			}
-			return item, nil
-		}
-		if !page.HasMore {
-			return nil, &Error{StatusCode: http.StatusNotFound, Code: "not_found", Title: "Resource Not Found"}
-		}
-		next := strings.TrimSpace(page.NextCursor)
-		if next == "" {
-			return nil, fmt.Errorf("%w: resource list lookup has_more without a cursor", qurl.ErrInvalidAPIResponse)
-		}
-		if _, exists := seen[next]; exists {
-			return nil, fmt.Errorf("%w: resource list lookup repeated its cursor", qurl.ErrInvalidAPIResponse)
-		}
-		seen[next] = struct{}{}
-		cursor = next
-	}
-	return nil, fmt.Errorf("%w: resource list lookup exceeded %d pages", qurl.ErrInvalidAPIResponse, maximumPageRead)
 }
 
 func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, error) {

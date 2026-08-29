@@ -47,6 +47,24 @@ const (
 // that. See the package comment for the flip procedure.
 var defaultServerPublicKeyB64 string
 
+// EmbeddedProductionPinFingerprint validates the build-time production trust
+// root and returns its SHA-256 fingerprint. It deliberately ignores custom
+// deployment environment overrides: release verification must prove that the
+// shipped executable itself carries the exact reviewed pin.
+func EmbeddedProductionPinFingerprint() (string, error) {
+	if defaultServerPublicKeyB64 == "" {
+		return "", fmt.Errorf("%w: this build has no pinned production Hub key", ErrConfig)
+	}
+	if defaultServerPublicKeyB64 != strings.TrimSpace(defaultServerPublicKeyB64) {
+		return "", fmt.Errorf("%w: the embedded production Hub key has surrounding whitespace", ErrConfig)
+	}
+	key, err := DecodeServerPublicKeyB64(defaultServerPublicKeyB64)
+	if err != nil {
+		return "", fmt.Errorf("%w: the embedded production Hub key %w", ErrConfig, err)
+	}
+	return FingerprintSHA256Hex(key), nil
+}
+
 // ErrConfig is the identity of every Hub trust-bootstrap configuration
 // failure this package can return: a dark build with no override triple, a
 // partially set triple, or a malformed value in it. One sentinel for the
