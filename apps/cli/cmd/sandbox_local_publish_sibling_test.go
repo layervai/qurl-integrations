@@ -46,8 +46,13 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 		loaded.DeviceAPIKey == "" || loaded.DeviceAPIKeyID == "" {
 		return errors.New("durable device identity is incomplete")
 	}
-	if loaded.EnrollmentCredentialKind != "account" {
-		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account", loaded.EnrollmentCredentialKind)
+	switch qurl.RegistrationKeyKind(loaded.EnrollmentCredentialKind) {
+	case qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap:
+		// Both kinds are owner-scoped by the qurl-go native session-operation
+		// contract. The CLI uses a one-shot agent enrollment token, which NHP
+		// records as bootstrap without making it connector-scoped.
+	default:
+		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account or bootstrap", loaded.EnrollmentCredentialKind)
 	}
 	if wantDeviceKeyID != "" && loaded.DeviceAPIKeyID != wantDeviceKeyID {
 		return errors.New("durable device credential identity changed across lifecycle restart")
@@ -57,22 +62,32 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 
 func TestValidateSandboxDeviceIdentity(t *testing.T) {
 	registeredAt := time.Now().UTC()
-	valid := &qurl.AgentState{
+	validAccount := &qurl.AgentState{
 		AgentID: "qurl-share-r1-a1-hs", PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt,
-		DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-1", EnrollmentCredentialKind: "account",
+		DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-1", EnrollmentCredentialKind: string(qurl.RegistrationKeyKindAccount),
 	}
-	if err := validateSandboxDeviceIdentity(valid, valid.AgentID, valid.DeviceAPIKeyID); err != nil {
-		t.Fatalf("valid identity: %v", err)
+	validBootstrap := *validAccount
+	validBootstrap.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindBootstrap)
+	for name, valid := range map[string]*qurl.AgentState{
+		"account":   validAccount,
+		"bootstrap": &validBootstrap,
+	} {
+		t.Run("valid_"+name, func(t *testing.T) {
+			if err := validateSandboxDeviceIdentity(valid, valid.AgentID, valid.DeviceAPIKeyID); err != nil {
+				t.Fatalf("valid owner-scoped identity: %v", err)
+			}
+		})
 	}
 	for name, loaded := range map[string]*qurl.AgentState{
 		"missing":          nil,
-		"incomplete":       {AgentID: valid.AgentID},
+		"incomplete":       {AgentID: validAccount.AgentID},
 		"wrong agent":      {AgentID: "other"},
-		"wrong credential": {AgentID: valid.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-2", EnrollmentCredentialKind: "account"},
-		"wrong scope":      {AgentID: valid.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: valid.DeviceAPIKeyID, EnrollmentCredentialKind: "bootstrap"},
+		"wrong credential": {AgentID: validAccount.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-2", EnrollmentCredentialKind: string(qurl.RegistrationKeyKindAccount)},
+		"connector scope":  {AgentID: validAccount.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: validAccount.DeviceAPIKeyID, EnrollmentCredentialKind: string(qurl.RegistrationKeyKindConnectorBootstrap)},
+		"retired agent":    {AgentID: validAccount.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: validAccount.DeviceAPIKeyID, EnrollmentCredentialKind: string(qurl.RegistrationKeyKindAgent)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSandboxDeviceIdentity(loaded, valid.AgentID, valid.DeviceAPIKeyID); err == nil {
+			if err := validateSandboxDeviceIdentity(loaded, validAccount.AgentID, validAccount.DeviceAPIKeyID); err == nil {
 				t.Fatal("invalid durable identity accepted")
 			}
 		})
