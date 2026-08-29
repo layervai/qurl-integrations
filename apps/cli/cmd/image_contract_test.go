@@ -276,6 +276,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
 		"TestSandboxForegroundLifecycleStateContract",
+		"TestSandboxFullCustomerLifecyclePhaseContract",
 		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",

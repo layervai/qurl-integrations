@@ -241,12 +241,13 @@ jobs:
       - name: Run credential-free sandbox validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding
             TestRunSandboxLocalCLIUsesExactBinaryAndState
             TestSandboxForegroundLifecycleStateContract
+            TestSandboxFullCustomerLifecyclePhaseContract
             TestSandboxHarnessPassesInlineAPIKeyToExactBinary
             TestSandboxNamespaceIsCanonicalAndSeparated
             TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
