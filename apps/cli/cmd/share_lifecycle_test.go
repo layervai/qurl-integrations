@@ -749,8 +749,8 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	if _, err := registry.Get(context.Background(), srv.Key.CRID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("deleted local share still present: %v", err)
 	}
-	if daemon.ensures != 0 || daemon.reloads != 0 {
-		t.Fatalf("delete touched LaunchAgent controller: %+v", daemon)
+	if daemon.ensures != 0 || daemon.reloads != 1 {
+		t.Fatalf("delete daemon reconciliation = %+v, want one reload and no install", daemon)
 	}
 }
 

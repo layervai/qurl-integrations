@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
@@ -104,13 +103,11 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 	if err := registry.Delete(ctx, local.ResourceID); err != nil {
 		return err
 	}
-	socketPath := connectordaemon.StateSocketPath(stateDir)
-	if _, err := os.Lstat(socketPath); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	_, err = (connectordaemon.IPCClient{SocketPath: socketPath}).ReloadIfRunning(ctx)
+	// Reload through the platform controller instead of probing for a Unix
+	// socket file. On Windows the same logical address maps to a named pipe and
+	// has no filesystem entry. ReloadIfRunning is side-effect free when no
+	// daemon exists: it neither installs nor starts a background job.
+	_, err = opts.newShareDaemon(stateDir, "").ReloadIfRunning(ctx)
 	return err
 }
 

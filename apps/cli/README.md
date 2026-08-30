@@ -169,19 +169,21 @@ second newline.
 On Unix, the file must be owned by you, have mode `0400` or `0600`, and have
 exactly one hard link. Create it with
 `(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`.
-PowerShell's normal CRLF line ending is accepted. To write UTF-8 without a BOM:
+
+On Windows, `QURL_API_KEY_FILE` must name a file that is owned by the current
+user and has a protected, owner-only ACL. PowerShell's normal CRLF line ending
+is accepted. To write UTF-8 without a BOM:
 
 ```powershell
 [IO.File]::WriteAllText($path, $key + "`n", [Text.UTF8Encoding]::new($false))
 ```
 
-On Windows, `QURL_API_KEY_FILE` must name a file that is owned by the current
-user and has a protected, owner-only ACL. Create the file inside an owner-only
-temporary directory, remove ACL inheritance from the file, and remove the file
-immediately after `qurl login`. The CLI rejects an inherited or broadly
-readable ACL with the exact failing ACL condition. For most Windows CI jobs,
-use the one-command `QURL_API_KEY` environment value instead; qurl consumes it
-only for enrollment and does not store it.
+Create the file inside an owner-only temporary directory, remove ACL
+inheritance from the file, and remove the file immediately after `qurl login`.
+The CLI rejects an inherited or broadly readable ACL with the exact failing
+ACL condition. For most Windows CI jobs, use the one-command `QURL_API_KEY`
+environment value instead; qurl consumes it only for enrollment and does not
+store it.
 
 The CLI validates the account key, mints one one-shot agent enrollment
 credential, and registers an X25519 device identity through NHP 1.1. Only the

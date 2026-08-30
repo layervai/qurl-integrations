@@ -114,7 +114,7 @@ func (c *client) MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnr
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode agent enrollment response: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	if err := validateAgentEnrollmentResponse(&env.Data, time.Now()); err != nil {
+	if err := validateAgentEnrollmentResponse(&env.Data); err != nil {
 		return nil, err
 	}
 	return &AgentEnrollmentToken{Token: env.Data.Token, KeyID: env.Data.KeyID, ExpiresAt: *env.Data.ExpiresAt}, nil
@@ -160,7 +160,7 @@ func (c *client) MintConnectorEnrollmentToken(ctx context.Context, opts MintConn
 	if err := json.Unmarshal(reply.body, &env); err != nil {
 		return nil, fmt.Errorf("%w: decode connector enrollment response: %w", qurl.ErrInvalidAPIResponse, err)
 	}
-	if err := validateConnectorEnrollmentResponse(&env.Data, opts.ConnectorID, time.Now()); err != nil {
+	if err := validateConnectorEnrollmentResponse(&env.Data, opts.ConnectorID); err != nil {
 		return nil, err
 	}
 	return &ConnectorEnrollmentToken{
@@ -187,7 +187,7 @@ func validateEnrollmentIdempotencyKey(value string) error {
 	return nil
 }
 
-func validateAgentEnrollmentResponse(data *connectorEnrollmentData, now time.Time) error {
+func validateAgentEnrollmentResponse(data *connectorEnrollmentData) error {
 	invalid := func(detail string) error {
 		return fmt.Errorf("%w: agent enrollment response %s", qurl.ErrInvalidAPIResponse, detail)
 	}
@@ -203,17 +203,17 @@ func validateAgentEnrollmentResponse(data *connectorEnrollmentData, now time.Tim
 	if data.Status != connectorEnrollmentStatus {
 		return invalid("is not active")
 	}
-	// This checks only that the one-shot credential is still usable; it does
-	// not infer or cap producer lifetime from the client clock. The service's
-	// 24-hour enrollment lifetime is the current clock-skew budget. Revisit the
-	// policy explicitly if that lifetime is shortened.
-	if data.ExpiresAt == nil || data.ExpiresAt.IsZero() || !data.ExpiresAt.After(now) {
-		return invalid("has no live expiry")
+	// The authenticated service and NHP verifier enforce credential lifetime.
+	// The CLI checks only that the response carries a timestamp; comparing it
+	// with this machine's clock would reject a fresh one-shot credential on a
+	// skewed client before the authority that minted it can validate it.
+	if data.ExpiresAt == nil || data.ExpiresAt.IsZero() {
+		return invalid("has no expiry")
 	}
 	return nil
 }
 
-func validateConnectorEnrollmentResponse(data *connectorEnrollmentData, connectorID string, now time.Time) error {
+func validateConnectorEnrollmentResponse(data *connectorEnrollmentData, connectorID string) error {
 	// TODO(upstream-contract): Keep these response-envelope checks in lockstep
 	// with qurl-service's Connector enrollment response contract.
 	invalid := func(detail string) error {
@@ -237,13 +237,10 @@ func validateConnectorEnrollmentResponse(data *connectorEnrollmentData, connecto
 	if data.Status != connectorEnrollmentStatus {
 		return invalid("is not active")
 	}
-	// As above, do not infer producer lifetime from the client clock. The
-	// service's 24-hour enrollment lifetime is the current skew budget.
+	// As above, keep lifetime enforcement with the credential authority rather
+	// than treating the client clock as trusted input.
 	if data.ExpiresAt == nil || data.ExpiresAt.IsZero() {
 		return invalid("missing expiry")
-	}
-	if !data.ExpiresAt.After(now) {
-		return invalid("is already expired")
 	}
 	return nil
 }

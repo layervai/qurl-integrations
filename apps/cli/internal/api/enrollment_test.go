@@ -223,7 +223,6 @@ func TestMintConnectorEnrollmentTokenRejectsInvalidResponses(t *testing.T) {
 		},
 		"inactive":       func(data map[string]any) { data["status"] = "revoked" },
 		"missing expiry": func(data map[string]any) { delete(data, "expires_at") },
-		"expired":        func(data map[string]any) { data["expires_at"] = time.Now().Add(-time.Minute) },
 		"malformed expiry": func(data map[string]any) {
 			data["expires_at"] = "not-a-timestamp"
 		},
@@ -268,8 +267,29 @@ func TestValidateAgentEnrollmentResponseRejectsWrongTokenShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateAgentEnrollmentResponse(&decoded, time.Now()); !errors.Is(err, qurl.ErrInvalidAPIResponse) || strings.Contains(err.Error(), "opaque-enrollment-token") {
+	if err := validateAgentEnrollmentResponse(&decoded); !errors.Is(err, qurl.ErrInvalidAPIResponse) || strings.Contains(err.Error(), "opaque-enrollment-token") {
 		t.Fatalf("agent enrollment validation error = %v, want redacted invalid response", err)
+	}
+}
+
+func TestEnrollmentResponseExpiryDoesNotTrustClientClock(t *testing.T) {
+	past := time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second)
+	data := validEnrollmentData(past)
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded connectorEnrollmentData
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConnectorEnrollmentResponse(&decoded, testConnectorID); err != nil {
+		t.Fatalf("connector enrollment rejected producer timestamp using client clock: %v", err)
+	}
+	decoded.Target = agentEnrollmentTarget
+	decoded.Claims = nil
+	if err := validateAgentEnrollmentResponse(&decoded); err != nil {
+		t.Fatalf("agent enrollment rejected producer timestamp using client clock: %v", err)
 	}
 }
 
