@@ -16,6 +16,22 @@ import (
 // ErrResourceGone marks a permanent resource-local denial.
 var ErrResourceGone = errors.New("local share resource is permanently unavailable")
 
+const (
+	diagnosticStateStarting = "starting"
+	diagnosticStateRetrying = "retrying"
+	diagnosticStateServing  = "serving"
+	diagnosticStateFailed   = "failed"
+	diagnosticStateStopped  = "stopped"
+
+	diagnosticFailureAssignment          = "assignment"
+	diagnosticFailureIdentity            = "identity"
+	diagnosticFailureLocalState          = "local_state"
+	diagnosticFailureNetwork             = "network"
+	diagnosticFailurePlatformDenied      = "platform_denied"
+	diagnosticFailureResourceUnavailable = "resource_unavailable"
+	diagnosticFailureUnknown             = "unknown"
+)
+
 // Registry is the durable desired-state surface consumed by the daemon.
 type Registry interface {
 	List(context.Context) ([]connectorstate.LocalShare, error)
@@ -49,6 +65,7 @@ type Manager struct {
 	failures            map[string]int
 	retrying            map[string]bool
 	retryGeneration     map[string]uint64
+	diagnostics         map[string]ResourceDiagnostic
 	nextRetryGeneration uint64
 	trigger             chan struct{}
 
@@ -62,6 +79,21 @@ type managedSession struct {
 	session Session
 }
 
+// ResourceDiagnostic is the redacted, resource-local daemon state exposed by
+// owner-only IPC. It contains no endpoint, credential, receipt, or topology.
+type ResourceDiagnostic struct {
+	State           string     `json:"state"`
+	LastTransition  time.Time  `json:"last_transition"`
+	FailureCategory string     `json:"failure_category,omitempty"`
+	FailureCode     string     `json:"failure_code,omitempty"`
+	RetryAttempt    int        `json:"retry_attempt"`
+	NextRetryAt     *time.Time `json:"next_retry_at,omitempty"`
+}
+
+type diagnosticSession interface {
+	Diagnostic() ResourceDiagnostic
+}
+
 // NewManager builds a resource-isolated share reconciler.
 func NewManager(registry Registry, factory SessionFactory) (*Manager, error) {
 	if registry == nil || factory == nil {
@@ -69,7 +101,8 @@ func NewManager(registry Registry, factory SessionFactory) (*Manager, error) {
 	}
 	return &Manager{
 		registry: registry, factory: factory,
-		sessions: map[string]*managedSession{}, failures: map[string]int{}, retrying: map[string]bool{}, retryGeneration: map[string]uint64{}, trigger: make(chan struct{}, 1),
+		sessions: map[string]*managedSession{}, failures: map[string]int{}, retrying: map[string]bool{},
+		retryGeneration: map[string]uint64{}, diagnostics: map[string]ResourceDiagnostic{}, trigger: make(chan struct{}, 1),
 		resourceStopTimeout: 10 * time.Second, resourceGonePersistTimeout: 5 * time.Second, retryDelay: daemonRetryDelay,
 	}, nil
 }
@@ -133,6 +166,7 @@ func (m *Manager) pruneRetryState(desired map[string]*connectorstate.LocalShare)
 			delete(m.failures, resourceID)
 			delete(m.retrying, resourceID)
 			delete(m.retryGeneration, resourceID)
+			delete(m.diagnostics, resourceID)
 		}
 	}
 }
@@ -188,7 +222,7 @@ func (m *Manager) stopReplacedSessions(ctx context.Context, desired map[string]*
 				if _, replaced := m.sessions[current.share.ResourceID]; !replaced {
 					m.sessions[current.share.ResourceID] = current
 				}
-				m.scheduleRetryLocked(ctx, current.share.ResourceID)
+				m.scheduleRetryLocked(ctx, current.share.ResourceID, err)
 				m.mu.Unlock()
 				delete(desired, current.share.ResourceID)
 			}
@@ -207,13 +241,13 @@ func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*
 			if errors.Is(err, ErrResourceGone) {
 				if !m.persistResourceGone(ctx, share) {
 					m.mu.Lock()
-					m.scheduleRetryLocked(ctx, share.ResourceID)
+					m.scheduleRetryLocked(ctx, share.ResourceID, ErrResourceGone)
 					m.mu.Unlock()
 				}
 				continue
 			}
 			m.mu.Lock()
-			m.scheduleRetryLocked(ctx, share.ResourceID)
+			m.scheduleRetryLocked(ctx, share.ResourceID, err)
 			m.mu.Unlock()
 			continue
 		}
@@ -222,6 +256,11 @@ func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*
 		delete(m.retrying, share.ResourceID)
 		delete(m.retryGeneration, share.ResourceID)
 		m.sessions[share.ResourceID] = &managedSession{share: *share, session: session}
+		if diagnostic, ok := session.(diagnosticSession); ok {
+			m.diagnostics[share.ResourceID] = diagnostic.Diagnostic()
+		} else {
+			m.diagnostics[share.ResourceID] = ResourceDiagnostic{State: diagnosticStateStarting, LastTransition: time.Now().UTC()}
+		}
 		m.mu.Unlock()
 		go m.watch(ctx, share.ResourceID, session)
 	}
@@ -241,13 +280,13 @@ func (m *Manager) watch(ctx context.Context, resourceID string, session Session)
 	if errors.Is(session.Err(), ErrResourceGone) {
 		if !m.persistResourceGone(ctx, &current.share) {
 			m.mu.Lock()
-			m.scheduleRetryLocked(ctx, resourceID)
+			m.scheduleRetryLocked(ctx, resourceID, session.Err())
 			m.mu.Unlock()
 		}
 		return
 	}
 	m.mu.Lock()
-	m.scheduleRetryLocked(ctx, resourceID)
+	m.scheduleRetryLocked(ctx, resourceID, session.Err())
 	m.mu.Unlock()
 }
 
@@ -275,18 +314,26 @@ func (m *Manager) persistResourceGone(parent context.Context, share *connectorst
 
 // scheduleRetryLocked records a resource-local retry without failing the
 // daemon or disturbing healthy siblings. m.mu must be held by the caller.
-func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string) {
+func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string, cause error) {
 	if m.retrying[resourceID] {
 		return
 	}
 	m.failures[resourceID]++
 	attempt := m.failures[resourceID]
+	delay := m.retryDelay(attempt)
+	now := time.Now().UTC()
+	next := now.Add(delay)
+	category, code := classifyShareFailure(cause)
+	m.diagnostics[resourceID] = ResourceDiagnostic{
+		State: diagnosticStateRetrying, LastTransition: now, FailureCategory: category,
+		FailureCode: code, RetryAttempt: attempt, NextRetryAt: &next,
+	}
 	m.retrying[resourceID] = true
 	m.nextRetryGeneration++
 	generation := m.nextRetryGeneration
 	m.retryGeneration[resourceID] = generation
 	go func() {
-		timer := time.NewTimer(m.retryDelay(attempt))
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		fire := false
 		select {
@@ -353,6 +400,22 @@ func (m *Manager) Running() map[string]string {
 	result := make(map[string]string, len(m.sessions))
 	for resourceID, current := range m.sessions {
 		result[resourceID] = current.share.CRID
+	}
+	return result
+}
+
+// Diagnostics returns one redacted snapshot per managed or retrying resource.
+func (m *Manager) Diagnostics() map[string]ResourceDiagnostic {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[string]ResourceDiagnostic, len(m.diagnostics))
+	for resourceID, diagnostic := range m.diagnostics {
+		result[resourceID] = diagnostic
+	}
+	for resourceID, current := range m.sessions {
+		if diagnostic, ok := current.session.(diagnosticSession); ok {
+			result[resourceID] = diagnostic.Diagnostic()
+		}
 	}
 	return result
 }

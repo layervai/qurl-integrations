@@ -38,6 +38,38 @@ type recordingShareDaemon struct {
 	reloadErr error
 }
 
+type diagnosticDaemonRegistry struct{ share connectorstate.LocalShare }
+
+func (r *diagnosticDaemonRegistry) List(context.Context) ([]connectorstate.LocalShare, error) {
+	return []connectorstate.LocalShare{r.share}, nil
+}
+
+func (r *diagnosticDaemonRegistry) DisableTerminal(context.Context, string, uint64) (*connectorstate.LocalShare, error) {
+	return &r.share, nil
+}
+
+type diagnosticDaemonSession struct {
+	done       chan struct{}
+	stop       sync.Once
+	diagnostic connectordaemon.ResourceDiagnostic
+}
+
+func (s *diagnosticDaemonSession) Done() <-chan struct{} { return s.done }
+func (*diagnosticDaemonSession) Err() error              { return nil }
+func (s *diagnosticDaemonSession) Stop(context.Context) error {
+	s.stop.Do(func() { close(s.done) })
+	return nil
+}
+func (s *diagnosticDaemonSession) Diagnostic() connectordaemon.ResourceDiagnostic {
+	return s.diagnostic
+}
+
+type diagnosticDaemonFactory struct{ session *diagnosticDaemonSession }
+
+func (f diagnosticDaemonFactory) Start(context.Context, *connectorstate.LocalShare) (connectordaemon.Session, error) {
+	return f.session, nil
+}
+
 func (d *recordingShareDaemon) Ensure(context.Context) error {
 	d.ensures++
 	return d.ensureErr
@@ -321,6 +353,48 @@ func TestWaitForSharingReportsLastObservedStateWhenRequestUsesDeadline(t *testin
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("wait error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	now := time.Now().UTC()
+	next := now.Add(time.Second)
+	local := connectorstate.LocalShare{
+		ResourceID: "resource-a", CRID: "crid-a", DesiredState: "on", ServingEpoch: 1,
+	}
+	session := &diagnosticDaemonSession{done: make(chan struct{}), diagnostic: connectordaemon.ResourceDiagnostic{
+		State: "retrying", LastTransition: now, FailureCategory: "platform_denied",
+		FailureCode: "52005", RetryAttempt: 3, NextRetryAt: &next,
+	}}
+	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: local}, diagnosticDaemonFactory{session: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	server := &connectordaemon.IPCServer{
+		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+	}
+	go func() { done <- server.Run(ctx) }()
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+		readyCancel()
+		cancel()
+		t.Fatal(err)
+	}
+	readyCancel()
+	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
+		&local, stateDir, 1, 10*time.Millisecond)
+	for _, want := range []string{"failure category platform_denied", "failure code 52005", "retry attempt 3"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			cancel()
+			t.Fatalf("diagnosed wait error = %v, want %q", err, want)
+		}
+	}
+	cancel()
+	if serverErr := <-done; !errors.Is(serverErr, context.Canceled) {
+		t.Fatalf("daemon shutdown = %v", serverErr)
 	}
 }
 
@@ -653,6 +727,49 @@ func TestShareStatusDoesNotStartOrReloadDaemon(t *testing.T) {
 	}
 	if daemon.ensures != 0 || daemon.reloads != 0 {
 		t.Fatalf("status touched daemon: %+v", daemon)
+	}
+}
+
+func TestShareInspectAddsRedactedLocalDiagnostics(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+			"desired_state": "on", "serving_epoch": seed.ServingEpoch, "connection_state": "connecting",
+		}, nil)
+	})
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "--output", "json", "inspect", srv.Key.CRID},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{
+		`"daemon_state": "not_running"`, `"local_target_health": "healthy"`,
+		`"last_transition":`, `"retry_attempt": 0`,
+	} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Fatalf("inspect output=%s, want %s", res.stdout.String(), want)
+		}
+	}
+	for _, forbidden := range []string{"connector_routing_id", "knock_resource_id", "session_receipt", "server_public_key"} {
+		if strings.Contains(res.stdout.String(), forbidden) {
+			t.Fatalf("inspect output exposed %q: %s", forbidden, res.stdout.String())
+		}
 	}
 }
 

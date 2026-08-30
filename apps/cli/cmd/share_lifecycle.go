@@ -19,6 +19,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 type localShareRegistry interface {
@@ -72,14 +73,14 @@ func shareInspectCmd(opts *globalOpts) *cobra.Command {
 	return shareReadStateCmd(opts, "inspect <CRID>", "Inspect resource or local sharing state", true)
 }
 
-func shareReadStateCmd(opts *globalOpts, use, short string, alias bool) *cobra.Command {
+func shareReadStateCmd(opts *globalOpts, use, short string, inspect bool) *cobra.Command {
 	long := `Show the current state of a published resource.
 
 For a remote URL, this command reports the resource type, target, and active or
 revoked state. For a local app, it reports durable desired state separately from
 the platform's observed Connector state and serving epoch.`
-	if alias {
-		long += "\n\nInspect is an alias for status and returns the same fields."
+	if inspect {
+		long += "\n\nInspect also reports redacted daemon, retry, transition, and local target health diagnostics."
 	}
 	return &cobra.Command{
 		Use:   use,
@@ -105,7 +106,7 @@ the platform's observed Connector state and serving epoch.`
 				}
 				return opts.printer().ResourceStatus(resource)
 			}
-			local, _, err := readLocalShareIfPresent(cmd.Context(), opts, args[0])
+			local, stateDir, err := readLocalShareIfPresent(cmd.Context(), opts, args[0])
 			if err != nil {
 				return err
 			}
@@ -115,6 +116,9 @@ the platform's observed Connector state and serving epoch.`
 					return err
 				}
 				target = local.TargetURL
+			}
+			if inspect {
+				return inspectLocalSharing(cmd.Context(), opts, local, stateDir, sharing)
 			}
 			return opts.printer().Sharing(target, sharing)
 		},
@@ -138,7 +142,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := requireBackgroundShareSupport(opts.backgroundShareGOOS); err != nil {
 		return err
 	}
-	registry, daemon, _, err := openShareControl(opts)
+	registry, daemon, stateDir, err := openShareControl(opts)
 	if err != nil {
 		return err
 	}
@@ -183,7 +187,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err := daemon.Ensure(ctx); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
-	sharing, err = waitForSharing(ctx, client, local, sharing.ServingEpoch, opts.sharingWaitLimit)
+	sharing, err = waitForSharingWithDiagnostics(ctx, client, local, stateDir, sharing.ServingEpoch, opts.sharingWaitLimit)
 	if err != nil {
 		return err
 	}
@@ -380,6 +384,105 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 		return nil, nil, "", err
 	}
 	return registry, opts.newShareDaemon(stateDir, logDir), stateDir, nil
+}
+
+func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connectorstate.LocalShare, stateDir string,
+	sharing *qurlapi.Sharing,
+) error {
+	inspection := output.SharingInspection{
+		State: sharing, DaemonState: "not_registered", TargetHealth: "not_available",
+	}
+	if local == nil {
+		return opts.printer().InspectSharing(&inspection)
+	}
+	inspection.TargetURL = local.TargetURL
+	lastTransition := local.UpdatedAt.UTC()
+	inspection.LastTransition = &lastTransition
+	healthCtx, cancelHealth := context.WithTimeout(ctx, 2*time.Second)
+	healthErr := opts.preflightTarget(healthCtx, local.LocalIP, local.LocalPort)
+	cancelHealth()
+	if healthErr == nil {
+		inspection.TargetHealth = "healthy"
+	} else {
+		inspection.TargetHealth = "unreachable"
+	}
+	if sharing.DesiredState == qurlapi.DesiredStateOff {
+		inspection.DaemonState = "stopped"
+	} else {
+		inspection.DaemonState = "not_running"
+	}
+	if stateDir == "" {
+		return opts.printer().InspectSharing(&inspection)
+	}
+	statusCtx, cancelStatus := context.WithTimeout(ctx, time.Second)
+	status, running, statusErr := (connectordaemon.IPCClient{
+		SocketPath: connectordaemon.StateSocketPath(stateDir),
+	}).Status(statusCtx)
+	cancelStatus()
+	if statusErr != nil {
+		if running {
+			inspection.DaemonState = "unavailable"
+			inspection.FailureCategory = "local_daemon"
+		}
+		return opts.printer().InspectSharing(&inspection)
+	}
+	if !running {
+		return opts.printer().InspectSharing(&inspection)
+	}
+	diagnostic, present := status.Resources[local.ResourceID]
+	if !present {
+		if _, managed := status.Running[local.ResourceID]; managed {
+			inspection.DaemonState = "starting"
+		} else if sharing.DesiredState == qurlapi.DesiredStateOn {
+			inspection.DaemonState = "idle"
+		}
+		return opts.printer().InspectSharing(&inspection)
+	}
+	inspection.DaemonState = diagnostic.State
+	inspection.FailureCategory = diagnostic.FailureCategory
+	inspection.FailureCode = diagnostic.FailureCode
+	inspection.RetryAttempt = diagnostic.RetryAttempt
+	inspection.NextRetryAt = diagnostic.NextRetryAt
+	if diagnostic.LastTransition.After(lastTransition) {
+		transition := diagnostic.LastTransition
+		inspection.LastTransition = &transition
+	}
+	return opts.printer().InspectSharing(&inspection)
+}
+
+func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, local *connectorstate.LocalShare,
+	stateDir string, epoch uint64, limit time.Duration,
+) (*qurlapi.Sharing, error) {
+	sharing, err := waitForSharing(ctx, client, local, epoch, limit)
+	if err == nil || local == nil || stateDir == "" {
+		return sharing, err
+	}
+	statusCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	status, running, statusErr := (connectordaemon.IPCClient{
+		SocketPath: connectordaemon.StateSocketPath(stateDir),
+	}).Status(statusCtx)
+	if statusErr != nil {
+		return nil, fmt.Errorf("qURL share did not become ready (daemon state unavailable): %w", err)
+	}
+	if !running {
+		return nil, fmt.Errorf("qURL share did not become ready (daemon state not_running): %w", err)
+	}
+	diagnostic, present := status.Resources[local.ResourceID]
+	if !present {
+		return nil, err
+	}
+	detail := "daemon state " + diagnostic.State
+	if diagnostic.FailureCategory != "" {
+		detail += ", failure category " + diagnostic.FailureCategory
+	}
+	if diagnostic.FailureCode != "" {
+		detail += ", failure code " + diagnostic.FailureCode
+	}
+	if diagnostic.RetryAttempt > 0 {
+		detail += ", retry attempt " + strconv.Itoa(diagnostic.RetryAttempt)
+	}
+	return nil, fmt.Errorf("qURL share did not become ready (%s): %w", detail, err)
 }
 
 func validateLocalSharing(local *connectorstate.LocalShare, sharing *qurlapi.Sharing) error {

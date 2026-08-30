@@ -1,6 +1,7 @@
 package output
 
 import (
+	"errors"
 	"fmt"
 	"text/tabwriter"
 	"time"
@@ -81,6 +82,31 @@ type sharingJSON struct {
 	ServingEpoch    uint64                  `json:"serving_epoch"`
 }
 
+type sharingInspectionJSON struct {
+	sharingJSON
+	DaemonState     string     `json:"daemon_state"`
+	LastTransition  *time.Time `json:"last_transition,omitempty"`
+	FailureCategory string     `json:"failure_category,omitempty"`
+	FailureCode     string     `json:"failure_code,omitempty"`
+	RetryAttempt    int        `json:"retry_attempt"`
+	NextRetryAt     *time.Time `json:"next_retry_at,omitempty"`
+	TargetHealth    string     `json:"local_target_health"`
+}
+
+// SharingInspection is the redacted diagnostic view assembled by the command
+// from cloud state, owner-only local state, and owner-only daemon IPC.
+type SharingInspection struct {
+	TargetURL       string
+	State           *qurlapi.Sharing
+	DaemonState     string
+	LastTransition  *time.Time
+	FailureCategory string
+	FailureCode     string
+	RetryAttempt    int
+	NextRetryAt     *time.Time
+	TargetHealth    string
+}
+
 type resourceStatusJSON struct {
 	// Description and tags are intentionally absent: status is the compact
 	// lifecycle view, while list is the metadata inventory surface.
@@ -153,6 +179,63 @@ func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
 		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
 		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		return ew.flush(tw)
+	}
+}
+
+// InspectSharing renders useful local diagnostics without endpoint topology,
+// credentials, session receipts, or raw internal errors.
+func (p *Printer) InspectSharing(inspection *SharingInspection) error {
+	if inspection == nil {
+		return errors.New("qURL sharing inspection is incomplete")
+	}
+	state := inspection.State
+	if state == nil {
+		return errors.New("qURL sharing inspection is incomplete")
+	}
+	switch {
+	case p.format == FormatJSON:
+		return p.writeJSON(sharingInspectionJSON{
+			sharingJSON: sharingJSON{
+				CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: inspection.TargetURL,
+				DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
+				ServingEpoch: state.ServingEpoch,
+			},
+			DaemonState: inspection.DaemonState, LastTransition: inspection.LastTransition,
+			FailureCategory: inspection.FailureCategory, FailureCode: inspection.FailureCode,
+			RetryAttempt: inspection.RetryAttempt, NextRetryAt: inspection.NextRetryAt,
+			TargetHealth: inspection.TargetHealth,
+		})
+	case p.quiet:
+		_, err := fmt.Fprintln(p.out, state.CRID)
+		return err
+	default:
+		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
+		ew := &errWriter{w: tw}
+		ew.printf("%s\t%s\n", p.bold("CRID:"), state.CRID)
+		if inspection.TargetURL != "" {
+			ew.printf("%s\t%s\n", p.bold("Target:"), inspection.TargetURL)
+		}
+		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
+		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
+		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		ew.printf("%s\t%s\n", p.bold("Daemon:"), inspection.DaemonState)
+		ew.printf("%s\t%s\n", p.bold("Local target:"), inspection.TargetHealth)
+		if inspection.LastTransition != nil {
+			ew.printf("%s\t%s\n", p.bold("Last transition:"), inspection.LastTransition.UTC().Format(time.RFC3339))
+		}
+		if inspection.FailureCategory != "" {
+			ew.printf("%s\t%s\n", p.bold("Failure category:"), inspection.FailureCategory)
+		}
+		if inspection.FailureCode != "" {
+			ew.printf("%s\t%s\n", p.bold("Failure code:"), inspection.FailureCode)
+		}
+		if inspection.RetryAttempt > 0 {
+			ew.printf("%s\t%d\n", p.bold("Retry attempt:"), inspection.RetryAttempt)
+		}
+		if inspection.NextRetryAt != nil {
+			ew.printf("%s\t%s\n", p.bold("Next retry:"), inspection.NextRetryAt.UTC().Format(time.RFC3339))
+		}
 		return ew.flush(tw)
 	}
 }

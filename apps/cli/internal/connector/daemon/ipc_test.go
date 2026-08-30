@@ -390,12 +390,15 @@ func TestWaitReadyClosesNonSuccessProbeBodies(t *testing.T) {
 
 func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 	for name, input := range map[string]string{
-		"empty version":     `{"job_version":"","running":{}}`,
+		"empty version":     `{"job_version":"","running":{},"resources":{}}`,
 		"missing map":       `{"job_version":"1/test"}`,
-		"unknown field":     `{"job_version":"1/test","running":{},"extra":true}`,
-		"trailing value":    `{"job_version":"1/test","running":{}} {}`,
-		"blank resource id": `{"job_version":"1/test","running":{"":"crid"}}`,
-		"blank crid":        `{"job_version":"1/test","running":{"resource":""}}`,
+		"missing resources": `{"job_version":"1/test","running":{}}`,
+		"unknown field":     `{"job_version":"1/test","running":{},"resources":{},"extra":true}`,
+		"trailing value":    `{"job_version":"1/test","running":{},"resources":{}} {}`,
+		"blank resource id": `{"job_version":"1/test","running":{"":"crid"},"resources":{}}`,
+		"blank crid":        `{"job_version":"1/test","running":{"resource":""},"resources":{}}`,
+		"unsafe category":   `{"job_version":"1/test","running":{},"resources":{"resource":{"state":"failed","last_transition":"2026-08-30T15:00:00Z","failure_category":"internal_topology","retry_attempt":0}}}`,
+		"unsafe code":       `{"job_version":"1/test","running":{},"resources":{"resource":{"state":"failed","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"secret","retry_attempt":0}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := decodeIPCStatus(strings.NewReader(input)); err == nil {
@@ -403,8 +406,9 @@ func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 			}
 		})
 	}
-	got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","running":{"resource":"crid"}}`))
-	if err != nil || got.JobVersion != "1/test" || got.Running["resource"] != "crid" {
+	got, err := decodeIPCStatus(strings.NewReader(`{"job_version":"1/test","running":{"resource":"crid"},"resources":{"resource":{"state":"retrying","last_transition":"2026-08-30T15:00:00Z","failure_category":"platform_denied","failure_code":"52005","retry_attempt":2,"next_retry_at":"2026-08-30T15:00:02Z"}}}`))
+	if err != nil || got.JobVersion != "1/test" || got.Running["resource"] != "crid" ||
+		got.Resources["resource"].FailureCode != "52005" {
 		t.Fatalf("valid status = %+v, %v", got, err)
 	}
 }

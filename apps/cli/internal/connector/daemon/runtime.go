@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -264,6 +267,12 @@ func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.
 	if err != nil {
 		return nil, err
 	}
+	// The manager owns the returned session and stops it explicitly. Retaining
+	// a one-shot Reconcile context would couple a healthy route to that call.
+	runCtx, cancel := context.WithCancel(context.Background())
+	session := &nativeSession{cancel: cancel, done: make(chan struct{}), diagnostic: ResourceDiagnostic{
+		State: diagnosticStateStarting, LastTransition: time.Now().UTC(),
+	}}
 	runner, err := connectorshare.NewResourceRunner(connectorshare.ResourceConfig{
 		KnockResourceID: local.KnockResourceID,
 		ResourceID:      local.ResourceID,
@@ -273,19 +282,18 @@ func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.
 			// A failed marker clear is deliberately retried on the next serving
 			// cycle. It must not tear down a healthy route or its siblings.
 			_ = f.admitter.MarkServingHealthy()
+			session.recordServing()
 		},
 		OnRetry: func(err error, wait time.Duration) {
+			session.recordRetry(err, wait)
 			slog.WarnContext(ctx, "share daemon session attempt failed; retrying",
 				"crid", local.CRID, "retry_in", wait, "error", qurlapi.Redact(err.Error()))
 		},
 	})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	// The manager owns the returned session and stops it explicitly. Retaining
-	// a one-shot Reconcile context would couple a healthy route to that call.
-	runCtx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is retained by nativeSession.Stop.
-	session := &nativeSession{cancel: cancel, done: make(chan struct{})}
 	go session.run(runCtx, runner)
 	return session, nil
 }
@@ -302,9 +310,10 @@ type nativeSession struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu   sync.Mutex
-	err  error
-	once sync.Once
+	mu         sync.Mutex
+	err        error
+	once       sync.Once
+	diagnostic ResourceDiagnostic
 }
 
 func (s *nativeSession) run(ctx context.Context, runner *connectorshare.ResourceRunner) {
@@ -316,6 +325,13 @@ func (s *nativeSession) run(ctx context.Context, runner *connectorshare.Resource
 	}
 	s.mu.Lock()
 	s.err = err
+	s.diagnostic.State = diagnosticStateStopped
+	if err != nil {
+		s.diagnostic.State = diagnosticStateFailed
+		s.diagnostic.FailureCategory, s.diagnostic.FailureCode = classifyShareFailure(err)
+	}
+	s.diagnostic.LastTransition = time.Now().UTC()
+	s.diagnostic.NextRetryAt = nil
 	s.mu.Unlock()
 	close(s.done)
 }
@@ -328,6 +344,81 @@ func (s *nativeSession) Err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
+}
+
+// Diagnostic returns the current redacted state for owner-only IPC.
+func (s *nativeSession) Diagnostic() ResourceDiagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.diagnostic
+}
+
+func (s *nativeSession) recordServing() {
+	s.mu.Lock()
+	s.diagnostic = ResourceDiagnostic{State: diagnosticStateServing, LastTransition: time.Now().UTC()}
+	s.mu.Unlock()
+}
+
+func (s *nativeSession) recordRetry(err error, wait time.Duration) {
+	now := time.Now().UTC()
+	next := now.Add(wait)
+	category, code := classifyShareFailure(err)
+	s.mu.Lock()
+	s.diagnostic.State = diagnosticStateRetrying
+	s.diagnostic.LastTransition = now
+	s.diagnostic.FailureCategory = category
+	s.diagnostic.FailureCode = code
+	s.diagnostic.RetryAttempt++
+	s.diagnostic.NextRetryAt = &next
+	s.mu.Unlock()
+}
+
+func classifyShareFailure(err error) (category, code string) {
+	if err == nil {
+		return diagnosticFailureUnknown, ""
+	}
+	var deny *qurl.ServerDenyError
+	if errors.As(err, &deny) {
+		return diagnosticFailurePlatformDenied, deny.ErrCode
+	}
+	var assignment *qurl.AssignmentError
+	if errors.As(err, &assignment) {
+		return diagnosticFailureAssignment, assignment.Code
+	}
+	for _, sentinel := range []error{
+		qurl.ErrAssignmentIdentityRejected, qurl.ErrAssignmentKeyRejected,
+		qurl.ErrInvalidAgentState, qurl.ErrInsecureAgentStatePermissions,
+		qurl.ErrRegistrationInvalidInput, qurl.ErrKeyRejected,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureIdentity, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrAssignmentUnavailable, qurl.ErrAssignmentRecoveryRequired,
+		qurl.ErrAssignmentReassignmentRequired, qurl.ErrAssignmentRateLimited,
+		qurl.ErrAssignmentLeaseExpired,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureAssignment, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrEndpointNoReply, nativeudp.ErrResolve, nativeudp.ErrTransport,
+		nativeudp.ErrNoReply, context.DeadlineExceeded,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureNetwork, ""
+		}
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, os.ErrPermission) {
+		return diagnosticFailureLocalState, ""
+	}
+	if errors.Is(err, ErrResourceGone) || errors.Is(err, connectorshare.ErrResourceGone) {
+		return diagnosticFailureResourceUnavailable, ""
+	}
+	return diagnosticFailureUnknown, ""
 }
 
 // Stop cancels and joins the resource runner.

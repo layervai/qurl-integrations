@@ -80,9 +80,10 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(struct {
-			JobVersion string            `json:"job_version"`
-			Running    map[string]string `json:"running"`
-		}{JobVersion: s.JobVersion, Running: s.Manager.Running()})
+			JobVersion string                        `json:"job_version"`
+			Running    map[string]string             `json:"running"`
+			Resources  map[string]ResourceDiagnostic `json:"resources"`
+		}{JobVersion: s.JobVersion, Running: s.Manager.Running(), Resources: s.Manager.Diagnostics()})
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	serveDone := make(chan error, 1)
@@ -121,8 +122,9 @@ type IPCClient struct {
 
 // IPCStatus is the daemon version handshake and active resource set.
 type IPCStatus struct {
-	JobVersion string            `json:"job_version"`
-	Running    map[string]string `json:"running"`
+	JobVersion string                        `json:"job_version"`
+	Running    map[string]string             `json:"running"`
+	Resources  map[string]ResourceDiagnostic `json:"resources"`
 }
 
 // Status reads the daemon handshake without starting it.
@@ -163,12 +165,74 @@ func decodeIPCStatus(reader io.Reader) (IPCStatus, error) {
 	if status.Running == nil {
 		return IPCStatus{}, errors.New("decode share daemon status: running map is missing")
 	}
+	if status.Resources == nil {
+		return IPCStatus{}, errors.New("decode share daemon status: resources map is missing")
+	}
 	for resourceID, crid := range status.Running {
 		if strings.TrimSpace(resourceID) == "" || resourceID != strings.TrimSpace(resourceID) || strings.TrimSpace(crid) == "" || crid != strings.TrimSpace(crid) {
 			return IPCStatus{}, errors.New("decode share daemon status: running resource identity is invalid")
 		}
 	}
+	for resourceID, diagnostic := range status.Resources {
+		if err := validateResourceDiagnostic(resourceID, &diagnostic); err != nil {
+			return IPCStatus{}, err
+		}
+	}
 	return status, nil
+}
+
+func validateResourceDiagnostic(resourceID string, diagnostic *ResourceDiagnostic) error {
+	if diagnostic == nil || strings.TrimSpace(resourceID) == "" || resourceID != strings.TrimSpace(resourceID) ||
+		!validDiagnosticState(diagnostic.State) || diagnostic.LastTransition.IsZero() ||
+		diagnostic.LastTransition != diagnostic.LastTransition.UTC() || diagnostic.RetryAttempt < 0 ||
+		!validDiagnosticCategory(diagnostic.FailureCategory) || !validDiagnosticCode(diagnostic.FailureCode) {
+		return errors.New("decode share daemon status: resource diagnostic is invalid")
+	}
+	if diagnostic.State == diagnosticStateRetrying &&
+		(diagnostic.FailureCategory == "" || diagnostic.NextRetryAt == nil) {
+		return errors.New("decode share daemon status: retry diagnostic is incomplete")
+	}
+	if diagnostic.NextRetryAt != nil &&
+		(diagnostic.NextRetryAt.IsZero() || *diagnostic.NextRetryAt != diagnostic.NextRetryAt.UTC()) {
+		return errors.New("decode share daemon status: retry time is invalid")
+	}
+	return nil
+}
+
+func validDiagnosticState(state string) bool {
+	switch state {
+	case diagnosticStateStarting, diagnosticStateRetrying, diagnosticStateServing, diagnosticStateFailed,
+		diagnosticStateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiagnosticCategory(category string) bool {
+	switch category {
+	case "", diagnosticFailureAssignment, diagnosticFailureIdentity, diagnosticFailureLocalState,
+		diagnosticFailureNetwork, diagnosticFailurePlatformDenied, diagnosticFailureResourceUnavailable,
+		diagnosticFailureUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiagnosticCode(code string) bool {
+	if code == "" {
+		return true
+	}
+	if len(code) != 5 {
+		return false
+	}
+	for _, character := range code {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ReloadIfRunning requests reconciliation without starting an absent daemon.

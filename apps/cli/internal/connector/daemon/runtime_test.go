@@ -14,6 +14,7 @@ import (
 	"time"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -47,7 +48,8 @@ func (*failingResourceAdmitter) Close() error                                   
 
 func TestNativeSessionFactoryLogsClassifiedRetryWithoutStoppingSession(t *testing.T) {
 	const secret = "lv_live_SUPERSECRETVALUE0000001"
-	attemptErr := errors.New("classified native attempt failure from Bearer " + secret)
+	attemptErr := errors.Join(errors.New("classified native attempt failure from Bearer "+secret),
+		&qurl.ServerDenyError{ErrCode: "52005"})
 	admitter := &failingResourceAdmitter{err: attemptErr}
 	common, err := DefaultFRPCommon(1, 1)
 	if err != nil {
@@ -80,6 +82,15 @@ func TestNativeSessionFactoryLogsClassifiedRetryWithoutStoppingSession(t *testin
 	}
 	if strings.Contains(got, secret) {
 		t.Fatalf("retry log contains a credential: %q", got)
+	}
+	diagnostic, ok := session.(diagnosticSession)
+	if !ok {
+		t.Fatal("native session does not expose redacted diagnostics")
+	}
+	state := diagnostic.Diagnostic()
+	if state.State != "retrying" || state.FailureCategory != "platform_denied" ||
+		state.FailureCode != "52005" || state.RetryAttempt != 1 || state.NextRetryAt == nil {
+		t.Fatalf("retry diagnostic = %#v", state)
 	}
 	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
