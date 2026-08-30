@@ -318,34 +318,45 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 		}
 		return err
 	}
+	target, cleanupErr := convergeStoppedLocalShare(ctx, opts, id, sharing)
+	printer := opts.printer()
+	if err := printer.Sharing(target, sharing); err != nil {
+		return err
+	}
+	if cleanupErr != nil {
+		printer.Warnf("The resource is stopped, but local sharing cleanup did not finish. A local session can remain until the daemon next reconciles: %v", cleanupErr)
+	}
+	return nil
+}
+
+func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, id string, sharing *qurlapi.Sharing) (string, error) {
 	local, stateDir, err := readLocalShareIfPresent(ctx, opts, id)
 	if err != nil {
-		// The cloud is already off. Surface corrupt/inaccessible existing local
-		// state without attempting to undo that fail-closed transition.
-		return err
+		return "", err
 	}
 	if local == nil {
-		return opts.printer().Sharing("", sharing)
+		return "", nil
 	}
 	if err := validateLocalSharing(local, sharing); err != nil {
-		return err
+		return "", err
 	}
+	target := local.TargetURL
 	registry, err := opts.openShareRegistry(stateDir)
 	if err != nil {
-		return err
+		return target, err
 	}
-	local, err = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	_, err = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
 	if err != nil {
-		return err
+		return target, err
 	}
 	logDir, err := connectordaemon.DefaultLogDir(stateDir)
 	if err != nil {
-		return err
+		return target, err
 	}
 	if _, err := opts.newShareDaemon(stateDir, logDir).ReloadIfRunning(ctx); err != nil {
-		return err
+		return target, err
 	}
-	return opts.printer().Sharing(local.TargetURL, sharing)
+	return target, nil
 }
 
 func readLocalShareIfPresent(ctx context.Context, opts *globalOpts, id string) (*connectorstate.LocalShare, string, error) {

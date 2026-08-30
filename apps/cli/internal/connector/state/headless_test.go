@@ -24,6 +24,7 @@ func TestLoadHeadlessConfigStrictContract(t *testing.T) {
 		{name: "missing owner", data: strings.Replace(valid, "owner_id: owner-one\n", "", 1), want: "account owner"},
 		{name: "two shares", data: valid + strings.TrimPrefix(valid, "version: 2\nowner_id: owner-one\nshares:\n"), want: "exactly one share"},
 		{name: "off", data: strings.Replace(valid, "desired_state: on", "desired_state: off", 1), want: "desired_state on"},
+		{name: "localhost is not canonical", data: strings.ReplaceAll(valid, "127.0.0.1", "localhost"), want: "literal loopback IP address"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

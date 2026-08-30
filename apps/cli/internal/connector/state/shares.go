@@ -530,20 +530,13 @@ func validateLocalShareTarget(share *LocalShare) error {
 		return errors.New("local share target must be a plain loopback HTTP origin")
 	}
 	host := parsed.Hostname()
-	if host != share.LocalIP || !isLoopbackHost(host) {
-		return errors.New("local share target host is not the recorded loopback address")
+	ip := net.ParseIP(host)
+	if host != share.LocalIP || ip == nil || !ip.IsLoopback() {
+		return errors.New("local share target host must be the recorded literal loopback IP address")
 	}
 	port, err := strconv.Atoi(parsed.Port())
 	if err != nil || port != share.LocalPort || port < 1 || port > 65535 {
 		return errors.New("local share target port is invalid")
 	}
 	return nil
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

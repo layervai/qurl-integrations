@@ -161,7 +161,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 func (m *Manager) pruneRetryState(desired map[string]*connectorstate.LocalShare) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for resourceID := range m.failures {
+	for resourceID := range m.diagnostics {
 		if _, present := desired[resourceID]; !present {
 			delete(m.failures, resourceID)
 			delete(m.retrying, resourceID)

@@ -635,6 +635,8 @@ func validateConnectorID(id string) error {
 	return nil
 }
 
+// TODO(upstream-contract): replace this copy when qurl-connector exports its
+// canonical Connector ID validator.
 func mustCompileConnectorIDPattern() func(string) bool {
 	return func(value string) bool {
 		if len(value) < 3 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {

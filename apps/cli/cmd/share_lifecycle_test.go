@@ -606,6 +606,91 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 	}
 }
 
+func TestStopReportsCommittedSuccessWhenDaemonReloadFails(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", local.ServingEpoch+1, "stopped"))
+	reloadErr := errors.New("daemon IPC unavailable")
+	daemon := &recordingShareDaemon{reloadErr: reloadErr}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, "Desired:", "off", "Observed:", "stopped"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Fatalf("stop stdout=%q, want %q", res.stdout.String(), want)
+		}
+	}
+	for _, want := range []string{"resource is stopped", "local sharing cleanup did not finish", "local session can remain", reloadErr.Error()} {
+		if !strings.Contains(res.stderr.String(), want) {
+			t.Fatalf("stop stderr=%q, want %q", res.stderr.String(), want)
+		}
+	}
+	updated, err := registry.Get(context.Background(), local.ResourceID)
+	if err != nil || updated.DesiredState != "off" || updated.ServingEpoch != local.ServingEpoch+1 {
+		t.Fatalf("committed local stop = %+v, %v", updated, err)
+	}
+	if daemon.reloads != 1 || daemon.ensures != 0 {
+		t.Fatalf("stop daemon reconciliation = %+v, want one reload and no install", daemon)
+	}
+}
+
+func TestStopReportsCommittedSuccessWhenLocalRegistryUpdateFails(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", local.ServingEpoch+1, "stopped"))
+	updateErr := errors.New("local registry unavailable")
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: &failNextSetDesiredRegistry{localShareRegistry: registry, err: updateErr},
+		shareDaemon:   &recordingShareDaemon{}, shareStateDir: stateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	for _, want := range []string{srv.Key.CRID, local.TargetURL, "Desired:", "off"} {
+		if !strings.Contains(res.stdout.String(), want) {
+			t.Fatalf("stop stdout=%q, want %q", res.stdout.String(), want)
+		}
+	}
+	for _, want := range []string{"resource is stopped", "local session can remain", updateErr.Error()} {
+		if !strings.Contains(res.stderr.String(), want) {
+			t.Fatalf("stop stderr=%q, want %q", res.stderr.String(), want)
+		}
+	}
+	unchanged, err := registry.Get(context.Background(), local.ResourceID)
+	if err != nil || unchanged.DesiredState != local.DesiredState || unchanged.ServingEpoch != local.ServingEpoch {
+		t.Fatalf("failed local convergence mutated registry = %+v, %v", unchanged, err)
+	}
+}
+
 func TestStartAndRestartRejectInternalConnectorID(t *testing.T) {
 	for _, command := range []string{"start", "restart"} {
 		t.Run(command, func(t *testing.T) {
@@ -1186,7 +1271,16 @@ func TestRemoteLifecycleReportsCorruptExistingLocalRegistry(t *testing.T) {
 				args: []string{"--endpoint", srv.URL, command, srv.Key.CRID},
 				env:  map[string]string{"QURL_API_KEY": testAPIKey}, shareStateDir: stateDir,
 			})
-			if res.code == 0 || !strings.Contains(res.stderr.String(), "local share registry") {
+			if command == "stop" {
+				if res.code != 0 || !strings.Contains(res.stderr.String(), "local sharing cleanup did not finish") ||
+					!strings.Contains(res.stderr.String(), "local share registry") {
+					t.Fatalf("committed stop result code=%d stderr=%s", res.code, res.stderr.String())
+				}
+				if !strings.Contains(res.stdout.String(), srv.Key.CRID) || !strings.Contains(res.stdout.String(), "Desired:") ||
+					!strings.Contains(res.stdout.String(), "off") {
+					t.Fatalf("committed stop stdout=%s", res.stdout.String())
+				}
+			} else if res.code == 0 || !strings.Contains(res.stderr.String(), "local share registry") {
 				t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
 			}
 			if requests := srv.Requests(); len(requests) != 1 || requests[0].Method != method {

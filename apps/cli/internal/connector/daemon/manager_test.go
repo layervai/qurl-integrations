@@ -194,6 +194,29 @@ func TestManagerKeepsSiblingServingAcrossStopRestartAndRemove(t *testing.T) {
 	}
 }
 
+func TestManagerPrunesDiagnosticsForSuccessfulRemovedResource(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Diagnostics()["a"]; !ok {
+		t.Fatal("successful session has no diagnostic before removal")
+	}
+
+	delete(registry.shares, "a")
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic, ok := manager.Diagnostics()["a"]; ok {
+		t.Fatalf("removed successful session retained diagnostic: %+v", diagnostic)
+	}
+}
+
 func TestManagerStopsRetryingPermanentMissingResource(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 4, "on")}}
 	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{"a": ErrResourceGone}}
