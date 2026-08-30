@@ -1116,7 +1116,7 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	if needs := parseWorkflowNeeds(t, "cli-main-ci", gate.Needs); !slices.Equal(needs, []string{releasePleaseJobID}) {
 		t.Errorf("cli-main-ci needs = %v, want release-please", needs)
 	}
-	wantGateIf := "!cancelled() && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )"
+	wantGateIf := "!cancelled() && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(gate.If), " "); got != wantGateIf {
 		t.Errorf("cli-main-ci.if = %q, want %q", got, wantGateIf)
 	}
@@ -1137,7 +1137,7 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 			t.Errorf("release-cli.needs does not include %q", need)
 		}
 	}
-	wantReleaseIf := "!cancelled() && needs.cli-main-ci.result == 'success' && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )"
+	wantReleaseIf := "!cancelled() && needs.cli-main-ci.result == 'success' && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(releaseCLI.If), " "); got != wantReleaseIf {
 		t.Errorf("release-cli.if = %q, want %q", got, wantReleaseIf)
 	}
