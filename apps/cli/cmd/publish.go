@@ -296,10 +296,34 @@ func (e *localEnrollment) recoveryCredential(context.Context) (string, error) {
 	return e.opts.apiCredential()
 }
 
-func (e *localEnrollment) resolveID(agentID string) (string, error) {
+func (e *localEnrollment) resolveID(ctx context.Context, stateDir, agentID string) (resolved string, retErr error) {
 	id, err := e.connectorID(agentID)
 	if err != nil {
 		return "", err
+	}
+	resourceStore, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
+	for generation := 0; generation <= 1024; generation++ {
+		binding, retired, found, err := resourceStore.ConnectorResourceBinding(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		if !found || !retired {
+			break
+		}
+		if e.requestedID != "" {
+			return "", exitcode.UsageError(fmt.Errorf("connector ID %q was deleted; choose a new value with --id", id))
+		}
+		if generation == 1024 {
+			return "", errors.New("local Connector replacement chain exceeds the durable state limit")
+		}
+		id, err = generatedReplacementLocalConnectorID(id, binding.ResourceID)
+		if err != nil {
+			return "", err
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -336,7 +360,9 @@ func prepareLocalPublishResource(
 		RefreshMode:                  connectorRefreshModeAuto,
 		SessionOperations:            sessionOperations,
 	}
-	resolved, err = opts.resolveLocalResource(ctx, cfg, enrollment.resolveID)
+	resolved, err = opts.resolveLocalResource(ctx, cfg, func(agentID string) (string, error) {
+		return enrollment.resolveID(ctx, stateDir, agentID)
+	})
 	if err != nil {
 		return nil, "", err
 	}

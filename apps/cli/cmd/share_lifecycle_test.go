@@ -773,6 +773,74 @@ func TestShareInspectAddsRedactedLocalDiagnostics(t *testing.T) {
 	}
 }
 
+func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = string(qurlapi.DesiredStateOff)
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+			"desired_state": "off", "serving_epoch": seed.ServingEpoch + 1, "connection_state": "stopped",
+		}, nil)
+	})
+	stale := seed
+	stale.DesiredState = string(qurlapi.DesiredStateOn)
+	session := &diagnosticDaemonSession{done: make(chan struct{}), diagnostic: connectordaemon.ResourceDiagnostic{
+		State: "starting", LastTransition: time.Now().UTC(),
+	}}
+	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: stale}, diagnosticDaemonFactory{session: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	server := &connectordaemon.IPCServer{
+		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+	}
+	go func() { done <- server.Run(ctx) }()
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+		readyCancel()
+		cancel()
+		t.Fatal(err)
+	}
+	readyCancel()
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "--output", "json", "inspect", srv.Key.CRID},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code != 0 || !strings.Contains(res.stdout.String(), `"daemon_state": "stopped"`) ||
+		strings.Contains(res.stdout.String(), `"daemon_state": "starting"`) {
+		cancel()
+		t.Fatalf("inspect exit=%d stdout=%s stderr=%s", res.code, res.stdout.String(), res.stderr.String())
+	}
+	cancel()
+	if serverErr := <-done; !errors.Is(serverErr, context.Canceled) {
+		t.Fatalf("daemon shutdown = %v", serverErr)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := manager.StopAll(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadLocalShareNormalizesRequestedIdentifier(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
@@ -914,6 +982,7 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := localShareFixture(srv)
+	seedLocalConnectorResourceBinding(t, stateDir, &local)
 	if err := registry.Put(context.Background(), &local); err != nil {
 		t.Fatal(err)
 	}
@@ -945,6 +1014,7 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	if gotStateDir != stateDir || gotLogDir != wantLogDir || gotLogDir == "" {
 		t.Fatalf("delete daemon paths = state %q log %q, want state %q log %q", gotStateDir, gotLogDir, stateDir, wantLogDir)
 	}
+	assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
 }
 
 func TestDeleteReportsCommittedSuccessWhenDaemonReloadFails(t *testing.T) {
@@ -956,6 +1026,7 @@ func TestDeleteReportsCommittedSuccessWhenDaemonReloadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := localShareFixture(srv)
+	seedLocalConnectorResourceBinding(t, stateDir, &local)
 	if err := registry.Put(context.Background(), &local); err != nil {
 		t.Fatal(err)
 	}
@@ -984,6 +1055,25 @@ func TestDeleteReportsCommittedSuccessWhenDaemonReloadFails(t *testing.T) {
 	if daemon.reloads != 1 || daemon.ensures != 0 {
 		t.Fatalf("delete daemon reconciliation = %+v, want one reload and no install", daemon)
 	}
+	assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
+}
+
+func TestIdempotentDeleteRetiresBindingAfterLocalShareRowWasAlreadyRemoved(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodDelete, "/v1/resources/"+srv.Key.CRID, apitest.HandlerNotFound404(t, "not_found"))
+	stateDir := connectorStateTestDir(t)
+	local := localShareFixture(srv)
+	seedLocalConnectorResourceBinding(t, stateDir, &local)
+
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+		shareStateDir: stateDir,
+	})
+	if res.code != 0 || !strings.Contains(res.stderr.String(), "already deleted") {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
 }
 
 func TestRemoteLifecycleWorksWithoutLocalRegistryRow(t *testing.T) {
@@ -2297,5 +2387,46 @@ func localShareFixture(srv *apitest.Server) connectorstate.LocalShare {
 		ConnectorID: "local-test", ConnectorRoutingID: "c-" + strings.Repeat("a", 52),
 		KnockResourceID: "q_catalog_key", TargetURL: "http://127.0.0.1:3000",
 		LocalIP: "127.0.0.1", LocalPort: 3000, DesiredState: "off", ServingEpoch: 4,
+	}
+}
+
+func seedLocalConnectorResourceBinding(t *testing.T, stateDir string, local *connectorstate.LocalShare) {
+	t.Helper()
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	tx, err := store.BeginConnectorResource(context.Background(), local.ConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := &connectorstate.ConnectorResourceBinding{
+		ConnectorID: local.ConnectorID, ResourceID: local.ResourceID, CRID: local.CRID,
+		ConnectorRoutingID: local.ConnectorRoutingID, KnockResourceID: local.KnockResourceID,
+	}
+	if err := tx.Commit(binding); err != nil {
+		_ = tx.Close()
+		t.Fatal(err)
+	}
+	if err := tx.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertLocalConnectorResourceRetired(t *testing.T, stateDir, connectorID string) {
+	t.Helper()
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), connectorID)
+	if err != nil || !found || !retired {
+		t.Fatalf("deleted Connector binding found=%t retired=%t err=%v", found, retired, err)
 	}
 }

@@ -482,3 +482,13 @@ func TestDeferredSessionFactoryConcurrentCloseWaitsForOneCleanup(t *testing.T) {
 		t.Fatalf("delegate closes=%d, want 1", delegate.closes.Load())
 	}
 }
+
+func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) {
+	category, code := classifyShareFailure(errors.Join(
+		qurl.ErrNativeSessionOperationLeaseMargin,
+		errors.New("assignment has insufficient journal margin"),
+	))
+	if category != diagnosticFailureAssignment || code != "" {
+		t.Fatalf("classification=%q/%q, want assignment with no public code", category, code)
+	}
+}

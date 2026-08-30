@@ -139,6 +139,20 @@ func generatedLocalConnectorID(agentID, canonicalOrigin string) (string, error) 
 	return "local-" + suffix, nil
 }
 
+// generatedReplacementLocalConnectorID derives the next stable default only
+// from a locally accepted binding that an authorized delete retired. It does
+// not turn an unexplained authority conflict into replacement permission.
+func generatedReplacementLocalConnectorID(connectorID, resourceID string) (string, error) {
+	connectorID = strings.TrimSpace(connectorID)
+	resourceID = strings.TrimSpace(resourceID)
+	if connectorID == "" || resourceID == "" {
+		return "", errors.New("cannot derive a replacement Connector ID without the retired Connector and resource identities")
+	}
+	digest := sha256.Sum256([]byte(localPublishIDDomain + "\x00replacement\x00" + connectorID + "\x00" + resourceID))
+	suffix := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:10]))
+	return "local-" + suffix, nil
+}
+
 const localEnrollmentEntropyBytes = 32
 
 // localEnrollmentIdempotencyKey binds one random, process-local enrollment

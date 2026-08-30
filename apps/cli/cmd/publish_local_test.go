@@ -14,6 +14,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 type emptyConnectorEnrollmentClient struct{ qurlapi.Client }
@@ -215,5 +216,47 @@ func TestLocalPublishRejectsInvalidExplicitConnectorIDBeforeOpen(t *testing.T) {
 	}
 	if opens != 0 {
 		t.Fatalf("invalid ID opened Connector state %d times", opens)
+	}
+}
+
+func TestLocalEnrollmentAdvancesDefaultIDOnlyAfterDurableRetirement(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	target, err := classifyPublishTarget("http://127.0.0.1:3000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := generatedLocalConnectorID("agent-one", target.canonicalOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstServer := apitest.NewServer(t)
+	first := localShareFixture(firstServer)
+	first.ConnectorID = baseID
+	seedLocalConnectorResourceBinding(t, stateDir, &first)
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.RetireConnectorResource(context.Background(), first.ResourceID)
+	if closeErr := store.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil || !retired {
+		t.Fatalf("retire first binding = %t, %v", retired, err)
+	}
+
+	want, err := generatedReplacementLocalConnectorID(baseID, first.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment := &localEnrollment{target: target}
+	got, err := enrollment.resolveID(context.Background(), stateDir, "agent-one")
+	if err != nil || got != want {
+		t.Fatalf("resolveID() = %q, %v, want %q", got, err, want)
+	}
+
+	explicit := &localEnrollment{target: target, requestedID: baseID}
+	if _, err := explicit.resolveID(context.Background(), stateDir, "agent-one"); err == nil || !strings.Contains(err.Error(), "choose a new value with --id") {
+		t.Fatalf("retired explicit resolveID() = %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -93,20 +94,19 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 		}
 		return err
 	}
-	_, present, err := connectorstate.ReadLocalSharesIfPresent(ctx, stateDir)
-	if err != nil || !present {
-		return err
-	}
-	registry, err := opts.openShareRegistry(stateDir)
+	registry, local, err := findDeletedLocalShare(ctx, opts, stateDir, id)
 	if err != nil {
 		return err
 	}
-	local, err := registry.Get(ctx, id)
-	if errors.Is(err, os.ErrNotExist) {
+	retired, err := retireDeletedConnectorBinding(ctx, stateDir, id, local)
+	if err != nil {
+		return err
+	}
+	if local != nil && !retired {
+		return errors.New("retire deleted local Connector binding: accepted resource identity is absent")
+	}
+	if local == nil {
 		return nil
-	}
-	if err != nil {
-		return err
 	}
 	if err := registry.Delete(ctx, local.ResourceID); err != nil {
 		return err
@@ -121,6 +121,45 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 	// daemon exists: it neither installs nor starts a background job.
 	_, err = opts.newShareDaemon(stateDir, logDir).ReloadIfRunning(ctx)
 	return err
+}
+
+func findDeletedLocalShare(ctx context.Context, opts *globalOpts, stateDir, id string) (localShareRegistry, *connectorstate.LocalShare, error) {
+	_, present, err := connectorstate.ReadLocalSharesIfPresent(ctx, stateDir)
+	if err != nil || !present {
+		return nil, nil, err
+	}
+	registry, err := opts.openShareRegistry(stateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	local, err := registry.Get(ctx, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return registry, nil, nil
+	}
+	return registry, local, err
+}
+
+func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, local *connectorstate.LocalShare) (bool, error) {
+	_, err := os.Lstat(filepath.Join(stateDir, connectorstate.ConnectorResourcesFile))
+	if errors.Is(err, os.ErrNotExist) {
+		if local == nil {
+			return false, nil
+		}
+		return false, errors.New("retire deleted local Connector binding: durable Connector resource state is missing")
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect Connector resource state during delete cleanup: %w", err)
+	}
+	resourceStore, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return false, err
+	}
+	lookupID := id
+	if local != nil {
+		lookupID = local.ResourceID
+	}
+	retired, retireErr := resourceStore.RetireConnectorResource(ctx, lookupID)
+	return retired, errors.Join(retireErr, resourceStore.Close())
 }
 
 // confirmDelete asks on the terminal. Without a terminal it refuses instead

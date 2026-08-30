@@ -84,6 +84,25 @@ func TestGeneratedLocalConnectorID(t *testing.T) {
 	}
 }
 
+func TestGeneratedReplacementLocalConnectorID(t *testing.T) {
+	t.Parallel()
+	first, err := generatedReplacementLocalConnectorID("local-a234567890123456", strings.Repeat("a", 91))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := generatedReplacementLocalConnectorID("local-a234567890123456", strings.Repeat("a", 91))
+	other, _ := generatedReplacementLocalConnectorID("local-a234567890123456", strings.Repeat("b", 91))
+	if first != again || first == other || !strings.HasPrefix(first, "local-") {
+		t.Fatalf("replacement IDs first=%q again=%q other=%q", first, again, other)
+	}
+	if err := validateConnectorID(first); err != nil {
+		t.Fatalf("replacement ID invalid: %v", err)
+	}
+	if _, err := generatedReplacementLocalConnectorID("", "resource"); err == nil {
+		t.Fatal("empty predecessor identity was accepted")
+	}
+}
+
 func TestLocalEnrollmentIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	entropy := make([]byte, localEnrollmentEntropyBytes)

@@ -100,6 +100,33 @@ func TestConnectorResourceTransactionPersistsExactRequestAndWarmContinuity(t *te
 	}
 }
 
+func TestRetireConnectorResourcePreservesIdentityAndBlocksReuse(t *testing.T) {
+	store := openTestStore(t)
+	binding := testResourceBinding(t, "deleted-api")
+	binding.CRID = testBindingCRID(t, &binding, 1)
+	commitTestBinding(t, store, &binding)
+
+	retired, err := store.RetireConnectorResource(context.Background(), binding.CRID)
+	if err != nil || !retired {
+		t.Fatalf("RetireConnectorResource() = %t, %v, want true", retired, err)
+	}
+	got, gotRetired, found, err := store.ConnectorResourceBinding(context.Background(), binding.ConnectorID)
+	if err != nil || !found || !gotRetired || got != binding {
+		t.Fatalf("ConnectorResourceBinding() = %+v retired=%t found=%t err=%v", got, gotRetired, found, err)
+	}
+	if _, err := store.BeginConnectorResource(context.Background(), binding.ConnectorID); !errors.Is(err, ErrConnectorResourceRetired) {
+		t.Fatalf("BeginConnectorResource() = %v, want retired error", err)
+	}
+	retired, err = store.RetireConnectorResource(context.Background(), binding.ResourceID)
+	if err != nil || !retired {
+		t.Fatalf("idempotent RetireConnectorResource() = %t, %v", retired, err)
+	}
+	retired, err = store.RetireConnectorResource(context.Background(), "unknown-public-id")
+	if err != nil || retired {
+		t.Fatalf("unknown RetireConnectorResource() = %t, %v, want false", retired, err)
+	}
+}
+
 func TestConnectorResourceStateSupportsIndependentConnectorIDs(t *testing.T) {
 	store := openTestStore(t)
 	first, err := store.BeginConnectorResource(context.Background(), "billing-api")

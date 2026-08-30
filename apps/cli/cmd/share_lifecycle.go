@@ -411,6 +411,12 @@ func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connector
 	} else {
 		inspection.DaemonState = "not_running"
 	}
+	// The cloud-off state is authoritative for this resource. A live daemon can
+	// briefly retain the prior session's local diagnostic while reconciliation
+	// stops it; that stale row must not relabel an already-fenced share.
+	if sharing.DesiredState == qurlapi.DesiredStateOff {
+		return opts.printer().InspectSharing(&inspection)
+	}
 	if stateDir == "" {
 		return opts.printer().InspectSharing(&inspection)
 	}

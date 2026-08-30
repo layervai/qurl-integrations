@@ -50,6 +50,9 @@ var (
 	// Treat it as a fail-closed verification failure, never as replacement
 	// authority for the previously accepted identity.
 	ErrConnectorResourceVerification = errors.New("connector resource response failed durable-state verification")
+	// ErrConnectorResourceRetired prevents a deliberately deleted Connector ID
+	// from being sent again as an implicit resource-reclamation request.
+	ErrConnectorResourceRetired = errors.New("connector resource was deliberately retired")
 )
 
 // ConnectorResourceCommitError rejects an authenticated response that
@@ -97,6 +100,7 @@ type connectorResourcesState struct {
 	Version  int                                        `json:"version"`
 	Bindings map[string]ConnectorResourceBinding        `json:"bindings"`
 	Pending  map[string]PendingConnectorResourceRequest `json:"pending"`
+	Retired  map[string]bool                            `json:"retired,omitempty"`
 }
 
 // ConnectorResourceTransaction owns the process and cross-process lock for
@@ -166,6 +170,9 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 	if err := s.validateContinuityLocked(); err != nil {
 		return nil, err
 	}
+	if current.Retired[connectorID] {
+		return nil, fmt.Errorf("%w: Connector ID %q", ErrConnectorResourceRetired, connectorID)
+	}
 	pending, ok := current.Pending[connectorID]
 	if !ok {
 		expected := ""
@@ -199,6 +206,105 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 		},
 		unlock: unlock,
 	}, nil
+}
+
+// ConnectorResourceBinding returns the durable binding and retirement state
+// for one exact Connector ID. It never searches by a remote-supplied alias.
+func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string) (_ ConnectorResourceBinding, retired, found bool, retErr error) {
+	if s == nil {
+		return ConnectorResourceBinding{}, false, false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	if err := validateConnectorID(connectorID); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	if ctx == nil {
+		return ConnectorResourceBinding{}, false, false, errors.New("read Connector resource binding: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	unlock, err := acquireConnectorResourcesLock(ctx, s.dir)
+	if err != nil {
+		return ConnectorResourceBinding{}, false, false, fmt.Errorf("lock Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	current, err := loadConnectorResources(s.dir)
+	if err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	binding, found := current.Bindings[connectorID]
+	return binding, current.Retired[connectorID], found, nil
+}
+
+// RetireConnectorResource records a completed user-authorized deletion by any
+// exact local public identity. The accepted binding remains available only to
+// derive a new default Connector ID; BeginConnectorResource refuses its reuse.
+func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired bool, retErr error) {
+	if s == nil {
+		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("retire Connector resource: identity is empty")
+	}
+	if ctx == nil {
+		return false, errors.New("retire Connector resource: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, err
+	}
+	unlock, err := acquireConnectorResourcesLock(ctx, s.dir)
+	if err != nil {
+		return false, fmt.Errorf("lock Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	current, err := loadConnectorResources(s.dir)
+	if err != nil {
+		return false, err
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, err
+	}
+	connectorID := ""
+	for candidateID, binding := range current.Bindings {
+		if id == candidateID || id == binding.ResourceID || id == binding.CRID {
+			if connectorID != "" && connectorID != candidateID {
+				return false, errors.New("retire Connector resource: public identity is ambiguous in durable state")
+			}
+			connectorID = candidateID
+		}
+	}
+	if connectorID == "" {
+		return false, nil
+	}
+	if current.Retired == nil {
+		current.Retired = make(map[string]bool)
+	}
+	if current.Retired[connectorID] {
+		return true, nil
+	}
+	current.Retired[connectorID] = true
+	delete(current.Pending, connectorID)
+	if err := writeConnectorResources(s.dir, current); err != nil {
+		return false, fmt.Errorf("retire Connector resource state: %w", err)
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, fmt.Errorf("validate state continuity after retiring Connector resource: %w", err)
+	}
+	return true, nil
 }
 
 // Request returns a copy of the exact durable LST request.
@@ -330,6 +436,7 @@ func emptyConnectorResourcesState() connectorResourcesState {
 		Version:  connectorResourcesVersion,
 		Bindings: make(map[string]ConnectorResourceBinding),
 		Pending:  make(map[string]PendingConnectorResourceRequest),
+		Retired:  make(map[string]bool),
 	}
 }
 
@@ -406,6 +513,9 @@ func decodeConnectorResources(data []byte) (connectorResourcesState, error) {
 	if err := decoder.Decode(&state); err != nil {
 		return connectorResourcesState{}, err
 	}
+	if state.Retired == nil {
+		state.Retired = make(map[string]bool)
+	}
 	if err := rejectTrailingJSON(decoder); err != nil {
 		return connectorResourcesState{}, err
 	}
@@ -419,11 +529,11 @@ func validateConnectorResourcesState(state connectorResourcesState) error {
 	if state.Version != connectorResourcesVersion {
 		return fmt.Errorf("unsupported version %d", state.Version)
 	}
-	if state.Bindings == nil || state.Pending == nil {
-		return errors.New("bindings and pending maps are required")
+	if state.Bindings == nil || state.Pending == nil || state.Retired == nil {
+		return errors.New("bindings, pending, and retired maps are required")
 	}
-	if len(state.Bindings) > connectorResourcesMaxItems || len(state.Pending) > connectorResourcesMaxItems {
-		return fmt.Errorf("bindings and pending are limited to %d entries each", connectorResourcesMaxItems)
+	if len(state.Bindings) > connectorResourcesMaxItems || len(state.Pending) > connectorResourcesMaxItems || len(state.Retired) > connectorResourcesMaxItems {
+		return fmt.Errorf("bindings, pending, and retired are limited to %d entries each", connectorResourcesMaxItems)
 	}
 	resourceOwners := make(map[string]string, len(state.Bindings))
 	routingOwners := make(map[string]string, len(state.Bindings))
@@ -456,6 +566,21 @@ func validateConnectorResourcesState(state connectorResourcesState) error {
 			return fmt.Errorf("pending %q does not assert its cached resource identity", key)
 		case !exists && pending.ExpectedResourceID != "":
 			return fmt.Errorf("pending %q asserts an identity without a cached binding", key)
+		}
+	}
+	return validateRetiredConnectorResources(state)
+}
+
+func validateRetiredConnectorResources(state connectorResourcesState) error {
+	for key, retired := range state.Retired {
+		if !retired {
+			return fmt.Errorf("retired Connector %q must have value true", key)
+		}
+		if _, exists := state.Bindings[key]; !exists {
+			return fmt.Errorf("retired Connector %q has no accepted binding", key)
+		}
+		if _, pending := state.Pending[key]; pending {
+			return fmt.Errorf("retired Connector %q still has a pending request", key)
 		}
 	}
 	return nil
@@ -782,7 +907,7 @@ func rejectNonCanonicalResourceFields(data []byte) error {
 	}
 	for key := range envelope {
 		switch key {
-		case jsonFieldVersion, "bindings", "pending":
+		case jsonFieldVersion, "bindings", "pending", "retired":
 		default:
 			return fmt.Errorf("unknown field %q", key)
 		}

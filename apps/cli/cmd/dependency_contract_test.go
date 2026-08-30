@@ -13,21 +13,14 @@ import (
 
 const (
 	connectorModule = "github.com/layervai/qurl-connector"
-	connectorFloor  = "v0.8.6"
 	cliRepoRoot     = "../../.."
 	goModPath       = cliRepoRoot + "/go.mod"
 )
 
-// TestConnectorFloorPreservesSuccessfulRecoveryHandoff keeps the released CLI
-// on a connector version that persists an authenticated assignment across the
-// recovery-to-serving process handoff and reports bounded, redacted retry
-// failures. An older version can repeat the Hub recovery request after a
-// successful recovery or hide the rejection that prevents local publish.
-// The floor rejects only older versions; qurl-connector's cross-process tests
-// own the behavioral contract for accepted current and future versions.
-// TODO(upstream-contract): Keep this floor in lockstep with qurl-connector's
-// successful-refresh handoff contract and its cross-process recovery tests.
-func TestConnectorFloorPreservesSuccessfulRecoveryHandoff(t *testing.T) {
+// TestConnectorUsesReleasedDirectDependency keeps go.mod as the only source of
+// truth for the connector version shipped in the CLI. The connector repository
+// owns its behavior tests; the packaged CLI journey tests that exact dependency.
+func TestConnectorUsesReleasedDirectDependency(t *testing.T) {
 	t.Parallel()
 
 	raw, err := os.ReadFile(goModPath)
@@ -56,60 +49,16 @@ func checkConnectorRequirement(path string, raw []byte) error {
 			continue
 		}
 		version := requirement.Mod.Version
-		if !connectorVersionAtLeast(version, connectorFloor) {
-			return fmt.Errorf("%s: %s version = %q, want %s or newer", path, connectorModule, version, connectorFloor)
+		if requirement.Indirect {
+			return fmt.Errorf("%s: %s must be a direct requirement", path, connectorModule)
+		}
+		if !semver.IsValid(version) || module.IsPseudoVersion(version) {
+			return fmt.Errorf("%s: %s version = %q, want a tagged semantic version", path, connectorModule, version)
 		}
 		return nil
 	}
 
-	return fmt.Errorf("%s: %s is not required by the released CLI dependency graph", path, connectorModule)
-}
-
-func connectorVersionAtLeast(version, floor string) bool {
-	if !semver.IsValid(version) || !semver.IsValid(floor) {
-		return false
-	}
-	if !module.IsPseudoVersion(version) {
-		return semver.Compare(version, floor) >= 0
-	}
-	base, err := module.PseudoVersionBase(version)
-	if err != nil || base == "" {
-		return false
-	}
-	// A pseudo-version after the floor release has the floor as its canonical
-	// parent (for example, v0.8.7-0... is based on v0.8.6). Comparing that
-	// parent accepts later unreleased fixes without accepting a pseudo-version
-	// based on the older v0.8.5 line.
-	return semver.Compare(base, floor) >= 0
-}
-
-func TestConnectorVersionFloor(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		version string
-		want    bool
-	}{
-		{version: "v0.8.6", want: true},
-		{version: "v0.8.7-rc.1", want: true},
-		{version: "v0.8.7-0.20260829010203-abcdefabcdef", want: true},
-		{version: "v0.8.2"},
-		{version: "v0.8.3"},
-		{version: "v0.8.4"},
-		{version: "v0.8.5"},
-		{version: "v0.8.5-rc.1"},
-		{version: "v0.8.5-0.20260829010203-abcdefabcdef"},
-		{version: "v0.8.3-rc.1"},
-		{version: "v0.8.3-0.20260828010203-abcdefabcdef"},
-		{version: "v0.0.0-20260828010203-abcdefabcdef"},
-		{version: "not-a-version"},
-	} {
-		t.Run(test.version, func(t *testing.T) {
-			t.Parallel()
-			if got := connectorVersionAtLeast(test.version, connectorFloor); got != test.want {
-				t.Fatalf("connectorVersionAtLeast(%q, %q) = %t, want %t", test.version, connectorFloor, got, test.want)
-			}
-		})
-	}
+	return fmt.Errorf("%s: %s is not required directly by the released CLI", path, connectorModule)
 }
 
 func TestCheckConnectorRequirement(t *testing.T) {
@@ -124,8 +73,9 @@ func TestCheckConnectorRequirement(t *testing.T) {
 			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6\n",
 		},
 		{
-			name:  "indirect requirement",
-			goMod: "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6 // indirect\n",
+			name:    "indirect requirement",
+			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.6 // indirect\n",
+			wantErr: "must be a direct requirement",
 		},
 		{
 			name:  "incompatible requirement",
@@ -143,9 +93,9 @@ func TestCheckConnectorRequirement(t *testing.T) {
 			wantErr: "must not be replaced",
 		},
 		{
-			name:    "older requirement",
-			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.5\n",
-			wantErr: "want v0.8.6 or newer",
+			name:    "pseudo version",
+			goMod:   "module example.com/cli\n\nrequire " + connectorModule + " v0.8.7-0.20260829010203-abcdefabcdef\n",
+			wantErr: "want a tagged semantic version",
 		},
 		{
 			name:    "malformed go.mod",

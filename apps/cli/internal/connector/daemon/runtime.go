@@ -397,7 +397,7 @@ func classifyShareFailure(err error) (category, code string) {
 	for _, sentinel := range []error{
 		qurl.ErrAssignmentUnavailable, qurl.ErrAssignmentRecoveryRequired,
 		qurl.ErrAssignmentReassignmentRequired, qurl.ErrAssignmentRateLimited,
-		qurl.ErrAssignmentLeaseExpired,
+		qurl.ErrAssignmentLeaseExpired, qurl.ErrNativeSessionOperationLeaseMargin,
 	} {
 		if errors.Is(err, sentinel) {
 			return diagnosticFailureAssignment, ""

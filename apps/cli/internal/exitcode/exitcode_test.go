@@ -69,6 +69,7 @@ var cliSentinels = map[string]struct {
 	// failure; a cross-Connector alias is valid identity in conflicting state.
 	"state.ErrConnectorResourceVerification":  {state.ErrConnectorResourceVerification, VerificationFailed},
 	"state.ErrConnectorResourceStateConflict": {state.ErrConnectorResourceStateConflict, Conflict},
+	"state.ErrConnectorResourceRetired":       {state.ErrConnectorResourceRetired, Conflict},
 	// The Hub trust triple (or a dark build's absent pin) is configuration
 	// even though it lives in the environment.
 	"hub.ErrConfig":           {hub.ErrConfig, Config},

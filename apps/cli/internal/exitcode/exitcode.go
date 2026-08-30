@@ -355,6 +355,10 @@ func connectorResourceSentinelCode(err error) (int, bool) {
 		// The authenticated response aliases a different Connector already in
 		// this owner's durable state: valid identities in conflicting state.
 		return Conflict, true
+	case errors.Is(err, state.ErrConnectorResourceRetired):
+		// A deleted Connector ID is valid but cannot be reused. The caller must
+		// select a successor instead of retrying or changing credentials.
+		return Conflict, true
 	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceRequest),
 		errors.Is(err, qurl.ErrConnectorResourceRequestRejected):
 		return InvalidInput, true
