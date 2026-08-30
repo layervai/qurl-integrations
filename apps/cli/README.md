@@ -168,7 +168,7 @@ key bytes followed by one LF or CRLF line ending, with no BOM, spaces, or
 second newline.
 On Unix, the file must be owned by you, have mode `0400` or `0600`, and have
 exactly one hard link. Create it with
-`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`. In PowerShell, use
+`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`.
 PowerShell's normal CRLF line ending is accepted. To write UTF-8 without a BOM:
 
 ```powershell

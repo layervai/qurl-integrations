@@ -490,11 +490,20 @@ func withoutExpectedDaemonCancellation(err error) error {
 		}
 		return errors.Join(kept...)
 	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		cause := wrapped.Unwrap()
+		if !errors.Is(cause, context.Canceled) {
+			return err
+		}
+		// A normal annotation can wrap a multi-cause shutdown error. Descend
+		// until the leaves so an expected cancellation cannot hide an
+		// independent daemon failure. Returning the kept leaves can drop only
+		// annotation text from a mixed cancellation chain, never a cause.
+		return withoutExpectedDaemonCancellation(cause)
+	}
 	// This filter runs only after this function canceled the daemon context.
-	// Platform IPC can wrap that expected cancellation. Remove the whole
-	// single-cause cancellation chain so it cannot mask the publish failure
-	// that caused shutdown. Multi-cause errors were split above, so any
-	// independent daemon failure remains joined and visible.
+	// Platform IPC can identify that expected cancellation. Remove that leaf
+	// so it cannot mask the publish failure that caused shutdown.
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}

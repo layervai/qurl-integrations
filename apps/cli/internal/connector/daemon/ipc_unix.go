@@ -105,9 +105,13 @@ func platformStateSocketPath(path string) string {
 		return path
 	}
 	digest := sha256.Sum256([]byte(path))
+	// IPCServer.Run passes this predictable directory through EnsureDirMode
+	// before listen. That helper rejects a symlink or a directory owned by any
+	// other user before it changes permissions, so a /tmp pre-creation can only
+	// make startup fail closed.
 	return filepath.Join(
 		unixIPCRuntimeRoot,
-		"layerv-qurl-"+strconv.Itoa(os.Getuid()),
+		"layerv-qurl-"+strconv.Itoa(os.Geteuid()),
 		hex.EncodeToString(digest[:16])+".sock",
 	)
 }

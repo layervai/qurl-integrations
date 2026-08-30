@@ -209,7 +209,7 @@ func replayableBody(req *http.Request) (func() (io.ReadCloser, error), bool) {
 // TODO(upstream-contract): qURL API responses use the delta-seconds form. If
 // the service adopts HTTP-date, update parseRetryAfterSeconds and its tests.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
-	if secs, ok := parseRetryAfterSeconds(resp.Header.Get("Retry-After")); ok {
+	if secs, ok := parseRetryAfterSeconds(resp.Header.Get("Retry-After")); ok && secs > 0 {
 		return time.Duration(secs) * time.Second
 	}
 	return time.Duration(attempt) * 500 * time.Millisecond

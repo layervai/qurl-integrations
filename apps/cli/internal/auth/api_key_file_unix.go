@@ -25,8 +25,8 @@ func validateOpenAPIKeyFilePlatform(_ *os.File, info os.FileInfo) error {
 
 func validateUnixAPIKeyFile(info os.FileInfo) error {
 	value, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || value.Nlink != 1 || (value.Uid != 0 && value.Uid != uint32(os.Geteuid())) {
-		return errors.New("API-key file is not singly linked and owned by root or the effective user")
+	if !ok || value.Nlink != 1 || value.Uid != uint32(os.Geteuid()) {
+		return errors.New("API-key file is not singly linked and owned by the effective user")
 	}
 	return nil
 }

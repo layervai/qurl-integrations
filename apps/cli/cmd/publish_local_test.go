@@ -60,6 +60,11 @@ func TestForegroundPublishKeepsDaemonFailureJoinedWithExpectedCancellation(t *te
 	if !errors.Is(got, daemonFailure) || errors.Is(got, context.Canceled) {
 		t.Fatalf("filtered wrapped cancellation plus daemon failure = %v, want only %v", got, daemonFailure)
 	}
+	nestedJoin := fmt.Errorf("share daemon: %w", errors.Join(wrappedCancellation, daemonFailure))
+	got = withoutExpectedDaemonCancellation(nestedJoin)
+	if !errors.Is(got, daemonFailure) || errors.Is(got, context.Canceled) {
+		t.Fatalf("filtered annotated join = %v, want only %v", got, daemonFailure)
+	}
 }
 
 func TestLocalPublishRejectsUnsupportedInputsBeforeStateOrNetwork(t *testing.T) {

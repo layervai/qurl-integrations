@@ -203,6 +203,10 @@ func validateAgentEnrollmentResponse(data *connectorEnrollmentData, now time.Tim
 	if data.Status != connectorEnrollmentStatus {
 		return invalid("is not active")
 	}
+	// This checks only that the one-shot credential is still usable; it does
+	// not infer or cap producer lifetime from the client clock. The service's
+	// 24-hour enrollment lifetime is the current clock-skew budget. Revisit the
+	// policy explicitly if that lifetime is shortened.
 	if data.ExpiresAt == nil || data.ExpiresAt.IsZero() || !data.ExpiresAt.After(now) {
 		return invalid("has no live expiry")
 	}
@@ -233,6 +237,8 @@ func validateConnectorEnrollmentResponse(data *connectorEnrollmentData, connecto
 	if data.Status != connectorEnrollmentStatus {
 		return invalid("is not active")
 	}
+	// As above, do not infer producer lifetime from the client clock. The
+	// service's 24-hour enrollment lifetime is the current skew budget.
 	if data.ExpiresAt == nil || data.ExpiresAt.IsZero() {
 		return invalid("missing expiry")
 	}

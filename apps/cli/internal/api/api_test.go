@@ -554,6 +554,10 @@ func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 	if d := retryDelay(resp, 2); d != time.Second {
 		t.Errorf("unparseable Retry-After delay = %v", d)
 	}
+	resp.Header.Set("Retry-After", "0")
+	if d := retryDelay(resp, 1); d != 500*time.Millisecond {
+		t.Errorf("zero Retry-After delay = %v, want fallback", d)
+	}
 	resp.Header.Set("Retry-After", "3600")
 	if d := retryDelay(resp, 1); d != maxRetryAfter {
 		t.Errorf("capped delay = %v, want %v", d, maxRetryAfter)
