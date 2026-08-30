@@ -328,7 +328,7 @@ func (c *client) Resolve(ctx context.Context, id string, opts ResolveOptions) (*
 // errors.Is against qurl.ErrTemporaryAccessLinksDisabled (and friends) keeps
 // working on the mapped error.
 //
-// Upstream SDK asks (qurl-go v0.5.3's APIError carries only
+// Upstream SDK asks (qurl-go's APIError carries only
 // StatusCode/Code/Type/Title/Detail — qurl/client.go:1345): RequestID, so
 // SDK-path failures can print a request id like direct-path ones do; and
 // RetryAfter, so SDK-path 429s that outlive the transport's bounded retry can

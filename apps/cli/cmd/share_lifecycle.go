@@ -329,6 +329,9 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 	}
 	target, cleanupErr := convergeStoppedLocalShare(ctx, opts, id, sharing)
 	if errors.Is(cleanupErr, errLocalSharingIdentityMismatch) {
+		// A remote stop committed, but an identity disagreement is a trust
+		// failure, not ordinary best-effort local cleanup. Report both facts and
+		// return nonzero so automation cannot ignore the local authority drift.
 		return fmt.Errorf("the resource is stopped remotely, but local state was not updated because its identity disagrees with the accepted stop response: %w", cleanupErr)
 	}
 	printer := opts.printer()

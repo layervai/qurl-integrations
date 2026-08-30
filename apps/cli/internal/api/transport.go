@@ -160,14 +160,18 @@ func retryableResponse(req *http.Request, resp *http.Response, basePath string) 
 		return true
 	default:
 		// TODO(upstream-contract): qurl-service must deduplicate every route
-		// that accepts Idempotency-Key before a caller marks it retryable here.
+		// that accepts Idempotency-Key for longer than this transport's maximum
+		// two-minute attempt-and-backoff span. The reviewed API-key mint path
+		// retains its atomic body-bound replay record for 24 hours.
 		return strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
 	}
 }
 
 func retrySafeRequest(req *http.Request, basePath string) bool {
 	// TODO(upstream-contract): qurl-service must deduplicate every route that
-	// accepts Idempotency-Key before a caller marks it retryable here.
+	// accepts Idempotency-Key for longer than this transport's maximum
+	// two-minute attempt-and-backoff span. The reviewed API-key mint path
+	// retains its atomic body-bound replay record for 24 hours.
 	if strings.TrimSpace(req.Header.Get("Idempotency-Key")) != "" {
 		return true
 	}

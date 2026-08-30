@@ -52,9 +52,37 @@ actual_head=$(git rev-parse --verify HEAD)
 
 qurl_go_module_version=$(GOWORK=off GOFLAGS=-mod=readonly \
   go list -m -f '{{.Version}}' github.com/layervai/qurl-go)
-if ! [[ "$qurl_go_module_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-0\.[0-9]{14}-([0-9a-f]{12})$ ]] ||
-  [ "${BASH_REMATCH[1]}" != "${qurl_go_source_sha:0:12}" ]; then
-  echo "qurl-go module version does not bind the required source SHA" >&2
+if ! [[ "$qurl_go_module_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "qurl-go module version is not a tagged semantic version" >&2
+  exit 65
+fi
+qurl_go_module=$(GOWORK=off GOFLAGS=-mod=readonly \
+  go mod download -json github.com/layervai/qurl-go)
+jq -e \
+  --arg version "$qurl_go_module_version" \
+  '.Path == "github.com/layervai/qurl-go" and
+   .Version == $version and
+   (.Sum | startswith("h1:"))' <<<"$qurl_go_module" >/dev/null || {
+  echo "qurl-go tagged module checksum does not match go.mod" >&2
+  exit 65
+}
+tag_refs=$(git ls-remote https://github.com/layervai/qurl-go.git \
+  "refs/tags/$qurl_go_module_version" "refs/tags/$qurl_go_module_version^{}")
+tag_source_sha=$(awk \
+  -v direct="refs/tags/$qurl_go_module_version" \
+  -v peeled="refs/tags/$qurl_go_module_version^{}" '
+    $2 == direct { direct_hash=$1; direct_count++ }
+    $2 == peeled { peeled_hash=$1 }
+    END {
+      if (direct_count != 1) exit 1
+      print (peeled_hash != "" ? peeled_hash : direct_hash)
+    }
+  ' <<<"$tag_refs") || {
+  echo "qurl-go release tag could not be resolved exactly" >&2
+  exit 65
+}
+if [[ ! "$tag_source_sha" =~ ^[0-9a-f]{40}$ ]] || [ "$tag_source_sha" != "$qurl_go_source_sha" ]; then
+  echo "qurl-go release tag does not bind the required source SHA" >&2
   exit 65
 fi
 

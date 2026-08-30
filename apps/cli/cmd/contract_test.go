@@ -334,25 +334,21 @@ func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 	}
 }
 
-// TestPublishNoCRIDKeepsResourceID pins the fallback the no-CRID warning
-// names: when the service mints no CRID, the text document must still carry
-// an identifier, so the resource id row comes back for exactly that case.
-func TestPublishNoCRIDKeepsResourceID(t *testing.T) {
+// TestPublishNoCRIDFailsClosed pins the current service contract: a successful
+// publish must contain the permanent public identity that the command exists
+// to return. Do not silently accept an older, partial response.
+func TestPublishNoCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishOmitCRID(true)
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
-	if res.code != 0 {
-		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	if res.code == 0 {
+		t.Fatalf("exit = 0, stdout: %s", res.stdout.String())
 	}
-	// tabwriter turns the label's tab into padding, so assert the label and
-	// the value separately rather than a single tab-joined string that can
-	// never match.
-	stdout := res.stdout.String()
-	if !strings.Contains(stdout, "Resource ID:") || !strings.Contains(stdout, srv.Key.ResourceID) {
-		t.Errorf("no-CRID publish must still show the labeled resource id, got %q", stdout)
+	if res.stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want no partial publish identity", res.stdout.String())
 	}
-	if !strings.Contains(res.stderr.String(), "did not return a CRID") {
-		t.Errorf("expected the no-CRID warning, got %q", res.stderr.String())
+	if !strings.Contains(res.stderr.String(), "publish response missing crid") {
+		t.Errorf("stderr = %q, want missing-CRID cause", res.stderr.String())
 	}
 }
 

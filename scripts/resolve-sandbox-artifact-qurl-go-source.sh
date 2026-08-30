@@ -8,20 +8,21 @@ for command in gh go jq; do
   }
 done
 
-module_version=$(GOWORK=off GOFLAGS=-mod=readonly \
-  go list -m -f '{{.Version}}' github.com/layervai/qurl-go)
-if ! [[ "$module_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-0\.[0-9]{14}-([0-9a-f]{12})$ ]]; then
-  echo "qurl-go is not pinned by one exact pseudo-version" >&2
-  exit 65
-fi
-prefix=${BASH_REMATCH[1]}
-
-commit=$(gh api "repos/layervai/qurl-go/commits/$prefix")
-source_sha=$(jq -er '.sha | select(test("^[0-9a-f]{40}$"))' <<<"$commit")
-[[ "$source_sha" == "$prefix"* ]] || {
-  echo "resolved qurl-go commit does not match the module pseudo-version" >&2
+module=$(GOWORK=off GOFLAGS=-mod=readonly \
+  go mod download -json github.com/layervai/qurl-go)
+module_version=$(jq -er '.Version | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' <<<"$module") || {
+  echo "qurl-go is not pinned by one tagged semantic version" >&2
   exit 65
 }
+jq -e \
+  'select(.Path == "github.com/layervai/qurl-go") | .Sum | select(startswith("h1:"))' \
+  <<<"$module" >/dev/null || {
+  echo "qurl-go tagged module checksum is missing" >&2
+  exit 65
+}
+
+commit=$(gh api "repos/layervai/qurl-go/commits/$module_version")
+source_sha=$(jq -er '.sha | select(test("^[0-9a-f]{40}$"))' <<<"$commit")
 jq -e '.commit.verification.verified == true and .commit.verification.reason == "valid"' \
   <<<"$commit" >/dev/null || {
   echo "resolved qurl-go commit is not signed and verified" >&2

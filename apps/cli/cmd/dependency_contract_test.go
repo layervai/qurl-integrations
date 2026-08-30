@@ -13,55 +13,58 @@ import (
 
 const (
 	connectorModule = "github.com/layervai/qurl-connector"
+	qurlGoModule    = "github.com/layervai/qurl-go"
 	cliRepoRoot     = "../../.."
 	goModPath       = cliRepoRoot + "/go.mod"
 )
 
-// TestConnectorUsesReleasedDirectDependency keeps go.mod as the only source of
-// truth for the connector version shipped in the CLI. The connector repository
-// owns its behavior tests; the packaged CLI journey tests that exact dependency.
-func TestConnectorUsesReleasedDirectDependency(t *testing.T) {
+// TestCLIUsesReleasedDirectDependencies keeps go.mod as the only source of
+// truth for the first-party runtime versions shipped in the CLI. Their owning
+// repositories test behavior; the packaged CLI journey tests these exact tags.
+func TestCLIUsesReleasedDirectDependencies(t *testing.T) {
 	t.Parallel()
 
 	raw, err := os.ReadFile(goModPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", goModPath, err)
 	}
-	if err := checkConnectorRequirement(goModPath, raw); err != nil {
-		t.Fatal(err)
+	for _, modulePath := range []string{connectorModule, qurlGoModule} {
+		if err := checkReleasedDirectRequirement(goModPath, raw, modulePath); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func checkConnectorRequirement(path string, raw []byte) error {
+func checkReleasedDirectRequirement(path string, raw []byte, modulePath string) error {
 	parsed, err := modfile.Parse(path, raw, nil)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	for _, replacement := range parsed.Replace {
-		if replacement.Old.Path == connectorModule {
-			return fmt.Errorf("%s: %s must not be replaced: released CLI must use the reviewed public module", path, connectorModule)
+		if replacement.Old.Path == modulePath {
+			return fmt.Errorf("%s: %s must not be replaced: released CLI must use the reviewed public module", path, modulePath)
 		}
 	}
 
 	for _, requirement := range parsed.Require {
-		if requirement.Mod.Path != connectorModule {
+		if requirement.Mod.Path != modulePath {
 			continue
 		}
 		version := requirement.Mod.Version
 		if requirement.Indirect {
-			return fmt.Errorf("%s: %s must be a direct requirement", path, connectorModule)
+			return fmt.Errorf("%s: %s must be a direct requirement", path, modulePath)
 		}
 		if !semver.IsValid(version) || module.IsPseudoVersion(version) {
-			return fmt.Errorf("%s: %s version = %q, want a tagged semantic version", path, connectorModule, version)
+			return fmt.Errorf("%s: %s version = %q, want a tagged semantic version", path, modulePath, version)
 		}
 		return nil
 	}
 
-	return fmt.Errorf("%s: %s is not required directly by the released CLI", path, connectorModule)
+	return fmt.Errorf("%s: %s is not required directly by the released CLI", path, modulePath)
 }
 
-func TestCheckConnectorRequirement(t *testing.T) {
+func TestCheckReleasedDirectRequirement(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name    string
@@ -105,7 +108,7 @@ func TestCheckConnectorRequirement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkConnectorRequirement("synthetic.mod", []byte(test.goMod))
+			err := checkReleasedDirectRequirement("synthetic.mod", []byte(test.goMod), connectorModule)
 			if test.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)

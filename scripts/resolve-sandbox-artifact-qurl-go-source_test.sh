@@ -13,12 +13,19 @@ trap cleanup EXIT
 cd "$root"
 module_version=$(GOWORK=off GOFLAGS=-mod=readonly \
   go list -m -f '{{.Version}}' github.com/layervai/qurl-go)
-if ! [[ "$module_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-0\.[0-9]{14}-([0-9a-f]{12})$ ]]; then
-  echo "test fixture could not resolve the qurl-go pseudo-version suffix" >&2
-  exit 1
-fi
-prefix=${BASH_REMATCH[1]}
-source_sha="${prefix}0000000000000000000000000000"
+tag_refs=$(git ls-remote https://github.com/layervai/qurl-go.git \
+  "refs/tags/$module_version" "refs/tags/$module_version^{}")
+source_sha=$(awk \
+  -v direct="refs/tags/$module_version" \
+  -v peeled="refs/tags/$module_version^{}" '
+    $2 == direct { direct_hash=$1; direct_count++ }
+    $2 == peeled { peeled_hash=$1 }
+    END {
+      if (direct_count != 1) exit 1
+      print (peeled_hash != "" ? peeled_hash : direct_hash)
+    }
+  ' <<<"$tag_refs")
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
 main_sha=ffffffffffffffffffffffffffffffffffffffff
 
 mkdir "$tmp/bin"
@@ -83,9 +90,9 @@ assert_rejected() {
   fi
 }
 
-assert_rejected "non-prefix commit" \
+assert_rejected "mismatched tag commit" \
   "$(commit 0000000000000000000000000000000000000000 true valid)" "$good_main" "$good_compare"
-assert_rejected "short commit" "$(commit "$prefix" true valid)" "$good_main" "$good_compare"
+assert_rejected "short commit" "$(commit "${source_sha:0:12}" true valid)" "$good_main" "$good_compare"
 assert_rejected "unsigned commit" "$(commit "$source_sha" false unsigned)" "$good_main" "$good_compare"
 assert_rejected "non-ancestor commit" "$good_commit" "$good_main" \
   "$(compare diverged "$source_sha" "$main_sha")"

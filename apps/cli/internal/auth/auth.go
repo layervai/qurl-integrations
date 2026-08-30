@@ -169,7 +169,7 @@ func ValidateKeyShape(key string) error {
 // never consult (and the chain removes the file precisely so the two can't
 // diverge) — SDK-based tools there take QURL_API_KEY instead.
 //
-// TODO(upstream-contract): mirrors qurl-go v0.5.3 qurl/client.go —
+// TODO(upstream-contract): mirrors qurl-go qurl/client.go —
 // UserIssuerStatePath = ".config/qurl/token" (the per-user credential file
 // resolveCredentials reads) and the credentialState JSON document
 // {"bearer_token": ...} its FileCredentials provider decodes. The SDK's

@@ -165,7 +165,7 @@ type publishRequest struct {
 
 // Publish registers targetURL as a protected URL resource. This is a direct
 // call rather than the SDK's ProtectURL because the pinned platform contract
-// requires the explicit `type: url` discriminator, which qurl-go v0.5.3 does
+// requires the explicit `type: url` discriminator, which qurl-go v0.8.1 does
 // not send.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
 	if err := validateTargetURL(targetURL); err != nil {
@@ -198,10 +198,11 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
 		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
-	if env.Data.CRID != "" {
-		if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
-			return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
-		}
+	if strings.TrimSpace(env.Data.CRID) == "" {
+		return nil, fmt.Errorf("%w: publish response missing crid", qurl.ErrInvalidAPIResponse)
+	}
+	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
+		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	return &Published{
 		CRID:          env.Data.CRID,
@@ -236,7 +237,7 @@ func validateTargetURL(target string) error {
 	return nil
 }
 
-// List fetches one page of the caller's resources. qurl-go v0.5.3 has no
+// List fetches one page of the caller's resources. qurl-go has no
 // generic list surface (its slug lookup is connector-only), so this is a
 // direct call on the same /v1/resources endpoint through the shared
 // transport.

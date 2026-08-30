@@ -15,11 +15,19 @@ cd "$root"
 head_sha=$(git rev-parse --verify HEAD)
 qurl_go_module_version=$(GOWORK=off GOFLAGS=-mod=readonly \
   go list -m -f '{{.Version}}' github.com/layervai/qurl-go)
-if ! [[ "$qurl_go_module_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-0\.[0-9]{14}-([0-9a-f]{12})$ ]]; then
-  echo "test fixture could not resolve the qurl-go pseudo-version suffix" >&2
-  exit 1
-fi
-qurl_go_source_sha="${BASH_REMATCH[1]}0000000000000000000000000000"
+tag_refs=$(git ls-remote https://github.com/layervai/qurl-go.git \
+  "refs/tags/$qurl_go_module_version" "refs/tags/$qurl_go_module_version^{}")
+qurl_go_source_sha=$(awk \
+  -v direct="refs/tags/$qurl_go_module_version" \
+  -v peeled="refs/tags/$qurl_go_module_version^{}" '
+    $2 == direct { direct_hash=$1; direct_count++ }
+    $2 == peeled { peeled_hash=$1 }
+    END {
+      if (direct_count != 1) exit 1
+      print (peeled_hash != "" ? peeled_hash : direct_hash)
+    }
+  ' <<<"$tag_refs")
+[[ "$qurl_go_source_sha" =~ ^[0-9a-f]{40}$ ]]
 
 file_mode() {
   case "$(uname -s)" in
@@ -155,7 +163,7 @@ if [ "$qurl_go_source_sha" = "$wrong_qurl_go_source_sha" ]; then
 fi
 if "$script" "$tmp/wrong-qurl-go-source" layervai/qurl-integrations \
   "$head_sha" 12345 2 "$wrong_qurl_go_source_sha" >/dev/null 2>&1; then
-  echo "a qurl-go source SHA that does not match the module suffix was accepted" >&2
+  echo "a qurl-go source SHA that does not match the tagged module origin was accepted" >&2
   exit 1
 fi
 if "$script" "$tmp/short-qurl-go-source" layervai/qurl-integrations \

@@ -94,9 +94,6 @@ share and turns it off when it exits.`,
 			}
 
 			printer := opts.printer()
-			if result.CRID == "" {
-				printer.Warnf("%s", msgNoCRIDReturned)
-			}
 			return printer.Publish(result)
 		},
 	}

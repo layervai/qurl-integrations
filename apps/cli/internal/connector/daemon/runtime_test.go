@@ -99,6 +99,18 @@ func TestNativeSessionFactoryLogsClassifiedRetryWithoutStoppingSession(t *testin
 	}
 }
 
+func TestNativeSessionCancellationFilterKeepsIndependentShutdownFailure(t *testing.T) {
+	failure := errors.New("retire native admission after shutdown")
+	wrappedCancellation := fmt.Errorf("resource runner stopped: %w", context.Canceled)
+	got := withoutExpectedNativeSessionCancellation(errors.Join(wrappedCancellation, failure))
+	if !errors.Is(got, failure) || errors.Is(got, context.Canceled) {
+		t.Fatalf("filtered native shutdown error = %v, want only %v", got, failure)
+	}
+	if got := withoutExpectedNativeSessionCancellation(errors.Join(wrappedCancellation)); got != nil {
+		t.Fatalf("filtered expected native cancellation = %v, want nil", got)
+	}
+}
+
 type closeTrackingFactory struct {
 	delegate *fakeFactory
 	closes   atomic.Int32

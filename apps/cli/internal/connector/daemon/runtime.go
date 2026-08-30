@@ -334,8 +334,8 @@ func (s *nativeSession) run(ctx context.Context, runner *connectorshare.Resource
 	err := runner.Run(ctx)
 	if errors.Is(err, connectorshare.ErrResourceGone) {
 		err = errors.Join(ErrResourceGone, err)
-	} else if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-		err = nil
+	} else if ctx.Err() != nil {
+		err = withoutExpectedNativeSessionCancellation(err)
 	}
 	s.mu.Lock()
 	s.err = err
@@ -348,6 +348,32 @@ func (s *nativeSession) run(ctx context.Context, runner *connectorshare.Resource
 	s.diagnostic.NextRetryAt = nil
 	s.mu.Unlock()
 	close(s.done)
+}
+
+func withoutExpectedNativeSessionCancellation(err error) error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		kept := make([]error, 0, len(joined.Unwrap()))
+		for _, cause := range joined.Unwrap() {
+			if cause = withoutExpectedNativeSessionCancellation(cause); cause != nil {
+				kept = append(kept, cause)
+			}
+		}
+		return errors.Join(kept...)
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		cause := wrapped.Unwrap()
+		if !errors.Is(cause, context.Canceled) {
+			return err
+		}
+		return withoutExpectedNativeSessionCancellation(cause)
+	}
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 // Done closes after the resource runner exits.

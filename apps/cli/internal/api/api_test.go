@@ -484,6 +484,21 @@ func TestPublishRejectsCRIDThatDoesNotCommitToResourceID(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsMissingCRID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID,
+			"target_url":  "https://example.com",
+			"status":      "active",
+		}, nil)
+	})
+	_, err := newTestClient(t, srv, nil).Publish(context.Background(), "https://example.com", PublishOptions{})
+	if !errors.Is(err, qurl.ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing crid") {
+		t.Fatalf("missing publish CRID error = %v, want invalid API response", err)
+	}
+}
+
 func TestPublishPreservesOmittedFoundExistingAsUnknown(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.OmitPublishFoundExisting()
