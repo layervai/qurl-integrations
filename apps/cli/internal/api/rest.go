@@ -318,11 +318,6 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 	if id != row.CRID && id != row.ResourceID {
 		return nil, fmt.Errorf("%w: resource detail identity does not match the request", qurl.ErrInvalidAPIResponse)
 	}
-	if row.CRID != "" {
-		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
-			return nil, fmt.Errorf("%w: resource detail identity: %w", qurl.ErrInvalidAPIResponse, err)
-		}
-	}
 	return summarizeResourceRow(row, "resource detail")
 }
 
@@ -330,10 +325,12 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 	if row == nil || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
 		return nil, fmt.Errorf("%w: %s has missing type or status", qurl.ErrInvalidAPIResponse, source)
 	}
-	if row.Type == "tunnel" {
+	if row.CRID != "" || row.Type == "tunnel" {
 		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
-			return nil, fmt.Errorf("%w: tunnel %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
+			return nil, fmt.Errorf("%w: %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
 		}
+	}
+	if row.Type == "tunnel" {
 		if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
 			return nil, fmt.Errorf("%w: tunnel %s has invalid desired_state %q", qurl.ErrInvalidAPIResponse, source, row.DesiredState)
 		}
@@ -522,9 +519,9 @@ func (c *client) doRESTOnce(ctx context.Context, method, path string, body any) 
 }
 
 // doRESTWithHeaders is doREST plus request-specific headers. Shared headers
-// (including authorization) still come from the same transport seam; this
-// narrow variant exists for contracts such as Idempotency-Key that cannot be
-// represented in a JSON body.
+// (including authorization and the transport-owned X-Request-Id) still come
+// from the same transport seam; this narrow variant exists for contracts such
+// as Idempotency-Key that cannot be represented in a JSON body.
 func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, body any, headers http.Header) (*restReply, error) {
 	return c.doRESTRequest(ctx, method, path, body, headers, true)
 }

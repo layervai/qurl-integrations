@@ -630,6 +630,9 @@ func TestListJSONCarriesZeroTunnelEpochButNotURLLifecycleFields(t *testing.T) {
 	if got := document.Resources[0]["desired_state"]; got != "off" {
 		t.Fatalf("tunnel desired_state = %#v, want off", got)
 	}
+	if _, ok := document.Resources[0]["connection_state"]; ok {
+		t.Fatalf("list fabricated a live tunnel observation: %#v", document.Resources[0])
+	}
 	if _, ok := document.Resources[1]["serving_epoch"]; ok {
 		t.Fatalf("URL row emitted tunnel serving_epoch: %#v", document.Resources[1])
 	}

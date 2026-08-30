@@ -39,18 +39,17 @@ type resolveJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	CRID            string                  `json:"crid,omitempty"`
-	ResourceID      string                  `json:"resource_id"`
-	TargetURL       string                  `json:"target_url,omitempty"`
-	Type            string                  `json:"type,omitempty"`
-	Status          string                  `json:"status,omitempty"`
-	DesiredState    qurlapi.DesiredState    `json:"desired_state,omitempty"`
-	ConnectionState qurlapi.ConnectionState `json:"connection_state,omitempty"`
-	ServingEpoch    *uint64                 `json:"serving_epoch,omitempty"`
-	Description     string                  `json:"description,omitempty"`
-	Tags            []string                `json:"tags,omitempty"`
-	CreatedAt       *time.Time              `json:"created_at,omitempty"`
-	ExpiresAt       *time.Time              `json:"expires_at,omitempty"`
+	CRID         string               `json:"crid,omitempty"`
+	ResourceID   string               `json:"resource_id"`
+	TargetURL    string               `json:"target_url,omitempty"`
+	Type         string               `json:"type,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	DesiredState qurlapi.DesiredState `json:"desired_state,omitempty"`
+	ServingEpoch *uint64              `json:"serving_epoch,omitempty"`
+	Description  string               `json:"description,omitempty"`
+	Tags         []string             `json:"tags,omitempty"`
+	CreatedAt    *time.Time           `json:"created_at,omitempty"`
+	ExpiresAt    *time.Time           `json:"expires_at,omitempty"`
 }
 
 type listJSON struct {
@@ -316,18 +315,17 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				CRID:            item.CRID,
-				ResourceID:      item.ResourceID,
-				TargetURL:       item.TargetURL,
-				Type:            item.Type,
-				Status:          item.Status,
-				DesiredState:    item.DesiredState,
-				ConnectionState: item.ConnectionState,
-				ServingEpoch:    servingEpoch,
-				Description:     item.Description,
-				Tags:            item.Tags,
-				CreatedAt:       item.CreatedAt,
-				ExpiresAt:       item.ExpiresAt,
+				CRID:         item.CRID,
+				ResourceID:   item.ResourceID,
+				TargetURL:    item.TargetURL,
+				Type:         item.Type,
+				Status:       item.Status,
+				DesiredState: item.DesiredState,
+				ServingEpoch: servingEpoch,
+				Description:  item.Description,
+				Tags:         item.Tags,
+				CreatedAt:    item.CreatedAt,
+				ExpiresAt:    item.ExpiresAt,
 			})
 		}
 		return p.writeJSON(out)
@@ -365,12 +363,9 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 		desired, observed := "-", item.Status
 		if item.Type == "tunnel" {
 			desired = string(item.DesiredState)
-			observed = string(item.ConnectionState)
+			observed = "unknown"
 			if desired == "" {
 				desired = "unknown"
-			}
-			if observed == "" {
-				observed = "unknown"
 			}
 		}
 		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\n",

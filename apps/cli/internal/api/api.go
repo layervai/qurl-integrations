@@ -155,18 +155,17 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	CRID            string
-	ResourceID      string
-	TargetURL       string
-	Type            string
-	Status          string
-	DesiredState    DesiredState
-	ServingEpoch    uint64
-	ConnectionState ConnectionState
-	Description     string
-	Tags            []string
-	CreatedAt       *time.Time
-	ExpiresAt       *time.Time
+	CRID         string
+	ResourceID   string
+	TargetURL    string
+	Type         string
+	Status       string
+	DesiredState DesiredState
+	ServingEpoch uint64
+	Description  string
+	Tags         []string
+	CreatedAt    *time.Time
+	ExpiresAt    *time.Time
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.

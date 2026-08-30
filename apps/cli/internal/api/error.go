@@ -26,7 +26,7 @@ type Error struct {
 	InvalidFields map[string]string
 	// RetryAfter is the server-requested wait in seconds for 429 responses
 	// that survived the transport's bounded retry, 0 when absent.
-	RetryAfter int
+	RetryAfter uint64
 	// RequestID correlates the failure with server logs, when provided.
 	RequestID string
 

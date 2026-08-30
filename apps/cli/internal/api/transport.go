@@ -23,7 +23,7 @@ const (
 	// maxRetryAfter caps each Retry-After wait before the CLI retries a
 	// replayable transient 429 or idempotent 503 response.
 	maxRetryAfter        = 15 * time.Second
-	maxRetryAfterSeconds = int(maxRetryAfter / time.Second)
+	maxRetryAfterSeconds = uint64(maxRetryAfter / time.Second)
 	// drainLimit bounds how much of a discarded retry response is read for
 	// connection reuse.
 	drainLimit = 512 << 10
@@ -159,11 +159,15 @@ func retryableResponse(req *http.Request, resp *http.Response, basePath string) 
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
 	default:
+		// TODO(upstream-contract): qurl-service must deduplicate every route
+		// that accepts Idempotency-Key before a caller marks it retryable here.
 		return strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
 	}
 }
 
 func retrySafeRequest(req *http.Request, basePath string) bool {
+	// TODO(upstream-contract): qurl-service must deduplicate every route that
+	// accepts Idempotency-Key before a caller marks it retryable here.
 	if strings.TrimSpace(req.Header.Get("Idempotency-Key")) != "" {
 		return true
 	}
@@ -228,15 +232,18 @@ func replayableBody(req *http.Request) (func() (io.ReadCloser, error), bool) {
 // the service adopts HTTP-date, update parseRetryAfterSeconds and its tests.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if secs, ok := parseRetryAfterSeconds(resp.Header.Get("Retry-After")); ok && secs > 0 {
+		if secs >= maxRetryAfterSeconds {
+			return maxRetryAfter
+		}
 		return time.Duration(secs) * time.Second
 	}
 	return time.Duration(attempt) * 500 * time.Millisecond
 }
 
-// parseRetryAfterSeconds is the one Retry-After policy for transport waits and
-// user-facing errors. It accepts the service's delta-seconds form and caps the
-// value so the CLI never waits or tells a user to wait longer than it will.
-func parseRetryAfterSeconds(value string) (int, bool) {
+// parseRetryAfterSeconds parses the service's delta-seconds form without
+// changing its value. The transport applies its short wait cap separately;
+// an error shown after retries are exhausted retains the server's full hint.
+func parseRetryAfterSeconds(value string) (uint64, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0, false
@@ -245,13 +252,7 @@ func parseRetryAfterSeconds(value string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	// Keep the narrowing conversion on an explicitly bounded branch. Besides
-	// making this safe on 32-bit Windows, this lets static analysis verify that
-	// an arbitrary uint64 from the service can never overflow int.
-	if seconds >= uint64(maxRetryAfterSeconds) {
-		return maxRetryAfterSeconds, true
-	}
-	return int(seconds), true
+	return seconds, true
 }
 
 func discardResponse(resp *http.Response) {

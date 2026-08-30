@@ -395,6 +395,21 @@ func TestListRejectsInvalidTunnelIdentity(t *testing.T) {
 	}
 }
 
+func TestListRejectsMismatchedURLIdentity(t *testing.T) {
+	key := apitest.GenerateResourceKey(t)
+	other := apitest.GenerateResourceKey(t)
+	srv := apitest.NewServerWithKey(t, key)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": key.ResourceID, "crid": other.CRID,
+			"type": "url", "status": "active",
+		}}, map[string]any{"has_more": false})
+	})
+	if _, err := newTestClient(t, srv, nil).List(context.Background(), ListOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("List error = %v, want invalid API response", err)
+	}
+}
+
 // testRequestID is the harness's fixed X-Request-Id value.
 const testRequestID = "unit-req"
 
@@ -723,7 +738,7 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 		}
 		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{
 			{
-				"resource_id": "r1", "crid": "c1", "target_url": "https://a.example",
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "target_url": "https://a.example",
 				"type": "url", "status": "active",
 				"description": "nightly export", "tags": []string{"ops", "nightly"},
 			},
@@ -871,8 +886,8 @@ func TestProblemErrorParsesPinnedEnvelope(t *testing.T) {
 	}
 	retryHeader.Set("Retry-After", "3600")
 	limited = (&restReply{status: 429, header: retryHeader, body: []byte(`{}`)}).problem()
-	if !errors.As(limited, &e) || e.RetryAfter != int(maxRetryAfter/time.Second) {
-		t.Errorf("capped retry-after: %+v", e)
+	if !errors.As(limited, &e) || e.RetryAfter != 3600 {
+		t.Errorf("full user-facing retry-after: %+v", e)
 	}
 }
 
