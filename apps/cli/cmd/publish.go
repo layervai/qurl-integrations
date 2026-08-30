@@ -569,9 +569,6 @@ func withoutExpectedDaemonCancellation(err error) error {
 
 func printLocalPublishServing(opts *globalOpts, resolved *agent.ResolvedResource, local *connectorstate.LocalShare) error {
 	printer := opts.printer()
-	if strings.TrimSpace(local.CRID) == "" {
-		printer.Warnf("%s", msgNoCRIDReturned)
-	}
 	return printer.Publish(&qurlapi.Published{
 		CRID: local.CRID, ResourceID: local.ResourceID, TargetURL: local.TargetURL,
 		Status: "serving", FoundExisting: resolved.FoundExisting,

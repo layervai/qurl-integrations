@@ -151,9 +151,8 @@ func (s *Server) OmitPublishFoundExisting() {
 	s.publishFoundExisting = nil
 }
 
-// SetPublishOmitCRID makes publish answer without a crid, the shape an
-// older deployment returns before it mints CRIDs. The CLI warns and falls
-// back to the resource id in that case.
+// SetPublishOmitCRID makes publish return a malformed success response so
+// callers can prove the CLI rejects a result without its required CRID.
 func (s *Server) SetPublishOmitCRID(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

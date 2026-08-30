@@ -82,7 +82,7 @@ func (e *ConnectorResourceCommitError) Unwrap() error { return e.kind }
 type ConnectorResourceBinding struct {
 	ConnectorID        string `json:"connector_id"`
 	ResourceID         string `json:"resource_id"`
-	CRID               string `json:"crid,omitempty"`
+	CRID               string `json:"crid"`
 	ConnectorRoutingID string `json:"connector_routing_id"`
 	KnockResourceID    string `json:"knock_resource_id"`
 }
@@ -344,12 +344,7 @@ func (t *ConnectorResourceTransaction) Commit(binding *ConnectorResourceBinding)
 		if existing.ConnectorRoutingID != committed.ConnectorRoutingID || existing.KnockResourceID != committed.KnockResourceID {
 			return t.rejectCommit(ErrConnectorResourceVerification, "authenticated response changed the cached routing or knock binding")
 		}
-		switch {
-		case existing.CRID != "" && committed.CRID == "":
-			// CRID is optional in an authenticated response. Preserve a
-			// previously key-verified value when a warm response omits it.
-			committed.CRID = existing.CRID
-		case existing.CRID != "" && committed.CRID != existing.CRID:
+		if committed.CRID != existing.CRID {
 			return t.rejectCommit(ErrConnectorResourceVerification, "authenticated response changed the cached CRID")
 		}
 	}
@@ -603,11 +598,12 @@ func validateBinding(binding *ConnectorResourceBinding) error {
 	if !validKnockResourceID(binding.KnockResourceID) {
 		return errors.New("knock resource ID is not canonical")
 	}
-	if binding.CRID != "" {
-		matched, err := crid.KeyMatches(binding.CRID, der)
-		if err != nil || !matched {
-			return errors.New("crid does not match the public resource identity")
-		}
+	if strings.TrimSpace(binding.CRID) == "" {
+		return errors.New("crid is required")
+	}
+	matched, err := crid.KeyMatches(binding.CRID, der)
+	if err != nil || !matched {
+		return errors.New("crid does not match the public resource identity")
 	}
 	return nil
 }

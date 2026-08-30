@@ -13,11 +13,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -36,9 +38,28 @@ func testNativeResource(t *testing.T, connectorID string) *qurl.ConnectorResourc
 	digest := sha256.Sum256(der)
 	return &qurl.ConnectorResource{
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+		CRID:               apitest.DeriveCRID(t, der, apitest.VersionProduction),
 		ConnectorRoutingID: "c-" + routingIDEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "nhp-resource-a",
 		Slug:               connectorID,
+	}
+}
+
+func TestResolveResourceRejectsMissingCRID(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "missing-crid")
+	resource.CRID = ""
+	installResourceResolver(t, func(context.Context, *qurl.AgentRuntimeBinding,
+		*qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption,
+	) (*qurl.ConnectorResourceResolution, error) {
+		return &qurl.ConnectorResourceResolution{Resource: resource}, nil
+	})
+	_, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, resource.Slug)
+	if !errors.Is(err, state.ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+		t.Fatalf("missing native CRID = %v, want terminal verification error", err)
+	}
+	if pending := pendingRequestFromDisk(t, store, resource.Slug); pending != nil {
+		t.Fatalf("missing native CRID retained request: %+v", pending)
 	}
 }
 

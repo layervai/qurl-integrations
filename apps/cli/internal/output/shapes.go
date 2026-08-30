@@ -148,7 +148,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			FoundExisting: res.FoundExisting,
 		})
 	case p.quiet:
-		_, err := fmt.Fprintln(p.out, primaryID(res.CRID, res.ResourceID))
+		_, err := fmt.Fprintln(p.out, res.CRID)
 		return err
 	default:
 		return p.publishText(res)
@@ -252,12 +252,12 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
 		})
 	case p.quiet:
-		_, err := fmt.Fprintln(p.out, primaryID(resource.CRID, resource.ResourceID))
+		_, err := fmt.Fprintln(p.out, resource.CRID)
 		return err
 	default:
 		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 		ew := &errWriter{w: tw}
-		ew.printf("%s\t%s\n", p.bold("CRID:"), primaryID(resource.CRID, resource.ResourceID))
+		ew.printf("%s\t%s\n", p.bold("CRID:"), resource.CRID)
 		if resource.TargetURL != "" {
 			ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
 		}
@@ -273,13 +273,10 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	}
 }
 
-// publishText renders the publish document. The raw platform resource id is
-// deliberately absent whenever a CRID exists: the CRID is the customer-facing
-// identity, and nothing in the CLI accepts a resource id as input. It comes
-// back only when the service minted no CRID, so the document still carries
-// some identifier — the same fallback --quiet makes through primaryID, and
-// the one cmd's no-CRID warning points the reader at. JSON always keeps the
-// raw field.
+// publishText renders the publish document. The raw platform resource ID is
+// deliberately absent: the CRID is the customer-facing identity, and nothing
+// in the CLI accepts a resource ID as input. JSON keeps the raw field for
+// machine-readable diagnostics.
 func (p *Printer) publishText(res *qurlapi.Published) error {
 	headline := "Published"
 	if foundExisting(res) {
@@ -294,9 +291,6 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
-	if res.CRID == "" && res.ResourceID != "" {
-		twe.printf("  %s\t%s\n", p.bold("Resource ID:"), res.ResourceID)
-	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}
@@ -317,9 +311,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	if foundExisting(res) && res.CRID != "" {
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
-	if res.CRID != "" {
-		ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
-	}
+	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
 }
 
@@ -418,7 +410,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 		ew := &errWriter{w: p.out}
 		for i := range page.Items {
 			item := &page.Items[i]
-			ew.printf("%s\n", primaryID(item.CRID, item.ResourceID))
+			ew.printf("%s\n", item.CRID)
 		}
 		return ew.flush(nil)
 	default:
@@ -454,7 +446,7 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 			}
 		}
 		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\n",
-			primaryID(item.CRID, item.ResourceID),
+			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
@@ -534,13 +526,4 @@ func (p *Printer) Downloaded(crid, path string, bytes int64) error {
 		_, _ = fmt.Fprintf(p.err, msgSavedTo+"\n", path, bytes)
 		return nil
 	}
-}
-
-// primaryID prefers the CRID and falls back to the resource ID for rows the
-// service has not (yet) minted a CRID for.
-func primaryID(crid, resourceID string) string {
-	if crid != "" {
-		return crid
-	}
-	return resourceID
 }

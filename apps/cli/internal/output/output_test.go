@@ -195,14 +195,6 @@ func TestQuietProjections(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := p.Publish(&qurlapi.Published{ResourceID: "rid-only"}); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "rid-only\n" {
-		t.Errorf("quiet publish without CRID = %q", out.String())
-	}
-
-	out.Reset()
 	if err := p.Resolve(&qurlapi.Resolved{QURL: "https://qurl.link/#x"}); err != nil {
 		t.Fatal(err)
 	}

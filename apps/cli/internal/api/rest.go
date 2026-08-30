@@ -326,10 +326,8 @@ func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, er
 	if row == nil || strings.TrimSpace(row.ResourceID) == "" || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
 		return nil, fmt.Errorf("%w: %s has missing resource_id, type, or status", qurl.ErrInvalidAPIResponse, source)
 	}
-	if row.CRID != "" || row.Type == "tunnel" {
-		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
-			return nil, fmt.Errorf("%w: %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
-		}
+	if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
+		return nil, fmt.Errorf("%w: %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
 	}
 	if row.Type == "tunnel" {
 		if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {

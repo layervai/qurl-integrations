@@ -600,8 +600,8 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 
 Every command's `-o json` document uses field names owned by this repo —
 a stable contract independent of upstream renames. Fields that only
-sometimes apply (`found_existing`, `already_gone`, a missing `crid` on
-older deployments) are omitted rather than emitted empty.
+sometimes apply (`found_existing`, `already_gone`) are omitted rather than
+emitted empty. Every resource result requires a verified `crid`.
 
 For `qurl list`, **`has_more` — not `next_cursor` presence — is the
 pagination terminator.** The service legitimately serves short and even

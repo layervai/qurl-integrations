@@ -33,12 +33,14 @@ func testResourceBinding(t *testing.T, connectorID string) ConnectorResourceBind
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(der)
-	return ConnectorResourceBinding{
+	binding := ConnectorResourceBinding{
 		ConnectorID:        connectorID,
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
 		ConnectorRoutingID: "c-" + testRoutingEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "nhp-target-" + connectorID,
 	}
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionProduction)
+	return binding
 }
 
 func testBindingCRID(t *testing.T, binding *ConnectorResourceBinding, version byte) string {
@@ -354,38 +356,55 @@ func TestConnectorResourceKnockIDWireBound(t *testing.T) {
 	}
 }
 
-func TestConnectorResourceCommitCRIDEnrichmentAndOmission(t *testing.T) {
-	t.Run("CRID enrichment", func(t *testing.T) {
+func TestConnectorResourceCommitRejectsMissingCRID(t *testing.T) {
+	t.Run("fresh binding", func(t *testing.T) {
 		store := openTestStore(t)
 		binding := testResourceBinding(t, "stable-api")
-		commitTestBinding(t, store, &binding)
-
-		binding.CRID = testBindingCRID(t, &binding, apitest.VersionProduction)
-		commitTestBinding(t, store, &binding)
+		binding.CRID = ""
+		tx, err := store.BeginConnectorResource(context.Background(), binding.ConnectorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tx.Commit(&binding)
+		if closeErr := tx.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if !errors.Is(err, ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+			t.Fatalf("missing fresh CRID commit = %v, want terminal verification error", err)
+		}
 		loaded, err := loadConnectorResources(store.Dir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := loaded.Bindings[binding.ConnectorID].CRID; got != binding.CRID {
-			t.Fatalf("enriched CRID = %q, want %q", got, binding.CRID)
+		if len(loaded.Bindings) != 0 || len(loaded.Pending) != 0 {
+			t.Fatalf("missing fresh CRID changed state: %+v", loaded)
 		}
 	})
 
-	t.Run("omitted CRID is preserved", func(t *testing.T) {
+	t.Run("warm binding", func(t *testing.T) {
 		store := openTestStore(t)
 		binding := testResourceBinding(t, "stable-api")
-		binding.CRID = testBindingCRID(t, &binding, apitest.VersionProduction)
 		commitTestBinding(t, store, &binding)
 
 		omitted := binding
 		omitted.CRID = ""
-		commitTestBinding(t, store, &omitted)
+		tx, err := store.BeginConnectorResource(context.Background(), binding.ConnectorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tx.Commit(&omitted)
+		if closeErr := tx.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if !errors.Is(err, ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+			t.Fatalf("missing warm CRID commit = %v, want terminal verification error", err)
+		}
 		loaded, err := loadConnectorResources(store.Dir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := loaded.Bindings[binding.ConnectorID].CRID; got != binding.CRID {
-			t.Fatalf("CRID after omission = %q, want preserved %q", got, binding.CRID)
+		if got := loaded.Bindings[binding.ConnectorID]; got != binding || len(loaded.Pending) != 0 {
+			t.Fatalf("missing warm CRID changed accepted state: %+v", loaded)
 		}
 	})
 }
@@ -504,6 +523,7 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 				second := testResourceBinding(t, "orders-api")
 				commitTestBinding(t, store, &first)
 				second.ResourceID = first.ResourceID
+				second.CRID = first.CRID
 				return preparedCase{
 					connectorID: second.ConnectorID, response: &second,
 					expectedBinding: map[string]ConnectorResourceBinding{first.ConnectorID: first},
@@ -536,6 +556,7 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = tx.Close() }()
 			originalRequest := *tx.Request()
 			err = tx.Commit(prepared.response)
 			if err == nil || !errors.Is(err, tc.kind) || !strings.Contains(err.Error(), tc.detail) {

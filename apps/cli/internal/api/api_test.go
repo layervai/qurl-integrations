@@ -747,6 +747,7 @@ func TestDark503IsNeverAutoRetried(t *testing.T) {
 
 func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	srv := apitest.NewServer(t)
+	other := apitest.GenerateResourceKey(t)
 	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("status"); got != "active" {
 			t.Errorf("status param = %q", got)
@@ -757,7 +758,8 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 				"type": "url", "status": "active",
 				"description": "nightly export", "tags": []string{"ops", "nightly"},
 			},
-			{"resource_id": "r2", "target_url": "https://b.example", "type": "url", "status": "revoked"},
+			{"resource_id": other.ResourceID, "crid": other.CRID,
+				"target_url": "https://b.example", "type": "url", "status": "revoked"},
 		}, map[string]any{"next_cursor": "cur2", "has_more": true})
 	})
 	client := newTestClient(t, srv, nil)
@@ -769,8 +771,8 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	if len(page.Items) != 2 || page.NextCursor != "cur2" || !page.HasMore {
 		t.Errorf("page = %+v", page)
 	}
-	if page.Items[1].CRID != "" || page.Items[1].ResourceID != "r2" {
-		t.Errorf("row without crid must survive projection: %+v", page.Items[1])
+	if page.Items[1].CRID != other.CRID || page.Items[1].ResourceID != other.ResourceID {
+		t.Errorf("second row identity = %+v", page.Items[1])
 	}
 	// The publish-time metadata is what a sweeper recognizes a row by, so it
 	// has to survive the projection rather than being dropped on the floor.
@@ -782,6 +784,21 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	// synthesized ones — an empty description is not a description.
 	if got := page.Items[1]; got.Type != "url" || got.Description != "" || got.Tags != nil {
 		t.Errorf("row without metadata gained some: %+v", got)
+	}
+}
+
+func TestListRejectsURLWithoutCRID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID,
+			"type":        "url",
+			"status":      "active",
+		}}, map[string]any{"has_more": false})
+	})
+	_, err := newTestClient(t, srv, nil).List(context.Background(), ListOptions{})
+	if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("URL list without CRID = %v, want invalid API response", err)
 	}
 }
 

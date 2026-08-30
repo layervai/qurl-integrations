@@ -21,17 +21,13 @@ const (
 
 	// msgVerifyMissing covers a resolve response that carried nothing to
 	// verify against; same fail-closed contract as msgVerifyMismatch.
-	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. This endpoint may be too old for verified resolution"
+	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. Try again; if it keeps happening, contact qURL support"
 
 	// msgNeedsYes is the non-interactive guard for destructive commands.
 	msgNeedsYes = "confirmation required: re-run with --yes (interactive confirmation needs a terminal)"
 
 	// msgDeleteCanceled acknowledges a declined confirmation prompt.
 	msgDeleteCanceled = "Canceled — nothing was deleted."
-
-	// msgNoCRIDReturned warns when publish succeeds but the service minted
-	// no CRID (older deployments).
-	msgNoCRIDReturned = "The service did not return a CRID for this resource; use the resource ID shown above until it does."
 
 	// msgInsecureEndpoint warns that a plain-http non-loopback endpoint sends
 	// an authorization credential unencrypted. Loopback endpoints never warn.
@@ -76,7 +72,6 @@ func customerMessages() []string {
 		msgVerifyMissing,
 		msgNeedsYes,
 		msgDeleteCanceled,
-		msgNoCRIDReturned,
 		msgTTLClamped,
 		msgNoKeyProvided,
 		msgAlreadyGone,
