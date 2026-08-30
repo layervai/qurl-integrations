@@ -588,7 +588,10 @@ func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodPost, "https://api.example"+tc.path, nil)
+			t.Parallel()
+			req, err := http.NewRequestWithContext(
+				context.Background(), http.MethodPost, "https://api.example"+tc.path, http.NoBody,
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
