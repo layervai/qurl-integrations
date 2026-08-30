@@ -105,6 +105,13 @@ type fakeSession struct {
 	block   bool
 }
 
+type fakeDiagnosticSession struct {
+	*fakeSession
+	diagnostic ResourceDiagnostic
+}
+
+func (s *fakeDiagnosticSession) Diagnostic() ResourceDiagnostic { return s.diagnostic }
+
 func newFakeSession() *fakeSession           { return &fakeSession{done: make(chan struct{})} }
 func (s *fakeSession) Done() <-chan struct{} { return s.done }
 func (s *fakeSession) Err() error            { return s.err }
@@ -125,11 +132,16 @@ type fakeFactory struct {
 	started  []connectorstate.LocalShare
 	sessions map[string][]*fakeSession
 	err      map[string]error
+	attempts map[string]int
 }
 
 func (f *fakeFactory) Start(_ context.Context, share *connectorstate.LocalShare) (Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.attempts == nil {
+		f.attempts = map[string]int{}
+	}
+	f.attempts[share.ResourceID]++
 	if err := f.err[share.ResourceID]; err != nil {
 		return nil, err
 	}
@@ -137,6 +149,67 @@ func (f *fakeFactory) Start(_ context.Context, share *connectorstate.LocalShare)
 	f.started = append(f.started, *share)
 	f.sessions[share.ResourceID] = append(f.sessions[share.ResourceID], session)
 	return session, nil
+}
+
+func (f *fakeFactory) attemptCount(resourceID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts[resourceID]
+}
+
+func TestManagerUnrelatedReconcileDoesNotBypassResourceBackoff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{
+		"a": errors.New("a unavailable"),
+		"b": errors.New("b unavailable"),
+	}}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if factory.attemptCount("a") != 1 || factory.attemptCount("b") != 1 {
+		t.Fatalf("unrelated reconcile bypassed backoff: attempts=%v", factory.attempts)
+	}
+
+	manager.mu.Lock()
+	delete(manager.retrying, "a")
+	delete(manager.retryGeneration, "a")
+	manager.mu.Unlock()
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if factory.attemptCount("a") != 2 || factory.attemptCount("b") != 1 {
+		t.Fatalf("resource-scoped retry disturbed sibling backoff: attempts=%v", factory.attempts)
+	}
+}
+
+func TestManagerDiagnosticsPreferScheduledRetryOverLiveSession(t *testing.T) {
+	manager, err := NewManager(&memoryRegistry{shares: map[string]connectorstate.LocalShare{}},
+		&fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.sessions["a"] = &managedSession{share: daemonShare("a", 1, "on"), session: &fakeDiagnosticSession{
+		fakeSession: newFakeSession(), diagnostic: ResourceDiagnostic{State: diagnosticStateServing},
+	}}
+	manager.retrying["a"] = true
+	manager.diagnostics["a"] = ResourceDiagnostic{State: diagnosticStateRetrying, RetryAttempt: 2}
+	got := manager.Diagnostics()["a"]
+	if got.State != diagnosticStateRetrying || got.RetryAttempt != 2 {
+		t.Fatalf("scheduled retry diagnostic was hidden by live session: %+v", got)
+	}
 }
 
 func daemonShare(id string, epoch uint64, desired string) connectorstate.LocalShare {
@@ -282,6 +355,7 @@ func TestManagerTransientStartFailureDoesNotStopSibling(t *testing.T) {
 		err:      map[string]error{"b": errors.New("network unavailable")},
 	}
 	manager, _ := NewManager(registry, factory)
+	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := manager.Reconcile(ctx); err != nil {
@@ -294,6 +368,11 @@ func TestManagerTransientStartFailureDoesNotStopSibling(t *testing.T) {
 	factory.mu.Lock()
 	delete(factory.err, "b")
 	factory.mu.Unlock()
+	waitManagerCondition(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return !manager.retrying["b"]
+	}, "resource-local start retry")
 	if err := manager.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -374,6 +453,7 @@ func TestManagerTransientStopFailureKeepsSiblingsAndPreventsReplacementOverlap(t
 	}}
 	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
 	manager, _ := NewManager(registry, factory)
+	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := manager.Reconcile(ctx); err != nil {
@@ -396,6 +476,11 @@ func TestManagerTransientStopFailureKeepsSiblingsAndPreventsReplacementOverlap(t
 	}
 
 	a1.stopErr = nil
+	waitManagerCondition(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return !manager.retrying["a"]
+	}, "resource-local stop retry")
 	if err := manager.Reconcile(ctx); err != nil {
 		t.Fatal(err)
 	}

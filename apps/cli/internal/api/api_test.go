@@ -682,7 +682,7 @@ func TestDeleteIsIdempotent(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
 
-	result, err := client.Delete(context.Background(), srv.Key.CRID)
+	result, err := client.Delete(context.Background(), " \t"+srv.Key.CRID+"\r\n")
 	if err != nil || result.AlreadyGone {
 		t.Fatalf("fresh delete: result=%+v err=%v", result, err)
 	}

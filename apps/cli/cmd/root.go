@@ -372,7 +372,7 @@ func insecureEndpointWarning(endpoint string) string {
 		return ""
 	}
 	host := u.Hostname()
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+	if host == "localhost" {
 		return ""
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {

@@ -174,6 +174,7 @@ type runOpts struct {
 	// client so command tests stay HTTP-only; dedicated API and connector tests
 	// cover the real registered-state seams.
 	openRegisteredClient func(context.Context, qurlapi.AccountClient, string, *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error)
+	openAPIClient        func(context.Context) (qurlapi.Client, error)
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -254,6 +255,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.openRegisteredClient = func(_ context.Context, account qurlapi.AccountClient, _ string, identity *qurlapi.Identity) (qurlapi.Client, *qurlapi.Identity, error) {
 				return account, identity, nil
 			}
+		}
+		if o.openAPIClient != nil {
+			g.openAPIClient = o.openAPIClient
 		}
 		g.openBrowser = browser.open
 		switch {

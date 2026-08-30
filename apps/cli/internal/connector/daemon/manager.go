@@ -233,6 +233,12 @@ func (m *Manager) stopReplacedSessions(ctx context.Context, desired map[string]*
 
 func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*connectorstate.LocalShare) error {
 	for _, share := range sortedDesired(desired) {
+		m.mu.Lock()
+		retryScheduled := m.retrying[share.ResourceID]
+		m.mu.Unlock()
+		if retryScheduled {
+			continue
+		}
 		session, err := m.factory.Start(ctx, share)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -413,6 +419,9 @@ func (m *Manager) Diagnostics() map[string]ResourceDiagnostic {
 		result[resourceID] = diagnostic
 	}
 	for resourceID, current := range m.sessions {
+		if m.retrying[resourceID] {
+			continue
+		}
 		if diagnostic, ok := current.session.(diagnosticSession); ok {
 			result[resourceID] = diagnostic.Diagnostic()
 		}

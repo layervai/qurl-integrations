@@ -759,7 +759,7 @@ func TestInsecureEndpointWarning(t *testing.T) {
 		"http://192.0.2.10":         true,
 		"https://api.example.com":   false,
 		"http://localhost:8080":     false,
-		"http://api.localhost:8080": false,
+		"http://api.localhost:8080": true,
 		"http://127.0.0.1:8080":     false,
 		"http://[::1]:8080":         false,
 	}

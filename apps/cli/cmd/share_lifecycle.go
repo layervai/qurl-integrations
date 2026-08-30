@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -37,6 +38,8 @@ type shareDaemonController interface {
 	Ensure(context.Context) error
 	ReloadIfRunning(context.Context) (bool, error)
 }
+
+var errLocalSharingIdentityMismatch = errors.New("qURL sharing response identity does not match local share")
 
 func shareStartCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
@@ -319,6 +322,9 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 		return err
 	}
 	target, cleanupErr := convergeStoppedLocalShare(ctx, opts, id, sharing)
+	if errors.Is(cleanupErr, errLocalSharingIdentityMismatch) {
+		return cleanupErr
+	}
 	printer := opts.printer()
 	if err := printer.Sharing(target, sharing); err != nil {
 		return err
@@ -507,7 +513,7 @@ func validateLocalSharing(local *connectorstate.LocalShare, sharing *qurlapi.Sha
 		return errors.New("qURL sharing response is incomplete")
 	}
 	if sharing.ResourceID != local.ResourceID || sharing.CRID != local.CRID {
-		return fmt.Errorf("qURL sharing response identity does not match local share %s", local.CRID)
+		return fmt.Errorf("%w %s", errLocalSharingIdentityMismatch, local.CRID)
 	}
 	return nil
 }
@@ -517,6 +523,7 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 	defer cancel()
 	var last *qurlapi.Sharing
 	var lastPollErr error
+	pollAttempt := 0
 	for {
 		sharing, err := client.Sharing(waitCtx, local.CRID)
 		if err != nil {
@@ -546,7 +553,8 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 			}
 			last = sharing
 		}
-		timer := time.NewTimer(200 * time.Millisecond)
+		timer := time.NewTimer(sharingPollDelay(local.CRID, pollAttempt))
+		pollAttempt++
 		select {
 		case <-waitCtx.Done():
 			timer.Stop()
@@ -557,6 +565,31 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 		case <-timer.C:
 		}
 	}
+}
+
+const (
+	sharingPollInitialDelay = 200 * time.Millisecond
+	sharingPollMaximumDelay = 2 * time.Second
+)
+
+// sharingPollDelay keeps the first readiness check fast, then reduces control-
+// plane load by ramping toward two seconds. CRID-derived jitter spreads large
+// publish waves without process-global random state or nondeterministic tests.
+func sharingPollDelay(crid string, attempt int) time.Duration {
+	if attempt <= 0 {
+		return sharingPollInitialDelay
+	}
+	delay := sharingPollInitialDelay
+	for range attempt {
+		if delay >= sharingPollMaximumDelay/2 {
+			delay = sharingPollMaximumDelay
+			break
+		}
+		delay *= 2
+	}
+	digest := sha256.Sum256([]byte(crid + "#" + strconv.Itoa(attempt)))
+	percent := 80 + int(digest[0])%21
+	return delay * time.Duration(percent) / 100
 }
 
 func retryableSharingPollError(err error) bool {

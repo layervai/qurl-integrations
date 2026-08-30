@@ -521,6 +521,31 @@ func TestSharingPollDoesNotRetryPermanentTransportFailures(t *testing.T) {
 	}
 }
 
+func TestSharingPollDelayRampsWithBoundedCRIDJitter(t *testing.T) {
+	if got := sharingPollDelay("qexample", 0); got != sharingPollInitialDelay {
+		t.Fatalf("initial poll delay = %v, want %v", got, sharingPollInitialDelay)
+	}
+	previousFloor := sharingPollInitialDelay
+	for attempt := 1; attempt <= 12; attempt++ {
+		base := sharingPollInitialDelay
+		for range attempt {
+			if base >= sharingPollMaximumDelay/2 {
+				base = sharingPollMaximumDelay
+				break
+			}
+			base *= 2
+		}
+		got := sharingPollDelay("qexample", attempt)
+		if got < base*80/100 || got > base || got < previousFloor*80/100 || got > sharingPollMaximumDelay {
+			t.Fatalf("poll delay attempt %d = %v, base %v previous floor %v", attempt, got, base, previousFloor)
+		}
+		previousFloor = base
+	}
+	if sharingPollDelay("qexample", 5) == sharingPollDelay("qanother", 5) {
+		t.Fatal("poll jitter did not vary across CRIDs")
+	}
+}
+
 func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -688,6 +713,48 @@ func TestStopReportsCommittedSuccessWhenLocalRegistryUpdateFails(t *testing.T) {
 	unchanged, err := registry.Get(context.Background(), local.ResourceID)
 	if err != nil || unchanged.DesiredState != local.DesiredState || unchanged.ServingEpoch != local.ServingEpoch {
 		t.Fatalf("failed local convergence mutated registry = %+v, %v", unchanged, err)
+	}
+}
+
+func TestStopRejectsSharingResponseThatMismatchesLocalIdentity(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	other := apitest.GenerateResourceKey(t)
+	client := &setSharingClient{off: &qurlapi.Sharing{
+		ResourceID: other.ResourceID, CRID: other.CRID, DesiredState: qurlapi.DesiredStateOff,
+		ServingEpoch: local.ServingEpoch + 1, ConnectionState: qurlapi.ConnectionStopped,
+	}}
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "stop", srv.Key.CRID},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		openAPIClient: func(context.Context) (qurlapi.Client, error) {
+			return client, nil
+		},
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "response identity does not match local share") {
+		t.Fatalf("identity mismatch exit=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
+	}
+	if res.stdout.Len() != 0 || strings.Contains(res.stderr.String(), "resource is stopped") {
+		t.Fatalf("identity mismatch reported untrusted success: stdout=%q stderr=%q", res.stdout.String(), res.stderr.String())
+	}
+	unchanged, err := registry.Get(context.Background(), local.ResourceID)
+	if err != nil || unchanged.DesiredState != local.DesiredState || unchanged.ServingEpoch != local.ServingEpoch {
+		t.Fatalf("identity mismatch mutated local state = %+v, %v", unchanged, err)
+	}
+	if daemon.reloads != 0 || daemon.ensures != 0 {
+		t.Fatalf("identity mismatch reached daemon: %+v", daemon)
 	}
 }
 

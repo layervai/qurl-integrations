@@ -475,7 +475,8 @@ func validateSharingRow(row sharingRow) error {
 // treated as success. If the platform ever starts answering 410 for a
 // delete on a tombstoned row, widen this switch in lockstep.
 func (c *client) Delete(ctx context.Context, id string) (*DeleteResult, error) {
-	if strings.TrimSpace(id) == "" {
+	id = strings.TrimSpace(id)
+	if id == "" {
 		return nil, fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
 	}
 	reply, err := c.doRESTOnce(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil)
