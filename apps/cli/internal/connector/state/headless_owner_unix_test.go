@@ -39,3 +39,22 @@ func TestSensitiveFileReadableByProcessRequiresTrustedOwner(t *testing.T) {
 		t.Fatal("current-user-owned credential was rejected")
 	}
 }
+
+func TestPinnedFileRejectsForeignOwnerAndWritableModes(t *testing.T) {
+	currentUID := uint32(os.Geteuid())
+	currentGID := uint32(os.Getegid())
+	foreignUID := currentUID + 1
+
+	unsafe, err := pinnedFileWritableByAnotherUser(nil, ownerTestFileInfo{mode: 0o444, uid: foreignUID, gid: currentGID})
+	if err != nil || !unsafe {
+		t.Fatalf("foreign-owned file = unsafe %t, err %v", unsafe, err)
+	}
+	unsafe, err = pinnedFileWritableByAnotherUser(nil, ownerTestFileInfo{mode: 0o644, uid: currentUID, gid: currentGID})
+	if err != nil || unsafe {
+		t.Fatalf("current-user-owned read-only file = unsafe %t, err %v", unsafe, err)
+	}
+	unsafe, err = pinnedFileWritableByAnotherUser(nil, ownerTestFileInfo{mode: 0o664, uid: currentUID, gid: currentGID})
+	if err != nil || !unsafe {
+		t.Fatalf("group-writable file = unsafe %t, err %v", unsafe, err)
+	}
+}

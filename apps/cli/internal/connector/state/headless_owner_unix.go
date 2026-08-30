@@ -11,6 +11,15 @@ import (
 )
 
 func pinnedFileWritableByAnotherUser(_ *os.File, info os.FileInfo) (bool, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false, errors.New("read file owner")
+	}
+	if stat.Uid != 0 && int(stat.Uid) != os.Geteuid() {
+		// A foreign owner can chmod an otherwise read-only file and replace
+		// the daemon configuration while this process continues to trust it.
+		return true, nil
+	}
 	return info.Mode().Perm()&0o022 != 0, nil
 }
 

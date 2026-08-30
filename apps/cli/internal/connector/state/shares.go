@@ -271,7 +271,7 @@ func (r *LocalShareRegistry) List(ctx context.Context) ([]LocalShare, error) {
 	return items, nil
 }
 
-// Delete removes one row by public resource ID or CRID.
+// Delete removes one row by public resource ID, CRID, or internal Connector ID.
 func (r *LocalShareRegistry) Delete(ctx context.Context, id string) error {
 	return r.update(ctx, func(state *localSharesState) error {
 		key, _, ok := findLocalShare(state.Shares, id)

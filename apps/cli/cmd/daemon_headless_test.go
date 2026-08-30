@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,12 +100,28 @@ func TestHiddenTestCRIDValidatorIsStrictAndCredentialFree(t *testing.T) {
 func TestLoadHeadlessBootstrapWarmStartDoesNotRequireToken(t *testing.T) {
 	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
-	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config, credential, err := loadHeadlessBootstrap(stateDir, configPath, filepath.Join(t.TempDir(), "absent-token"))
+	writeHeadlessAgentState(t, stateDir, true)
+	config, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, filepath.Join(t.TempDir(), "absent-token"))
 	if err != nil || config == nil || credential != "" {
 		t.Fatalf("warm bootstrap = %+v, credential=%q, err=%v", config, credential, err)
+	}
+}
+
+func TestLoadHeadlessBootstrapIncompleteStateReusesEnrollmentToken(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	configPath := writeHeadlessConfigFixture(t)
+	writeHeadlessAgentState(t, stateDir, false)
+	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
+	if err := os.WriteFile(tokenPath, []byte("same-one-time-value\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	config, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, tokenPath)
+	if err != nil || config == nil || credential != "same-one-time-value" {
+		t.Fatalf("incomplete bootstrap = %+v, credential=%q, err=%v", config, credential, err)
+	}
+	if _, _, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, ""); err == nil ||
+		!strings.Contains(err.Error(), "resume an incomplete") {
+		t.Fatalf("missing incomplete-state token error = %v", err)
 	}
 }
 
@@ -114,11 +132,11 @@ func TestLoadHeadlessBootstrapFirstStartRequiresReadOnlyToken(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("one-time-value\n"), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	_, credential, err := loadHeadlessBootstrap(stateDir, configPath, tokenPath)
+	_, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, tokenPath)
 	if err != nil || credential != "one-time-value" {
 		t.Fatalf("first bootstrap credential=%q, err=%v", credential, err)
 	}
-	if _, _, err := loadHeadlessBootstrap(stateDir, configPath, ""); err == nil || !strings.Contains(err.Error(), "required for first") {
+	if _, _, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, ""); err == nil || !strings.Contains(err.Error(), "required for first") {
 		t.Fatalf("missing first token error = %v", err)
 	}
 }
@@ -252,6 +270,39 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	}
 }
 
+func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
+	originalWait := waitHeadlessNativeRetry
+	t.Cleanup(func() { waitHeadlessNativeRetry = originalWait })
+	waitHeadlessNativeRetry = func(context.Context, time.Duration) error { return nil }
+
+	var logs bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	const secret = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	factory := &headlessTestFactory{started: make(chan struct{})}
+	attempts := 0
+	got, err := openHeadlessSessionFactory(context.Background(), func(context.Context) (connectordaemon.SessionFactory, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("temporary native failure for " + secret)
+		}
+		return factory, nil
+	})
+	if err != nil || got != factory || attempts != 2 {
+		t.Fatalf("headless open = %T, attempts=%d, err=%v", got, attempts, err)
+	}
+	text := logs.String()
+	if !strings.Contains(text, "headless share daemon bootstrap failed; retrying") ||
+		!strings.Contains(text, "attempt=1") || !strings.Contains(text, "retry_in=250ms") {
+		t.Fatalf("retry log missing context: %q", text)
+	}
+	if strings.Contains(text, secret) || !strings.Contains(text, "lv_***") {
+		t.Fatalf("retry log did not redact credential: %q", text)
+	}
+}
+
 func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	stateDir, err := os.MkdirTemp("/tmp", "qurl-headless-warm-")
 	if err != nil {
@@ -270,9 +321,7 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	if err := registry.Put(context.Background(), &config.Shares[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeHeadlessAgentState(t, stateDir, true)
 
 	originalBuilder := buildNativeSessionFactory
 	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
@@ -345,9 +394,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			if err := registry.Put(context.Background(), &other); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeHeadlessAgentState(t, stateDir, true)
 
 			originalBuilder := buildNativeSessionFactory
 			t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
@@ -402,4 +449,30 @@ shares:
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeHeadlessAgentState(t *testing.T, stateDir string, complete bool) {
+	t.Helper()
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdkStore, err := store.Handoff()
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	state := &qurl.AgentState{AgentID: "headless-test-agent"}
+	if complete {
+		registeredAt := time.Now().UTC()
+		state.RegisteredAt = &registeredAt
+		state.DeviceAPIKey = "lv_device_headless_test"
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), state); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

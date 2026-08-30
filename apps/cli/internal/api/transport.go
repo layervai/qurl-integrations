@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ type transport struct {
 	newRequestID func() string
 	sleep        func(time.Duration)
 	verbose      func(format string, args ...any)
+	basePath     string
 }
 
 type requestRetryIntentKey struct{}
@@ -71,9 +73,18 @@ func newTransport(cfg *Config) *transport {
 		newRequestID: newRequestID,
 		// nil means the context-aware timer path in backoff; tests inject a
 		// recorder.
-		sleep:   cfg.Sleep,
-		verbose: cfg.Verbose,
+		sleep:    cfg.Sleep,
+		verbose:  cfg.Verbose,
+		basePath: apiBasePath(cfg.BaseURL),
 	}
+}
+
+func apiBasePath(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(parsed.EscapedPath(), "/")
 }
 
 // Do sends req with the CLI headers set, retrying bounded transient responses.
@@ -89,7 +100,7 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 	// request context until the upstream interface can express it directly.
 	allowRetry, explicit := req.Context().Value(requestRetryIntentKey{}).(bool)
 	if !explicit {
-		allowRetry = retrySafeRequest(req)
+		allowRetry = retrySafeRequest(req, t.basePath)
 	}
 	return t.do(req, allowRetry)
 }
@@ -102,20 +113,22 @@ func (t *transport) DoOnce(req *http.Request) (*http.Response, error) {
 }
 
 func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, error) {
-	req.Header.Set("User-Agent", t.userAgent)
-	req.Header.Set("X-Request-Id", t.newRequestID())
+	request := req.Clone(req.Context())
+	request.Header = req.Header.Clone()
+	request.Header.Set("User-Agent", t.userAgent)
+	request.Header.Set("X-Request-Id", t.newRequestID())
 
 	for attempt := 1; ; attempt++ {
-		t.verbosef("> %s %s", req.Method, req.URL.Path)
-		resp, err := t.next.Do(req)
+		t.verbosef("> %s %s", request.Method, request.URL.Path)
+		resp, err := t.next.Do(request)
 		if err != nil {
 			return nil, err
 		}
-		if !allowRetry || !retryableResponse(req, resp) || attempt >= maxAttempts {
+		if !allowRetry || !retryableResponse(request, resp, t.basePath) || attempt >= maxAttempts {
 			t.verbosef("< HTTP %d", resp.StatusCode)
 			return resp, nil
 		}
-		replay, ok := replayableBody(req)
+		replay, ok := replayableBody(request)
 		if !ok {
 			t.verbosef("< HTTP %d", resp.StatusCode)
 			return resp, nil
@@ -123,7 +136,7 @@ func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, erro
 		wait := retryDelay(resp, attempt)
 		discardResponse(resp)
 		t.verbosef("< HTTP %d, retrying in %s", resp.StatusCode, wait)
-		if err := t.backoff(req.Context(), wait); err != nil {
+		if err := t.backoff(request.Context(), wait); err != nil {
 			return nil, err
 		}
 		if replay != nil {
@@ -131,14 +144,14 @@ func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, erro
 			if err != nil {
 				return nil, err
 			}
-			req.Body = body
+			request.Body = body
 		}
 	}
 }
 
-func retryableResponse(req *http.Request, resp *http.Response) bool {
+func retryableResponse(req *http.Request, resp *http.Response, basePath string) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return retrySafeRequest(req)
+		return retrySafeRequest(req, basePath)
 	}
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		return false
@@ -151,7 +164,7 @@ func retryableResponse(req *http.Request, resp *http.Response) bool {
 	}
 }
 
-func retrySafeRequest(req *http.Request) bool {
+func retrySafeRequest(req *http.Request, basePath string) bool {
 	if strings.TrimSpace(req.Header.Get("Idempotency-Key")) != "" {
 		return true
 	}
@@ -163,7 +176,7 @@ func retrySafeRequest(req *http.Request) bool {
 		// qurl-go owns this request and cannot carry our private context marker,
 		// so keep the one reviewed SDK write-like route explicit here. A 503
 		// still requires an Idempotency-Key in retryableResponse.
-		resource, ok := strings.CutPrefix(req.URL.EscapedPath(), "/v1/resources/")
+		resource, ok := strings.CutPrefix(req.URL.EscapedPath(), basePath+"/v1/resources/")
 		if !ok {
 			return false
 		}

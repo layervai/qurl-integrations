@@ -630,11 +630,14 @@ func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		path string
-		want bool
+		name     string
+		path     string
+		basePath string
+		want     bool
 	}{
 		{name: "exact", path: "/v1/resources/qexample/resolve", want: true},
+		{name: "exact with base path", path: "/proxy/v1/resources/qexample/resolve", basePath: "/proxy", want: true},
+		{name: "wrong base path", path: "/other/v1/resources/qexample/resolve", basePath: "/proxy"},
 		{name: "empty resource", path: "/v1/resources//resolve"},
 		{name: "nested resource", path: "/v1/resources/qexample/sessions/resolve"},
 		{name: "different version", path: "/v2/resources/qexample/resolve"},
@@ -650,7 +653,7 @@ func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := retrySafeRequest(req); got != tc.want {
+			if got := retrySafeRequest(req, tc.basePath); got != tc.want {
 				t.Errorf("retrySafeRequest(%q) = %t, want %t", tc.path, got, tc.want)
 			}
 		})

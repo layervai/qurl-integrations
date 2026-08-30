@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -106,9 +107,8 @@ func ReadEnrollmentCredential(path string) (string, error) {
 }
 
 func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, errors.New("file path is empty")
+	if err := validatePinnedFilePath(path); err != nil {
+		return nil, err
 	}
 	if err := validatePinnedFileParent(path); err != nil {
 		return nil, err
@@ -169,4 +169,12 @@ func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, 
 		return nil, fmt.Errorf("file exceeds %d bytes", limit)
 	}
 	return data, nil
+}
+
+func validatePinnedFilePath(path string) error {
+	if path == "" || path != strings.TrimSpace(path) || strings.ContainsAny(path, "\x00\r\n") ||
+		!filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("file path must be an absolute, clean path")
+	}
+	return nil
 }

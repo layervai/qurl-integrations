@@ -45,6 +45,24 @@ func TestLoadHeadlessConfigStrictContract(t *testing.T) {
 	}
 }
 
+func TestPinnedFilesRequireAbsoluteCleanPaths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		read func(string) error
+	}{
+		{name: "config", read: func(path string) error { _, err := LoadHeadlessConfig(path); return err }},
+		{name: "credential", read: func(path string) error { _, err := ReadEnrollmentCredential(path); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, path := range []string{"relative-file", " relative-file", filepath.Join(t.TempDir(), "child") + string(filepath.Separator) + ".." + string(filepath.Separator) + "file"} {
+				if err := test.read(path); err == nil || !strings.Contains(err.Error(), "absolute, clean path") {
+					t.Fatalf("path %q error = %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestReadOnlyProjectedFilesAndCredentialSafety(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "..data-token")

@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -186,5 +187,38 @@ func TestTransportRetriesSafe503ButNeverUnkeyedMutation(t *testing.T) {
 				t.Fatalf("response = HTTP %d after %d requests, want HTTP 503 after %d", resp.StatusCode, requests.Load(), test.wantRequests)
 			}
 		})
+	}
+}
+
+func TestTransportDoesNotMutateCallerRequestAcrossRetry(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) < maxAttempts {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	transport := newTransport(&Config{BaseURL: srv.URL, HTTPClient: srv.Client(), Version: "test", Sleep: func(time.Duration) {}})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		srv.URL+"/v1/resources/qexample/resolve", bytes.NewBufferString("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Caller", "preserved")
+	originalBody := req.Body
+	resp, err := transport.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	if resp.StatusCode != http.StatusOK || requests.Load() != maxAttempts {
+		t.Fatalf("response = HTTP %d after %d requests", resp.StatusCode, requests.Load())
+	}
+	if req.Body != originalBody || req.Header.Get("User-Agent") != "" || req.Header.Get("X-Request-Id") != "" || req.Header.Get("X-Caller") != "preserved" {
+		t.Fatalf("caller request was mutated: body_same=%t headers=%v", req.Body == originalBody, req.Header)
 	}
 }

@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -217,7 +217,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	headless, enrollmentCredential, err := loadHeadlessBootstrap(stateDir, headlessConfigPath, enrollmentTokenPath)
+	headless, enrollmentCredential, err := loadHeadlessBootstrap(ctx, stateDir, headlessConfigPath, enrollmentTokenPath)
 	if err != nil {
 		return err
 	}
@@ -410,7 +410,10 @@ func openHeadlessSessionFactory(ctx context.Context, open func(context.Context) 
 		if isPermanentHeadlessNativeOpenError(err) {
 			return nil, err
 		}
-		if err := waitHeadlessNativeRetry(ctx, headlessNativeRetryDelay(attempt)); err != nil {
+		delay := headlessNativeRetryDelay(attempt)
+		slog.WarnContext(ctx, "headless share daemon bootstrap failed; retrying",
+			"attempt", attempt, "retry_in", delay, "error", qurlapi.Redact(err.Error()))
+		if err := waitHeadlessNativeRetry(ctx, delay); err != nil {
 			return nil, err
 		}
 	}
@@ -434,7 +437,7 @@ func headlessNativeRetryDelay(attempt int) time.Duration {
 	return delay
 }
 
-func loadHeadlessBootstrap(stateDir, configPath, tokenPath string) (*connectorstate.HeadlessConfig, string, error) {
+func loadHeadlessBootstrap(ctx context.Context, stateDir, configPath, tokenPath string) (*connectorstate.HeadlessConfig, string, error) {
 	if configPath == "" {
 		if tokenPath != "" {
 			return nil, "", errors.New("--enrollment-token-file requires --headless-config")
@@ -445,12 +448,32 @@ func loadHeadlessBootstrap(stateDir, configPath, tokenPath string) (*connectorst
 	if err != nil {
 		return nil, "", err
 	}
-	_, stateErr := os.Lstat(filepath.Join(stateDir, connectorstate.AgentStateFile))
+	stateStore, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("inspect native agent state before headless bootstrap: %w", err)
+	}
+	defer func() { _ = stateStore.Close() }()
+	sdkStore, err := stateStore.Handoff()
+	if err != nil {
+		return nil, "", fmt.Errorf("inspect native agent state before headless bootstrap: %w", err)
+	}
+	state, stateErr := sdkStore.LoadAgentState(ctx)
 	switch {
 	case stateErr == nil:
-		// Warm starts never reopen or require the one-time credential file.
-		return config, "", nil
-	case errors.Is(stateErr, os.ErrNotExist):
+		if state != nil && state.RegisteredAt != nil && strings.TrimSpace(state.DeviceAPIKey) != "" {
+			// A complete warm identity uses only its device keypair and device
+			// credential. The one-time enrollment token is not reopened.
+			return config, "", nil
+		}
+		if tokenPath == "" {
+			return nil, "", errors.New("--enrollment-token-file is required to resume an incomplete headless bootstrap")
+		}
+		credential, err := connectorstate.ReadEnrollmentCredential(tokenPath)
+		if err != nil {
+			return nil, "", err
+		}
+		return config, credential, nil
+	case errors.Is(stateErr, qurl.ErrAgentStateNotFound):
 		if tokenPath == "" {
 			return nil, "", errors.New("--enrollment-token-file is required for first headless bootstrap")
 		}
