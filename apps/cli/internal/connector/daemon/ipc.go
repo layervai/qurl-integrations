@@ -108,8 +108,16 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	}
 }
 
+const ipcRequestTimeout = 5 * time.Second
+
 // IPCClient talks to an already-running local share daemon.
-type IPCClient struct{ SocketPath string }
+type IPCClient struct {
+	SocketPath string
+	// requestTimeout is test-only configuration. Production calls use the
+	// fixed bounded timeout so an unresponsive daemon cannot block lifecycle
+	// commands after their cloud operation has completed.
+	requestTimeout time.Duration
+}
 
 // IPCStatus is the daemon version handshake and active resource set.
 type IPCStatus struct {
@@ -231,7 +239,11 @@ func (c IPCClient) do(ctx context.Context, method, path string) (*http.Response,
 	if err != nil {
 		return nil, true, err
 	}
-	response, err := (&http.Client{Transport: transport}).Do(request)
+	timeout := c.requestTimeout
+	if timeout <= 0 {
+		timeout = ipcRequestTimeout
+	}
+	response, err := (&http.Client{Transport: transport, Timeout: timeout}).Do(request)
 	if err != nil {
 		if isUnavailableIPCError(err) {
 			return nil, false, nil

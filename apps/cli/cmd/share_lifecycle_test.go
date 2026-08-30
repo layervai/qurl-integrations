@@ -655,6 +655,28 @@ func TestShareStatusDoesNotStartOrReloadDaemon(t *testing.T) {
 	}
 }
 
+func TestReadLocalShareNormalizesRequestedIdentifier(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	opts := &globalOpts{resolveShareStateDir: func(string) (string, error) { return stateDir, nil }}
+
+	local, gotDir, err := readLocalShareIfPresent(context.Background(), opts, " \t"+seed.CRID+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local == nil || local.ResourceID != seed.ResourceID || gotDir != stateDir {
+		t.Fatalf("local share = %+v, state dir = %q", local, gotDir)
+	}
+}
+
 func TestShareStatusReportsRemoteURLResource(t *testing.T) {
 	for _, format := range []string{"text", "json"} {
 		t.Run(format, func(t *testing.T) {

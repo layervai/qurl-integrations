@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func listCmd(opts *globalOpts) *cobra.Command {
@@ -42,7 +43,10 @@ observation. Pages continue with --cursor when there are more results.`,
 			if err != nil {
 				return err
 			}
-			if !opts.quiet {
+			// JSON is the same structured document with or without --quiet.
+			// Keep its local tunnel targets stable; only quiet text skips the
+			// registry read because it prints identifiers alone.
+			if !opts.quiet || opts.resolvedFormat == output.FormatJSON {
 				if err := enrichTunnelList(cmd.Context(), opts, page); err != nil {
 					return err
 				}

@@ -322,8 +322,8 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 }
 
 func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, error) {
-	if row == nil || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
-		return nil, fmt.Errorf("%w: %s has missing type or status", qurl.ErrInvalidAPIResponse, source)
+	if row == nil || strings.TrimSpace(row.ResourceID) == "" || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
+		return nil, fmt.Errorf("%w: %s has missing resource_id, type, or status", qurl.ErrInvalidAPIResponse, source)
 	}
 	if row.CRID != "" || row.Type == "tunnel" {
 		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {

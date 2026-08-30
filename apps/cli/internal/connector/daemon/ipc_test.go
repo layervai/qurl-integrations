@@ -183,6 +183,49 @@ func TestIPCClientRefusesPermissiveSocket(t *testing.T) {
 	}
 }
 
+func TestIPCClientBoundsUnresponsiveDaemon(t *testing.T) {
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, SocketFile)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		close(accepted)
+		<-release
+		_ = conn.Close()
+	}()
+	t.Cleanup(func() {
+		close(release)
+		_ = listener.Close()
+		_ = os.Remove(path)
+	})
+
+	client := IPCClient{SocketPath: path, requestTimeout: 25 * time.Millisecond}
+	_, running, err := client.Status(context.Background())
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Status() err = %v, want bounded deadline", err)
+	}
+	if !running {
+		t.Fatal("unresponsive verified daemon was reported absent")
+	}
+	select {
+	case <-accepted:
+	default:
+		t.Fatal("timeout occurred before the client connected to the daemon")
+	}
+}
+
 func TestIPCServerRefusesRegularFileAtSocketPath(t *testing.T) {
 	dir := shortTempDir(t)
 	path := filepath.Join(dir, SocketFile)

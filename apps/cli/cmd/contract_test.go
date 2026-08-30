@@ -499,6 +499,50 @@ func TestListQuietSkipsLocalRegistryAndSharingReads(t *testing.T) {
 	}
 }
 
+func TestListJSONQuietKeepsLocalTunnelTargets(t *testing.T) {
+	srv := apitest.NewServer(t)
+	run := func(t *testing.T, quiet bool) string {
+		t.Helper()
+		srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+				"status": "active", "desired_state": "on", "serving_epoch": 1,
+			}}, map[string]any{"has_more": false})
+		})
+		args := []string{"--endpoint", srv.URL, "--output", "json"}
+		if quiet {
+			args = append(args, "--quiet")
+		}
+		args = append(args, "list")
+		loads := 0
+		res := runCLI(t, &runOpts{
+			args: args,
+			localShares: []connectorstate.LocalShare{{
+				ResourceID: srv.Key.ResourceID,
+				CRID:       srv.Key.CRID,
+				TargetURL:  "http://127.0.0.1:3000",
+			}},
+			localSharesLoads: &loads,
+		})
+		if res.code != 0 {
+			t.Fatalf("JSON list: code=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
+		}
+		if loads != 1 {
+			t.Fatalf("local registry loads = %d, want one", loads)
+		}
+		return res.stdout.String()
+	}
+
+	regular := run(t, false)
+	quiet := run(t, true)
+	if quiet != regular {
+		t.Fatalf("--quiet changed JSON list output:\nregular: %s\nquiet: %s", regular, quiet)
+	}
+	if !strings.Contains(quiet, `"target_url": "http://127.0.0.1:3000"`) {
+		t.Fatalf("JSON list omitted local tunnel target: %s", quiet)
+	}
+}
+
 func TestDeleteNonInteractiveRequiresYes(t *testing.T) {
 	srv := apitest.NewServer(t)
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "delete", srv.Key.CRID}})

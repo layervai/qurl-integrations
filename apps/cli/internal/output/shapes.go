@@ -39,8 +39,10 @@ type resolveJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	CRID         string               `json:"crid,omitempty"`
-	ResourceID   string               `json:"resource_id"`
+	CRID       string `json:"crid,omitempty"`
+	ResourceID string `json:"resource_id"`
+	// TargetURL is the owner-visible URL for URL resources and the target
+	// from this machine's local registry for tunnel resources when present.
 	TargetURL    string               `json:"target_url,omitempty"`
 	Type         string               `json:"type,omitempty"`
 	Status       string               `json:"status,omitempty"`

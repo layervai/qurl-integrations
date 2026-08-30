@@ -345,6 +345,7 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 }
 
 func readLocalShareIfPresent(ctx context.Context, opts *globalOpts, id string) (*connectorstate.LocalShare, string, error) {
+	id = strings.TrimSpace(id)
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {

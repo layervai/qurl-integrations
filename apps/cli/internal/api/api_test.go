@@ -795,6 +795,20 @@ func TestResourceParsesURLDetailEnvelope(t *testing.T) {
 	}
 }
 
+func TestListRejectsMissingResourceID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": " ", "target_url": "https://a.example", "type": "url", "status": "active",
+		}}, map[string]any{"has_more": false})
+	})
+	client := newTestClient(t, srv, nil)
+
+	if _, err := client.List(context.Background(), ListOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("missing resource_id err = %v", err)
+	}
+}
+
 func TestResourceRejectsDetailIdentityMismatch(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
