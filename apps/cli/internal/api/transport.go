@@ -114,7 +114,6 @@ func (t *transport) DoOnce(req *http.Request) (*http.Response, error) {
 
 func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, error) {
 	request := req.Clone(req.Context())
-	request.Header = req.Header.Clone()
 	request.Header.Set("User-Agent", t.userAgent)
 	request.Header.Set("X-Request-Id", t.newRequestID())
 

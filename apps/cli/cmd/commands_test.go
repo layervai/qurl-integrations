@@ -198,6 +198,18 @@ func TestREADMEQuickstartOutputMatchesPrinter(t *testing.T) {
 	}
 }
 
+func TestREADMEHeadlessEnrollmentRecoveryContract(t *testing.T) {
+	readme := strings.Join(strings.Fields(readCLIREADME(t)), " ")
+	for _, want := range []string{
+		"If bootstrap stops before registration finishes, retry with the same still-valid one-time credential.",
+		"A complete warm start does not read or require that file.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("CLI README lost interrupted-enrollment guidance %q", want)
+		}
+	}
+}
+
 // readCLIREADME makes repository checkout line endings irrelevant to semantic
 // documentation assertions. GitHub's Windows runners can materialize Markdown
 // with CRLF even though the formatter intentionally emits LF.

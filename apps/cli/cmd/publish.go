@@ -137,6 +137,8 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	// resource runtime uses the completed-state fast path for the same state
 	// directory; later mutations use operation leases, and qurl-connector locks
 	// its session-operation journals across processes.
+	// TODO(upstream-contract): Keep the completed-state fast path and journal
+	// serialization assumption in lockstep with qurl-connector.
 	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir, sessionOperations)
 	if err != nil {
 		return err
@@ -495,10 +497,10 @@ func withoutExpectedDaemonCancellation(err error) error {
 		if !errors.Is(cause, context.Canceled) {
 			return err
 		}
-		// A normal annotation can wrap a multi-cause shutdown error. Descend
-		// until the leaves so an expected cancellation cannot hide an
-		// independent daemon failure. Returning the kept leaves can drop only
-		// annotation text from a mixed cancellation chain, never a cause.
+		// A normal annotation can wrap either expected cancellation alone or a
+		// multi-cause shutdown error. Descend to the leaves: annotation around
+		// cancellation alone is expected shutdown detail and is removed, while
+		// every independent daemon-failure cause remains actionable.
 		return withoutExpectedDaemonCancellation(cause)
 	}
 	// This filter runs only after this function canceled the daemon context.

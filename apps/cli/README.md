@@ -275,10 +275,12 @@ The first start of a new state volume also requires
 `--enrollment-token-file <path>`. This file contains a one-time enrollment
 credential, not an account API key. It must be a read-only regular file or a
 Kubernetes projected-secret link, and only its owner or the process's dedicated
-group can read it. After qurl creates durable device state, remove the flag and
-secret mount from the next deployment revision, verify that the warm start
-connects, and delete the one-time secret. A warm start does not read or require
-that file.
+group can read it. Keep the same file available until the first start finishes.
+If bootstrap stops before registration finishes, retry with the same still-valid
+one-time credential. In the next deployment revision, remove the flag but keep
+the secret recoverable. Verify that the warm start connects, then remove the
+secret mount and delete the one-time secret. A complete warm start does not read
+or require that file.
 
 Commands that take a CRID assess it locally first: a likely typo (bad
 checksum, wrong alphabet) is warned about and still forwarded — the server
