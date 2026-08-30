@@ -197,6 +197,11 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
 		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
+	if env.Data.CRID != "" {
+		if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
+			return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
+		}
+	}
 	return &Published{
 		CRID:          env.Data.CRID,
 		ResourceID:    env.Data.ResourceID,

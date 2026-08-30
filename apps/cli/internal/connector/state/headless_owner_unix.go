@@ -10,6 +10,10 @@ import (
 	"syscall"
 )
 
+func pinnedFileWritableByAnotherUser(_ *os.File, info os.FileInfo) (bool, error) {
+	return info.Mode().Perm()&0o022 != 0, nil
+}
+
 func sensitiveFileReadableByProcess(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

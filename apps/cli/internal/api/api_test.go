@@ -17,6 +17,40 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
+type untouchedAgentStateStore struct{}
+
+func (untouchedAgentStateStore) LoadAgentState(context.Context) (*qurl.AgentState, error) {
+	panic("cleartext endpoint validation loaded registered state")
+}
+
+func (untouchedAgentStateStore) SaveAgentState(context.Context, *qurl.AgentState) error {
+	panic("cleartext endpoint validation saved registered state")
+}
+
+func TestClientConstructorsRejectCleartextNonLoopbackBaseURL(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func() error
+	}{
+		{name: "account", open: func() error {
+			_, err := New(&Config{BaseURL: "http://api.example.com", APIKey: "lv_test_boundary", Version: "test"})
+			return err
+		}},
+		{name: "registered", open: func() error {
+			_, err := NewRegistered(context.Background(), &Config{
+				BaseURL: "http://api.example.com", Version: "test",
+			}, untouchedAgentStateStore{})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.open(); !errors.Is(err, qurl.ErrInvalidClientConfig) {
+				t.Fatalf("cleartext non-loopback endpoint error = %v, want ErrInvalidClientConfig", err)
+			}
+		})
+	}
+}
+
 func TestSharingLifecycleWireContract(t *testing.T) {
 	srv := apitest.NewServer(t)
 	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
@@ -411,6 +445,26 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	}
 	if res.FoundExisting == nil || !*res.FoundExisting {
 		t.Errorf("replayed publish FoundExisting = %v, want known true", res.FoundExisting)
+	}
+}
+
+func TestPublishRejectsCRIDThatDoesNotCommitToResourceID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	other := apitest.GenerateResourceKey(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID,
+			"crid":        other.CRID,
+			"target_url":  "https://example.com/data",
+			"status":      "active",
+		}, nil)
+	})
+	client := newTestClient(t, srv, nil)
+	if _, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("mismatched publish identity error = %v, want ErrInvalidAPIResponse", err)
+	}
+	if got := len(srv.Requests()); got != 1 {
+		t.Fatalf("mismatched publish requests = %d, want one", got)
 	}
 }
 

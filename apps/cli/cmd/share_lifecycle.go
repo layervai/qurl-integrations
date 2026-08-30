@@ -216,6 +216,9 @@ func changeAuthoritativeSharing(ctx context.Context, client qurlapi.Client, id s
 		return sharing, prior.DesiredState == qurlapi.DesiredStateOff, err
 	case "restart":
 		sharing, err := restartSharingReconciled(ctx, client, id, prior)
+		// Restart fences the prior serving epoch before the local daemon takes
+		// ownership of the replacement. If that handoff fails, turn sharing off
+		// instead of leaving desired-on state that no current epoch can serve.
 		return sharing, true, err
 	default:
 		return nil, false, fmt.Errorf("unsupported share lifecycle action %q", action)

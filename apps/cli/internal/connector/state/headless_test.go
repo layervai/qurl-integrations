@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
 func TestLoadHeadlessConfigStrictContract(t *testing.T) {
@@ -144,21 +142,4 @@ func TestProjectedFileSwapFailsClosed(t *testing.T) {
 	if _, err := ReadEnrollmentCredential(link); err == nil || !strings.Contains(err.Error(), "changed while it was opened") {
 		t.Fatalf("swap error = %v", err)
 	}
-}
-
-func testHeadlessYAML(t *testing.T) string {
-	t.Helper()
-	binding := testResourceBinding(t, "headless-app")
-	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
-	return "version: 2\nowner_id: owner-one\nshares:\n" +
-		"  - crid: " + binding.CRID + "\n" +
-		"    resource_id: " + binding.ResourceID + "\n" +
-		"    connector_id: " + binding.ConnectorID + "\n" +
-		"    connector_routing_id: " + binding.ConnectorRoutingID + "\n" +
-		"    knock_resource_id: " + binding.KnockResourceID + "\n" +
-		"    target_url: http://127.0.0.1:8080\n" +
-		"    local_ip: 127.0.0.1\n" +
-		"    local_port: 8080\n" +
-		"    desired_state: on\n" +
-		"    serving_epoch: 1\n"
 }

@@ -134,7 +134,14 @@ func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	if !opened.Mode().IsRegular() || opened.Mode().Perm()&0o022 != 0 {
+	if !opened.Mode().IsRegular() {
+		return nil, errors.New("resolved file must be regular and not writable by group or other users")
+	}
+	writableByAnotherUser, err := pinnedFileWritableByAnotherUser(file, opened)
+	if err != nil {
+		return nil, err
+	}
+	if writableByAnotherUser {
 		return nil, errors.New("resolved file must be regular and not writable by group or other users")
 	}
 	if policy == bearerCredential {

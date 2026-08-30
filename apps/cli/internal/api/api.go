@@ -248,6 +248,9 @@ func New(cfg *Config) (AccountClient, error) {
 	}
 	tr := newTransport(cfg)
 	provider := qurl.BearerToken(cfg.APIKey)
+	// TODO(upstream-contract): the pinned qurl-go WithBaseURL contract rejects
+	// cleartext non-loopback API origins before this bearer provider can send a
+	// request. TestNewRejectsCleartextNonLoopbackBaseURL pins that boundary here.
 	sdk, err := qurl.NewClient(provider,
 		qurl.WithBaseURL(cfg.BaseURL),
 		qurl.WithHTTPClient(tr),
@@ -278,6 +281,9 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 		return nil, fmt.Errorf("%w: account API key is not valid for registered-client open", qurl.ErrInvalidClientConfig)
 	}
 	tr := newTransport(cfg)
+	// TODO(upstream-contract): the pinned qurl-go WithAgentClientBaseURL contract
+	// applies the same HTTPS-or-loopback gate to the device credential before it
+	// loads state or sends a request. The local API contract test pins this too.
 	sdk, err := qurl.OpenRegisteredAgent(ctx, store,
 		qurl.WithAgentClientBaseURL(cfg.BaseURL),
 		qurl.WithAgentClientHTTPClient(tr),
