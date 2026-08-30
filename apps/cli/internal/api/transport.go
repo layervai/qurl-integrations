@@ -207,17 +207,31 @@ func replayableBody(req *http.Request) (func() (io.ReadCloser, error), bool) {
 // retryDelay honors a parseable Retry-After seconds value (capped) and falls
 // back to a small linear backoff otherwise.
 // TODO(upstream-contract): qURL API responses use the delta-seconds form. If
-// the service adopts HTTP-date, parse it here and in restReply.problem.
+// the service adopts HTTP-date, update parseRetryAfterSeconds and its tests.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
-	if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.ParseUint(v, 10, 64); err == nil {
-			if secs > uint64(maxRetryAfter/time.Second) {
-				return maxRetryAfter
-			}
-			return time.Duration(secs) * time.Second
-		}
+	if secs, ok := parseRetryAfterSeconds(resp.Header.Get("Retry-After")); ok {
+		return time.Duration(secs) * time.Second
 	}
 	return time.Duration(attempt) * 500 * time.Millisecond
+}
+
+// parseRetryAfterSeconds is the one Retry-After policy for transport waits and
+// user-facing errors. It accepts the service's delta-seconds form and caps the
+// value so the CLI never waits or tells a user to wait longer than it will.
+func parseRetryAfterSeconds(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	seconds, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	maximum := uint64(maxRetryAfter / time.Second)
+	if seconds > maximum {
+		seconds = maximum
+	}
+	return int(seconds), true
 }
 
 func discardResponse(resp *http.Response) {

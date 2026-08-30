@@ -10,6 +10,11 @@ import (
 
 const apiKeyEnvironmentFileMaxBytes = 4 << 10
 
+// The account API-key file is an explicit, short-lived workstation or CI
+// bootstrap authority. Unlike the headless daemon's enrollment file, it does
+// not need Kubernetes projected-secret symlinks or group-readable fsGroup
+// access. Refuse both here so another local principal cannot replace the
+// credential between validation and enrollment.
 func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo // One exact owner-only file and byte fence stays together.
 	if path == "" || path != strings.TrimSpace(path) || strings.ContainsAny(path, "\x00\r\n") ||
 		!filepath.IsAbs(path) || filepath.Clean(path) != path {
@@ -46,10 +51,17 @@ func readAPIKeyEnvironmentFile(path string) (string, error) { //nolint:gocyclo /
 		validateOpenAPIKeyFilePlatform(file, openedAfter) != nil || validateAPIKeyFilePathPlatform(path, after) != nil {
 		return "", fmt.Errorf("%w: %s changed while reading", ErrInvalidKey, EnvAPIKeyFile)
 	}
-	if raw[len(raw)-1] != '\n' || bytesContainWhitespaceOrControl(raw[:len(raw)-1]) {
-		return "", fmt.Errorf("%w: %s must contain exact key bytes plus one LF", ErrInvalidKey, EnvAPIKeyFile)
+	if raw[len(raw)-1] != '\n' {
+		return "", fmt.Errorf("%w: %s must contain exact key bytes plus one LF or CRLF", ErrInvalidKey, EnvAPIKeyFile)
 	}
-	key := string(raw[:len(raw)-1])
+	keyBytes := raw[:len(raw)-1]
+	if len(keyBytes) > 0 && keyBytes[len(keyBytes)-1] == '\r' {
+		keyBytes = keyBytes[:len(keyBytes)-1]
+	}
+	if bytesContainWhitespaceOrControl(keyBytes) {
+		return "", fmt.Errorf("%w: %s must contain exact key bytes plus one LF or CRLF", ErrInvalidKey, EnvAPIKeyFile)
+	}
+	key := string(keyBytes)
 	if err := ValidateKeyShape(key); err != nil {
 		return "", err
 	}

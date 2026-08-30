@@ -120,6 +120,40 @@ func TestResolveEnvironmentFileIsStrictPrivateAndHermetic(t *testing.T) {
 	if err != nil || key != testKeyEnv || source != SourceEnvironmentFile {
 		t.Fatalf("blank inline with file credential = %q %q %v", key, source, err)
 	}
+
+	crlfPath := filepath.Join(directory, "api-key-crlf")
+	if err := os.WriteFile(crlfPath, []byte(testKeyEnv+"\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protectAPIKeyTestFile(t, crlfPath)
+	key, source, err = Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: crlfPath}), store)
+	if err != nil || key != testKeyEnv || source != SourceEnvironmentFile {
+		t.Fatalf("CRLF file credential = %q %q %v", key, source, err)
+	}
+}
+
+func TestResolveEmptyEnvironmentFileIsUnset(t *testing.T) {
+	for name, fileValue := range map[string]string{
+		"empty":      "",
+		"whitespace": " \t ",
+	} {
+		t.Run(name+" with inline key", func(t *testing.T) {
+			store := &probeStore{key: testKeyStored}
+			key, source, err := Resolve(lookupFrom(map[string]string{
+				EnvAPIKey: testKeyEnv, EnvAPIKeyFile: fileValue,
+			}), store)
+			if err != nil || key != testKeyEnv || source != SourceEnvironment || store.touched {
+				t.Fatalf("credential = %q %q %v, store touched=%v", key, source, err, store.touched)
+			}
+		})
+		t.Run(name+" with store", func(t *testing.T) {
+			store := &probeStore{key: testKeyStored}
+			key, source, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: fileValue}), store)
+			if err != nil || key != testKeyStored || source != SourceStore || !store.touched {
+				t.Fatalf("credential = %q %q %v, store touched=%v", key, source, err, store.touched)
+			}
+		})
+	}
 }
 
 func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {
@@ -135,7 +169,8 @@ func TestResolveEnvironmentFileRejectsAuthorityMutationUnion(t *testing.T) {
 	}{
 		{"missing LF", []byte(testKeyEnv), 0o600},
 		{"double LF", []byte(testKeyEnv + "\n\n"), 0o600},
-		{"CRLF", []byte(testKeyEnv + "\r\n"), 0o600},
+		{"bare CR", []byte(testKeyEnv + "\r"), 0o600},
+		{"double CRLF", []byte(testKeyEnv + "\r\n\r\n"), 0o600},
 		{"leading space", []byte(" " + testKeyEnv + "\n"), 0o600},
 		{"trailing space", []byte(testKeyEnv + " \n"), 0o600},
 		{"tab", []byte(testKeyEnv + "\t\n"), 0o600},

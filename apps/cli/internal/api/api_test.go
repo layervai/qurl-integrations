@@ -773,6 +773,11 @@ func TestProblemErrorParsesPinnedEnvelope(t *testing.T) {
 	if !errors.As(limited, &e) || e.RetryAfter != 7 {
 		t.Errorf("retry-after: %+v", e)
 	}
+	retryHeader.Set("Retry-After", "3600")
+	limited = (&restReply{status: 429, header: retryHeader, body: []byte(`{}`)}).problem()
+	if !errors.As(limited, &e) || e.RetryAfter != int(maxRetryAfter/time.Second) {
+		t.Errorf("capped retry-after: %+v", e)
+	}
 }
 
 func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {

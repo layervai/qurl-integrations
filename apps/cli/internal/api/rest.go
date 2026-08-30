@@ -623,11 +623,9 @@ func (r *restReply) problem() error {
 		e.Detail = bodySnippet(r.body)
 	}
 	// TODO(upstream-contract): qURL API responses use Retry-After seconds, not
-	// HTTP-date. Keep this paired with retryDelay if the service changes form.
-	if v := strings.TrimSpace(r.header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			e.RetryAfter = secs
-		}
+	// HTTP-date. retryDelay uses the same parser below.
+	if secs, ok := parseRetryAfterSeconds(r.header.Get("Retry-After")); ok && secs > 0 {
+		e.RetryAfter = secs
 	}
 	return e
 }

@@ -82,6 +82,12 @@ func Resolve(lookup func(string) (string, bool), store CredentialStore) (string,
 		inline, inlineSet := lookup(EnvAPIKey)
 		path, fileSet := lookup(EnvAPIKeyFile)
 		inline = strings.TrimSpace(inline)
+		// Empty environment variables are common in shared CI templates. Treat
+		// an empty file variable as unset, just as an empty inline variable is
+		// unset. A non-empty path remains byte-strict in the file reader below.
+		if fileSet && strings.TrimSpace(path) == "" {
+			fileSet = false
+		}
 		if inlineSet && inline != "" && fileSet {
 			return "", "", ErrCredentialConflict
 		}
