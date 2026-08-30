@@ -21,7 +21,8 @@ const (
 	maxAttempts = 3
 	// maxRetryAfter caps each Retry-After wait before the CLI retries a
 	// replayable transient 429 or idempotent 503 response.
-	maxRetryAfter = 15 * time.Second
+	maxRetryAfter        = 15 * time.Second
+	maxRetryAfterSeconds = int(maxRetryAfter / time.Second)
 	// drainLimit bounds how much of a discarded retry response is read for
 	// connection reuse.
 	drainLimit = 512 << 10
@@ -227,9 +228,11 @@ func parseRetryAfterSeconds(value string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	maximum := uint64(maxRetryAfter / time.Second)
-	if seconds > maximum {
-		seconds = maximum
+	// Keep the narrowing conversion on an explicitly bounded branch. Besides
+	// making this safe on 32-bit Windows, this lets static analysis verify that
+	// an arbitrary uint64 from the service can never overflow int.
+	if seconds >= uint64(maxRetryAfterSeconds) {
+		return maxRetryAfterSeconds, true
 	}
 	return int(seconds), true
 }
