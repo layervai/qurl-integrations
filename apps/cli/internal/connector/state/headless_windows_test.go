@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsHeadlessConfigAcceptsOrdinaryFileAndCredentialFailsClosed(t *testing.T) {
@@ -19,7 +21,7 @@ func TestWindowsHeadlessConfigAcceptsOrdinaryFileAndCredentialFailsClosed(t *tes
 	if err != nil || len(config.Shares) != 1 {
 		t.Fatalf("ordinary Windows headless config = %+v, %v", config, err)
 	}
-	setWindowsConnectorTestACL(t, configPath, true)
+	setWindowsConnectorTestACLWithWorldMask(t, configPath, windows.GENERIC_WRITE)
 	if _, err := LoadHeadlessConfig(configPath); err == nil || !strings.Contains(err.Error(), "not writable") {
 		t.Fatalf("broad Windows headless-config ACL error = %v", err)
 	}

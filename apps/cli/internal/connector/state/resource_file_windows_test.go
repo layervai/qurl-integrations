@@ -124,6 +124,15 @@ func TestDiscardWindowsConnectorTempClosesAndRemovesFile(t *testing.T) {
 
 func setWindowsConnectorTestACL(t *testing.T, path string, includeWorld bool) {
 	t.Helper()
+	worldMask := windows.ACCESS_MASK(0)
+	if includeWorld {
+		worldMask = windows.GENERIC_READ
+	}
+	setWindowsConnectorTestACLWithWorldMask(t, path, worldMask)
+}
+
+func setWindowsConnectorTestACLWithWorldMask(t *testing.T, path string, worldMask windows.ACCESS_MASK) {
+	t.Helper()
 	currentSID, _, err := currentWindowsConnectorSecurity()
 	if err != nil {
 		t.Fatal(err)
@@ -141,12 +150,12 @@ func setWindowsConnectorTestACL(t *testing.T, path string, includeWorld bool) {
 		windowsConnectorTestAccess(adminSID, windows.GENERIC_ALL),
 		windowsConnectorTestAccess(systemSID, windows.GENERIC_ALL),
 	}
-	if includeWorld {
+	if worldMask != 0 {
 		worldSID, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries = append(entries, windowsConnectorTestAccess(worldSID, windows.GENERIC_READ))
+		entries = append(entries, windowsConnectorTestAccess(worldSID, worldMask))
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
