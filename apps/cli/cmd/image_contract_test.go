@@ -396,6 +396,16 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if !strings.Contains(windowsCompileStep.Run, "go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...") {
 		t.Error("Windows matrix does not compile the private sandbox test surface")
 	}
+	for _, required := range []string{
+		"$testName = 'TestSandboxWindowsDefaultDaemonFullCustomerLifecycle'",
+		"$testPattern = '^TestSandboxWindowsDefaultDaemonFullCustomerLifecycle$'",
+		"go test -tags=clisandbox -list $testPattern ./apps/cli/cmd",
+		"$declared.Count -ne 1 -or $declared[0] -ne $testName",
+	} {
+		if strings.Count(windowsCompileStep.Run, required) != 1 {
+			t.Errorf("Windows protected customer journey declaration is not pinned with %q", required)
+		}
+	}
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {

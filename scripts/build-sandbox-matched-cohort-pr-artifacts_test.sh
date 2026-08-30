@@ -36,6 +36,7 @@ output="$tmp/output"
 test -x "$output/lifecycle-artifact/bin/sandbox-matched-cohort-lifecycle"
 test -x "$output/lifecycle-artifact/bin/sandbox-matched-cohort-authority"
 test -x "$output/lifecycle-artifact/bin/qurl"
+test -x "$output/lifecycle-artifact/bin/qurl-windows-amd64.exe"
 test "$(file_mode "$output")" = 700
 test "$(file_mode "$output/lifecycle-artifact")" = 700
 test "$(file_mode "$output/lifecycle-artifact/bin")" = 700
@@ -43,9 +44,11 @@ test "$(file_mode "$output/source-receipt-artifact")" = 700
 test "$(file_mode "$output/lifecycle-artifact/bin/sandbox-matched-cohort-lifecycle")" = 500
 test "$(file_mode "$output/lifecycle-artifact/bin/sandbox-matched-cohort-authority")" = 500
 test "$(file_mode "$output/lifecycle-artifact/bin/qurl")" = 500
+test "$(file_mode "$output/lifecycle-artifact/bin/qurl-windows-amd64.exe")" = 500
 test "$(file_mode "$output/source-receipt-artifact/sandbox-matched-cohort-source-receipt.json")" = 400
 
 test "$(cd "$output/lifecycle-artifact" && find . -type f | LC_ALL=C sort)" = "./bin/qurl
+./bin/qurl-windows-amd64.exe
 ./bin/sandbox-matched-cohort-authority
 ./bin/sandbox-matched-cohort-lifecycle"
 test "$(cd "$output/source-receipt-artifact" && find . -type f | LC_ALL=C sort)" = "./sandbox-matched-cohort-source-receipt.json"
@@ -59,7 +62,7 @@ cmp "$receipt" <(jq -cS . "$receipt")
 
 jq -e '
   keys == ["binaries", "head_sha", "qurl_go_module_version", "qurl_go_source_sha", "repository", "run_attempt", "run_id", "schema_version"] and
-  .schema_version == 1 and
+  .schema_version == 2 and
   .repository == "layervai/qurl-integrations" and
   .head_sha == $head_sha and
   .run_id == 12345 and
@@ -69,9 +72,11 @@ jq -e '
   .binaries.lifecycle.path == "bin/sandbox-matched-cohort-lifecycle" and
   .binaries.authority.path == "bin/sandbox-matched-cohort-authority" and
   .binaries.qurl.path == "bin/qurl" and
+  .binaries.qurl_windows_amd64.path == "bin/qurl-windows-amd64.exe" and
   (.binaries.lifecycle.sha256 | test("^[0-9a-f]{64}$")) and
   (.binaries.authority.sha256 | test("^[0-9a-f]{64}$")) and
-  (.binaries.qurl.sha256 | test("^[0-9a-f]{64}$"))
+  (.binaries.qurl.sha256 | test("^[0-9a-f]{64}$")) and
+  (.binaries.qurl_windows_amd64.sha256 | test("^[0-9a-f]{64}$"))
 ' --arg head_sha "$head_sha" \
   --arg qurl_go_source_sha "$qurl_go_source_sha" \
   --arg qurl_go_module_version "$qurl_go_module_version" \
@@ -83,6 +88,8 @@ test "$(shasum -a 256 "$output/lifecycle-artifact/bin/sandbox-matched-cohort-aut
   "$(jq -r .binaries.authority.sha256 "$receipt")"
 test "$(shasum -a 256 "$output/lifecycle-artifact/bin/qurl" | awk '{print $1}')" = \
   "$(jq -r .binaries.qurl.sha256 "$receipt")"
+test "$(shasum -a 256 "$output/lifecycle-artifact/bin/qurl-windows-amd64.exe" | awk '{print $1}')" = \
+  "$(jq -r .binaries.qurl_windows_amd64.sha256 "$receipt")"
 test "$(shasum -a 256 "$receipt" | awk '{print $1}')" = \
   "$(<"$output/source-receipt-sha256.txt")"
 

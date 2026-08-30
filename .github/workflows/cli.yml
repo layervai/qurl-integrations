@@ -606,6 +606,17 @@ jobs:
         run: |
           go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testName = 'TestSandboxWindowsDefaultDaemonFullCustomerLifecycle'
+          $testPattern = '^TestSandboxWindowsDefaultDaemonFullCustomerLifecycle$'
+          $declared = @(
+            & go test -tags=clisandbox -list $testPattern ./apps/cli/cmd |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
+            Write-Error "exact protected Windows customer journey declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
 
       - name: Run tests
         shell: bash

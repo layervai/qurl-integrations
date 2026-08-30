@@ -73,7 +73,8 @@ mkdir -m 700 \
 build_binary() {
   local package=$1
   local destination=$2
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off GOFLAGS=-mod=readonly \
+  local target_os=${3:-linux}
+  CGO_ENABLED=0 GOOS="$target_os" GOARCH=amd64 GOWORK=off GOFLAGS=-mod=readonly \
     go build -trimpath -buildvcs=true -ldflags='-buildid=' -o "$destination" "$package"
   chmod 500 "$destination"
 }
@@ -84,11 +85,14 @@ build_binary ./apps/cli/cmd/sandbox-matched-cohort-authority \
   "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-authority"
 build_binary ./apps/cli/cmd \
   "$output_dir/lifecycle-artifact/bin/qurl"
+build_binary ./apps/cli/cmd \
+  "$output_dir/lifecycle-artifact/bin/qurl-windows-amd64.exe" windows
 
 for binary in \
   "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-lifecycle" \
   "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-authority" \
-  "$output_dir/lifecycle-artifact/bin/qurl"; do
+  "$output_dir/lifecycle-artifact/bin/qurl" \
+  "$output_dir/lifecycle-artifact/bin/qurl-windows-amd64.exe"; do
   if [[ ! -f "$binary" || -L "$binary" ]]; then
     echo "build output is not a regular file: $binary" >&2
     exit 73
@@ -112,10 +116,12 @@ verify_binary_metadata() {
 verify_binary_metadata "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-lifecycle"
 verify_binary_metadata "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-authority"
 verify_binary_metadata "$output_dir/lifecycle-artifact/bin/qurl"
+verify_binary_metadata "$output_dir/lifecycle-artifact/bin/qurl-windows-amd64.exe"
 
 lifecycle_sha=$(shasum -a 256 "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-lifecycle" | awk '{print $1}')
 authority_sha=$(shasum -a 256 "$output_dir/lifecycle-artifact/bin/sandbox-matched-cohort-authority" | awk '{print $1}')
 qurl_sha=$(shasum -a 256 "$output_dir/lifecycle-artifact/bin/qurl" | awk '{print $1}')
+qurl_windows_amd64_sha=$(shasum -a 256 "$output_dir/lifecycle-artifact/bin/qurl-windows-amd64.exe" | awk '{print $1}')
 
 jq -cnS \
   --arg repository "$repository" \
@@ -127,8 +133,9 @@ jq -cnS \
   --arg lifecycle_sha "$lifecycle_sha" \
   --arg authority_sha "$authority_sha" \
   --arg qurl_sha "$qurl_sha" \
+  --arg qurl_windows_amd64_sha "$qurl_windows_amd64_sha" \
   '{
-    schema_version: 1,
+    schema_version: 2,
     repository: $repository,
     head_sha: $head_sha,
     run_id: $run_id,
@@ -147,6 +154,10 @@ jq -cnS \
       qurl: {
         path: "bin/qurl",
         sha256: $qurl_sha
+      },
+      qurl_windows_amd64: {
+        path: "bin/qurl-windows-amd64.exe",
+        sha256: $qurl_windows_amd64_sha
       }
     }
   }' >"$output_dir/source-receipt-artifact/sandbox-matched-cohort-source-receipt.json"
@@ -161,9 +172,11 @@ printf '%s\n' "$source_receipt_sha" >"$output_dir/source-receipt-sha256.txt"
 printf '%s\n' "$lifecycle_sha" >"$output_dir/lifecycle-sha256.txt"
 printf '%s\n' "$authority_sha" >"$output_dir/authority-sha256.txt"
 printf '%s\n' "$qurl_sha" >"$output_dir/qurl-sha256.txt"
+printf '%s\n' "$qurl_windows_amd64_sha" >"$output_dir/qurl-windows-amd64-sha256.txt"
 chmod 400 \
   "$output_dir/qurl-go-source-sha.txt" \
   "$output_dir/source-receipt-sha256.txt" \
   "$output_dir/lifecycle-sha256.txt" \
   "$output_dir/authority-sha256.txt" \
-  "$output_dir/qurl-sha256.txt"
+  "$output_dir/qurl-sha256.txt" \
+  "$output_dir/qurl-windows-amd64-sha256.txt"
