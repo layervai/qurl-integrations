@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -221,8 +222,11 @@ type localEnrollment struct {
 	target      *publishTarget
 	requestedID string
 
-	mu       sync.Mutex
-	mintedID string
+	mu                 sync.Mutex
+	mintedID           string
+	attemptAgentID     string
+	attemptConnectorID string
+	attemptKey         string
 }
 
 func (e *localEnrollment) connectorID(agentID string) (string, error) {
@@ -237,7 +241,7 @@ func (e *localEnrollment) credential(ctx context.Context, request qurl.AgentEnro
 	if err != nil {
 		return "", err
 	}
-	idempotencyKey, err := localEnrollmentIdempotencyKey(request.AgentID, id)
+	idempotencyKey, err := e.enrollmentAttemptKey(request.AgentID, id)
 	if err != nil {
 		return "", err
 	}
@@ -251,6 +255,9 @@ func (e *localEnrollment) credential(ctx context.Context, request qurl.AgentEnro
 	if err != nil {
 		return "", err
 	}
+	if token == nil || strings.TrimSpace(token.Token) == "" {
+		return "", errors.New("qURL service returned an empty Connector enrollment credential")
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.mintedID != "" && e.mintedID != id {
@@ -258,6 +265,31 @@ func (e *localEnrollment) credential(ctx context.Context, request qurl.AgentEnro
 	}
 	e.mintedID = id
 	return token.Token, nil
+}
+
+func (e *localEnrollment) enrollmentAttemptKey(agentID, connectorID string) (string, error) {
+	agentID = strings.TrimSpace(agentID)
+	connectorID = strings.TrimSpace(connectorID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.attemptKey != "" {
+		if e.attemptAgentID != agentID || e.attemptConnectorID != connectorID {
+			return "", errors.New("local Connector identity changed during one enrollment attempt")
+		}
+		return e.attemptKey, nil
+	}
+	entropy := make([]byte, localEnrollmentEntropyBytes)
+	if _, err := rand.Read(entropy); err != nil {
+		return "", fmt.Errorf("generate Connector enrollment idempotency: %w", err)
+	}
+	key, err := localEnrollmentIdempotencyKey(agentID, connectorID, entropy)
+	if err != nil {
+		return "", err
+	}
+	e.attemptAgentID = agentID
+	e.attemptConnectorID = connectorID
+	e.attemptKey = key
+	return key, nil
 }
 
 func (e *localEnrollment) recoveryCredential(context.Context) (string, error) {

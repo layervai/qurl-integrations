@@ -86,14 +86,22 @@ func TestGeneratedLocalConnectorID(t *testing.T) {
 
 func TestLocalEnrollmentIdempotencyKey(t *testing.T) {
 	t.Parallel()
-	first, err := localEnrollmentIdempotencyKey("agent-a", "local-a234567890123456")
+	entropy := make([]byte, localEnrollmentEntropyBytes)
+	entropy[0] = 1
+	otherEntropy := append([]byte(nil), entropy...)
+	otherEntropy[0] = 2
+	first, err := localEnrollmentIdempotencyKey("agent-a", "local-a234567890123456", entropy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, _ := localEnrollmentIdempotencyKey("agent-a", "local-a234567890123456")
-	other, _ := localEnrollmentIdempotencyKey("agent-a", "local-b234567890123456")
-	if first != again || first == other || len(first) < 32 || len(first) > 256 {
-		t.Fatalf("idempotency keys first=%q again=%q other=%q", first, again, other)
+	again, _ := localEnrollmentIdempotencyKey("agent-a", "local-a234567890123456", entropy)
+	otherID, _ := localEnrollmentIdempotencyKey("agent-a", "local-b234567890123456", entropy)
+	otherAttempt, _ := localEnrollmentIdempotencyKey("agent-a", "local-a234567890123456", otherEntropy)
+	if first != again || first == otherID || first == otherAttempt || len(first) < 32 || len(first) > 256 {
+		t.Fatalf("idempotency keys first=%q again=%q otherID=%q otherAttempt=%q", first, again, otherID, otherAttempt)
+	}
+	if _, err := localEnrollmentIdempotencyKey("agent-a", "local-a234567890123456", entropy[:len(entropy)-1]); err == nil {
+		t.Fatal("short enrollment entropy was accepted")
 	}
 }
 

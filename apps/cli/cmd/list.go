@@ -78,7 +78,7 @@ func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.Resou
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		opts.printer().Warnf("Local sharing state is unavailable; local targets were omitted.")
+		opts.printer().Warnf("Local sharing state is invalid or inaccessible; local targets were omitted: %v", err)
 		return nil
 	}
 	localTargets := make(map[string]string, len(shares))

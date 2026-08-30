@@ -279,6 +279,71 @@ func TestManagerTransientStartFailureDoesNotStopSibling(t *testing.T) {
 	}
 }
 
+func TestManagerRemovedResourceDoesNotRetainRetryBackoff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := &fakeFactory{
+		sessions: map[string][]*fakeSession{},
+		err:      map[string]error{"a": errors.New("network unavailable")},
+	}
+	manager, _ := NewManager(registry, factory)
+	firstDelayReady := make(chan struct{})
+	secondDelayReady := make(chan struct{})
+	delayCalls := 0
+	manager.retryDelay = func(int) time.Duration {
+		delayCalls++
+		if delayCalls == 1 {
+			close(firstDelayReady)
+			return 100 * time.Millisecond
+		}
+		close(secondDelayReady)
+		return time.Hour
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-firstDelayReady
+	manager.mu.Lock()
+	firstFailures, firstRetrying := manager.failures["a"], manager.retrying["a"]
+	manager.mu.Unlock()
+	if firstFailures != 1 || !firstRetrying {
+		t.Fatalf("first retry state = failures %d retrying %t, want 1/true", firstFailures, firstRetrying)
+	}
+
+	delete(registry.shares, "a")
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	_, hasFailures := manager.failures["a"]
+	_, hasRetrying := manager.retrying["a"]
+	manager.mu.Unlock()
+	if hasFailures || hasRetrying {
+		t.Fatalf("removed resource retained retry state: failures=%t retrying=%t", hasFailures, hasRetrying)
+	}
+
+	registry.shares["a"] = daemonShare("a", 2, "on")
+	if err := manager.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	<-secondDelayReady
+	manager.mu.Lock()
+	republishedFailures := manager.failures["a"]
+	manager.mu.Unlock()
+	if republishedFailures != 1 {
+		t.Fatalf("republished resource failure count = %d, want fresh attempt 1", republishedFailures)
+	}
+	time.Sleep(150 * time.Millisecond)
+	manager.mu.Lock()
+	stillRetrying := manager.retrying["a"]
+	_, hasGeneration := manager.retryGeneration["a"]
+	manager.mu.Unlock()
+	if !stillRetrying || !hasGeneration || len(manager.trigger) != 0 {
+		t.Fatalf("stale timer disturbed republished retry: retrying=%t generation=%t triggers=%d", stillRetrying, hasGeneration, len(manager.trigger))
+	}
+}
+
 func TestManagerTransientStopFailureKeepsSiblingsAndPreventsReplacementOverlap(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
 		"a": daemonShare("a", 1, "on"),

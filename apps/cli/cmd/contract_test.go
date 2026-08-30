@@ -457,7 +457,7 @@ func TestListWarnsAndOmitsTargetsWhenLocalStateIsUnavailable(t *testing.T) {
 	if strings.Contains(res.stdout.String(), "127.0.0.1") {
 		t.Fatalf("list fabricated a local target:\n%s", res.stdout.String())
 	}
-	if got := strings.Count(res.stderr.String(), "Local sharing state is unavailable; local targets were omitted."); got != 1 {
+	if got := strings.Count(res.stderr.String(), "Local sharing state is invalid or inaccessible; local targets were omitted: corrupt local registry"); got != 1 {
 		t.Fatalf("warning count=%d stderr=%q", got, res.stderr.String())
 	}
 	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {

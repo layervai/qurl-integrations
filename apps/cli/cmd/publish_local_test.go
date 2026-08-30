@@ -9,10 +9,18 @@ import (
 	"testing"
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 )
+
+type emptyConnectorEnrollmentClient struct{ qurlapi.Client }
+
+func (emptyConnectorEnrollmentClient) MintConnectorEnrollmentToken(context.Context, qurlapi.MintConnectorEnrollmentTokenOptions) (*qurlapi.ConnectorEnrollmentToken, error) {
+	return nil, nil //nolint:nilnil // The test pins the caller's fail-closed guard for an invalid implementation.
+}
 
 func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	srv := apitest.NewServer(t)
@@ -40,6 +48,41 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	requests := srv.Requests()
 	if len(requests) != 1 || requests[0].Method != http.MethodGet || requests[0].Path != "/v1/me" {
 		t.Fatalf("owner bootstrap requests = %#v", requests)
+	}
+}
+
+func TestLocalEnrollmentIdempotencyIsAttemptScoped(t *testing.T) {
+	first := &localEnrollment{}
+	key1, err := first.enrollmentAttemptKey("agent-a", "local-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key1Again, err := first.enrollmentAttemptKey("agent-a", "local-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := &localEnrollment{}
+	key2, err := second.enrollmentAttemptKey("agent-a", "local-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key1 != key1Again || key1 == key2 {
+		t.Fatalf("attempt keys first=%q repeated=%q next-process=%q", key1, key1Again, key2)
+	}
+	if _, err := first.enrollmentAttemptKey("agent-b", "local-a"); err == nil {
+		t.Fatal("one enrollment attempt accepted a changed Agent identity")
+	}
+}
+
+func TestLocalEnrollmentRejectsEmptyMintedCredential(t *testing.T) {
+	enrollment := &localEnrollment{
+		opts:        &globalOpts{registeredClient: emptyConnectorEnrollmentClient{}},
+		target:      &publishTarget{},
+		requestedID: "local-a",
+	}
+	_, err := enrollment.credential(context.Background(), qurl.AgentEnrollmentCredentialRequest{AgentID: "agent-a"})
+	if err == nil || !strings.Contains(err.Error(), "empty Connector enrollment credential") {
+		t.Fatalf("empty enrollment credential error = %v", err)
 	}
 }
 

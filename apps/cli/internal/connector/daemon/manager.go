@@ -44,11 +44,13 @@ type Manager struct {
 	registry Registry
 	factory  SessionFactory
 
-	mu       sync.Mutex
-	sessions map[string]*managedSession
-	failures map[string]int
-	retrying map[string]bool
-	trigger  chan struct{}
+	mu                  sync.Mutex
+	sessions            map[string]*managedSession
+	failures            map[string]int
+	retrying            map[string]bool
+	retryGeneration     map[string]uint64
+	nextRetryGeneration uint64
+	trigger             chan struct{}
 
 	resourceStopTimeout        time.Duration
 	resourceGonePersistTimeout time.Duration
@@ -67,7 +69,7 @@ func NewManager(registry Registry, factory SessionFactory) (*Manager, error) {
 	}
 	return &Manager{
 		registry: registry, factory: factory,
-		sessions: map[string]*managedSession{}, failures: map[string]int{}, retrying: map[string]bool{}, trigger: make(chan struct{}, 1),
+		sessions: map[string]*managedSession{}, failures: map[string]int{}, retrying: map[string]bool{}, retryGeneration: map[string]uint64{}, trigger: make(chan struct{}, 1),
 		resourceStopTimeout: 10 * time.Second, resourceGonePersistTimeout: 5 * time.Second, retryDelay: daemonRetryDelay,
 	}, nil
 }
@@ -110,11 +112,29 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("list desired local shares: %w", err)
 	}
 	desired := desiredShareSet(shares)
+	m.pruneRetryState(desired)
 	toStop := m.detachReplacedSessions(desired)
 	if err := m.stopReplacedSessions(ctx, desired, toStop); err != nil {
 		return err
 	}
 	return m.startDesiredSessions(ctx, desired)
+}
+
+// pruneRetryState forgets backoff only after a reconciliation observes that a
+// resource is no longer desired. If the same resource ID is published later,
+// it starts as a new lifecycle instead of inheriting an old failure delay.
+// An already-scheduled timer sees that its generation was removed and exits;
+// it cannot clear or trigger a later retry for a republished resource.
+func (m *Manager) pruneRetryState(desired map[string]*connectorstate.LocalShare) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for resourceID := range m.failures {
+		if _, present := desired[resourceID]; !present {
+			delete(m.failures, resourceID)
+			delete(m.retrying, resourceID)
+			delete(m.retryGeneration, resourceID)
+		}
+	}
 }
 
 func desiredShareSet(shares []connectorstate.LocalShare) map[string]*connectorstate.LocalShare {
@@ -200,6 +220,7 @@ func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*
 		m.mu.Lock()
 		delete(m.failures, share.ResourceID)
 		delete(m.retrying, share.ResourceID)
+		delete(m.retryGeneration, share.ResourceID)
 		m.sessions[share.ResourceID] = &managedSession{share: *share, session: session}
 		m.mu.Unlock()
 		go m.watch(ctx, share.ResourceID, session)
@@ -261,6 +282,9 @@ func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string) {
 	m.failures[resourceID]++
 	attempt := m.failures[resourceID]
 	m.retrying[resourceID] = true
+	m.nextRetryGeneration++
+	generation := m.nextRetryGeneration
+	m.retryGeneration[resourceID] = generation
 	go func() {
 		timer := time.NewTimer(m.retryDelay(attempt))
 		defer timer.Stop()
@@ -271,7 +295,12 @@ func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string) {
 			fire = true
 		}
 		m.mu.Lock()
+		if m.retryGeneration[resourceID] != generation {
+			m.mu.Unlock()
+			return
+		}
 		delete(m.retrying, resourceID)
+		delete(m.retryGeneration, resourceID)
 		m.mu.Unlock()
 		if fire {
 			m.Trigger()

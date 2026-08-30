@@ -101,7 +101,7 @@ the platform's observed Connector state and serving epoch.`
 					return resourceErr
 				}
 				if resource.Type == connectorResourceType {
-					return fmt.Errorf("connector sharing state was unavailable: %w", err)
+					return fmt.Errorf("qURL Connector sharing state was unavailable: %w", err)
 				}
 				return opts.printer().ResourceStatus(resource)
 			}

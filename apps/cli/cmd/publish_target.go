@@ -139,13 +139,26 @@ func generatedLocalConnectorID(agentID, canonicalOrigin string) (string, error) 
 	return "local-" + suffix, nil
 }
 
-func localEnrollmentIdempotencyKey(agentID, connectorID string) (string, error) {
+const localEnrollmentEntropyBytes = 32
+
+// localEnrollmentIdempotencyKey binds one random, process-local enrollment
+// attempt to its Agent and Connector identities. The same attempt reuses the
+// key for safe transport retry. A later process must use new entropy because
+// the service can retain a successful one-shot credential response for at
+// least as long as that credential is valid.
+func localEnrollmentIdempotencyKey(agentID, connectorID string, entropy []byte) (string, error) {
 	agentID = strings.TrimSpace(agentID)
 	connectorID = strings.TrimSpace(connectorID)
 	if agentID == "" || connectorID == "" {
 		return "", errors.New("cannot derive enrollment idempotency without the native agent and Connector identities")
 	}
-	digest := sha256.Sum256([]byte(localPublishIDDomain + "\x00enrollment\x00" + agentID + "\x00" + connectorID))
+	if len(entropy) != localEnrollmentEntropyBytes {
+		return "", errors.New("qURL Connector enrollment idempotency requires 32 bytes of attempt entropy")
+	}
+	payload := make([]byte, 0, len(localPublishIDDomain)+len(agentID)+len(connectorID)+len(entropy)+3)
+	payload = append(payload, localPublishIDDomain+"\x00enrollment\x00"+agentID+"\x00"+connectorID+"\x00"...)
+	payload = append(payload, entropy...)
+	digest := sha256.Sum256(payload)
 	return "qurl-cli-local-publish-" + hex.EncodeToString(digest[:]), nil
 }
 
