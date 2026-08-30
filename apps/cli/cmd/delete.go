@@ -63,10 +63,17 @@ scripts and pipelines must pass --yes.`,
 				// Idempotent delete: already-gone is the requested outcome.
 				printer.Notef(msgAlreadyGone)
 			}
-			if err := cleanupDeletedLocalShare(cmd.Context(), opts, assessment.Input); err != nil {
+			// The service deletion is already committed. Local convergence cannot
+			// roll it back, so report the requested outcome as success and make any
+			// incomplete local cleanup explicit as a warning.
+			cleanupErr := cleanupDeletedLocalShare(cmd.Context(), opts, assessment.Input)
+			if err := printer.Delete(assessment.Input, result.AlreadyGone); err != nil {
 				return err
 			}
-			return printer.Delete(assessment.Input, result.AlreadyGone)
+			if cleanupErr != nil {
+				printer.Warnf("The resource was deleted, but local sharing cleanup did not finish: %v", cleanupErr)
+			}
+			return nil
 		},
 	}
 

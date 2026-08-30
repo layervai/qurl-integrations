@@ -465,6 +465,29 @@ func TestListWarnsAndOmitsTargetsWhenLocalStateIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestListDoesNotWarnWhenThisPlatformHasNoDefaultLocalStateDirectory(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args:           []string{"--endpoint", srv.URL, "list"},
+		localSharesErr: connectorstate.ErrNoDefaultStateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), "Local sharing state") {
+		t.Fatalf("list warned when local state is not supported on this platform: %q", res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), srv.Key.CRID) {
+		t.Fatalf("list omitted the remote Connector row: %q", res.stdout.String())
+	}
+}
+
 func TestEnrichTunnelListReturnsParentCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

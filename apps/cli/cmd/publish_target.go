@@ -155,7 +155,7 @@ func localEnrollmentIdempotencyKey(agentID, connectorID string, entropy []byte) 
 	if len(entropy) != localEnrollmentEntropyBytes {
 		return "", errors.New("qURL Connector enrollment idempotency requires 32 bytes of attempt entropy")
 	}
-	payload := make([]byte, 0, len(localPublishIDDomain)+len(agentID)+len(connectorID)+len(entropy)+3)
+	payload := make([]byte, 0, len(localPublishIDDomain)+len("\x00enrollment\x00")+len(agentID)+len(connectorID)+len(entropy)+2)
 	payload = append(payload, localPublishIDDomain+"\x00enrollment\x00"+agentID+"\x00"+connectorID+"\x00"...)
 	payload = append(payload, entropy...)
 	digest := sha256.Sum256(payload)

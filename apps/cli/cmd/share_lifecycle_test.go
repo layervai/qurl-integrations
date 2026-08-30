@@ -35,6 +35,7 @@ type recordingShareDaemon struct {
 	ensures   int
 	reloads   int
 	ensureErr error
+	reloadErr error
 }
 
 func (d *recordingShareDaemon) Ensure(context.Context) error {
@@ -172,7 +173,7 @@ func (d *journeyDaemon) close() {
 
 func (d *recordingShareDaemon) ReloadIfRunning(context.Context) (bool, error) {
 	d.reloads++
-	return true, nil
+	return true, d.reloadErr
 }
 
 type sharingErrorClient struct {
@@ -826,6 +827,45 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	}
 	if gotStateDir != stateDir || gotLogDir != wantLogDir || gotLogDir == "" {
 		t.Fatalf("delete daemon paths = state %q log %q, want state %q log %q", gotStateDir, gotLogDir, stateDir, wantLogDir)
+	}
+}
+
+func TestDeleteReportsCommittedSuccessWhenDaemonReloadFails(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	t.Setenv("QURL_CONNECTOR_STATE_DIR", stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	reloadErr := errors.New("daemon IPC unavailable")
+	daemon := &recordingShareDaemon{reloadErr: reloadErr}
+	res := runCLI(t, &runOpts{
+		args:          []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+		env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+		shareRegistry: registry,
+		shareDaemonFactory: func(string, string) shareDaemonController {
+			return daemon
+		},
+		shareStateDir: stateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if _, err := registry.Get(context.Background(), srv.Key.CRID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted local share still present: %v", err)
+	}
+	for _, want := range []string{"Deleted " + srv.Key.CRID, "local sharing cleanup did not finish", reloadErr.Error()} {
+		if !strings.Contains(res.stderr.String(), want) {
+			t.Fatalf("delete stderr=%q, want %q", res.stderr.String(), want)
+		}
+	}
+	if daemon.reloads != 1 || daemon.ensures != 0 {
+		t.Fatalf("delete daemon reconciliation = %+v, want one reload and no install", daemon)
 	}
 }
 

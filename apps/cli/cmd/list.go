@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -77,6 +79,9 @@ func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.Resou
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+			return nil
 		}
 		opts.printer().Warnf("Local sharing state is invalid or inaccessible; local targets were omitted: %v", err)
 		return nil
