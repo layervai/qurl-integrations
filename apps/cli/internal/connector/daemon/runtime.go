@@ -100,7 +100,11 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 			}
 		}
 		initialize := f.initialize
-		initCtx, cancel := context.WithCancel(ctx)
+		// Initialization follows this Start call until it finishes, but a
+		// successful native runtime must not retain the caller context. Close
+		// owns the independent lifetime cancellation after successful handoff.
+		initCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		stopCallerCancel := context.AfterFunc(ctx, cancel)
 		f.initializing = true
 		f.ready = make(chan struct{})
 		f.initCancel = cancel
@@ -108,6 +112,7 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		f.mu.Unlock()
 
 		delegate, err := initialize(initCtx)
+		settleInitializationCaller(ctx, cancel, stopCallerCancel)
 		if err == nil && delegate == nil {
 			err = errors.New("deferred share session factory initialized without a delegate")
 		}
@@ -148,6 +153,15 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 			return nil, err
 		}
 		continue
+	}
+}
+
+func settleInitializationCaller(ctx context.Context, cancel context.CancelFunc, stopCallerCancel func() bool) {
+	if !stopCallerCancel() || ctx.Err() != nil {
+		// Either the cancellation callback has started or cancellation won the
+		// handoff before the callback ran. Complete its effect synchronously so
+		// the factory cannot cache that delegate as successful.
+		cancel()
 	}
 }
 
@@ -286,7 +300,7 @@ func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.
 		},
 		OnRetry: func(err error, wait time.Duration) {
 			session.recordRetry(err, wait)
-			slog.WarnContext(ctx, "share daemon session attempt failed; retrying",
+			slog.WarnContext(runCtx, "share daemon session attempt failed; retrying",
 				"crid", local.CRID, "retry_in", wait, "error", qurlapi.Redact(err.Error()))
 		},
 	})

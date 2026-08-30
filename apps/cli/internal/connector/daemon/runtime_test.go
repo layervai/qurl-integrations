@@ -270,12 +270,14 @@ func TestDeferredSessionFactoryKeepsSuccessfulRuntimeContextUntilClose(t *testin
 		t.Fatal(err)
 	}
 	share := daemonShare("context-lifetime", 1, "on")
-	session, err := factory.Start(context.Background(), &share)
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	session, err := factory.Start(startCtx, &share)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cancelStart()
 	if runtimeCtx == nil || runtimeCtx.Err() != nil {
-		t.Fatalf("successful runtime context = %v, want live context", runtimeCtx)
+		t.Fatalf("runtime context after Start caller cancellation = %v, want live context", runtimeCtx)
 	}
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
 	if err := session.Stop(stopCtx); err != nil {
@@ -291,6 +293,36 @@ func TestDeferredSessionFactoryKeepsSuccessfulRuntimeContextUntilClose(t *testin
 	}
 	if delegate.closes.Load() != 1 {
 		t.Fatalf("successful delegate closes=%d, want 1", delegate.closes.Load())
+	}
+}
+
+func TestDeferredSessionFactoryRejectsDelegateCompletedAfterCallerCancellation(t *testing.T) {
+	delegate := newCloseTrackingFactory()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	factory, err := NewDeferredSessionFactory(func(context.Context) (SessionFactory, error) {
+		close(started)
+		<-release
+		return delegate, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	share := daemonShare("canceled-initialization", 1, "on")
+	go func() {
+		_, startErr := factory.Start(startCtx, &share)
+		done <- startErr
+	}()
+	<-started
+	cancelStart()
+	close(release)
+	if startErr := <-done; !errors.Is(startErr, context.Canceled) {
+		t.Fatalf("Start error = %v, want caller cancellation", startErr)
+	}
+	if delegate.closes.Load() != 1 {
+		t.Fatalf("delegate completed after cancellation closes=%d, want 1", delegate.closes.Load())
 	}
 }
 

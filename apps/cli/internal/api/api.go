@@ -211,8 +211,8 @@ type Config struct {
 	// Verbose, when non-nil, receives one already-redacted diagnostic line
 	// per transport event.
 	Verbose func(format string, args ...any)
-	// Sleep is used between 429 retries; nil means time.Sleep. Tests inject
-	// a recorder.
+	// Sleep overrides the context-aware retry timer. Nil uses that timer; tests
+	// inject a recorder when they do not need cancellation behavior.
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string

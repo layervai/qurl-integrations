@@ -91,6 +91,9 @@ the platform's observed Connector state and serving epoch.`
 		Long:  long,
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectLocalConnectorID(cmd.Context(), opts, args[0], cmd.Name()); err != nil {
+				return err
+			}
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
@@ -304,6 +307,9 @@ func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id str
 // needs no matching local share, log path, or daemon controller. Registered
 // device state and its owner-bound registry are still required for authentication.
 func stopShare(ctx context.Context, opts *globalOpts, id string) error {
+	if err := rejectLocalConnectorID(ctx, opts, id, "stop"); err != nil {
+		return err
+	}
 	client, err := opts.newClient(ctx)
 	if err != nil {
 		return err
@@ -323,7 +329,7 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 	}
 	target, cleanupErr := convergeStoppedLocalShare(ctx, opts, id, sharing)
 	if errors.Is(cleanupErr, errLocalSharingIdentityMismatch) {
-		return cleanupErr
+		return fmt.Errorf("the resource is stopped remotely, but local state was not updated because its identity disagrees with the accepted stop response: %w", cleanupErr)
 	}
 	printer := opts.printer()
 	if err := printer.Sharing(target, sharing); err != nil {
@@ -385,6 +391,22 @@ func readLocalShareIfPresent(ctx context.Context, opts *globalOpts, id string) (
 		}
 	}
 	return nil, stateDir, nil
+}
+
+// rejectLocalConnectorID gives local users the canonical CRID before an
+// internal Connector slug reaches an API route that does not accept it. State
+// lookup is only a hint: missing, unavailable, or unrelated local state must
+// not block a valid remote resource command.
+func rejectLocalConnectorID(ctx context.Context, opts *globalOpts, id, action string) error {
+	local, _, err := readLocalShareIfPresent(ctx, opts, id)
+	if err != nil || local == nil {
+		return nil //nolint:nilerr // Optional local hint; the service remains authoritative for valid identifiers.
+	}
+	trimmedID := strings.TrimSpace(id)
+	if trimmedID != local.ConnectorID || trimmedID == local.CRID || trimmedID == local.ResourceID {
+		return nil
+	}
+	return exitcode.UsageError(fmt.Errorf("%s accepts a CRID or resource ID, not a Connector ID; use CRID %s", action, local.CRID))
 }
 
 func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonController, string, error) {

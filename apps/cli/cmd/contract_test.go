@@ -501,6 +501,15 @@ func TestEnrichTunnelListReturnsParentCancellation(t *testing.T) {
 	}
 }
 
+func TestDefaultLocalShareLoaderUsesConfiguredStateDirectoryResolver(t *testing.T) {
+	want := errors.New("configured state directory unavailable")
+	opts := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", want }}
+	opts.applyDefaults()
+	if _, err := opts.loadLocalShares(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("loadLocalShares() = %v, want configured resolver error", err)
+	}
+}
+
 func TestListQuietSkipsLocalRegistryAndSharingReads(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -759,6 +768,7 @@ func TestInsecureEndpointWarning(t *testing.T) {
 		"http://192.0.2.10":         true,
 		"https://api.example.com":   false,
 		"http://localhost:8080":     false,
+		"http://LOCALHOST:8080":     false,
 		"http://api.localhost:8080": true,
 		"http://127.0.0.1:8080":     false,
 		"http://[::1]:8080":         false,

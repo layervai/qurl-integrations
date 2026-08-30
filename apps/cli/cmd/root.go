@@ -274,9 +274,12 @@ func (o *globalOpts) applyDefaults() {
 	if o.runForegroundDaemon == nil {
 		o.runForegroundDaemon = runShareDaemon
 	}
+	if o.resolveShareStateDir == nil {
+		o.resolveShareStateDir = connectorstate.ResolveDir
+	}
 	if o.loadLocalShares == nil {
 		o.loadLocalShares = func(ctx context.Context) ([]connectorstate.LocalShare, error) {
-			dir, err := connectorstate.ResolveDir("")
+			dir, err := o.resolveShareStateDir("")
 			if err != nil {
 				return nil, err
 			}
@@ -296,9 +299,6 @@ func (o *globalOpts) applyDefaults() {
 	}
 	if o.preflightTarget == nil {
 		o.preflightTarget = preflightLocalTarget
-	}
-	if o.resolveShareStateDir == nil {
-		o.resolveShareStateDir = connectorstate.ResolveDir
 	}
 	if o.resolveLocalResource == nil {
 		o.resolveLocalResource = resolveLocalPublishResource
@@ -372,7 +372,7 @@ func insecureEndpointWarning(endpoint string) string {
 		return ""
 	}
 	host := u.Hostname()
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
 		return ""
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {

@@ -743,10 +743,11 @@ func TestStopRejectsSharingResponseThatMismatchesLocalIdentity(t *testing.T) {
 			return client, nil
 		},
 	})
-	if res.code == 0 || !strings.Contains(res.stderr.String(), "response identity does not match local share") {
+	if res.code == 0 || !strings.Contains(res.stderr.String(), "resource is stopped remotely") ||
+		!strings.Contains(res.stderr.String(), "response identity does not match local share") {
 		t.Fatalf("identity mismatch exit=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
 	}
-	if res.stdout.Len() != 0 || strings.Contains(res.stderr.String(), "resource is stopped") {
+	if res.stdout.Len() != 0 {
 		t.Fatalf("identity mismatch reported untrusted success: stdout=%q stderr=%q", res.stdout.String(), res.stderr.String())
 	}
 	unchanged, err := registry.Get(context.Background(), local.ResourceID)
@@ -758,8 +759,8 @@ func TestStopRejectsSharingResponseThatMismatchesLocalIdentity(t *testing.T) {
 	}
 }
 
-func TestStartAndRestartRejectInternalConnectorID(t *testing.T) {
-	for _, command := range []string{"start", "restart"} {
+func TestLifecycleCommandsRejectInternalConnectorID(t *testing.T) {
+	for _, command := range []string{"start", "restart", "status", "inspect", "stop"} {
 		t.Run(command, func(t *testing.T) {
 			srv := apitest.NewServer(t)
 			stateDir := connectorStateTestDir(t)
