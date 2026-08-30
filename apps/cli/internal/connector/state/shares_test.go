@@ -134,6 +134,21 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 	if updated.DesiredState != "on" || updated.ServingEpoch != 2 {
 		t.Fatalf("updated = %+v", updated)
 	}
+	beforeIdempotentSet, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err = registry.SetDesired(context.Background(), binding.CRID, "on", 2)
+	if err != nil || updated.DesiredState != "on" || updated.ServingEpoch != 2 {
+		t.Fatalf("idempotent desired-state update = %+v, %v", updated, err)
+	}
+	afterIdempotentSet, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeIdempotentSet, afterIdempotentSet) {
+		t.Fatal("idempotent desired-state update replaced the durable registry file")
+	}
 	got, err := registry.Get(context.Background(), binding.ConnectorID)
 	if err != nil || got.ResourceID != binding.ResourceID || got.TargetURL != share.TargetURL {
 		t.Fatalf("Get = %+v, %v", got, err)
@@ -147,6 +162,20 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 	}
 	if _, err := registry.Get(context.Background(), binding.CRID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Get after delete = %v", err)
+	}
+	beforeAbsentDelete, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Delete(context.Background(), binding.ResourceID); err != nil {
+		t.Fatalf("idempotent delete: %v", err)
+	}
+	afterAbsentDelete, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeAbsentDelete, afterAbsentDelete) {
+		t.Fatal("absent delete replaced the durable registry file")
 	}
 }
 

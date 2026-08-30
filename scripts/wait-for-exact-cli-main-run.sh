@@ -45,8 +45,12 @@ for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
     sleep "$poll_seconds"
     continue
   fi
-  consecutive_api_failures=0
   run=$(jq -c --arg repository "$repository" --arg sha "$source_sha" '
+    if ((.total_count | type) != "number") or .total_count < 0 or .total_count > 100 or
+       ((.workflow_runs | type) != "array") or ((.workflow_runs | length) != .total_count)
+    then error("truncated or malformed exact CLI main-run data")
+    else .
+    end |
     [(.workflow_runs // [])[] | select(
       .repository.full_name == $repository and
       .head_repository.full_name == $repository and
@@ -56,12 +60,9 @@ for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
       (.id | type == "number" and . > 0) and
       (.run_attempt | type == "number" and . > 0)
     )] |
-    if length == 0 then null
-    elif length == 1 then .[0]
-    else error("ambiguous exact CLI main runs")
-    end
+    sort_by(.id) | last // null
   ' <<<"$response") || {
-    echo "::error::GitHub returned malformed or ambiguous CLI main-run data" >&2
+    echo "::error::GitHub returned malformed or truncated CLI main-run data" >&2
     exit 1
   }
 
@@ -71,6 +72,33 @@ for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
       conclusion=$(jq -er '.conclusion | select(type == "string")' <<<"$run")
       url=$(jq -r '.html_url // ""' <<<"$run")
       if [[ "$conclusion" == success ]]; then
+        if ! jobs_response=$(gh api --method GET "repos/${repository}/actions/runs/$(jq -r .id <<<"$run")/attempts/$(jq -r .run_attempt <<<"$run")/jobs" -f per_page=100); then
+          consecutive_api_failures=$((consecutive_api_failures + 1))
+          if ((consecutive_api_failures >= max_api_failures)); then
+            echo "::error::GitHub API failed ${consecutive_api_failures} consecutive CLI main job polls" >&2
+            exit 1
+          fi
+          echo "::warning::GitHub API CLI main job poll failed; retrying (${consecutive_api_failures}/${max_api_failures})" >&2
+          sleep "$poll_seconds"
+          continue
+        fi
+        consecutive_api_failures=0
+        jq -e '
+          if ((.total_count | type) != "number") or .total_count < 0 or .total_count > 100 or
+             ((.jobs | type) != "array") or ((.jobs | length) != .total_count)
+          then error("truncated or malformed CLI main jobs")
+          else .
+          end |
+          . as $response |
+          ["cli / exact packaged customer journey", "cli / required"] as $required |
+          all($required[]; . as $name |
+            ([$response.jobs[] | select(.name == $name and .status == "completed" and .conclusion == "success")] | length) == 1 and
+            ([$response.jobs[] | select(.name == $name)] | length) == 1
+          )
+        ' <<<"$jobs_response" >/dev/null || {
+          echo "::error::Exact CLI main workflow did not complete every required CLI job successfully: ${url}" >&2
+          exit 1
+        }
         jq -cn --argjson run_id "$(jq -r .id <<<"$run")" \
           --argjson run_attempt "$(jq -r .run_attempt <<<"$run")" \
           --arg url "$url" '{run_id:$run_id,run_attempt:$run_attempt,url:$url}'
@@ -80,6 +108,7 @@ for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
       exit 1
     fi
   fi
+  consecutive_api_failures=0
 
   if ((poll_index + 1 == max_polls)); then
     break

@@ -43,6 +43,12 @@ case "$SCENARIO" in
     ]}'
     exit 0
     ;;
+  truncated)
+    jq -n --arg external "$EXPECTED_EXTERNAL" '{total_count:101,check_runs:[
+      {id:2,name:"qURL Customer Journey / exact CLI artifact",external_id:$external,app:{slug:"github-actions"},status:"completed",conclusion:"success",details_url:"https://example.invalid/result"}
+    ]}'
+    exit 0
+    ;;
   malformed)
     printf '{not-json\n'
     exit 0
@@ -107,6 +113,7 @@ run_case wrong_external 1
 [[ $(cat "$work/calls") == 2 ]]
 run_case wrong_app 1
 run_case duplicate 0
+run_case truncated 1
 run_case malformed 1
 run_case api_failure 1
 [[ $(cat "$work/calls") == 2 ]]

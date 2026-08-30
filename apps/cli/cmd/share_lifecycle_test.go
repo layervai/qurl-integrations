@@ -531,6 +531,47 @@ func TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon(t *testing.T) {
 	}
 }
 
+func TestStartAndRestartRejectInternalConnectorID(t *testing.T) {
+	for _, command := range []string{"start", "restart"} {
+		t.Run(command, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := localShareFixture(srv)
+			if err := registry.Put(context.Background(), &local); err != nil {
+				t.Fatal(err)
+			}
+			preflightCalls := 0
+			res := runCLI(t, &runOpts{
+				args: []string{"--endpoint", srv.URL, command, local.ConnectorID},
+				env: map[string]string{
+					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+				},
+				shareRegistry: registry, shareDaemon: &recordingShareDaemon{},
+				shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error {
+					preflightCalls++
+					return nil
+				},
+			})
+			if res.code != exitcode.Usage {
+				t.Fatalf("exit=%d stderr=%s, want usage error", res.code, res.stderr.String())
+			}
+			for _, want := range []string{"not a Connector ID", "use CRID " + local.CRID} {
+				if !strings.Contains(res.stderr.String(), want) {
+					t.Fatalf("stderr=%q, want %q", res.stderr.String(), want)
+				}
+			}
+			if preflightCalls != 0 || len(srv.Requests()) != 0 {
+				t.Fatalf("rejected Connector ID reached preflight or service: preflight=%d requests=%#v", preflightCalls, srv.Requests())
+			}
+		})
+	}
+}
+
 func TestStartRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
@@ -736,11 +777,20 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	if err := registry.Put(context.Background(), &local); err != nil {
 		t.Fatal(err)
 	}
+	wantLogDir, err := connectordaemon.DefaultLogDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	daemon := &recordingShareDaemon{}
+	gotStateDir, gotLogDir := "", ""
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
 		env:           map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
-		shareRegistry: registry, shareDaemon: daemon,
+		shareRegistry: registry,
+		shareDaemonFactory: func(stateDir, logDir string) shareDaemonController {
+			gotStateDir, gotLogDir = stateDir, logDir
+			return daemon
+		},
 		shareStateDir: stateDir,
 	})
 	if res.code != 0 {
@@ -751,6 +801,9 @@ func TestDeleteRemovesLocalShareWithoutStartingDaemon(t *testing.T) {
 	}
 	if daemon.ensures != 0 || daemon.reloads != 1 {
 		t.Fatalf("delete daemon reconciliation = %+v, want one reload and no install", daemon)
+	}
+	if gotStateDir != stateDir || gotLogDir != wantLogDir || gotLogDir == "" {
+		t.Fatalf("delete daemon paths = state %q log %q, want state %q log %q", gotStateDir, gotLogDir, stateDir, wantLogDir)
 	}
 }
 

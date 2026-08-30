@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -883,6 +884,15 @@ func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
 	}
 	if got := bodySnippet([]byte{'o', 'k', 0xff, 'x'}); !utf8.ValidString(got) || !strings.Contains(got, "\uFFFD") {
 		t.Fatalf("invalid response bytes were not sanitized: %q", got)
+	}
+	got = bodySnippet([]byte("bad\x1b[31m\x7f\u202Eresponse"))
+	if !strings.Contains(got, "\uFFFD") {
+		t.Fatalf("response controls were not replaced: %q", got)
+	}
+	for _, r := range got {
+		if !unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			t.Fatalf("response snippet retained control rune %U: %q", r, got)
+		}
 	}
 }
 

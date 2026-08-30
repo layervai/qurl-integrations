@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -141,11 +142,8 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if err != nil {
 		return err
 	}
-	local, err := registry.Get(ctx, id)
+	local, err := controllableLocalShare(ctx, registry, id, action)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no local share is registered for %s", id)
-		}
 		return err
 	}
 	if err := opts.preflightTarget(ctx, local.LocalIP, local.LocalPort); err != nil {
@@ -190,6 +188,21 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 		return err
 	}
 	return opts.printer().Sharing(local.TargetURL, sharing)
+}
+
+func controllableLocalShare(ctx context.Context, registry localShareRegistry, id, action string) (*connectorstate.LocalShare, error) {
+	local, err := registry.Get(ctx, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("no local share is registered for %s", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	trimmedID := strings.TrimSpace(id)
+	if trimmedID == local.ConnectorID && trimmedID != local.CRID && trimmedID != local.ResourceID {
+		return nil, exitcode.UsageError(fmt.Errorf("%s accepts a CRID or resource ID, not a Connector ID; use CRID %s", action, local.CRID))
+	}
+	return local, nil
 }
 
 func requireBackgroundShareSupport(goos string) error {

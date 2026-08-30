@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
@@ -362,6 +363,9 @@ func (c *client) SetSharing(ctx context.Context, id string, desired DesiredState
 	if desired != DesiredStateOn && desired != DesiredStateOff {
 		return nil, fmt.Errorf("%w: desired_state must be on or off", qurl.ErrInvalidResourceRequest)
 	}
+	// TODO(upstream-contract): qurl-service advances serving_epoch whenever
+	// desired_state changes. The local registry rejects a same-epoch state
+	// contradiction, so keep that service invariant explicit and tested.
 	return c.doSharing(ctx, http.MethodPut, id, struct {
 		DesiredState DesiredState `json:"desired_state"`
 	}{DesiredState: desired}, false)
@@ -638,7 +642,13 @@ func (r *restReply) problem() error {
 const maxSnippet = 256
 
 func bodySnippet(body []byte) string {
-	fields := strings.Fields(strings.ToValidUTF8(string(body), "\uFFFD"))
+	clean := strings.Map(func(r rune) rune {
+		if !unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, strings.ToValidUTF8(string(body), "\uFFFD"))
+	fields := strings.Fields(clean)
 	snippet := strings.Join(fields, " ")
 	if len(snippet) > maxSnippet {
 		end := maxSnippet

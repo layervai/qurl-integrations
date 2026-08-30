@@ -37,6 +37,7 @@ var (
 	// ErrLocalShareVersionUnsupported marks a registry written with another
 	// schema version. v2 deliberately does not migrate prerelease state.
 	ErrLocalShareVersionUnsupported = errors.New("local share registry version is unsupported")
+	errLocalShareUnchanged          = errors.New("local share registry is unchanged")
 )
 
 // LocalShare is the non-secret local half of one tunnel resource. The qURL
@@ -194,6 +195,10 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 		if epoch == share.ServingEpoch && desired != share.DesiredState {
 			return fmt.Errorf("refuse contradictory desired state %q at serving epoch %d", desired, epoch)
 		}
+		updated = share
+		if epoch == share.ServingEpoch {
+			return errLocalShareUnchanged
+		}
 		share.DesiredState = desired
 		share.ServingEpoch = epoch
 		share.UpdatedAt = time.Now().UTC()
@@ -237,7 +242,7 @@ func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epo
 	return &updated, nil
 }
 
-// Get resolves one row by public resource ID or CRID.
+// Get resolves one row by public resource ID, CRID, or internal Connector ID.
 func (r *LocalShareRegistry) Get(ctx context.Context, id string) (*LocalShare, error) {
 	state, unlock, err := r.loadLocked(ctx)
 	if err != nil {
@@ -271,7 +276,7 @@ func (r *LocalShareRegistry) Delete(ctx context.Context, id string) error {
 	return r.update(ctx, func(state *localSharesState) error {
 		key, _, ok := findLocalShare(state.Shares, id)
 		if !ok {
-			return nil
+			return errLocalShareUnchanged
 		}
 		delete(state.Shares, key)
 		return nil
@@ -285,6 +290,9 @@ func (r *LocalShareRegistry) update(ctx context.Context, mutate func(*localShare
 	}
 	defer func() { retErr = errors.Join(retErr, unlock()) }()
 	if err := mutate(&state); err != nil {
+		if errors.Is(err, errLocalShareUnchanged) {
+			return nil
+		}
 		return err
 	}
 	return writeLocalShares(r.dir, state)
@@ -361,7 +369,7 @@ func loadLocalShares(dir string) (localSharesState, error) {
 	state, err := decodeLocalShares(data)
 	if err != nil {
 		if errors.Is(err, ErrLocalShareVersionUnsupported) {
-			return localSharesState{}, fmt.Errorf("%w at %q; this CLI does not migrate old state: revoke any device key stored with it in the qURL console, then move or remove the complete state directory and run `qurl login` again", err, path)
+			return localSharesState{}, fmt.Errorf("%w at %q; this CLI does not migrate old state: revoke any device key stored with it in the qURL dashboard, then move or remove the complete state directory and run `qurl login` again", err, path)
 		}
 		return localSharesState{}, fmt.Errorf("decode local share registry: %w", err)
 	}

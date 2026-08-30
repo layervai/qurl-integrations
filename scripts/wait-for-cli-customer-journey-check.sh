@@ -56,6 +56,11 @@ for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
   fi
   consecutive_api_failures=0
   latest=$(jq -c --arg name "$check_name" --arg external_id "$external_id" '
+    if ((.total_count | type) != "number") or .total_count < 0 or .total_count > 100 or
+       ((.check_runs | type) != "array") or ((.check_runs | length) != .total_count)
+    then error("truncated or malformed customer-journey check data")
+    else .
+    end |
     (.check_runs // []) |
     map(select(
       .name == $name and
@@ -65,7 +70,7 @@ for ((poll_index = 0; poll_index < max_polls; poll_index++)); do
     )) |
     if length == 0 then null else max_by(.id) end
   ' <<<"$response") || {
-    echo "::error::GitHub returned malformed customer-journey check data" >&2
+    echo "::error::GitHub returned malformed or truncated customer-journey check data" >&2
     exit 1
   }
 

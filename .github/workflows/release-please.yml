@@ -583,8 +583,6 @@ jobs:
 
       - name: Post recovery instructions on failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           {
             echo "## CLI release incomplete"

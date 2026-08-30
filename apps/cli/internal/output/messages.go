@@ -41,12 +41,12 @@ const (
 
 	// hintExpired tells an expired key apart from a rejected one: the remedy
 	// is a new key, not a retyped one.
-	hintExpired = "Hint: this API key has expired. Create a new key in the qURL console and run `qurl login` again."
+	hintExpired = "Hint: this API key has expired. Create a new key in the qURL dashboard and run `qurl login` again."
 
 	// hintKeyInvalid covers the platform's explicit not-a-key answer. Unlike
 	// the generic 401 hint it does not steer to QURL_API_KEY: the key in
 	// hand — typed at login or stored — is the thing the service refused.
-	hintKeyInvalid = "Hint: the qURL service doesn't recognize this API key. Re-copy it from the qURL console, then run `qurl login` again (or update QURL_API_KEY if that's where it lives)."
+	hintKeyInvalid = "Hint: the qURL service doesn't recognize this API key. Re-copy it from the qURL dashboard, then run `qurl login` again (or update QURL_API_KEY if that's where it lives)."
 
 	// Storage backend labels used in login/logout confirmations.
 	labelKeyring        = "OS keyring"
@@ -168,7 +168,7 @@ const (
 	// (52203).
 	msgConnectorQuotaExceeded = "Your qURL account has reached its limit on enrolled Connectors, so this machine can't be added."
 
-	hintConnectorQuotaExceeded = "Hint: retire a Connector you no longer use in the qURL console, or ask your qURL administrator to raise the limit, then run the command again."
+	hintConnectorQuotaExceeded = "Hint: retire a Connector you no longer use in the qURL dashboard, or ask your qURL administrator to raise the limit, then run the command again."
 
 	// msgConnectorAssignmentUnavailable renders the four sentinels whose
 	// customer story and next step are identical — the platform could not
