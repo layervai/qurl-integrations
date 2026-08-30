@@ -381,8 +381,27 @@ func TestMintConnectorEnrollmentTokenMapsProblemResponse(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Code != "insufficient_scope" || apiErr.RequestID != "req_test" {
 		t.Errorf("mapped error = %+v", apiErr)
 	}
-	if !apiErr.EnrollmentScopeRequired() {
-		t.Error("enrollment scope failure lost its operation-specific remedy marker")
+	if apiErr.AgentEnrollmentScopeRequired() || !apiErr.ConnectorEnrollmentScopeRequired() {
+		t.Error("Connector enrollment failure lost its registered-device remedy marker")
+	}
+}
+
+func TestMintAgentEnrollmentTokenMapsOnlyAgentScopeRemedy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
+	}))
+	t.Cleanup(srv.Close)
+	client, ok := newEnrollmentTestClient(t, srv.URL).(AccountClient)
+	if !ok {
+		t.Fatal("account-key client does not expose agent enrollment")
+	}
+
+	_, err := client.MintAgentEnrollmentToken(context.Background(), MintAgentEnrollmentTokenOptions{
+		IdempotencyKey: testIdempotencyKey,
+	})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || !apiErr.AgentEnrollmentScopeRequired() || apiErr.ConnectorEnrollmentScopeRequired() {
+		t.Errorf("agent enrollment remedy markers = %+v", apiErr)
 	}
 }
 

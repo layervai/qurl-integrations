@@ -371,7 +371,7 @@ func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 	var buf bytes.Buffer
 	RenderError(&buf, fmt.Errorf("bootstrap local Connector: %w", err), false)
 	got := buf.String()
-	if !strings.Contains(got, "qurl:agent") || !strings.Contains(got, "one-time device enrollment credential") {
+	if !strings.Contains(got, "registered device") || !strings.Contains(got, "publish local apps") {
 		t.Errorf("operation-specific remedy missing:\n%s", got)
 	}
 	if strings.Contains(got, hintScope) {

@@ -70,9 +70,6 @@ func LoadHeadlessConfig(path string) (*HeadlessConfig, error) {
 	if len(config.Shares) != 1 {
 		return nil, errors.New("headless share config requires exactly one share")
 	}
-	resourceIDs := make(map[string]struct{}, len(config.Shares))
-	crids := make(map[string]struct{}, len(config.Shares))
-	connectorIDs := make(map[string]struct{}, len(config.Shares))
 	for i := range config.Shares {
 		share := &config.Shares[i]
 		if err := ValidateLocalShareDefinition(share); err != nil {
@@ -81,18 +78,6 @@ func LoadHeadlessConfig(path string) (*HeadlessConfig, error) {
 		if share.DesiredState != "on" {
 			return nil, fmt.Errorf("headless share config shares[%d] must have desired_state on", i)
 		}
-		if _, exists := resourceIDs[share.ResourceID]; exists {
-			return nil, fmt.Errorf("headless share config shares[%d] duplicates resource_id", i)
-		}
-		if _, exists := crids[share.CRID]; exists {
-			return nil, fmt.Errorf("headless share config shares[%d] duplicates CRID", i)
-		}
-		if _, exists := connectorIDs[share.ConnectorID]; exists {
-			return nil, fmt.Errorf("headless share config shares[%d] duplicates connector_id", i)
-		}
-		resourceIDs[share.ResourceID] = struct{}{}
-		crids[share.CRID] = struct{}{}
-		connectorIDs[share.ConnectorID] = struct{}{}
 	}
 	return &config, nil
 }

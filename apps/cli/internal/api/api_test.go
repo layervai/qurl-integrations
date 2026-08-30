@@ -572,6 +572,33 @@ func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 	}
 }
 
+func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "exact", path: "/v1/resources/qexample/resolve", want: true},
+		{name: "empty resource", path: "/v1/resources//resolve"},
+		{name: "nested resource", path: "/v1/resources/qexample/sessions/resolve"},
+		{name: "different version", path: "/v2/resources/qexample/resolve"},
+		{name: "unrelated suffix", path: "/v1/admin/resolve"},
+		{name: "trailing slash", path: "/v1/resources/qexample/resolve/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "https://api.example"+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := retrySafeRequest(req); got != tc.want {
+				t.Errorf("retrySafeRequest(%q) = %t, want %t", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDeleteIsIdempotent pins the delete contract: 204 and 404 are both
 // success — the second delete of anything reports AlreadyGone, never an
 // error — while other failures stay typed.

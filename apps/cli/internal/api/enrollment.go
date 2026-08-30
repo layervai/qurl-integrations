@@ -104,7 +104,7 @@ func (c *client) MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnr
 		problem := reply.problem()
 		var apiErr *Error
 		if errors.As(problem, &apiErr) && strings.EqualFold(apiErr.Code, "insufficient_scope") {
-			apiErr.enrollmentScopeRequired = true
+			apiErr.agentEnrollmentScopeRequired = true
 		}
 		return nil, problem
 	}
@@ -149,7 +149,7 @@ func (c *client) MintConnectorEnrollmentToken(ctx context.Context, opts MintConn
 		problem := reply.problem()
 		var apiErr *Error
 		if errors.As(problem, &apiErr) && strings.EqualFold(apiErr.Code, "insufficient_scope") {
-			apiErr.enrollmentScopeRequired = true
+			apiErr.connectorEnrollmentScopeRequired = true
 		}
 		return nil, problem
 	}
@@ -188,6 +188,8 @@ func validateEnrollmentIdempotencyKey(value string) error {
 }
 
 func validateAgentEnrollmentResponse(data *connectorEnrollmentData) error {
+	// TODO(upstream-contract): Keep these response-envelope checks in lockstep
+	// with qurl-service's agent enrollment response contract.
 	invalid := func(detail string) error {
 		return fmt.Errorf("%w: agent enrollment response %s", qurl.ErrInvalidAPIResponse, detail)
 	}

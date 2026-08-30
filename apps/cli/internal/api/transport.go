@@ -163,7 +163,12 @@ func retrySafeRequest(req *http.Request) bool {
 		// qurl-go owns this request and cannot carry our private context marker,
 		// so keep the one reviewed SDK write-like route explicit here. A 503
 		// still requires an Idempotency-Key in retryableResponse.
-		return strings.HasSuffix(req.URL.EscapedPath(), "/resolve")
+		resource, ok := strings.CutPrefix(req.URL.EscapedPath(), "/v1/resources/")
+		if !ok {
+			return false
+		}
+		resource, ok = strings.CutSuffix(resource, "/resolve")
+		return ok && resource != "" && !strings.Contains(resource, "/")
 	default:
 		return false
 	}

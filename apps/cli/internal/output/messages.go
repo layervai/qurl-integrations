@@ -29,8 +29,9 @@ const (
 	hintRetired = "Hint: this resource was permanently retired and will never resolve again. Publish the target again to get a new CRID."
 
 	// hintScope covers a key that authenticates but cannot resolve.
-	hintScope           = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access."
-	hintEnrollmentScope = "Hint: log in with an API key that includes qurl:agent. The CLI uses it only to mint a one-time device enrollment credential."
+	hintScope                    = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access."
+	hintEnrollmentScope          = "Hint: log in with an API key that includes qurl:agent. The CLI uses it only to mint a one-time device enrollment credential."
+	hintConnectorEnrollmentScope = "Hint: this registered device is not allowed to publish local apps. Contact your qURL administrator."
 
 	// hintFrozen is the account-standing message for 403 account_frozen: the
 	// key is fine, the account is paused — a materially different situation
