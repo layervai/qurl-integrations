@@ -251,7 +251,8 @@ func (r *LocalShareRegistry) Get(ctx context.Context, id string) (*LocalShare, e
 	return &share, nil
 }
 
-// List returns a stable snapshot of every local share.
+// List returns one locked point-in-time snapshot of every local share. The
+// item order is unspecified because callers key rows by resource identity.
 func (r *LocalShareRegistry) List(ctx context.Context) ([]LocalShare, error) {
 	state, unlock, err := r.loadLocked(ctx)
 	if err != nil {

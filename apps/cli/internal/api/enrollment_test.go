@@ -21,7 +21,7 @@ import (
 const (
 	testConnectorID    = "conn-cli-enrollment"
 	testIdempotencyKey = "0123456789abcdef0123456789abcdef"
-	testEnrollmentKey  = "lv_test_enrollmentsecret123456789"
+	testEnrollmentKey  = "lv_test_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 )
 
 func TestMintAgentEnrollmentTokenSendsUnboundOneShotShape(t *testing.T) {
@@ -204,11 +204,14 @@ func TestMintConnectorEnrollmentTokenRejectsInvalidResponses(t *testing.T) {
 	cases := map[string]func(map[string]any){
 		"missing token":    func(data map[string]any) { delete(data, "api_key") },
 		"whitespace token": func(data map[string]any) { data["api_key"] = " " + testEnrollmentKey },
-		"missing key id":   func(data map[string]any) { delete(data, "key_id") },
-		"padded key id":    func(data map[string]any) { data["key_id"] = " key_enrollment_1" },
-		"wrong kind":       func(data map[string]any) { data["kind"] = "api_key" },
-		"wrong target":     func(data map[string]any) { data["target"] = "agent" },
-		"missing claim":    func(data map[string]any) { data["claims"] = []any{} },
+		"wrong token shape": func(data map[string]any) {
+			data["api_key"] = "opaque-enrollment-token"
+		},
+		"missing key id": func(data map[string]any) { delete(data, "key_id") },
+		"padded key id":  func(data map[string]any) { data["key_id"] = " key_enrollment_1" },
+		"wrong kind":     func(data map[string]any) { data["kind"] = "api_key" },
+		"wrong target":   func(data map[string]any) { data["target"] = "agent" },
+		"missing claim":  func(data map[string]any) { data["claims"] = []any{} },
 		"extra claim": func(data map[string]any) {
 			data["claims"] = []map[string]string{{"type": "connector", "id": testConnectorID}, {"type": "connector", "id": "other"}}
 		},
@@ -249,6 +252,24 @@ func TestMintConnectorEnrollmentTokenRejectsInvalidResponses(t *testing.T) {
 				t.Error("invalid-response error leaked the enrollment token")
 			}
 		})
+	}
+}
+
+func TestValidateAgentEnrollmentResponseRejectsWrongTokenShape(t *testing.T) {
+	data := validEnrollmentData(time.Now().Add(time.Hour))
+	data["api_key"] = "opaque-enrollment-token"
+	data["target"] = agentEnrollmentTarget
+	data["claims"] = []map[string]string{}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded connectorEnrollmentData
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAgentEnrollmentResponse(&decoded, time.Now()); !errors.Is(err, qurl.ErrInvalidAPIResponse) || strings.Contains(err.Error(), "opaque-enrollment-token") {
+		t.Fatalf("agent enrollment validation error = %v, want redacted invalid response", err)
 	}
 }
 

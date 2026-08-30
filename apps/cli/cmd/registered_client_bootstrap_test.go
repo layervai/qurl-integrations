@@ -136,6 +136,7 @@ func bootstrapGlobalOpts(t *testing.T, endpoint string, runtime *bootstrapNative
 }
 
 func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
+	const agentEnrollmentToken = "lv_test_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	srv := apitest.NewServer(t)
 	expires := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	var idempotencyKeys []string
@@ -158,7 +159,7 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 			t.Error("device enrollment must not request caller-selected scopes")
 		}
 		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
-			"api_key": "one-shot-agent-enrollment", "key_id": "key_enrollment01",
+			"api_key": agentEnrollmentToken, "key_id": "key_enrollment01",
 			"kind": "enrollment_token", "target": "agent", "claims": []any{},
 			"status": "active", "expires_at": expires,
 		}, nil)
@@ -180,7 +181,7 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 		}
 		for range 2 {
 			credential, providerErr := cfg.EnrollmentCredentialProvider(ctx, qurl.AgentEnrollmentCredentialRequest{AgentID: "agent-durable-01"})
-			if providerErr != nil || credential != "one-shot-agent-enrollment" {
+			if providerErr != nil || credential != agentEnrollmentToken {
 				t.Fatalf("enrollment provider = %q, %v", credential, providerErr)
 			}
 		}
@@ -202,7 +203,7 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 		t.Fatalf("idempotency key = %q, want 32 random bytes in hex: %v", idempotencyKeys[0], err)
 	}
 	for _, request := range srv.Requests() {
-		if strings.Contains(request.Header.Get("Authorization"), "one-shot-agent-enrollment") {
+		if strings.Contains(request.Header.Get("Authorization"), agentEnrollmentToken) {
 			t.Error("one-shot enrollment credential reached the REST surface")
 		}
 	}
@@ -368,7 +369,7 @@ func TestLocalPublishWarmOwnerCachesClientBeforeEnrollment(t *testing.T) {
 	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	srv.Script(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
-			"api_key":    "lv_test_enrollmentsecret123456789",
+			"api_key":    "lv_test_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
 			"key_id":     "key_enrollment_warm",
 			"kind":       "enrollment_token",
 			"target":     "connector",

@@ -185,6 +185,116 @@ func (c sharingErrorClient) Sharing(ctx context.Context, _ string) (*qurlapi.Sha
 	return nil, c.err
 }
 
+type restartReconcileClient struct {
+	qurlapi.Client
+	restartErr error
+	current    *qurlapi.Sharing
+	sharingErr error
+}
+
+func (c restartReconcileClient) RestartSharing(context.Context, string) (*qurlapi.Sharing, error) {
+	return nil, c.restartErr
+}
+
+func (c restartReconcileClient) Sharing(context.Context, string) (*qurlapi.Sharing, error) {
+	return c.current, c.sharingErr
+}
+
+type setSharingClient struct {
+	qurlapi.Client
+	off         *qurlapi.Sharing
+	requestedID string
+}
+
+func (c *setSharingClient) SetSharing(_ context.Context, id string, _ qurlapi.DesiredState) (*qurlapi.Sharing, error) {
+	c.requestedID = id
+	return c.off, nil
+}
+
+func TestCompensateShareChangeUsesOnlyTrustedLocalIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		sharing *qurlapi.Sharing
+	}{
+		{name: "nil rejected response"},
+		{name: "mismatched rejected response", sharing: &qurlapi.Sharing{ResourceID: "wrong-resource", CRID: "wrong-crid"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			registry, err := openOwnedTestShareRegistry(connectorStateTestDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := localShareFixture(srv)
+			local.DesiredState = "on"
+			local.ServingEpoch = 4
+			if err := registry.Put(context.Background(), &local); err != nil {
+				t.Fatal(err)
+			}
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", 5, "stopped"))
+			client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "compensation-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cause := errors.New("rejected lifecycle response")
+			err = compensateShareChange(cause, true, client, registry, &local, test.sharing)
+			if !errors.Is(err, cause) {
+				t.Fatalf("compensation error = %v, want original cause", err)
+			}
+			requests := srv.Requests()
+			if len(requests) != 1 || requests[0].Method != http.MethodPut || requests[0].Path != path {
+				t.Fatalf("compensation requests = %#v, want trusted local path %s", requests, path)
+			}
+			stored, err := registry.Get(context.Background(), local.ResourceID)
+			if err != nil || stored.DesiredState != "off" || stored.ServingEpoch != 5 {
+				t.Fatalf("compensated local state = %+v, %v", stored, err)
+			}
+		})
+	}
+}
+
+func TestCompensateShareChangeRejectsUntrustedOffEpoch(t *testing.T) {
+	srv := apitest.NewServer(t)
+	registry, err := openOwnedTestShareRegistry(connectorStateTestDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	local.DesiredState = "on"
+	local.ServingEpoch = 4
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	other := apitest.GenerateResourceKey(t)
+	client := &setSharingClient{off: &qurlapi.Sharing{
+		ResourceID: other.ResourceID, CRID: other.CRID, DesiredState: qurlapi.DesiredStateOff,
+		ServingEpoch: 999, ConnectionState: qurlapi.ConnectionStopped,
+	}}
+	cause := errors.New("rejected lifecycle response")
+	err = compensateShareChange(cause, true, client, registry, &local, nil)
+	if client.requestedID != local.CRID {
+		t.Fatalf("compensation requested %q, want trusted local CRID %q", client.requestedID, local.CRID)
+	}
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "response identity does not match") {
+		t.Fatalf("compensation error = %v, want cause plus identity rejection", err)
+	}
+	stored, err := registry.Get(context.Background(), local.ResourceID)
+	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != 4 {
+		t.Fatalf("untrusted compensation changed local state = %+v, %v", stored, err)
+	}
+}
+
+func TestRestartReconciliationRejectsEmptyAuthoritativeState(t *testing.T) {
+	restartErr := errors.New("restart response lost")
+	_, err := restartSharingReconciled(context.Background(), restartReconcileClient{restartErr: restartErr}, "trusted-crid", &qurlapi.Sharing{
+		ResourceID: "trusted-resource", CRID: "trusted-crid", DesiredState: qurlapi.DesiredStateOn, ServingEpoch: 4,
+	})
+	if !errors.Is(err, restartErr) || !strings.Contains(err.Error(), "authoritative state was empty") {
+		t.Fatalf("restart reconciliation error = %v, want safe ambiguity error", err)
+	}
+}
+
 func TestWaitForSharingReportsLastObservedStateWhenRequestUsesDeadline(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {

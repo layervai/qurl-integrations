@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 const (
@@ -189,7 +191,7 @@ func validateAgentEnrollmentResponse(data *connectorEnrollmentData, now time.Tim
 	invalid := func(detail string) error {
 		return fmt.Errorf("%w: agent enrollment response %s", qurl.ErrInvalidAPIResponse, detail)
 	}
-	if strings.TrimSpace(data.Token) == "" || strings.TrimSpace(data.Token) != data.Token {
+	if auth.ValidateKeyShape(data.Token) != nil {
 		return invalid("has a missing or malformed token")
 	}
 	if strings.TrimSpace(data.KeyID) == "" || strings.TrimSpace(data.KeyID) != data.KeyID {
@@ -213,7 +215,7 @@ func validateConnectorEnrollmentResponse(data *connectorEnrollmentData, connecto
 	invalid := func(detail string) error {
 		return fmt.Errorf("%w: connector enrollment response %s", qurl.ErrInvalidAPIResponse, detail)
 	}
-	if strings.TrimSpace(data.Token) == "" || strings.TrimSpace(data.Token) != data.Token {
+	if auth.ValidateKeyShape(data.Token) != nil {
 		return invalid("has a missing or malformed token")
 	}
 	if strings.TrimSpace(data.KeyID) == "" || strings.TrimSpace(data.KeyID) != data.KeyID {

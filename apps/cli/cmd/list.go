@@ -77,11 +77,10 @@ func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.Resou
 		opts.printer().Warnf("Local sharing state is unavailable; local targets were omitted.")
 		return nil
 	}
-	localTargets := make(map[string]string, len(shares)*2)
+	localTargets := make(map[string]string, len(shares))
 	for index := range shares {
 		share := &shares[index]
 		localTargets[share.ResourceID] = share.TargetURL
-		localTargets[share.CRID] = share.TargetURL
 	}
 	for _, index := range tunnelRows {
 		if target := localTargets[page.Items[index].ResourceID]; target != "" {

@@ -349,6 +349,9 @@ jobs:
               *.tar.gz) tar -xzf "$archive" -C "$extracted"; binary="$extracted/qurl" ;;
               *) echo "::error::unexpected qurl archive: $archive" >&2; exit 1 ;;
             esac
+            # Byte presence covers every release archive. The executable check
+            # below proves native linux/amd64 behavior; platform CI separately
+            # executes the macOS and Windows binaries before release.
             if [[ ! -f "$binary" ]] || ! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"; then
               echo "::error::$(basename "$archive") does not carry the exact verified production Hub trust root" >&2
               exit 1

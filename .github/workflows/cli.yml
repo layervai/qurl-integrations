@@ -124,6 +124,14 @@ jobs:
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m ./apps/cli/...
 
+      - name: Verify installed golangci-lint version
+        run: |
+          installed_version="v$(golangci-lint version --short)"
+          if [ "$installed_version" != "$GOLANGCI_LINT_VERSION" ]; then
+            echo "::error::golangci-lint version is $installed_version, want $GOLANGCI_LINT_VERSION" >&2
+            exit 1
+          fi
+
       - name: Cross-lint Windows CLI sources
         run: |
           command -v golangci-lint

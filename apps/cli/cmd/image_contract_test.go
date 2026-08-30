@@ -231,6 +231,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	}
 	sandboxLintStep := findStep("lint", "golangci-lint sandbox tests")
 	windowsLintStep := findStep("lint", "Cross-lint Windows CLI sources")
+	versionLintStep := findStep("lint", "Verify installed golangci-lint version")
 	if got := workflow.Jobs["lint"].Env["GOLANGCI_LINT_VERSION"]; got != "v2.12.2" {
 		t.Errorf("public CLI workflow linter version = %#v, want one job-level v2.12.2 pin", got)
 	}
@@ -242,6 +243,11 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if got := findStep("lint", "golangci-lint").With["version"]; got != "${{ env.GOLANGCI_LINT_VERSION }}" {
 		t.Errorf("public CLI workflow linter action version = %#v, want job-level pin expression", got)
 	}
+	const versionLintCommand = "installed_version=\"v$(golangci-lint version --short)\"\nif [ \"$installed_version\" != \"$GOLANGCI_LINT_VERSION\" ]; then\n  echo \"::error::golangci-lint version is $installed_version, want $GOLANGCI_LINT_VERSION\" >&2\n  exit 1\nfi\n"
+	if versionLintStep.Run != versionLintCommand {
+		t.Errorf("public CLI workflow linter version check = %q, want %q", versionLintStep.Run, versionLintCommand)
+	}
+	assertRequiredGate("lint", versionLintStep)
 	const windowsLintCommand = "command -v golangci-lint\nGOOS=windows GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m ./apps/cli/...\n"
 	if windowsLintStep.Run != windowsLintCommand {
 		t.Errorf("public CLI workflow Windows lint command = %q, want %q", windowsLintStep.Run, windowsLintCommand)
@@ -520,6 +526,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				`--pattern 'qurl_*_windows_*.zip'`,
 				`if (( ${#archives[@]} != 6 ))`,
 				`grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
+				`Byte presence covers every release archive`,
 				`version --verify-release-native-trust`,
 				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
 			} {

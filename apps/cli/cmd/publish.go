@@ -322,12 +322,12 @@ func activateLocalPublish(
 	target *publishTarget,
 ) (*connectorstate.LocalShare, *qurlapi.Sharing, bool, error) {
 	existing, err := registry.Get(ctx, resource.ResourceID)
-	localMissing := errors.Is(err, os.ErrNotExist)
-	localPresent := err == nil
-	targetChanged := err == nil && (existing.TargetURL != target.canonicalOrigin || existing.LocalIP != target.localIP || existing.LocalPort != target.localPort)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, false, err
 	}
+	localMissing := errors.Is(err, os.ErrNotExist)
+	localPresent := err == nil
+	targetChanged := localPresent && (existing.TargetURL != target.canonicalOrigin || existing.LocalIP != target.localIP || existing.LocalPort != target.localPort)
 	prior, err := client.Sharing(ctx, resource.CRID)
 	if err != nil {
 		return nil, nil, false, err
@@ -437,8 +437,9 @@ func runForegroundLocalPublish(
 				}
 			}
 		}
-		// Foreground mode deliberately owns cloud/local desired state. Leaving
-		// the process must not strand a desired-on share without a launchd owner.
+		// Foreground mode deliberately takes ownership of cloud/local desired
+		// state, even when the share was already on. Leaving the process must not
+		// strand a desired-on share without this foreground process as its owner.
 		retErr = compensateLocalPublish(client, registry, resolved.Resource, retErr)
 	}()
 	jobVersion, err := connectordaemon.JobVersion(opts.version)

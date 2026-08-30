@@ -103,11 +103,11 @@ func Bootstrap() (qurl.HubBootstrap, error) {
 			if strings.TrimSpace(required.value) == "" {
 				return qurl.HubBootstrap{}, fmt.Errorf("%w: %s must be non-empty when the custom Hub triple is set", ErrConfig, required.name)
 			}
+			if required.value != strings.TrimSpace(required.value) {
+				return qurl.HubBootstrap{}, fmt.Errorf("%w: %s must not have surrounding whitespace", ErrConfig, required.name)
+			}
 		}
 	}
-	host = strings.TrimSpace(host)
-	key = strings.TrimSpace(key)
-	portRaw = strings.TrimSpace(portRaw)
 	port, err := strconv.Atoi(portRaw)
 	if err != nil {
 		return qurl.HubBootstrap{}, fmt.Errorf("%w: %s must be a valid port: %w", ErrConfig, EnvPort, err)

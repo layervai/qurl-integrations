@@ -134,9 +134,6 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	if action == "stop" {
 		return stopShare(ctx, opts, id)
 	}
-	if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
-		return err
-	}
 	if err := requireBackgroundShareSupport(opts.backgroundShareGOOS); err != nil {
 		return err
 	}
@@ -229,12 +226,21 @@ func compensateShareChange(cause error, enabled bool, client qurlapi.Client, reg
 	if !enabled {
 		return cause
 	}
+	if local == nil {
+		return errors.Join(cause, errors.New("cannot compensate qURL sharing change without a trusted local share"))
+	}
 	compensationCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	off, offErr := client.SetSharing(compensationCtx, sharing.CRID, qurlapi.DesiredStateOff)
+	// The rejected response is not an identity authority. Compensate only the
+	// CRID from the owner-bound local registry, including when sharing is nil.
+	off, offErr := client.SetSharing(compensationCtx, local.CRID, qurlapi.DesiredStateOff)
 	var localErr error
 	if offErr == nil {
-		_, localErr = registry.SetDesired(compensationCtx, local.ResourceID, string(off.DesiredState), off.ServingEpoch)
+		if validationErr := validateLocalSharing(local, off); validationErr != nil {
+			offErr = fmt.Errorf("compensating qURL sharing response was rejected: %w", validationErr)
+		} else {
+			_, localErr = registry.SetDesired(compensationCtx, local.ResourceID, string(off.DesiredState), off.ServingEpoch)
+		}
 	}
 	return errors.Join(cause, offErr, localErr)
 }
@@ -260,6 +266,9 @@ func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id str
 			fmt.Errorf("qURL sharing restart result is ambiguous: %w", err),
 			fmt.Errorf("read authoritative sharing state: %w", reconcileErr),
 		)
+	}
+	if current == nil {
+		return nil, fmt.Errorf("qURL sharing restart result is ambiguous and authoritative state was empty: %w", err)
 	}
 	if prior != nil && current.ResourceID == prior.ResourceID && current.DesiredState == qurlapi.DesiredStateOn && current.ServingEpoch > prior.ServingEpoch {
 		return current, nil
