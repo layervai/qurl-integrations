@@ -116,12 +116,12 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 	default:
 		return sandboxRunNamespace{}, errors.New("qURL sharing test label is unsupported")
 	}
-	agentID := fmt.Sprintf("qurl-share-r%s-a%s-%s%s", runID, attempt, runtimeCode, labelCode)
+	agentID := fmt.Sprintf("qurl-journey-v2-r%s-a%s-%s%s", runID, attempt, runtimeCode, labelCode)
 	if len(agentID) > 64 {
 		return sandboxRunNamespace{}, errors.New("qURL sharing agent identity exceeds the platform bound")
 	}
-	digest := sha256.Sum256([]byte(strings.Join([]string{"qurl-sharing-sandbox-v1", runID, attempt, runtimeName, label}, "\x00")))
-	connectorID := "connector-sandbox-local-publish-" + hex.EncodeToString(digest[:12])
+	digest := sha256.Sum256([]byte(strings.Join([]string{"qurl-cli-journey-v2", runID, attempt, runtimeName, label}, "\x00")))
+	connectorID := "connector-cli-journey-v2-" + hex.EncodeToString(digest[:12])
 	return sandboxRunNamespace{AgentID: agentID, ConnectorID: connectorID}, nil
 }
 
@@ -137,11 +137,11 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 	if err != nil || second != first {
 		t.Fatalf("repeat namespace = %+v, %v; want %+v", second, err, first)
 	}
-	if !strings.HasPrefix(first.AgentID, "qurl-share-r32635672597-a2-") ||
-		!strings.HasPrefix(first.ConnectorID, "connector-sandbox-local-publish-") || len(first.AgentID) > 64 {
+	if !strings.HasPrefix(first.AgentID, "qurl-journey-v2-r32635672597-a2-") ||
+		!strings.HasPrefix(first.ConnectorID, "connector-cli-journey-v2-") || len(first.AgentID) > 64 {
 		t.Fatalf("namespace = %+v", first)
 	}
-	if first.ConnectorID != "connector-sandbox-local-publish-755de9f48bb9bab132dc1c5e" {
+	if first.ConnectorID != "connector-cli-journey-v2-de8ccdb9ceb99a0657d94412" {
 		t.Fatalf("smoke Connector ID = %q; trusted cleanup derivation would drift", first.ConnectorID)
 	}
 	seen := map[sandboxRunNamespace]bool{first: true}

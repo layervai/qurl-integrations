@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -165,101 +164,6 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 	}
 }
 
-func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
-	t.Parallel()
-
-	repoRoot := filepath.Clean(cliRepoRoot)
-	retired, err := filepath.Glob(filepath.Join(repoRoot, ".github", "workflows", "cli-connector-resource-*.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(retired) != 0 {
-		t.Fatalf("retired credential-bearing workflows still exist: %v", retired)
-	}
-	for _, retiredPath := range []string{
-		"apps/cli/internal/matchedcohort",
-		"apps/cli/cmd/sandbox-matched-cohort-authority",
-		"apps/cli/cmd/sandbox-matched-cohort-lifecycle",
-	} {
-		if _, err := os.Stat(filepath.Join(repoRoot, retiredPath)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("retired matched-cohort surface remains at %s: %v", retiredPath, err)
-		}
-	}
-
-	for _, name := range []string{"cli.yml", "cli-nightly.yml"} {
-		data, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, forbidden := range []string{
-			"CLI_SANDBOX_E2E",
-			"QURL_SANDBOX_API_KEY",
-			"QURL_SANDBOX_CLEANUP_JWT",
-			"QURL_CLI_SANDBOX_CONNECTOR",
-			"AUTH0_CLIENT_SECRET",
-			"qurl-integrations-infra",
-			"ops-routines",
-		} {
-			if bytes.Contains(data, []byte(forbidden)) {
-				t.Errorf("public workflow %s retains private live authority %q", name, forbidden)
-			}
-		}
-	}
-
-	cliWorkflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "cli.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(cliWorkflow, []byte("go test -race -tags=clisandbox")) {
-		t.Error("public CLI workflow does not compile the private sandbox test surface")
-	}
-	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(makefile, []byte("go test -tags=clisandbox")) {
-		t.Error("local CLI check does not compile the private sandbox test surface")
-	}
-	for _, forbidden := range []string{"CLI_SANDBOX_E2E", "QURL_SANDBOX_API_KEY", "QURL_SANDBOX_CLEANUP_JWT"} {
-		if bytes.Contains(makefile, []byte(forbidden)) {
-			t.Errorf("public Makefile retains private live authority %q", forbidden)
-		}
-	}
-
-	liveWorkflowData, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "qurl-cli-customer-journey.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var liveWorkflow cliWorkflowContract
-	if err := yaml.Unmarshal(liveWorkflowData, &liveWorkflow); err != nil {
-		t.Fatalf("parse protected customer-journey workflow: %v", err)
-	}
-	journeyJob, ok := liveWorkflow.Jobs["journey"]
-	if !ok {
-		t.Fatal("protected customer-journey workflow has no journey job")
-	}
-	var journeySteps []cliWorkflowStep
-	for _, step := range journeyJob.Steps {
-		if step.Name == "Run the packaged customer journey" {
-			journeySteps = append(journeySteps, step)
-		}
-	}
-	if len(journeySteps) != 2 {
-		t.Fatalf("protected customer-journey workflow has %d execution steps, want POSIX and Windows", len(journeySteps))
-	}
-	for _, step := range journeySteps {
-		statusName := "journey_status"
-		if step.If == "runner.os == 'Windows'" {
-			statusName = "journeyStatus"
-		}
-		for _, required := range []string{"one exact top-level PASS and no SKIP", "--- PASS:", "--- SKIP:", statusName} {
-			if !strings.Contains(step.Run, required) {
-				t.Errorf("protected %v customer-journey step does not fail closed with %q", step.If, required)
-			}
-		}
-	}
-}
-
 func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	t.Parallel()
 
@@ -360,7 +264,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 	validatorPattern := "^(" + strings.Join(validatorTests, "|") + ")$"
 	validatorNames := strings.Join(validatorTests, "\n")
-	validatorStep := findStep("test", "Run credential-free sandbox validator tests")
+	validatorStep := findStep("test", "Run credential-free journey validator tests")
 	assertRequiredGate("test", validatorStep)
 	if len(validatorStep.Env) != 2 || validatorStep.Env["VALIDATOR_TEST_REGEX"] != validatorPattern || validatorStep.Env["VALIDATOR_TEST_NAMES"] != validatorNames {
 		t.Errorf("public CLI workflow validator env = %#v, want exact regex and sorted test names", validatorStep.Env)

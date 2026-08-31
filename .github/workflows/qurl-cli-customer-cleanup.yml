@@ -1,0 +1,105 @@
+name: "qURL CLI Customer Cleanup"
+
+# The primary workflow reconciles each lane before it can pass. This small,
+# trusted fallback also runs after cancellation, when an in-workflow cleanup
+# job might not have started.
+on:
+  workflow_run:
+    workflows: ["cli: Build and Test"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qurl-cli-customer-cleanup-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve cleanup requirement
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      required: ${{ steps.source.outputs.required }}
+    steps:
+      - id: source
+        name: Require an exact main journey run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_BRANCH" == main && "$SOURCE_EVENT" == push && \
+            "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
+            "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {
+            echo "::error::cleanup accepts only an exact same-repository main push" >&2
+            exit 1
+          }
+          [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::cleanup source run attempt is not a positive integer" >&2
+            exit 1
+          }
+          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs?per_page=100")
+          required=$(jq -r '
+            if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
+              (.jobs | type) != "array" or (.jobs | length) != .total_count
+            then error("source jobs are malformed or truncated")
+            else any(.jobs[]; .name == "cli / customer journey" or
+              (.name | startswith("cli / customer journey (")))
+            end
+          ' <<<"$jobs")
+          echo "required=$required" >>"$GITHUB_OUTPUT"
+
+  cleanup:
+    name: Reconcile cancelled customer journeys
+    needs: resolve
+    if: needs.resolve.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cli-customer-journey-cleanup
+    permissions:
+      contents: read
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
+      AUTH_TOKEN_ENDPOINT: ${{ vars.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Revoke exact-run resources and credentials
+        env:
+          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          client_dir=$RUNNER_TEMP/qurl-journey-auth
+          cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
+          trap cleanup EXIT
+          mkdir -m 0700 "$client_dir"
+          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
+          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
+          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          for lane_spec in linux:1 macos:2 windows:3; do
+            IFS=: read -r lane lane_id <<<"$lane_spec"
+            python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
+              --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+              --client-secret-file "$client_dir/client-secret" \
+              --run-id "${SOURCE_RUN_ID}${lane_id}" --run-attempt "$SOURCE_RUN_ATTEMPT" \
+              --lane "$lane" --runtime host
+          done

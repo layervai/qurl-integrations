@@ -70,7 +70,7 @@ const journeyTimeout = 4 * time.Minute
 // sandbox tenancy — or a sweeper reading `qurl list -o json` — can tell a
 // leaked fixture from a real one. assertListFindsCRID holds the CLI to
 // surfacing it: a label no listing carries identifies nothing.
-const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
+const journeyDescription = "qurl CLI journey v2 (self-cleaning; safe to delete)"
 
 func sandboxJourneyResourceDescription(t *testing.T, env map[string]string) string {
 	t.Helper()
@@ -84,7 +84,7 @@ func sandboxJourneyResourceDescription(t *testing.T, env map[string]string) stri
 		(runtimeName != "host" && runtimeName != "hardened_container") {
 		t.Fatal("run-scoped journey resource description received an incomplete identity")
 	}
-	return fmt.Sprintf("qurl CLI CI resource %s/%s/%s", runID, attempt, runtimeName)
+	return fmt.Sprintf("qurl CLI journey v2 resource %s/%s/%s", runID, attempt, runtimeName)
 }
 
 // sandboxJourneyEnv reads the common suite env contract from the real process

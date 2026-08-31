@@ -48,7 +48,7 @@ class FakeAPI:
         self.keys: dict[str, dict[str, object]] = {}
         self.resources = [
             {
-                "description": "qurl CLI CI resource 1231/2/host",
+                "description": "qurl CLI journey v2 resource 1231/2/host",
                 "resource_id": "r_customer_ci",
                 "status": "active",
                 "target_url": "https://example.com/?qurl-private-sandbox-device-journey=1",
@@ -67,15 +67,15 @@ class FakeAPI:
             },
         ]
         self.connector_resources = {
-            "connector-sandbox-local-publish-f7cb5872ed38e4784311c503": {
+            "connector-cli-journey-v2-415907f85f12d5ffd69c6a62": {
                 "resource_id": "r_connector_smoke",
-                "slug": "connector-sandbox-local-publish-f7cb5872ed38e4784311c503",
+                "slug": "connector-cli-journey-v2-415907f85f12d5ffd69c6a62",
                 "status": "active",
                 "type": "tunnel",
             },
-            "connector-sandbox-local-publish-365faf55fba72fb0bc45860a": {
+            "connector-cli-journey-v2-87e091ca6623843507b5863b": {
                 "resource_id": "r_connector_failure",
-                "slug": "connector-sandbox-local-publish-365faf55fba72fb0bc45860a",
+                "slug": "connector-cli-journey-v2-87e091ca6623843507b5863b",
                 "status": "active",
                 "type": "tunnel",
             },
@@ -171,7 +171,7 @@ class FakeAPI:
             return 200, json.dumps({"data": self.resources, "meta": {"has_more": False}}).encode()
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
             resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
-            assert not resource_id.startswith("connector-sandbox-local-publish-")
+            assert not resource_id.startswith("connector-cli-journey-v2-")
             self.deleted_resources.append(resource_id)
             self.operations.append("delete:" + resource_id)
             for connector_id, row in list(self.connector_resources.items()):
@@ -232,7 +232,7 @@ def test_unbounded_valid_pagination() -> None:
 
 
 def test_connector_cleanup_lookup_fails_closed() -> None:
-    connector_id = "connector-sandbox-local-publish-f7cb5872ed38e4784311c503"
+    connector_id = "connector-cli-journey-v2-415907f85f12d5ffd69c6a62"
     valid = {
         "resource_id": "r_connector_smoke",
         "slug": connector_id,
@@ -242,7 +242,7 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
     for response in (
         {},
         {"data": [valid, valid]},
-        {"data": [{**valid, "slug": "connector-sandbox-local-publish-000000000000000000000000"}]},
+        {"data": [{**valid, "slug": "connector-cli-journey-v2-000000000000000000000000"}]},
         {"data": [{**valid, "type": "url"}]},
         {"data": [{**valid, "status": "revoked"}]},
     ):
@@ -297,16 +297,23 @@ def main() -> None:
     test_connector_cleanup_lookup_fails_closed()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
-    ) == {"agent:qurl-share-r1231-a2-hs", "agent:qurl-share-r1231-a2-hf"}
+    ) == {"agent:qurl-journey-v2-r1231-a2-hs", "agent:qurl-journey-v2-r1231-a2-hf"}
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="hardened_container")
-    ) == {"agent:qurl-share-r1231-a2-cs", "agent:qurl-share-r1231-a2-cf"}
+    ) == {"agent:qurl-journey-v2-r1231-a2-cs", "agent:qurl-journey-v2-r1231-a2-cf"}
     assert credentials.run_connector_ids(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host", lane="linux")
     ) == {
-        "connector-sandbox-local-publish-f7cb5872ed38e4784311c503",
-        "connector-sandbox-local-publish-365faf55fba72fb0bc45860a",
+        "connector-cli-journey-v2-415907f85f12d5ffd69c6a62",
+        "connector-cli-journey-v2-87e091ca6623843507b5863b",
     }
+    lane_identities = [
+        argparse.Namespace(run_id="9001" + str(index), run_attempt="3", runtime="host", lane=lane)
+        for index, lane in enumerate(("linux", "macos", "windows"), start=1)
+    ]
+    assert len({credentials.run_identity(item) for item in lane_identities}) == 3
+    assert len(set().union(*(credentials.run_device_key_names(item) for item in lane_identities))) == 6
+    assert len(set().union(*(credentials.run_connector_ids(item) for item in lane_identities))) == 6
     fake = FakeAPI()
     with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(credentials, "request", fake), mock.patch.object(
         credentials.time, "sleep", lambda _: None
@@ -336,7 +343,7 @@ def main() -> None:
         recovery = root / "recovery"
         recovery.mkdir(mode=0o700)
         credentials.write_private(recovery / "cleanup-jwt", fake.jwt)
-        credentials.write_private(recovery / "run-name", "qurl CLI CI 1232/2/macos")
+        credentials.write_private(recovery / "run-name", "qurl CLI journey v2 1232/2/macos")
         credentials.revoke_persisted(args.qurl_endpoint, recovery)
         assert (recovery / "api-key-id").read_text(encoding="utf-8") == fake.key_id
 
@@ -348,28 +355,28 @@ def main() -> None:
         fake.keys[run_key_id] = {
             "key_id": run_key_id,
             "kind": "api_key",
-            "name": "qurl CLI CI 1231/2/linux",
+            "name": "qurl CLI journey v2 1231/2/linux",
             "scopes": credentials.CUSTOMER_SCOPES,
             "status": "active",
         }
         fake.keys[device_key_id] = {
             "key_id": device_key_id,
             "kind": "device",
-            "name": "agent:qurl-share-r1231-a2-hs",
+            "name": "agent:qurl-journey-v2-r1231-a2-hs",
             "scopes": credentials.DEVICE_SCOPES,
             "status": "active",
         }
         fake.keys[unrecorded_device_key_id] = {
             "key_id": unrecorded_device_key_id,
             "kind": "device",
-            "name": "agent:qurl-share-r1231-a2-hf",
+            "name": "agent:qurl-journey-v2-r1231-a2-hf",
             "scopes": credentials.DEVICE_SCOPES,
             "status": "active",
         }
         fake.keys[unrelated_key_id] = {
             "key_id": unrelated_key_id,
             "kind": "api_key",
-            "name": "qurl CLI CI 9999/1/linux",
+            "name": "qurl CLI journey v2 9999/1/linux",
             "scopes": credentials.CUSTOMER_SCOPES,
             "status": "active",
         }
@@ -412,7 +419,7 @@ def main() -> None:
         fake.keys[malformed_device_key_id] = {
             "key_id": malformed_device_key_id,
             "kind": "api_key",
-            "name": "agent:qurl-share-r1231-a2-hs",
+            "name": "agent:qurl-journey-v2-r1231-a2-hs",
             "scopes": credentials.DEVICE_SCOPES,
             "status": "active",
         }
@@ -433,7 +440,7 @@ def main() -> None:
             raise AssertionError("malformed exact-name device credential was not rejected")
         assert malformed_device_key_id not in fake.deleted_keys
 
-    print("qurl CLI CI credential tests passed")
+    print("qurl CLI journey credential tests passed")
 
 
 if __name__ == "__main__":

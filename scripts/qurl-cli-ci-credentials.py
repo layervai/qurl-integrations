@@ -25,9 +25,9 @@ DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,19}\Z")
 LANE = re.compile(r"(?:linux|macos|windows)\Z")
-RUN_NAME = re.compile(r"qurl CLI CI [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/(?:linux|macos|windows)\Z")
+RUN_NAME = re.compile(r"qurl CLI journey v2 [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/(?:linux|macos|windows)\Z")
 CLEANUP_ID_FILE = re.compile(r"device-key-[0-9a-f]{64}\Z")
-RUN_CONNECTOR_ID = re.compile(r"connector-sandbox-local-publish-[0-9a-f]{24}\Z")
+RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 MAX_ATTEMPTS = 3
 
 
@@ -396,8 +396,8 @@ def run_identity(args: argparse.Namespace) -> tuple[str, str]:
         raise CredentialError("platform lane is invalid")
     if args.runtime not in {"host", "hardened_container"}:
         raise CredentialError("journey runtime is invalid")
-    name = f"qurl CLI CI {args.run_id}/{args.run_attempt}/{args.lane}"
-    description = f"qurl CLI CI resource {args.run_id}/{args.run_attempt}/{args.runtime}"
+    name = f"qurl CLI journey v2 {args.run_id}/{args.run_attempt}/{args.lane}"
+    description = f"qurl CLI journey v2 resource {args.run_id}/{args.run_attempt}/{args.runtime}"
     return name, description
 
 
@@ -406,10 +406,10 @@ def run_device_key_names(args: argparse.Namespace) -> set[str]:
     # "agent:" + AgentID, and the tagged harness derives AgentID from this
     # exact run/attempt/runtime plus its smoke or controlled-failure phase.
     # Keep both sides in lockstep so a lost runner remains exactly cleanable
-    # without moving a bearer credential or cleanup receipt between jobs.
+    # without moving a bearer credential between jobs.
     runtime_code = {"host": "h", "hardened_container": "c"}[args.runtime]
     return {
-        f"agent:qurl-share-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
+        f"agent:qurl-journey-v2-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
         for label_code in ("s", "f")
     }
 
@@ -423,9 +423,9 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
     result: set[str] = set()
     for label in ("smoke", "failure"):
         material = "\x00".join(
-            ("qurl-sharing-sandbox-v1", args.run_id, args.run_attempt, args.runtime, label)
+            ("qurl-cli-journey-v2", args.run_id, args.run_attempt, args.runtime, label)
         ).encode("utf-8")
-        result.add("connector-sandbox-local-publish-" + hashlib.sha256(material).hexdigest()[:24])
+        result.add("connector-cli-journey-v2-" + hashlib.sha256(material).hexdigest()[:24])
     return result
 
 
@@ -612,7 +612,7 @@ def create(args: argparse.Namespace) -> None:
         raise CredentialError("platform lane is invalid")
     endpoint, jwt, expected_owner = authenticated_owner(args)
 
-    name = f"qurl CLI CI {args.run_id}/{args.run_attempt}/{args.lane}"
+    name = f"qurl CLI journey v2 {args.run_id}/{args.run_attempt}/{args.lane}"
     prepare_output_directory(args.output_dir)
     write_private(args.output_dir / "cleanup-jwt", jwt)
     write_private(args.output_dir / "run-name", name)
