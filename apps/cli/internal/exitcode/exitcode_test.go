@@ -48,6 +48,7 @@ var cliSentinels = map[string]struct {
 	"consume.ErrPipedNeedsFile":     {consume.ErrPipedNeedsFile, Usage},
 	"consume.ErrFileExists":         {consume.ErrFileExists, Conflict},
 	"consume.ErrLinkExpired":        {consume.ErrLinkExpired, NotFound},
+	"consume.ErrLinkUnavailable":    {consume.ErrLinkUnavailable, Unavailable},
 	"consume.ErrLinkFetch":          {consume.ErrLinkFetch, ServerError},
 	"consume.ErrUnopenableLink":     {consume.ErrUnopenableLink, ServerError},
 

@@ -44,8 +44,8 @@ acted on:
   - With --file <path> it downloads to that path instead. The download is
     atomic: bytes arrive in <path>.part, which becomes <path> only when the
     download completes. Existing files are never replaced unless --force is
-    given, and an access link that expires mid-download is refreshed and
-    retried once automatically.
+    given. If a granted link is not ready, the CLI retries that same grant
+    briefly. It requests one fresh link only after the grant expires.
   - With --file - the raw bytes stream to stdout, clean for piping.
 
 When stdout is not a terminal, get never opens a browser: pass --file, or

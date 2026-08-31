@@ -12,6 +12,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // T3/T4 tests for `qurl get`: the real command tree against the mock qURL
@@ -630,8 +631,8 @@ func TestGetDownloadErrorDoesNotExposeGrantedURL(t *testing.T) {
 			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
 		},
 	})
-	if res.code == 0 {
-		t.Fatal("get succeeded with an invalid granted URL")
+	if res.code != exitcode.Unavailable {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
 	}
 	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), capability) {
 		t.Fatalf("rendered error exposed granted authority: %q", res.stderr.String())

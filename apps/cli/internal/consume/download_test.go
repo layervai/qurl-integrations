@@ -352,8 +352,8 @@ func TestDownloadTransportErrorDoesNotExposeGrantedURL(t *testing.T) {
 	}
 
 	_, err := d.StreamTo(context.Background(), io.Discard)
-	if !errors.Is(err, ErrLinkFetch) {
-		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	if !errors.Is(err, ErrLinkUnavailable) {
+		t.Fatalf("err = %v, want ErrLinkUnavailable", err)
 	}
 	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "capability-secret") {
 		t.Fatalf("transport error exposed granted authority: %q", err)
@@ -367,8 +367,8 @@ func TestDownloadRequestBuildErrorDoesNotExposeGrantedURL(t *testing.T) {
 	}}
 
 	_, err := d.StreamTo(context.Background(), io.Discard)
-	if !errors.Is(err, ErrLinkFetch) {
-		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	if !errors.Is(err, ErrLinkUnavailable) {
+		t.Fatalf("err = %v, want ErrLinkUnavailable", err)
 	}
 	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "capability-secret") {
 		t.Fatalf("request-build error exposed granted authority: %q", err)

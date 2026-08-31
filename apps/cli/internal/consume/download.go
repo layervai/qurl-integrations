@@ -293,7 +293,7 @@ func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response
 	if err != nil {
 		// URL parsing errors can echo link. Granted URLs carry short-lived
 		// authority, so keep the same fixed capability boundary as Do below.
-		return nil, fmt.Errorf("%w: invalid download link", ErrLinkFetch)
+		return nil, fmt.Errorf("%w: invalid download link", ErrLinkUnavailable)
 	}
 	if d.Client == nil {
 		// Lazy-init once and keep it: the expiry retry must reach the same
@@ -311,7 +311,7 @@ func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response
 	}
 	// net/http transport errors normally include req.URL. A granted content
 	// URL is short-lived authority, so never retain that error text or chain.
-	return nil, fmt.Errorf("%w: request failed", ErrLinkFetch)
+	return nil, fmt.Errorf("%w: request failed", ErrLinkUnavailable)
 }
 
 func linkExpired(resp *http.Response) bool {

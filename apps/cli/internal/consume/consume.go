@@ -60,6 +60,10 @@ const (
 	// wraps add the HTTP status.
 	MsgLinkFetch = "the download failed"
 
+	// MsgLinkUnavailable reports a request or transport failure without
+	// retaining the granted URL carried by the underlying error.
+	MsgLinkUnavailable = "the download host could not be reached"
+
 	// MsgUnopenableLink frames a resolved link the browser must not open.
 	MsgUnopenableLink = "the service answered with a link this command won't open"
 
@@ -83,6 +87,9 @@ var (
 	// ErrLinkFetch reports a link host answer outside the download contract
 	// (server error).
 	ErrLinkFetch = errors.New(MsgLinkFetch)
+	// ErrLinkUnavailable reports a URL-free request or transport failure
+	// (temporarily unavailable).
+	ErrLinkUnavailable = errors.New(MsgLinkUnavailable)
 	// ErrUnopenableLink reports a verified resolve answer whose link is not
 	// a web URL — outside the service's contract (server error).
 	ErrUnopenableLink = errors.New(MsgUnopenableLink)
@@ -111,6 +118,7 @@ func CustomerMessages() []string {
 		MsgFileExists,
 		MsgLinkExpired,
 		MsgLinkFetch,
+		MsgLinkUnavailable,
 		MsgUnopenableLink,
 		msgForceRemedy,
 		msgDirectoryDest,
