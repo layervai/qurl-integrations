@@ -575,8 +575,8 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 	if err := json.Unmarshal([]byte(published.stdout), &resource); err != nil {
 		t.Fatalf("decode Windows remote publish output: %v", err)
 	}
-	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != target || resource.FoundExisting {
-		t.Fatalf("Windows remote publish = %+v, want one new URL resource", resource)
+	if resource.CRID == "" || resource.ResourceID == "" || !sameJourneyTargetURL(resource.TargetURL, target) || resource.FoundExisting {
+		t.Fatalf("Windows remote publish = %+v, want one new URL resource for %q", resource, target)
 	}
 	deleted := false
 	t.Cleanup(func() {

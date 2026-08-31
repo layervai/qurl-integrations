@@ -65,17 +65,23 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 		t.Fatalf("controlled-failure child exceeded %s", sandboxFailureChildTimeout)
 	}
 	combined := stdout.String() + stderr.String()
-	if err := validateSandboxFailureChildExit(runErr, combined, childTestName); err != nil {
-		t.Fatalf("controlled-failure child result: %v", err)
-	}
+	// Prove the child kept every protected value out of its own output before
+	// that output is validated or reported. A child that both leaked a secret
+	// and stopped early has to fail as a leak, and the diagnostic below must
+	// never be the thing that prints one.
 	for _, secret := range []string{
 		primaryAPIKey,
 		failureAPIKey,
 		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
+		strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY")),
 	} {
 		if secret != "" && strings.Contains(combined, secret) {
 			t.Fatal("controlled-failure child exposed a protected credential")
 		}
+	}
+	if err := validateSandboxFailureChildExit(runErr, combined, childTestName); err != nil {
+		t.Fatalf("controlled-failure child result: %v\ncontrolled-failure child output:\n%s",
+			err, boundedSandboxChildOutput(combined))
 	}
 	crid, err := sandboxFailureCleanedCRID(combined)
 	if err != nil {
@@ -140,6 +146,28 @@ func sandboxFailureChildCredentialOverrides(failureAPIKey string) map[string]str
 		overrides["QURL_API_KEY_FILE"] = failureFile
 	}
 	return overrides
+}
+
+const sandboxFailureChildOutputTailBytes = 8 << 10
+
+// boundedSandboxChildOutput returns the tail of the child's already
+// leak-checked output. The parent reports it whenever the child stopped before
+// the controlled failure, because the child's own reason is otherwise
+// discarded — which leaves the packaged journey debuggable only by guessing.
+// The tail is cut at a line boundary so the excerpt is never a partial rune.
+func boundedSandboxChildOutput(combined string) string {
+	trimmed := strings.TrimRight(combined, "\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return "(the controlled-failure child produced no output)"
+	}
+	if len(trimmed) <= sandboxFailureChildOutputTailBytes {
+		return trimmed
+	}
+	tail := trimmed[len(trimmed)-sandboxFailureChildOutputTailBytes:]
+	if index := strings.IndexByte(tail, '\n'); index >= 0 {
+		tail = tail[index+1:]
+	}
+	return "(truncated to the last lines)\n" + tail
 }
 
 func validateSandboxFailureChildExit(runErr error, output, childTestName string) error {

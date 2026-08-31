@@ -635,3 +635,70 @@ func reclaimSandboxResource(t *testing.T, cliEnv map[string]string, id string) {
 			id, res.code, res.stderr.String())
 	}
 }
+
+// sameJourneyTargetURL reports whether the service echoed back the exact
+// resource the journey asked it to publish. qURL stores the target in its
+// canonical form, and an http(s) URL with an empty path names the same
+// resource as one with a bare "/" path under RFC 3986 scheme-based
+// normalization: publishing "https://example.com/?q" is answered with
+// "https://example.com?q". The journey therefore compares the normalized
+// forms rather than the raw bytes it happened to send, so a cosmetic
+// canonicalization cannot masquerade as the service resolving the wrong
+// target.
+func sameJourneyTargetURL(got, want string) bool {
+	normalized := func(raw string) (string, bool) {
+		if strings.TrimSpace(raw) == "" {
+			return "", false
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "", false
+		}
+		if parsed.Path == "" {
+			parsed.Path = "/"
+			parsed.RawPath = ""
+		}
+		return parsed.String(), true
+	}
+	gotNormalized, gotOK := normalized(got)
+	wantNormalized, wantOK := normalized(want)
+	return gotOK && wantOK && gotNormalized == wantNormalized
+}
+
+// TestSameJourneyTargetURLAcceptsServiceCanonicalForm pins the exact
+// difference the live journey must tolerate — and every difference it must
+// still reject. This is the credential-free guard for the comparison the
+// remote publish phases depend on.
+func TestSameJourneyTargetURLAcceptsServiceCanonicalForm(t *testing.T) {
+	const requested = "https://example.com/?qurl-private-sandbox-device-journey=17881886511"
+	equivalent := map[string]string{
+		"canonicalized empty path": "https://example.com?qurl-private-sandbox-device-journey=17881886511",
+		"exact echo":               requested,
+	}
+	for name, echoed := range equivalent {
+		t.Run(name, func(t *testing.T) {
+			if !sameJourneyTargetURL(echoed, requested) {
+				t.Fatalf("sameJourneyTargetURL(%q, %q) = false, want true", echoed, requested)
+			}
+		})
+	}
+	different := map[string]string{
+		"different query":  "https://example.com/?qurl-private-sandbox-device-journey=17881886512",
+		"different host":   "https://example.org/?qurl-private-sandbox-device-journey=17881886511",
+		"different scheme": "http://example.com/?qurl-private-sandbox-device-journey=17881886511",
+		"real path":        "https://example.com/elsewhere?qurl-private-sandbox-device-journey=17881886511",
+		"query dropped":    "https://example.com/",
+		"empty":            "",
+		"not a URL":        "example.com",
+	}
+	for name, echoed := range different {
+		t.Run(name, func(t *testing.T) {
+			if sameJourneyTargetURL(echoed, requested) {
+				t.Fatalf("sameJourneyTargetURL(%q, %q) = true, want false", echoed, requested)
+			}
+		})
+	}
+	if sameJourneyTargetURL(requested, "") || sameJourneyTargetURL("", "") {
+		t.Fatal("sameJourneyTargetURL accepted an absent requested target")
+	}
+}
