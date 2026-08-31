@@ -52,6 +52,13 @@ type goreleaserConfig struct {
 		Manpages    []string          `yaml:"manpages"`
 		Completions map[string]string `yaml:"completions"`
 		SkipUpload  bool              `yaml:"skip_upload"`
+		Homepage    string            `yaml:"homepage"`
+		Description string            `yaml:"description"`
+		Hooks       struct {
+			Post struct {
+				Install string `yaml:"install"`
+			} `yaml:"post"`
+		} `yaml:"hooks"`
 	} `yaml:"homebrew_casks"`
 	Release struct {
 		Draft            bool `yaml:"draft"`
@@ -98,6 +105,20 @@ func TestReleaseStaysDraftAndDefersHomebrewPublication(t *testing.T) {
 	}
 	if !cfg.HomebrewCasks[0].SkipUpload {
 		t.Fatal("GoReleaser can publish the Homebrew cask before release verification")
+	}
+}
+
+func TestCaskMetadataAndPostflightAreHomebrewStyleSafe(t *testing.T) {
+	cask := loadGoreleaserConfig(t).HomebrewCasks[0]
+	if cask.Homepage != "https://layerv.ai/" {
+		t.Errorf("Homebrew homepage = %q, want canonical trailing slash", cask.Homepage)
+	}
+	if cask.Description != "Publish and access protected resources" {
+		t.Errorf("Homebrew description = %q", cask.Description)
+	}
+	const postflight = `system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"] if OS.mac?`
+	if cask.Hooks.Post.Install != postflight {
+		t.Errorf("Homebrew postflight = %q, want one style-safe modifier", cask.Hooks.Post.Install)
 	}
 }
 

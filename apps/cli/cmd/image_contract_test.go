@@ -544,7 +544,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 					t.Errorf("%s draft CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
 				}
 			}
-			publishIndex, signatureIndex, imageIndex, caskValidationIndex, caskIndex := -1, -1, -1, -1, -1
+			signatureIndex, imageIndex, caskValidationIndex, caskStageIndex := -1, -1, -1, -1
 			for index, candidate := range job.Steps {
 				switch candidate.Name {
 				case "Verify release signature (self-test)":
@@ -558,33 +558,36 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 							t.Errorf("%s Homebrew pre-publication gate does not bind %q", target.file, required)
 						}
 					}
-				case "Publish the verified CLI release":
-					publishIndex = index
-					for _, required := range []string{`gh release edit "$CLI_TAG"`, "--draft=false", "--verify-tag"} {
-						if strings.Count(candidate.Run, required) != 1 {
-							t.Errorf("%s verified release publisher does not fail closed with %q", target.file, required)
-						}
-					}
-				case "Publish the verified Homebrew cask":
-					caskIndex = index
-					for _, required := range []string{"dist/homebrew/Casks/qurl.rb", `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`} {
-						if strings.Count(candidate.Run, required) != 1 {
-							t.Errorf("%s verified Homebrew publisher does not bind %q", target.file, required)
-						}
+				case "Stage the Homebrew validation bundle":
+					caskStageIndex = index
+					if candidate.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" {
+						t.Errorf("%s stages Homebrew validation with an unpinned action", target.file)
 					}
 				}
 			}
 			if caskValidationIndex <= releaseVerifierStepIndex || caskValidationIndex <= signatureIndex || caskValidationIndex <= imageIndex {
 				t.Errorf("%s validates the generated cask before every artifact gate (cask=%d archive=%d signature=%d image=%d)", target.file, caskValidationIndex, releaseVerifierStepIndex, signatureIndex, imageIndex)
 			}
-			if publishIndex <= caskValidationIndex {
-				t.Errorf("%s publishes before the generated cask passes its local gate (publish=%d cask=%d)", target.file, publishIndex, caskValidationIndex)
-			}
-			if caskIndex <= publishIndex {
-				t.Errorf("%s publishes Homebrew before the verified GitHub Release (cask=%d release=%d)", target.file, caskIndex, publishIndex)
+			if caskStageIndex <= caskValidationIndex {
+				t.Errorf("%s stages the Homebrew bundle before local validation (stage=%d validate=%d)", target.file, caskStageIndex, caskValidationIndex)
 			}
 			if _, present := goreleaserSteps[0].Env["HOMEBREW_TAP_GITHUB_TOKEN"]; present {
 				t.Errorf("%s exposes the tap token to GoReleaser before verification", target.file)
+			}
+			validator, hasValidator := workflow.Jobs["validate-homebrew-cask"]
+			publisher, hasPublisher := workflow.Jobs["publish-cli-release"]
+			tapPublisher, hasTapPublisher := workflow.Jobs["publish-homebrew-cask"]
+			if !hasValidator || !hasPublisher || !hasTapPublisher {
+				t.Fatalf("%s has an incomplete Homebrew publication chain", target.file)
+			}
+			for _, required := range []string{`brew style --fix "$cask"`, `brew audit --cask "$token"`, `brew install --cask "$token"`} {
+				if len(validator.Steps) == 0 || !strings.Contains(fmt.Sprint(validator.Steps), required) {
+					t.Errorf("%s Homebrew validator does not bind %q", target.file, required)
+				}
+			}
+			if !strings.Contains(fmt.Sprint(publisher.Steps), `gh release edit "$CLI_TAG"`) ||
+				!strings.Contains(fmt.Sprint(tapPublisher.Steps), `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`) {
+				t.Errorf("%s publication jobs do not preserve release then tap publication", target.file)
 			}
 			continue
 		}

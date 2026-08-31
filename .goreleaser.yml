@@ -121,8 +121,8 @@ homebrew_casks:
       owner: layervai
       name: homebrew-tap
     directory: Casks
-    homepage: "https://layerv.ai"
-    description: "qURL CLI - manage secure links from the command line"
+    homepage: "https://layerv.ai/"
+    description: "Publish and access protected resources"
     license: "MIT"
     url:
       verified: github.com/layervai/qurl-integrations/releases/download
@@ -151,10 +151,7 @@ homebrew_casks:
       fish: completions/qurl.fish
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"]
-          end
+        install: 'system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"] if OS.mac?'
 
 nfpms:
   - id: qurl

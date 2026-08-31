@@ -1154,40 +1154,40 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	assertExecutableRepoScript(t, "scripts/wait-for-exact-cli-main-run.sh")
 }
 
-// TestCLIReleaseValidatesTheCaskBeforePublication keeps every local
-// GoReleaser/cask assertion on the recoverable side of the publication line.
-// The tap update stays last because it needs the public release URLs, but a
-// missing or malformed generated cask must leave the GitHub Release draft.
+// TestCLIReleaseValidatesTheCaskBeforePublication keeps the exact generated
+// cask on the recoverable side of both publication lines. A dedicated macOS
+// job applies Homebrew's safe layout corrections, audits the cask, and installs
+// its exact staged archive. Only those validated bytes can publish afterward.
 func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 	t.Parallel()
 
 	workflow := readWorkflow(t, releasePleaseWorkflow)
-	job, ok := workflow.Jobs["release-cli"]
-	if !ok {
-		t.Fatal("release-please.yml is missing the release-cli job")
+	release := workflow.Jobs["release-cli"]
+	validator := workflow.Jobs["validate-homebrew-cask"]
+	publisher := workflow.Jobs["publish-cli-release"]
+	tapPublisher := workflow.Jobs["publish-homebrew-cask"]
+	if release == nil || validator == nil || publisher == nil || tapPublisher == nil {
+		t.Fatalf("release Homebrew chain is incomplete: release=%t validator=%t publisher=%t tap=%t",
+			release != nil, validator != nil, publisher != nil, tapPublisher != nil)
 	}
-	const (
-		validateName = "Validate generated Homebrew cask"
-		releaseName  = "Publish the verified CLI release"
-		tapName      = "Publish the verified Homebrew cask"
-	)
-	indices := map[string]int{}
-	steps := map[string]*step{}
-	for index := range job.Steps {
-		current := &job.Steps[index]
-		if current.Name == validateName || current.Name == releaseName || current.Name == tapName {
-			indices[current.Name] = index
-			steps[current.Name] = current
+	assertJobPermissions(t, "validate-homebrew-cask", validator.Permissions, map[string]string{"actions": "read", "contents": "read"})
+	assertJobPermissions(t, "publish-cli-release", publisher.Permissions, map[string]string{"contents": "write"})
+	assertJobPermissions(t, "publish-homebrew-cask", tapPublisher.Permissions, map[string]string{"actions": "read", "contents": "read"})
+	stepsFor := func(job *githubJob) map[string]*step {
+		steps := map[string]*step{}
+		for index := range job.Steps {
+			steps[job.Steps[index].Name] = &job.Steps[index]
 		}
+		return steps
 	}
-	for _, name := range []string{validateName, releaseName, tapName} {
-		if steps[name] == nil {
-			t.Fatalf("release-cli is missing %q", name)
-		}
-	}
-	if indices[validateName] >= indices[releaseName] || indices[releaseName] >= indices[tapName] {
-		t.Fatalf("release-cli step order validate/release/tap = %d/%d/%d",
-			indices[validateName], indices[releaseName], indices[tapName])
+	releaseSteps := stepsFor(release)
+	validatorSteps := stepsFor(validator)
+	publisherSteps := stepsFor(publisher)
+	tapSteps := stepsFor(tapPublisher)
+	validateName := "Validate generated Homebrew cask"
+	stageName := "Stage the Homebrew validation bundle"
+	if releaseSteps[validateName] == nil || releaseSteps[stageName] == nil {
+		t.Fatal("release-cli does not validate and stage the generated cask")
 	}
 	for _, fragment := range []string{
 		"generated=dist/homebrew/Casks/qurl.rb",
@@ -1196,15 +1196,74 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 		"generated Homebrew cask does not name the exact CLI version",
 		"generated Homebrew cask does not bind all four release archives",
 	} {
-		if !strings.Contains(steps[validateName].Run, fragment) {
+		if !strings.Contains(releaseSteps[validateName].Run, fragment) {
 			t.Errorf("%q does not enforce %q", validateName, fragment)
 		}
-		if strings.Contains(steps[tapName].Run, fragment) && fragment != "generated=dist/homebrew/Casks/qurl.rb" {
-			t.Errorf("%q still defers local validation %q until after publication", tapName, fragment)
+	}
+	if releaseSteps[stageName].Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		releaseSteps[stageName].With["if-no-files-found"] != "error" ||
+		!strings.Contains(fmt.Sprint(releaseSteps[stageName].With["path"]), "dist/qurl_*_darwin_*.tar.gz") {
+		t.Errorf("staged Homebrew bundle is not exact: %#v", releaseSteps[stageName])
+	}
+
+	audit := validatorSteps["Audit and install the exact staged cask"]
+	upload := validatorSteps["Upload the audited and installed cask"]
+	if audit == nil || upload == nil {
+		t.Fatal("macOS Homebrew validator does not audit, install, and emit one cask")
+	}
+	for _, fragment := range []string{
+		`brew style --fix "$cask"`,
+		`brew style "$cask"`,
+		`brew audit --cask "$token"`,
+		`brew --cache --cask "$token"`,
+		`install -m 0644 "$archive" "$cache_path"`,
+		`brew install --cask "$token"`,
+		`"$installed" version | grep -Fq "$CLI_TAG"`,
+	} {
+		if !strings.Contains(audit.Run, fragment) {
+			t.Errorf("Homebrew pre-publication validator does not enforce %q", fragment)
 		}
 	}
-	if !strings.Contains(steps[releaseName].Run, "--draft=false --verify-tag") {
-		t.Errorf("%q no longer publishes the verified draft", releaseName)
+	if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		upload.With["if-no-files-found"] != "error" {
+		t.Errorf("validated Homebrew cask is not fail-closed: %#v", upload)
+	}
+	if got := parseWorkflowNeeds(t, "validate-homebrew-cask", validator.Needs); !slices.Contains(got, "release-cli") {
+		t.Errorf("Homebrew validator does not depend on release-cli: %v", got)
+	}
+
+	releasePublish := publisherSteps["Publish the verified CLI release"]
+	if releasePublish == nil || !strings.Contains(releasePublish.Run, "--draft=false --verify-tag") {
+		t.Error("GitHub Release publication is not behind the Homebrew validator")
+	}
+	if got := parseWorkflowNeeds(t, "publish-cli-release", publisher.Needs); !slices.Contains(got, "validate-homebrew-cask") {
+		t.Errorf("CLI publication bypasses Homebrew validation: %v", got)
+	}
+
+	tapPublish := tapSteps["Publish the audited Homebrew cask"]
+	if tapPublish == nil || !strings.Contains(tapPublish.Run, `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`) ||
+		!strings.Contains(tapPublish.Run, "$RUNNER_TEMP/qurl-homebrew-validated/qurl.rb") {
+		t.Error("tap publication does not consume the audited cask")
+	}
+	tapNeeds := parseWorkflowNeeds(t, "publish-homebrew-cask", tapPublisher.Needs)
+	for _, required := range []string{"publish-cli-release", "validate-homebrew-cask"} {
+		if !slices.Contains(tapNeeds, required) {
+			t.Errorf("tap publication can bypass %q: %v", required, tapNeeds)
+		}
+	}
+	for id, candidate := range map[string]*githubJob{
+		"release-cli": release, "validate-homebrew-cask": validator, "publish-cli-release": publisher,
+	} {
+		encoded, err := yaml.Marshal(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), "HOMEBREW_TAP_GITHUB_TOKEN") {
+			t.Errorf("%s can access the tap publication token", id)
+		}
+	}
+	if tapPublish.Env["GH_TOKEN"] != "${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}" {
+		t.Error("tap publisher does not hold the token only at its final API step")
 	}
 }
 

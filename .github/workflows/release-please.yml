@@ -6,8 +6,9 @@ name: Release Please
 #      release-please-config.json). Merging one creates the tag and a draft
 #      GitHub Release.
 #   2. CLI releases additionally run GoReleaser to attach binaries and build
-#      deb/rpm packages. The workflow verifies every artifact, publishes the
-#      release, and only then updates the Homebrew tap.
+#      deb/rpm packages. The workflow verifies every artifact, audits and
+#      installs the exact staged Homebrew cask, publishes the release, and
+#      only then updates the Homebrew tap.
 #
 # GoReleaser runs as a dependent job here — NOT as a tag-triggered workflow —
 # because release-please tags with the workflow's GITHUB_TOKEN, and GitHub
@@ -539,6 +540,130 @@ jobs:
             exit 1
           }
 
+      - name: Stage the Homebrew validation bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-homebrew-validation-${{ needs.cli-main-ci.outputs.source_sha }}
+          path: |
+            dist/homebrew/Casks/qurl.rb
+            dist/qurl_*_darwin_*.tar.gz
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      - name: Post recovery instructions on failure
+        if: failure()
+        run: |
+          {
+            echo "## CLI release incomplete"
+            echo ""
+            echo "The artifact job did not finish. \`${CLI_TAG}\` remains a draft and the Homebrew tap stays on its prior version."
+            echo ""
+            echo "Recovery: fix the cause, then run workflow_dispatch from main with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs**. Do NOT use 'Re-run all jobs' because release-please will skip this job after it creates the release. Re-uploads are idempotent."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-homebrew-cask:
+    name: Validate exact Homebrew cask before publication
+    needs: [release-cli, cli-main-ci, release-please]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' && (
+        needs.release-please.outputs.cli_release_created == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Download the staged Homebrew bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-homebrew-validation-${{ needs.cli-main-ci.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-homebrew-validation
+          digest-mismatch: error
+
+      - name: Audit and install the exact staged cask
+        env:
+          TAP_ROOT: ${{ runner.temp }}/qurl-homebrew-validation-tap
+        run: |
+          set -euo pipefail
+          cask="$RUNNER_TEMP/qurl-homebrew-validation/homebrew/Casks/qurl.rb"
+          release_version="${CLI_TAG#v}"
+          [[ -f "$cask" && "v${release_version}" == "$CLI_TAG" ]]
+
+          # GoReleaser owns the cask template. Homebrew owns its Ruby layout.
+          # Apply only Homebrew's safe autocorrections, then require a clean
+          # style and audit result on the exact bytes that will be published.
+          brew style --fix "$cask"
+          brew style "$cask"
+
+          tap_link="$(brew --repository)/Library/Taps/layervaici/homebrew-qurl-release-gate"
+          mkdir -p "$TAP_ROOT/Casks" "$(dirname "$tap_link")"
+          install -m 0644 "$cask" "$TAP_ROOT/Casks/qurl.rb"
+          ln -s "$TAP_ROOT" "$tap_link"
+          echo "QURL_HOMEBREW_TAP_LINK=$tap_link" >>"$GITHUB_ENV"
+
+          token=layervaici/qurl-release-gate/qurl
+          brew audit --cask "$token"
+          case "$(uname -m)" in
+            arm64) archive="$RUNNER_TEMP/qurl-homebrew-validation/qurl_${release_version}_darwin_arm64.tar.gz" ;;
+            x86_64) archive="$RUNNER_TEMP/qurl-homebrew-validation/qurl_${release_version}_darwin_amd64.tar.gz" ;;
+            *) echo "::error::unsupported Homebrew validation architecture" >&2; exit 1 ;;
+          esac
+          [[ -f "$archive" ]] || {
+            echo "::error::native Homebrew validation archive is missing" >&2
+            exit 1
+          }
+          cache_path="$(brew --cache --cask "$token")"
+          mkdir -p "$(dirname "$cache_path")"
+          install -m 0644 "$archive" "$cache_path"
+          echo "QURL_HOMEBREW_CACHE_PATH=$cache_path" >>"$GITHUB_ENV"
+
+          # The populated cache makes this a test of the exact staged archive
+          # and cask. It does not require the draft GitHub Release to be public.
+          brew install --cask "$token"
+          installed="$(command -v qurl)"
+          [[ -x "$installed" ]]
+          "$installed" version | grep -Fq "$CLI_TAG"
+
+      - name: Upload the audited and installed cask
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-homebrew-validated-${{ needs.cli-main-ci.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-homebrew-validation/homebrew/Casks/qurl.rb
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      - name: Remove the validation cask and cache
+        if: always()
+        run: |
+          brew uninstall --cask layervaici/qurl-release-gate/qurl 2>/dev/null || true
+          [[ -z "${QURL_HOMEBREW_TAP_LINK:-}" || ! -L "$QURL_HOMEBREW_TAP_LINK" ]] || unlink "$QURL_HOMEBREW_TAP_LINK"
+          [[ -z "${QURL_HOMEBREW_CACHE_PATH:-}" || ! -f "$QURL_HOMEBREW_CACHE_PATH" ]] || unlink "$QURL_HOMEBREW_CACHE_PATH"
+
+  publish-cli-release:
+    name: Publish the verified CLI release
+    needs: [validate-homebrew-cask, release-please]
+    if: >-
+      !cancelled() && needs.validate-homebrew-cask.result == 'success' && (
+        needs.release-please.outputs.cli_release_created == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
+    steps:
       - name: Publish the verified CLI release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -551,7 +676,31 @@ jobs:
             exit 1
           }
 
-      - name: Publish the verified Homebrew cask
+  publish-homebrew-cask:
+    name: Publish the audited Homebrew cask
+    needs: [publish-cli-release, validate-homebrew-cask, cli-main-ci, release-please]
+    if: >-
+      !cancelled() && needs.publish-cli-release.result == 'success' &&
+      needs.validate-homebrew-cask.result == 'success' && (
+        needs.release-please.outputs.cli_release_created == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
+    steps:
+      - name: Download the audited Homebrew cask
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-homebrew-validated-${{ needs.cli-main-ci.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-homebrew-validated
+          digest-mismatch: error
+
+      - name: Publish the audited Homebrew cask
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
         run: |
@@ -559,7 +708,11 @@ jobs:
           tap_repo=layervai/homebrew-tap
           tap_branch=main
           cask_path=Casks/qurl.rb
-          generated=dist/homebrew/Casks/qurl.rb
+          generated="$RUNNER_TEMP/qurl-homebrew-validated/qurl.rb"
+          [[ -f "$generated" ]] || {
+            echo "::error::audited Homebrew cask is missing" >&2
+            exit 1
+          }
 
           work="$(mktemp -d)"
           trap 'rm -rf "$work"' EXIT
@@ -580,14 +733,3 @@ jobs:
             '{message:$message,content:$content,sha:$sha,branch:$branch}' |
             gh api --method PUT "repos/${tap_repo}/contents/${cask_path}" --input - |
             jq -e '.commit.sha | test("^[0-9a-f]{40}$")' >/dev/null
-
-      - name: Post recovery instructions on failure
-        if: failure()
-        run: |
-          {
-            echo "## CLI release incomplete"
-            echo ""
-            echo "The release job did not finish. Before publication, \`${CLI_TAG}\` remains a draft and the Homebrew tap stays on its prior version. If publication succeeded but the final tap update failed, the verified GitHub Release is public and Homebrew remains on its prior version."
-            echo ""
-            echo "Recovery: for a draft release, fix the cause, then re-run via workflow_dispatch with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs** on this run. Do NOT use 'Re-run all jobs' (release-please will skip this job because the release already exists). Re-uploads are idempotent. If only the Homebrew update failed after publication, rerun the exact cask compare-and-swap after fixing the tap access problem."
-          } >> "$GITHUB_STEP_SUMMARY"
