@@ -250,6 +250,18 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 	markSandboxFailurePhase(sandboxFailurePhaseSetup)
 	fixture := startSandboxLocalPublishInState(t, "failure", stateDir)
 	crid = fixture.local.CRID
+	controlledFailureReached := false
+	defer func() {
+		if controlledFailureReached {
+			return
+		}
+		inspection := runSandboxLocalCLI(t, fixture.binary, fixture.env, stateDir, "-o", "json", "inspect", crid)
+		var commandErr error
+		if inspection.code != 0 {
+			commandErr = fmt.Errorf("exit %d", inspection.code)
+		}
+		markSandboxFailureDiagnosticFromCommand(inspection.stdout.String(), inspection.stderr.String(), commandErr)
+	}()
 	t.Cleanup(func() {
 		deleted := runSandboxLocalCLI(t, fixture.binary, fixture.env, stateDir, "delete", crid, "--yes")
 		if deleted.code != 0 {
@@ -293,8 +305,10 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", filepath.Join(t.TempDir(), "fenced"),
 	)
 	if err := validateSandboxStoppedRouteRefusal(failedGet, sandboxStoppedRouteRefusal(t)); err != nil {
+		markSandboxFailureDiagnosticFromCommand(failedGet.stdout.String(), failedGet.stderr.String(), errors.New("controlled get failed"))
 		t.Fatalf("controlled customer get did not fail as required: %v", err)
 	}
+	controlledFailureReached = true
 	t.Fatal(sandboxFailureChildSentinel)
 }
 

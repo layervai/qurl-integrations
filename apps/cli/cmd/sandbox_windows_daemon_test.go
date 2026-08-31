@@ -313,8 +313,17 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		"--id", namespace.ConnectorID)
 	cridValue = strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
+		markSandboxFailureDiagnosticFromCommand(published.stdout, published.stderr, published.err)
 		t.Fatalf("controlled-failure Windows publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
 	}
+	controlledFailureReached := false
+	defer func() {
+		if controlledFailureReached {
+			return
+		}
+		inspection := runWindowsSandboxCLI(t, binary, cliEnv, "-o", "json", "inspect", cridValue)
+		markSandboxFailureDiagnosticFromCommand(inspection.stdout, inspection.stderr, inspection.err)
+	}()
 	t.Cleanup(func() {
 		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 		if deleted.err != nil {
@@ -355,11 +364,13 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", filepath.Join(t.TempDir(), "fenced"))
 	if windowsSandboxExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
 		!strings.Contains(strings.ToLower(failedGet.stderr), "aren't available") {
+		markSandboxFailureDiagnosticFromCommand(failedGet.stdout, failedGet.stderr, failedGet.err)
 		t.Fatalf("controlled customer get did not return the fenced-resource failure: error %v, stdout %q, stderr %q", failedGet.err, failedGet.stdout, failedGet.stderr)
 	}
 	if local.CRID != cridValue {
 		t.Fatalf("controlled-failure Windows registry CRID = %q, want %q", local.CRID, cridValue)
 	}
+	controlledFailureReached = true
 	t.Fatal(sandboxFailureChildSentinel)
 }
 
