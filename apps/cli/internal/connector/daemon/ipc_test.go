@@ -413,6 +413,14 @@ func TestDecodeIPCStatusRejectsAmbiguousShapes(t *testing.T) {
 	}
 }
 
+func TestValidDiagnosticCategoryAcceptsPublicFailureClasses(t *testing.T) {
+	for _, category := range []string{diagnosticFailureEnrollment, diagnosticFailurePeerTimeout} {
+		if !validDiagnosticCategory(category) {
+			t.Errorf("public diagnostic category %q was rejected", category)
+		}
+	}
+}
+
 type closeTracker struct {
 	io.Reader
 	onClose func()

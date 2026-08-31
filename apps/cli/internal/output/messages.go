@@ -90,6 +90,12 @@ const (
 	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
 	hintConnectorSessionConfig = "Hint: update to the latest qURL CLI and sign in again. Do not add cloud or database settings, and do not edit the Connector state files."
 
+	msgConnectorDeviceCredential  = "This machine's saved qURL device credential cannot be used safely."
+	hintConnectorDeviceCredential = "Hint: keep the local Connector state unchanged and run `qurl login` with a current qURL API key. If the problem continues, wait a short time, retry, and contact LayerV support."
+
+	msgConnectorPeerTimeout  = "The qURL platform did not answer this Connector before the network timeout."
+	hintConnectorPeerTimeout = "Hint: keep the local Connector state unchanged, check this machine's outbound network access, and retry after a short wait. Contact LayerV support if the problem continues."
+
 	msgConnectorRecoveryCredentialRejected  = "The qURL platform refused the account credential used to recover this registered device."
 	hintConnectorRecoveryCredentialRejected = "Hint: run `qurl login` with a current qURL API key. If qURL accepts that key but recovery is still refused, keep the local Connector state unchanged, wait a short time, retry, and then contact LayerV support if it continues."
 
@@ -113,6 +119,30 @@ const (
 
 	msgConnectorRecoveryExpired  = "The safe recovery period for this registered device has ended."
 	hintConnectorRecoveryExpired = "Hint: keep the local Connector state unchanged and contact LayerV support to recover or deliberately reprovision this device."
+
+	msgConnectorEnrollmentConfig  = "qURL could not start this Connector's device enrollment because the CLI's local enrollment settings are invalid."
+	hintConnectorEnrollmentConfig = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if the problem continues."
+
+	msgConnectorEnrollmentUnavailable  = "This Connector's device enrollment did not finish before its safe retry period ended."
+	hintConnectorEnrollmentUnavailable = "Hint: keep the local Connector state unchanged and run the same command again after a short wait. The CLI will safely resume the saved enrollment."
+
+	msgConnectorEnrollmentIdentity  = "The qURL platform could not verify this Connector during device enrollment."
+	hintConnectorEnrollmentIdentity = "Hint: keep the local Connector state unchanged, run `qurl login` with a current API key for the owning account, and retry. Contact LayerV support if it continues."
+
+	msgConnectorEnrollmentConflict  = "This Connector's local identity conflicts with the platform's current device enrollment state, so qURL stopped safely."
+	hintConnectorEnrollmentConflict = "Hint: do not delete or edit the local Connector state. Contact LayerV support before you retry or enroll this machine again."
+
+	msgConnectorEnrollmentInvalid  = "The qURL platform refused this Connector's device enrollment request."
+	hintConnectorEnrollmentInvalid = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if the platform still refuses the request."
+
+	msgConnectorEnrollmentMismatch  = "The qURL platform and this CLI did not agree on this Connector's device enrollment, so qURL stopped safely."
+	hintConnectorEnrollmentMismatch = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if the problem continues."
+
+	msgConnectorDeviceQuota  = "This qURL account has reached its limit on active device credentials for Connector enrollment."
+	hintConnectorDeviceQuota = "Hint: ask your qURL administrator to revoke an unused device credential or raise the limit, then run the command again."
+
+	msgConnectorEnrollmentPersistence  = "qURL could not safely save this Connector's device enrollment state on this machine, so it stopped."
+	hintConnectorEnrollmentPersistence = "Hint: keep the local Connector state unchanged, make sure no other qURL command is changing it, and check free disk space and directory access before you retry."
 
 	// Native assigned-cell resource setup. These messages deliberately call
 	// the capability a Connector resource, distinct from enrollment and from
@@ -253,6 +283,10 @@ func CustomerMessages() []string {
 		hintConnectorHubConfig,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,
+		msgConnectorDeviceCredential,
+		hintConnectorDeviceCredential,
+		msgConnectorPeerTimeout,
+		hintConnectorPeerTimeout,
 		msgConnectorRecoveryCredentialRejected,
 		hintConnectorRecoveryCredentialRejected,
 		msgConnectorRecoveryIdentityRejected,
@@ -269,6 +303,22 @@ func CustomerMessages() []string {
 		hintConnectorRecoveryInvalid,
 		msgConnectorRecoveryExpired,
 		hintConnectorRecoveryExpired,
+		msgConnectorEnrollmentConfig,
+		hintConnectorEnrollmentConfig,
+		msgConnectorEnrollmentUnavailable,
+		hintConnectorEnrollmentUnavailable,
+		msgConnectorEnrollmentIdentity,
+		hintConnectorEnrollmentIdentity,
+		msgConnectorEnrollmentConflict,
+		hintConnectorEnrollmentConflict,
+		msgConnectorEnrollmentInvalid,
+		hintConnectorEnrollmentInvalid,
+		msgConnectorEnrollmentMismatch,
+		hintConnectorEnrollmentMismatch,
+		msgConnectorDeviceQuota,
+		hintConnectorDeviceQuota,
+		msgConnectorEnrollmentPersistence,
+		hintConnectorEnrollmentPersistence,
 		msgConnectorResourceInvalidRequest,
 		hintConnectorResourceInvalidRequest,
 		msgConnectorResourceUnavailable,

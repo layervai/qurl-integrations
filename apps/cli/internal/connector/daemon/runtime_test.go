@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 
@@ -622,6 +623,65 @@ func TestClassifyShareFailureRecoverySentinelsWithoutWireEnvelope(t *testing.T) 
 			category, code := classifyShareFailure(fmt.Errorf("recover native identity: %w", test.err))
 			if category != test.category || code != "" {
 				t.Fatalf("classification=%q/%q, want %s with no code", category, code, test.category)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailurePreservesPublicEnrollmentTaxonomy(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		category string
+		code     string
+	}{
+		{
+			name: "peer timeout",
+			err: errors.Join(
+				&qurl.EndpointNoReplyError{Endpoint: "private.invalid:443", Attempts: 3, Elapsed: time.Second},
+				qurl.ErrRegistrationRecoveryRequired,
+			),
+			category: diagnosticFailurePeerTimeout,
+		},
+		{"device credential", &qurl.NativeCredentialRecoveryRequiredError{AgentID: "private-agent", Cause: qurl.ErrDeviceCredentialMissing}, diagnosticFailureIdentity, ""},
+		{"registration recovery", qurl.ErrRegistrationRecoveryRequired, diagnosticFailureEnrollment, ""},
+		{"registration disabled", qurl.ErrRegistrationDisabled, diagnosticFailurePlatformDenied, ""},
+		{"local persistence", qurl.ErrAgentCompletionCandidatePersistence, diagnosticFailureLocalState, ""},
+		{"invalid session operation", qurl.ErrInvalidNativeSessionOperation, diagnosticFailureLocalState, ""},
+		{"operation conflict", agentstate.ErrSessionOperationConflict, diagnosticFailureLocalState, ""},
+		{"operation journal", agentstate.ErrSessionOperationJournalCorrupt, diagnosticFailureLocalState, ""},
+		{
+			name: "completion identity code",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "52301"},
+				qurl.ErrCompletionIdentityRejected,
+			),
+			category: diagnosticFailureIdentity,
+			code:     "52301",
+		},
+		{
+			name: "completion request code",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "52304"},
+				qurl.ErrCompletionRequestRejected,
+			),
+			category: diagnosticFailureEnrollment,
+			code:     "52304",
+		},
+		{
+			name: "unrecognized completion code hidden",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "99999"},
+				qurl.ErrCompletionRequestRejected,
+			),
+			category: diagnosticFailureEnrollment,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			category, code := classifyShareFailure(fmt.Errorf("run Connector: %w", test.err))
+			if category != test.category || code != test.code {
+				t.Fatalf("classification=%q/%q, want %s/%s", category, code, test.category, test.code)
 			}
 		})
 	}

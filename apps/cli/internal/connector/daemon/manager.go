@@ -24,9 +24,11 @@ const (
 	diagnosticStateStopped  = "stopped"
 
 	diagnosticFailureAssignment          = "assignment"
+	diagnosticFailureEnrollment          = "enrollment"
 	diagnosticFailureIdentity            = "identity"
 	diagnosticFailureLocalState          = "local_state"
 	diagnosticFailureNetwork             = "network"
+	diagnosticFailurePeerTimeout         = "peer_timeout"
 	diagnosticFailurePlatformDenied      = "platform_denied"
 	diagnosticFailureResourceUnavailable = "resource_unavailable"
 	diagnosticFailureUnknown             = "unknown"

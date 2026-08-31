@@ -521,6 +521,103 @@ func TestConnectorRecoveryStateRenderingHidesSDKDetails(t *testing.T) {
 	}
 }
 
+func TestConnectorDeviceCredentialRenderingHidesIdentityAndSDKAdvice(t *testing.T) {
+	err := &qurl.NativeCredentialRecoveryRequiredError{
+		AgentID: "agent-private-identity",
+		Cause:   fmt.Errorf("internal recovery phase: %w", qurl.ErrDeviceCredentialMissing),
+	}
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("open registered runtime: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorDeviceCredential, hintConnectorDeviceCredential} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("device credential rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"agent-private-identity", "RecoverAgentRuntime", "internal recovery phase", "qurl:", "X25519"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("device credential rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorPeerTimeoutRenderingHidesEndpointAndTopology(t *testing.T) {
+	err := errors.Join(
+		&qurl.EndpointNoReplyError{
+			Endpoint: "private-cell.sandbox.invalid:443",
+			Attempts: 4,
+			Elapsed:  3 * time.Second,
+			Last:     errors.New("private route dropped UDP"),
+		},
+		qurl.ErrAssignmentRecoveryRequired,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("refresh assignment: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorPeerTimeout, hintConnectorPeerTimeout} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("peer-timeout rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"private-cell", "sandbox", "private route", "source-fenced", "qurl:", "UDP"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("peer-timeout rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorEnrollmentRenderingsHideSDKInternals(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"invalid local config", qurl.ErrInvalidRegisterConfig, msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig},
+		{"binding persistence", qurl.ErrAgentBindingPersistence, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"candidate persistence", qurl.ErrAgentCompletionCandidatePersistence, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"setup lock", qurl.ErrAgentSetupLock, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"REG recovery", qurl.ErrRegistrationRecoveryRequired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"REG rate limited", qurl.ErrRegistrationRateLimited, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"ticket expired", qurl.ErrAssignmentTicketExpired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"completion unavailable", qurl.ErrCompletionUnavailable, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"completion recovery", qurl.ErrCompletionRecoveryRequired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"key rejected", qurl.ErrKeyRejected, msgConnectorTokenRejected, hintConnectorTokenRejected},
+		{"bootstrap consumed", qurl.ErrBootstrapSetupKeyConsumed, msgConnectorTokenConsumed, hintConnectorTokenConsumed},
+		{"completion identity", qurl.ErrCompletionIdentityRejected, msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity},
+		{"agent identity conflict", qurl.ErrAgentIdentityConflict, msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict},
+		{"completion conflict", qurl.ErrCompletionCredentialConflict, msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict},
+		{"REG invalid input", qurl.ErrRegistrationInvalidInput, msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid},
+		{"completion rejected", qurl.ErrCompletionRequestRejected, msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid},
+		{"registration disabled", qurl.ErrRegistrationDisabled, msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled},
+		{"device quota", qurl.ErrDeviceKeyQuotaExceeded, msgConnectorDeviceQuota, hintConnectorDeviceQuota},
+		{"ticket invalid", qurl.ErrAssignmentTicketInvalid, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+		{"reply malformed", qurl.ErrRegisterReplyMalformed, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+		{"key kind disallowed", qurl.ErrRegistrationKeyKindDisallowed, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := fmt.Errorf(
+				"private assigned-cell phase for agent-private; call WithAgentRuntimeHeadlessEnrollment; code 52399: %w",
+				test.err,
+			)
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("enrollment rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{"assigned-cell", "agent-private", "WithAgentRuntime", "52399", "qurl:"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("enrollment rendering exposed %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
 func TestConnectorResourceRenderings(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -623,6 +720,16 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence,
 		msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid,
 		msgConnectorRecoveryExpired, hintConnectorRecoveryExpired,
+		msgConnectorDeviceCredential, hintConnectorDeviceCredential,
+		msgConnectorPeerTimeout, hintConnectorPeerTimeout,
+		msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig,
+		msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable,
+		msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity,
+		msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict,
+		msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid,
+		msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch,
+		msgConnectorDeviceQuota, hintConnectorDeviceQuota,
+		msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence,
 		msgConnectorIdentityRejected, hintConnectorIdentityRejected,
 		msgConnectorQuotaExceeded, hintConnectorQuotaExceeded,
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,

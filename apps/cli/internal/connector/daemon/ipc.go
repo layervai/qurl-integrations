@@ -211,8 +211,9 @@ func validDiagnosticState(state string) bool {
 
 func validDiagnosticCategory(category string) bool {
 	switch category {
-	case "", diagnosticFailureAssignment, diagnosticFailureIdentity, diagnosticFailureLocalState,
-		diagnosticFailureNetwork, diagnosticFailurePlatformDenied, diagnosticFailureResourceUnavailable,
+	case "", diagnosticFailureAssignment, diagnosticFailureEnrollment, diagnosticFailureIdentity,
+		diagnosticFailureLocalState, diagnosticFailureNetwork, diagnosticFailurePeerTimeout,
+		diagnosticFailurePlatformDenied, diagnosticFailureResourceUnavailable,
 		diagnosticFailureUnknown:
 		return true
 	default:

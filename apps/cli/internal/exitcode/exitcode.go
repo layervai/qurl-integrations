@@ -301,6 +301,41 @@ func connectorSentinelCode(err error) (int, bool) {
 		// cause must not relabel that completed transition as an authentication
 		// failure; the saved runtime needs a later assignment refresh.
 		return Unavailable, true
+	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
+		errors.Is(err, qurl.ErrCredentialRecoveryRequired):
+		return Auth, true
+	case errors.Is(err, qurl.ErrEndpointNoReply):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrInvalidRegisterConfig):
+		return Config, true
+	case errors.Is(err, qurl.ErrAgentBindingPersistence),
+		errors.Is(err, qurl.ErrAgentCompletionCandidatePersistence),
+		errors.Is(err, qurl.ErrAgentSetupLock):
+		return General, true
+	case errors.Is(err, qurl.ErrKeyRejected),
+		errors.Is(err, qurl.ErrBootstrapSetupKeyConsumed),
+		errors.Is(err, qurl.ErrCompletionIdentityRejected):
+		return Auth, true
+	case errors.Is(err, qurl.ErrAgentIdentityConflict),
+		errors.Is(err, qurl.ErrCompletionCredentialConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrRegistrationDisabled),
+		errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
+		return Forbidden, true
+	case errors.Is(err, qurl.ErrRegistrationRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrRegistrationRecoveryRequired),
+		errors.Is(err, qurl.ErrAssignmentTicketExpired),
+		errors.Is(err, qurl.ErrCompletionUnavailable),
+		errors.Is(err, qurl.ErrCompletionRecoveryRequired):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrRegistrationInvalidInput),
+		errors.Is(err, qurl.ErrCompletionRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrAssignmentTicketInvalid),
+		errors.Is(err, qurl.ErrRegisterReplyMalformed),
+		errors.Is(err, qurl.ErrRegistrationKeyKindDisallowed):
+		return ServerError, true
 	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
 		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
@@ -417,6 +419,12 @@ func classifyShareFailure(err error) (category, code string) {
 	if err == nil {
 		return diagnosticFailureUnknown, ""
 	}
+	// This typed observation is more precise than the operation wrappers that
+	// can contain it. It does not claim whether the peer or the path was at
+	// fault, and it exposes no destination.
+	if errors.Is(err, qurl.ErrEndpointNoReply) {
+		return diagnosticFailurePeerTimeout, ""
+	}
 	// These recovery wrappers carry a cause, but their top-level state is more
 	// useful than that cause. For example, a completed credential replacement
 	// can wrap an assignment identity denial while it waits for the refreshed
@@ -427,6 +435,9 @@ func classifyShareFailure(err error) (category, code string) {
 	case errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
 		return diagnosticFailureAssignment, ""
 	case errors.Is(err, qurl.ErrCredentialRecoveryExpired):
+		return diagnosticFailureIdentity, ""
+	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
+		errors.Is(err, qurl.ErrCredentialRecoveryRequired):
 		return diagnosticFailureIdentity, ""
 	}
 	var deny *qurl.ServerDenyError
@@ -465,12 +476,29 @@ func classifyShareFailure(err error) (category, code string) {
 		}
 		return diagnosticFailureAssignment, assignment.Code
 	}
+	var completion *qurl.CompletionError
+	if errors.As(err, &completion) {
+		category := diagnosticFailureEnrollment
+		switch {
+		case errors.Is(err, qurl.ErrCompletionIdentityRejected):
+			category = diagnosticFailureIdentity
+		case errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded),
+			errors.Is(err, qurl.ErrCompletionCredentialConflict):
+			category = diagnosticFailurePlatformDenied
+		}
+		code := ""
+		if strings.HasPrefix(completion.Code, "523") && validDiagnosticCode(completion.Code) {
+			code = completion.Code
+		}
+		return category, code
+	}
 	for _, sentinel := range []error{
 		qurl.ErrAssignmentIdentityRejected, qurl.ErrAssignmentKeyRejected,
 		qurl.ErrAssignmentBootstrapConsumed, qurl.ErrRecoveryCredentialRejected,
 		qurl.ErrCredentialRecoveryIdentityRejected, qurl.ErrCredentialRecoveryRevokeRequired,
 		qurl.ErrInvalidAgentState, qurl.ErrInsecureAgentStatePermissions,
-		qurl.ErrRegistrationInvalidInput, qurl.ErrKeyRejected,
+		qurl.ErrKeyRejected, qurl.ErrBootstrapSetupKeyConsumed,
+		qurl.ErrCompletionIdentityRejected, qurl.ErrAgentIdentityConflict,
 	} {
 		if errors.Is(err, sentinel) {
 			return diagnosticFailureIdentity, ""
@@ -487,7 +515,37 @@ func classifyShareFailure(err error) (category, code string) {
 		}
 	}
 	for _, sentinel := range []error{
-		qurl.ErrEndpointNoReply, nativeudp.ErrResolve, nativeudp.ErrTransport,
+		qurl.ErrRegistrationRecoveryRequired, qurl.ErrRegistrationRateLimited,
+		qurl.ErrAssignmentTicketInvalid, qurl.ErrAssignmentTicketExpired,
+		qurl.ErrRegistrationInvalidInput,
+		qurl.ErrRegisterReplyMalformed, qurl.ErrRegistrationKeyKindDisallowed,
+		qurl.ErrCompletionUnavailable, qurl.ErrCompletionRequestRejected,
+		qurl.ErrCompletionRecoveryRequired,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureEnrollment, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrInvalidRegisterConfig, qurl.ErrAgentBindingPersistence,
+		qurl.ErrAgentCompletionCandidatePersistence, qurl.ErrAgentSetupLock,
+		qurl.ErrInvalidNativeSessionOperation, agentstate.ErrSessionOperationConflict,
+		agentstate.ErrSessionOperationJournalCorrupt,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureLocalState, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrRegistrationDisabled, qurl.ErrDeviceKeyQuotaExceeded,
+		qurl.ErrCompletionCredentialConflict,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailurePlatformDenied, ""
+		}
+	}
+	for _, sentinel := range []error{
+		nativeudp.ErrResolve, nativeudp.ErrTransport,
 		nativeudp.ErrNoReply, context.DeadlineExceeded,
 	} {
 		if errors.Is(err, sentinel) {
