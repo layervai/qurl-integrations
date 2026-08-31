@@ -67,6 +67,8 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 		labelCode = "a"
 	case "sibling-b":
 		labelCode = "b"
+	case "failure":
+		labelCode = "f"
 	default:
 		return sandboxRunNamespace{}, errors.New("qURL sharing test label is unsupported")
 	}
@@ -97,7 +99,7 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 	}
 	seen := map[sandboxRunNamespace]bool{first: true}
 	for _, tc := range []struct{ runtime, label string }{
-		{"hardened_container", "smoke"}, {"host", "soak"}, {"host", "crid"}, {"host", "sibling-a"}, {"host", "sibling-b"},
+		{"hardened_container", "smoke"}, {"host", "soak"}, {"host", "crid"}, {"host", "sibling-a"}, {"host", "sibling-b"}, {"host", "failure"},
 	} {
 		t.Setenv(sandboxRuntimeEnv, tc.runtime)
 		got, gotErr := sandboxNamespace(tc.label)

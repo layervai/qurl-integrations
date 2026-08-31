@@ -45,6 +45,7 @@ const (
 	localPublishSandboxArming           = "QURL_CLI_SANDBOX_LOCAL_PUBLISH"
 	sandboxRemoteURLLifecyclePhase      = "remote_url_resource_lifecycle"
 	sandboxLocalConnectorLifecyclePhase = "local_connector_lifecycle"
+	sandboxPOSIXFailureChildTest        = "TestSandboxPOSIXControlledFailureCleanupChild"
 	sandboxCleanupTimeout               = 30 * time.Second
 	sandboxRegistryTimeout              = 30 * time.Second
 	sandboxRouteFenceTimeout            = 2 * time.Minute
@@ -114,12 +115,12 @@ func TestSandboxLocalPublishLifecycleSmoke(t *testing.T) {
 }
 
 // TestSandboxFullCustomerLifecyclePhaseContract gives the credential-free CI
-// lane a fail-fast contract for the two customer journeys that the protected
+// lane a fail-fast contract for the three customer journeys that the protected
 // release gate must execute. The protected runner also validates the emitted
-// subtest results, so listing this test cannot replace either live journey.
+// subtest results, so listing this test cannot replace any live journey.
 func TestSandboxFullCustomerLifecyclePhaseContract(t *testing.T) {
-	want := []string{"remote_url_resource_lifecycle", "local_connector_lifecycle"}
-	got := []string{sandboxRemoteURLLifecyclePhase, sandboxLocalConnectorLifecyclePhase}
+	want := []string{"remote_url_resource_lifecycle", "local_connector_lifecycle", "controlled_failure_cleanup"}
+	got := []string{sandboxRemoteURLLifecyclePhase, sandboxLocalConnectorLifecyclePhase, sandboxControlledFailureLifecyclePhase}
 	if !slices.Equal(got, want) {
 		t.Fatalf("full customer lifecycle phases = %q, want %q", got, want)
 	}
@@ -170,6 +171,10 @@ func testSandboxFullCustomerLifecycleSmoke(t *testing.T) {
 	}
 	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
 	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
+	t.Run(sandboxControlledFailureLifecyclePhase, func(t *testing.T) {
+		failureCRID := runSandboxFailureChild(t, sandboxPOSIXFailureChildTest)
+		assertSandboxFailureRemoteDeleted(t, binary, cliEnv, stateDir, failureCRID)
+	})
 	t.Run(sandboxRemoteURLLifecyclePhase, func(t *testing.T) {
 		assertSandboxRemoteURLDeviceJourney(t, binary, cliEnv, stateDir)
 	})
@@ -213,6 +218,60 @@ func testSandboxFullCustomerLifecycleSmoke(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSandboxPOSIXControlledFailureCleanupChild is invoked only by a trusted
+// parent journey. It reaches one real customer-command failure and exits
+// nonzero so the parent can prove that every registered cleanup still ran.
+func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
+	stateDir := sandboxFailureChildStateDir(t)
+	var crid string
+	productCleanupComplete := false
+	registerSandboxFailureFinalCleanup(t, stateDir, &crid, &productCleanupComplete)
+
+	fixture := startSandboxLocalPublishInState(t, "failure", stateDir)
+	crid = fixture.local.CRID
+	t.Cleanup(func() {
+		deleted := runSandboxLocalCLI(t, fixture.binary, fixture.env, stateDir, "delete", crid, "--yes")
+		if deleted.code != 0 {
+			t.Errorf("controlled-failure delete exit = %d: %s", deleted.code, deleted.stderr.String())
+			return
+		}
+		shares, present, err := state.ReadLocalSharesIfPresent(context.Background(), stateDir)
+		if err != nil {
+			t.Errorf("read controlled-failure local registry after delete: %v", err)
+			return
+		}
+		for _, share := range shares {
+			if share.CRID == crid {
+				t.Errorf("controlled-failure CRID %s remains in local registry", crid)
+				return
+			}
+		}
+		if !present && len(shares) != 0 {
+			t.Errorf("controlled-failure registry has %d rows while absent", len(shares))
+			return
+		}
+		productCleanupComplete = true
+	})
+	t.Cleanup(func() { fixture.interruptAndValidate(t) })
+
+	initial := waitSandboxSharingState(t, fixture.binary, fixture.env, stateDir, crid, "on", "serving", time.Minute)
+	assertSandboxLocalRoute(t, fixture.binary, fixture.env, stateDir, crid, fixture.marker, time.Minute)
+	stopped := decodeSandboxSharing(t, runSandboxLocalCLI(
+		t, fixture.binary, fixture.env, stateDir, "-o", "json", "stop", crid,
+	))
+	if err := validateSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
+		t.Fatalf("controlled-failure stop state = %+v: %v", stopped, err)
+	}
+	assertSandboxControlledFailureRouteFenced(t, fixture, 30*time.Second)
+	failedGet := runSandboxLocalCLI(
+		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", filepath.Join(t.TempDir(), "fenced"),
+	)
+	if err := validateSandboxStoppedRouteRefusal(failedGet, sandboxStoppedRouteRefusal(t)); err != nil {
+		t.Fatalf("controlled customer get did not fail as required: %v", err)
+	}
+	t.Fatal(sandboxFailureChildSentinel)
 }
 
 func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map[string]string, stateDir string) {
@@ -365,6 +424,11 @@ type sandboxLocalFixture struct {
 
 func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	t.Helper()
+	return startSandboxLocalPublishInState(t, label, "")
+}
+
+func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir string) *sandboxLocalFixture {
+	t.Helper()
 	binary, err := validateSandboxCLIBinary(os.Getenv(sandboxCLIBinaryEnv))
 	if err != nil {
 		t.Fatalf("load exact customer CLI binary: %v", err)
@@ -393,8 +457,14 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	if err != nil {
 		t.Fatalf("derive local-publish namespace: %v", err)
 	}
-	stateDir := connectorStateTestDir(t)
-	if err := os.Chmod(stateDir, 0o700); err != nil { //nolint:gosec // Agent state requires a private directory.
+	stateDir := requestedStateDir
+	if stateDir == "" {
+		stateDir = connectorStateTestDir(t)
+	}
+	if !filepath.IsAbs(stateDir) || filepath.Clean(stateDir) != stateDir {
+		t.Fatal("local-publish state directory must be one exact absolute path")
+	}
+	if err := state.EnsureDirMode(stateDir); err != nil {
 		t.Fatalf("secure local-publish state directory: %v", err)
 	}
 	cliEnv[state.EnvStateDirPrimary] = stateDir
@@ -496,6 +566,39 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 		t.Fatalf("sandbox minted a non-test CRID: %v", err)
 	}
 	return fixture
+}
+
+func assertSandboxControlledFailureRouteFenced(t *testing.T, fixture *sandboxLocalFixture, limit time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	destination := filepath.Join(t.TempDir(), "fenced-payload")
+	if err := waitSandboxRouteFence(
+		ctx,
+		sandboxRouteFencePoll,
+		sandboxRouteFenceSettle,
+		sandboxRouteServeGrace,
+		5*time.Second,
+		func(ctx context.Context) (sandboxRouteProbeState, error) {
+			return probeSandboxLocalRoute(
+				ctx, t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID,
+				fixture.marker, destination, sandboxStoppedRouteRefusal(t),
+			)
+		},
+		fixture.backendHits.Load,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, stateDir, crid string) {
+	t.Helper()
+	result := runSandboxLocalCLI(t, binary, env, stateDir, "resolve", crid)
+	if result.code != exitcode.NotFound || result.stdout.Len() != 0 ||
+		!strings.Contains(strings.ToLower(result.stderr.String()), "deleted") {
+		t.Fatalf("controlled-failure remote cleanup = exit %d, stdout %q, stderr %q",
+			result.code, result.stdout.String(), result.stderr.String())
+	}
 }
 
 func waitSandboxLocalShareRegistry(ctx context.Context, stateDir string, pollInterval time.Duration,

@@ -127,6 +127,14 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 			t.Errorf("remove qURL LaunchAgent after journey: %v", err)
 		}
 	})
+	t.Run(sandboxControlledFailureLifecyclePhase, func(t *testing.T) {
+		failureCRID := runSandboxFailureChild(t, sandboxPOSIXFailureChildTest)
+		assertSandboxFailureRemoteDeleted(t, binary, cliEnv, stateDir, failureCRID)
+		status, statusErr := jobManager.Status(connectordaemon.DaemonJobLabel)
+		if statusErr != nil || status.Installed || status.Running {
+			t.Fatalf("controlled-failure LaunchAgent cleanup = %+v, %v; want absent", status, statusErr)
+		}
+	})
 
 	marker := fmt.Sprintf("sandbox-macos-daemon-%d", time.Now().UnixNano())
 	var backendHits atomic.Uint64

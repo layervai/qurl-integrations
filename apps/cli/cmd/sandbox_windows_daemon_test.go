@@ -29,12 +29,14 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 const (
 	windowsDaemonSandboxArming = "QURL_CLI_SANDBOX_WINDOWS_DAEMON"
 	windowsSandboxCommandLimit = 3 * time.Minute
 	windowsSandboxCleanupLimit = 30 * time.Second
+	windowsSandboxFailureChild = "TestSandboxWindowsControlledFailureCleanupChild"
 )
 
 // TestSandboxWindowsDefaultDaemonFullCustomerLifecycle is the protected
@@ -147,6 +149,14 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 			t.Errorf("remove qURL Task Scheduler job after journey: %v", err)
 		}
 	})
+	t.Run(sandboxControlledFailureLifecyclePhase, func(t *testing.T) {
+		failureCRID := runSandboxFailureChild(t, windowsSandboxFailureChild)
+		assertWindowsSandboxFailureRemoteDeleted(t, binary, cliEnv, failureCRID)
+		status, statusErr := jobManager.Status(connectordaemon.DaemonJobLabel)
+		if statusErr != nil || status.Installed || status.Running {
+			t.Fatalf("controlled-failure Task Scheduler cleanup = %+v, %v; want absent", status, statusErr)
+		}
+	})
 
 	marker := fmt.Sprintf("sandbox-windows-daemon-%d", time.Now().UnixNano())
 	var backendHits atomic.Uint64
@@ -229,6 +239,119 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 	assertWindowsSandboxLogsExcludeSecrets(t, stateDir, bootstrapKey, cleanupJWT)
 }
 
+// TestSandboxWindowsControlledFailureCleanupChild runs in a separate trusted
+// process so its intentional failure exercises Go's real terminal cleanup
+// path while it drives the exact packaged qurl.exe.
+func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
+	stateDir := sandboxFailureChildStateDir(t)
+	var cridValue string
+	productCleanupComplete := false
+	registerSandboxFailureFinalCleanup(t, stateDir, &cridValue, &productCleanupComplete)
+
+	binaryInput := strings.TrimSpace(os.Getenv("QURL_CLI_SANDBOX_BINARY"))
+	if binaryInput == "" {
+		t.Fatal("QURL_CLI_SANDBOX_BINARY is required")
+	}
+	binary, err := filepath.Abs(binaryInput)
+	if err != nil {
+		t.Fatalf("resolve exact Windows qurl candidate: %v", err)
+	}
+	if info, statErr := os.Stat(binary); statErr != nil || !info.Mode().IsRegular() {
+		t.Fatalf("exact Windows qurl candidate is unavailable: %v", statErr)
+	}
+	cliEnv := sandboxJourneyEnv(t)
+	addSandboxRunIdentity(t, cliEnv)
+	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
+	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			t.Fatalf("Windows controlled-failure journey requires %s", name)
+		}
+		cliEnv[name] = value
+	}
+	namespace, err := sandboxNamespace("failure")
+	if err != nil {
+		t.Fatalf("derive Windows controlled-failure namespace: %v", err)
+	}
+	cliEnv[connectorstate.EnvStateDirPrimary] = stateDir
+	cliEnv[connectorstate.EnvAgentID] = namespace.AgentID
+	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
+	bootstrapKey := cliEnv["QURL_API_KEY"]
+	delete(cliEnv, "QURL_API_KEY")
+	login := runWindowsSandboxCLIInput(t, binary, cliEnv, bootstrapKey+"\n", "-o", "json", "login")
+	if login.err != nil {
+		t.Fatalf("controlled-failure Windows login: %v; stderr %q", login.err, login.stderr)
+	}
+	device := loadWindowsSandboxAgentState(t, stateDir)
+	registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
+	assertWindowsSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
+
+	jobManager := connectorservice.NewUserJobManager()
+	if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
+		t.Fatalf("remove Windows controlled-failure Task Scheduler job: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
+			t.Errorf("remove Windows controlled-failure Task Scheduler job after failure: %v", err)
+		}
+	})
+
+	marker := fmt.Sprintf("sandbox-windows-controlled-failure-%d", time.Now().UnixNano())
+	var backendHits atomic.Uint64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		_, _ = io.WriteString(w, marker)
+	}))
+	defer backend.Close()
+	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], namespace.ConnectorID, device.DeviceAPIKey)
+	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL, "--id", namespace.ConnectorID)
+	cridValue = strings.TrimSpace(published.stdout)
+	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
+		t.Fatalf("controlled-failure Windows publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
+	}
+	t.Cleanup(func() {
+		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
+		if deleted.err != nil {
+			t.Errorf("controlled-failure Windows delete: %v; stderr %q", deleted.err, deleted.stderr)
+			return
+		}
+		shares, present, readErr := connectorstate.ReadLocalSharesIfPresent(context.Background(), stateDir)
+		if readErr != nil {
+			t.Errorf("read controlled-failure Windows registry after delete: %v", readErr)
+			return
+		}
+		for _, share := range shares {
+			if share.CRID == cridValue {
+				t.Errorf("controlled-failure Windows CRID %s remains in local registry", cridValue)
+				return
+			}
+		}
+		if !present && len(shares) != 0 {
+			t.Errorf("controlled-failure Windows registry has %d rows while absent", len(shares))
+			return
+		}
+		productCleanupComplete = true
+	})
+
+	local := waitWindowsSandboxShare(t, stateDir, cridValue, time.Minute)
+	initial := waitWindowsSandboxState(t, binary, cliEnv, cridValue, "on", "serving", time.Minute)
+	assertWindowsSandboxRoute(t, binary, cliEnv, cridValue, marker, time.Minute)
+	stopped := windowsSandboxLifecycle(t, binary, cliEnv, "stop", cridValue)
+	if err := validateWindowsSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
+		t.Fatalf("controlled-failure Windows stop state = %+v: %v", stopped, err)
+	}
+	assertWindowsSandboxRouteFenced(t, binary, cliEnv, cridValue, &backendHits)
+	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", filepath.Join(t.TempDir(), "fenced"))
+	if windowsSandboxExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
+		!strings.Contains(strings.ToLower(failedGet.stderr), "aren't available") {
+		t.Fatalf("controlled customer get did not return the fenced-resource failure: error %v, stdout %q, stderr %q", failedGet.err, failedGet.stdout, failedGet.stderr)
+	}
+	if local.CRID != cridValue {
+		t.Fatalf("controlled-failure Windows registry CRID = %q, want %q", local.CRID, cridValue)
+	}
+	t.Fatal(sandboxFailureChildSentinel)
+}
+
 type windowsSandboxCLIResult struct {
 	stdout string
 	stderr string
@@ -262,6 +385,27 @@ func runWindowsSandboxCLIInput(t *testing.T, binary string, env map[string]strin
 		}
 	}
 	return windowsSandboxCLIResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
+}
+
+func windowsSandboxExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func assertWindowsSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, cridValue string) {
+	t.Helper()
+	result := runWindowsSandboxCLI(t, binary, env, "resolve", cridValue)
+	if windowsSandboxExitCode(result.err) != exitcode.NotFound || result.stdout != "" ||
+		!strings.Contains(strings.ToLower(result.stderr), "deleted") {
+		t.Fatalf("controlled-failure Windows remote cleanup = error %v, stdout %q, stderr %q",
+			result.err, result.stdout, result.stderr)
+	}
 }
 
 func windowsSandboxEnvironment(overrides map[string]string) []string {
