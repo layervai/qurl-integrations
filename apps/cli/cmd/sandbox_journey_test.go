@@ -334,8 +334,10 @@ func markSandboxFailureLoginDiagnostic(stderr string, err error) {
 }
 
 func writeSandboxFailureLoginDiagnostic(w io.Writer, stderr string, err error) {
-	exit := "unknown"
-	if code, ok := sandboxFailureExitCodeFromError(err); ok {
+	exit := sandboxFailureLoginExitUnknown
+	if errors.Is(err, context.DeadlineExceeded) {
+		exit = sandboxFailureLoginExitTimeout
+	} else if code, ok := sandboxFailureExitCodeFromError(err); ok {
 		exit = strconv.Itoa(code)
 	}
 	_, _ = fmt.Fprintf(w, "%s %s\n", sandboxFailureLoginExitMarker, exit)
@@ -348,9 +350,6 @@ func writeSandboxFailureLoginDiagnostic(w io.Writer, stderr string, err error) {
 // stable public exit class and an optional five-digit support code; neither can
 // carry a credential, request ID, path, endpoint, or private topology.
 func sandboxFailureExitCodeFromError(err error) (int, bool) {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return exitcode.Unavailable, true
-	}
 	var exitCoder interface{ ExitCode() int }
 	if !errors.As(err, &exitCoder) {
 		return 0, false
@@ -467,9 +466,15 @@ func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 		var unknown bytes.Buffer
 		writeSandboxFailureLoginDiagnostic(&unknown,
 			secret+": error 52201 then error 52401 at https://private.invalid", errors.New(secret))
-		if want := sandboxFailureLoginExitMarker + " unknown\n"; unknown.String() != want ||
+		if want := sandboxFailureLoginExitMarker + " " + sandboxFailureLoginExitUnknown + "\n"; unknown.String() != want ||
 			strings.Contains(unknown.String(), secret) || strings.Contains(unknown.String(), "private.invalid") {
 			t.Fatalf("closed unknown login diagnostic = %q, want %q", unknown.String(), want)
+		}
+		var timeout bytes.Buffer
+		writeSandboxFailureLoginDiagnostic(&timeout, secret, context.DeadlineExceeded)
+		if want := sandboxFailureLoginExitMarker + " " + sandboxFailureLoginExitTimeout + "\n"; timeout.String() != want ||
+			strings.Contains(timeout.String(), secret) {
+			t.Fatalf("closed timeout login diagnostic = %q, want %q", timeout.String(), want)
 		}
 	})
 }

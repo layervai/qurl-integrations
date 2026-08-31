@@ -31,6 +31,8 @@ const (
 	sandboxFailurePhaseMarker              = "QURL_CONTROLLED_FAILURE_PHASE"
 	sandboxFailureDiagnosticMarker         = "QURL_CONTROLLED_FAILURE_DIAGNOSTIC"
 	sandboxFailureLoginExitMarker          = "QURL_CONTROLLED_FAILURE_LOGIN_EXIT"
+	sandboxFailureLoginExitTimeout         = "timeout"
+	sandboxFailureLoginExitUnknown         = "unknown"
 	sandboxFailureChildTimeout             = 3 * time.Minute
 	sandboxFailureDaemonStopTimeout        = 15 * time.Second
 )
@@ -40,41 +42,49 @@ type sandboxFailureDiagnostic struct {
 	Code     string
 }
 
+type sandboxLocalStateMarker struct {
+	text   string
+	reason string
+}
+
+// TODO(upstream-contract): These phrases mirror the pinned qurl-go and
+// qurl-connector sentinel text. Keep this list in lockstep when those pins
+// change so diagnostic drift fails review instead of silently degrading.
+var sandboxLocalStateMarkers = []sandboxLocalStateMarker{
+	{text: "native session operation journal is corrupt", reason: "operation_journal_corrupt"},
+	{text: "native session operation state conflict", reason: "operation_conflict"},
+	{text: "qurl: invalid native session operation", reason: "invalid_session_operation"},
+	{text: "qurl: agent binding persistence failed", reason: "agent_binding_persistence"},
+	{text: "qurl: native completion candidate durability is unknown", reason: "completion_persistence"},
+	{text: "qurl: agent state setup lock failed", reason: "agent_state_lock"},
+}
+
 // sandboxLocalStateReason converts the daemon's private, redacted log text
 // into one closed test-only reason. The live journey may print the returned
 // value, but never the source line: paths, resource IDs, and deployment
 // endpoints in that line stay out of CI output.
 func sandboxLocalStateReason(logText string) string {
-	type marker struct {
-		text   string
-		reason string
-	}
-	markers := []marker{
-		{text: "native session operation journal is corrupt", reason: "operation_journal_corrupt"},
-		{text: "native session operation state conflict", reason: "operation_conflict"},
-		{text: "qurl: invalid native session operation", reason: "invalid_session_operation"},
-		{text: "qurl: agent binding persistence failed", reason: "agent_binding_persistence"},
-		{text: "qurl: native completion candidate durability is unknown", reason: "completion_persistence"},
-		{text: "qurl: agent state setup lock failed", reason: "agent_state_lock"},
-	}
-
 	lower := strings.ToLower(logText)
 	// A daemon can recover from an earlier reason before the command fails on
-	// a later one. Classify only the latest retry record so stale log history
-	// cannot be reported as the current cause.
+	// a later one. Ignore records before the latest retry, but retain later
+	// primary and error-log lines. The last line with a known reason is the
+	// latest event; within that line the first marker is the outer wrapper.
 	const retryRecord = "share daemon session attempt failed; retrying"
 	if start := strings.LastIndex(lower, retryRecord); start >= 0 {
 		lower = lower[start:]
-		if end := strings.IndexByte(lower, '\n'); end >= 0 {
-			lower = lower[:end]
-		}
 	}
-	latestIndex := -1
 	reason := "unclassified_local_state"
-	for _, candidate := range markers {
-		if index := strings.LastIndex(lower, candidate.text); index > latestIndex {
-			latestIndex = index
-			reason = candidate.reason
+	for _, line := range strings.Split(lower, "\n") {
+		firstIndex := len(line)
+		lineReason := ""
+		for _, candidate := range sandboxLocalStateMarkers {
+			if index := strings.Index(line, candidate.text); index >= 0 && index < firstIndex {
+				firstIndex = index
+				lineReason = candidate.reason
+			}
+		}
+		if lineReason != "" {
+			reason = lineReason
 		}
 	}
 	return reason
@@ -279,7 +289,7 @@ func validSandboxFailureCode(code string) bool {
 }
 
 func validSandboxFailureExitCode(code int) bool {
-	return code >= exitcode.General && code <= exitcode.VerificationFailed || code == exitcode.Interrupted
+	return (code >= exitcode.General && code <= exitcode.VerificationFailed) || code == exitcode.Interrupted
 }
 
 func validSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) bool {
@@ -346,12 +356,12 @@ func sandboxFailureLastLoginExit(output string) string {
 		if !found {
 			continue
 		}
-		if value == "unknown" {
+		if value == sandboxFailureLoginExitUnknown || value == sandboxFailureLoginExitTimeout {
 			last = value
 			continue
 		}
 		if code, err := strconv.Atoi(value); err == nil && validSandboxFailureExitCode(code) {
-			last = value
+			last = strconv.Itoa(code)
 		}
 	}
 	return last
@@ -409,6 +419,36 @@ func TestSandboxFailureDiagnosticsAreAllowListedAndRedacted(t *testing.T) {
 			t.Fatalf("controlled-failure diagnostic error = %q, want %q", err, want)
 		}
 	})
+	t.Run("closed login exit", func(t *testing.T) {
+		output := strings.Join([]string{
+			sandboxFailureLoginExitMarker + " " + sandboxFailureLoginExitUnknown,
+			sandboxFailureLoginExitMarker + " " + secret,
+			sandboxFailureLoginExitMarker + " 999999",
+			sandboxFailureLoginExitMarker + " +011",
+			" " + sandboxFailureLoginExitMarker + " 7",
+		}, "\n")
+		if got := sandboxFailureLastLoginExit(output); got != "11" {
+			t.Fatalf("last controlled-failure login exit = %q, want 11", got)
+		}
+		err := sandboxFailureMissingSentinelError(sandboxFailurePhaseMarker + " login\n" + output)
+		want := "child did not reach the controlled customer failure (last phase: login, login exit: 11)"
+		if err.Error() != want || strings.Contains(err.Error(), secret) {
+			t.Fatalf("controlled-failure login error = %q, want %q", err, want)
+		}
+
+		for _, token := range []string{sandboxFailureLoginExitTimeout, sandboxFailureLoginExitUnknown} {
+			t.Run(token, func(t *testing.T) {
+				marker := sandboxFailureLoginExitMarker + " " + token
+				if got := sandboxFailureLastLoginExit(marker); got != token {
+					t.Fatalf("closed login token = %q, want %q", got, token)
+				}
+				want := "child did not reach the controlled customer failure (last phase: unknown, login exit: " + token + ")"
+				if got := sandboxFailureMissingSentinelError(marker).Error(); got != want {
+					t.Fatalf("closed login token error = %q, want %q", got, want)
+				}
+			})
+		}
+	})
 	t.Run("diagnostic cannot carry secret", func(t *testing.T) {
 		output := sandboxFailureDiagnosticMarker + " unknown none\narbitrary child detail " + secret
 		err := validateSandboxFailureChildResult(errors.New("not an exit error"), output, "ChildTest", []string{secret})
@@ -437,7 +477,14 @@ func TestSandboxLocalStateReasonIsClosedAndUsesLatestCause(t *testing.T) {
 		{name: "binding persistence", log: "qurl: agent binding persistence failed: " + privateDetail, want: "agent_binding_persistence"},
 		{name: "completion persistence", log: "qurl: native completion candidate durability is unknown: " + privateDetail, want: "completion_persistence"},
 		{name: "state lock", log: "qurl: agent state setup lock failed: " + privateDetail, want: "agent_state_lock"},
-		{name: "latest wins", log: "qurl: invalid native session operation then native session operation state conflict", want: "operation_conflict"},
+		{name: "outer wrapper wins within one line", log: "qurl: invalid native session operation then native session operation state conflict", want: "invalid_session_operation"},
+		{name: "latest relevant line wins", log: "qurl: invalid native session operation\nnative session operation state conflict", want: "operation_conflict"},
+		{
+			name: "later error log is retained after retry",
+			log: "share daemon session attempt failed; retrying arbitrary cause\n" +
+				"qurl: agent state setup lock failed: private detail",
+			want: "agent_state_lock",
+		},
 		{
 			name: "latest retry does not reuse stale reason",
 			log: "share daemon session attempt failed; retrying qurl: invalid native session operation\n" +
