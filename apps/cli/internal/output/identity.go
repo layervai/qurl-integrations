@@ -7,7 +7,6 @@ import (
 	"time"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 // Identity renderings for whoami and login. The identity is who the
@@ -35,13 +34,6 @@ type loginJSON struct {
 	DeviceEnrolled bool   `json:"device_enrolled"`
 }
 
-type logoutJSON struct {
-	// Removed lists the backends a key was removed from ("keyring", "file");
-	// empty when nothing was stored. Always emitted so scripts can tell the
-	// idempotent no-op from the real removal.
-	Removed []string `json:"removed"`
-}
-
 func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 	if id.Key == nil {
 		return nil
@@ -53,15 +45,6 @@ func identityKey(id *qurlapi.Identity) *identityKeyJSON {
 		KeyPrefix: id.Key.KeyPrefix,
 		ExpiresAt: id.Key.ExpiresAt,
 	}
-}
-
-// backendLabel maps a storage backend to its prose name; JSON carries the
-// machine-stable Backend value itself.
-func backendLabel(b auth.Backend) string {
-	if b == auth.BackendKeyring {
-		return labelKeyring
-	}
-	return labelCredentialFile
 }
 
 // WhoAmI renders the identity behind the configured credential. Identity is
@@ -136,30 +119,4 @@ func (p *Printer) loginText(id *qurlapi.Identity) error {
 	twe.printf("  %s\t%s\n", p.bold("Auth:"), id.AuthType)
 	twe.printf("  %s\t%s\n", p.bold("Account key:"), "consumed, not stored")
 	return twe.flush(tw)
-}
-
-// Logout renders a logout outcome. The confirmation goes to stderr; JSON
-// reports the removed backends on stdout; --quiet prints nothing (the exit
-// code is the outcome). An empty removed set is the idempotent no-op.
-func (p *Printer) Logout(removed []auth.Backend) error {
-	switch {
-	case p.format == FormatJSON:
-		names := make([]string, 0, len(removed))
-		for _, b := range removed {
-			names = append(names, string(b))
-		}
-		return p.writeJSON(logoutJSON{Removed: names})
-	case p.quiet:
-		return nil
-	case len(removed) == 0:
-		_, err := fmt.Fprintf(p.err, "%s\n", msgNothingStored)
-		return err
-	default:
-		labels := make([]string, 0, len(removed))
-		for _, b := range removed {
-			labels = append(labels, backendLabel(b))
-		}
-		_, err := fmt.Fprintf(p.err, msgLoggedOut+"\n", strings.Join(labels, " and "))
-		return err
-	}
 }

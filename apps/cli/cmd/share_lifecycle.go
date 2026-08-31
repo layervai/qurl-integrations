@@ -34,6 +34,11 @@ type localShareRegistry interface {
 
 const connectorResourceType = "tunnel"
 
+const (
+	sharingDiagnosticSettleLimit = 500 * time.Millisecond
+	sharingDiagnosticSettlePoll  = 25 * time.Millisecond
+)
+
 type shareDaemonController interface {
 	Ensure(context.Context) error
 	ReloadIfRunning(context.Context) (bool, error)
@@ -499,11 +504,10 @@ func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, l
 	if err == nil || local == nil || stateDir == "" {
 		return sharing, err
 	}
-	statusCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	status, running, statusErr := (connectordaemon.IPCClient{
-		SocketPath: connectordaemon.StateSocketPath(stateDir),
-	}).Status(statusCtx)
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	status, running, statusErr := settledSharingDaemonStatus(ctx, stateDir, local.ResourceID)
 	if statusErr != nil {
 		return nil, fmt.Errorf("qURL share did not become ready (daemon state unavailable): %w", err)
 	}
@@ -512,7 +516,10 @@ func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, l
 	}
 	diagnostic, present := status.Resources[local.ResourceID]
 	if !present {
-		return nil, err
+		if _, managed := status.Running[local.ResourceID]; managed {
+			return nil, fmt.Errorf("qURL share did not become ready (daemon state starting): %w", err)
+		}
+		return nil, fmt.Errorf("qURL share did not become ready (daemon running, resource diagnostic absent): %w", err)
 	}
 	detail := "daemon state " + diagnostic.State
 	if diagnostic.FailureCategory != "" {
@@ -525,6 +532,54 @@ func waitForSharingWithDiagnostics(ctx context.Context, client qurlapi.Client, l
 		detail += ", retry attempt " + strconv.Itoa(diagnostic.RetryAttempt)
 	}
 	return nil, fmt.Errorf("qURL share did not become ready (%s): %w", detail, err)
+}
+
+// settledSharingDaemonStatus gives the daemon a small diagnostic handoff
+// window after the cloud-readiness deadline. The connector can finish its
+// bounded recovery and publish OnRetry at the same instant that the outer CLI
+// deadline expires. A single IPC sample can therefore see only "starting".
+// This poll never extends recovery, and a terminal or already-diagnostic state
+// returns immediately.
+func settledSharingDaemonStatus(ctx context.Context, stateDir, resourceID string) (connectordaemon.IPCStatus, bool, error) {
+	settleCtx, cancel := context.WithTimeout(ctx, sharingDiagnosticSettleLimit)
+	defer cancel()
+	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	var lastStatus connectordaemon.IPCStatus
+	var lastRunning bool
+	var lastErr error
+	for {
+		status, running, err := client.Status(settleCtx)
+		if err == nil {
+			lastStatus, lastRunning, lastErr = status, running, nil
+			if !sharingDaemonDiagnosticPending(status, running, resourceID) {
+				return status, running, nil
+			}
+		} else if settleCtx.Err() == nil || !lastRunning {
+			return status, running, err
+		}
+		timer := time.NewTimer(sharingDiagnosticSettlePoll)
+		select {
+		case <-settleCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return lastStatus, lastRunning, lastErr
+		case <-timer.C:
+		}
+	}
+}
+
+func sharingDaemonDiagnosticPending(status connectordaemon.IPCStatus, running bool, resourceID string) bool {
+	if !running {
+		return false
+	}
+	diagnostic, present := status.Resources[resourceID]
+	if !present {
+		_, managed := status.Running[resourceID]
+		return managed
+	}
+	return diagnostic.State == "starting" && diagnostic.FailureCategory == "" &&
+		diagnostic.FailureCode == "" && diagnostic.RetryAttempt == 0
 }
 
 func validateLocalSharing(local *connectorstate.LocalShare, sharing *qurlapi.Sharing) error {

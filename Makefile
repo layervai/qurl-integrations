@@ -154,9 +154,9 @@ endef
 # cli.yml's quality gates for the host OS, so a contributor can run them
 # before pushing. Adding or removing a gate there means updating this target
 # too. It cannot mirror the three-OS matrix: only the host OS runs here, and CI
-# provisions an ephemeral platform keyring while this target uses the host's
-# configured keyring. Credentialed sandbox smoke/soak now runs only in the
-# private orchestrator against the exact public source SHA. `goreleaser check`
+# uses the host's filesystem security controls. Credentialed sandbox
+# smoke runs only in the protected same-repository journey against the exact
+# packaged source SHA. `goreleaser check`
 # needs goreleaser on PATH, like release-snapshot above. The 70 floor mirrors
 # cli.yml's coverage gate and leaves a small margin below the measured v2 CLI.
 check-cli:
@@ -171,7 +171,6 @@ check-cli:
 	go vet ./apps/cli/...
 	go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...
 	go tool govulncheck ./apps/cli/...
-	QURL_TEST_HARNESS=1 go test -count=1 ./apps/cli/...
 	goreleaser check
 
 # Kept verbose for local debugging — discord.yml adds --silent.

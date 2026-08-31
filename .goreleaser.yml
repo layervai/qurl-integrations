@@ -135,7 +135,6 @@ homebrew_casks:
       - manpages/qurl-inspect.1
       - manpages/qurl-list.1
       - manpages/qurl-login.1
-      - manpages/qurl-logout.1
       - manpages/qurl-publish.1
       - manpages/qurl-resolve.1
       - manpages/qurl-restart.1

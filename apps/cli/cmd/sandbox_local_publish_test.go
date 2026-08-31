@@ -165,10 +165,14 @@ func testSandboxFullCustomerLifecycleSmoke(t *testing.T) {
 	}
 
 	initial := waitSandboxSharingState(t, binary, cliEnv, stateDir, local.CRID, "on", "serving", 2*time.Minute)
-	inspected := decodeSandboxSharing(t, runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "inspect", local.CRID))
-	if inspected != initial {
-		t.Fatalf("inspect state = %+v, want status state %+v", inspected, initial)
+	inspect := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "inspect", local.CRID)
+	var inspectErr error
+	if inspect.code != 0 {
+		inspectErr = fmt.Errorf("exit %d", inspect.code)
 	}
+	assertHealthySandboxInspection(t, inspect.stdout.Bytes(), inspectErr, inspect.stderr.String(),
+		local.CRID, local.ResourceID, initial.DesiredState, initial.ConnectionState, initial.ServingEpoch,
+		fixture.key, fixture.cleanupJWT, loadSandboxAgentState(t, stateDir).DeviceAPIKey)
 	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
 	assertSandboxLocalRoute(t, binary, cliEnv, stateDir, local.CRID, fixture.marker, 2*time.Minute)
 	t.Run(sandboxControlledFailureLifecyclePhase, func(t *testing.T) {
@@ -277,8 +281,9 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map[string]string, stateDir string) {
 	t.Helper()
 	target := fmt.Sprintf("https://example.com/?qurl-private-sandbox-device-journey=%d", time.Now().UnixNano())
+	description := sandboxJourneyResourceDescription(t, cliEnv)
 	published := runSandboxLocalCLI(t, binary, cliEnv, stateDir,
-		"-o", "json", "publish", target, "--description", journeyDescription)
+		"-o", "json", "publish", target, "--description", description)
 	if published.code != 0 {
 		t.Fatalf("device-authenticated remote publish exit = %d: %s", published.code, published.stderr.String())
 	}
@@ -342,8 +347,8 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 		for _, resource := range document.Resources {
 			if resource.CRID == pub.CRID {
 				seen++
-				if resource.Description != journeyDescription {
-					t.Errorf("device-authenticated list description = %q, want %q", resource.Description, journeyDescription)
+				if resource.Description != description {
+					t.Errorf("device-authenticated list description = %q, want %q", resource.Description, description)
 				}
 			}
 		}
@@ -486,23 +491,6 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	if enrolled.OwnerID == "" || enrolled.AuthType != "api_key" || !enrolled.DeviceEnrolled {
 		t.Fatalf("one-time customer login returned incomplete device identity: %+v", enrolled)
 	}
-	// logout is legacy account-key cleanup in v2. It must not orphan the
-	// durable device credential, which cannot revoke itself through the
-	// account-key management API. Exercise that boundary in the executable
-	// journey before every warm device-only operation.
-	logout := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "logout")
-	if logout.code != 0 {
-		t.Fatalf("post-enrollment logout exit = %d: %s", logout.code, logout.stderr.String())
-	}
-	var logoutResult struct {
-		Removed []string `json:"removed"`
-	}
-	if err := json.Unmarshal(logout.stdout.Bytes(), &logoutResult); err != nil {
-		t.Fatalf("decode post-enrollment logout output: %v", err)
-	}
-	if len(logoutResult.Removed) != 0 {
-		t.Fatalf("post-enrollment logout removed legacy account-key stores: %v", logoutResult.Removed)
-	}
 	whoami := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "-o", "json", "whoami")
 	if whoami.code != 0 {
 		t.Fatalf("warm device whoami exit = %d: %s", whoami.code, whoami.stderr.String())
@@ -528,6 +516,7 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	if err := validateSandboxDeviceIdentity(loadedAfterLogin, namespace.AgentID, ""); err != nil {
 		t.Fatalf("one-time customer login durable identity: %v", err)
 	}
+	recordSandboxCleanupDeviceKey(t, loadedAfterLogin.DeviceAPIKeyID)
 	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
 	fixture := &sandboxLocalFixture{
@@ -570,6 +559,14 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 
 func assertSandboxControlledFailureRouteFenced(t *testing.T, fixture *sandboxLocalFixture, limit time.Duration) {
 	t.Helper()
+	assertSandboxControlledFailureRouteFencedInputs(t, fixture.binary, fixture.env, fixture.stateDir,
+		fixture.local.CRID, fixture.marker, &fixture.backendHits, limit)
+}
+
+func assertSandboxControlledFailureRouteFencedInputs(t *testing.T, binary string, env map[string]string,
+	stateDir, crid, marker string, backendHits *atomic.Uint64, limit time.Duration,
+) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	destination := filepath.Join(t.TempDir(), "fenced-payload")
@@ -581,11 +578,11 @@ func assertSandboxControlledFailureRouteFenced(t *testing.T, fixture *sandboxLoc
 		5*time.Second,
 		func(ctx context.Context) (sandboxRouteProbeState, error) {
 			return probeSandboxLocalRoute(
-				ctx, t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID,
-				fixture.marker, destination, sandboxStoppedRouteRefusal(t),
+				ctx, t, binary, env, stateDir, crid,
+				marker, destination, sandboxStoppedRouteRefusal(t),
 			)
 		},
-		fixture.backendHits.Load,
+		backendHits.Load,
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -192,10 +192,7 @@ native state directory. The account API key and one-shot enrollment credential
 remain in memory and are not stored by qurl. A warm command reuses the device
 identity and does not read `QURL_API_KEY`.
 
-`qurl whoami` checks the registered device and shows its account. `qurl logout`
-removes only legacy stored account-key copies from CLI versions before this
-device-enrollment design; it does not unset `QURL_API_KEY` or delete the native
-device state.
+`qurl whoami` checks the registered device and shows its account.
 
 Authenticated commands need the owner-only native state directory to remain
 writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
@@ -252,7 +249,7 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
 | `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl login` / `qurl logout` | Enroll this device with a one-time account key / remove legacy stored account-key copies |
+| `qurl login` | Enroll this device with a one-time account key |
 | `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
@@ -507,15 +504,13 @@ does not make one live API request per row, so its observed column is
 `connecting`, or `serving` observation. If the owner-only local registry is
 unavailable, list omits local targets and emits one warning.
 
-### qurl login / logout / whoami
+### qurl login / whoami
 
 `qurl login` reads the account key from piped stdin or a hidden interactive
 prompt — never as an argument — validates it, enrolls the registered device,
 checks that the device belongs to the same account, and discards the account
-key. `qurl logout` clears only legacy stored account-key copies; it does not
-touch `QURL_API_KEY` in your environment or delete native device state.
-`qurl whoami` checks the registered device and shows its account identity only,
-with no plan or usage data. `--quiet` prints just the owner id.
+key. `qurl whoami` checks the registered device and shows its account identity
+only, with no plan or usage data. `--quiet` prints just the owner id.
 
 ```bash
 op read op://team/qurl/key | qurl login

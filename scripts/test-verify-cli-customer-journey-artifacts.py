@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import pathlib
@@ -18,10 +19,21 @@ VERIFIER = ROOT / "scripts" / "verify-cli-customer-journey-artifacts.py"
 REPOSITORY = "layervai/qurl-integrations"
 RUN_ID = "701"
 RUN_ATTEMPT = "2"
+HUB_KEY = bytes(range(32))
+BUILD_ENV = dict(
+    os.environ,
+    QURL_RELEASE_HUB_PUBLIC_KEY_B64=base64.b64encode(HUB_KEY).decode("ascii"),
+    QURL_RELEASE_HUB_PUBLIC_KEY_SHA256=hashlib.sha256(HUB_KEY).hexdigest(),
+)
 
 
-def run(*arguments: str, expect_success: bool, error: str = "") -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(arguments, cwd=ROOT, capture_output=True, text=True)
+def run(
+    *arguments: str,
+    expect_success: bool,
+    error: str = "",
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(arguments, cwd=ROOT, capture_output=True, text=True, env=environment)
     if (result.returncode == 0) != expect_success:
         raise AssertionError(
             f"unexpected exit {result.returncode}: {' '.join(arguments)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -62,8 +74,17 @@ def main() -> None:
             RUN_ID,
             RUN_ATTEMPT,
             expect_success=True,
+            environment=BUILD_ENV,
         )
         verify(pristine, head, expect_success=True)
+
+        trust_case = temporary_path / "trust"
+        shutil.copytree(pristine, trust_case)
+        manifest_path = trust_case / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["release_hub_public_key_sha256"] = "0" * 64
+        write_manifest(manifest_path, manifest)
+        verify(trust_case, head, expect_success=False, error="does not carry the manifest Hub trust root")
 
         for module in ("github.com/layervai/qurl-go", "github.com/layervai/qurl-connector"):
             case = temporary_path / module.rsplit("/", 1)[-1]

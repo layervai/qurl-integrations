@@ -8,7 +8,6 @@ import (
 	"time"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 )
 
 func fixtureIdentity() *qurlapi.Identity {
@@ -148,57 +147,6 @@ func TestLoginProjections(t *testing.T) {
 		}
 		if !doc.DeviceEnrolled {
 			t.Error("device_enrolled = false, want true")
-		}
-	})
-}
-
-// TestLogoutProjections pins logout's renderings, including the idempotent
-// empty case and the always-emitted removed array in JSON.
-func TestLogoutProjections(t *testing.T) {
-	t.Run("both backends", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.Logout([]auth.Backend{auth.BackendKeyring, auth.BackendFile}); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(errBuf.String(), "OS keyring and credential file") {
-			t.Errorf("both backends must be listed:\n%s", errBuf.String())
-		}
-		if out.Len() != 0 {
-			t.Errorf("logout text must not touch stdout, got %q", out.String())
-		}
-	})
-
-	t.Run("nothing stored", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
-		if err := p.Logout(nil); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(errBuf.String(), "nothing to remove") {
-			t.Errorf("idempotent logout must say so:\n%s", errBuf.String())
-		}
-	})
-
-	t.Run("quiet is silent", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatText, true, false, false)
-		if err := p.Logout([]auth.Backend{auth.BackendKeyring}); err != nil {
-			t.Fatal(err)
-		}
-		if out.Len() != 0 || errBuf.Len() != 0 {
-			t.Errorf("quiet logout must print nothing, got stdout %q stderr %q", out.String(), errBuf.String())
-		}
-	})
-
-	t.Run("json empty removal is an empty array", func(t *testing.T) {
-		var out, errBuf bytes.Buffer
-		p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
-		if err := p.Logout(nil); err != nil {
-			t.Fatal(err)
-		}
-		if got := out.String(); !strings.Contains(got, `"removed": []`) {
-			t.Errorf("empty removal = %s, want an explicit empty array", got)
 		}
 	})
 }

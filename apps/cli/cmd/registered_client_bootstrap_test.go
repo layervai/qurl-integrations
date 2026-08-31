@@ -39,9 +39,10 @@ func (*bootstrapAgentStateStore) SaveAgentState(context.Context, *qurl.AgentStat
 }
 
 type bootstrapNativeRuntime struct {
-	store    qurl.AgentStateStore
-	closed   bool
-	closeErr error
+	store                             qurl.AgentStateStore
+	recoverDeviceAuthorizationFailure func(context.Context, int, string, func(context.Context) (string, error)) error
+	closed                            bool
+	closeErr                          error
 }
 
 // ownerOnlyTestShareRegistry keeps the registered-device ownership seam
@@ -90,6 +91,14 @@ func (*ownerOnlyTestShareRegistry) Delete(context.Context, string) error {
 }
 
 func (r *bootstrapNativeRuntime) Handoff() (qurl.AgentStateStore, error) { return r.store, nil }
+func (r *bootstrapNativeRuntime) RecoverCredentialAfterDeviceAuthorizationFailure(
+	ctx context.Context, statusCode int, problemCode string, provider func(context.Context) (string, error),
+) error {
+	if r.recoverDeviceAuthorizationFailure == nil {
+		return errors.New("unexpected registered-device authorization recovery")
+	}
+	return r.recoverDeviceAuthorizationFailure(ctx, statusCode, problemCode, provider)
+}
 func (r *bootstrapNativeRuntime) Close() error {
 	r.closed = true
 	return r.closeErr
@@ -236,6 +245,173 @@ func TestOpenNativeRegisteredClient_WarmOpenDoesNotReadAccountKey(t *testing.T) 
 	}
 }
 
+func TestOpenNativeRegisteredClient_ExplicitLoginRepairsWarmDeviceAuthorizationOnce(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
+	state := bootstrapRegisteredState(t)
+	oldDeviceKey := state.DeviceAPIKey
+	replacementDeviceKey := "lv_live_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x38}, 32))
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: state}}
+	recoveryCalls := 0
+	providerCalls := 0
+	runtime.recoverDeviceAuthorizationFailure = func(
+		ctx context.Context, statusCode int, problemCode string, provider func(context.Context) (string, error),
+	) error {
+		recoveryCalls++
+		if statusCode != http.StatusUnauthorized || problemCode != "api_key_invalid" {
+			t.Fatalf("device rejection = HTTP %d / %q", statusCode, problemCode)
+		}
+		credential, err := provider(ctx)
+		providerCalls++
+		if err != nil || credential != testAPIKey {
+			t.Fatalf("validated recovery credential = %q, %v", credential, err)
+		}
+		state.DeviceAPIKey = replacementDeviceKey
+		return nil
+	}
+	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+	account, err := opts.apiClient(testAPIKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountIdentity := &qurlapi.Identity{OwnerID: apitest.MeOwnerID}
+	client, identity, err := opts.openNativeRegisteredClient(context.Background(), account, testAPIKey, accountIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil || identity == nil || identity.OwnerID != accountIdentity.OwnerID {
+		t.Fatalf("repaired registered identity = %#v", identity)
+	}
+	if recoveryCalls != 1 || providerCalls != 1 {
+		t.Fatalf("repair calls recovery/provider=%d/%d, want 1/1", recoveryCalls, providerCalls)
+	}
+	requests := srv.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("device identity requests = %d, want initial request plus one retry", len(requests))
+	}
+	if got := requests[0].Header.Get("Authorization"); got != "Bearer "+oldDeviceKey {
+		t.Fatalf("initial device authorization = %q", got)
+	}
+	if got := requests[1].Header.Get("Authorization"); got != "Bearer "+replacementDeviceKey {
+		t.Fatalf("retried device authorization = %q", got)
+	}
+	if err := opts.closeAPIClient(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenNativeRegisteredClient_ExplicitLoginDoesNotLoopAfterRetryRejection(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ScriptRepeat(http.MethodGet, "/v1/me", 2, apitest.HandlerAPIKeyInvalid401(t))
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	recoveryCalls := 0
+	providerCalls := 0
+	runtime.recoverDeviceAuthorizationFailure = func(
+		ctx context.Context, statusCode int, problemCode string, provider func(context.Context) (string, error),
+	) error {
+		recoveryCalls++
+		if statusCode != http.StatusUnauthorized || problemCode != "api_key_invalid" {
+			t.Fatalf("device rejection = HTTP %d / %q", statusCode, problemCode)
+		}
+		credential, err := provider(ctx)
+		providerCalls++
+		if err != nil || credential != testAPIKey {
+			t.Fatalf("validated recovery credential = %q, %v", credential, err)
+		}
+		return nil
+	}
+	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+	account, err := opts.apiClient(testAPIKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = opts.openNativeRegisteredClient(
+		context.Background(), account, testAPIKey, &qurlapi.Identity{OwnerID: apitest.MeOwnerID},
+	)
+	var apiErr *qurlapi.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "api_key_invalid" {
+		t.Fatalf("retried device authorization error = %v, want exact second rejection", err)
+	}
+	if recoveryCalls != 1 || providerCalls != 1 || len(srv.Requests()) != 2 {
+		t.Fatalf("retry loop calls recovery/provider/requests=%d/%d/%d, want 1/1/2",
+			recoveryCalls, providerCalls, len(srv.Requests()))
+	}
+}
+
+func TestOpenNativeRegisteredClient_ExplicitLoginDoesNotRecoverOtherAuthorizationFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		handler    func(*testing.T) http.HandlerFunc
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "unauthorized wrong code",
+			handler:    apitest.HandlerAPIKeyExpired401,
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "api_key_expired",
+		},
+		{
+			name: "invalid-key code on forbidden status",
+			handler: func(t *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					apitest.WriteProblem(t, w, http.StatusForbidden, "api_key_invalid", "Forbidden", "not a registered-device invalid-key rejection")
+				}
+			},
+			wantStatus: http.StatusForbidden,
+			wantCode:   "api_key_invalid",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodGet, "/v1/me", test.handler(t))
+			runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+			runtime.recoverDeviceAuthorizationFailure = func(context.Context, int, string, func(context.Context) (string, error)) error {
+				t.Fatal("non-matching device authorization failure attempted recovery")
+				return nil
+			}
+			opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+			account, err := opts.apiClient(testAPIKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = opts.openNativeRegisteredClient(
+				context.Background(), account, testAPIKey, &qurlapi.Identity{OwnerID: apitest.MeOwnerID},
+			)
+			var apiErr *qurlapi.Error
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != test.wantStatus || apiErr.Code != test.wantCode {
+				t.Fatalf("device authorization error = %v, want HTTP %d / %s", err, test.wantStatus, test.wantCode)
+			}
+			if len(srv.Requests()) != 1 {
+				t.Fatalf("device identity requests = %d, want no recovery retry", len(srv.Requests()))
+			}
+			if !runtime.closed {
+				t.Fatal("failed explicit login did not close native runtime")
+			}
+		})
+	}
+}
+
+func TestOpenNativeRegisteredClient_WarmDeviceAuthorizationFailureDoesNotReadAccountKey(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
+	runtime := &bootstrapNativeRuntime{store: &bootstrapAgentStateStore{state: bootstrapRegisteredState(t)}}
+	runtime.recoverDeviceAuthorizationFailure = func(context.Context, int, string, func(context.Context) (string, error)) error {
+		t.Fatal("ordinary warm open attempted credential recovery")
+		return nil
+	}
+	opts := bootstrapGlobalOpts(t, srv.URL, runtime)
+	_, _, err := opts.openNativeRegisteredClient(context.Background(), nil, "", nil)
+	var apiErr *qurlapi.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Code != "api_key_invalid" {
+		t.Fatalf("ordinary warm open error = %v, want exact device authorization failure", err)
+	}
+	if len(srv.Requests()) != 1 {
+		t.Fatalf("ordinary warm open requests = %d, want no retry", len(srv.Requests()))
+	}
+}
+
 func TestOpenNativeRegisteredClient_RefusesRuntimeReplacement(t *testing.T) {
 	srv := apitest.NewServer(t)
 	existing := &bootstrapNativeRuntime{}
@@ -314,31 +490,6 @@ func TestBindRegisteredDeviceOwnerDoesNotRewriteExistingBinding(t *testing.T) {
 	}
 	if registry.bindCalls != 0 {
 		t.Fatalf("warm owner binding called BindOwner %d time(s), want zero", registry.bindCalls)
-	}
-}
-
-func TestRegisteredAccountBootstrap_LegacyCleanupFailureWarnsAfterEnrollment(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	deleteErr := errors.New("locked compatibility keyring")
-	keyring := &fakeKeyring{key: testAPIKeyStored, deleteErr: deleteErr}
-	opts := &globalOpts{
-		streams:        &output.Streams{Out: &stdout, Err: &stderr},
-		resolvedFormat: output.FormatText,
-		now:            time.Now,
-		configDir:      t.TempDir(),
-		newCredentialStore: func(dir string, onFileRead func()) *auth.Chain {
-			return auth.NewChain(keyring, auth.NewFileStore(dir), onFileRead)
-		},
-	}
-	bootstrap := &registeredAccountBootstrap{opts: opts, lazy: true, used: true}
-	bootstrap.retireLegacyKey()
-	if !strings.Contains(stderr.String(), "machine enrollment succeeded") ||
-		!strings.Contains(stderr.String(), "legacy stored account key") ||
-		!strings.Contains(stderr.String(), deleteErr.Error()) {
-		t.Fatalf("cleanup warning = %q", stderr.String())
-	}
-	if keyring.key != testAPIKeyStored {
-		t.Fatal("failed compatibility-key cleanup claimed or performed removal")
 	}
 }
 

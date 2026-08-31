@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import platform
 import re
 import subprocess
 import sys
@@ -22,6 +23,19 @@ EXPECTED_PLATFORMS = {
     "qurl-darwin-arm64": ("darwin", "arm64"),
     "qurl-windows-amd64.exe": ("windows", "amd64"),
 }
+
+
+def native_binary_name() -> str:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    architecture = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(machine)
+    if architecture is None:
+        fail(f"unsupported verifier architecture {machine}")
+    suffix = ".exe" if system == "windows" else ""
+    name = f"qurl-{system}-{architecture}{suffix}"
+    if name not in EXPECTED_PLATFORMS:
+        fail(f"customer artifact set has no native verifier binary for {system}/{architecture}")
+    return name
 
 
 def fail(message: str) -> None:
@@ -84,7 +98,7 @@ def main() -> int:
     if raw != (json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n").encode():
         fail("manifest is not canonical JSON")
     if (
-        set(manifest) != {"files", "head_sha", "modules", "repository", "run_attempt", "run_id", "schema", "version"}
+        set(manifest) != {"files", "head_sha", "modules", "release_hub_public_key_sha256", "repository", "run_attempt", "run_id", "schema", "version"}
         or manifest["schema"] != "layerv.qurl-cli-customer-journey.v1"
         or manifest["repository"] != args.repository
         or manifest["head_sha"] != args.head_sha
@@ -92,6 +106,7 @@ def main() -> int:
         or manifest["run_id"] != args.run_id
         or manifest["run_attempt"] != args.run_attempt
         or args.run_attempt < 1
+        or not DIGEST.fullmatch(manifest["release_hub_public_key_sha256"])
         or not VERSION.fullmatch(manifest["version"])
         or manifest["version"].split(".")[-1] != args.head_sha[:12]
     ):
@@ -118,6 +133,15 @@ def main() -> int:
         if hashlib.sha256((args.artifact / name).read_bytes()).hexdigest() != digest:
             fail("downloaded customer artifact digest does not match")
         verify_build_info(args.artifact / name, args.head_sha, modules)
+    native = args.artifact / native_binary_name()
+    trust = subprocess.run(
+        [str(native), "version", "--verify-release-native-trust"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if trust != manifest["release_hub_public_key_sha256"]:
+        fail("native customer artifact does not carry the manifest Hub trust root")
     print("verified exact packaged customer artifacts")
     return 0
 

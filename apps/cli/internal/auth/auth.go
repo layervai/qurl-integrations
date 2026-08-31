@@ -6,19 +6,14 @@
 // history and process lists). Bootstrap resolves it from these sources:
 //
 //  1. The QURL_API_KEY_FILE environment variable — private-file hermetic mode.
-//  2. The QURL_API_KEY environment variable — inline hermetic mode. When set, the
-//     credential store is bypassed entirely: nothing is read from or written
-//     to disk, which is what CI jobs and containers want.
-//  3. The legacy credential store, only when a caller explicitly supplies it.
-//     The current command path passes nil and uses the store only for cleanup.
+//  2. The QURL_API_KEY environment variable — inline hermetic mode.
+//
+// Neither source is written to persistent account-key storage.
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -51,33 +46,11 @@ type Source string
 const (
 	SourceEnvironment     Source = "environment"
 	SourceEnvironmentFile Source = "environment file"
-	SourceStore           Source = "credential store"
 )
 
-// CredentialStore persists the API key between runs. Implementations must
-// never write the key anywhere a config file could pick it up.
-//
-// Load error contract: an error wrapping ErrNoCredential means the backend
-// works but holds nothing; any other error means the backend itself is
-// unavailable or broken. Chain relies on that distinction to decide when the
-// file fallback may be consulted.
-type CredentialStore interface {
-	// Save stores the key, replacing any previous one.
-	Save(key string) error
-	// Load returns the stored key, or an error wrapping ErrNoCredential
-	// when nothing is stored.
-	Load() (string, error)
-	// Delete removes the stored key, reporting whether one was removed.
-	// Deleting when nothing is stored is not an error.
-	Delete() (removed bool, err error)
-	// Name describes the backend for user-facing messages (e.g. "file").
-	Name() string
-}
-
 // Resolve returns the API key using the credential precedence contract.
-// lookup provides environment access (usually os.LookupEnv); store may be nil
-// when no on-disk store is available.
-func Resolve(lookup func(string) (string, bool), store CredentialStore) (string, Source, error) {
+// lookup provides environment access (usually os.LookupEnv).
+func Resolve(lookup func(string) (string, bool)) (string, Source, error) {
 	if lookup != nil {
 		inline, inlineSet := lookup(EnvAPIKey)
 		path, fileSet := lookup(EnvAPIKeyFile)
@@ -102,14 +75,7 @@ func Resolve(lookup func(string) (string, bool), store CredentialStore) (string,
 			return inline, SourceEnvironment, nil
 		}
 	}
-	if store == nil {
-		return "", "", ErrNoCredential
-	}
-	key, err := store.Load()
-	if err != nil {
-		return "", "", err
-	}
-	return key, SourceStore, nil
+	return "", "", ErrNoCredential
 }
 
 // The pinned qURL API key wire format.
@@ -159,105 +125,4 @@ func ValidateKeyShape(key string) error {
 		}
 	}
 	return nil
-}
-
-// The file fallback's on-disk contract is qurl-go's FileCredentials, so a key
-// saved by `qurl login` on a machine WITHOUT an OS keyring is the same
-// credential the SDK (and the Connector installer) read. That cross-tool
-// sharing is a property of the keyring-less fallback only: on keyring
-// machines the credential lives in the OS keyring, which file-only readers
-// never consult (and the chain removes the file precisely so the two can't
-// diverge) — SDK-based tools there take QURL_API_KEY instead.
-//
-// TODO(upstream-contract): mirrors qurl-go qurl/client.go —
-// UserIssuerStatePath = ".config/qurl/token" (the per-user credential file
-// resolveCredentials reads) and the credentialState JSON document
-// {"bearer_token": ...} its FileCredentials provider decodes. The SDK's
-// readPrivateStateFile (qurl/private_state.go) refuses symlinks, non-regular
-// files, file modes wider than 0600, and group/other-writable parent
-// directories, which is why Save pins 0600/0700 below. If the SDK moves the
-// path or the document shape, update these in lockstep.
-const (
-	// credentialFileName is the file inside the CLI config directory; with
-	// the default directory (~/.config/qurl) the full path is exactly the
-	// SDK's UserIssuerStatePath.
-	credentialFileName = "token"
-)
-
-// credentialFile is qurl-go's credentialState document. Only bearer_token is
-// written by the CLI; authorization is read-tolerated so a file written by
-// another LayerV tool is diagnosed rather than misparsed.
-type credentialFile struct {
-	Authorization string `json:"authorization,omitempty"`
-	BearerToken   string `json:"bearer_token,omitempty"`
-}
-
-// fileStore is the plain-file fallback CredentialStore: one key in one file
-// with owner-only permissions, in the exact place and shape qurl-go's
-// FileCredentials reads. It is used only where the OS keyring is unavailable.
-type fileStore struct {
-	path string
-}
-
-// NewFileStore returns the file-backed credential store rooted at dir
-// (normally the CLI config directory). The key is stored in a separate file,
-// never in config.yaml.
-func NewFileStore(dir string) CredentialStore {
-	return &fileStore{path: filepath.Join(dir, credentialFileName)}
-}
-
-// Name identifies the backend in user-facing messages.
-func (s *fileStore) Name() string { return "file" }
-
-// Save writes the key as the SDK's credential document with owner-only
-// permissions (the SDK refuses anything wider on read).
-func (s *fileStore) Save(key string) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("create credential dir: %w", err)
-	}
-	doc, err := json.Marshal(credentialFile{BearerToken: key})
-	if err != nil {
-		return fmt.Errorf("encode credential file: %w", err)
-	}
-	return os.WriteFile(s.path, append(doc, '\n'), 0o600)
-}
-
-// Load reads the stored key; a missing or empty file is ErrNoCredential.
-func (s *fileStore) Load() (string, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("%w: run `qurl login` or set %s", ErrNoCredential, EnvAPIKey)
-		}
-		return "", fmt.Errorf("read credential file: %w", err)
-	}
-	if strings.TrimSpace(string(data)) == "" {
-		return "", fmt.Errorf("%w: the credential file is empty", ErrNoCredential)
-	}
-	var doc credentialFile
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return "", fmt.Errorf("%w: the credential file at %s is not in the expected format — run `qurl login` to rewrite it", ErrInvalidKey, s.path)
-	}
-	key := strings.TrimSpace(doc.BearerToken)
-	if key == "" {
-		if strings.TrimSpace(doc.Authorization) != "" {
-			// Another LayerV tool stored a raw authorization header here; the
-			// CLI manages API keys only. Refuse rather than misuse it.
-			return "", fmt.Errorf("%w: the credential file at %s does not hold a qURL API key — run `qurl login` to replace it", ErrInvalidKey, s.path)
-		}
-		return "", fmt.Errorf("%w: the credential file holds no key", ErrNoCredential)
-	}
-	return key, nil
-}
-
-// Delete removes the stored key; deleting nothing is a no-op.
-func (s *fileStore) Delete() (bool, error) {
-	err := os.Remove(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("remove credential file: %w", err)
-	}
-	return true, nil
 }

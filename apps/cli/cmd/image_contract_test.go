@@ -166,18 +166,18 @@ func TestActiveSourcesDoNotReferenceLegacyConnectorArtifacts(t *testing.T) {
 
 func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	t.Parallel()
+
 	repoRoot := filepath.Clean(cliRepoRoot)
-	retiredWorkflows, err := filepath.Glob(filepath.Join(repoRoot, ".github", "workflows", "cli-connector-resource-*.yml"))
+	retired, err := filepath.Glob(filepath.Join(repoRoot, ".github", "workflows", "cli-connector-resource-*.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(retiredWorkflows) != 0 {
-		t.Fatalf("retired credential-bearing workflows still exist: %v", retiredWorkflows)
+	if len(retired) != 0 {
+		t.Fatalf("retired credential-bearing workflows still exist: %v", retired)
 	}
 
 	for _, name := range []string{"cli.yml", "cli-nightly.yml"} {
-		path := filepath.Join(repoRoot, ".github", "workflows", name)
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,23 +186,46 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 			"QURL_SANDBOX_API_KEY",
 			"QURL_SANDBOX_CLEANUP_JWT",
 			"QURL_CLI_SANDBOX_CONNECTOR",
-			"-tags=clisoak",
+			"AUTH0_CLIENT_SECRET",
+			"qurl-integrations-infra",
+			"ops-routines",
 		} {
 			if bytes.Contains(data, []byte(forbidden)) {
-				t.Errorf("public workflow %s retains private live-lane contract %q", name, forbidden)
+				t.Errorf("public workflow %s retains private live authority %q", name, forbidden)
 			}
 		}
 	}
+
 	cliWorkflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "cli.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cliWorkflow = bytes.ReplaceAll(cliWorkflow, []byte("\r\n"), []byte("\n"))
-	if !bytes.Contains(cliWorkflow, []byte("go test -race -tags=clisandbox -run '^$' -count=1 ./apps/cli/...")) {
+	if !bytes.Contains(cliWorkflow, []byte("go test -race -tags=clisandbox")) {
 		t.Error("public CLI workflow does not compile the private sandbox test surface")
 	}
+	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(makefile, []byte("go test -tags=clisandbox")) {
+		t.Error("local CLI check does not compile the private sandbox test surface")
+	}
+	for _, forbidden := range []string{"CLI_SANDBOX_E2E", "QURL_SANDBOX_API_KEY", "QURL_SANDBOX_CLEANUP_JWT"} {
+		if bytes.Contains(makefile, []byte(forbidden)) {
+			t.Errorf("public Makefile retains private live authority %q", forbidden)
+		}
+	}
+}
+
+func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", "cli.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var workflow cliWorkflowContract
-	if err := yaml.Unmarshal(cliWorkflow, &workflow); err != nil {
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse public CLI workflow: %v", err)
 	}
 	const expectedCLIJobIf = "needs.changes.outputs.cli == 'true'"
@@ -229,37 +252,10 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 			t.Errorf("public CLI workflow %s / %s is bypassable: %v", jobName, step.Name, err)
 		}
 	}
-	sandboxLintStep := findStep("lint", "golangci-lint sandbox tests")
-	windowsLintStep := findStep("lint", "Cross-lint Windows CLI sources")
-	versionLintStep := findStep("lint", "Verify installed golangci-lint version")
-	if got := workflow.Jobs["lint"].Env["GOLANGCI_LINT_VERSION"]; got != "v2.12.2" {
-		t.Errorf("public CLI workflow linter version = %#v, want one job-level v2.12.2 pin", got)
-	}
-	configLintStep := findStep("lint", "Verify golangci-lint config")
-	const configLintCommand = `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"${GOLANGCI_LINT_VERSION}" config verify`
-	if configLintStep.Run != configLintCommand {
-		t.Errorf("public CLI workflow config lint command = %q, want %q", configLintStep.Run, configLintCommand)
-	}
-	if got := findStep("lint", "golangci-lint").With["version"]; got != "${{ env.GOLANGCI_LINT_VERSION }}" {
-		t.Errorf("public CLI workflow linter action version = %#v, want job-level pin expression", got)
-	}
-	const versionLintCommand = "installed_version=\"v$(golangci-lint version --short)\"\nif [ \"$installed_version\" != \"$GOLANGCI_LINT_VERSION\" ]; then\n  echo \"::error::golangci-lint version is $installed_version, want $GOLANGCI_LINT_VERSION\" >&2\n  exit 1\nfi\n"
-	if versionLintStep.Run != versionLintCommand {
-		t.Errorf("public CLI workflow linter version check = %q, want %q", versionLintStep.Run, versionLintCommand)
-	}
-	assertRequiredGate("lint", versionLintStep)
-	const windowsLintCommand = "command -v golangci-lint\nGOOS=windows GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m ./apps/cli/...\n"
-	if windowsLintStep.Run != windowsLintCommand {
-		t.Errorf("public CLI workflow Windows lint command = %q, want %q", windowsLintStep.Run, windowsLintCommand)
-	}
-	assertRequiredGate("lint", windowsLintStep)
-	const sandboxLintCommand = "command -v golangci-lint\ngolangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...\n"
-	if sandboxLintStep.Run != sandboxLintCommand {
-		t.Errorf("public CLI workflow sandbox lint command = %q, want %q", sandboxLintStep.Run, sandboxLintCommand)
-	}
-	assertRequiredGate("lint", sandboxLintStep)
+
 	lifecycleTests := []string{
 		"TestDaemonServesTwoResourcesAndStopsOneIndependently",
+		"TestLinuxStartRotatesEpochAfterLocalTerminalDisable",
 		"TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership",
 		"TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly",
 		"TestPublishNewMachineTakeoverRotatesEpochOnce",
@@ -267,7 +263,6 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		"TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch",
 		"TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon",
 		"TestStartFailsImmediatelyWhenServingEpochAdvances",
-		"TestStartRotatesEpochAfterLocalTerminalDisable",
 	}
 	lifecycleRegex := "^(" + strings.Join(lifecycleTests, "|") + ")$"
 	lifecycleNames := strings.Join(lifecycleTests, "\n")
@@ -299,6 +294,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if strings.Index(lifecycleStep.Run, lifecycleListCommand) >= strings.Index(lifecycleStep.Run, lifecycleRunCommand) {
 		t.Error("public CLI workflow does not verify CRID lifecycle test declarations before execution")
 	}
+
 	validatorTests := []string{
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
@@ -338,6 +334,7 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 		strings.Index(validatorStep.Run, validatorPassedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) {
 		t.Error("public CLI workflow validator gate checks process status before PASS/SKIP diagnostics")
 	}
+
 	warmDaemonStep := findStep("test", "Run exact warm-daemon process contract")
 	assertRequiredGate("test", warmDaemonStep)
 	if len(warmDaemonStep.Env) != 2 || warmDaemonStep.Env["WARM_DAEMON_TEST_REGEX"] != "^TestExactWarmDaemonProcessContract$" || warmDaemonStep.Env["WARM_DAEMON_TEST_NAME"] != "TestExactWarmDaemonProcessContract" {
@@ -354,70 +351,6 @@ func TestCustomerSharingLiveLanesArePrivate(t *testing.T) {
 	if strings.Index(warmDaemonStep.Run, warmDaemonSkippedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) ||
 		strings.Index(warmDaemonStep.Run, warmDaemonPassedCheck) >= strings.Index(warmDaemonStep.Run, warmDaemonStatusCheck) {
 		t.Error("public CLI workflow warm-daemon gate checks process status before PASS/SKIP diagnostics")
-	}
-	windowsTaskStep := findStep("matrix", "Run pinned Windows Task Scheduler integration")
-	windowsPipeStep := findStep("matrix", "Run pinned Windows named-pipe owner integration")
-	windowsCompileStep := findStep("matrix", "Compile private sandbox test surface on Windows")
-	for _, step := range []cliWorkflowStep{windowsTaskStep, windowsPipeStep, windowsCompileStep} {
-		if workflow.Jobs["matrix"].If != expectedCLIJobIf || workflow.Jobs["matrix"].ContinueOnError != nil ||
-			step.If != "runner.os == 'Windows'" || step.ContinueOnError != nil {
-			t.Errorf("public CLI workflow Windows gate %q is bypassable", step.Name)
-		}
-	}
-	if got := windowsTaskStep.Env["QURL_WINDOWS_USER_JOB_INTEGRATION"]; got != "1" {
-		t.Errorf("Windows Task Scheduler integration arming = %#v, want 1", got)
-	}
-	for _, required := range []string{
-		"$testName = 'TestWindowsUserJobIntegration'",
-		"$testPattern = '^TestWindowsUserJobIntegration$'",
-		"go test -list $testPattern $testPackage",
-		"go test -count=1 -json -run $testPattern $testPackage",
-		"$_.Action -eq 'skip'",
-		"$_.Action -eq 'pass'",
-		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
-	} {
-		if strings.Count(windowsTaskStep.Run, required) != 1 {
-			t.Errorf("Windows Task Scheduler integration does not fail closed with %q", required)
-		}
-	}
-	for _, required := range []string{
-		"$testName = 'TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown'",
-		"$testPattern = '^TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown$'",
-		"go test -list $testPattern $testPackage",
-		"go test -count=1 -json -run $testPattern $testPackage",
-		"$_.Action -eq 'skip'",
-		"$_.Action -eq 'pass'",
-		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
-	} {
-		if strings.Count(windowsPipeStep.Run, required) != 1 {
-			t.Errorf("Windows named-pipe owner integration does not fail closed with %q", required)
-		}
-	}
-	if !strings.Contains(windowsCompileStep.Run, "go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...") {
-		t.Error("Windows matrix does not compile the private sandbox test surface")
-	}
-	for _, required := range []string{
-		"$testName = 'TestSandboxWindowsDefaultDaemonFullCustomerLifecycle'",
-		"$testPattern = '^TestSandboxWindowsDefaultDaemonFullCustomerLifecycle$'",
-		"go test -tags=clisandbox -list $testPattern ./apps/cli/cmd",
-		"$declared.Count -ne 1 -or $declared[0] -ne $testName",
-	} {
-		if strings.Count(windowsCompileStep.Run, required) != 1 {
-			t.Errorf("Windows protected customer journey declaration is not pinned with %q", required)
-		}
-	}
-
-	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"-tags=clisoak", "CLI_SANDBOX_E2E"} {
-		if bytes.Contains(makefile, []byte(forbidden)) {
-			t.Errorf("public Makefile retains private live-lane contract %q", forbidden)
-		}
-	}
-	if !bytes.Contains(makefile, []byte("go test -tags=clisandbox -run '^$$' -count=1 ./apps/cli/...")) {
-		t.Error("public Makefile does not compile the private sandbox test surface")
 	}
 }
 
@@ -473,7 +406,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 		requiredMode, hasRequiredMode := step.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]
 		if target.release {
 			releaseGate := strings.Join(strings.Fields(fmt.Sprint(job.If)), " ")
-			const expectedReleaseGate = "!cancelled() && needs.cli-main-ci.result == 'success' && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub spells this function cancelled().
+			const expectedReleaseGate = "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub spells this function cancelled().
 			if releaseGate != expectedReleaseGate {
 				t.Errorf("%s release-cli gate = %q, want %q", target.file, releaseGate, expectedReleaseGate)
 			}

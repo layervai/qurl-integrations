@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -33,9 +34,8 @@ import (
 // Credential contract (all four required before this suite runs anything):
 //
 //	QURL_API_KEY  — a sandbox API key holding the qurl:agent, qurl:read,
-//	    qurl:write, and qurl:resolve scopes. Read through the CLI's hermetic mode: with the
-//	    variable set, the credential store is bypassed entirely and nothing
-//	    on disk is read or written.
+//	    qurl:write, and qurl:resolve scopes. The CLI reads it only for
+//	    bootstrap and does not write the account key to disk.
 //	QURL_ENDPOINT — the sandbox qURL API base URL (a repository secret:
 //	    the sandbox hostname is deliberately not public).
 //	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
@@ -71,6 +71,21 @@ const journeyTimeout = 4 * time.Minute
 // leaked fixture from a real one. assertListFindsCRID holds the CLI to
 // surfacing it: a label no listing carries identifies nothing.
 const journeyDescription = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
+
+func sandboxJourneyResourceDescription(t *testing.T, env map[string]string) string {
+	t.Helper()
+	runID := strings.TrimSpace(env[sandboxRunIDEnv])
+	attempt := strings.TrimSpace(env[sandboxRunAttemptEnv])
+	runtimeName := strings.TrimSpace(env[sandboxRuntimeEnv])
+	if runID == "" && attempt == "" && runtimeName == "" {
+		return journeyDescription
+	}
+	if !sandboxPositiveDecimal.MatchString(runID) || !sandboxPositiveDecimal.MatchString(attempt) ||
+		(runtimeName != "host" && runtimeName != "hardened_container") {
+		t.Fatal("run-scoped journey resource description received an incomplete identity")
+	}
+	return fmt.Sprintf("qurl CLI CI resource %s/%s/%s", runID, attempt, runtimeName)
+}
 
 // sandboxJourneyEnv reads the common suite env contract from the real process
 // environment and skips loudly — naming every missing variable — when it
@@ -232,6 +247,68 @@ type journeyResourceStatusDoc struct {
 	Status     string `json:"status"`
 }
 
+type sandboxInspectionDoc struct {
+	CRID            string     `json:"crid"`
+	ResourceID      string     `json:"resource_id"`
+	TargetURL       string     `json:"target_url"`
+	DesiredState    string     `json:"desired_state"`
+	ConnectionState string     `json:"connection_state"`
+	ServingEpoch    uint64     `json:"serving_epoch"`
+	DaemonState     *string    `json:"daemon_state"`
+	LastTransition  *time.Time `json:"last_transition"`
+	FailureCategory *string    `json:"failure_category"`
+	FailureCode     *string    `json:"failure_code"`
+	RetryAttempt    *int       `json:"retry_attempt"`
+	NextRetryAt     *time.Time `json:"next_retry_at"`
+	TargetHealth    *string    `json:"local_target_health"`
+}
+
+// assertHealthySandboxInspection proves that inspect is the real redacted
+// diagnostic surface, not an alias for status. The healthy journey requires
+// every always-present diagnostic and requires failure and retry details to be
+// absent when no failure exists.
+func assertHealthySandboxInspection(
+	t *testing.T,
+	raw []byte,
+	commandErr error,
+	stderr, cridValue, resourceID, desired, observed string,
+	epoch uint64,
+	forbidden ...string,
+) {
+	t.Helper()
+	if commandErr != nil {
+		t.Fatalf("qurl inspect failed: %v; stderr %q", commandErr, stderr)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var document sandboxInspectionDoc
+	if err := decoder.Decode(&document); err != nil {
+		t.Fatalf("decode qurl inspect output: %v; output %q", err, string(raw))
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		t.Fatalf("qurl inspect output has trailing data: %q", string(raw))
+	}
+	if document.CRID != cridValue || document.ResourceID != resourceID || document.DesiredState != desired ||
+		document.ConnectionState != observed || document.ServingEpoch != epoch {
+		t.Fatalf("qurl inspect lifecycle = %+v, want %s/%s at epoch %d for %s", document, desired, observed, epoch, cridValue)
+	}
+	if document.DaemonState == nil || *document.DaemonState != "serving" ||
+		document.LastTransition == nil || document.LastTransition.IsZero() ||
+		document.TargetHealth == nil || *document.TargetHealth != "healthy" ||
+		document.RetryAttempt == nil || *document.RetryAttempt != 0 {
+		t.Fatalf("qurl inspect healthy diagnostics are incomplete: %+v", document)
+	}
+	if document.FailureCategory != nil || document.FailureCode != nil || document.NextRetryAt != nil {
+		t.Fatalf("qurl inspect exposed failure or retry details for a healthy share: %+v", document)
+	}
+	for _, secret := range forbidden {
+		if secret != "" && bytes.Contains(raw, []byte(secret)) {
+			t.Fatal("qurl inspect exposed a bearer credential")
+		}
+	}
+}
+
 // journeyListDoc mirrors the list `-o json` document. HasMore — not cursor
 // presence — is the continuation signal, per the ResourcePage contract.
 type journeyListDoc struct {
@@ -259,7 +336,8 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	// assertion leans on the same stability: this page's body is known to
 	// carry journeyTargetMarker.
 	target := "https://example.com/?qurl-private-sandbox-crid-journey=" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", journeyDescription)
+	description := sandboxJourneyResourceDescription(t, cliEnv)
+	res := runSandboxCLI(ctx, t, cliEnv, "-o", "json", "publish", target, "--description", description)
 	if res.code != 0 {
 		t.Fatalf("publish exit = %d, want 0\nstderr: %s", res.code, res.stderr.String())
 	}
@@ -293,7 +371,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 	}
 
 	assertRemoteStatusAndInspect(ctx, t, cliEnv, pub)
-	assertListFindsCRID(ctx, t, cliEnv, pub.CRID)
+	assertListFindsCRID(ctx, t, cliEnv, pub.CRID, description)
 	link := assertResolveJourney(ctx, t, cliEnv, pub.CRID)
 	// The link value never reaches the log: CI logs are public, and a
 	// minted link carries the sandbox hostname and a live qURL credential.
@@ -367,7 +445,7 @@ const (
 // honored server-side (handlers/resource.go parses it into ListFilters) —
 // if it ever stops being, the filter silently becomes a no-op and this walk
 // quietly reverts to scanning the whole history.
-func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
+func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]string, id, expectedDescription string) {
 	t.Helper()
 	seen := 0
 	label := ""
@@ -410,9 +488,9 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 	}
 	// Not a Fatal: the row was found, so the rest of the journey (resolve,
 	// download, delete) is still worth running and still reclaims the row.
-	if label != journeyDescription {
+	if label != expectedDescription {
 		t.Errorf("listed row description = %q, want %q; nothing built on `qurl list` can identify this fixture",
-			label, journeyDescription)
+			label, expectedDescription)
 	}
 }
 

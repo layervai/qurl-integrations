@@ -273,7 +273,7 @@ func cliSentinelCode(err error) (int, bool) {
 }
 
 // connectorSentinelCode maps the native local-share lifecycle sentinels.
-func connectorSentinelCode(err error) (int, bool) {
+func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the closed connector sentinel-to-exit-code mapping in one boundary.
 	if code, ok := connectorResourceSentinelCode(err); ok {
 		return code, true
 	}

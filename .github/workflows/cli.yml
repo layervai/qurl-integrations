@@ -85,11 +85,14 @@ jobs:
               - '.github/workflows/release-please.yml'
               - 'scripts/build-cli-customer-journey-artifacts.sh'
               - 'scripts/qurl-cli-ci-credentials.py'
+              - 'scripts/remove-sensitive-tree.sh'
               - 'scripts/test-qurl-cli-ci-credentials.py'
+              - 'scripts/test-remove-sensitive-tree.sh'
+              - 'scripts/test-verify-cli-customer-journey-artifacts.py'
               - 'scripts/verify-cli-customer-journey-artifacts.py'
               - 'scripts/extract-qurl-image-attestations.sh'
-              - 'scripts/test-wait-for-exact-cli-main-run.sh'
-              - 'scripts/wait-for-exact-cli-main-run.sh'
+              - 'scripts/check-exact-cli-release-gate.sh'
+              - 'scripts/test-check-exact-cli-release-gate.sh'
 
   lint:
     name: cli / lint
@@ -162,9 +165,10 @@ jobs:
       - name: Run CRID lifecycle unit tests
         shell: bash
         env:
-          LIFECYCLE_TEST_REGEX: '^(TestDaemonServesTwoResourcesAndStopsOneIndependently|TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership|TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly|TestPublishNewMachineTakeoverRotatesEpochOnce|TestRestartReconcilesAmbiguousAppliedPostWithoutReplay|TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch|TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon|TestStartFailsImmediatelyWhenServingEpochAdvances|TestStartRotatesEpochAfterLocalTerminalDisable)$'
+          LIFECYCLE_TEST_REGEX: '^(TestDaemonServesTwoResourcesAndStopsOneIndependently|TestLinuxStartRotatesEpochAfterLocalTerminalDisable|TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership|TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly|TestPublishNewMachineTakeoverRotatesEpochOnce|TestRestartReconcilesAmbiguousAppliedPostWithoutReplay|TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch|TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon|TestStartFailsImmediatelyWhenServingEpochAdvances)$'
           LIFECYCLE_TEST_NAMES: |-
             TestDaemonServesTwoResourcesAndStopsOneIndependently
+            TestLinuxStartRotatesEpochAfterLocalTerminalDisable
             TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership
             TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly
             TestPublishNewMachineTakeoverRotatesEpochOnce
@@ -172,7 +176,6 @@ jobs:
             TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch
             TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon
             TestStartFailsImmediatelyWhenServingEpochAdvances
-            TestStartRotatesEpochAfterLocalTerminalDisable
         run: |
           set -euo pipefail
           actual_tests="$(
@@ -349,7 +352,14 @@ jobs:
           # guard still verifies the exact committed source.
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/qurl-cli-pycache
         run: |
-          shellcheck scripts/build-cli-customer-journey-artifacts.sh
+          shellcheck \
+            scripts/build-cli-customer-journey-artifacts.sh \
+            scripts/check-exact-cli-release-gate.sh \
+            scripts/remove-sensitive-tree.sh \
+            scripts/test-remove-sensitive-tree.sh \
+            scripts/test-check-exact-cli-release-gate.sh
+          bash scripts/test-check-exact-cli-release-gate.sh
+          bash scripts/test-remove-sensitive-tree.sh
           python3 -m py_compile \
             scripts/qurl-cli-ci-credentials.py \
             scripts/test-qurl-cli-ci-credentials.py \
@@ -390,10 +400,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      # The v2 suite uses the real platform filesystem and keyring surfaces on
-      # each hosted OS. No customer credential or external service is used.
-      QURL_TEST_HARNESS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -409,104 +415,6 @@ jobs:
           go tool govulncheck ./apps/cli/...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # The live credential-store smoke needs an unlocked keyring on every OS.
-      # CI keyrings start locked on macOS and absent on Linux; Windows
-      # Credential Manager works headless as-is.
-      - name: Set up macOS keychain
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          # Ephemeral CI keychain: throwaway random password, auto-lock timeout
-          # cleared, made the default so keyring libraries find it unlocked.
-          password="$(uuidgen)"
-          security create-keychain -p "$password" qurl-ci.keychain
-          security set-keychain-settings qurl-ci.keychain
-          security default-keychain -s qurl-ci.keychain
-          security unlock-keychain -p "$password" qurl-ci.keychain
-
-      - name: Set up Linux keyring (gnome-keyring over D-Bus)
-        if: runner.os == 'Linux'
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          select_fallback_mirrors() {
-            local status
-            echo "::warning::Switching Linux package downloads away from the slow Azure mirror"
-            # TODO(upstream-contract): actions/runner-images routes apt through
-            # /etc/apt/apt-mirrors.txt and configure-apt-sources.sh writes one
-            # URI plus a tab-delimited priority on each mirror-list line.
-            if printf '%s\tpriority:%s\n' \
-              'https://archive.ubuntu.com/ubuntu/' '1' \
-              'https://security.ubuntu.com/ubuntu/' '2' | \
-              sudo -n tee /etc/apt/apt-mirrors.txt >/dev/null; then
-              return 0
-            else
-              status=$?
-            fi
-            echo "::error::Unable to select the bounded Ubuntu package mirror fallback"
-            return "$status"
-          }
-
-          install_keyring_packages() {
-            local attempt status
-            for attempt in 1 2; do
-              echo "Installing Linux keyring packages (attempt ${attempt}/2)"
-              if sudo -n env DEBIAN_FRONTEND=noninteractive \
-                timeout --signal=TERM --kill-after=10s 90s \
-                apt-get \
-                  -o Acquire::Retries=2 \
-                  -o Acquire::http::Timeout=20 \
-                  -o Acquire::https::Timeout=20 \
-                  -o DPkg::Lock::Timeout=30 \
-                  -o Dpkg::Use-Pty=0 \
-                  install -y --no-install-recommends gnome-keyring dbus; then
-                return 0
-              else
-                status=$?
-              fi
-              echo "::warning::Linux keyring package install attempt ${attempt}/2 failed with exit ${status}"
-              if [ "$attempt" -lt 2 ]; then
-                # runner-images already routes apt through this mirror list;
-                # the TODO(upstream-contract) above tracks that dependency.
-                # A slow-but-responsive Azure endpoint does not trigger apt's
-                # own failover, so make the official Ubuntu mirrors explicit
-                # before the one remaining bounded attempt.
-                if ! select_fallback_mirrors; then
-                  return 1
-                fi
-                sleep 5
-              fi
-            done
-            echo "::error::Linux keyring package install failed after 2 bounded attempts"
-            return "$status"
-          }
-
-          # Hosted images already carry D-Bus and may eventually carry
-          # gnome-keyring too. Avoid an unnecessary apt index refresh: the
-          # image's configured Azure mirror can stall indefinitely while
-          # fetching package indexes or archives. The image's package metadata
-          # is sufficient for installing its own release packages, and a slow
-          # first download gets one retry through the official Ubuntu mirrors.
-          if ! command -v gnome-keyring-daemon >/dev/null 2>&1 || ! command -v dbus-run-session >/dev/null 2>&1; then
-            install_keyring_packages
-          fi
-          for command in gnome-keyring-daemon dbus-run-session; do
-            if ! command -v "$command" >/dev/null 2>&1; then
-              echo "::error::Linux keyring setup completed without required command: ${command}"
-              exit 1
-            fi
-          done
-          # gnome-keyring-daemon cannot create/unlock the default collection
-          # unless the keyrings directory already exists with owner-only
-          # permissions. This preparation (and the unlock in the test step)
-          # is zalando/go-keyring's own CI recipe — the upstream-proven shape.
-          mkdir -p "$HOME/.cache/"
-          mkdir -p "$HOME/.local/share/keyrings/"
-          chmod -R 700 "$HOME/.local/"
-          # Arms the dbus-run-session wrapper in the test step below: the
-          # daemon must be unlocked inside the same session the tests run in,
-          # so the wrapper cannot live in this step.
-          echo "QURL_CLI_KEYRING_DBUS=1" >> "$GITHUB_ENV"
 
       - name: Build and smoke the Windows CLI executable
         if: runner.os == 'Windows'
@@ -619,21 +527,7 @@ jobs:
 
       - name: Run tests
         shell: bash
-        run: |
-          if [ "${QURL_CLI_KEYRING_DBUS:-}" = "1" ]; then
-            # The unlock password must be non-empty and piped to the daemon
-            # inside the same D-Bus session the tests run in; an empty
-            # password leaves the Secret Service refusing every store with
-            # "failed to unlock correct collection
-            # '/org/freedesktop/secrets/aliases/default'". The incantation is
-            # copied from zalando/go-keyring's own CI (a throwaway password
-            # for an ephemeral runner keyring, not a secret). -eo pipefail
-            # makes a failed unlock redden this step itself instead of
-            # surfacing as a confusing failure inside the tests.
-            dbus-run-session -- bash -c "set -eo pipefail; echo 'somecredstorepass' | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/..."
-          else
-            go test -count=1 ./apps/cli/...
-          fi
+        run: go test -count=1 ./apps/cli/...
 
   customer-artifacts:
     name: cli / customer journey artifacts
@@ -672,6 +566,8 @@ jobs:
       - name: Build exact packaged customer artifacts once
         env:
           CALLER_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
           scripts/build-cli-customer-journey-artifacts.sh \

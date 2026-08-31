@@ -100,23 +100,11 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		device.PrivateKeyB64 == "" || device.PublicKeyB64 == "" {
 		t.Fatal("one-time Windows customer login did not persist a complete device identity")
 	}
+	recordSandboxCleanupDeviceKey(t, device.DeviceAPIKeyID)
 	if cleanupJWT != "" {
 		registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
 	}
 	assertWindowsSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
-	logout := runWindowsSandboxCLI(t, binary, cliEnv, "-o", "json", "logout")
-	if logout.err != nil {
-		t.Fatalf("post-enrollment Windows logout: %v; stderr %q", logout.err, logout.stderr)
-	}
-	var logoutResult struct {
-		Removed []string `json:"removed"`
-	}
-	if err := json.Unmarshal([]byte(logout.stdout), &logoutResult); err != nil {
-		t.Fatalf("decode post-enrollment Windows logout output: %v", err)
-	}
-	if len(logoutResult.Removed) != 0 {
-		t.Fatalf("post-enrollment Windows logout removed legacy account-key stores: %v", logoutResult.Removed)
-	}
 
 	whoami := runWindowsSandboxCLI(t, binary, cliEnv, "-o", "json", "whoami")
 	if whoami.err != nil {
@@ -168,7 +156,8 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 
 	connectorID := namespace.ConnectorID
 	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, device.DeviceAPIKey)
-	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL, "--id", connectorID)
+	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
+		"--id", connectorID, "--description", sandboxJourneyResourceDescription(t, cliEnv))
 	cridValue := strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
 		t.Fatalf("default Windows background publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
@@ -186,10 +175,10 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 	}
 
 	initial := waitWindowsSandboxState(t, binary, cliEnv, cridValue, "on", "serving", 2*time.Minute)
-	inspect := windowsSandboxLifecycle(t, binary, cliEnv, "inspect", cridValue)
-	if inspect != initial {
-		t.Fatalf("Windows inspect state = %+v, want status state %+v", inspect, initial)
-	}
+	inspect := runWindowsSandboxCLI(t, binary, cliEnv, "-o", "json", "inspect", cridValue)
+	assertHealthySandboxInspection(t, []byte(inspect.stdout), inspect.err, inspect.stderr,
+		cridValue, local.ResourceID, initial.DesiredState, initial.ConnectionState, initial.ServingEpoch,
+		bootstrapKey, cleanupJWT, device.DeviceAPIKey)
 	assertWindowsSandboxListContains(t, binary, cliEnv, cridValue)
 	assertWindowsSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
 
@@ -283,7 +272,10 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		t.Fatalf("controlled-failure Windows login: %v; stderr %q", login.err, login.stderr)
 	}
 	device := loadWindowsSandboxAgentState(t, stateDir)
-	registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
+	recordSandboxCleanupDeviceKey(t, device.DeviceAPIKeyID)
+	if cleanupJWT != "" {
+		registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
+	}
 	assertWindowsSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
 	jobManager := connectorservice.NewUserJobManager()
@@ -304,7 +296,8 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	}))
 	defer backend.Close()
 	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], namespace.ConnectorID, device.DeviceAPIKey)
-	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL, "--id", namespace.ConnectorID)
+	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
+		"--id", namespace.ConnectorID, "--description", sandboxJourneyResourceDescription(t, cliEnv))
 	cridValue = strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
 		t.Fatalf("controlled-failure Windows publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
@@ -572,7 +565,8 @@ func assertWindowsSandboxListContains(t *testing.T, binary string, env map[strin
 func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]string) {
 	t.Helper()
 	target := fmt.Sprintf("https://example.com/?qurl-private-windows-journey=%d", time.Now().UnixNano())
-	published := runWindowsSandboxCLI(t, binary, env, "-o", "json", "publish", target, "--description", journeyDescription)
+	published := runWindowsSandboxCLI(t, binary, env, "-o", "json", "publish", target,
+		"--description", sandboxJourneyResourceDescription(t, env))
 	if published.err != nil {
 		t.Fatalf("Windows remote publish: %v; stderr %q", published.err, published.stderr)
 	}

@@ -415,7 +415,7 @@ func (s *nativeSession) recordRetry(err error, wait time.Duration) {
 	s.mu.Unlock()
 }
 
-func classifyShareFailure(err error) (category, code string) {
+func classifyShareFailure(err error) (category, code string) { //nolint:gocognit,gocyclo // Keep the closed failure taxonomy in one precedence-ordered boundary.
 	if err == nil {
 		return diagnosticFailureUnknown, ""
 	}

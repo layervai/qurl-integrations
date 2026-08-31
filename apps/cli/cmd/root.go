@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -57,9 +58,6 @@ type globalOpts struct {
 	now          func() time.Time
 	sleep        func(time.Duration)
 	newRequestID func() string
-	// newCredentialStore builds the storage chain; tests inject a fake
-	// keyring so unit tests never touch a developer's real one.
-	newCredentialStore func(dir string, onFileRead func()) *auth.Chain
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
@@ -119,6 +117,7 @@ type rootOption func(*globalOpts)
 
 type registeredNativeRuntime interface {
 	Handoff() (qurl.AgentStateStore, error)
+	RecoverCredentialAfterDeviceAuthorizationFailure(context.Context, int, string, func(context.Context) (string, error)) error
 	Close() error
 }
 
@@ -243,7 +242,6 @@ QURL_API_KEY for the same one-time bootstrap.`,
 		deleteCmd(opts),
 		daemonCmd(opts),
 		loginCmd(opts),
-		logoutCmd(opts),
 		whoamiCmd(opts),
 		versionCmd(version),
 		completionCmd(),
@@ -256,9 +254,6 @@ QURL_API_KEY for the same one-time bootstrap.`,
 func (o *globalOpts) applyDefaults() {
 	if o.configDir == "" {
 		o.configDir = config.DefaultDir()
-	}
-	if o.newCredentialStore == nil {
-		o.newCredentialStore = auth.NewStore
 	}
 	if o.openBrowser == nil {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
@@ -424,15 +419,6 @@ func (o *globalOpts) errColor() bool {
 	return output.ResolveColor(output.ColorAuto, o.lookupEnv, o.streams.ErrIsTTY)
 }
 
-// credentialStore builds the legacy account-key storage chain. Current login
-// never writes it; successful enrollment and logout use it only to remove
-// copies left by earlier CLI builds.
-func (o *globalOpts) credentialStore() *auth.Chain {
-	return o.newCredentialStore(o.configDir, func() {
-		o.printer().Warnf("%s", msgKeyringUnavailable)
-	})
-}
-
 // newClient opens the persisted registered-device identity. The account key
 // is consulted only when the native state is missing or the Hub explicitly
 // rejects the stored device credential. A warm command does not read it.
@@ -464,7 +450,7 @@ func (o *globalOpts) newClient(ctx context.Context) (qurlapi.Client, error) {
 // ordinary warm starts do not read it or pass it into the background daemon.
 // v2 has no stored-account-key compatibility path.
 func (o *globalOpts) apiCredential() (string, error) {
-	key, _, err := auth.Resolve(o.lookupEnv, nil)
+	key, _, err := auth.Resolve(o.lookupEnv)
 	if err != nil {
 		return "", err
 	}
@@ -493,13 +479,12 @@ func (o *globalOpts) apiClient(key string) (qurlapi.AccountClient, error) {
 // registration or recovery attempt. It loads the key lazily unless login
 // supplies it explicitly.
 type registeredAccountBootstrap struct {
-	opts                     *globalOpts
-	client                   qurlapi.AccountClient
-	key                      string
-	identity                 *qurlapi.Identity
-	enrollmentIdempotencyKey string
-	lazy                     bool
-	used                     bool
+	opts                              *globalOpts
+	client                            qurlapi.AccountClient
+	key                               string
+	identity                          *qurlapi.Identity
+	explicitValidatedAccountAuthority bool
+	enrollmentIdempotencyKey          string
 }
 
 type deviceAccountConflictError struct {
@@ -559,7 +544,10 @@ func bindRegisteredDeviceOwner(
 }
 
 func newRegisteredAccountBootstrap(opts *globalOpts, client qurlapi.AccountClient, key string, identity *qurlapi.Identity) *registeredAccountBootstrap {
-	return &registeredAccountBootstrap{opts: opts, client: client, key: key, identity: identity, lazy: client == nil}
+	return &registeredAccountBootstrap{
+		opts: opts, client: client, key: key, identity: identity,
+		explicitValidatedAccountAuthority: client != nil && identity != nil && strings.TrimSpace(key) != "",
+	}
 }
 
 func (b *registeredAccountBootstrap) load(ctx context.Context) (qurlapi.AccountClient, string, *qurlapi.Identity, error) {
@@ -581,7 +569,6 @@ func (b *registeredAccountBootstrap) load(ctx context.Context) (qurlapi.AccountC
 		}
 		b.identity = identity
 	}
-	b.used = true
 	return b.client, b.key, b.identity, nil
 }
 
@@ -618,18 +605,6 @@ func (b *registeredAccountBootstrap) enrollmentCredential(ctx context.Context, r
 func (b *registeredAccountBootstrap) recoveryCredential(ctx context.Context) (string, error) {
 	_, key, _, err := b.load(ctx)
 	return key, err
-}
-
-func (b *registeredAccountBootstrap) retireLegacyKey() {
-	if !b.lazy || !b.used {
-		return
-	}
-	if _, err := b.opts.credentialStore().Delete(); err != nil {
-		// Registration is already durable. Match explicit login: a stale
-		// compatibility-key cleanup failure must not turn enrollment into a
-		// false command failure.
-		b.opts.printer().Warnf("machine enrollment succeeded, but qurl could not remove a legacy stored account key: %v", err)
-	}
 }
 
 // openNativeRegisteredClient opens or creates the machine identity through
@@ -687,21 +662,27 @@ func (o *globalOpts) openNativeRegisteredClient(
 			retErr = errors.Join(retErr, nativeRuntime.Close())
 		}
 	}()
-	store, err := nativeRuntime.Handoff()
-	if err != nil {
-		return nil, nil, err
+	openDeviceClient := func() (qurlapi.Client, error) {
+		store, handoffErr := nativeRuntime.Handoff()
+		if handoffErr != nil {
+			return nil, handoffErr
+		}
+		return qurlapi.NewRegistered(ctx, &qurlapi.Config{
+			BaseURL:      origin,
+			Version:      o.version,
+			Verbose:      o.verboseLogger(),
+			Sleep:        o.sleep,
+			NewRequestID: o.newRequestID,
+		}, store)
 	}
-	client, err := qurlapi.NewRegistered(ctx, &qurlapi.Config{
-		BaseURL:      origin,
-		Version:      o.version,
-		Verbose:      o.verboseLogger(),
-		Sleep:        o.sleep,
-		NewRequestID: o.newRequestID,
-	}, store)
+	client, err := openDeviceClient()
 	if err != nil {
 		return nil, nil, err
 	}
 	deviceIdentity, err := client.Me(ctx)
+	client, deviceIdentity, err = repairExplicitLoginDeviceAuthorization(
+		ctx, nativeRuntime, bootstrap, openDeviceClient, client, deviceIdentity, err,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -725,9 +706,40 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if err := bindRegisteredDeviceOwner(ctx, registry, stateDir, deviceKeyID, deviceIdentity.OwnerID); err != nil {
 		return nil, nil, err
 	}
-	bootstrap.retireLegacyKey()
 	o.nativeRuntime = nativeRuntime
 	return client, deviceIdentity, nil
+}
+
+func repairExplicitLoginDeviceAuthorization(
+	ctx context.Context,
+	nativeRuntime registeredNativeRuntime,
+	bootstrap *registeredAccountBootstrap,
+	openDeviceClient func() (qurlapi.Client, error),
+	client qurlapi.Client,
+	deviceIdentity *qurlapi.Identity,
+	requestErr error,
+) (qurlapi.Client, *qurlapi.Identity, error) {
+	// Explicit login already validated this exact account key. If a warm native
+	// open then exposes the exact registered-device invalid-key response, allow
+	// the connector to spend that authority once and retry this request once.
+	// Ordinary warm commands never enter this branch, even if Hub recovery had
+	// to load bootstrap authority while opening the native runtime.
+	var apiErr *qurlapi.Error
+	if requestErr != nil && bootstrap.explicitValidatedAccountAuthority && errors.As(requestErr, &apiErr) &&
+		apiErr.StatusCode == http.StatusUnauthorized && apiErr.Code == "api_key_invalid" {
+		if repairErr := nativeRuntime.RecoverCredentialAfterDeviceAuthorizationFailure(
+			ctx, apiErr.StatusCode, apiErr.Code, bootstrap.recoveryCredential,
+		); repairErr != nil {
+			return nil, nil, repairErr
+		}
+		repairedClient, openErr := openDeviceClient()
+		if openErr != nil {
+			return nil, nil, openErr
+		}
+		repairedIdentity, retryErr := repairedClient.Me(ctx)
+		return repairedClient, repairedIdentity, retryErr
+	}
+	return client, deviceIdentity, requestErr
 }
 
 func (o *globalOpts) closeAPIClient() error {

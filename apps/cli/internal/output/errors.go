@@ -72,7 +72,7 @@ func renderErrorLines(p *Printer, err error) []string {
 // enroll/refresh path wraps it (`refresh native assignment binding: %w`) or
 // after the SDK returns it inside an *AssignmentError. A mapping that only
 // fired on a bare sentinel would be dead code on the real path.
-func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
+func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) { //nolint:gocyclo // Keep ordered terminal-cause rendering in one boundary.
 	headline, hint, includeDetail := "", "", true
 	if resourceHeadline, resourceHint, ok := connectorResourceErrorPosture(err); ok {
 		return renderConnectorPosture(p, head, err, resourceHeadline, resourceHint, true), true

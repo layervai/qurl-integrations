@@ -21,8 +21,7 @@ import (
 //
 // Order matters and is pinned by tests: the key is validated first, then an
 // X25519 device identity is registered through NHP, then the resulting device
-// REST credential is checked against the same account. Only after that full
-// transition succeeds are any legacy stored account-key copies removed.
+// REST credential is checked against the same account.
 func loginCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -71,11 +70,6 @@ key.`,
 			}
 			opts.registeredClient = client
 			opts.registeredIdentity = deviceIdentity
-			if _, err := opts.credentialStore().RemoveAll(); err != nil {
-				// Enrollment and the device-owner binding are already durable. A legacy-key
-				// cleanup failure must not tell the user that enrollment failed.
-				opts.printer().Warnf("machine enrollment succeeded, but qurl could not remove a legacy stored account key: %v", err)
-			}
 			return opts.printer().Login(deviceIdentity)
 		},
 	}

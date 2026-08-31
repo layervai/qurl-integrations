@@ -48,10 +48,6 @@ const (
 	// hand — typed at login or stored — is the thing the service refused.
 	hintKeyInvalid = "Hint: the qURL service doesn't recognize this API key. Re-copy it from the qURL dashboard, then run `qurl login` again (or update QURL_API_KEY if that's where it lives)."
 
-	// Storage backend labels used in login/logout confirmations.
-	labelKeyring        = "OS keyring"
-	labelCredentialFile = "credential file"
-
 	// labelCRID prefixes the copyable identity line every document that has
 	// a CRID ends with, so publish and the Connector serve note cannot drift
 	// into two spellings of the same label.
@@ -59,14 +55,6 @@ const (
 
 	// msgDeviceEnrolled opens the login confirmation; %s is the account.
 	msgDeviceEnrolled = "Enrolled this device for %s."
-
-	// msgLoggedOut confirms legacy-key removal without claiming that the
-	// durable registered device identity was deleted. %s lists the storage
-	// that held the old account key.
-	msgLoggedOut = "Removed a legacy qURL account API key from the %s. This device remains enrolled."
-
-	// msgNothingStored is logout's idempotent no-op note (still exit 0).
-	msgNothingStored = "No legacy account API key is stored on this machine; nothing to remove."
 
 	// msgSavedTo confirms a completed download: destination, then size.
 	msgSavedTo = "Saved to %s (%d bytes)."
@@ -270,12 +258,8 @@ func CustomerMessages() []string {
 		hintFrozen,
 		hintExpired,
 		hintKeyInvalid,
-		labelKeyring,
-		labelCredentialFile,
 		labelCRID,
 		msgDeviceEnrolled,
-		msgLoggedOut,
-		msgNothingStored,
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,

@@ -9,11 +9,6 @@ const exampleCRID = "aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledf
 // referenced by both the commands and the jargon-gate test, so the strings a
 // customer sees and the strings the gate vets can never drift apart.
 const (
-	// msgKeyringUnavailable is the file-fallback warning: emitted by login
-	// when the key had to be stored in the fallback file, and once per
-	// invocation by any command that reads the key from that file.
-	msgKeyringUnavailable = "OS keyring storage isn't available on this system; your qURL API key is kept in a file only your user can read (mode 0600)"
-
 	// msgVerifyMismatch is printed (stderr only) when a resolve response
 	// fails CRID verification; nothing is emitted on stdout and the exit
 	// code is 12.
@@ -67,7 +62,6 @@ const (
 // package can emit, for the jargon gate.
 func customerMessages() []string {
 	return []string{
-		msgKeyringUnavailable,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgNeedsYes,

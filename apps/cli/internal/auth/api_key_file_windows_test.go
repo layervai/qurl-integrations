@@ -49,7 +49,7 @@ func TestWindowsAPIKeyFileRejectsBroadACL(t *testing.T) {
 		nil, nil, acl, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path}), &probeStore{}); !errors.Is(err, ErrInvalidKey) {
+	if _, _, err := Resolve(lookupFrom(map[string]string{EnvAPIKeyFile: path})); !errors.Is(err, ErrInvalidKey) {
 		t.Fatalf("broad Windows API-key ACL error = %v, want ErrInvalidKey", err)
 	}
 }

@@ -21,10 +21,12 @@ from typing import Any
 MAX_RESPONSE = 64 * 1024
 REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
+DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,19}\Z")
 LANE = re.compile(r"(?:linux|macos|windows)\Z")
 RUN_NAME = re.compile(r"qurl CLI CI [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/(?:linux|macos|windows)\Z")
+CLEANUP_ID_FILE = re.compile(r"device-key-[0-9a-f]{64}\Z")
 MAX_ATTEMPTS = 3
 
 
@@ -370,6 +372,115 @@ def sweep(args: argparse.Namespace) -> None:
     print(f"reconciled {len(resource_ids)} resources and {len(key_ids)} credentials")
 
 
+def run_identity(args: argparse.Namespace) -> tuple[str, str]:
+    if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(args.run_attempt):
+        raise CredentialError("run identity must use canonical positive integers")
+    if not LANE.fullmatch(args.lane):
+        raise CredentialError("platform lane is invalid")
+    if args.runtime not in {"host", "hardened_container"}:
+        raise CredentialError("journey runtime is invalid")
+    name = f"qurl CLI CI {args.run_id}/{args.run_attempt}/{args.lane}"
+    description = f"qurl CLI CI resource {args.run_id}/{args.run_attempt}/{args.runtime}"
+    return name, description
+
+
+def run_device_key_names(args: argparse.Namespace) -> set[str]:
+    # TODO(upstream-contract): qurl-service stores each native device key as
+    # "agent:" + AgentID, and the tagged harness derives AgentID from this
+    # exact run/attempt/runtime plus its smoke or controlled-failure phase.
+    # Keep both sides in lockstep so a lost runner remains exactly cleanable
+    # without moving a bearer credential or cleanup receipt between jobs.
+    runtime_code = {"host": "h", "hardened_container": "c"}[args.runtime]
+    return {
+        f"agent:qurl-share-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
+        for label_code in ("s", "f")
+    }
+
+
+def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
+    if path is None or not path.exists():
+        return set()
+    if not path.is_absolute() or path == pathlib.Path(path.anchor):
+        raise CredentialError("cleanup ID directory must be an absolute non-root path")
+    before = path.lstat()
+    private = os.name == "nt" or (before.st_uid == os.getuid() and not before.st_mode & 0o077)
+    if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode) or not private:
+        raise CredentialError("cleanup ID directory is not one private directory")
+    entries = list(path.iterdir())
+    if len(entries) > 16:
+        raise CredentialError("cleanup ID directory exceeds its file limit")
+    result: set[str] = set()
+    for entry in entries:
+        if not CLEANUP_ID_FILE.fullmatch(entry.name):
+            raise CredentialError("cleanup ID directory contains an unexpected entry")
+        key_id = private_value(entry, "device API key ID")
+        if not KEY_ID.fullmatch(key_id):
+            raise CredentialError("cleanup device API key ID is malformed")
+        digest = hashlib.sha256(key_id.encode("ascii")).hexdigest()
+        if entry.name != "device-key-" + digest:
+            raise CredentialError("cleanup device API key ID filename does not match its value")
+        result.add(key_id)
+    return result
+
+
+def reconcile_run(args: argparse.Namespace) -> None:
+    name, description = run_identity(args)
+    device_key_names = run_device_key_names(args)
+    device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
+    endpoint, jwt, _ = authenticated_owner(args)
+
+    resources = paged_rows(endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None)
+    resource_ids: list[str] = []
+    for row in resources:
+        if row.get("description") != description:
+            continue
+        resource_id = row.get("resource_id")
+        if not isinstance(resource_id, str):
+            raise CredentialError("run-scoped qURL resource has no resource ID")
+        resource_ids.append(resource_id)
+    for resource_id in dict.fromkeys(resource_ids):
+        retry_resource_delete(endpoint, jwt, resource_id)
+
+    credentials = paged_rows(endpoint, jwt, "/v1/api-keys", "qURL credential cleanup")
+    key_ids: list[str] = []
+    seen_device_ids: set[str] = set()
+    for row in credentials:
+        key_id = row.get("key_id")
+        if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
+            raise CredentialError("qURL credential cleanup row has a malformed key ID")
+        row_name = row.get("name")
+        if row_name == name:
+            if row.get("kind") != "api_key" or row.get("scopes") != CUSTOMER_SCOPES:
+                raise CredentialError("run cleanup customer credential has an unexpected authority shape")
+            key_ids.append(key_id)
+        if key_id in device_key_ids or row_name in device_key_names:
+            if row.get("kind") != "device" or row_name not in device_key_names or row.get("scopes") != DEVICE_SCOPES:
+                raise CredentialError("run cleanup device credential has an unexpected authority shape")
+            seen_device_ids.add(key_id)
+            key_ids.append(key_id)
+    # A device key that the harness already revoked is correctly absent from
+    # the active inventory. Any still-active recorded key must be visible and
+    # have the exact device scope set before this controller can delete it.
+    missing_device_ids = device_key_ids - seen_device_ids
+    if missing_device_ids:
+        all_credentials = paged_rows(
+            endpoint, jwt, "/v1/api-keys", "qURL revoked credential cleanup", status_filter=None
+        )
+        revoked_ids = {
+            row.get("key_id")
+            for row in all_credentials
+            if row.get("status") == "revoked"
+            and row.get("kind") == "device"
+            and row.get("name") in device_key_names
+            and row.get("scopes") == DEVICE_SCOPES
+        }
+        if not missing_device_ids.issubset(revoked_ids):
+            raise CredentialError("recorded device credential is absent from the owner inventory")
+    for key_id in dict.fromkeys(key_ids):
+        retry_revoke(endpoint, jwt, key_id)
+    print(f"reconciled {len(resource_ids)} run resources and {len(key_ids)} run credentials")
+
+
 def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
     idempotency = "qurl-cli-ci-" + hashlib.sha256(name.encode("ascii")).hexdigest()
     body = {"kind": "api_key", "name": name, "scopes": CUSTOMER_SCOPES}
@@ -510,7 +621,8 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     create_parser = commands.add_parser("create")
     identify_parser = commands.add_parser("identify")
-    for current in (create_parser, identify_parser, commands.add_parser("sweep")):
+    reconcile_parser = commands.add_parser("reconcile-run")
+    for current in (create_parser, identify_parser, commands.add_parser("sweep"), reconcile_parser):
         current.add_argument("--token-endpoint", required=True)
         current.add_argument("--audience", required=True)
         current.add_argument("--qurl-endpoint", required=True)
@@ -525,6 +637,12 @@ def parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--run-attempt", required=True)
     create_parser.add_argument("--lane", required=True)
     create_parser.set_defaults(handler=create)
+    reconcile_parser.add_argument("--run-id", required=True)
+    reconcile_parser.add_argument("--run-attempt", required=True)
+    reconcile_parser.add_argument("--lane", required=True)
+    reconcile_parser.add_argument("--runtime", required=True)
+    reconcile_parser.add_argument("--cleanup-id-dir", type=pathlib.Path)
+    reconcile_parser.set_defaults(handler=reconcile_run)
     revoke_parser = commands.add_parser("revoke")
     revoke_parser.add_argument("--qurl-endpoint", required=True)
     revoke_parser.add_argument("--credential-dir", type=pathlib.Path, required=True)

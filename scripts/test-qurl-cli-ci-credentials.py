@@ -46,6 +46,7 @@ class FakeAPI:
         self.keys: dict[str, dict[str, object]] = {}
         self.resources = [
             {
+                "description": "qurl CLI CI resource 1231/2/host",
                 "resource_id": "r_customer_ci",
                 "status": "active",
                 "target_url": "https://example.com/?qurl-private-sandbox-device-journey=1",
@@ -201,6 +202,12 @@ def test_unbounded_valid_pagination() -> None:
 
 def main() -> None:
     test_unbounded_valid_pagination()
+    assert credentials.run_device_key_names(
+        argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
+    ) == {"agent:qurl-share-r1231-a2-hs", "agent:qurl-share-r1231-a2-hf"}
+    assert credentials.run_device_key_names(
+        argparse.Namespace(run_id="1231", run_attempt="2", runtime="hardened_container")
+    ) == {"agent:qurl-share-r1231-a2-cs", "agent:qurl-share-r1231-a2-cf"}
     fake = FakeAPI()
     with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(credentials, "request", fake), mock.patch.object(
         credentials.time, "sleep", lambda _: None
@@ -234,10 +241,95 @@ def main() -> None:
         credentials.revoke_persisted(args.qurl_endpoint, recovery)
         assert (recovery / "api-key-id").read_text(encoding="utf-8") == fake.key_id
 
+        run_key_id = "key_RunKey123456"
+        device_key_id = "key_DevRun123456"
+        unrecorded_device_key_id = "key_DevFail12345"
+        unrelated_key_id = "key_OtherKey1234"
+        unrelated_device_key_id = "key_OtherDev1234"
+        fake.keys[run_key_id] = {
+            "key_id": run_key_id,
+            "kind": "api_key",
+            "name": "qurl CLI CI 1231/2/linux",
+            "scopes": credentials.CUSTOMER_SCOPES,
+            "status": "active",
+        }
+        fake.keys[device_key_id] = {
+            "key_id": device_key_id,
+            "kind": "device",
+            "name": "agent:qurl-share-r1231-a2-hs",
+            "scopes": credentials.DEVICE_SCOPES,
+            "status": "active",
+        }
+        fake.keys[unrecorded_device_key_id] = {
+            "key_id": unrecorded_device_key_id,
+            "kind": "device",
+            "name": "agent:qurl-share-r1231-a2-hf",
+            "scopes": credentials.DEVICE_SCOPES,
+            "status": "active",
+        }
+        fake.keys[unrelated_key_id] = {
+            "key_id": unrelated_key_id,
+            "kind": "api_key",
+            "name": "qurl CLI CI 9999/1/linux",
+            "scopes": credentials.CUSTOMER_SCOPES,
+            "status": "active",
+        }
+        fake.keys[unrelated_device_key_id] = {
+            "key_id": unrelated_device_key_id,
+            "kind": "device",
+            "name": "agent:qurl-share-r9999-a1-hs",
+            "scopes": credentials.DEVICE_SCOPES,
+            "status": "active",
+        }
+        cleanup_ids = root / "cleanup-ids"
+        cleanup_ids.mkdir(mode=0o700)
+        device_digest = credentials.hashlib.sha256(device_key_id.encode("ascii")).hexdigest()
+        private_file(cleanup_ids, "device-key-" + device_digest, device_key_id)
+        credentials.reconcile_run(
+            argparse.Namespace(
+                **vars(args),
+                cleanup_id_dir=cleanup_ids,
+                lane="linux",
+                run_attempt="2",
+                run_id="1231",
+                runtime="host",
+            )
+        )
+        assert set(fake.deleted_resources) == {"r_customer_ci"}
+        assert {run_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
+        assert unrelated_key_id not in fake.deleted_keys
+        assert unrelated_device_key_id not in fake.deleted_keys
+
+        malformed_device_key_id = "key_BadDevice123"
+        fake.keys[malformed_device_key_id] = {
+            "key_id": malformed_device_key_id,
+            "kind": "api_key",
+            "name": "agent:qurl-share-r1231-a2-hs",
+            "scopes": credentials.DEVICE_SCOPES,
+            "status": "active",
+        }
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    cleanup_id_dir=None,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert "unexpected authority shape" in str(exc)
+        else:
+            raise AssertionError("malformed exact-name device credential was not rejected")
+        assert malformed_device_key_id not in fake.deleted_keys
+
         fake.keys[fake.key_id] = {
             "key_id": fake.key_id,
             "kind": "api_key",
             "name": "qurl CLI CI 1233/2/windows",
+            "scopes": credentials.CUSTOMER_SCOPES,
             "status": "active",
         }
         credentials.sweep(args)

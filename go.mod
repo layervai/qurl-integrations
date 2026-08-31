@@ -13,12 +13,11 @@ require (
 	github.com/fatedier/frp v0.71.0
 	github.com/fatedier/golib v0.8.2
 	github.com/layervai/qurl-conformance v0.13.0
-	github.com/layervai/qurl-connector v0.8.7
-	github.com/layervai/qurl-go v0.8.1
+	github.com/layervai/qurl-connector v0.8.8
+	github.com/layervai/qurl-go v0.8.3
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.55.0
 	golang.org/x/mod v0.38.0
 	golang.org/x/sys v0.47.0
@@ -55,14 +54,12 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-oidc/v3 v3.18.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
-	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
-	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.17 // indirect
@@ -144,3 +141,5 @@ replace github.com/hashicorp/yamux => github.com/fatedier/yamux v0.0.0-202508250
 // LayerV's signed FRP release carries the reviewed InitialRunID hook required
 // to bind one native NHP admission cycle to the matching FRP Login.
 replace github.com/fatedier/frp => github.com/layervai/frp v1.0.0
+
+// Local validation only. Remove before committing.

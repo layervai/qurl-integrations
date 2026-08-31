@@ -12,6 +12,8 @@ repository=$2
 head_sha=$3
 run_id=$4
 run_attempt=$5
+hub_public_key_b64=${QURL_RELEASE_HUB_PUBLIC_KEY_B64:-}
+hub_public_key_sha256=${QURL_RELEASE_HUB_PUBLIC_KEY_SHA256:-}
 
 [[ "$repository" == "layervai/qurl-integrations" ]] || {
   echo "unsupported repository" >&2
@@ -42,6 +44,25 @@ run_attempt=$5
   exit 65
 }
 
+python3 - "$hub_public_key_b64" "$hub_public_key_sha256" <<'PY'
+import base64
+import binascii
+import hashlib
+import re
+import sys
+
+try:
+    key = base64.b64decode(sys.argv[1], validate=True)
+except (binascii.Error, ValueError) as exc:
+    raise SystemExit(f"release Hub public key is not canonical base64: {exc}") from exc
+if len(key) != 32:
+    raise SystemExit("release Hub public key must decode to 32 bytes")
+if not re.fullmatch(r"[0-9a-f]{64}", sys.argv[2]):
+    raise SystemExit("release Hub public-key SHA-256 is malformed")
+if hashlib.sha256(key).hexdigest() != sys.argv[2]:
+    raise SystemExit("release Hub public key does not match its SHA-256")
+PY
+
 qurl_go_version=$(GOWORK=off GOFLAGS=-mod=readonly go list -m -f '{{.Version}}' github.com/layervai/qurl-go)
 connector_version=$(GOWORK=off GOFLAGS=-mod=readonly go list -m -f '{{.Version}}' github.com/layervai/qurl-connector)
 for selection in "$qurl_go_version" "$connector_version"; do
@@ -62,7 +83,8 @@ build_target() {
   local qurl_path="$output_dir/qurl-${suffix}${executable_suffix}"
 
   CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" GOWORK=off GOFLAGS=-mod=readonly \
-    go build -trimpath -buildvcs=true -ldflags="-buildid= -X main.version=${version}" \
+    go build -trimpath -buildvcs=true \
+      -ldflags="-buildid= -s -w -X main.version=${version} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${hub_public_key_b64}" \
       -o "$qurl_path" ./apps/cli/cmd
   chmod 0500 "$qurl_path"
 }
@@ -77,10 +99,14 @@ for binary in "$output_dir"/qurl-*; do
     echo "build output is not one regular file" >&2
     exit 73
   }
+  grep -aFq -- "$hub_public_key_b64" "$binary" || {
+    echo "customer binary does not carry the exact release Hub trust root" >&2
+    exit 73
+  }
 done
 
 manifest="$output_dir/manifest.json"
-python3 - "$output_dir" "$repository" "$head_sha" "$run_id" "$run_attempt" "$version" "$qurl_go_version" "$connector_version" <<'PY'
+python3 - "$output_dir" "$repository" "$head_sha" "$run_id" "$run_attempt" "$version" "$qurl_go_version" "$connector_version" "$hub_public_key_sha256" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -98,6 +124,7 @@ document = {
     "run_id": int(sys.argv[4]),
     "run_attempt": int(sys.argv[5]),
     "version": sys.argv[6],
+    "release_hub_public_key_sha256": sys.argv[9],
     "modules": {
         "github.com/layervai/qurl-go": sys.argv[7],
         "github.com/layervai/qurl-connector": sys.argv[8],

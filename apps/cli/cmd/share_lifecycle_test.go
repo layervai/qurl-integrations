@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,9 +50,12 @@ func (r *diagnosticDaemonRegistry) DisableTerminal(context.Context, string, uint
 }
 
 type diagnosticDaemonSession struct {
-	done       chan struct{}
-	stop       sync.Once
-	diagnostic connectordaemon.ResourceDiagnostic
+	done               chan struct{}
+	stop               sync.Once
+	mu                 sync.Mutex
+	diagnostic         connectordaemon.ResourceDiagnostic
+	diagnosticSequence []connectordaemon.ResourceDiagnostic
+	diagnosticCalls    int
 }
 
 func (s *diagnosticDaemonSession) Done() <-chan struct{} { return s.done }
@@ -61,7 +65,27 @@ func (s *diagnosticDaemonSession) Stop(context.Context) error {
 	return nil
 }
 func (s *diagnosticDaemonSession) Diagnostic() connectordaemon.ResourceDiagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.diagnosticSequence) > 0 {
+		index := min(s.diagnosticCalls, len(s.diagnosticSequence)-1)
+		s.diagnosticCalls++
+		return s.diagnosticSequence[index]
+	}
 	return s.diagnostic
+}
+
+func (s *diagnosticDaemonSession) setDiagnosticSequence(sequence ...connectordaemon.ResourceDiagnostic) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.diagnosticSequence = slices.Clone(sequence)
+	s.diagnosticCalls = 0
+}
+
+func (s *diagnosticDaemonSession) diagnosticCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.diagnosticCalls
 }
 
 type diagnosticDaemonFactory struct{ session *diagnosticDaemonSession }
@@ -398,6 +422,90 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	}
 }
 
+func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	now := time.Now().UTC()
+	next := now.Add(time.Second)
+	local := connectorstate.LocalShare{
+		ResourceID: "resource-a", CRID: "crid-a", DesiredState: "on", ServingEpoch: 1,
+	}
+	session := &diagnosticDaemonSession{done: make(chan struct{}), diagnostic: connectordaemon.ResourceDiagnostic{
+		State: "starting", LastTransition: now,
+	}}
+	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: local}, diagnosticDaemonFactory{session: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	server := &connectordaemon.IPCServer{
+		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+	}
+	go func() { done <- server.Run(ctx) }()
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+		readyCancel()
+		cancel()
+		t.Fatal(err)
+	}
+	readyCancel()
+	session.setDiagnosticSequence(
+		connectordaemon.ResourceDiagnostic{State: "starting", LastTransition: now},
+		connectordaemon.ResourceDiagnostic{
+			State: "retrying", LastTransition: now.Add(time.Millisecond), FailureCategory: "platform_denied",
+			FailureCode: "52029", RetryAttempt: 1, NextRetryAt: &next,
+		},
+	)
+	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
+		&local, stateDir, 1, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "failure category platform_denied") ||
+		!strings.Contains(err.Error(), "failure code 52029") || !strings.Contains(err.Error(), "retry attempt 1") {
+		cancel()
+		t.Fatalf("settled diagnostic error = %v, want the retry cause", err)
+	}
+	if calls := session.diagnosticCallCount(); calls < 2 {
+		cancel()
+		t.Fatalf("diagnostic samples = %d, want starting plus one bounded handoff sample", calls)
+	}
+	cancel()
+	if serverErr := <-done; !errors.Is(serverErr, context.Canceled) {
+		t.Fatalf("daemon shutdown = %v", serverErr)
+	}
+}
+
+func TestWaitForSharingReportsMissingDaemonResourceDiagnostic(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	manager, err := connectordaemon.NewManager(emptyForegroundRegistry{}, emptyForegroundFactory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	server := &connectordaemon.IPCServer{
+		SocketPath: connectordaemon.StateSocketPath(stateDir), Manager: manager, JobVersion: "1/test",
+	}
+	go func() { done <- server.Run(ctx) }()
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := (connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}).WaitReady(readyCtx); err != nil {
+		readyCancel()
+		cancel()
+		t.Fatal(err)
+	}
+	readyCancel()
+	local := &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a", ServingEpoch: 1}
+	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
+		local, stateDir, 1, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "daemon running, resource diagnostic absent") ||
+		!strings.Contains(err.Error(), "temporary poll failure") {
+		cancel()
+		t.Fatalf("diagnosed wait error = %v, want redacted missing-resource root cause", err)
+	}
+	cancel()
+	if serverErr := <-done; !errors.Is(serverErr, context.Canceled) {
+		t.Fatalf("daemon shutdown = %v", serverErr)
+	}
+}
+
 func TestWaitForSharingPreservesCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -408,6 +516,18 @@ func TestWaitForSharingPreservesCallerCancellation(t *testing.T) {
 	_, err = waitForSharing(ctx, client, &connectorstate.LocalShare{ResourceID: "resource-a", CRID: "crid-a"}, 1, time.Minute)
 	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "did not start serving") {
 		t.Fatalf("canceled wait error = %v, want unmodified caller cancellation", err)
+	}
+}
+
+func TestWaitForSharingWithDiagnosticsPreservesCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pollErr := errors.New("poll interrupted")
+	_, err := waitForSharingWithDiagnostics(ctx, sharingErrorClient{err: pollErr}, &connectorstate.LocalShare{
+		ResourceID: "resource-a", CRID: "crid-a",
+	}, connectorStateTestDir(t), 1, time.Minute)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, pollErr) || strings.Contains(err.Error(), "daemon state") {
+		t.Fatalf("canceled diagnosed wait error = %v, want the unmodified caller cancellation", err)
 	}
 }
 

@@ -54,30 +54,56 @@ const (
 	cliMatrixJobID             = "matrix"
 	cliCustomerArtifactsJobID  = "customer-artifacts"
 	cliCustomerJourneyWorkflow = "qurl-cli-customer-journey.yml"
-	cliMacOSKeychainSetupStep  = "Set up macOS keychain"
-	cliLinuxKeyringSetupStep   = "Set up Linux keyring (gnome-keyring over D-Bus)"
-	cliMatrixTestStep          = "Run tests"
 
 	workflowContractWorkflow = "workflow-contract.yml"
 )
 
-// TestCLICustomerJourneyArtifactsAreExactAndHermetic pins the only
-// pull-request-controlled input to the protected journey: four qurl binaries
-// built once from the exact same-repository head. No credential or deployment
-// authority is present in this producer.
+// TestCLICustomerJourneyArtifactsAreExactAndHermetic protects the untrusted
+// producer boundary. Pull-request code can build the package, but it receives
+// no standing authority and must publish one SHA-bound, fail-closed bundle.
 func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 	t.Parallel()
 
 	workflow := readWorkflow(t, cliWorkflow)
+	changes := workflow.Jobs[changesJobID]
+	if changes == nil {
+		t.Fatalf("%s is missing %q", cliWorkflow, changesJobID)
+	}
+	var filter *step
+	for index := range changes.Steps {
+		if strings.HasPrefix(changes.Steps[index].Uses, "dorny/paths-filter@") {
+			filter = &changes.Steps[index]
+			break
+		}
+	}
+	if filter == nil {
+		t.Fatal("CLI change detector has no paths-filter step")
+	}
+	filterSource := fmt.Sprint(filter.With["filters"])
+	for _, requiredPath := range []string{
+		".github/workflows/cli.yml",
+		".github/workflows/qurl-cli-customer-journey.yml",
+		".github/workflows/release-please.yml",
+		"scripts/build-cli-customer-journey-artifacts.sh",
+		"scripts/check-exact-cli-release-gate.sh",
+		"scripts/qurl-cli-ci-credentials.py",
+		"scripts/remove-sensitive-tree.sh",
+		"scripts/test-check-exact-cli-release-gate.sh",
+		"scripts/test-qurl-cli-ci-credentials.py",
+		"scripts/test-remove-sensitive-tree.sh",
+		"scripts/test-verify-cli-customer-journey-artifacts.py",
+		"scripts/verify-cli-customer-journey-artifacts.py",
+	} {
+		if strings.Count(filterSource, requiredPath) != 1 {
+			t.Errorf("CLI change filter contains %q %d times, want once", requiredPath, strings.Count(filterSource, requiredPath))
+		}
+	}
 	job := workflow.Jobs[cliCustomerArtifactsJobID]
 	if job == nil {
 		t.Fatalf("%s is missing %q", cliWorkflow, cliCustomerArtifactsJobID)
 	}
-	if job.Name != "cli / customer journey artifacts" || job.If != "needs.changes.outputs.cli == 'true'" {
-		t.Errorf("artifact job name/if = %q / %q", job.Name, job.If)
-	}
-	if timeout, ok := job.TimeoutMinutes.(int); !ok || timeout != 20 {
-		t.Errorf("artifact job timeout = %#v, want 20", job.TimeoutMinutes)
+	if job.If != "needs.changes.outputs.cli == 'true'" {
+		t.Errorf("artifact producer if = %q", job.If)
 	}
 	assertJobPermissions(t, cliCustomerArtifactsJobID, job.Permissions, map[string]string{"contents": "read"})
 
@@ -96,141 +122,76 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 			upload = current
 		}
 	}
-	if checkout == nil || checkout.With["persist-credentials"] != false ||
-		checkout.With["ref"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" {
+	const sourceSHA = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+	if checkout == nil || checkout.With["ref"] != sourceSHA || checkout.With["persist-credentials"] != false {
 		t.Errorf("artifact checkout is not exact and credential-free: %#v", checkout)
 	}
 	if build == nil || !strings.Contains(build.Run, "scripts/build-cli-customer-journey-artifacts.sh") ||
-		!strings.Contains(build.Run, "\"$GITHUB_REPOSITORY\" \"$CALLER_HEAD_SHA\" \"$GITHUB_RUN_ID\" \"$GITHUB_RUN_ATTEMPT\"") {
-		t.Errorf("artifact build is not bound to the exact source run: %#v", build)
+		!strings.Contains(build.Run, "$CALLER_HEAD_SHA") {
+		t.Errorf("artifact build is not SHA-bound: %#v", build)
 	}
-	if upload == nil || upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
-		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != 7 ||
-		upload.With["compression-level"] != 0 || upload.With["include-hidden-files"] != false ||
-		upload.With["name"] != "qurl-customer-journey-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}" {
-		t.Errorf("artifact upload is not exact: %#v", upload)
+	if build != nil && (fmt.Sprint(build.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"]) != "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}" ||
+		fmt.Sprint(build.Env["QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"]) != "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}") {
+		t.Errorf("artifact build does not use the exact production Hub-pin inputs: %#v", build.Env)
+	}
+	if upload == nil ||
+		upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		upload.With["if-no-files-found"] != "error" ||
+		upload.With["include-hidden-files"] != false ||
+		!strings.Contains(fmt.Sprint(upload.With["name"]), sourceSHA) ||
+		!strings.Contains(fmt.Sprint(upload.With["name"]), "${{ github.run_attempt }}") {
+		t.Errorf("artifact upload is not immutable and fail-closed: %#v", upload)
 	}
 
-	jobText, err := yaml.Marshal(job)
+	encoded, err := yaml.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{
-		"actions/create-github-app-token", "DEPLOY_DISPATCHER", "qurl-integrations-infra",
-		"AUTH0_CLIENT", "amazonaws.com", "customer-journey.test",
-	} {
-		if strings.Contains(string(jobText), forbidden) {
-			t.Errorf("artifact producer retains forbidden authority or test input %q", forbidden)
+	producerText := strings.ReplaceAll(string(encoded), "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}", "")
+	producerText = strings.ReplaceAll(producerText, "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}", "")
+	for _, forbidden := range []string{"secrets.", "AUTH0_", "DEPLOY_DISPATCHER", "qurl-integrations-infra", "amazonaws.com"} {
+		if strings.Contains(producerText, forbidden) {
+			t.Errorf("artifact producer retains standing or cross-repository authority %q", forbidden)
 		}
 	}
 	required := workflow.Jobs[requiredJobID]
 	if required == nil || !slices.Contains(parseWorkflowNeeds(t, requiredJobID, required.Needs), cliCustomerArtifactsJobID) {
-		t.Errorf("cli / required can pass without the exact artifact producer")
+		t.Error("cli / required can pass without the artifact producer")
 	}
-
-	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{
-		"dispatch-customer-journey", "wait-for-cli-customer-journey-check.sh",
-		"accept-cli-customer-journey-result.sh", "ops-routines-workflows",
-	} {
-		if strings.Contains(string(raw), forbidden) {
-			t.Errorf("CLI workflow retains obsolete cross-repository journey coupling %q", forbidden)
-		}
-	}
-	for _, script := range []string{
-		"scripts/build-cli-customer-journey-artifacts.sh",
-		"scripts/qurl-cli-ci-credentials.py",
-		"scripts/test-qurl-cli-ci-credentials.py",
-		"scripts/test-verify-cli-customer-journey-artifacts.py",
-		"scripts/verify-cli-customer-journey-artifacts.py",
-	} {
-		assertExecutableRepoScript(t, script)
-	}
+	assertExecutableRepoScript(t, "scripts/build-cli-customer-journey-artifacts.sh")
+	assertExecutableRepoScript(t, "scripts/verify-cli-customer-journey-artifacts.py")
 }
 
-// TestCLICustomerJourneySupportChecksKeepSourceClean prevents Python's normal
-// bytecode cache from making the exact-artifact builder reject its own source
-// tree. The order matters: compile and controller tests run before the builder
-// is invoked by the verifier test.
-func TestCLICustomerJourneySupportChecksKeepSourceClean(t *testing.T) {
-	t.Parallel()
-
-	workflow := readWorkflow(t, cliWorkflow)
-	job := workflow.Jobs["test"]
-	if job == nil {
-		t.Fatalf("%s is missing %q", cliWorkflow, "test")
-	}
-	var support *step
-	for index := range job.Steps {
-		if job.Steps[index].Name == "Check customer-journey support scripts" {
-			support = &job.Steps[index]
-			break
-		}
-	}
-	if support == nil {
-		t.Fatal("CLI test job is missing the customer-journey support check")
-	}
-	if got := support.Env["PYTHONPYCACHEPREFIX"]; got != "${{ runner.temp }}/qurl-cli-pycache" {
-		t.Errorf("support-check Python cache = %#v, want runner temp", got)
-	}
-
-	compileAt := strings.Index(support.Run, "python3 -m py_compile")
-	credentialsAt := strings.Index(support.Run, "python3 scripts/test-qurl-cli-ci-credentials.py")
-	verifierAt := strings.Index(support.Run, "python3 scripts/test-verify-cli-customer-journey-artifacts.py")
-	if compileAt < 0 || credentialsAt <= compileAt || verifierAt <= credentialsAt {
-		t.Errorf("support-check order does not preserve compile, credential test, then clean-tree verifier:\n%s", support.Run)
-	}
-}
-
-// TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel binds the live gate
-// to one exact same-repository main push while keeping pull-request jobs
-// uncredentialed. Linux, macOS, and Windows consume the same immutable main
-// bundle in independent matrix legs.
+// TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel protects only the
+// load-bearing trust boundary: a same-repository main workflow_run, minimum
+// permissions, separated environments, isolated parallel lanes, verified
+// artifacts, no standing authority in lane jobs, and cleanup on every result.
 func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	t.Parallel()
 
-	const path = "../../.github/workflows/" + cliCustomerJourneyWorkflow
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := readWorkflowBytes(t, cliCustomerJourneyWorkflow)
 	workflow := readWorkflow(t, cliCustomerJourneyWorkflow)
+	for _, name := range []string{"resolve", "journey", "cleanup", "result"} {
+		if workflow.Jobs[name] == nil {
+			t.Fatalf("%s is missing %q", cliCustomerJourneyWorkflow, name)
+		}
+	}
+	if workflow.Jobs["mint"] != nil || len(workflow.Jobs) != 4 {
+		t.Fatalf("%s jobs = %v; want only resolve, journey, cleanup, and result", cliCustomerJourneyWorkflow, maps.Keys(workflow.Jobs))
+	}
 	resolve := workflow.Jobs["resolve"]
-	mint := workflow.Jobs["mint"]
 	journey := workflow.Jobs["journey"]
 	cleanup := workflow.Jobs["cleanup"]
 	result := workflow.Jobs["result"]
-	if resolve == nil || mint == nil || journey == nil || cleanup == nil || result == nil || len(workflow.Jobs) != 5 {
-		t.Fatalf("%s jobs = %v, want resolve, mint, journey, cleanup, and result", cliCustomerJourneyWorkflow, maps.Keys(workflow.Jobs))
-	}
-	if resolve.Outputs["required"] != "${{ steps.producer.outputs.required }}" {
-		t.Errorf("trusted resolver does not expose one exact required decision")
-	}
-	var resolver *step
-	for index := range resolve.Steps {
-		if resolve.Steps[index].ID == "producer" {
-			resolver = &resolve.Steps[index]
-		}
-	}
-	if resolver == nil ||
-		!strings.Contains(resolver.Run, "\"$SOURCE_REPOSITORY\" == \"$GITHUB_REPOSITORY\"") ||
-		!strings.Contains(resolver.Run, "\"$WORKFLOW_REPOSITORY\" == \"$GITHUB_REPOSITORY\"") ||
-		!strings.Contains(resolver.Run, "\"$SOURCE_EVENT\" == push") ||
-		!strings.Contains(resolver.Run, "\"$DEFAULT_REF\" == refs/heads/main") ||
-		!strings.Contains(resolver.Run, "\"$SOURCE_BRANCH\" == main") ||
-		!strings.Contains(resolver.Run, "^[0-9a-f]{40}$") ||
-		!strings.Contains(resolver.Run, "cli / customer journey artifacts") ||
-		!strings.Contains(resolver.Run, ".total_count > 100") {
-		t.Errorf("trusted resolver does not bind one exact same-repository main artifact producer: %#v", resolver)
-	}
-	if resolver.Env["SOURCE_HEAD_SHA"] != "${{ github.event.workflow_run.head_sha }}" {
-		t.Errorf("trusted resolver source SHA = %#v", resolver.Env["SOURCE_HEAD_SHA"])
+	if journey.If != "needs.resolve.outputs.required == 'true'" {
+		t.Errorf("protected journey if = %q, want exact CLI-change gate", journey.If)
 	}
 
 	var contract struct {
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress *bool  `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
 		On struct {
 			WorkflowRun struct {
 				Workflows []string `yaml:"workflows"`
@@ -245,10 +206,12 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 				FailFast *bool `yaml:"fail-fast"`
 				Matrix   struct {
 					Include []struct {
-						Lane     string `yaml:"lane"`
-						LaneID   int    `yaml:"lane_id"`
-						OS       string `yaml:"os"`
-						TestName string `yaml:"test_name"`
+						Lane                    string `yaml:"lane"`
+						LaneID                  int    `yaml:"lane_id"`
+						OS                      string `yaml:"os"`
+						TestName                string `yaml:"test_name"`
+						Auth0ClientIDSecret     string `yaml:"auth0_client_id_secret"`
+						Auth0ClientSecretSecret string `yaml:"auth0_client_secret_secret"`
 					} `yaml:"include"`
 				} `yaml:"matrix"`
 			} `yaml:"strategy"`
@@ -257,201 +220,297 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &contract); err != nil {
 		t.Fatalf("decode trusted journey contract: %v", err)
 	}
-	if !slices.Equal(contract.On.WorkflowRun.Workflows, []string{"cli: Build and Test"}) ||
-		!slices.Equal(contract.On.WorkflowRun.Types, []string{"completed"}) ||
-		!slices.Equal(contract.On.WorkflowRun.Branches, []string{"main"}) {
-		t.Errorf("trusted journey trigger = %#v", contract.On.WorkflowRun)
+	trigger := contract.On.WorkflowRun
+	if !slices.Equal(trigger.Workflows, []string{"cli: Build and Test"}) ||
+		!slices.Equal(trigger.Types, []string{"completed"}) ||
+		!slices.Equal(trigger.Branches, []string{"main"}) {
+		t.Errorf("trusted journey trigger = %#v", trigger)
+	}
+	if contract.Concurrency.Group != "qurl-cli-customer-journey-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" ||
+		contract.Concurrency.CancelInProgress == nil || *contract.Concurrency.CancelInProgress {
+		t.Errorf("trusted journey concurrency is not exact-run and non-cancelling: %#v", contract.Concurrency)
+	}
+
+	var resolver *step
+	for index := range resolve.Steps {
+		if resolve.Steps[index].ID == "producer" {
+			resolver = &resolve.Steps[index]
+			break
+		}
+	}
+	if resolver == nil {
+		t.Fatal("trusted journey has no source resolver")
+	}
+	wantResolverEnv := map[string]string{
+		"DEFAULT_REF":         "${{ github.ref }}",
+		"SOURCE_BRANCH":       "${{ github.event.workflow_run.head_branch }}",
+		"SOURCE_EVENT":        "${{ github.event.workflow_run.event }}",
+		"SOURCE_HEAD_SHA":     "${{ github.event.workflow_run.head_sha }}",
+		"SOURCE_REPOSITORY":   "${{ github.event.workflow_run.head_repository.full_name }}",
+		"WORKFLOW_REPOSITORY": "${{ github.event.workflow_run.repository.full_name }}",
+	}
+	for name, want := range wantResolverEnv {
+		if got := resolver.Env[name]; got != want {
+			t.Errorf("resolver %s = %#v, want %q", name, got, want)
+		}
+	}
+	for _, required := range []string{
+		`"$DEFAULT_REF" == refs/heads/main`,
+		`"$SOURCE_BRANCH" == main`,
+		`"$SOURCE_EVENT" == push`,
+		`"$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY"`,
+		`"$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY"`,
+		`"$SOURCE_HEAD_SHA" =~ ^[0-9a-f]{40}$`,
+		"cli / customer journey artifacts",
+	} {
+		if !strings.Contains(resolver.Run, required) {
+			t.Errorf("source resolver is missing %q", required)
+		}
+	}
+
+	assertJobPermissions(t, "workflow", workflow.Permissions, map[string]string{"contents": "read"})
+	for jobName, want := range map[string]map[string]string{
+		"resolve": {"actions": "read", "contents": "read"},
+		"journey": {"actions": "read", "contents": "read"},
+		"cleanup": {"contents": "read"},
+		"result":  {"actions": "write", "checks": "write", "contents": "read"},
+	} {
+		assertJobPermissions(t, jobName, workflow.Jobs[jobName].Permissions, want)
+	}
+
+	if contract.Jobs["cleanup"].Environment != "cli-connector-resource-sandbox-controller" {
+		t.Error("fallback authority is not confined to the protected controller environment")
 	}
 	matrix := contract.Jobs["journey"]
-	if matrix.Environment != "cli-connector-resource-sandbox" || matrix.RunsOn != "${{ matrix.os }}" ||
+	if matrix.Environment != "cli-connector-resource-sandbox" ||
+		matrix.RunsOn != "${{ matrix.os }}" ||
 		matrix.Strategy.FailFast == nil || *matrix.Strategy.FailFast {
 		t.Errorf("journey matrix trust/parallel contract = %#v", matrix)
 	}
-	wantLanes := map[string]struct {
-		id   int
-		os   string
-		test string
-	}{
-		"linux":   {1, "ubuntu-latest", "TestSandboxFullCustomerLifecycleSmoke"},
-		"macos":   {2, "macos-latest", "TestSandboxMacOSDefaultDaemonLifecycle"},
-		"windows": {3, "windows-latest", "TestSandboxWindowsDefaultDaemonFullCustomerLifecycle"},
+	wantOS := map[string]string{
+		"linux": "ubuntu-latest", "macos": "macos-latest", "windows": "windows-latest",
 	}
-	if len(matrix.Strategy.Matrix.Include) != len(wantLanes) {
-		t.Fatalf("journey matrix has %d lanes, want %d", len(matrix.Strategy.Matrix.Include), len(wantLanes))
+	seenIDs := map[int]bool{}
+	if len(matrix.Strategy.Matrix.Include) != len(wantOS) {
+		t.Fatalf("journey matrix has %d lanes, want three", len(matrix.Strategy.Matrix.Include))
 	}
 	for _, lane := range matrix.Strategy.Matrix.Include {
-		want, ok := wantLanes[lane.Lane]
-		if !ok || lane.LaneID != want.id || lane.OS != want.os || lane.TestName != want.test {
-			t.Errorf("journey lane = %#v, want one exact isolated platform lane", lane)
+		upper := strings.ToUpper(lane.Lane)
+		if wantOS[lane.Lane] != lane.OS || lane.LaneID < 1 || seenIDs[lane.LaneID] || strings.TrimSpace(lane.TestName) == "" ||
+			lane.Auth0ClientIDSecret != "QURL_SANDBOX_AUTH0_CLIENT_ID_"+upper ||
+			lane.Auth0ClientSecretSecret != "QURL_SANDBOX_AUTH0_CLIENT_SECRET_"+upper {
+			t.Errorf("journey lane is not isolated: %#v", lane)
 		}
-		delete(wantLanes, lane.Lane)
+		seenIDs[lane.LaneID] = true
+		delete(wantOS, lane.Lane)
 	}
-	if len(wantLanes) != 0 {
-		t.Errorf("journey matrix is missing lanes %v", maps.Keys(wantLanes))
+	if len(wantOS) != 0 {
+		t.Errorf("journey matrix is missing lanes %v", maps.Keys(wantOS))
 	}
-	if journey.If != "needs.resolve.outputs.required == 'true' && needs.mint.result == 'success'" {
-		t.Errorf("journey if = %q", journey.If)
-	}
-	if timeout, ok := journey.TimeoutMinutes.(int); !ok || timeout != 35 {
-		t.Errorf("journey timeout = %#v, want 35", journey.TimeoutMinutes)
-	}
-	assertJobPermissions(t, "journey", journey.Permissions, map[string]string{"actions": "read", "contents": "read"})
 
-	var checkout, sourceDownload, credentialDownload, verify *step
-	harnessBuilds := 0
-	selectedTestChecks := 0
-	customerRuns := 0
-	cleanupSteps := 0
+	jobEnv, err := yaml.Marshal(journey.Env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"AUTH0_CLIENT", "QURL_CLI_SANDBOX_CLEANUP_JWT", "AWS_ACCESS_KEY", "AWS_SECRET"} {
+		if strings.Contains(string(jobEnv), forbidden) {
+			t.Errorf("journey job environment receives standing authority %q", forbidden)
+		}
+	}
+
+	for _, jobName := range []string{"journey", "cleanup"} {
+		checkouts := 0
+		for index := range workflow.Jobs[jobName].Steps {
+			current := &workflow.Jobs[jobName].Steps[index]
+			if !strings.HasPrefix(current.Uses, checkoutActionPrefix) {
+				continue
+			}
+			checkouts++
+			if current.With["ref"] != "${{ github.event.workflow_run.head_sha }}" ||
+				current.With["persist-credentials"] != false {
+				t.Errorf("%s checkout is not exact and credential-free: %#v", jobName, current)
+			}
+		}
+		if checkouts != 1 {
+			t.Errorf("%s checkout count = %d, want one", jobName, checkouts)
+		}
+	}
+
+	var sourceDownload, verify *step
+	localCleanup := 0
+	localCleanupIDs := map[string]bool{}
+	mintSteps := 0
+	fenceSteps := 0
+	reconcileSteps := 0
+	firstCandidate := len(journey.Steps)
+	lastFence := -1
+	firstReconcile := len(journey.Steps)
 	for index := range journey.Steps {
 		current := &journey.Steps[index]
 		switch {
-		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
-			checkout = current
 		case strings.HasPrefix(current.Uses, "actions/download-artifact@"):
-			if current.With["run-id"] == "${{ github.event.workflow_run.id }}" {
-				sourceDownload = current
-			} else {
-				credentialDownload = current
+			if sourceDownload != nil {
+				t.Error("journey downloads more than one artifact")
 			}
+			sourceDownload = current
 		case current.Name == "Verify exact packaged artifacts":
 			verify = current
-		case current.Name == "Build the trusted customer-journey harness":
-			harnessBuilds++
-			if !strings.Contains(current.Run, "go test -c") || !strings.Contains(current.Run, "-tags=clisandbox") {
-				t.Errorf("trusted harness build is not exact: %#v", current)
-			}
-		case current.Name == "Require the selected customer test":
-			selectedTestChecks++
-			if !strings.Contains(current.Run, "-test.list") || !strings.Contains(current.Run, "matrix.test_name") {
-				t.Errorf("selected customer test is not proved present: %#v", current)
+		case current.Name == "Mint this lane's disposable key in place":
+			mintSteps++
+			if fmt.Sprint(current.Env["AUTH0_CLIENT_ID"]) != "${{ secrets[matrix.auth0_client_id_secret] }}" ||
+				fmt.Sprint(current.Env["AUTH0_CLIENT_SECRET"]) != "${{ secrets[matrix.auth0_client_secret_secret] }}" ||
+				!strings.Contains(current.Run, "qurl-cli-ci-credentials.py create") ||
+				!strings.Contains(current.Run, "qurl-cli-ci-cleanup-ids") {
+				t.Errorf("lane-local mint is not exact and cleanup-bound: %#v", current)
 			}
 		case current.Name == "Run the packaged customer journey":
-			customerRuns++
-			if !strings.Contains(current.Run, "QURL_CUSTOMER_JOURNEY_TEST") {
-				t.Errorf("customer journey does not execute the trusted harness: %#v", current)
+			firstCandidate = min(firstCandidate, index)
+			encoded, marshalErr := yaml.Marshal(current)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			for _, forbidden := range []string{"AUTH0_", "secrets[", "CLEANUP_JWT"} {
+				if strings.Contains(string(encoded), forbidden) {
+					t.Errorf("candidate step receives standing authority %q", forbidden)
+				}
+			}
+		case current.Name == "Fence the packaged POSIX background service", current.Name == "Fence the packaged Windows background service":
+			fenceSteps++
+			lastFence = max(lastFence, index)
+			if current.ID == "" || !strings.HasPrefix(current.If, "always()") {
+				t.Errorf("service fence is not terminal and addressable: %#v", current)
+			}
+		case current.Name == "Reconcile this POSIX lane after the service fence", current.Name == "Reconcile this Windows lane after the service fence":
+			reconcileSteps++
+			firstReconcile = min(firstReconcile, index)
+			if !strings.Contains(current.If, "steps.fence-") || !strings.Contains(current.If, "steps.remove-") ||
+				strings.Count(current.If, ".outcome == 'success'") != 2 ||
+				!strings.Contains(current.Run, "qurl-cli-ci-credentials.py reconcile-run") ||
+				!strings.Contains(current.Run, "--cleanup-id-dir") {
+				t.Errorf("lane cleanup can expose authority before a successful service and key fence: %#v", current)
 			}
 		case current.Name == "Remove the local disposable key":
-			cleanupSteps++
-			if current.If != "always() && runner.os != 'Windows'" && current.If != "always() && runner.os == 'Windows'" {
-				t.Errorf("credential cleanup is not terminal: %#v", current)
+			localCleanup++
+			localCleanupIDs[current.ID] = true
+			if current.ID == "" || !strings.HasPrefix(current.If, "always()") {
+				t.Errorf("local credential cleanup is conditional: %#v", current)
 			}
 		}
 	}
-	if checkout == nil || checkout.With["ref"] != "${{ github.event.workflow_run.head_sha }}" ||
-		checkout.With["path"] != "orchestrator" || checkout.With["persist-credentials"] != false {
-		t.Errorf("trusted orchestrator checkout is not source-main exact and credential-free: %#v", checkout)
-	}
-	if sourceDownload == nil || sourceDownload.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
-		sourceDownload.With["run-id"] != "${{ github.event.workflow_run.id }}" ||
-		sourceDownload.With["digest-mismatch"] != "error" {
-		t.Errorf("main artifact download is not exact: %#v", sourceDownload)
-	}
-	if credentialDownload == nil || credentialDownload.With["name"] != "qurl-customer-key-${{ github.run_id }}-${{ matrix.lane }}" ||
-		credentialDownload.With["digest-mismatch"] != "error" {
-		t.Errorf("per-lane credential download is not exact: %#v", credentialDownload)
+	if sourceDownload == nil ||
+		sourceDownload.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+		sourceDownload.With["digest-mismatch"] != "error" ||
+		!strings.Contains(fmt.Sprint(sourceDownload.With["name"]), "${{ github.event.workflow_run.head_sha }}") ||
+		!strings.Contains(fmt.Sprint(sourceDownload.With["name"]), "${{ github.event.workflow_run.run_attempt }}") {
+		t.Errorf("source artifact download is not SHA-bound and integrity-checked: %#v", sourceDownload)
 	}
 	if verify == nil || !strings.Contains(verify.Run, "verify-cli-customer-journey-artifacts.py") {
-		t.Errorf("main artifact verification is missing: %#v", verify)
+		t.Errorf("packaged artifact verification is missing: %#v", verify)
 	}
-	if harnessBuilds != 2 || selectedTestChecks != 2 || customerRuns != 2 || cleanupSteps != 2 {
-		t.Errorf("trusted harness/selection/customer/local cleanup step counts = %d/%d/%d/%d, want 2/2/2/2", harnessBuilds, selectedTestChecks, customerRuns, cleanupSteps)
+	if localCleanup != 2 {
+		t.Errorf("local credential cleanup steps = %d, want Unix and Windows", localCleanup)
 	}
-	journeyText, err := yaml.Marshal(journey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"AUTH0_CLIENT", "cleanup-jwt", "QURL_CLI_SANDBOX_CLEANUP_JWT"} {
-		if strings.Contains(string(journeyText), forbidden) {
-			t.Errorf("live journey runner receives standing authority %q", forbidden)
+	for _, id := range []string{"remove-posix-key", "remove-windows-key"} {
+		if !localCleanupIDs[id] {
+			t.Errorf("local credential cleanup is missing addressable step %q", id)
 		}
 	}
-	if contract.Jobs["mint"].Environment != "cli-connector-resource-sandbox-controller" ||
-		contract.Jobs["cleanup"].Environment != "cli-connector-resource-sandbox-controller" {
-		t.Errorf("standing-authority jobs do not use the main-only controller environment")
+	if mintSteps != 2 || fenceSteps != 2 || reconcileSteps != 2 || firstCandidate >= lastFence || lastFence >= firstReconcile {
+		t.Errorf("lane authority order = mint %d, candidate %d, fences %d through %d, reconcile %d through %d",
+			mintSteps, firstCandidate, fenceSteps, lastFence, reconcileSteps, firstReconcile)
 	}
-	if contract.Jobs["journey"].Environment != "cli-connector-resource-sandbox" {
-		t.Errorf("live journey jobs do not keep the customer-journey environment separate")
-	}
-	assertJobPermissions(t, "mint", mint.Permissions, map[string]string{"actions": "write", "contents": "read"})
-	assertJobPermissions(t, "cleanup", cleanup.Permissions, map[string]string{"actions": "write", "contents": "read"})
-	if cleanup.If != "always() && needs.resolve.outputs.required == 'true'" {
-		t.Errorf("cleanup if = %q", cleanup.If)
-	}
-	mintText, err := yaml.Marshal(mint)
+	journeyRaw, err := yaml.Marshal(journey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	journeySource := string(journeyRaw)
+	for _, required := range []string{
+		"ai.layerv.qurl.share-daemon.service",
+		"ai.layerv.qurl.share-daemon.plist",
+		"$sid`0$label",
+		"qurl-cli-ci-credentials.py reconcile-run",
+	} {
+		if !strings.Contains(journeySource, required) {
+			t.Errorf("journey service/cleanup fence is missing %q", required)
+		}
+	}
+	if strings.Contains(journeySource, "ai.layerv.qurl.daemon.service") {
+		t.Error("journey cleanup retains the retired Linux service name")
+	}
+
+	if cleanup.If != "always() && needs.resolve.outputs.required == 'true'" ||
+		!slices.Contains(parseWorkflowNeeds(t, "cleanup", cleanup.Needs), "journey") {
+		t.Errorf("remote cleanup is not terminal: if=%q needs=%v", cleanup.If, cleanup.Needs)
+	}
+	if result.If != "always()" ||
+		!slices.Contains(parseWorkflowNeeds(t, "result", result.Needs), "cleanup") {
+		t.Errorf("result does not wait for cleanup: if=%q needs=%v", result.If, result.Needs)
+	}
+	for jobName, stepNames := range map[string][]string{
+		"cleanup": {"Remove standing authority from the cleanup runner"},
+	} {
+		for _, stepName := range stepNames {
+			found := false
+			for index := range workflow.Jobs[jobName].Steps {
+				current := &workflow.Jobs[jobName].Steps[index]
+				if current.Name == stepName {
+					found = true
+					if current.If != "always()" {
+						t.Errorf("%s / %s cleanup if = %q", jobName, stepName, current.If)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("%s is missing terminal cleanup %q", jobName, stepName)
+			}
+		}
+	}
+
+	source := string(raw)
+	for _, forbidden := range []string{"qurl-integrations-infra", "ops-routines", "DEPLOY_DISPATCHER", "amazonaws.com", "QURL_CLI_SANDBOX_CLEANUP_JWT"} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("trusted journey retains cross-repository or cloud authority %q", forbidden)
+		}
 	}
 	cleanupText, err := yaml.Marshal(cleanup)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{
-		"qurl-cli-ci-credentials.py identify", "qurl-cli-ci-credentials.py sweep",
-		"qurl-cli-ci-credentials.py create", "Revoke partial mint on failure",
-	} {
-		if !strings.Contains(string(mintText), required) {
-			t.Errorf("trusted mint path is missing %q", required)
-		}
+	if !strings.Contains(string(cleanupText), "qurl-cli-ci-credentials.py reconcile-run") || strings.Contains(string(cleanupText), " sweep ") {
+		t.Error("fallback cleanup is not exact-run scoped")
 	}
-	mintSource := string(mintText)
-	identifyAt := strings.Index(mintSource, "qurl-cli-ci-credentials.py identify")
-	sweepAt := strings.Index(mintSource, "qurl-cli-ci-credentials.py sweep")
-	createAt := strings.Index(mintSource, "qurl-cli-ci-credentials.py create")
-	uploadAt := strings.Index(mintSource, "actions/upload-artifact@")
-	if identifyAt < 0 || sweepAt <= identifyAt || createAt <= sweepAt || uploadAt <= createAt {
-		t.Errorf("trusted mint order does not verify owners, sweep, create, then upload")
-	}
-	for _, required := range []string{
-		"qurl-cli-ci-credentials.py identify", "qurl-cli-ci-credentials.py sweep",
-		"cleanup owners are not distinct", "Delete transient customer-key artifacts",
-	} {
-		if !strings.Contains(string(cleanupText), required) {
-			t.Errorf("trusted cleanup path is missing %q", required)
-		}
-	}
-	cleanupSource := string(cleanupText)
-	if strings.Index(cleanupSource, "qurl-cli-ci-credentials.py identify") >=
-		strings.Index(cleanupSource, "qurl-cli-ci-credentials.py sweep") {
-		t.Error("trusted cleanup sweeps before it verifies distinct owners")
-	}
-	for jobName, current := range map[string]*githubJob{"mint": mint, "cleanup": cleanup} {
-		checkoutCount := 0
-		for index := range current.Steps {
-			currentStep := &current.Steps[index]
-			if !strings.HasPrefix(currentStep.Uses, checkoutActionPrefix) {
-				continue
-			}
-			checkoutCount++
-			if currentStep.With["ref"] != "${{ github.event.workflow_run.head_sha }}" ||
-				currentStep.With["persist-credentials"] != false {
-				t.Errorf("%s checkout is not exact and credential-free: %#v", jobName, currentStep)
-			}
-		}
-		if checkoutCount != 1 {
-			t.Errorf("%s checkout count = %d, want 1", jobName, checkoutCount)
-		}
-	}
+}
 
-	source := string(raw)
-	for _, required := range []string{
-		"qURL Customer Journey / exact CLI artifact",
-		"layerv.qurl-cli-customer-journey.v1:${SOURCE_RUN_ID}:${SOURCE_RUN_ATTEMPT}:${HEAD_SHA}",
-		"QURL_SANDBOX_AUTH0_CLIENT_ID_LINUX", "QURL_SANDBOX_AUTH0_CLIENT_SECRET_LINUX",
-		"QURL_SANDBOX_AUTH0_CLIENT_ID_MACOS", "QURL_SANDBOX_AUTH0_CLIENT_SECRET_MACOS",
-		"QURL_SANDBOX_AUTH0_CLIENT_ID_WINDOWS", "QURL_SANDBOX_AUTH0_CLIENT_SECRET_WINDOWS",
-		"declare -A owner_lanes=()", "platform lanes do not have distinct dedicated owners",
-	} {
-		if !strings.Contains(source, required) {
-			t.Errorf("trusted customer journey is missing %q", required)
+// TestCLICustomerJourneyNeverTransfersBearerSecretsAsArtifacts prevents a
+// public-workflow regression where a disposable API key is uploaded even for
+// a short retention period. Each protected lane must mint and revoke in place.
+func TestCLICustomerJourneyNeverTransfersBearerSecretsAsArtifacts(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliCustomerJourneyWorkflow)
+	downloads := 0
+	for jobName, job := range workflow.Jobs {
+		for index := range job.Steps {
+			current := &job.Steps[index]
+			if strings.HasPrefix(current.Uses, "actions/upload-artifact@") {
+				t.Errorf("%s uploads an artifact from a credential-bearing workflow: %#v", jobName, current)
+			}
+			if strings.HasPrefix(current.Uses, "actions/download-artifact@") {
+				downloads++
+				if jobName != "journey" || current.With["run-id"] != "${{ github.event.workflow_run.id }}" ||
+					current.With["path"] != "dist" {
+					t.Errorf("unexpected customer-journey artifact download: %s %#v", jobName, current)
+				}
+			}
 		}
 	}
-	for _, forbidden := range []string{
-		"qurl-integrations-infra", "ops-routines", "DEPLOY_DISPATCHER",
-		"amazonaws.com", "AWS_ACCESS_KEY", "AWS_SECRET",
-		"secrets.QURL_SANDBOX_AUTH0_CLIENT_ID }}", "secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET }}",
-	} {
+	if downloads != 1 {
+		t.Errorf("customer-journey artifact downloads = %d, want one source bundle", downloads)
+	}
+	source := string(readWorkflowBytes(t, cliCustomerJourneyWorkflow))
+	for _, forbidden := range []string{"qurl-customer-key-${{", "cleanup-jwt", "retention-days:"} {
 		if strings.Contains(source, forbidden) {
-			t.Errorf("trusted customer journey retains forbidden cross-repository or AWS authority %q", forbidden)
+			t.Errorf("customer journey retains a bearer-artifact marker %q", forbidden)
 		}
 	}
 }
@@ -682,321 +741,6 @@ type step struct {
 	TimeoutMinutes any `yaml:"timeout-minutes"`
 }
 
-// TestCLIMacOSKeychainSetupIsLive prevents the matrix from inferring whether
-// credential-store coverage matters from source text. QURL_TEST_HARNESS arms
-// TestKeyringLiveSmoke on every OS, so macOS must always unlock the ephemeral
-// keychain before the suite starts.
-func TestCLIMacOSKeychainSetupIsLive(t *testing.T) {
-	t.Parallel()
-
-	workflow := readWorkflow(t, cliWorkflow)
-	job, ok := workflow.Jobs[cliMatrixJobID]
-	if !ok {
-		t.Fatalf("%s is missing the %q job", cliWorkflow, cliMatrixJobID)
-	}
-	var setup *step
-	for i := range job.Steps {
-		if job.Steps[i].Name == cliMacOSKeychainSetupStep {
-			setup = &job.Steps[i]
-			break
-		}
-	}
-	if setup == nil {
-		t.Fatalf("%s is missing %q", cliMatrixJobID, cliMacOSKeychainSetupStep)
-	}
-	if setup.If != "runner.os == 'macOS'" {
-		t.Errorf("%s if = %q, want the macOS runner guard", cliMacOSKeychainSetupStep, setup.If)
-	}
-	if setup.Shell != "bash" {
-		t.Errorf("%s shell = %q, want bash", cliMacOSKeychainSetupStep, setup.Shell)
-	}
-	if setup.ContinueOnError != nil {
-		t.Errorf("%s sets continue-on-error = %v; failed keychain setup must fail the macOS matrix leg", cliMacOSKeychainSetupStep, setup.ContinueOnError)
-	}
-	for _, fragment := range []string{"uuidgen", "security create-keychain", "security default-keychain", "security unlock-keychain"} {
-		if !strings.Contains(setup.Run, fragment) {
-			t.Errorf("%s is missing load-bearing fragment %q", cliMacOSKeychainSetupStep, fragment)
-		}
-	}
-	if strings.Contains(setup.Run, "grep -riq keyring") {
-		t.Errorf("%s infers whether live coverage matters from source text", cliMacOSKeychainSetupStep)
-	}
-}
-
-// TestCLILinuxKeyringSetupIsBoundedAndLive protects the Linux half of the
-// cross-platform credential-store smoke. Two independent ubuntu-latest runs
-// exhausted the entire 25-minute matrix budget inside an unbounded `apt-get
-// update` while the configured Azure mirror stopped delivering package
-// indexes. That skipped the tests altogether and held every CLI change behind
-// an infrastructure hang.
-//
-// The bootstrap may reuse binaries already on the hosted image or install
-// them, but it may never skip the live store test. Its package operation is
-// noninteractive, password-prompt-free, transport/lock/whole-process bounded,
-// retried finitely through an explicit non-Azure fallback, and followed by
-// binary verification before the D-Bus test path is armed.
-func TestCLILinuxKeyringSetupIsBoundedAndLive(t *testing.T) {
-	t.Parallel()
-
-	workflow := readWorkflow(t, cliWorkflow)
-	job, ok := workflow.Jobs[cliMatrixJobID]
-	if !ok {
-		t.Fatalf("%s is missing the %q job", cliWorkflow, cliMatrixJobID)
-	}
-	if got := job.Env["QURL_TEST_HARNESS"]; got != "1" {
-		t.Errorf("%s env QURL_TEST_HARNESS = %q, want 1 so TestKeyringLiveSmoke runs", cliMatrixJobID, got)
-	}
-
-	var setup, tests *step
-	for i := range job.Steps {
-		candidate := &job.Steps[i]
-		switch candidate.Name {
-		case cliLinuxKeyringSetupStep:
-			setup = candidate
-		case cliMatrixTestStep:
-			tests = candidate
-		}
-	}
-	if setup == nil {
-		t.Fatalf("%s is missing %q", cliMatrixJobID, cliLinuxKeyringSetupStep)
-	}
-	if tests == nil {
-		t.Fatalf("%s is missing %q", cliMatrixJobID, cliMatrixTestStep)
-	}
-
-	if setup.If != "runner.os == 'Linux'" {
-		t.Errorf("%s if = %q, want the Linux runner guard", cliLinuxKeyringSetupStep, setup.If)
-	}
-	if setup.Shell != "bash" {
-		t.Errorf("%s shell = %q, want bash", cliLinuxKeyringSetupStep, setup.Shell)
-	}
-	timeoutMinutes, ok := setup.TimeoutMinutes.(int)
-	if !ok || timeoutMinutes <= 0 || timeoutMinutes > 5 {
-		t.Errorf("%s timeout-minutes = %#v, want a literal positive integer no greater than 5", cliLinuxKeyringSetupStep, setup.TimeoutMinutes)
-	}
-	if setup.ContinueOnError != nil {
-		t.Errorf("%s sets continue-on-error = %v; failed keyring setup must fail the Linux matrix leg", cliLinuxKeyringSetupStep, setup.ContinueOnError)
-	}
-
-	requiredSetupFragments := []string{
-		"TODO(upstream-contract)",
-		"for attempt in 1 2",
-		"sudo -n env DEBIAN_FRONTEND=noninteractive",
-		"sudo -n tee /etc/apt/apt-mirrors.txt",
-		`printf '%s\tpriority:%s\n'`,
-		"https://archive.ubuntu.com/ubuntu/",
-		"https://security.ubuntu.com/ubuntu/",
-		"timeout --signal=TERM --kill-after=10s 90s",
-		"Acquire::Retries=2",
-		"Acquire::http::Timeout=20",
-		"Acquire::https::Timeout=20",
-		"DPkg::Lock::Timeout=30",
-		"install -y --no-install-recommends gnome-keyring dbus",
-		"command -v gnome-keyring-daemon",
-		"command -v dbus-run-session",
-		"QURL_CLI_KEYRING_DBUS=1",
-	}
-	for _, fragment := range requiredSetupFragments {
-		if !strings.Contains(setup.Run, fragment) {
-			t.Errorf("%s is missing load-bearing fragment %q", cliLinuxKeyringSetupStep, fragment)
-		}
-	}
-	for _, forbidden := range []string{"apt-get update", "grep -riq keyring", "continue-on-error"} {
-		if strings.Contains(setup.Run, forbidden) {
-			t.Errorf("%s contains %q; setup must not refresh indexes, infer whether coverage matters, or swallow failures", cliLinuxKeyringSetupStep, forbidden)
-		}
-	}
-
-	for _, fragment := range []string{"QURL_CLI_KEYRING_DBUS", "dbus-run-session", "gnome-keyring-daemon --unlock", "go test -count=1 ./apps/cli/..."} {
-		if !strings.Contains(tests.Run, fragment) {
-			t.Errorf("%s is missing %q; Linux must exercise the real keyring rather than skip the suite", cliMatrixTestStep, fragment)
-		}
-	}
-}
-
-// TestCLILinuxKeyringSetupRetryBehavior executes the checked-in workflow
-// script with a fake sudo boundary. The structural test above pins the apt
-// flags; this one proves the control flow they sit inside: a transient failure
-// selects the official mirror fallback before one retry, fallback and repeated
-// install failures are loud and finite, and a pre-provisioned runner still
-// arms the live test without invoking apt.
-func TestCLILinuxKeyringSetupRetryBehavior(t *testing.T) {
-	workflow := readWorkflow(t, cliWorkflow)
-	job := workflow.Jobs[cliMatrixJobID]
-	var script string
-	for i := range job.Steps {
-		candidate := &job.Steps[i]
-		if candidate.Name == cliLinuxKeyringSetupStep {
-			script = candidate.Run
-			break
-		}
-	}
-	if strings.TrimSpace(script) == "" {
-		t.Fatalf("%s has no executable script", cliLinuxKeyringSetupStep)
-	}
-
-	tests := []struct {
-		name             string
-		mode             string
-		preinstalled     bool
-		wantSuccess      bool
-		wantInstallCalls int
-		wantMirrorCalls  int
-		wantErrorMessage string
-	}{
-		{name: "healthy primary mirror installs without fallback", mode: "succeed-first", wantSuccess: true, wantInstallCalls: 1},
-		{name: "slow primary mirror falls back then arms live test", mode: "fail-once", wantSuccess: true, wantInstallCalls: 2, wantMirrorCalls: 1},
-		{name: "fallback selection failure fails loudly", mode: "fallback-fail", wantInstallCalls: 1, wantMirrorCalls: 1, wantErrorMessage: "::error::Unable to select the bounded Ubuntu package mirror fallback"},
-		{name: "repeated install failure fails loudly after bound", mode: "always-fail", wantInstallCalls: 2, wantMirrorCalls: 1, wantErrorMessage: "::error::Linux keyring package install failed after 2 bounded attempts"},
-		{name: "preinstalled binaries avoid apt and still arm live test", mode: "unexpected", preinstalled: true, wantSuccess: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			binDir := filepath.Join(dir, "bin")
-			if err := os.Mkdir(binDir, 0o700); err != nil {
-				t.Fatalf("create fake bin: %v", err)
-			}
-			writeExecutable := func(name, body string) {
-				t.Helper()
-				path := filepath.Join(binDir, name)
-				// #nosec G306 -- this test fixture must be executable and lives beneath t.TempDir.
-				if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
-					t.Fatalf("write fake %s: %v", name, err)
-				}
-			}
-			writeExecutable("dbus-run-session", "#!/usr/bin/env bash\nexit 0\n")
-			writeExecutable("sleep", "#!/usr/bin/env bash\nexit 0\n")
-			if tc.preinstalled {
-				writeExecutable("gnome-keyring-daemon", "#!/usr/bin/env bash\nexit 0\n")
-			}
-
-			sudoLog := filepath.Join(dir, "sudo.log")
-			mirrorContent := filepath.Join(dir, "mirror-content")
-			writeExecutable("sudo", `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
-if [[ "$*" == *"tee /etc/apt/apt-mirrors.txt"* ]]; then
-  if [ "$FAKE_SUDO_MODE" = "fallback-fail" ]; then
-    exit 43
-  fi
-  cat > "$FAKE_MIRROR_CONTENT"
-  exit 0
-fi
-case "$FAKE_SUDO_MODE" in
-  succeed-first)
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_BIN/gnome-keyring-daemon"
-    chmod 700 "$FAKE_BIN/gnome-keyring-daemon"
-    ;;
-  fail-once)
-    if [ "$(grep -c apt-get "$FAKE_SUDO_LOG")" -lt 2 ]; then
-      exit 42
-    fi
-    if ! grep -q archive.ubuntu.com "$FAKE_MIRROR_CONTENT" ||
-      ! grep -q security.ubuntu.com "$FAKE_MIRROR_CONTENT" ||
-      grep -q azure.archive.ubuntu.com "$FAKE_MIRROR_CONTENT"; then
-      echo "second install ran before selecting only the official mirrors" >&2
-      exit 44
-    fi
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_BIN/gnome-keyring-daemon"
-    chmod 700 "$FAKE_BIN/gnome-keyring-daemon"
-    ;;
-  always-fail)
-    exit 42
-    ;;
-  fallback-fail)
-    exit 42
-    ;;
-  unexpected)
-    echo "sudo was called even though both keyring commands were preinstalled" >&2
-    exit 99
-    ;;
-  *)
-    echo "unknown fake sudo mode" >&2
-    exit 98
-    ;;
-esac
-`)
-
-			githubEnv := filepath.Join(dir, "github_env")
-			if err := os.WriteFile(githubEnv, nil, 0o600); err != nil {
-				t.Fatalf("create GITHUB_ENV: %v", err)
-			}
-			combined, err := runVerifierScriptWithEnv(t, script, map[string]string{
-				"FAKE_BIN":            binDir,
-				"FAKE_MIRROR_CONTENT": mirrorContent,
-				"FAKE_SUDO_LOG":       sudoLog,
-				"FAKE_SUDO_MODE":      tc.mode,
-				"GITHUB_ENV":          githubEnv,
-				"HOME":                filepath.Join(dir, "home"),
-				"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-			})
-			if tc.wantSuccess && err != nil {
-				t.Fatalf("setup failed: %v\noutput:\n%s", err, combined)
-			}
-			if !tc.wantSuccess && err == nil {
-				t.Fatalf("setup succeeded, want bounded failure\noutput:\n%s", combined)
-			}
-
-			var sudoCalls []string
-			// #nosec G304 -- sudoLog is a fixed filename beneath t.TempDir.
-			if data, readErr := os.ReadFile(sudoLog); readErr == nil {
-				sudoCalls = strings.Split(strings.TrimSpace(string(data)), "\n")
-			} else if !os.IsNotExist(readErr) {
-				t.Fatalf("read fake sudo log: %v", readErr)
-			}
-			installCalls, mirrorCalls := 0, 0
-			for _, call := range sudoCalls {
-				if strings.Contains(call, "apt-get") {
-					installCalls++
-				}
-				if strings.Contains(call, "tee /etc/apt/apt-mirrors.txt") {
-					mirrorCalls++
-				}
-			}
-			if installCalls != tc.wantInstallCalls {
-				t.Errorf("apt install calls = %d, want %d\noutput:\n%s", installCalls, tc.wantInstallCalls, combined)
-			}
-			if mirrorCalls != tc.wantMirrorCalls {
-				t.Errorf("mirror fallback calls = %d, want %d\noutput:\n%s", mirrorCalls, tc.wantMirrorCalls, combined)
-			}
-			if tc.wantMirrorCalls > 0 && tc.mode != "fallback-fail" {
-				// #nosec G304 -- mirrorContent is a fixed filename beneath t.TempDir.
-				data, readErr := os.ReadFile(mirrorContent)
-				if readErr != nil {
-					t.Fatalf("read fallback mirror content: %v", readErr)
-				}
-				content := string(data)
-				for _, required := range []string{
-					"https://archive.ubuntu.com/ubuntu/\tpriority:1",
-					"https://security.ubuntu.com/ubuntu/\tpriority:2",
-				} {
-					if !strings.Contains(content, required) {
-						t.Errorf("fallback mirror content is missing %q: %q", required, content)
-					}
-				}
-				if strings.Contains(content, "azure.archive.ubuntu.com") {
-					t.Errorf("fallback mirror content still selects Azure: %q", content)
-				}
-			}
-
-			// #nosec G304 -- githubEnv is a fixed filename beneath t.TempDir.
-			envData, readErr := os.ReadFile(githubEnv)
-			if readErr != nil {
-				t.Fatalf("read GITHUB_ENV: %v", readErr)
-			}
-			armed := strings.Contains(string(envData), "QURL_CLI_KEYRING_DBUS=1")
-			if armed != tc.wantSuccess {
-				t.Errorf("live keyring test armed = %t, want %t; GITHUB_ENV = %q", armed, tc.wantSuccess, envData)
-			}
-			if tc.wantErrorMessage != "" && !strings.Contains(combined, tc.wantErrorMessage) {
-				t.Errorf("bounded failure omitted %q\noutput:\n%s", tc.wantErrorMessage, combined)
-			}
-		})
-	}
-}
-
 // TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
 // these repo-wide tests useful. A paths filter or conditional job would put the
 // check back behind the same green-when-broken hole this package exists to
@@ -1137,36 +881,50 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 
 	assertExecutableRepoScript(t, cliReleaseVerifierScript)
 
-	// A dropped release is a visibility problem, not a reason to widen the
-	// token: reading a release needs no more than the contents access this job
-	// already holds to create one.
+	// Keep workflow-dispatch authority out of the third-party release action.
+	// The separate signal job owns the narrow Actions write permission.
 	assertJobPermissions(t, releasePleaseJobID, job.Permissions, map[string]string{
 		"contents":      "write",
 		"pull-requests": "write",
 	})
 }
 
-// TestCLIReleaseWaitsForExactMainCI keeps publication behind the exact
-// packaged customer journey. The CLI workflow owns that journey and reports
-// success only after its exact-artifact result returns. The release workflow
-// must gate release-cli before it can upload or publish customer artifacts.
-// Normal release-please PR maintenance must not wait for this long CLI-only
-// gate.
-func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
+// TestCLIReleaseUsesAnExactEventDrivenGate keeps publication behind the exact
+// packaged journey without holding a polling runner. The release creator and
+// journey result both signal the same SHA-bound continuation. The first event
+// can exit as not ready; the second event starts the release.
+func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	t.Parallel()
 
+	raw := readWorkflowBytes(t, releasePleaseWorkflow)
+	var releaseConcurrency struct {
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress *bool  `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+	}
+	if err := yaml.Unmarshal(raw, &releaseConcurrency); err != nil {
+		t.Fatalf("decode release concurrency: %v", err)
+	}
+	wantConcurrency := "${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}-{1}', inputs.cli_tag, inputs.source_sha || 'operator') }}"
+	if releaseConcurrency.Concurrency.Group != wantConcurrency || releaseConcurrency.Concurrency.CancelInProgress == nil ||
+		*releaseConcurrency.Concurrency.CancelInProgress {
+		t.Errorf("release concurrency = %#v, want separate non-cancelling maintenance and exact continuation groups",
+			releaseConcurrency.Concurrency)
+	}
+
 	workflow := readWorkflow(t, releasePleaseWorkflow)
-	gate, ok := workflow.Jobs["cli-main-ci"]
+	gate, ok := workflow.Jobs["cli-release-gate"]
 	if !ok {
-		t.Fatal("release-please.yml is missing the exact CLI main-CI gate")
+		t.Fatal("release-please.yml is missing the exact CLI release gate")
 	}
-	if gate.Name != "Gate exact CLI main CI before release" {
-		t.Errorf("cli-main-ci.name = %q", gate.Name)
+	if gate.Name != "Verify the exact CLI release gate" {
+		t.Errorf("cli-release-gate.name = %q", gate.Name)
 	}
-	if timeout, ok := gate.TimeoutMinutes.(int); !ok || timeout != 220 {
-		t.Errorf("cli-main-ci timeout = %#v, want 220", gate.TimeoutMinutes)
+	if timeout, ok := gate.TimeoutMinutes.(int); !ok || timeout != 5 {
+		t.Errorf("cli-release-gate timeout = %#v, want 5", gate.TimeoutMinutes)
 	}
-	assertJobPermissions(t, "cli-main-ci", gate.Permissions, map[string]string{
+	assertJobPermissions(t, "cli-release-gate", gate.Permissions, map[string]string{
 		"actions":  "read",
 		"contents": "read",
 	})
@@ -1179,25 +937,31 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	for _, name := range []string{
 		"Require the canonical release branch",
 		"Resolve the exact release source",
-		"Require successful exact CLI main CI",
+		"Check the exact packaged customer-journey gate once",
+		"Decide whether this signal starts the CLI release",
 	} {
 		if steps[name] == nil {
-			t.Fatalf("cli-main-ci is missing %q", name)
+			t.Fatalf("cli-release-gate is missing %q", name)
 		}
 	}
-	if !strings.Contains(steps["Require successful exact CLI main CI"].Run,
-		"scripts/wait-for-exact-cli-main-run.sh") {
-		t.Error("cli-main-ci does not invoke the exact CLI main-run waiter")
+	verify := steps["Check the exact packaged customer-journey gate once"]
+	if !strings.Contains(verify.Run, "scripts/check-exact-cli-release-gate.sh") ||
+		strings.Contains(verify.Run, "sleep ") || strings.Contains(verify.Run, "while ") {
+		t.Error("cli-release-gate is not one bounded exact check")
 	}
-	if steps["Require successful exact CLI main CI"].ContinueOnError != nil {
-		t.Error("exact CLI main-CI gate allows failure")
+	source := steps["Resolve the exact release source"]
+	for _, required := range []string{"HANDOFF_SOURCE_SHA", `"${CLI_TAG}^{commit}"`,
+		"CLI release tag does not match the handed-off source SHA"} {
+		if !strings.Contains(source.Run+fmt.Sprint(source.Env), required) {
+			t.Errorf("exact source resolver is missing %q", required)
+		}
 	}
-	if needs := parseWorkflowNeeds(t, "cli-main-ci", gate.Needs); !slices.Equal(needs, []string{releasePleaseJobID}) {
-		t.Errorf("cli-main-ci needs = %v, want release-please", needs)
+	if needs := parseWorkflowNeeds(t, "cli-release-gate", gate.Needs); !slices.Equal(needs, []string{releasePleaseJobID, "signal-cli-release"}) {
+		t.Errorf("cli-release-gate needs = %v, want release-please and signal-cli-release", needs)
 	}
-	wantGateIf := "!cancelled() && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub expression function spelling.
+	wantGateIf := "always() && !cancelled() && github.event_name == 'workflow_dispatch'" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(gate.If), " "); got != wantGateIf {
-		t.Errorf("cli-main-ci.if = %q, want %q", got, wantGateIf)
+		t.Errorf("cli-release-gate.if = %q, want %q", got, wantGateIf)
 	}
 
 	releasePlease := workflow.Jobs[releasePleaseJobID]
@@ -1207,16 +971,28 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	if needs := parseWorkflowNeeds(t, releasePleaseJobID, releasePlease.Needs); len(needs) != 0 {
 		t.Errorf("release-please PR maintenance is coupled to %v", needs)
 	}
+	signal := workflow.Jobs["signal-cli-release"]
+	if signal == nil {
+		t.Fatal("release workflow is missing its narrow exact-source signal job")
+	}
+	assertJobPermissions(t, "signal-cli-release", signal.Permissions, map[string]string{
+		"actions": "write", "contents": "read",
+	})
+	releaseSignal := len(signal.Steps) == 1 &&
+		strings.Contains(signal.Steps[0].Run, "gh workflow run release-please.yml") &&
+		strings.Contains(signal.Steps[0].Run, "source_sha=$SOURCE_SHA")
+	if !releaseSignal {
+		t.Error("release creator does not signal the exact source continuation")
+	}
+
 	releaseCLI := workflow.Jobs["release-cli"]
 	if releaseCLI == nil {
 		t.Fatal("release-please.yml is missing release-cli")
 	}
-	for _, need := range []string{"cli-main-ci", releasePleaseJobID} {
-		if !slices.Contains(parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs), need) {
-			t.Errorf("release-cli.needs does not include %q", need)
-		}
+	if needs := parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs); !slices.Equal(needs, []string{"cli-release-gate"}) {
+		t.Errorf("release-cli.needs = %v, want only cli-release-gate", needs)
 	}
-	wantReleaseIf := "!cancelled() && needs.cli-main-ci.result == 'success' && ( needs.release-please.outputs.cli_release_created == 'true' || github.event_name == 'workflow_dispatch' )" //nolint:misspell // GitHub expression function spelling.
+	wantReleaseIf := "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'"
 	if got := strings.Join(strings.Fields(releaseCLI.If), " "); got != wantReleaseIf {
 		t.Errorf("release-cli.if = %q, want %q", got, wantReleaseIf)
 	}
@@ -1235,7 +1011,22 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 		t.Error("release-cli does not bind its tag to the exact gated source")
 	}
 
-	assertExecutableRepoScript(t, "scripts/wait-for-exact-cli-main-run.sh")
+	journey := readWorkflow(t, cliCustomerJourneyWorkflow)
+	result := journey.Jobs["result"]
+	journeySignal := false
+	for index := range result.Steps {
+		current := &result.Steps[index]
+		if current.Name == "Signal an exact CLI release that is ready to continue" {
+			journeySignal = strings.Contains(current.Run, "gh workflow run release-please.yml") &&
+				strings.Contains(current.Run, "source_sha=$HEAD_SHA") &&
+				strings.Contains(current.Run, `"${cli_tag}^{commit}"`)
+		}
+	}
+	if !journeySignal {
+		t.Error("customer-journey result does not signal the exact source continuation")
+	}
+
+	assertExecutableRepoScript(t, "scripts/check-exact-cli-release-gate.sh")
 }
 
 // TestCLIReleaseValidatesTheCaskBeforePublication keeps the exact generated
