@@ -28,27 +28,29 @@ import (
 
 // T6 live sandbox CRID journey: the design doc's §28.1/§28.3 manual
 // checklist, automated. This file carries the clisandbox build tag so the
-// private qurl-integrations-infra sandbox orchestrator can compile and run it
-// from an exact public integrations commit without storing credentials here.
+// protected main workflow can compile and run it from the exact integrations
+// commit without storing credentials here.
 //
-// Credential contract (all four required before this suite runs anything):
+// Credential contract (four common inputs; full lifecycle entrypoints also
+// require the isolated failure key before they start live work):
 //
 //	QURL_API_KEY  — a sandbox API key holding the qurl:agent, qurl:read,
 //	    qurl:write, and qurl:resolve scopes. The CLI reads it only for
 //	    bootstrap and does not write the account key to disk.
-//	QURL_ENDPOINT — the sandbox qURL API base URL (a repository secret:
-//	    the sandbox hostname is deliberately not public).
+//	QURL_ENDPOINT — the sandbox qURL API base URL (a protected environment
+//	    secret; the sandbox hostname is deliberately not public).
 //	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
-//	    "<kid>=<standard-base64 P-256 SPKI DER>" (a repository variable,
-//	    mirrored from the same-named qurl-connector variable).
+//	    "<kid>=<standard-base64 P-256 SPKI DER>" (a protected environment
+//	    secret).
 //	QURL_SANDBOX_QV2_RELAY_URL — the sandbox's platform access URL (a
-//	    repository variable, same provenance).
+//	    protected environment secret).
+//	QURL_CLI_SANDBOX_FAILURE_API_KEY — a second one-time account key used
+//	    only by the controlled-failure child in the full lifecycle.
 //
 // The last two become a QURL_DEPLOYMENT settings file for the download
 // step: `get --file` opens fragment-credential links through the platform
 // access flow, which needs the deployment's trust settings. Their values —
-// like every minted link — never reach the log: repository variables are
-// not masked, and CI logs are public.
+// like every minted link — never reach the log.
 //
 // Quota safety: each run publishes exactly ONE throwaway resource and always
 // reclaims it. The happy path ends in delete + idempotent re-delete, and a
@@ -58,7 +60,7 @@ import (
 // adds no retry loops of its own.
 //
 // The commands run through runCLI with the PRODUCTION wiring and no injected
-// seams. The private orchestrator requires an exact PASS and rejects SKIP.
+// seams. The protected workflow requires an exact PASS and rejects SKIP.
 
 // journeyTimeout bounds the whole journey. Every API call also carries the
 // transport's own 30-second HTTP timeout; this outer bound exists so a
@@ -116,8 +118,8 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
 			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:agent, qurl:read, "+
 			"qurl:write, and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
-			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
-			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
+			"protected input), and the protected QURL_SANDBOX_QV2_ISSUER_KEY / "+
+			"QURL_SANDBOX_QV2_RELAY_URL inputs the download step's deployment "+
 			"settings are built from.", missing)
 	}
 	return map[string]string{
@@ -127,9 +129,9 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 	}
 }
 
-// sandboxRunIdentity reads the exact private-orchestrator run identity. A
+// sandboxRunIdentity reads the exact protected workflow run identity. A
 // hardened-container run must also bind the immutable image ID that the
-// trusted orchestrator already verified. A host run must not inherit it.
+// trusted workflow already verified. A host run must not inherit it.
 func sandboxRunIdentity() (map[string]string, error) {
 	values := map[string]string{
 		sandboxRunIDEnv:      strings.TrimSpace(os.Getenv(sandboxRunIDEnv)),
@@ -182,7 +184,7 @@ func addSandboxRunIdentity(t *testing.T, env map[string]string) {
 	}
 }
 
-// journeyDeploymentFile converts the two sandbox repository variables into
+// journeyDeploymentFile converts the two protected sandbox inputs into
 // the SDK's deployment settings file and returns its path. Failures name
 // the offending variable but NEVER its value: CI logs are public, and the
 // values identify the sandbox.

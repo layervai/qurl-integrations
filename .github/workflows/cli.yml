@@ -248,11 +248,12 @@ jobs:
       - name: Run credential-free journey validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding
             TestRunSandboxLocalCLIUsesExactBinaryAndState
+            TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey
             TestSandboxForegroundLifecycleStateContract
             TestSandboxFullCustomerLifecyclePhaseContract
             TestSandboxHarnessPassesInlineAPIKeyToExactBinary
@@ -710,7 +711,7 @@ jobs:
           )
           $expected = @('qurl-darwin-amd64', 'qurl-darwin-arm64', 'qurl-linux-amd64', 'qurl-windows-amd64.exe')
           if (Compare-Object $expected $observed) { throw 'customer artifact set is not exact' }
-          $qurl = Join-Path $artifactDir 'qurl-windows-amd64.exe'
+          $artifactQurl = Join-Path $artifactDir 'qurl-windows-amd64.exe'
           $harness = Join-Path $env:RUNNER_TEMP 'qurl-customer-journey.test.exe'
           $testName = '${{ matrix.test_name }}'
           $listPattern = '^' + [Regex]::Escape($testName) + '$'
@@ -720,16 +721,32 @@ jobs:
             throw 'selected customer journey is not in the trusted harness'
           }
           $expectedVersion = "v0.0.0-ci.$($env:GITHUB_SHA.Substring(0, 12))"
-          $actualVersion = ((& $qurl version) -split '\s+')[2]
+          $artifactVersion = ((& $artifactQurl version) -split '\s+')[2]
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($actualVersion -ne $expectedVersion) { throw 'packaged CLI version does not match the exact source' }
+          if ($artifactVersion -ne $expectedVersion) { throw 'packaged CLI version does not match the exact source' }
+          $installDir = Join-Path $env:LOCALAPPDATA "qurl-ci-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          if (Test-Path -LiteralPath $installDir) { throw 'Windows customer install directory already exists' }
+          New-Item -ItemType Directory -Path $installDir -ErrorAction Stop | Out-Null
+          "QURL_CLI_SANDBOX_INSTALL_DIR=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & icacls.exe $installDir /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $qurl = Join-Path $installDir 'qurl.exe'
+          Copy-Item -LiteralPath $artifactQurl -Destination $qurl -ErrorAction Stop
+          $artifactHash = (Get-FileHash -LiteralPath $artifactQurl -Algorithm SHA256).Hash
+          $installedHash = (Get-FileHash -LiteralPath $qurl -Algorithm SHA256).Hash
+          if ($artifactHash -ne $installedHash) { throw 'installed Windows CLI does not match the exact packaged artifact' }
+          $installedVersion = ((& $qurl version) -split '\s+')[2]
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($installedVersion -ne $expectedVersion) { throw 'installed Windows CLI version does not match the exact source' }
           "QURL_CLI_SANDBOX_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CLI_SANDBOX_QURL_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CUSTOMER_JOURNEY_TEST=$harness" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # The M2M authority exists only in this trusted setup step. The journey
-      # receives one disposable ordinary key and no M2M token or client secret.
-      - name: Mint this lane's disposable key
+      # receives two isolated one-time enrollment keys: one for its normal
+      # path and one for the controlled-failure child. It receives no M2M
+      # token or client secret.
+      - name: Mint this lane's disposable keys
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -745,26 +762,36 @@ jobs:
             scripts/remove-sensitive-tree.sh "$client_dir" "$credential_dir"
           }
           trap cleanup_authority EXIT
-          mkdir -m 0700 "$client_dir" "$credential_dir" "$key_dir" "$cleanup_id_dir"
+          mkdir -m 0700 "$client_dir" "$credential_dir" "$credential_dir/primary" "$credential_dir/failure" "$key_dir" "$cleanup_id_dir"
           printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          python3 scripts/qurl-cli-ci-credentials.py create \
-            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" --output-dir "$credential_dir" \
-            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
-            --lane '${{ matrix.lane }}'
-          install -m 0600 "$credential_dir/api-key" "$key_dir/api-key"
+          for purpose in primary failure; do
+            python3 scripts/qurl-cli-ci-credentials.py create \
+              --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+              --client-secret-file "$client_dir/client-secret" --output-dir "$credential_dir/$purpose" \
+              --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
+              --lane '${{ matrix.lane }}' --purpose "$purpose"
+          done
+          install -m 0600 "$credential_dir/primary/api-key" "$key_dir/api-key"
+          install -m 0600 "$credential_dir/failure/api-key" "$key_dir/failure-api-key"
           key=$(<"$key_dir/api-key")
+          failure_key=$(<"$key_dir/failure-api-key")
+          if [[ ! "$key" =~ ^lv_(live|test)_ || ! "$failure_key" =~ ^lv_(live|test)_ || "$key" == "$failure_key" ]]; then
+            echo "::error::disposable keys are malformed or not isolated" >&2
+            exit 1
+          fi
           echo "::add-mask::$key"
+          echo "::add-mask::$failure_key"
           {
             echo "QURL_API_KEY_FILE=$key_dir/api-key"
+            echo "QURL_CLI_SANDBOX_FAILURE_API_KEY_FILE=$key_dir/failure-api-key"
             echo "QURL_CLI_CI_CLEANUP_ID_DIR=$cleanup_id_dir"
           } >>"$GITHUB_ENV"
 
-      - name: Mint this lane's disposable key
+      - name: Mint this lane's disposable keys
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -781,24 +808,41 @@ jobs:
               & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
+            $primaryDir = Join-Path $credentialDir 'primary'
+            $failureDir = Join-Path $credentialDir 'failure'
+            foreach ($path in @($primaryDir, $failureDir)) {
+              New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null
+              & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
             $clientIDFile = Join-Path $clientDir 'client-id'
             $clientSecretFile = Join-Path $clientDir 'client-secret'
             [IO.File]::WriteAllText($clientIDFile, $env:AUTH_CLIENT_ID)
             [IO.File]::WriteAllText($clientSecretFile, $env:AUTH_CLIENT_SECRET)
             Remove-Item Env:AUTH_CLIENT_ID, Env:AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
-            python scripts/qurl-cli-ci-credentials.py create `
-              --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
-              --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
-              --client-secret-file $clientSecretFile --output-dir $credentialDir `
-              --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
-              --lane '${{ matrix.lane }}'
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            foreach ($purpose in @('primary', 'failure')) {
+              $outputDir = Join-Path $credentialDir $purpose
+              python scripts/qurl-cli-ci-credentials.py create `
+                --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
+                --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
+                --client-secret-file $clientSecretFile --output-dir $outputDir `
+                --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
+                --lane '${{ matrix.lane }}' --purpose $purpose
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
             $apiKeyFile = Join-Path $keyDir 'api-key'
-            Copy-Item -LiteralPath (Join-Path $credentialDir 'api-key') -Destination $apiKeyFile -ErrorAction Stop
+            $failureAPIKeyFile = Join-Path $keyDir 'failure-api-key'
+            Copy-Item -LiteralPath (Join-Path $primaryDir 'api-key') -Destination $apiKeyFile -ErrorAction Stop
+            Copy-Item -LiteralPath (Join-Path $failureDir 'api-key') -Destination $failureAPIKeyFile -ErrorAction Stop
             $key = [IO.File]::ReadAllText($apiKeyFile)
-            if ($key -notmatch '^lv_(?:live|test)_') { throw 'disposable key is malformed' }
+            $failureKey = [IO.File]::ReadAllText($failureAPIKeyFile)
+            if ($key -notmatch '^lv_(?:live|test)_' -or $failureKey -notmatch '^lv_(?:live|test)_' -or $key -eq $failureKey) {
+              throw 'disposable keys are malformed or not isolated'
+            }
             Write-Output "::add-mask::$key"
+            Write-Output "::add-mask::$failureKey"
             "QURL_API_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "QURL_CLI_SANDBOX_FAILURE_API_KEY=$failureKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             "QURL_CLI_CI_CLEANUP_ID_DIR=$cleanupIDDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } finally {
             foreach ($path in @($clientDir, $credentialDir)) {
@@ -916,7 +960,7 @@ jobs:
         run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/qurl-customer-key"
 
       - id: remove-windows-key
-        name: Remove the local disposable key
+        name: Remove the local disposable keys
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -924,6 +968,19 @@ jobs:
           if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
           if (Test-Path -LiteralPath $path) { throw 'local disposable key remains on the journey runner' }
           "QURL_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_CLI_SANDBOX_FAILURE_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Keep the exact install until the scheduled task is proven stopped;
+      # deleting it earlier could leave a live task pointing at a missing binary.
+      - name: Remove the Windows customer installation
+        if: always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success'
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }
+          $expected = Join-Path $env:LOCALAPPDATA "qurl-ci-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          if ($env:QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected) { throw 'Windows customer install directory is not the exact run-owned path' }
+          if (Test-Path -LiteralPath $expected) { Remove-Item -LiteralPath $expected -Recurse -Force }
+          if (Test-Path -LiteralPath $expected) { throw 'Windows customer install directory remains after the service fence' }
 
       - name: Reconcile this lane after the POSIX service fence
         if: always() && runner.os != 'Windows' && steps.fence-posix-service.outcome == 'success' && steps.remove-posix-key.outcome == 'success'
@@ -1016,15 +1073,23 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          reconcile_failed=0
           for lane_spec in linux:1 macos:2 windows:3; do
             IFS=: read -r lane lane_id <<<"$lane_spec"
-            python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
+            if ! python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
               --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
               --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
               --client-secret-file "$client_dir/client-secret" \
               --run-id "${GITHUB_RUN_ID}${lane_id}" --run-attempt "$GITHUB_RUN_ATTEMPT" \
-              --lane "$lane" --runtime host
+              --lane "$lane" --runtime host; then
+              echo "::error::run cleanup failed for $lane lane" >&2
+              reconcile_failed=1
+            fi
           done
+          if (( reconcile_failed != 0 )); then
+            echo "::error::run cleanup failed for one or more lanes" >&2
+            exit 1
+          fi
 
   goreleaser-check:
     name: cli / goreleaser check

@@ -22,6 +22,7 @@ const (
 	sandboxControlledFailureLifecyclePhase = "controlled_failure_cleanup"
 	sandboxFailureChildArmingEnv           = "QURL_CLI_SANDBOX_FAILURE_CHILD"
 	sandboxFailureChildStateDirEnv         = "QURL_CLI_SANDBOX_FAILURE_STATE_DIR"
+	sandboxFailureAPIKeyEnv                = "QURL_CLI_SANDBOX_FAILURE_API_KEY"
 	sandboxFailureChildSentinel            = "controlled customer failure reached after route fencing"
 	sandboxFailureCleanupMarker            = "QURL_CONTROLLED_FAILURE_CLEANED"
 	sandboxFailureChildTimeout             = 3 * time.Minute
@@ -33,6 +34,7 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	if childTestName == "" || strings.ContainsAny(childTestName, "^$[]()|*+?\\") {
 		t.Fatal("controlled-failure child test name is invalid")
 	}
+	primaryAPIKey, failureAPIKey := requireSandboxFailureCredentials(t)
 	testBinary, err := os.Executable()
 	if err != nil {
 		t.Fatalf("locate trusted customer-journey harness: %v", err)
@@ -51,10 +53,10 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, testBinary, //nolint:gosec // The parent executes its own trusted, already-running test harness.
 		"-test.v", "-test.count=1", "-test.timeout=165s", "-test.run=^"+childTestName+"$")
-	cmd.Env = sandboxFailureChildEnvironment(map[string]string{
-		sandboxFailureChildArmingEnv:   "enabled",
-		sandboxFailureChildStateDirEnv: stateDir,
-	})
+	overrides := sandboxFailureChildCredentialOverrides(failureAPIKey)
+	overrides[sandboxFailureChildArmingEnv] = "enabled"
+	overrides[sandboxFailureChildStateDirEnv] = stateDir
+	cmd.Env = sandboxFailureChildEnvironment(overrides)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -67,7 +69,8 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 		t.Fatalf("controlled-failure child result: %v", err)
 	}
 	for _, secret := range []string{
-		sandboxSecret(t, "QURL_API_KEY"),
+		primaryAPIKey,
+		failureAPIKey,
 		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
 	} {
 		if secret != "" && strings.Contains(combined, secret) {
@@ -80,6 +83,63 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	}
 	assertSandboxFailureLocalCleanup(t, stateDir, crid)
 	return crid
+}
+
+func requireSandboxFailureCredentials(t *testing.T) (primaryAPIKey, failureAPIKey string) {
+	t.Helper()
+	primaryAPIKey = sandboxSecret(t, "QURL_API_KEY")
+	failureAPIKey = sandboxSecret(t, sandboxFailureAPIKeyEnv)
+	if primaryAPIKey == "" || failureAPIKey == "" {
+		t.Fatalf("QURL_API_KEY and %s are required before the full lifecycle starts", sandboxFailureAPIKeyEnv)
+	}
+	if failureAPIKey == primaryAPIKey {
+		t.Fatal("controlled-failure and primary enrollment keys must be distinct")
+	}
+	return primaryAPIKey, failureAPIKey
+}
+
+func TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey(t *testing.T) {
+	for name, failureFile := range map[string]string{
+		"protected-file": "/protected/failure",
+		"inline":         "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("QURL_API_KEY", "primary-inline")
+			t.Setenv("QURL_API_KEY_FILE", "/protected/primary")
+			t.Setenv(sandboxFailureAPIKeyEnv, "failure-inline")
+			t.Setenv(sandboxFailureAPIKeyEnv+"_FILE", failureFile)
+			got := map[string]string{}
+			for _, entry := range sandboxFailureChildEnvironment(sandboxFailureChildCredentialOverrides("failure-exact")) {
+				key, value, ok := strings.Cut(entry, "=")
+				if ok {
+					got[key] = value
+				}
+			}
+			wantInline := "failure-exact"
+			if failureFile != "" {
+				wantInline = ""
+			}
+			if got["QURL_API_KEY"] != wantInline || got["QURL_API_KEY_FILE"] != failureFile ||
+				got[sandboxFailureAPIKeyEnv] != "" || got[sandboxFailureAPIKeyEnv+"_FILE"] != "" {
+				t.Fatalf("controlled-failure credential environment = %#v", got)
+			}
+		})
+	}
+}
+
+func sandboxFailureChildCredentialOverrides(failureAPIKey string) map[string]string {
+	failureFile := os.Getenv(sandboxFailureAPIKeyEnv + "_FILE")
+	overrides := map[string]string{
+		"QURL_API_KEY":                    failureAPIKey,
+		"QURL_API_KEY_FILE":               "",
+		sandboxFailureAPIKeyEnv:           "",
+		sandboxFailureAPIKeyEnv + "_FILE": "",
+	}
+	if failureFile != "" {
+		overrides["QURL_API_KEY"] = ""
+		overrides["QURL_API_KEY_FILE"] = failureFile
+	}
+	return overrides
 }
 
 func validateSandboxFailureChildExit(runErr error, output, childTestName string) error {

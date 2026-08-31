@@ -168,7 +168,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		}
 	}
 	mint, run, download := 0, 0, 0
-	var windowsSelect, windowsRun *step
+	var posixMint, windowsMint, windowsSelect, windowsRun, windowsKeyRemoval, windowsInstallCleanup *step
 	for index := range journey.Steps {
 		current := &journey.Steps[index]
 		switch current.Name {
@@ -176,8 +176,14 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			if current.Shell == "pwsh" {
 				windowsSelect = current
 			}
-		case "Mint this lane's disposable key":
+		case "Mint this lane's disposable keys":
 			mint++
+			switch current.Shell {
+			case "pwsh":
+				windowsMint = current
+			case "bash":
+				posixMint = current
+			}
 			if fmt.Sprint(current.Env["AUTH_CLIENT_ID"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}" ||
 				fmt.Sprint(current.Env["AUTH_CLIENT_SECRET"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}" {
 				t.Errorf("journey does not use the one protected M2M authority: %#v", current.Env)
@@ -196,6 +202,10 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 					t.Errorf("candidate step receives standing authority %q", forbidden)
 				}
 			}
+		case "Remove the Windows customer installation":
+			windowsInstallCleanup = current
+		case "Remove the local disposable keys":
+			windowsKeyRemoval = current
 		}
 		if strings.HasPrefix(current.Uses, "actions/download-artifact@") {
 			download++
@@ -211,9 +221,72 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if mint != 2 || run != 2 || download != 1 {
 		t.Errorf("journey steps = mint %d, run %d, download %d", mint, run, download)
 	}
-	if windowsSelect == nil || !strings.Contains(windowsSelect.Run, `"-test.list=$listPattern"`) ||
+	if posixMint == nil || windowsMint == nil {
+		t.Fatalf("journey does not have exact POSIX and Windows mint steps: posix=%#v windows=%#v", posixMint, windowsMint)
+	}
+	for _, requiredText := range []string{
+		"for purpose in primary failure",
+		`--purpose "$purpose"`,
+		`[[ ! "$key" =~ ^lv_(live|test)_`,
+		`! "$failure_key" =~ ^lv_(live|test)_`,
+		`"$key" == "$failure_key"`,
+		"disposable keys are malformed or not isolated",
+		"QURL_CLI_SANDBOX_FAILURE_API_KEY_FILE=$key_dir/failure-api-key",
+	} {
+		if !strings.Contains(posixMint.Run, requiredText) {
+			t.Errorf("POSIX mint step does not isolate both one-time keys: missing %q", requiredText)
+		}
+	}
+	for _, requiredText := range []string{
+		"foreach ($purpose in @('primary', 'failure'))",
+		"--purpose $purpose",
+		"$key -notmatch '^lv_(?:live|test)_'",
+		"$failureKey -notmatch '^lv_(?:live|test)_'",
+		"$key -eq $failureKey",
+		"disposable keys are malformed or not isolated",
+		"QURL_CLI_SANDBOX_FAILURE_API_KEY=$failureKey",
+	} {
+		if !strings.Contains(windowsMint.Run, requiredText) {
+			t.Errorf("Windows mint step does not isolate both one-time keys: missing %q", requiredText)
+		}
+	}
+	if windowsSelect == nil {
+		t.Fatal("Windows journey selector is missing")
+	}
+	if !strings.Contains(windowsSelect.Run, `"-test.list=$listPattern"`) ||
 		strings.Contains(windowsSelect.Run, "& $harness -test.list") {
 		t.Errorf("Windows journey selector does not pass the dotted Go test flag as one native argument: %#v", windowsSelect)
+	}
+	if !strings.Contains(windowsSelect.Run, "$env:LOCALAPPDATA") ||
+		!strings.Contains(windowsSelect.Run, "icacls.exe $installDir /inheritance:r /grant:r") ||
+		!strings.Contains(windowsSelect.Run, "$qurl = Join-Path $installDir 'qurl.exe'") ||
+		!strings.Contains(windowsSelect.Run, "Copy-Item -LiteralPath $artifactQurl -Destination $qurl") ||
+		!strings.Contains(windowsSelect.Run, "$artifactHash -ne $installedHash") ||
+		!strings.Contains(windowsSelect.Run, "$installedVersion -ne $expectedVersion") ||
+		!strings.Contains(windowsSelect.Run, "QURL_CLI_SANDBOX_INSTALL_DIR=$installDir") ||
+		!strings.Contains(windowsSelect.Run, "QURL_CLI_SANDBOX_BINARY=$qurl") ||
+		!strings.Contains(windowsSelect.Run, "QURL_CLI_SANDBOX_QURL_BINARY=$qurl") {
+		t.Errorf("Windows journey does not install and bind the exact artifact in a protected user path: %#v", windowsSelect)
+	}
+	recorded := strings.Index(windowsSelect.Run, "QURL_CLI_SANDBOX_INSTALL_DIR=$installDir")
+	protected := strings.Index(windowsSelect.Run, "icacls.exe $installDir")
+	if recorded < 0 || protected < 0 || recorded > protected {
+		t.Error("Windows journey does not record its run-owned install directory before fallible protection and verification")
+	}
+	if windowsInstallCleanup == nil ||
+		windowsInstallCleanup.If != "always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success'" ||
+		!strings.Contains(windowsInstallCleanup.Run, "if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }") ||
+		!strings.Contains(windowsInstallCleanup.Run, "QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected") ||
+		!strings.Contains(windowsInstallCleanup.Run, "Remove-Item -LiteralPath $expected -Recurse -Force") ||
+		!strings.Contains(windowsInstallCleanup.Run, "Test-Path -LiteralPath $expected) { throw") {
+		t.Errorf("Windows journey does not remove the exact test installation after fencing: %#v", windowsInstallCleanup)
+	}
+	if windowsInstallCleanup != nil {
+		guarded := strings.Index(windowsInstallCleanup.Run, "if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }")
+		derived := strings.Index(windowsInstallCleanup.Run, "$expected = Join-Path")
+		if guarded < 0 || derived < 0 || guarded > derived {
+			t.Error("Windows journey derives an install path before it proves one was recorded")
+		}
 	}
 	if windowsRun == nil || !strings.Contains(windowsRun.Run, `@('-test.v=true', '-test.count=1', "-test.run=$testPattern")`) ||
 		!strings.Contains(windowsRun.Run, "@testArgs 2>&1") || strings.Contains(windowsRun.Run, " -test.v ") {
@@ -221,6 +294,10 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if !strings.Contains(fmt.Sprint(journey.Env["QURL_SHARING_RUN_ID"]), "matrix.lane_id") {
 		t.Error("parallel lanes do not have distinct deterministic run IDs")
+	}
+	if windowsKeyRemoval == nil || !strings.Contains(windowsKeyRemoval.Run, "QURL_API_KEY=") ||
+		!strings.Contains(windowsKeyRemoval.Run, "QURL_CLI_SANDBOX_FAILURE_API_KEY=") {
+		t.Errorf("Windows journey does not clear both disposable keys after fencing: %#v", windowsKeyRemoval)
 	}
 
 	cleanup := workflow.Jobs["journey-cleanup"]
@@ -282,6 +359,124 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		}
 	}
 	assertExecutableRepoScript(t, "scripts/build-cli-customer-journey-artifacts.sh")
+}
+
+func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
+	t.Parallel()
+
+	workflows := []struct {
+		name     string
+		jobID    string
+		stepName string
+	}{
+		{name: cliWorkflow, jobID: "journey-cleanup", stepName: "Revoke run resources and credentials"},
+		{name: "qurl-cli-customer-cleanup.yml", jobID: "cleanup", stepName: "Revoke exact-run resources and credentials"},
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fakePython = `#!/usr/bin/env bash
+set -euo pipefail
+lane=
+while (( $# > 0 )); do
+  if [[ "$1" == --lane && $# -ge 2 ]]; then
+    lane=$2
+    break
+  fi
+  shift
+done
+[[ -n "$lane" ]]
+printf '%s\n' "$lane" >>"$LANE_CAPTURE"
+if [[ -n "${FAIL_LANE:-}" && "$lane" == "$FAIL_LANE" ]]; then
+  exit 17
+fi
+`
+
+	for _, subject := range workflows {
+		t.Run(subject.name, func(t *testing.T) {
+			t.Parallel()
+
+			workflow := readWorkflow(t, subject.name)
+			job := workflow.Jobs[subject.jobID]
+			if job == nil {
+				t.Fatalf("%s is missing job %q", subject.name, subject.jobID)
+			}
+			var cleanup *step
+			for index := range job.Steps {
+				if job.Steps[index].Name == subject.stepName {
+					cleanup = &job.Steps[index]
+					break
+				}
+			}
+			if cleanup == nil {
+				t.Fatalf("%s is missing step %q", subject.name, subject.stepName)
+			}
+
+			for _, test := range []struct {
+				name     string
+				failLane string
+				wantFail bool
+			}{
+				{name: "all lanes succeed"},
+				{name: "first lane fails", failLane: "linux", wantFail: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Parallel()
+
+					fakeBin := t.TempDir()
+					if err := os.WriteFile(filepath.Join(fakeBin, "python3"), []byte(fakePython), 0o700); err != nil { //nolint:gosec // Test-owned executable in t.TempDir.
+						t.Fatal(err)
+					}
+					runnerTemp := t.TempDir()
+					capture := filepath.Join(runnerTemp, "lanes")
+					command := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", cleanup.Run) //nolint:gosec // Executes the checked-in workflow step with a test-owned python3.
+					command.Dir = repoRoot
+					command.Env = []string{
+						"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+						"RUNNER_TEMP=" + runnerTemp,
+						"LANE_CAPTURE=" + capture,
+						"FAIL_LANE=" + test.failLane,
+						"AUTH_CLIENT_ID=test-client",
+						"AUTH_CLIENT_SECRET=secret-value-must-not-print",
+						"AUTH_TOKEN_ENDPOINT=https://auth.example",
+						"QURL_ENDPOINT=https://sandbox.example",
+						"GITHUB_RUN_ID=700",
+						"GITHUB_RUN_ATTEMPT=2",
+						"SOURCE_RUN_ID=700",
+						"SOURCE_RUN_ATTEMPT=2",
+					}
+					output, err := command.CombinedOutput()
+					if gotFail := err != nil; gotFail != test.wantFail {
+						t.Fatalf("cleanup error = %v, want failure %t: %s", err, test.wantFail, output)
+					}
+					lanes, readErr := os.ReadFile(capture) //nolint:gosec // Test-owned path under t.TempDir.
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if got, want := string(lanes), "linux\nmacos\nwindows\n"; got != want {
+						t.Errorf("attempted lanes = %q, want %q", got, want)
+					}
+					text := string(output)
+					if strings.Contains(text, "secret-value-must-not-print") {
+						t.Error("cleanup output contains protected authority")
+					}
+					if test.wantFail {
+						for _, message := range []string{
+							"::error::run cleanup failed for linux lane",
+							"::error::run cleanup failed for one or more lanes",
+						} {
+							if !strings.Contains(text, message) {
+								t.Errorf("cleanup output is missing %q: %s", message, output)
+							}
+						}
+					} else if strings.Contains(text, "::error::") {
+						t.Errorf("successful cleanup reported an error: %s", output)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing.T) {
