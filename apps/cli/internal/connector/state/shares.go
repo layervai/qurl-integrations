@@ -212,12 +212,12 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 	return &updated, nil
 }
 
-// DisableTerminal records a fail-closed local stop after the resource's
-// currently running session receives a permanent terminal denial. Unlike
-// SetDesired, this transition is not an authoritative cloud lifecycle
-// response: it may only turn the exact stored epoch from on to off. It never
-// advances an epoch, changes identity/target data, or turns sharing on.
-func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epoch uint64) (*LocalShare, error) {
+// DisableAtCurrentEpoch records a fail-closed local stop without rotating the
+// serving epoch. It is used after either a permanent terminal denial for the
+// current session or an authoritative idempotent cloud-off response. It may
+// only turn the exact stored epoch from on to off; it never advances an epoch,
+// changes identity or target data, or turns sharing on.
+func (r *LocalShareRegistry) DisableAtCurrentEpoch(ctx context.Context, id string, epoch uint64) (*LocalShare, error) {
 	var updated LocalShare
 	err := r.update(ctx, func(state *localSharesState) error {
 		key, share, ok := findLocalShare(state.Shares, id)
@@ -225,10 +225,14 @@ func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epo
 			return os.ErrNotExist
 		}
 		if epoch != share.ServingEpoch {
-			return fmt.Errorf("refuse terminal disable for serving epoch %d while local epoch is %d", epoch, share.ServingEpoch)
+			return fmt.Errorf("refuse local disable for serving epoch %d while local epoch is %d", epoch, share.ServingEpoch)
 		}
 		if share.DesiredState != desiredStateOn && share.DesiredState != desiredStateOff {
 			return fmt.Errorf("invalid local share desired state %q", share.DesiredState)
+		}
+		updated = share
+		if share.DesiredState == desiredStateOff {
+			return errLocalShareUnchanged
 		}
 		share.DesiredState = desiredStateOff
 		share.UpdatedAt = time.Now().UTC()

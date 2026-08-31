@@ -69,11 +69,13 @@ const (
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
 
-	// msgConnectorHubConfig renders hub.ErrConfig. The detail block names the
-	// exact variable; this headline places the problem.
-	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
+	// msgConnectorHubConfig renders hub.ErrConfig without exposing deployment
+	// topology or the hidden inputs used by custom builds.
+	msgConnectorHubConfig = "This qURL CLI is missing required built-in connection settings, so local sharing can't start."
 
-	hintConnectorHubConfig = "Hint: production builds ship this configuration built in — install an official qURL release, or for a custom deployment set QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 together."
+	hintConnectorHubConfig = "Hint: install or reinstall an official qURL release. For a custom deployment, use the release supplied by your qURL administrator."
+
+	labelConnectorErrorCode = "Error code:"
 
 	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
 	hintConnectorSessionConfig = "Hint: update to the latest qURL CLI and sign in again. Do not add cloud or database settings, and do not edit the Connector state files."
@@ -136,7 +138,7 @@ const (
 	// the capability a Connector resource, distinct from enrollment and from
 	// the longer-lived cell assignment.
 	msgConnectorResourceInvalidRequest  = "This Connector's saved resource request is invalid, so it stopped instead of sending or changing it."
-	hintConnectorResourceInvalidRequest = "Hint: update to the latest qURL CLI and run the same command again. If it still fails, do not edit the state file; contact LayerV support with the detail above."
+	hintConnectorResourceInvalidRequest = "Hint: update to the latest qURL CLI and run the same command again. If it still fails, do not edit the state file; contact LayerV support."
 
 	msgConnectorResourceUnavailable  = "The qURL platform couldn't set up this Connector's resource right now."
 	hintConnectorResourceUnavailable = "Hint: run the same command again after a short wait. The CLI saved the exact request and will safely replay it; if the problem persists, check this machine's outbound network access and contact LayerV support."
@@ -151,13 +153,13 @@ const (
 	hintConnectorResourceQuota = "Hint: remove a Connector resource you no longer use with the qURL management tools, or ask your qURL administrator to raise the limit, then run the command again."
 
 	msgConnectorResourceInvalidResponse  = "The qURL platform answered this Connector's resource request in a way this version can't accept, so it stopped instead of guessing."
-	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support with the detail above."
+	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support."
 
 	msgConnectorResourceLocalVerification  = "The qURL platform's answer did not match this Connector's saved request or resource identity, so the CLI refused the answer and stopped."
-	hintConnectorResourceLocalVerification = "Hint: do not delete or edit the state file to accept a different identity. Contact LayerV support with the detail above before running this Connector again."
+	hintConnectorResourceLocalVerification = "Hint: do not delete or edit the state file to accept a different identity. Contact LayerV support before running this Connector again."
 
 	msgConnectorResourceLocalConflict  = "The qURL platform's answer reused an identity already saved for a different Connector ID, so the CLI kept the earlier identity and stopped."
-	hintConnectorResourceLocalConflict = "Hint: confirm each Connector uses its intended --id and state directory. Do not edit the state file to bypass this check; contact your qURL administrator or LayerV support with the detail above."
+	hintConnectorResourceLocalConflict = "Hint: confirm each Connector uses its intended --id and state directory. Do not edit the state file to bypass this check; contact your qURL administrator or LayerV support."
 
 	// Enrollment and platform-assignment renderings for the qurl-go
 	// assignment taxonomy. Without these the SDK's own text reaches the
@@ -265,6 +267,7 @@ func CustomerMessages() []string {
 		msgPublishFoundExisting,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
+		labelConnectorErrorCode,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,
 		msgConnectorDeviceCredential,

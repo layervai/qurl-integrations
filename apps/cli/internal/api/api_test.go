@@ -124,6 +124,34 @@ func TestSharingLifecycleFailsClosedOnInvalidState(t *testing.T) {
 	}
 }
 
+func TestSetSharingRejectsResponseThatDidNotApplyRequestedState(t *testing.T) {
+	tests := []struct {
+		name                string
+		requested, returned DesiredState
+		connection          ConnectionState
+	}{
+		{name: "requested on returned off", requested: DesiredStateOn, returned: DesiredStateOff, connection: ConnectionStopped},
+		{name: "requested off returned on", requested: DesiredStateOff, returned: DesiredStateOn, connection: ConnectionServing},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodPut, path, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+					"desired_state": test.returned, "serving_epoch": 7,
+					"connection_state": test.connection,
+				}, nil)
+			})
+			client := newTestClient(t, srv, nil)
+			if _, err := client.SetSharing(context.Background(), srv.Key.CRID, test.requested); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("SetSharing mismatch error = %v, want ErrInvalidAPIResponse", err)
+			}
+		})
+	}
+}
+
 func TestSharingLifecycleRequiresCanonicalServingEpochField(t *testing.T) {
 	key := apitest.GenerateResourceKey(t)
 	base := fmt.Sprintf(`"resource_id":%q,"crid":%q,"desired_state":"off","connection_state":"stopped"`, key.ResourceID, key.CRID)

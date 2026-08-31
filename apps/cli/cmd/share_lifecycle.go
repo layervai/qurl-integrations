@@ -29,6 +29,7 @@ type localShareRegistry interface {
 	Get(context.Context, string) (*connectorstate.LocalShare, error)
 	Put(context.Context, *connectorstate.LocalShare) error
 	SetDesired(context.Context, string, string, uint64) (*connectorstate.LocalShare, error)
+	DisableAtCurrentEpoch(context.Context, string, uint64) (*connectorstate.LocalShare, error)
 	Delete(context.Context, string) error
 }
 
@@ -96,7 +97,8 @@ the platform's observed Connector state and serving epoch.`
 		Long:  long,
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := rejectLocalConnectorID(cmd.Context(), opts, args[0], cmd.Name()); err != nil {
+			localLookup := lookupLocalShare(cmd.Context(), opts, args[0])
+			if err := rejectLocalConnectorIDFromShare(localLookup.share, args[0], cmd.Name()); err != nil {
 				return err
 			}
 			client, err := opts.newClient(cmd.Context())
@@ -117,9 +119,13 @@ the platform's observed Connector state and serving epoch.`
 				}
 				return opts.printer().ResourceStatus(resource)
 			}
-			local, stateDir, err := readLocalShareIfPresent(cmd.Context(), opts, args[0])
-			if err != nil {
-				return err
+			// The service has now proved this is a valid Connector. An unreadable
+			// registry supplies no trusted local row, so do not use it or let it
+			// block a remote tunnel read. A matching row read successfully remains
+			// a fail-closed identity boundary below.
+			local, stateDir := localLookup.share, localLookup.stateDir
+			if localLookup.err != nil {
+				local = nil
 			}
 			target := ""
 			if local != nil {
@@ -129,7 +135,7 @@ the platform's observed Connector state and serving epoch.`
 				target = local.TargetURL
 			}
 			if inspect {
-				return inspectLocalSharing(cmd.Context(), opts, local, stateDir, sharing)
+				return inspectLocalSharing(cmd.Context(), opts, local, stateDir, localLookup.err, sharing)
 			}
 			return opts.printer().Sharing(target, sharing)
 		},
@@ -185,7 +191,7 @@ func changeShareState(ctx context.Context, opts *globalOpts, id, action string) 
 	}
 	sharing, compensateOff, err := changeAuthoritativeSharing(ctx, client, local.CRID, prior, authorityAction)
 	if err != nil {
-		return err
+		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
 	}
 	if err := validateLocalSharing(local, sharing); err != nil {
 		return compensateShareChange(err, compensateOff, client, registry, local, sharing)
@@ -261,18 +267,50 @@ func compensateShareChange(cause error, enabled bool, client qurlapi.Client, reg
 	off, offErr := client.SetSharing(compensationCtx, local.CRID, qurlapi.DesiredStateOff)
 	var localErr error
 	if offErr == nil {
-		if validationErr := validateLocalSharing(local, off); validationErr != nil {
-			offErr = fmt.Errorf("compensating qURL sharing response was rejected: %w", validationErr)
-		} else {
-			_, localErr = registry.SetDesired(compensationCtx, local.ResourceID, string(off.DesiredState), off.ServingEpoch)
-		}
+		localErr = persistCompensatingOff(compensationCtx, registry, local.ResourceID, local.CRID, off, false)
 	}
 	return errors.Join(cause, offErr, localErr)
+}
+
+// persistCompensatingOff validates the response against the trusted resource
+// identity before it changes local intent. A cloud stop may retain the serving
+// epoch, so the exact current-epoch transition uses the narrow fail-closed
+// registry operation instead of SetDesired. Publish can compensate before its
+// first local row is stored; no other caller may ignore a missing row.
+func persistCompensatingOff(ctx context.Context, registry localShareRegistry, resourceID, crid string,
+	off *qurlapi.Sharing, allowMissing bool,
+) error {
+	trusted := &connectorstate.LocalShare{ResourceID: resourceID, CRID: crid}
+	if validationErr := validateLocalSharing(trusted, off); validationErr != nil {
+		return fmt.Errorf("compensating qURL sharing response was rejected: %w", validationErr)
+	}
+	if off.DesiredState != qurlapi.DesiredStateOff {
+		return fmt.Errorf("compensating qURL sharing response was rejected: desired_state is %q, want %q", off.DesiredState, qurlapi.DesiredStateOff)
+	}
+	local, err := registry.Get(ctx, resourceID)
+	if errors.Is(err, os.ErrNotExist) && allowMissing {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateLocalSharing(local, off); err != nil {
+		return fmt.Errorf("compensating qURL sharing response was rejected: %w", err)
+	}
+	if off.ServingEpoch == local.ServingEpoch {
+		_, err = registry.DisableAtCurrentEpoch(ctx, local.ResourceID, off.ServingEpoch)
+		return err
+	}
+	_, err = registry.SetDesired(ctx, local.ResourceID, string(off.DesiredState), off.ServingEpoch)
+	return err
 }
 
 func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id string, prior *qurlapi.Sharing) (*qurlapi.Sharing, error) {
 	restarted, err := client.RestartSharing(ctx, id)
 	if err == nil {
+		if validationErr := validateRestartAdvance(prior, restarted); validationErr != nil {
+			return nil, fmt.Errorf("%w: qURL sharing restart response: %w", qurl.ErrInvalidAPIResponse, validationErr)
+		}
 		return restarted, nil
 	}
 	if ctx.Err() != nil {
@@ -292,13 +330,30 @@ func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id str
 			fmt.Errorf("read authoritative sharing state: %w", reconcileErr),
 		)
 	}
-	if current == nil {
-		return nil, fmt.Errorf("qURL sharing restart result is ambiguous and authoritative state was empty: %w", err)
-	}
-	if prior != nil && current.ResourceID == prior.ResourceID && current.DesiredState == qurlapi.DesiredStateOn && current.ServingEpoch > prior.ServingEpoch {
+	validationErr := validateRestartAdvance(prior, current)
+	if validationErr == nil {
 		return current, nil
 	}
-	return nil, fmt.Errorf("qURL sharing restart result is ambiguous and authoritative state did not advance: %w", err)
+	return nil, fmt.Errorf("qURL sharing restart result is ambiguous and authoritative state did not advance: %w", errors.Join(err, validationErr))
+}
+
+func validateRestartAdvance(prior, result *qurlapi.Sharing) error {
+	if prior == nil {
+		return errors.New("prior sharing state is empty")
+	}
+	if result == nil {
+		return errors.New("resulting sharing state is empty")
+	}
+	if result.ResourceID != prior.ResourceID || result.CRID != prior.CRID {
+		return errors.New("resulting resource identity does not match prior sharing state")
+	}
+	if result.DesiredState != qurlapi.DesiredStateOn {
+		return fmt.Errorf("resulting desired_state is %q, want %q", result.DesiredState, qurlapi.DesiredStateOn)
+	}
+	if result.ServingEpoch <= prior.ServingEpoch {
+		return fmt.Errorf("resulting serving epoch %d did not advance beyond %d", result.ServingEpoch, prior.ServingEpoch)
+	}
+	return nil
 }
 
 // stopShare commits the authoritative cloud-off transition before consulting
@@ -306,7 +361,8 @@ func restartSharingReconciled(ctx context.Context, client qurlapi.Client, id str
 // needs no matching local share, log path, or daemon controller. Registered
 // device state and its owner-bound registry are still required for authentication.
 func stopShare(ctx context.Context, opts *globalOpts, id string) error {
-	if err := rejectLocalConnectorID(ctx, opts, id, "stop"); err != nil {
+	localLookup := lookupLocalShare(ctx, opts, id)
+	if err := rejectLocalConnectorIDFromShare(localLookup.share, id, "stop"); err != nil {
 		return err
 	}
 	client, err := opts.newClient(ctx)
@@ -326,7 +382,7 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 		}
 		return err
 	}
-	target, cleanupErr := convergeStoppedLocalShare(ctx, opts, id, sharing)
+	target, cleanupErr := convergeStoppedLocalShare(ctx, opts, localLookup, sharing)
 	if errors.Is(cleanupErr, errLocalSharingIdentityMismatch) {
 		// A remote stop committed, but an identity disagreement is a trust
 		// failure, not ordinary best-effort local cleanup. Report both facts and
@@ -343,11 +399,19 @@ func stopShare(ctx context.Context, opts *globalOpts, id string) error {
 	return nil
 }
 
-func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, id string, sharing *qurlapi.Sharing) (string, error) {
-	local, stateDir, err := readLocalShareIfPresent(ctx, opts, id)
-	if err != nil {
-		return "", err
+func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, lookup localShareLookup, sharing *qurlapi.Sharing) (string, error) {
+	if lookup.err != nil {
+		if lookup.stateDir == "" {
+			return "", lookup.err
+		}
+		logDir, logErr := connectordaemon.DefaultLogDir(lookup.stateDir)
+		if logErr != nil {
+			return "", errors.Join(lookup.err, logErr)
+		}
+		_, reloadErr := opts.newShareDaemon(lookup.stateDir, logDir).ReloadIfRunning(ctx)
+		return "", errors.Join(lookup.err, reloadErr)
 	}
+	local, stateDir := lookup.share, lookup.stateDir
 	if local == nil {
 		return "", nil
 	}
@@ -359,7 +423,11 @@ func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, id string,
 	if err != nil {
 		return target, err
 	}
-	_, err = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	if sharing.ServingEpoch == local.ServingEpoch && sharing.DesiredState == qurlapi.DesiredStateOff {
+		_, err = registry.DisableAtCurrentEpoch(ctx, local.ResourceID, sharing.ServingEpoch)
+	} else {
+		_, err = registry.SetDesired(ctx, local.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	}
 	if err != nil {
 		return target, err
 	}
@@ -373,36 +441,44 @@ func convergeStoppedLocalShare(ctx context.Context, opts *globalOpts, id string,
 	return target, nil
 }
 
-func readLocalShareIfPresent(ctx context.Context, opts *globalOpts, id string) (*connectorstate.LocalShare, string, error) {
+type localShareLookup struct {
+	share    *connectorstate.LocalShare
+	stateDir string
+	err      error
+}
+
+func lookupLocalShare(ctx context.Context, opts *globalOpts, id string) localShareLookup {
 	id = strings.TrimSpace(id)
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
 		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
-			return nil, "", nil
+			return localShareLookup{}
 		}
-		return nil, "", err
+		return localShareLookup{err: err}
 	}
-	shares, present, err := connectorstate.ReadLocalSharesIfPresent(ctx, stateDir)
+	shares, present, err := opts.readLocalShares(ctx, stateDir)
 	if err != nil || !present {
-		return nil, stateDir, err
+		return localShareLookup{stateDir: stateDir, err: err}
 	}
 	for i := range shares {
 		share := shares[i]
 		if share.ResourceID == id || share.CRID == id || share.ConnectorID == id {
-			return &share, stateDir, nil
+			return localShareLookup{share: &share, stateDir: stateDir}
 		}
 	}
-	return nil, stateDir, nil
+	return localShareLookup{stateDir: stateDir}
 }
 
-// rejectLocalConnectorID gives local users the canonical CRID before an
-// internal Connector slug reaches an API route that does not accept it. State
-// lookup is only a hint: missing, unavailable, or unrelated local state must
-// not block a valid remote resource command.
-func rejectLocalConnectorID(ctx context.Context, opts *globalOpts, id, action string) error {
-	local, _, err := readLocalShareIfPresent(ctx, opts, id)
-	if err != nil || local == nil {
-		return nil //nolint:nilerr // Optional local hint; the service remains authoritative for valid identifiers.
+func readLocalShareIfPresent(ctx context.Context, opts *globalOpts, id string) (*connectorstate.LocalShare, string, error) {
+	lookup := lookupLocalShare(ctx, opts, id)
+	return lookup.share, lookup.stateDir, lookup.err
+}
+
+// rejectLocalConnectorIDFromShare gives local users the canonical CRID before
+// an internal Connector slug reaches an API route that does not accept it.
+func rejectLocalConnectorIDFromShare(local *connectorstate.LocalShare, id, action string) error {
+	if local == nil {
+		return nil
 	}
 	trimmedID := strings.TrimSpace(id)
 	if trimmedID != local.ConnectorID || trimmedID == local.CRID || trimmedID == local.ResourceID {
@@ -428,10 +504,15 @@ func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonControll
 }
 
 func inspectLocalSharing(ctx context.Context, opts *globalOpts, local *connectorstate.LocalShare, stateDir string,
-	sharing *qurlapi.Sharing,
+	localStateErr error, sharing *qurlapi.Sharing,
 ) error {
 	inspection := output.SharingInspection{
 		State: sharing, DaemonState: "not_registered", TargetHealth: "not_available",
+	}
+	if localStateErr != nil {
+		inspection.DaemonState = "unavailable"
+		inspection.FailureCategory = "local_state"
+		return opts.printer().InspectSharing(&inspection)
 	}
 	if local == nil {
 		return opts.printer().InspectSharing(&inspection)

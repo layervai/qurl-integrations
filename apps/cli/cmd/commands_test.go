@@ -50,8 +50,13 @@ func TestReleaseNativeTrustVerifierIsHiddenAndFailsClosedInDarkBuild(t *testing.
 		t.Fatalf("version help exposed the release verifier: code=%d stdout=%q stderr=%q", help.code, help.stdout.String(), help.stderr.String())
 	}
 	result := runCLI(t, &runOpts{args: []string{"version", "--verify-release-native-trust"}})
-	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "no pinned production Hub key") {
+	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "missing required built-in connection settings") {
 		t.Fatalf("dark release verifier = code=%d stdout=%q stderr=%q", result.code, result.stdout.String(), result.stderr.String())
+	}
+	for _, forbidden := range []string{"Hub", "QURL_CONNECTOR_HUB_", "server public key"} {
+		if strings.Contains(result.stderr.String(), forbidden) {
+			t.Fatalf("dark release verifier exposed %q: stderr=%q", forbidden, result.stderr.String())
+		}
 	}
 }
 

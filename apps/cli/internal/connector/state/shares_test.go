@@ -210,7 +210,7 @@ func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
 	}
 }
 
-func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T) {
+func TestLocalShareRegistryDisableAtCurrentEpochIsFailClosedAndExact(t *testing.T) {
 	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
@@ -231,21 +231,33 @@ func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T
 	if err := registry.Put(context.Background(), &share); err != nil {
 		t.Fatal(err)
 	}
-	if disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 6); err == nil || disabled != nil {
-		t.Fatalf("older terminal disable result = %+v, %v; want nil row and an error", disabled, err)
+	if disabled, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 6); err == nil || disabled != nil {
+		t.Fatalf("older local disable result = %+v, %v; want nil row and an error", disabled, err)
 	}
-	if disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 8); err == nil || disabled != nil {
-		t.Fatalf("newer terminal disable result = %+v, %v; want nil row and an error", disabled, err)
+	if disabled, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 8); err == nil || disabled != nil {
+		t.Fatalf("newer local disable result = %+v, %v; want nil row and an error", disabled, err)
 	}
-	disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 7)
+	disabled, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if disabled.DesiredState != "off" || disabled.ServingEpoch != 7 || disabled.TargetURL != share.TargetURL || disabled.ConnectorRoutingID != share.ConnectorRoutingID {
-		t.Fatalf("terminal disable changed more than local intent: %+v", disabled)
+		t.Fatalf("local disable changed more than local intent: %+v", disabled)
 	}
-	if _, err := registry.DisableTerminal(context.Background(), share.CRID, 7); err != nil {
-		t.Fatalf("idempotent terminal disable: %v", err)
+	transitionTime := disabled.UpdatedAt
+	disabledAgain, err := registry.DisableAtCurrentEpoch(context.Background(), share.CRID, 7)
+	if err != nil {
+		t.Fatalf("idempotent local disable: %v", err)
+	}
+	if !disabledAgain.UpdatedAt.Equal(transitionTime) {
+		t.Fatalf("idempotent local disable changed transition time from %s to %s", transitionTime, disabledAgain.UpdatedAt)
+	}
+	storedAgain, err := registry.Get(context.Background(), share.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !storedAgain.UpdatedAt.Equal(transitionTime) {
+		t.Fatalf("idempotent local disable persisted transition time %s, want %s", storedAgain.UpdatedAt, transitionTime)
 	}
 }
 

@@ -96,6 +96,7 @@ type runOpts struct {
 	localShares          []connectorstate.LocalShare
 	localSharesErr       error
 	localSharesLoads     *int
+	readLocalShares      func(context.Context, string) ([]connectorstate.LocalShare, bool, error)
 	shareRegistry        localShareRegistry
 	shareDaemon          shareDaemonController
 	shareRegistryFactory func(string) (localShareRegistry, error)
@@ -226,6 +227,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 				*o.localSharesLoads++
 			}
 			return append([]connectorstate.LocalShare(nil), o.localShares...), o.localSharesErr
+		}
+		if o.readLocalShares != nil {
+			g.readLocalShares = o.readLocalShares
 		}
 		if o.shareRegistryFactory != nil {
 			g.openShareRegistry = o.shareRegistryFactory

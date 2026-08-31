@@ -359,12 +359,20 @@ func (c *client) SetSharing(ctx context.Context, id string, desired DesiredState
 	if desired != DesiredStateOn && desired != DesiredStateOff {
 		return nil, fmt.Errorf("%w: desired_state must be on or off", qurl.ErrInvalidResourceRequest)
 	}
-	// TODO(upstream-contract): qurl-service advances serving_epoch whenever
-	// desired_state changes. The local registry rejects a same-epoch state
-	// contradiction, so keep that service invariant explicit and tested.
-	return c.doSharing(ctx, http.MethodPut, id, struct {
+	// Stopping can retain the current serving epoch because the epoch fences a
+	// serving generation, not the desired-off transition. Starting a stopped
+	// share uses RestartSharing so it must advance to a new fenced generation.
+	// In both cases, require the response to confirm the requested state.
+	sharing, err := c.doSharing(ctx, http.MethodPut, id, struct {
 		DesiredState DesiredState `json:"desired_state"`
 	}{DesiredState: desired}, false)
+	if err != nil {
+		return nil, err
+	}
+	if sharing.DesiredState != desired {
+		return nil, fmt.Errorf("%w: sharing response desired_state %q does not match requested state %q", qurl.ErrInvalidAPIResponse, sharing.DesiredState, desired)
+	}
+	return sharing, nil
 }
 
 // RestartSharing rotates the serving epoch and leaves the resource desired on.

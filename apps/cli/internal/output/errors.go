@@ -75,11 +75,11 @@ func renderErrorLines(p *Printer, err error) []string {
 func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) { //nolint:gocyclo // Keep ordered terminal-cause rendering in one boundary.
 	headline, hint, includeDetail := "", "", true
 	if resourceHeadline, resourceHint, ok := connectorResourceErrorPosture(err); ok {
-		return renderConnectorPosture(p, head, err, resourceHeadline, resourceHint, true), true
+		return renderConnectorResourcePosture(p, head, err, resourceHeadline, resourceHint), true
 	}
 	switch {
 	case errors.Is(err, hub.ErrConfig):
-		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
+		headline, hint, includeDetail = msgConnectorHubConfig, hintConnectorHubConfig, false
 	case errors.Is(err, sessionconfig.ErrConfig):
 		headline, hint = msgConnectorSessionConfig, hintConnectorSessionConfig
 	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
@@ -208,6 +208,31 @@ func renderConnectorPosture(p *Printer, head string, err error, headline, hint s
 	return lines
 }
 
+// renderConnectorResourcePosture keeps the SDK and local continuity detail
+// behind the customer boundary. The native result code is the only dynamic
+// value admitted here: qurl-go defines it as a non-secret five-digit support
+// code and does not attach a peer, request nonce, credential, or endpoint.
+func renderConnectorResourcePosture(p *Printer, head string, err error, headline, hint string) []string {
+	lines := []string{head + " " + headline}
+	if code := connectorResourceCode(err); code != "" {
+		lines = append(lines, "", "  "+p.dim(labelConnectorErrorCode+" "+code))
+	}
+	return append(lines, "", "  "+p.dim(hint))
+}
+
+func connectorResourceCode(err error) string {
+	var discovery *qurl.ConnectorResourceDiscoveryError
+	if !errors.As(err, &discovery) || discovery == nil || len(discovery.Code) != 5 {
+		return ""
+	}
+	for _, character := range discovery.Code {
+		if character < '0' || character > '9' {
+			return ""
+		}
+	}
+	return discovery.Code
+}
+
 func connectorResourceErrorPosture(err error) (headline, hint string, ok bool) {
 	switch {
 	case errors.Is(err, state.ErrConnectorResourceVerification):
@@ -236,7 +261,11 @@ func connectorResourceErrorPosture(err error) (headline, hint string, ok bool) {
 }
 
 // apiErrorLines is the RFC 7807 anatomy: headline with status, detail
-// paragraph, sorted invalid fields, one hint, request id.
+// paragraph, sorted invalid fields, one hint, request id. Title, Detail, and
+// InvalidFields are the qURL service's public error contract and are rendered
+// as supplied. Credential redaction still applies at RenderError; do not add a
+// heuristic topology sanitizer here because it would silently rewrite that
+// public contract.
 func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 	headline := apiErr.Title
 	if headline == "" {

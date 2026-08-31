@@ -185,22 +185,21 @@ ACL condition. For most Windows CI jobs, use the one-command `QURL_API_KEY`
 environment value instead; qurl consumes it only for enrollment and does not
 store it.
 
-The CLI validates the account key, mints one one-shot agent enrollment
-credential, and registers an X25519 device identity through NHP 1.1. Only the
-restricted device identity and device REST credential enter the owner-only
-native state directory. The account API key and one-shot enrollment credential
-remain in memory and are not stored by qurl. A warm command reuses the device
-identity and does not read `QURL_API_KEY`.
+The CLI validates the account key and uses it once to enroll a restricted
+device identity. Only that device identity and its restricted credential enter
+the owner-only local state directory. The account API key and one-time
+enrollment credential remain in memory and are not stored by qurl. A warm
+command reuses the device identity and does not read `QURL_API_KEY`.
 
 `qurl whoami` checks the registered device and shows its account.
 
-Authenticated commands need the owner-only native state directory to remain
+Authenticated commands need the owner-only local state directory to remain
 writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
 credentials, but it is not a steady-state bypass for that durable identity.
-Each authenticated command also opens the pinned NHP device runtime before it
-calls the qURL REST API. A Hub outage therefore makes read-only commands such
-as `qurl list` unavailable too; the CLI reports the native connection or trust
-configuration error. An account API key does not bypass this boundary.
+Each authenticated command verifies the saved device identity with the qURL
+platform before it calls the resource API. If the platform cannot verify that
+identity, read-only commands such as `qurl list` are unavailable too. An
+account API key does not bypass this boundary.
 
 One native state directory belongs to one account. To switch accounts, first
 revoke the registered device key in the qURL dashboard. Then move or remove the
@@ -266,7 +265,7 @@ With no headless flags, it serves the local shares already stored under
 Generated Docker, Kubernetes, and other headless deployment instructions can
 also supply `--headless-config <share.yaml>`. This is a non-secret, read-only
 version 2 YAML file for exactly one share. Use the generated file as-is; its
-resource and routing identifiers bind the deployment to that share.
+identifiers bind the deployment to that share.
 
 The first start of a new state volume also requires
 `--enrollment-token-file <path>`. This file contains a one-time enrollment
@@ -479,23 +478,22 @@ qurl inspect <CRID>
 `stop` disables the cloud route first and then tells an already-running local
 daemon to reconcile; it never starts the daemon. `start` is idempotent and
 requires the saved local target to be reachable. `restart` always advances the
-serving epoch so stale registrations cannot keep routing. `status` and
+serving epoch so stale sessions cannot keep serving. `status` and
 `inspect` use the same authoritative view. Both work for remote resources and
 include the local target only when this machine owns one.
 
-CLI v2 requires the owner-facing resource-detail route
-`GET /v1/resources/{id}`. Custom deployments must provide that route; the CLI
-does not fall back to an account-wide list scan after a detail-route failure.
+Custom deployments must support the current CLI resource-status API. The CLI
+does not scan the full account inventory when one resource-status request
+fails.
 
-The daemon uses one resource-bound NHP admission and FRP session per share. It
-recovers assignment, sleep/wake, and network failures automatically with
-persisted bounded backoff. Customers never need a refresh approval flag. On
-macOS the first local `publish` or `start` installs an owner-only
-LaunchAgent. On Windows it installs a least-privilege per-user Task Scheduler
-job. The installed `qurl` path survives normal upgrades, and a binary-version
-change reloads the resident daemon deliberately. Ordinary lifecycle commands
-reload desired state over an owner-only Unix socket or Windows named pipe
-without restarting healthy sibling shares.
+The daemon keeps each share independent. It recovers assignment, sleep/wake,
+and network failures automatically with persisted bounded backoff. Customers
+never need a refresh approval flag. On macOS the first local `publish` or
+`start` installs an owner-only LaunchAgent. On Windows it installs a
+least-privilege per-user Task Scheduler job. The installed `qurl` path survives
+normal upgrades, and a binary-version change reloads the resident daemon
+deliberately. Ordinary lifecycle commands reload desired state over an
+owner-only local control channel without restarting healthy sibling shares.
 
 `qurl list` prints every full CRID. For locally registered tunnel rows it also
 prints the canonical loopback target and durable desired state. The paged list

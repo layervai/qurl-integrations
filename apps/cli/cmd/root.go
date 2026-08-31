@@ -74,6 +74,7 @@ type globalOpts struct {
 	// in-process tunnel server logs through the same global concurrently.
 	redirectFRPLogs      func()
 	loadLocalShares      func(context.Context) ([]connectorstate.LocalShare, error)
+	readLocalShares      func(context.Context, string) ([]connectorstate.LocalShare, bool, error)
 	openShareRegistry    func(string) (localShareRegistry, error)
 	newShareDaemon       func(string, string) shareDaemonController
 	preflightTarget      func(context.Context, string, int) error
@@ -281,6 +282,9 @@ func (o *globalOpts) applyDefaults() {
 			shares, _, err := connectorstate.ReadLocalSharesIfPresent(ctx, dir)
 			return shares, err
 		}
+	}
+	if o.readLocalShares == nil {
+		o.readLocalShares = connectorstate.ReadLocalSharesIfPresent
 	}
 	if o.openShareRegistry == nil {
 		o.openShareRegistry = func(dir string) (localShareRegistry, error) {

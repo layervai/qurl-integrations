@@ -10,13 +10,12 @@ consumer-facing contract.
 ## Required CLI customer-journey gate
 
 Pull-request CI builds and verifies the packaged CLI artifacts without access
-to live credentials or private sandbox inputs. After the exact change reaches
-`main`, the trusted customer-journey workflow accepts only the matching
-same-repository `push` SHA. It runs the exact packaged artifacts on Linux,
-macOS, and Windows. A CLI release stays blocked until that exact `main` result
-passes. The smoke must begin with a fresh native state directory and an
-ordinary account key piped to `qurl login`. Every later command must use only
-the stored device identity.
+to live credentials. After the exact change reaches `main`, a trusted
+customer-journey workflow accepts only the matching same-repository `push`
+SHA. It runs the exact packaged artifacts on Linux, macOS, and Windows. A CLI
+release stays blocked until that exact `main` result passes. The smoke must
+begin with a fresh local state directory and an ordinary account key piped to
+`qurl login`. Every later command must use only the stored device identity.
 
 The required journey is: login, warm `whoami`, remote-URL publish with status
 and inspect, loopback publish, status, inspect, list, public-route response,
@@ -27,36 +26,20 @@ the released command surface and its real Task Scheduler integration. Unit
 tests, compiled tagged tests, source receipts, and artifact attestations support
 this gate; they do not replace the live journey.
 
-The `cli-connector-resource-sandbox-controller` environment must allow only
-`main` and must not require a reviewer. Configure these six environment
-secrets:
+Live inputs belong only in a protected, `main`-only environment. Each platform
+lane must use an isolated test owner and a disposable minimum-scope credential.
+Candidate code must never receive the authority that creates those
+credentials. Pull-request jobs must not use the live environment. Lane-local
+cleanup and an independent `always()` cleanup job must delete every created
+resource and revoke every disposable credential on success, failure, or
+cancellation.
 
-- `QURL_SANDBOX_AUTH0_CLIENT_ID_LINUX`
-- `QURL_SANDBOX_AUTH0_CLIENT_SECRET_LINUX`
-- `QURL_SANDBOX_AUTH0_CLIENT_ID_MACOS`
-- `QURL_SANDBOX_AUTH0_CLIENT_SECRET_MACOS`
-- `QURL_SANDBOX_AUTH0_CLIENT_ID_WINDOWS`
-- `QURL_SANDBOX_AUTH0_CLIENT_SECRET_WINDOWS`
-
-Each client must map to a different, dedicated sandbox-only owner. That owner
-must contain no state outside its one platform lane. Each client grants exactly
-`qurl:agent`, `qurl:read`, and `qurl:write`. It must not have AWS authority or
-Auth0 Management API access. Configure
-`QURL_SANDBOX_AUTH0_TOKEN_ENDPOINT` as a controller environment variable and
-`QURL_SANDBOX_ENDPOINT` as an environment secret. The separate
-`cli-connector-resource-sandbox` environment contains the private live-journey
-inputs. Pull-request jobs must not use either environment. Before and after
-each live run, the controller deletes every resource and revokes every API or
-device credential owned by each dedicated lane owner.
-
-CLI release publication also fails closed until both production NHP Hub trust
-pin secrets are populated: the canonical public key and the independent
-SHA-256 fingerprint of its raw 32-byte value. The release job verifies the
-pair before GoReleaser runs. It then checks the exact fingerprint from the
-draft Linux binary and from both tested container platforms. The GitHub
-Release stays draft and the Homebrew tap stays on its prior version until all
-artifact, image, and signature checks pass. Do not bypass this gate or publish
-a dark CLI build.
+CLI release publication also fails closed until the exact production
+connection settings are embedded and independently verified in the packaged
+artifacts. The GitHub Release stays draft and the Homebrew tap stays on its
+prior version until all customer-journey, artifact, image, and signature checks
+pass. Do not bypass this gate or publish a build without its required
+connection settings.
 
 ## What a CLI release ships
 

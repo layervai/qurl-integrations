@@ -37,7 +37,7 @@ const (
 // Registry is the durable desired-state surface consumed by the daemon.
 type Registry interface {
 	List(context.Context) ([]connectorstate.LocalShare, error)
-	DisableTerminal(context.Context, string, uint64) (*connectorstate.LocalShare, error)
+	DisableAtCurrentEpoch(context.Context, string, uint64) (*connectorstate.LocalShare, error)
 }
 
 // Session is one independently managed resource route.
@@ -67,6 +67,7 @@ type Manager struct {
 	failures            map[string]int
 	retrying            map[string]bool
 	retryGeneration     map[string]uint64
+	retryDefinitions    map[string]connectorstate.LocalShare
 	diagnostics         map[string]ResourceDiagnostic
 	nextRetryGeneration uint64
 	trigger             chan struct{}
@@ -104,7 +105,8 @@ func NewManager(registry Registry, factory SessionFactory) (*Manager, error) {
 	return &Manager{
 		registry: registry, factory: factory,
 		sessions: map[string]*managedSession{}, failures: map[string]int{}, retrying: map[string]bool{},
-		retryGeneration: map[string]uint64{}, diagnostics: map[string]ResourceDiagnostic{}, trigger: make(chan struct{}, 1),
+		retryGeneration: map[string]uint64{}, retryDefinitions: map[string]connectorstate.LocalShare{},
+		diagnostics: map[string]ResourceDiagnostic{}, trigger: make(chan struct{}, 1),
 		resourceStopTimeout: 10 * time.Second, resourceGonePersistTimeout: 5 * time.Second, retryDelay: daemonRetryDelay,
 	}, nil
 }
@@ -164,12 +166,14 @@ func (m *Manager) pruneRetryState(desired map[string]*connectorstate.LocalShare)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for resourceID := range m.diagnostics {
-		if _, present := desired[resourceID]; !present {
-			delete(m.failures, resourceID)
-			delete(m.retrying, resourceID)
-			delete(m.retryGeneration, resourceID)
-			delete(m.diagnostics, resourceID)
+		if _, present := desired[resourceID]; present {
+			continue
 		}
+		delete(m.failures, resourceID)
+		delete(m.retrying, resourceID)
+		delete(m.retryGeneration, resourceID)
+		delete(m.retryDefinitions, resourceID)
+		delete(m.diagnostics, resourceID)
 	}
 }
 
@@ -224,7 +228,7 @@ func (m *Manager) stopReplacedSessions(ctx context.Context, desired map[string]*
 				if _, replaced := m.sessions[current.share.ResourceID]; !replaced {
 					m.sessions[current.share.ResourceID] = current
 				}
-				m.scheduleRetryLocked(ctx, current.share.ResourceID, err)
+				m.scheduleRetryLocked(ctx, &current.share, err)
 				m.mu.Unlock()
 				delete(desired, current.share.ResourceID)
 			}
@@ -237,6 +241,22 @@ func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*
 	for _, share := range sortedDesired(desired) {
 		m.mu.Lock()
 		retryScheduled := m.retrying[share.ResourceID]
+		if retryScheduled {
+			retryDefinition, bound := m.retryDefinitions[share.ResourceID]
+			_, live := m.sessions[share.ResourceID]
+			if bound && !live && !sameSessionDefinition(&retryDefinition, share) {
+				// A new lifecycle must not inherit an old start/watcher delay.
+				// Removing the generation also makes the old timer inert. A live
+				// old session is different: its failed Stop keeps this gate until
+				// overlap is no longer possible.
+				delete(m.failures, share.ResourceID)
+				delete(m.retrying, share.ResourceID)
+				delete(m.retryGeneration, share.ResourceID)
+				delete(m.retryDefinitions, share.ResourceID)
+				delete(m.diagnostics, share.ResourceID)
+				retryScheduled = false
+			}
+		}
 		m.mu.Unlock()
 		if retryScheduled {
 			continue
@@ -249,13 +269,13 @@ func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*
 			if errors.Is(err, ErrResourceGone) {
 				if !m.persistResourceGone(ctx, share) {
 					m.mu.Lock()
-					m.scheduleRetryLocked(ctx, share.ResourceID, ErrResourceGone)
+					m.scheduleRetryLocked(ctx, share, ErrResourceGone)
 					m.mu.Unlock()
 				}
 				continue
 			}
 			m.mu.Lock()
-			m.scheduleRetryLocked(ctx, share.ResourceID, err)
+			m.scheduleRetryLocked(ctx, share, err)
 			m.mu.Unlock()
 			continue
 		}
@@ -263,6 +283,7 @@ func (m *Manager) startDesiredSessions(ctx context.Context, desired map[string]*
 		delete(m.failures, share.ResourceID)
 		delete(m.retrying, share.ResourceID)
 		delete(m.retryGeneration, share.ResourceID)
+		delete(m.retryDefinitions, share.ResourceID)
 		m.sessions[share.ResourceID] = &managedSession{share: *share, session: session}
 		if diagnostic, ok := session.(diagnosticSession); ok {
 			m.diagnostics[share.ResourceID] = diagnostic.Diagnostic()
@@ -288,13 +309,13 @@ func (m *Manager) watch(ctx context.Context, resourceID string, session Session)
 	if errors.Is(session.Err(), ErrResourceGone) {
 		if !m.persistResourceGone(ctx, &current.share) {
 			m.mu.Lock()
-			m.scheduleRetryLocked(ctx, resourceID, session.Err())
+			m.scheduleRetryLocked(ctx, &current.share, session.Err())
 			m.mu.Unlock()
 		}
 		return
 	}
 	m.mu.Lock()
-	m.scheduleRetryLocked(ctx, resourceID, session.Err())
+	m.scheduleRetryLocked(ctx, &current.share, session.Err())
 	m.mu.Unlock()
 }
 
@@ -312,7 +333,7 @@ func (m *Manager) persistResourceGone(parent context.Context, share *connectorst
 	}
 	persistCtx, cancel := context.WithTimeout(parent, m.resourceGonePersistTimeout)
 	defer cancel()
-	_, err := m.registry.DisableTerminal(persistCtx, share.ResourceID, share.ServingEpoch)
+	_, err := m.registry.DisableAtCurrentEpoch(persistCtx, share.ResourceID, share.ServingEpoch)
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		return true
 	}
@@ -322,7 +343,8 @@ func (m *Manager) persistResourceGone(parent context.Context, share *connectorst
 
 // scheduleRetryLocked records a resource-local retry without failing the
 // daemon or disturbing healthy siblings. m.mu must be held by the caller.
-func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string, cause error) {
+func (m *Manager) scheduleRetryLocked(ctx context.Context, share *connectorstate.LocalShare, cause error) {
+	resourceID := share.ResourceID
 	if m.retrying[resourceID] {
 		return
 	}
@@ -340,6 +362,7 @@ func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string, ca
 	m.nextRetryGeneration++
 	generation := m.nextRetryGeneration
 	m.retryGeneration[resourceID] = generation
+	m.retryDefinitions[resourceID] = *share
 	go func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -356,6 +379,7 @@ func (m *Manager) scheduleRetryLocked(ctx context.Context, resourceID string, ca
 		}
 		delete(m.retrying, resourceID)
 		delete(m.retryGeneration, resourceID)
+		delete(m.retryDefinitions, resourceID)
 		m.mu.Unlock()
 		if fire {
 			m.Trigger()

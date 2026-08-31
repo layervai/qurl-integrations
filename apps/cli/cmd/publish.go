@@ -141,14 +141,14 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	}
 	resource := resolved.Resource
 	local, sharing, compensateOff, err := activateLocalPublish(ctx, client, registry, resource, knockResourceID, target)
-	if err != nil {
-		return err
-	}
 	compensate := func(cause error) error {
 		if !compensateOff {
 			return cause
 		}
 		return compensateLocalPublish(client, registry, resource, cause)
+	}
+	if err != nil {
+		return compensate(err)
 	}
 	if err := validateLocalSharing(local, sharing); err != nil {
 		return compensate(err)
@@ -393,13 +393,14 @@ func activateLocalPublish(
 	var sharing *qurlapi.Sharing
 	terminalRecovery := localPresent && existing.DesiredState == string(qurlapi.DesiredStateOff) && prior.DesiredState == qurlapi.DesiredStateOn
 	restartRequired := targetChanged || (localMissing && prior.DesiredState == qurlapi.DesiredStateOn) || terminalRecovery
+	compensateOff := restartRequired || prior.DesiredState == qurlapi.DesiredStateOff
 	if restartRequired {
 		sharing, err = restartSharingReconciled(ctx, client, resource.CRID, prior)
 	} else {
 		sharing, err = client.SetSharing(ctx, resource.CRID, qurlapi.DesiredStateOn)
 	}
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, compensateOff, err
 	}
 	local := &connectorstate.LocalShare{
 		CRID: resource.CRID, ResourceID: resource.ResourceID, ConnectorID: resource.Slug,
@@ -407,7 +408,7 @@ func activateLocalPublish(
 		TargetURL: target.canonicalOrigin, LocalIP: target.localIP, LocalPort: target.localPort,
 		DesiredState: string(sharing.DesiredState), ServingEpoch: sharing.ServingEpoch,
 	}
-	return local, sharing, restartRequired || prior.DesiredState == qurlapi.DesiredStateOff, nil
+	return local, sharing, compensateOff, nil
 }
 
 func compensateLocalPublish(
@@ -421,10 +422,7 @@ func compensateLocalPublish(
 	off, offErr := client.SetSharing(ctx, resource.CRID, qurlapi.DesiredStateOff)
 	var localErr error
 	if offErr == nil {
-		_, localErr = registry.SetDesired(ctx, resource.ResourceID, string(off.DesiredState), off.ServingEpoch)
-		if errors.Is(localErr, os.ErrNotExist) {
-			localErr = nil
-		}
+		localErr = persistCompensatingOff(ctx, registry, resource.ResourceID, resource.CRID, off, true)
 	}
 	return errors.Join(cause, offErr, localErr)
 }

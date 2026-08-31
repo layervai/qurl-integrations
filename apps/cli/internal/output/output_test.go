@@ -19,6 +19,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -622,32 +623,89 @@ func TestConnectorResourceRenderings(t *testing.T) {
 	cases := []struct {
 		name     string
 		err      error
+		code     string
 		headline string
 		hint     string
 	}{
-		{"invalid local request", qurl.ErrInvalidNativeConnectorResourceRequest, msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
-		{"request rejected", qurl.ErrConnectorResourceRequestRejected, msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
-		{"identity rejected", qurl.ErrConnectorResourceIdentityRejected, msgConnectorIdentityRejected, hintConnectorIdentityRejected},
-		{"entitlement", qurl.ErrConnectorResourceEntitlementDenied, msgConnectorResourceEntitlement, hintConnectorResourceEntitlement},
-		{"continuity conflict", qurl.ErrConnectorResourceIdentityConflict, msgConnectorResourceConflict, hintConnectorResourceConflict},
-		{"quota", qurl.ErrConnectorResourceQuotaExceeded, msgConnectorResourceQuota, hintConnectorResourceQuota},
-		{"rate limited", qurl.ErrConnectorResourceRateLimited, msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
-		{"unavailable", qurl.ErrConnectorResourceUnavailable, msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
-		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},
-		{"local verification", state.ErrConnectorResourceVerification, msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification},
-		{"local cross-Connector conflict", state.ErrConnectorResourceStateConflict, msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict},
+		{"invalid local request", qurl.ErrInvalidNativeConnectorResourceRequest, "", msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"request rejected", qurl.ErrConnectorResourceRequestRejected, "52506", msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"identity rejected", qurl.ErrConnectorResourceIdentityRejected, "52501", msgConnectorIdentityRejected, hintConnectorIdentityRejected},
+		{"entitlement", qurl.ErrConnectorResourceEntitlementDenied, "52502", msgConnectorResourceEntitlement, hintConnectorResourceEntitlement},
+		{"continuity conflict", qurl.ErrConnectorResourceIdentityConflict, "52503", msgConnectorResourceConflict, hintConnectorResourceConflict},
+		{"quota", qurl.ErrConnectorResourceQuotaExceeded, "52504", msgConnectorResourceQuota, hintConnectorResourceQuota},
+		{"rate limited", qurl.ErrConnectorResourceRateLimited, "52505", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"unavailable", qurl.ErrConnectorResourceUnavailable, "52500", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, "", msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},
+		{"local verification", state.ErrConnectorResourceVerification, "", msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification},
+		{"local cross-Connector conflict", state.ErrConnectorResourceStateConflict, "", msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			for _, err := range []error{test.err, fmt.Errorf("connector setup: %w", test.err)} {
+			poison := "assigned cell private-cell.example:443 returned LRT during routing/knock with QURL_CONNECTOR_HUB_HOST and qurl: raw detail"
+			err := fmt.Errorf("%s: %w", poison, test.err)
+			if test.code != "" {
+				err = errors.Join(err, &qurl.ConnectorResourceDiscoveryError{Code: test.code})
+			}
+			for _, rendering := range []struct {
+				err      error
+				wantCode bool
+			}{
+				{err: test.err},
+				{err: err, wantCode: test.code != ""},
+			} {
 				var buf bytes.Buffer
-				RenderError(&buf, err, false)
+				RenderError(&buf, rendering.err, false)
 				got := buf.String()
 				if !strings.Contains(got, test.headline) || !strings.Contains(got, test.hint) {
 					t.Fatalf("rendered error missing customer posture:\n%s", got)
 				}
+				if rendering.wantCode && !strings.Contains(got, labelConnectorErrorCode+" "+test.code) {
+					t.Fatalf("rendered error missing safe support code %q:\n%s", test.code, got)
+				}
+				for _, forbidden := range []string{
+					"assigned cell", "private-cell.example", "LRT", "routing/knock",
+					"QURL_CONNECTOR_HUB_HOST", "qurl: raw detail",
+				} {
+					if strings.Contains(got, forbidden) {
+						t.Fatalf("resource rendering exposed %q:\n%s", forbidden, got)
+					}
+				}
 			}
 		})
+	}
+
+	t.Run("malformed support code stays hidden", func(t *testing.T) {
+		err := errors.Join(
+			qurl.ErrConnectorResourceUnavailable,
+			&qurl.ConnectorResourceDiscoveryError{Code: "host1"},
+		)
+		var buf bytes.Buffer
+		RenderError(&buf, err, false)
+		if got := buf.String(); strings.Contains(got, "host1") || strings.Contains(got, labelConnectorErrorCode) {
+			t.Fatalf("malformed support code reached customer output:\n%s", got)
+		}
+	})
+}
+
+func TestConnectorHubConfigRenderingHidesTopology(t *testing.T) {
+	err := fmt.Errorf(
+		"%w: private-cell.example:443 Hub server public key via QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT",
+		hub.ErrConfig,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, err, false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorHubConfig, hintConnectorHubConfig} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Hub configuration rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"private-cell.example", "Hub", "server public key", "QURL_CONNECTOR_HUB_", ":443",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Hub configuration rendering exposed %q:\n%s", forbidden, got)
+		}
 	}
 }
 
