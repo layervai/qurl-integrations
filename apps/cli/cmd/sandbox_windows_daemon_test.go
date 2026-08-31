@@ -279,6 +279,7 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	markSandboxFailurePhase(sandboxFailurePhaseLogin)
 	login := runWindowsSandboxCLIInput(t, binary, cliEnv, bootstrapKey+"\n", "-o", "json", "login")
 	if login.err != nil {
+		markSandboxFailureLoginDiagnostic(login.stderr, login.err)
 		t.Fatalf("controlled-failure Windows login: %v; stderr %q", login.err, login.stderr)
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseIdentity)

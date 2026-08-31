@@ -23,6 +23,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // T6 live sandbox CRID journey: the design doc's §28.1/§28.3 manual
@@ -328,6 +329,36 @@ func markSandboxFailureDiagnosticFromCommand(stdout, stderr string, commandErr e
 	}
 }
 
+func markSandboxFailureLoginDiagnostic(stderr string, err error) {
+	writeSandboxFailureLoginDiagnostic(os.Stdout, stderr, err)
+}
+
+func writeSandboxFailureLoginDiagnostic(w io.Writer, stderr string, err error) {
+	exit := "unknown"
+	if code, ok := sandboxFailureExitCodeFromError(err); ok {
+		exit = strconv.Itoa(code)
+	}
+	_, _ = fmt.Fprintf(w, "%s %s\n", sandboxFailureLoginExitMarker, exit)
+	if parsed, ok := sandboxFailureDiagnosticFromCLIError(stderr); ok {
+		writeSandboxFailureDiagnostic(w, parsed)
+	}
+}
+
+// The child process boundary removes the CLI's typed error. Preserve only its
+// stable public exit class and an optional five-digit support code; neither can
+// carry a credential, request ID, path, endpoint, or private topology.
+func sandboxFailureExitCodeFromError(err error) (int, bool) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return exitcode.Unavailable, true
+	}
+	var exitCoder interface{ ExitCode() int }
+	if !errors.As(err, &exitCoder) {
+		return 0, false
+	}
+	code := exitCoder.ExitCode()
+	return code, validSandboxFailureExitCode(code)
+}
+
 func markSandboxFailureDiagnosticFromError(err error) {
 	writeSandboxFailureDiagnosticFromError(os.Stdout, err)
 }
@@ -408,7 +439,45 @@ func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 			t.Fatalf("redacted error markers = %q and %q", withCode, withoutCode)
 		}
 	})
+	t.Run("failed login marker is closed", func(t *testing.T) {
+		const secret = "lv_test_command_marker_must_not_relay"
+		for _, test := range []struct {
+			name string
+			err  error
+			want int
+		}{
+			{name: "authentication", err: sandboxFailureExitError(exitcode.Auth), want: exitcode.Auth},
+			{name: "configuration", err: sandboxFailureExitError(exitcode.Config), want: exitcode.Config},
+			{name: "forbidden", err: sandboxFailureExitError(exitcode.Forbidden), want: exitcode.Forbidden},
+			{name: "unavailable", err: sandboxFailureExitError(exitcode.Unavailable), want: exitcode.Unavailable},
+			{name: "server", err: sandboxFailureExitError(exitcode.ServerError), want: exitcode.ServerError},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				var output bytes.Buffer
+				writeSandboxFailureLoginDiagnostic(&output,
+					secret+": https://private.invalid/request/secret error 52401", test.err)
+				want := fmt.Sprintf("%s %d\n%s unknown 52401\n",
+					sandboxFailureLoginExitMarker, test.want, sandboxFailureDiagnosticMarker)
+				if output.String() != want || strings.Contains(output.String(), secret) ||
+					strings.Contains(output.String(), "private.invalid") {
+					t.Fatalf("closed command diagnostic = %q, want %q", output.String(), want)
+				}
+			})
+		}
+		var unknown bytes.Buffer
+		writeSandboxFailureLoginDiagnostic(&unknown,
+			secret+": error 52201 then error 52401 at https://private.invalid", errors.New(secret))
+		if want := sandboxFailureLoginExitMarker + " unknown\n"; unknown.String() != want ||
+			strings.Contains(unknown.String(), secret) || strings.Contains(unknown.String(), "private.invalid") {
+			t.Fatalf("closed unknown login diagnostic = %q, want %q", unknown.String(), want)
+		}
+	})
 }
+
+type sandboxFailureExitError int
+
+func (e sandboxFailureExitError) Error() string { return "closed test exit" }
+func (e sandboxFailureExitError) ExitCode() int { return int(e) }
 
 // assertHealthySandboxInspection proves that inspect is the real redacted
 // diagnostic surface, not an alias for status. The healthy journey requires

@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 const (
@@ -28,6 +30,7 @@ const (
 	sandboxFailureCleanupMarker            = "QURL_CONTROLLED_FAILURE_CLEANED"
 	sandboxFailurePhaseMarker              = "QURL_CONTROLLED_FAILURE_PHASE"
 	sandboxFailureDiagnosticMarker         = "QURL_CONTROLLED_FAILURE_DIAGNOSTIC"
+	sandboxFailureLoginExitMarker          = "QURL_CONTROLLED_FAILURE_LOGIN_EXIT"
 	sandboxFailureChildTimeout             = 3 * time.Minute
 	sandboxFailureDaemonStopTimeout        = 15 * time.Second
 )
@@ -275,6 +278,10 @@ func validSandboxFailureCode(code string) bool {
 	return true
 }
 
+func validSandboxFailureExitCode(code int) bool {
+	return code >= exitcode.General && code <= exitcode.VerificationFailed || code == exitcode.Interrupted
+}
+
 func validSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) bool {
 	_, categoryOK := sandboxFailureCategories[diagnostic.Category]
 	return categoryOK && validSandboxFailureCode(diagnostic.Code)
@@ -331,8 +338,30 @@ func sandboxFailureLastDiagnostic(output string) (sandboxFailureDiagnostic, bool
 	return last, found
 }
 
+func sandboxFailureLastLoginExit(output string) string {
+	last := ""
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		value, found := strings.CutPrefix(line, sandboxFailureLoginExitMarker+" ")
+		if !found {
+			continue
+		}
+		if value == "unknown" {
+			last = value
+			continue
+		}
+		if code, err := strconv.Atoi(value); err == nil && validSandboxFailureExitCode(code) {
+			last = value
+		}
+	}
+	return last
+}
+
 func sandboxFailureMissingSentinelError(output string) error {
 	detail := fmt.Sprintf("last phase: %s", sandboxFailureLastPhase(output))
+	if exit := sandboxFailureLastLoginExit(output); exit != "" {
+		detail += ", login exit: " + exit
+	}
 	if diagnostic, ok := sandboxFailureLastDiagnostic(output); ok {
 		detail += ", failure category: " + diagnostic.Category
 		if diagnostic.Code != "" {
