@@ -343,6 +343,11 @@ jobs:
 
       - name: Check customer-journey support scripts
         shell: bash
+        env:
+          # The verifier invokes the artifact builder after the Python checks.
+          # Keep bytecode outside the checkout so the builder's clean-tree
+          # guard still verifies the exact committed source.
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/qurl-cli-pycache
         run: |
           shellcheck scripts/build-cli-customer-journey-artifacts.sh
           python3 -m py_compile \

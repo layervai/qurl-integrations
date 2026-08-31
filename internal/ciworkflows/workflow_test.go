@@ -151,6 +151,40 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 	}
 }
 
+// TestCLICustomerJourneySupportChecksKeepSourceClean prevents Python's normal
+// bytecode cache from making the exact-artifact builder reject its own source
+// tree. The order matters: compile and controller tests run before the builder
+// is invoked by the verifier test.
+func TestCLICustomerJourneySupportChecksKeepSourceClean(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliWorkflow)
+	job := workflow.Jobs["test"]
+	if job == nil {
+		t.Fatalf("%s is missing %q", cliWorkflow, "test")
+	}
+	var support *step
+	for index := range job.Steps {
+		if job.Steps[index].Name == "Check customer-journey support scripts" {
+			support = &job.Steps[index]
+			break
+		}
+	}
+	if support == nil {
+		t.Fatal("CLI test job is missing the customer-journey support check")
+	}
+	if got := support.Env["PYTHONPYCACHEPREFIX"]; got != "${{ runner.temp }}/qurl-cli-pycache" {
+		t.Errorf("support-check Python cache = %#v, want runner temp", got)
+	}
+
+	compileAt := strings.Index(support.Run, "python3 -m py_compile")
+	credentialsAt := strings.Index(support.Run, "python3 scripts/test-qurl-cli-ci-credentials.py")
+	verifierAt := strings.Index(support.Run, "python3 scripts/test-verify-cli-customer-journey-artifacts.py")
+	if compileAt < 0 || credentialsAt <= compileAt || verifierAt <= credentialsAt {
+		t.Errorf("support-check order does not preserve compile, credential test, then clean-tree verifier:\n%s", support.Run)
+	}
+}
+
 // TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel binds the live gate
 // to the completed CLI workflow while keeping elevated credential creation in
 // default-branch code. Linux, macOS, and Windows consume the same immutable
