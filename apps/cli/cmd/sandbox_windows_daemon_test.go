@@ -60,9 +60,6 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 	cliEnv := sandboxJourneyEnv(t)
 	addSandboxRunIdentity(t, cliEnv)
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
-	if cleanupJWT == "" {
-		t.Fatal("QURL_CLI_SANDBOX_CLEANUP_JWT is required")
-	}
 	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
 		value := strings.TrimSpace(os.Getenv(name))
 		if value == "" {
@@ -72,6 +69,11 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 	}
 	stateDir := windowsSandboxStateDir(t)
 	cliEnv[connectorstate.EnvStateDirPrimary] = stateDir
+	namespace, err := sandboxNamespace("smoke")
+	if err != nil {
+		t.Fatalf("derive Windows journey namespace: %v", err)
+	}
+	cliEnv[connectorstate.EnvAgentID] = namespace.AgentID
 	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
 
 	bootstrapKey := cliEnv["QURL_API_KEY"]
@@ -96,7 +98,9 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		device.PrivateKeyB64 == "" || device.PublicKeyB64 == "" {
 		t.Fatal("one-time Windows customer login did not persist a complete device identity")
 	}
-	registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
+	if cleanupJWT != "" {
+		registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
+	}
 	assertWindowsSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 	logout := runWindowsSandboxCLI(t, binary, cliEnv, "-o", "json", "logout")
 	if logout.err != nil {
@@ -152,7 +156,7 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	connectorID := fmt.Sprintf("sandbox-windows-daemon-%d", time.Now().UnixNano())
+	connectorID := namespace.ConnectorID
 	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, device.DeviceAPIKey)
 	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL, "--id", connectorID)
 	cridValue := strings.TrimSpace(published.stdout)
@@ -262,14 +266,15 @@ func runWindowsSandboxCLIInput(t *testing.T, binary string, env map[string]strin
 
 func windowsSandboxEnvironment(overrides map[string]string) []string {
 	values := map[string]string{}
-	for _, entry := range os.Environ() {
-		if key, value, ok := strings.Cut(entry, "="); ok {
+	for _, key := range []string{
+		"APPDATA", "COMSPEC", "LOCALAPPDATA", "PATH", "PATHEXT", "ProgramData",
+		"ProgramFiles", "ProgramFiles(x86)", "SystemRoot", "TEMP", "TMP", "USERNAME",
+		"USERPROFILE", "WINDIR",
+	} {
+		if value, ok := os.LookupEnv(key); ok {
 			values[key] = value
 		}
 	}
-	delete(values, "QURL_API_KEY")
-	delete(values, "QURL_API_KEY_FILE")
-	delete(values, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	for key, value := range overrides {
 		values[key] = value
 	}

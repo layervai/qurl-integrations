@@ -75,27 +75,20 @@ jobs:
               # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
-              # The callback path is intentionally CLI-impacting: any trust or
-              # schema change must mint a fresh artifact and pass the complete
-              # exact-artifact journey, not only the generic scripts workflow.
               - 'apps/cli/**'
               - 'go.mod'
               - 'go.sum'
               - '.golangci.yml'
               - '.goreleaser.yml'
               - '.github/workflows/cli.yml'
-              - '.github/workflows/qurl-cli-customer-journey-result.yml'
+              - '.github/workflows/qurl-cli-customer-journey.yml'
               - '.github/workflows/release-please.yml'
-              - 'scripts/accept-cli-customer-journey-result.sh'
-              - 'scripts/build-sandbox-matched-cohort-pr-artifacts.sh'
-              - 'scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh'
-              - 'scripts/resolve-sandbox-artifact-qurl-go-source.sh'
-              - 'scripts/resolve-sandbox-artifact-qurl-go-source_test.sh'
+              - 'scripts/build-cli-customer-journey-artifacts.sh'
+              - 'scripts/qurl-cli-ci-credentials.py'
+              - 'scripts/test-qurl-cli-ci-credentials.py'
+              - 'scripts/verify-cli-customer-journey-artifacts.py'
               - 'scripts/extract-qurl-image-attestations.sh'
-              - 'scripts/test-accept-cli-customer-journey-result.sh'
-              - 'scripts/test-wait-for-cli-customer-journey-check.sh'
               - 'scripts/test-wait-for-exact-cli-main-run.sh'
-              - 'scripts/wait-for-cli-customer-journey-check.sh'
               - 'scripts/wait-for-exact-cli-main-run.sh'
 
   lint:
@@ -164,8 +157,8 @@ jobs:
             ./apps/cli/...
 
       # This is an independent named release gate, not an accidental repeat of
-      # the coverage run. The private lifecycle receipt binds this exact step
-      # and test set, so keep their result visible and stable on every CLI PR.
+      # the coverage run. Keep the lifecycle result visible and stable on every
+      # CLI pull request.
       - name: Run CRID lifecycle unit tests
         shell: bash
         env:
@@ -348,16 +341,15 @@ jobs:
             exit "$warm_daemon_status"
           fi
 
-      - name: Test sandbox matched-cohort artifact contract
+      - name: Check customer-journey support scripts
         shell: bash
         run: |
-          shellcheck \
-            scripts/build-sandbox-matched-cohort-pr-artifacts.sh \
-            scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh \
-            scripts/resolve-sandbox-artifact-qurl-go-source.sh \
-            scripts/resolve-sandbox-artifact-qurl-go-source_test.sh
-          scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh
-          scripts/resolve-sandbox-artifact-qurl-go-source_test.sh
+          shellcheck scripts/build-cli-customer-journey-artifacts.sh
+          python3 -m py_compile \
+            scripts/qurl-cli-ci-credentials.py \
+            scripts/test-qurl-cli-ci-credentials.py \
+            scripts/verify-cli-customer-journey-artifacts.py
+          python3 scripts/test-qurl-cli-ci-credentials.py
 
   govulncheck:
     name: cli / govulncheck
@@ -636,24 +628,15 @@ jobs:
             go test -count=1 ./apps/cli/...
           fi
 
-  sandbox-customer-artifacts:
-    name: cli / sandbox matched-cohort artifacts
+  customer-artifacts:
+    name: cli / customer journey artifacts
     runs-on: ubuntu-latest
     needs: changes
-    timeout-minutes: 15
-    # NHP post-deploy consumes an artifact from the exact current main SHA.
-    # Therefore every main push must produce one even when this push did not
-    # change CLI paths. PRs keep the normal CLI-impacting path boundary.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || needs.changes.outputs.cli == 'true'
+    timeout-minutes: 20
+    if: needs.changes.outputs.cli == 'true'
     permissions:
       contents: read
-    outputs:
-      producer_run_attempt: ${{ steps.producer.outputs.run_attempt }}
     steps:
-      # Artifacts from a fork must never become executable input to the
-      # protected NHP journey that consumes this producer in the next PR.
-      # Keep the reporting job present and red instead of hiding it behind a
-      # job-level condition.
       - name: Require the trusted artifact producer
         env:
           CALLER_EVENT: ${{ github.event_name }}
@@ -669,16 +652,6 @@ jobs:
             exit 1
           fi
 
-      - id: producer
-        name: Bind the artifact-producing run attempt
-        run: |
-          set -euo pipefail
-          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
-            echo "::error::artifact producer run attempt must be a positive integer" >&2
-            exit 1
-          }
-          echo "run_attempt=$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -689,37 +662,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build exact sandbox customer artifacts
+      - name: Build exact packaged customer artifacts once
         env:
           CALLER_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          QURL_GO_SOURCE_SHA=$(scripts/resolve-sandbox-artifact-qurl-go-source.sh)
-          scripts/build-sandbox-matched-cohort-pr-artifacts.sh \
-            "$RUNNER_TEMP/sandbox-matched-cohort-pr-artifacts" \
-            "$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "${{ steps.producer.outputs.run_attempt }}" \
-            "$QURL_GO_SOURCE_SHA"
+          scripts/build-cli-customer-journey-artifacts.sh \
+            "$RUNNER_TEMP/qurl-customer-journey" \
+            "$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
 
-      - name: Upload exact sandbox customer binaries
+      - name: Upload exact packaged customer artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sandbox-matched-cohort-binaries
-          path: ${{ runner.temp }}/sandbox-matched-cohort-pr-artifacts/lifecycle-artifact/
+          name: qurl-customer-journey-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qurl-customer-journey/
           if-no-files-found: error
           include-hidden-files: false
           compression-level: 0
-          retention-days: 30
-
-      - name: Upload exact sandbox customer source receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sandbox-matched-cohort-source-receipt
-          path: ${{ runner.temp }}/sandbox-matched-cohort-pr-artifacts/source-receipt-artifact/
-          if-no-files-found: error
-          include-hidden-files: false
-          compression-level: 0
-          retention-days: 30
+          retention-days: 7
 
   goreleaser-check:
     name: cli / goreleaser check
@@ -840,43 +800,6 @@ jobs:
             --type https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1 \
             "$candidate" >/dev/null
 
-  dispatch-customer-journey:
-    name: cli / dispatch exact customer journey
-    needs: [changes, lint, test, govulncheck, matrix, sandbox-customer-artifacts, goreleaser-check, image-smoke]
-    if: needs.changes.outputs.cli == 'true'
-    permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@b384fb104357360047df76c5cc7c060f6cabd183 # v0.12.0
-    with:
-      target_repo: qurl-integrations-infra
-      event_type: qurl-cli-customer-journey
-      client_payload: >-
-        {"schema":"layerv.qurl-cli-customer-journey.v1","source_sha":"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}","source_kind":"${{ github.event_name == 'pull_request' && 'pull_request' || 'main' }}","pull_request_number":${{ github.event_name == 'pull_request' && github.event.pull_request.number || 0 }},"producer_run_id":${{ github.run_id }},"producer_run_attempt":${{ needs.sandbox-customer-artifacts.outputs.producer_run_attempt }}}
-    secrets:
-      app_id: ${{ secrets.DEPLOY_DISPATCHER_APP_ID }}
-      app_private_key: ${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}
-
-  customer-journey:
-    name: cli / exact packaged customer journey
-    runs-on: ubuntu-latest
-    needs: [changes, sandbox-customer-artifacts, dispatch-customer-journey]
-    if: needs.changes.outputs.cli == 'true' && needs.dispatch-customer-journey.result == 'success'
-    timeout-minutes: 155
-    permissions:
-      checks: read
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Require the exact packaged CLI customer journey
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          PRODUCER_RUN_ATTEMPT: ${{ needs.sandbox-customer-artifacts.outputs.producer_run_attempt }}
-        run: scripts/wait-for-cli-customer-journey-check.sh "$SOURCE_SHA" "$GITHUB_RUN_ID" "$PRODUCER_RUN_ATTEMPT"
-
   required:
     name: cli / required
     runs-on: ubuntu-latest
@@ -884,7 +807,7 @@ jobs:
     permissions: {}
     # Every CLI quality gate must be listed here; cli / required only
     # validates jobs in this needs set. display_names below is annotation-only.
-    needs: [changes, lint, test, govulncheck, matrix, sandbox-customer-artifacts, goreleaser-check, image-smoke, dispatch-customer-journey, customer-journey]
+    needs: [changes, lint, test, govulncheck, matrix, customer-artifacts, goreleaser-check, image-smoke]
     if: always()
     steps:
       - name: Verify CLI CI result
@@ -926,20 +849,14 @@ jobs:
               matrix)
                 echo "cli / matrix"
                 ;;
-              sandbox-customer-artifacts)
-                echo "cli / sandbox matched-cohort artifacts"
+              customer-artifacts)
+                echo "cli / customer journey artifacts"
                 ;;
               goreleaser-check)
                 echo "cli / goreleaser check"
                 ;;
               image-smoke)
                 echo "cli / image smoke"
-                ;;
-              dispatch-customer-journey)
-                echo "cli / dispatch exact customer journey"
-                ;;
-              customer-journey)
-                echo "cli / exact packaged customer journey"
                 ;;
               *)
                 echo "$1"

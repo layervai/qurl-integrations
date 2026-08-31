@@ -76,13 +76,13 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-verify-cli-release.sh
 
-      - name: Test exact CLI customer-journey check waiter
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-wait-for-cli-customer-journey-check.sh
-
       - name: Test exact CLI main-run waiter
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-wait-for-exact-cli-main-run.sh
+
+      - name: Test CLI customer-credential controller
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 scripts/test-qurl-cli-ci-credentials.py
 
       - name: Check Chrome/Edge extension lockstep
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -113,9 +113,3 @@ jobs:
       - name: Test validated-base resolver
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-resolve-validated-base.sh
-
-      # The callback turns a trusted protected-journey result into a check on
-      # one exact CLI producer commit. Exercise sender, run, and PR-head fences.
-      - name: Test CLI customer-journey result receiver
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-accept-cli-customer-journey-result.sh

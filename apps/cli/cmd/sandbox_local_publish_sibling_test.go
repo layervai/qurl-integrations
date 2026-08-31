@@ -582,6 +582,9 @@ func cleanupSandboxSiblingAuthority(
 		// serialized next-run sweeper still has authority to retry.
 		return fmt.Errorf("sandbox sibling resource cleanup: %w", err)
 	}
+	if cleanupJWT == "" {
+		return nil
+	}
 	if err := ops.revokeDevice(ctx, endpoint, cleanupJWT, loaded.DeviceAPIKeyID); err != nil {
 		return fmt.Errorf("sandbox sibling device cleanup: %w", err)
 	}

@@ -374,10 +374,9 @@ func startSandboxLocalPublish(t *testing.T, label string) *sandboxLocalFixture {
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	missing := []string{}
 	for name, value := range map[string]string{
-		"QURL_CLI_SANDBOX_CLEANUP_JWT": cleanupJWT,
-		hub.EnvHost:                    os.Getenv(hub.EnvHost),
-		hub.EnvPort:                    os.Getenv(hub.EnvPort),
-		hub.EnvServerPublicKey:         os.Getenv(hub.EnvServerPublicKey),
+		hub.EnvHost:            os.Getenv(hub.EnvHost),
+		hub.EnvPort:            os.Getenv(hub.EnvPort),
+		hub.EnvServerPublicKey: os.Getenv(hub.EnvServerPublicKey),
 	} {
 		if strings.TrimSpace(value) == "" {
 			missing = append(missing, name)

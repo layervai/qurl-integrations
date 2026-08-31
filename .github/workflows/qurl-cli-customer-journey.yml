@@ -1,0 +1,498 @@
+name: "qURL CLI Customer Journey"
+
+# workflow_run loads this file from the default branch. Pull-request code can
+# produce the candidate artifact, but it cannot change this credentialed job.
+# `cli-connector-resource-sandbox-controller` must allow only `main`, have no
+# required reviewer, hold QURL_SANDBOX_AUTH0_CLIENT_ID and
+# QURL_SANDBOX_AUTH0_CLIENT_SECRET as environment secrets, and hold
+# QURL_SANDBOX_AUTH0_TOKEN_ENDPOINT as an environment variable. The separate
+# `cli-connector-resource-sandbox` environment owns candidate-only Hub values
+# and can retain its reviewer rule. The controller M2M client must own only
+# disposable CI state, grant exactly qurl:agent, qurl:read, and qurl:write, and
+# issue access tokens with a lifetime from one through two hours.
+on:
+  workflow_run:
+    workflows: ["cli: Build and Test"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qurl-cli-customer-journey
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve exact CLI producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      required: ${{ steps.producer.outputs.required }}
+    steps:
+      - id: producer
+        name: Require one exact artifact producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {
+            echo "::error::customer journeys accept only same-repository source" >&2
+            exit 1
+          }
+          [[ "$SOURCE_EVENT" == pull_request || "$SOURCE_EVENT" == push ]] || {
+            echo "::error::customer journey source event is unsupported" >&2
+            exit 1
+          }
+          jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100")
+          producer=$(jq -c '
+            if (.total_count | type) != "number" or .total_count > 100 or
+              (.jobs | type) != "array" or (.jobs | length) != .total_count
+            then error("source job response is malformed or truncated")
+            else [.jobs[] | select(.name == "cli / customer journey artifacts")]
+              | if length == 1 then .[0] else error("expected one artifact producer") end
+            end
+          ' <<<"$jobs")
+          conclusion=$(jq -r '.conclusion' <<<"$producer")
+          if [[ "$conclusion" == skipped && "$SOURCE_CONCLUSION" == success ]]; then
+            echo "required=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$conclusion" == success && "$SOURCE_CONCLUSION" == success ]] || {
+            echo "::error::source CLI workflow did not pass the exact artifact producer and quality gates" >&2
+            exit 1
+          }
+          echo "required=true" >>"$GITHUB_OUTPUT"
+
+  mint:
+    name: Mint disposable customer credentials
+    needs: resolve
+    if: needs.resolve.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This controller environment is main-only and has no required reviewer.
+    # It contains standing M2M authority, but no candidate job references it.
+    environment: cli-connector-resource-sandbox-controller
+    permissions:
+      actions: write
+      contents: read
+    outputs:
+      linux_artifact_id: ${{ steps.linux-key.outputs.artifact-id }}
+      macos_artifact_id: ${{ steps.macos-key.outputs.artifact-id }}
+      windows_artifact_id: ${{ steps.windows-key.outputs.artifact-id }}
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+      AUTH0_TOKEN_ENDPOINT: ${{ vars.QURL_SANDBOX_AUTH0_TOKEN_ENDPOINT }}
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Mint three isolated customer keys
+        env:
+          AUTH0_CLIENT_ID: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          client_dir=$RUNNER_TEMP/qurl-cli-ci-auth0
+          mkdir -m 0700 "$client_dir"
+          printf %s "$AUTH0_CLIENT_ID" >"$client_dir/id"
+          printf %s "$AUTH0_CLIENT_SECRET" >"$client_dir/secret"
+          chmod 0600 "$client_dir/id" "$client_dir/secret"
+          unset AUTH0_CLIENT_ID AUTH0_CLIENT_SECRET
+          python3 scripts/qurl-cli-ci-credentials.py sweep \
+            --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/id" \
+            --client-secret-file "$client_dir/secret"
+          for lane_spec in linux:1 macos:2 windows:3; do
+            IFS=: read -r lane lane_id <<<"$lane_spec"
+            credential_dir=$RUNNER_TEMP/qurl-cli-ci-credential-$lane
+            bundle_dir=$RUNNER_TEMP/qurl-cli-ci-bundle-$lane
+            mkdir -m 0700 "$credential_dir" "$bundle_dir"
+            python3 scripts/qurl-cli-ci-credentials.py create \
+              --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/id" \
+              --client-secret-file "$client_dir/secret" --output-dir "$credential_dir" \
+              --run-id "${SOURCE_RUN_ID}${lane_id}" --run-attempt "$SOURCE_RUN_ATTEMPT" \
+              --lane "$lane"
+            echo "::add-mask::$(<"$credential_dir/api-key")"
+            install -m 0600 "$credential_dir/api-key" "$bundle_dir/api-key"
+          done
+
+      - id: linux-key
+        name: Seal Linux customer key for this run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-customer-key-${{ github.run_id }}-linux
+          path: ${{ runner.temp }}/qurl-cli-ci-bundle-linux/api-key
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      - id: macos-key
+        name: Seal macOS customer key for this run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-customer-key-${{ github.run_id }}-macos
+          path: ${{ runner.temp }}/qurl-cli-ci-bundle-macos/api-key
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      - id: windows-key
+        name: Seal Windows customer key for this run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qurl-customer-key-${{ github.run_id }}-windows
+          path: ${{ runner.temp }}/qurl-cli-ci-bundle-windows/api-key
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 1
+
+      - name: Revoke partial mint on failure
+        if: failure() || cancelled()
+        run: |
+          set -u
+          failed=0
+          for lane in linux macos windows; do
+            credential_dir=$RUNNER_TEMP/qurl-cli-ci-credential-$lane
+            [[ ! -e "$credential_dir" ]] || python3 scripts/qurl-cli-ci-credentials.py revoke \
+              --qurl-endpoint "$QURL_ENDPOINT" --credential-dir "$credential_dir" || failed=1
+          done
+          exit "$failed"
+
+      - name: Remove standing authority from the mint runner
+        if: always()
+        run: |
+          for directory in \
+            "$RUNNER_TEMP/qurl-cli-ci-auth0" \
+            "$RUNNER_TEMP/qurl-cli-ci-credential-linux" \
+            "$RUNNER_TEMP/qurl-cli-ci-credential-macos" \
+            "$RUNNER_TEMP/qurl-cli-ci-credential-windows" \
+            "$RUNNER_TEMP/qurl-cli-ci-bundle-linux" \
+            "$RUNNER_TEMP/qurl-cli-ci-bundle-macos" \
+            "$RUNNER_TEMP/qurl-cli-ci-bundle-windows"; do
+            [[ ! -d "$directory" ]] || find "$directory" -type f -exec shred -u -- {} + 2>/dev/null || true
+            rmdir "$directory" 2>/dev/null || true
+          done
+
+  journey:
+    name: Customer journey / ${{ matrix.lane }}
+    needs: [resolve, mint]
+    if: needs.resolve.outputs.required == 'true' && needs.mint.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: linux
+            lane_id: 1
+            os: ubuntu-latest
+            test_name: TestSandboxFullCustomerLifecycleSmoke
+          - lane: macos
+            lane_id: 2
+            os: macos-latest
+            test_name: TestSandboxMacOSDefaultDaemonLifecycle
+          - lane: windows
+            lane_id: 3
+            os: windows-latest
+            test_name: TestSandboxWindowsDefaultDaemonFullCustomerLifecycle
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    environment: cli-connector-resource-sandbox
+    permissions:
+      actions: read
+      contents: read
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+      QURL_SANDBOX_QV2_ISSUER_KEY: ${{ vars.QURL_SANDBOX_QV2_ISSUER_KEY }}
+      QURL_SANDBOX_QV2_RELAY_URL: ${{ vars.QURL_SANDBOX_QV2_RELAY_URL }}
+      QURL_CONNECTOR_HUB_HOST: ${{ vars.QURL_CONNECTOR_HUB_HOST }}
+      QURL_CONNECTOR_HUB_PORT: ${{ vars.QURL_CONNECTOR_HUB_PORT }}
+      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ vars.QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 }}
+      SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      QURL_SHARING_RUNTIME: host
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: orchestrator
+          persist-credentials: false
+
+      # The candidate pull request supplies only qurl. The credentialed test
+      # harness comes from this workflow's trusted default-branch revision.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: orchestrator/go.mod
+          cache: true
+
+      - name: Build the trusted customer-journey harness
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: orchestrator
+        env:
+          GOFLAGS: -mod=readonly
+          GOWORK: off
+        run: go test -c -trimpath -tags=clisandbox -o "$RUNNER_TEMP/qurl-customer-journey.test" ./apps/cli/cmd
+
+      - name: Build the trusted customer-journey harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: orchestrator
+        env:
+          GOFLAGS: -mod=readonly
+          GOWORK: off
+        run: go test -c -trimpath -tags=clisandbox -o "$env:RUNNER_TEMP/qurl-customer-journey.test.exe" ./apps/cli/cmd
+
+      - name: Require the selected customer test
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected=$("$RUNNER_TEMP/qurl-customer-journey.test" -test.list '^${{ matrix.test_name }}$')
+          [[ "$selected" == '${{ matrix.test_name }}' ]]
+
+      - name: Require the selected customer test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $test = Join-Path $env:RUNNER_TEMP 'qurl-customer-journey.test.exe'
+          $selected = @(& $test -test.list '^${{ matrix.test_name }}$')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($selected.Count -ne 1 -or $selected[0] -ne '${{ matrix.test_name }}') {
+            throw 'selected customer-journey test is not in the trusted harness'
+          }
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-customer-journey-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}
+          path: dist
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-customer-key-${{ github.run_id }}-${{ matrix.lane }}
+          path: ${{ runner.temp }}/qurl-customer-key
+          digest-mismatch: error
+
+      - name: Verify exact packaged artifacts
+        shell: bash
+        run: >-
+          python3 orchestrator/scripts/verify-cli-customer-journey-artifacts.py
+          dist "$GITHUB_REPOSITORY" "$SOURCE_HEAD_SHA" "$SOURCE_RUN_ID" "$SOURCE_RUN_ATTEMPT"
+
+      - name: Select this runner's exact artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS/$(uname -m)" in
+            Linux/x86_64) suffix=linux-amd64 ;;
+            macOS/x86_64) suffix=darwin-amd64 ;;
+            macOS/arm64) suffix=darwin-arm64 ;;
+            *) echo "::error::unsupported journey runner platform" >&2; exit 1 ;;
+          esac
+          chmod 0500 "dist/qurl-$suffix" "$RUNNER_TEMP/qurl-customer-journey.test"
+          {
+            echo "QURL_CLI_SANDBOX_BINARY=$GITHUB_WORKSPACE/dist/qurl-$suffix"
+            echo "QURL_CLI_SANDBOX_QURL_BINARY=$GITHUB_WORKSPACE/dist/qurl-$suffix"
+            echo "QURL_CUSTOMER_JOURNEY_TEST=$RUNNER_TEMP/qurl-customer-journey.test"
+            echo "QURL_SHARING_RUN_ID=${SOURCE_RUN_ID}${{ matrix.lane_id }}"
+            echo "QURL_SHARING_RUN_ATTEMPT=$SOURCE_RUN_ATTEMPT"
+          } >>"$GITHUB_ENV"
+
+      - name: Select this runner's exact artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $qurl = Join-Path $env:GITHUB_WORKSPACE 'dist/qurl-windows-amd64.exe'
+          $test = Join-Path $env:RUNNER_TEMP 'qurl-customer-journey.test.exe'
+          "QURL_CLI_SANDBOX_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_CLI_SANDBOX_QURL_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_CUSTOMER_JOURNEY_TEST=$test" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_SHARING_RUN_ID=$($env:SOURCE_RUN_ID)${{ matrix.lane_id }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_SHARING_RUN_ATTEMPT=$($env:SOURCE_RUN_ATTEMPT)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Load only this lane's disposable key
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file=$RUNNER_TEMP/qurl-customer-key/api-key
+          [[ -f "$key_file" && ! -L "$key_file" && $(find "$RUNNER_TEMP/qurl-customer-key" -type f | wc -l) -eq 1 ]]
+          chmod 0600 "$key_file"
+          key=$(<"$key_file")
+          [[ "$key" == lv_live_* || "$key" == lv_test_* ]]
+          echo "::add-mask::$key"
+          echo "QURL_API_KEY_FILE=$key_file" >>"$GITHUB_ENV"
+
+      - name: Load only this lane's disposable key
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $keyDir = Join-Path $env:RUNNER_TEMP 'qurl-customer-key'
+          $files = @(Get-ChildItem -LiteralPath $keyDir -File -Recurse)
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'api-key') { throw 'disposable key artifact is not exact' }
+          $apiKey = $files[0].FullName
+          & icacls.exe $apiKey /inheritance:r /grant:r "${env:USERNAME}:(F)" '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $key = [IO.File]::ReadAllText($apiKey)
+          if ($key -notmatch '^lv_(?:live|test)_') { throw 'disposable key artifact is malformed' }
+          Write-Output "::add-mask::$key"
+          "QURL_API_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run the packaged customer journey
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          QURL_CLI_SANDBOX_LOCAL_PUBLISH: ${{ matrix.lane == 'linux' && 'enabled' || '' }}
+          QURL_CLI_SANDBOX_MACOS_DAEMON: ${{ matrix.lane == 'macos' && 'enabled' || '' }}
+        run: |
+          set -euo pipefail
+          cd orchestrator/apps/cli/cmd
+          "$QURL_CUSTOMER_JOURNEY_TEST" -test.v -test.count=1 -test.run '^${{ matrix.test_name }}$'
+
+      - name: Run the packaged customer journey
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QURL_CLI_SANDBOX_WINDOWS_DAEMON: enabled
+        run: |
+          Set-Location orchestrator/apps/cli/cmd
+          & $env:QURL_CUSTOMER_JOURNEY_TEST -test.v -test.count=1 -test.run '^${{ matrix.test_name }}$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove the local disposable key
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: |
+          find "$RUNNER_TEMP/qurl-customer-key" -type f -exec shred -u {} + 2>/dev/null || true
+          rmdir "$RUNNER_TEMP/qurl-customer-key" 2>/dev/null || true
+
+      - name: Remove the local disposable key
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'qurl-customer-key'
+          if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+
+  cleanup:
+    name: Reconcile disposable customer state
+    needs: [resolve, mint, journey]
+    if: always() && needs.resolve.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Cleanup must never wait for a second manual approval after a candidate
+    # failure. This is the same main-only controller environment used by mint.
+    environment: cli-connector-resource-sandbox-controller
+    permissions:
+      actions: write
+      contents: read
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+      AUTH0_TOKEN_ENDPOINT: ${{ vars.QURL_SANDBOX_AUTH0_TOKEN_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Revoke run resources and credentials
+        env:
+          AUTH0_CLIENT_ID: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          client_dir=$RUNNER_TEMP/qurl-cli-ci-auth0
+          mkdir -m 0700 "$client_dir"
+          printf %s "$AUTH0_CLIENT_ID" >"$client_dir/id"
+          printf %s "$AUTH0_CLIENT_SECRET" >"$client_dir/secret"
+          chmod 0600 "$client_dir/id" "$client_dir/secret"
+          unset AUTH0_CLIENT_ID AUTH0_CLIENT_SECRET
+          python3 scripts/qurl-cli-ci-credentials.py sweep \
+            --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/id" \
+            --client-secret-file "$client_dir/secret"
+
+      - name: Delete transient customer-key artifacts
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINUX_ARTIFACT_ID: ${{ needs.mint.outputs.linux_artifact_id }}
+          MACOS_ARTIFACT_ID: ${{ needs.mint.outputs.macos_artifact_id }}
+          WINDOWS_ARTIFACT_ID: ${{ needs.mint.outputs.windows_artifact_id }}
+        run: |
+          set -euo pipefail
+          for artifact_id in "$LINUX_ARTIFACT_ID" "$MACOS_ARTIFACT_ID" "$WINDOWS_ARTIFACT_ID"; do
+            [[ -z "$artifact_id" ]] && continue
+            [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done
+
+      - name: Remove standing authority from the cleanup runner
+        if: always()
+        run: |
+          find "$RUNNER_TEMP/qurl-cli-ci-auth0" -type f -exec shred -u {} + 2>/dev/null || true
+          rmdir "$RUNNER_TEMP/qurl-cli-ci-auth0" 2>/dev/null || true
+
+  result:
+    name: Record exact customer-journey result
+    needs: [resolve, mint, journey, cleanup]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - name: Record the exact source result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUIRED: ${{ needs.resolve.outputs.required }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          MINT_RESULT: ${{ needs.mint.result }}
+          JOURNEY_RESULT: ${{ needs.journey.result }}
+          CLEANUP_RESULT: ${{ needs.cleanup.result }}
+          SOURCE_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+          conclusion=failure
+          summary="The trusted customer journey did not complete."
+          if [[ "$RESOLVE_RESULT" == success && "$REQUIRED" == false ]]; then
+            conclusion=success
+            summary="No CLI-impacting change required the packaged customer journey."
+          elif [[ "$RESOLVE_RESULT" == success && "$REQUIRED" == true && \
+            "$MINT_RESULT" == success && "$JOURNEY_RESULT" == success && "$CLEANUP_RESULT" == success ]]; then
+            conclusion=success
+            summary="The exact packaged artifacts passed on Linux, macOS, and Windows."
+          fi
+          jq -cn \
+            --arg name "qURL Customer Journey / exact CLI artifact" \
+            --arg sha "$HEAD_SHA" --arg conclusion "$conclusion" \
+            --arg external_id "layerv.qurl-cli-customer-journey.v1:${SOURCE_RUN_ID}:${SOURCE_RUN_ATTEMPT}:${HEAD_SHA}" \
+            --arg title "Exact packaged CLI customer journey" \
+            --arg summary "$summary" --arg details "$SOURCE_RUN_URL" \
+            '{name:$name,head_sha:$sha,external_id:$external_id,status:"completed",conclusion:$conclusion,details_url:$details,output:{title:$title,summary:$summary}}' \
+            >request.json
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input request.json >/dev/null
+          [[ "$conclusion" == success ]]

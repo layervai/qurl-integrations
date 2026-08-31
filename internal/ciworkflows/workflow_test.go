@@ -52,9 +52,8 @@ const (
 	checkoutActionPrefix       = "actions/checkout@"
 	cliWorkflow                = "cli.yml"
 	cliMatrixJobID             = "matrix"
-	cliSandboxArtifactsJobID   = "sandbox-customer-artifacts"
-	cliJourneyDispatchJobID    = "dispatch-customer-journey"
-	cliJourneyWaitJobID        = "customer-journey"
+	cliCustomerArtifactsJobID  = "customer-artifacts"
+	cliCustomerJourneyWorkflow = "qurl-cli-customer-journey.yml"
 	cliMacOSKeychainSetupStep  = "Set up macOS keychain"
 	cliLinuxKeyringSetupStep   = "Set up Linux keyring (gnome-keyring over D-Bus)"
 	cliMatrixTestStep          = "Run tests"
@@ -62,317 +61,312 @@ const (
 	workflowContractWorkflow = "workflow-contract.yml"
 )
 
-// TestCLISandboxCustomerArtifactsAreExactAndHermetic pins the bootstrap
-// producer consumed by the later NHP customer-journey gate. This first stage
-// builds and uploads only reviewed bytes. It has no token, dispatch, live
-// sandbox, or deployment authority. Forks keep a visible failed gate instead
-// of publishing executable input under the trusted repository identity.
-func TestCLISandboxCustomerArtifactsAreExactAndHermetic(t *testing.T) {
+// TestCLICustomerJourneyArtifactsAreExactAndHermetic pins the only
+// pull-request-controlled input to the protected journey: four qurl binaries
+// built once from the exact same-repository head. No credential or deployment
+// authority is present in this producer.
+func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 	t.Parallel()
 
 	workflow := readWorkflow(t, cliWorkflow)
-	job, ok := workflow.Jobs[cliSandboxArtifactsJobID]
-	if !ok {
-		t.Fatalf("%s is missing %q", cliWorkflow, cliSandboxArtifactsJobID)
+	job := workflow.Jobs[cliCustomerArtifactsJobID]
+	if job == nil {
+		t.Fatalf("%s is missing %q", cliWorkflow, cliCustomerArtifactsJobID)
 	}
-	if job.Name != "cli / sandbox matched-cohort artifacts" ||
-		job.If != "(github.event_name == 'push' && github.ref == 'refs/heads/main') || needs.changes.outputs.cli == 'true'" {
+	if job.Name != "cli / customer journey artifacts" || job.If != "needs.changes.outputs.cli == 'true'" {
 		t.Errorf("artifact job name/if = %q / %q", job.Name, job.If)
 	}
-	for _, fixture := range []struct {
-		name, event, ref string
-		cliChanged       bool
-		want             bool
-	}{
-		{name: "non-CLI main push", event: "push", ref: "refs/heads/main", want: true},
-		{name: "CLI pull request", event: "pull_request", ref: "refs/pull/1/merge", cliChanged: true, want: true},
-		{name: "non-CLI pull request", event: "pull_request", ref: "refs/pull/1/merge", want: false},
-	} {
-		t.Run(fixture.name, func(t *testing.T) {
-			t.Parallel()
-			got := (fixture.event == "push" && fixture.ref == "refs/heads/main") || fixture.cliChanged
-			if got != fixture.want {
-				t.Fatalf("artifact producer run decision = %t, want %t", got, fixture.want)
+	if timeout, ok := job.TimeoutMinutes.(int); !ok || timeout != 20 {
+		t.Errorf("artifact job timeout = %#v, want 20", job.TimeoutMinutes)
+	}
+	assertJobPermissions(t, cliCustomerArtifactsJobID, job.Permissions, map[string]string{"contents": "read"})
+
+	var checkout, build, upload *step
+	for index := range job.Steps {
+		current := &job.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			if checkout != nil {
+				t.Fatal("artifact producer has more than one checkout")
 			}
-		})
-	}
-	if timeout, ok := job.TimeoutMinutes.(int); !ok || timeout != 15 {
-		t.Errorf("artifact job timeout = %#v, want 15", job.TimeoutMinutes)
-	}
-	assertJobPermissions(t, cliSandboxArtifactsJobID, job.Permissions, map[string]string{"contents": "read"})
-
-	indices := map[string]int{}
-	steps := map[string]*step{}
-	for index := range job.Steps {
-		current := &job.Steps[index]
-		if current.Name != "" {
-			indices[current.Name], steps[current.Name] = index, current
+			checkout = current
+		case current.Name == "Build exact packaged customer artifacts once":
+			build = current
+		case current.Name == "Upload exact packaged customer artifacts":
+			upload = current
 		}
 	}
-	requiredNames := []string{
-		"Require the trusted artifact producer",
-		"Bind the artifact-producing run attempt",
-		"Build exact sandbox customer artifacts",
-		"Upload exact sandbox customer binaries",
-		"Upload exact sandbox customer source receipt",
-	}
-	for _, name := range requiredNames {
-		if steps[name] == nil {
-			t.Fatalf("artifact job is missing %q", name)
-		}
-	}
-
-	guard := steps[requiredNames[0]]
-	if indices[requiredNames[0]] != 0 || !strings.Contains(guard.Run, "pull_request|push") ||
-		!strings.Contains(guard.Run, "layervai/qurl-integrations") || !strings.Contains(guard.Run, "does not accept a fork") {
-		t.Errorf("trusted producer guard is not the first exact fail-closed step")
-	}
-	producer := steps[requiredNames[1]]
-	if producer.ID != "producer" ||
-		!strings.Contains(producer.Run, `[[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]`) ||
-		!strings.Contains(producer.Run, `echo "run_attempt=$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"`) {
-		t.Errorf("artifact producer does not bind one validated run attempt: %#v", producer)
-	}
-	if job.Outputs["producer_run_attempt"] != "${{ steps.producer.outputs.run_attempt }}" {
-		t.Errorf("artifact producer output = %#v", job.Outputs)
-	}
-
-	checkoutIndex := -1
-	var checkout *step
-	for index := range job.Steps {
-		current := &job.Steps[index]
-		if strings.HasPrefix(current.Uses, checkoutActionPrefix) {
-			checkout, checkoutIndex = current, index
-			break
-		}
-	}
-	if checkout == nil || checkoutIndex <= 0 || checkout.With["persist-credentials"] != false ||
+	if checkout == nil || checkout.With["persist-credentials"] != false ||
 		checkout.With["ref"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" {
-		t.Errorf("artifact checkout does not bind the exact caller head without credentials: %#v", checkout)
+		t.Errorf("artifact checkout is not exact and credential-free: %#v", checkout)
+	}
+	if build == nil || !strings.Contains(build.Run, "scripts/build-cli-customer-journey-artifacts.sh") ||
+		!strings.Contains(build.Run, "\"$GITHUB_REPOSITORY\" \"$CALLER_HEAD_SHA\" \"$GITHUB_RUN_ID\" \"$GITHUB_RUN_ATTEMPT\"") {
+		t.Errorf("artifact build is not bound to the exact source run: %#v", build)
+	}
+	if upload == nil || upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != 7 ||
+		upload.With["compression-level"] != 0 || upload.With["include-hidden-files"] != false ||
+		upload.With["name"] != "qurl-customer-journey-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}" {
+		t.Errorf("artifact upload is not exact: %#v", upload)
 	}
 
-	build := steps[requiredNames[2]]
-	if !strings.Contains(build.Run, "scripts/build-sandbox-matched-cohort-pr-artifacts.sh") ||
-		!strings.Contains(build.Run, `"$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "${{ steps.producer.outputs.run_attempt }}"`) ||
-		!strings.Contains(build.Run, `"$QURL_GO_SOURCE_SHA"`) {
-		t.Errorf("artifact build does not bind the exact repository/head/run identity")
-	}
-	for _, expected := range []string{
-		`scripts/resolve-sandbox-artifact-qurl-go-source.sh`,
-	} {
-		if !strings.Contains(build.Run, expected) {
-			t.Errorf("artifact build is missing moving qurl-go source authority %q", expected)
-		}
-	}
-
-	for label, current := range map[string]*step{
-		"binaries": steps[requiredNames[3]],
-		"receipt":  steps[requiredNames[4]],
-	} {
-		if current.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
-			current.With["if-no-files-found"] != "error" || current.With["retention-days"] != 30 ||
-			current.With["compression-level"] != 0 || current.With["include-hidden-files"] != false {
-			t.Errorf("%s artifact upload is not exact: %#v", label, current.With)
-		}
-	}
-	if steps[requiredNames[3]].With["name"] != "sandbox-matched-cohort-binaries" ||
-		steps[requiredNames[4]].With["name"] != "sandbox-matched-cohort-source-receipt" {
-		t.Errorf("customer artifact names are not exact")
-	}
-
-	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
-	if err != nil {
-		t.Fatal(err)
-	}
 	jobText, err := yaml.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, forbidden := range []string{
-		"actions/create-github-app-token", "DEPLOY_DISPATCHER", "nhp-smoke-tests",
-		"blue-green-deploy", "qurl-live-env-lock", "run-sandbox-matched-cohort-pr-journey",
+		"actions/create-github-app-token", "DEPLOY_DISPATCHER", "qurl-integrations-infra",
+		"AUTH0_CLIENT", "amazonaws.com", "customer-journey.test",
 	} {
 		if strings.Contains(string(jobText), forbidden) {
-			t.Errorf("artifact producer retains forbidden live authority %q", forbidden)
+			t.Errorf("artifact producer retains forbidden authority or test input %q", forbidden)
 		}
 	}
-	if !strings.Contains(string(raw), "scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh") {
-		t.Errorf("CLI hermetic test job does not execute the artifact contract test")
+	required := workflow.Jobs[requiredJobID]
+	if required == nil || !slices.Contains(parseWorkflowNeeds(t, requiredJobID, required.Needs), cliCustomerArtifactsJobID) {
+		t.Errorf("cli / required can pass without the exact artifact producer")
+	}
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"dispatch-customer-journey", "wait-for-cli-customer-journey-check.sh",
+		"accept-cli-customer-journey-result.sh", "ops-routines-workflows",
+	} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("CLI workflow retains obsolete cross-repository journey coupling %q", forbidden)
+		}
 	}
 	for _, script := range []string{
-		"scripts/build-sandbox-matched-cohort-pr-artifacts.sh",
-		"scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh",
-		"scripts/resolve-sandbox-artifact-qurl-go-source.sh",
-		"scripts/resolve-sandbox-artifact-qurl-go-source_test.sh",
+		"scripts/build-cli-customer-journey-artifacts.sh",
+		"scripts/qurl-cli-ci-credentials.py",
+		"scripts/test-qurl-cli-ci-credentials.py",
+		"scripts/verify-cli-customer-journey-artifacts.py",
 	} {
 		assertExecutableRepoScript(t, script)
 	}
 }
 
-// TestCLICustomerJourneyCallbackTracksArtifactProducer keeps the inbound
-// result validator tied to the exact public artifact producer it authenticates.
-// A job or step rename must fail the required workflow-contract check instead
-// of surfacing only after a protected journey has completed.
-func TestCLICustomerJourneyCallbackTracksArtifactProducer(t *testing.T) {
+// TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel binds the live gate
+// to the completed CLI workflow while keeping elevated credential creation in
+// default-branch code. Linux, macOS, and Windows consume the same immutable
+// candidate bundle in independent matrix legs.
+func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	t.Parallel()
 
-	workflow := readWorkflow(t, cliWorkflow)
-	producer := workflow.Jobs[cliSandboxArtifactsJobID]
-	if producer == nil || producer.Name != "cli / sandbox matched-cohort artifacts" {
-		t.Fatalf("CLI artifact producer name drifted: %#v", producer)
-	}
-	wantSteps := []string{
-		"Build exact sandbox customer artifacts",
-		"Upload exact sandbox customer binaries",
-		"Upload exact sandbox customer source receipt",
-	}
-	producerSteps := map[string]int{}
-	for index := range producer.Steps {
-		producerSteps[producer.Steps[index].Name]++
-	}
-
-	const callbackPath = "../../scripts/accept-cli-customer-journey-result.sh"
-	callback, err := os.ReadFile(callbackPath)
+	const path = "../../.github/workflows/" + cliCustomerJourneyWorkflow
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", callbackPath, err)
+		t.Fatal(err)
 	}
-	callbackSource := string(callback)
-	for _, literal := range append([]string{producer.Name}, wantSteps...) {
-		if literal != producer.Name && producerSteps[literal] != 1 {
-			t.Errorf("CLI artifact producer has %d steps named %q, want 1", producerSteps[literal], literal)
-		}
-		if count := strings.Count(callbackSource, literal); count != 1 {
-			t.Errorf("customer-journey callback contains %q %d times, want 1", literal, count)
-		}
+	workflow := readWorkflow(t, cliCustomerJourneyWorkflow)
+	resolve := workflow.Jobs["resolve"]
+	mint := workflow.Jobs["mint"]
+	journey := workflow.Jobs["journey"]
+	cleanup := workflow.Jobs["cleanup"]
+	result := workflow.Jobs["result"]
+	if resolve == nil || mint == nil || journey == nil || cleanup == nil || result == nil || len(workflow.Jobs) != 5 {
+		t.Fatalf("%s jobs = %v, want resolve, mint, journey, cleanup, and result", cliCustomerJourneyWorkflow, maps.Keys(workflow.Jobs))
 	}
-	workflowPath := ".github/workflows/" + cliWorkflow
-	if count := strings.Count(callbackSource, workflowPath); count != 2 {
-		t.Errorf("customer-journey callback contains workflow path %q %d times, want 2", workflowPath, count)
+	if resolve.Outputs["required"] != "${{ steps.producer.outputs.required }}" {
+		t.Errorf("trusted resolver does not expose one exact required decision")
 	}
-}
-
-// TestCLIExactArtifactCustomerJourneyIsRequired binds the public CLI run to
-// the protected sandbox orchestrator without moving credentials or internal
-// topology into this repository. The called dispatcher stamps the caller
-// identity, and the waiter accepts only the callback for this exact source,
-// workflow run, and run attempt.
-func TestCLIExactArtifactCustomerJourneyIsRequired(t *testing.T) {
-	t.Parallel()
-
-	workflow := readWorkflow(t, cliWorkflow)
-	dispatch := workflow.Jobs[cliJourneyDispatchJobID]
-	if dispatch == nil {
-		t.Fatalf("%s is missing %q", cliWorkflow, cliJourneyDispatchJobID)
-	}
-	if dispatch.Name != "cli / dispatch exact customer journey" ||
-		dispatch.If != "needs.changes.outputs.cli == 'true'" {
-		t.Errorf("journey dispatch name/if = %q / %q", dispatch.Name, dispatch.If)
-	}
-	const dispatcher = "layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@b384fb104357360047df76c5cc7c060f6cabd183"
-	if dispatch.Uses != dispatcher {
-		t.Errorf("journey dispatcher = %q, want %q", dispatch.Uses, dispatcher)
-	}
-	assertJobPermissions(t, cliJourneyDispatchJobID, dispatch.Permissions, map[string]string{})
-	wantDispatchNeeds := []string{
-		"changes", "goreleaser-check", "govulncheck", "image-smoke", "lint",
-		"matrix", "sandbox-customer-artifacts", "test",
-	}
-	gotDispatchNeeds := parseWorkflowNeeds(t, cliJourneyDispatchJobID, dispatch.Needs)
-	slices.Sort(gotDispatchNeeds)
-	if !slices.Equal(gotDispatchNeeds, wantDispatchNeeds) {
-		t.Errorf("journey dispatch needs = %v, want %v", gotDispatchNeeds, wantDispatchNeeds)
-	}
-
-	wait := workflow.Jobs[cliJourneyWaitJobID]
-	if wait == nil {
-		t.Fatalf("%s is missing %q", cliWorkflow, cliJourneyWaitJobID)
-	}
-	if wait.Name != "cli / exact packaged customer journey" ||
-		wait.If != "needs.changes.outputs.cli == 'true' && needs.dispatch-customer-journey.result == 'success'" {
-		t.Errorf("journey waiter name/if = %q / %q", wait.Name, wait.If)
-	}
-	if timeout, ok := wait.TimeoutMinutes.(int); !ok || timeout != 155 {
-		t.Errorf("journey waiter timeout = %#v, want 155", wait.TimeoutMinutes)
-	}
-	assertJobPermissions(t, cliJourneyWaitJobID, wait.Permissions, map[string]string{
-		"checks": "read", "contents": "read",
-	})
-	if needs := parseWorkflowNeeds(t, cliJourneyWaitJobID, wait.Needs); !slices.Equal(needs, []string{"changes", cliSandboxArtifactsJobID, cliJourneyDispatchJobID}) {
-		t.Errorf("journey waiter needs = %v", needs)
-	}
-	var checkout, require *step
-	for index := range wait.Steps {
-		current := &wait.Steps[index]
-		if strings.HasPrefix(current.Uses, checkoutActionPrefix) {
-			checkout = current
-		}
-		if current.Name == "Require the exact packaged CLI customer journey" {
-			require = current
+	var resolver *step
+	for index := range resolve.Steps {
+		if resolve.Steps[index].ID == "producer" {
+			resolver = &resolve.Steps[index]
 		}
 	}
-	if checkout == nil || checkout.With["persist-credentials"] != false ||
-		checkout.With["ref"] != "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" {
-		t.Errorf("journey waiter checkout is not exact and credential-free: %#v", checkout)
-	}
-	if require == nil || !strings.Contains(require.Run, "scripts/wait-for-cli-customer-journey-check.sh") ||
-		require.ContinueOnError != nil {
-		t.Errorf("journey waiter does not fail closed through the checked-in script: %#v", require)
-	}
-	if require.Env["PRODUCER_RUN_ATTEMPT"] != "${{ needs.sandbox-customer-artifacts.outputs.producer_run_attempt }}" ||
-		!strings.Contains(require.Run, `"$PRODUCER_RUN_ATTEMPT"`) ||
-		strings.Contains(require.Run, `"$GITHUB_RUN_ATTEMPT"`) {
-		t.Errorf("journey waiter is not bound to the artifact-producing attempt: %#v", require)
+	if resolver == nil ||
+		!strings.Contains(resolver.Run, "\"$SOURCE_REPOSITORY\" == \"$GITHUB_REPOSITORY\"") ||
+		!strings.Contains(resolver.Run, "cli / customer journey artifacts") ||
+		!strings.Contains(resolver.Run, ".total_count > 100") {
+		t.Errorf("trusted resolver does not bind one same-repository artifact producer: %#v", resolver)
 	}
 
-	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", cliWorkflow))
-	if err != nil {
-		t.Fatalf("read %s: %v", cliWorkflow, err)
-	}
-	var caller struct {
+	var contract struct {
+		On struct {
+			WorkflowRun struct {
+				Workflows []string `yaml:"workflows"`
+				Types     []string `yaml:"types"`
+			} `yaml:"workflow_run"`
+		} `yaml:"on"`
 		Jobs map[string]struct {
-			With    map[string]any    `yaml:"with"`
-			Secrets map[string]string `yaml:"secrets"`
+			Environment string `yaml:"environment"`
+			RunsOn      string `yaml:"runs-on"`
+			Strategy    struct {
+				FailFast *bool `yaml:"fail-fast"`
+				Matrix   struct {
+					Include []struct {
+						Lane     string `yaml:"lane"`
+						LaneID   int    `yaml:"lane_id"`
+						OS       string `yaml:"os"`
+						TestName string `yaml:"test_name"`
+					} `yaml:"include"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(raw, &caller); err != nil {
-		t.Fatalf("decode %s caller contract: %v", cliWorkflow, err)
+	if err := yaml.Unmarshal(raw, &contract); err != nil {
+		t.Fatalf("decode trusted journey contract: %v", err)
 	}
-	call := caller.Jobs[cliJourneyDispatchJobID]
-	if call.With["target_repo"] != "qurl-integrations-infra" ||
-		call.With["event_type"] != "qurl-cli-customer-journey" {
-		t.Errorf("journey dispatch target is not exact: %#v", call.With)
+	if !slices.Equal(contract.On.WorkflowRun.Workflows, []string{"cli: Build and Test"}) ||
+		!slices.Equal(contract.On.WorkflowRun.Types, []string{"completed"}) {
+		t.Errorf("trusted journey trigger = %#v", contract.On.WorkflowRun)
 	}
-	payload, ok := call.With["client_payload"].(string)
-	if !ok {
-		t.Fatalf("journey client_payload = %#v, want string", call.With["client_payload"])
+	matrix := contract.Jobs["journey"]
+	if matrix.Environment != "cli-connector-resource-sandbox" || matrix.RunsOn != "${{ matrix.os }}" ||
+		matrix.Strategy.FailFast == nil || *matrix.Strategy.FailFast {
+		t.Errorf("journey matrix trust/parallel contract = %#v", matrix)
 	}
-	for _, required := range []string{
-		"layerv.qurl-cli-customer-journey.v1", "source_sha", "source_kind",
-		"pull_request_number", "producer_run_id", "producer_run_attempt",
-		"github.event.pull_request.head.sha", "github.run_id",
-		"needs.sandbox-customer-artifacts.outputs.producer_run_attempt",
-	} {
-		if !strings.Contains(payload, required) {
-			t.Errorf("journey client_payload is missing %q", required)
+	wantLanes := map[string]struct {
+		id   int
+		os   string
+		test string
+	}{
+		"linux":   {1, "ubuntu-latest", "TestSandboxFullCustomerLifecycleSmoke"},
+		"macos":   {2, "macos-latest", "TestSandboxMacOSDefaultDaemonLifecycle"},
+		"windows": {3, "windows-latest", "TestSandboxWindowsDefaultDaemonFullCustomerLifecycle"},
+	}
+	if len(matrix.Strategy.Matrix.Include) != len(wantLanes) {
+		t.Fatalf("journey matrix has %d lanes, want %d", len(matrix.Strategy.Matrix.Include), len(wantLanes))
+	}
+	for _, lane := range matrix.Strategy.Matrix.Include {
+		want, ok := wantLanes[lane.Lane]
+		if !ok || lane.LaneID != want.id || lane.OS != want.os || lane.TestName != want.test {
+			t.Errorf("journey lane = %#v, want one exact isolated platform lane", lane)
+		}
+		delete(wantLanes, lane.Lane)
+	}
+	if len(wantLanes) != 0 {
+		t.Errorf("journey matrix is missing lanes %v", maps.Keys(wantLanes))
+	}
+	if journey.If != "needs.resolve.outputs.required == 'true' && needs.mint.result == 'success'" {
+		t.Errorf("journey if = %q", journey.If)
+	}
+	if timeout, ok := journey.TimeoutMinutes.(int); !ok || timeout != 35 {
+		t.Errorf("journey timeout = %#v, want 35", journey.TimeoutMinutes)
+	}
+	assertJobPermissions(t, "journey", journey.Permissions, map[string]string{"actions": "read", "contents": "read"})
+
+	var checkout, candidateDownload, credentialDownload, verify *step
+	harnessBuilds := 0
+	selectedTestChecks := 0
+	customerRuns := 0
+	cleanupSteps := 0
+	for index := range journey.Steps {
+		current := &journey.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			checkout = current
+		case strings.HasPrefix(current.Uses, "actions/download-artifact@"):
+			if current.With["run-id"] == "${{ github.event.workflow_run.id }}" {
+				candidateDownload = current
+			} else {
+				credentialDownload = current
+			}
+		case current.Name == "Verify exact packaged artifacts":
+			verify = current
+		case current.Name == "Build the trusted customer-journey harness":
+			harnessBuilds++
+			if !strings.Contains(current.Run, "go test -c") || !strings.Contains(current.Run, "-tags=clisandbox") {
+				t.Errorf("trusted harness build is not exact: %#v", current)
+			}
+		case current.Name == "Require the selected customer test":
+			selectedTestChecks++
+			if !strings.Contains(current.Run, "-test.list") || !strings.Contains(current.Run, "matrix.test_name") {
+				t.Errorf("selected customer test is not proved present: %#v", current)
+			}
+		case current.Name == "Run the packaged customer journey":
+			customerRuns++
+			if !strings.Contains(current.Run, "QURL_CUSTOMER_JOURNEY_TEST") {
+				t.Errorf("customer journey does not execute the trusted harness: %#v", current)
+			}
+		case current.Name == "Remove the local disposable key":
+			cleanupSteps++
+			if current.If != "always() && runner.os != 'Windows'" && current.If != "always() && runner.os == 'Windows'" {
+				t.Errorf("credential cleanup is not terminal: %#v", current)
+			}
 		}
 	}
-	for _, forbidden := range []string{"amazonaws.com", "account_id", "us-east", "api.layerv", "secret"} {
-		if strings.Contains(strings.ToLower(payload), forbidden) {
-			t.Errorf("public journey payload contains internal detail %q", forbidden)
+	if checkout == nil || checkout.With["ref"] != "${{ github.sha }}" ||
+		checkout.With["path"] != "orchestrator" || checkout.With["persist-credentials"] != false {
+		t.Errorf("trusted orchestrator checkout is not default-branch exact and credential-free: %#v", checkout)
+	}
+	if candidateDownload == nil || candidateDownload.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+		candidateDownload.With["run-id"] != "${{ github.event.workflow_run.id }}" ||
+		candidateDownload.With["digest-mismatch"] != "error" {
+		t.Errorf("candidate artifact download is not exact: %#v", candidateDownload)
+	}
+	if credentialDownload == nil || credentialDownload.With["name"] != "qurl-customer-key-${{ github.run_id }}-${{ matrix.lane }}" ||
+		credentialDownload.With["digest-mismatch"] != "error" {
+		t.Errorf("per-lane credential download is not exact: %#v", credentialDownload)
+	}
+	if verify == nil || !strings.Contains(verify.Run, "verify-cli-customer-journey-artifacts.py") {
+		t.Errorf("candidate artifact verification is missing: %#v", verify)
+	}
+	if harnessBuilds != 2 || selectedTestChecks != 2 || customerRuns != 2 || cleanupSteps != 2 {
+		t.Errorf("trusted harness/selection/customer/local cleanup step counts = %d/%d/%d/%d, want 2/2/2/2", harnessBuilds, selectedTestChecks, customerRuns, cleanupSteps)
+	}
+	journeyText, err := yaml.Marshal(journey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"AUTH0_CLIENT", "cleanup-jwt", "QURL_CLI_SANDBOX_CLEANUP_JWT"} {
+		if strings.Contains(string(journeyText), forbidden) {
+			t.Errorf("candidate runner receives standing authority %q", forbidden)
 		}
 	}
-	wantSecrets := map[string]string{
-		"app_id":          "${{ secrets.DEPLOY_DISPATCHER_APP_ID }}",
-		"app_private_key": "${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}",
+	if contract.Jobs["mint"].Environment != "cli-connector-resource-sandbox-controller" ||
+		contract.Jobs["cleanup"].Environment != "cli-connector-resource-sandbox-controller" {
+		t.Errorf("standing-authority jobs do not use the main-only controller environment")
 	}
-	if !maps.Equal(call.Secrets, wantSecrets) {
-		t.Errorf("journey dispatcher secrets = %#v, want exact narrow App credentials", call.Secrets)
+	if contract.Jobs["journey"].Environment != "cli-connector-resource-sandbox" {
+		t.Errorf("candidate jobs do not keep the customer-journey environment separate")
+	}
+	assertJobPermissions(t, "mint", mint.Permissions, map[string]string{"actions": "write", "contents": "read"})
+	assertJobPermissions(t, "cleanup", cleanup.Permissions, map[string]string{"actions": "write", "contents": "read"})
+	if cleanup.If != "always() && needs.resolve.outputs.required == 'true'" {
+		t.Errorf("cleanup if = %q", cleanup.If)
+	}
+	mintText, err := yaml.Marshal(mint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupText, err := yaml.Marshal(cleanup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"qurl-cli-ci-credentials.py sweep", "qurl-cli-ci-credentials.py create", "Revoke partial mint on failure"} {
+		if !strings.Contains(string(mintText), required) {
+			t.Errorf("trusted mint path is missing %q", required)
+		}
+	}
+	for _, required := range []string{"qurl-cli-ci-credentials.py sweep", "Delete transient customer-key artifacts"} {
+		if !strings.Contains(string(cleanupText), required) {
+			t.Errorf("trusted cleanup path is missing %q", required)
+		}
 	}
 
-	required := workflow.Jobs[requiredJobID]
-	for _, need := range []string{cliJourneyDispatchJobID, cliJourneyWaitJobID} {
-		if !slices.Contains(parseWorkflowNeeds(t, requiredJobID, required.Needs), need) {
-			t.Errorf("cli / required can pass without %q", need)
+	source := string(raw)
+	for _, required := range []string{
+		"qURL Customer Journey / exact CLI artifact",
+		"layerv.qurl-cli-customer-journey.v1:${SOURCE_RUN_ID}:${SOURCE_RUN_ATTEMPT}:${HEAD_SHA}",
+		"QURL_SANDBOX_AUTH0_CLIENT_ID", "QURL_SANDBOX_AUTH0_CLIENT_SECRET",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("trusted customer journey is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"qurl-integrations-infra", "ops-routines", "DEPLOY_DISPATCHER",
+		"amazonaws.com", "AWS_ACCESS_KEY", "AWS_SECRET",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("trusted customer journey retains forbidden cross-repository or AWS authority %q", forbidden)
 		}
 	}
 }
@@ -1157,7 +1151,6 @@ func TestCLIReleaseWaitsForExactMainCI(t *testing.T) {
 	}
 
 	assertExecutableRepoScript(t, "scripts/wait-for-exact-cli-main-run.sh")
-	assertExecutableRepoScript(t, "scripts/wait-for-cli-customer-journey-check.sh")
 }
 
 // TestCLIReleaseValidatesTheCaskBeforePublication keeps every local

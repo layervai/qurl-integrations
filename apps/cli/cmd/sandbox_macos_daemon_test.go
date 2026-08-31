@@ -48,6 +48,7 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	}
 
 	cliEnv := sandboxJourneyEnv(t)
+	addSandboxRunIdentity(t, cliEnv)
 	cleanupJWT := sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")
 	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
 		value := strings.TrimSpace(os.Getenv(name))
@@ -61,6 +62,11 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 		t.Fatalf("resolve canonical macOS state directory: %v", err)
 	}
 	cliEnv[connectorstate.EnvStateDirPrimary] = stateDir
+	namespace, err := sandboxNamespace("smoke")
+	if err != nil {
+		t.Fatalf("derive macOS journey namespace: %v", err)
+	}
+	cliEnv[connectorstate.EnvAgentID] = namespace.AgentID
 	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
 	bootstrapKey := cliEnv["QURL_API_KEY"]
 	delete(cliEnv, "QURL_API_KEY")
@@ -87,7 +93,9 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 		t.Fatalf("one-time macOS customer login durable identity: %v", err)
 	}
 	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
-	registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, loadedAfterLogin.DeviceAPIKeyID)
+	if cleanupJWT != "" {
+		registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, loadedAfterLogin.DeviceAPIKeyID)
+	}
 	whoami := runExternalSandboxCLI(t, binary, cliEnv, "-o", "json", "whoami")
 	if whoami.err != nil {
 		t.Fatalf("warm macOS device whoami: %v; stderr %q", whoami.err, whoami.stderr)
@@ -128,7 +136,7 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	connectorID := fmt.Sprintf("sandbox-macos-daemon-%d", time.Now().UnixNano())
+	connectorID := namespace.ConnectorID
 	registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, loadedAfterLogin.DeviceAPIKey)
 	publish := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL, "--id", connectorID)
 	cridValue := strings.TrimSpace(publish.stdout)
@@ -148,12 +156,19 @@ func TestSandboxMacOSDefaultDaemonLifecycle(t *testing.T) {
 	assertMacOSLaunchAgentContainsNoCredential(t, cliEnv["QURL_ENDPOINT"], cliEnv[hub.EnvHost], cliEnv[hub.EnvServerPublicKey], bootstrapKey, cleanupJWT)
 
 	initial := waitExternalSandboxState(t, binary, cliEnv, cridValue, "on", "serving", 2*time.Minute)
+	inspected := externalSandboxLifecycle(t, binary, cliEnv, "inspect", cridValue)
+	if inspected != initial {
+		t.Fatalf("macOS inspect state = %+v, want status state %+v", inspected, initial)
+	}
+	assertSandboxListRow(t, binary, cliEnv, stateDir, local, initial.ServingEpoch)
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, 2*time.Minute)
+	assertSandboxRemoteURLDeviceJourney(t, binary, cliEnv, stateDir)
 
 	stopped := externalSandboxLifecycle(t, binary, cliEnv, "stop", cridValue)
 	if err := validateSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
 		t.Fatalf("stop state = %+v: %v", stopped, err)
 	}
+	assertSandboxLocalRouteFenced(t, binary, cliEnv, stateDir, cridValue, marker, &backendHits)
 	started := externalSandboxLifecycle(t, binary, cliEnv, "start", cridValue)
 	if err := validateSandboxSharingTransition(started, "on", "serving", stopped.ServingEpoch); err != nil {
 		t.Fatalf("start state = %+v: %v", started, err)
@@ -218,13 +233,11 @@ func runExternalSandboxCLIInput(t *testing.T, binary string, env map[string]stri
 
 func externalSandboxEnvironment(overrides map[string]string) []string {
 	values := map[string]string{}
-	for _, entry := range os.Environ() {
-		if key, value, ok := strings.Cut(entry, "="); ok {
+	for _, key := range []string{"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER"} {
+		if value, ok := os.LookupEnv(key); ok {
 			values[key] = value
 		}
 	}
-	delete(values, "QURL_API_KEY")
-	delete(values, "QURL_API_KEY_FILE")
 	for key, value := range overrides {
 		values[key] = value
 	}
@@ -244,6 +257,7 @@ func externalSandboxEnvironment(overrides map[string]string) []string {
 func TestExternalSandboxEnvironmentUsesOneAPIKeySource(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "inherited-inline")
 	t.Setenv("QURL_API_KEY_FILE", "/run/secrets/inherited-api-key")
+	t.Setenv("ACTIONS_RUNTIME_TOKEN", "runner-authority")
 	got := map[string]string{}
 	for _, entry := range externalSandboxEnvironment(map[string]string{
 		"QURL_API_KEY":  "exact-customer-key",
@@ -262,6 +276,9 @@ func TestExternalSandboxEnvironmentUsesOneAPIKeySource(t *testing.T) {
 	}
 	if got["QURL_ENDPOINT"] != "https://sandbox.example" {
 		t.Fatal("customer process lost its exact endpoint override")
+	}
+	if got["ACTIONS_RUNTIME_TOKEN"] != "" {
+		t.Fatal("customer process inherited GitHub runner authority")
 	}
 	withoutCredential := map[string]string{}
 	for _, entry := range externalSandboxEnvironment(map[string]string{"QURL_ENDPOINT": "https://sandbox.example"}) {
