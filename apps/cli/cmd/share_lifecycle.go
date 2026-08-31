@@ -38,6 +38,7 @@ const connectorResourceType = "tunnel"
 const (
 	sharingDiagnosticSettleLimit = 500 * time.Millisecond
 	sharingDiagnosticSettlePoll  = 25 * time.Millisecond
+	sharingPollRequestLimit      = 3 * time.Second
 )
 
 type shareDaemonController interface {
@@ -674,13 +675,22 @@ func validateLocalSharing(local *connectorstate.LocalShare, sharing *qurlapi.Sha
 }
 
 func waitForSharing(ctx context.Context, client qurlapi.Client, local *connectorstate.LocalShare, epoch uint64, limit time.Duration) (*qurlapi.Sharing, error) {
+	return waitForSharingWithPollLimit(ctx, client, local, epoch, limit, sharingPollRequestLimit)
+}
+
+func waitForSharingWithPollLimit(ctx context.Context, client qurlapi.Client, local *connectorstate.LocalShare,
+	epoch uint64, limit, pollLimit time.Duration,
+) (*qurlapi.Sharing, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	var last *qurlapi.Sharing
 	var lastPollErr error
 	pollAttempt := 0
 	for {
-		sharing, err := client.Sharing(waitCtx, local.CRID)
+		pollCtx, cancelPoll := context.WithTimeout(waitCtx, pollLimit)
+		sharing, err := client.Sharing(pollCtx, local.CRID)
+		pollCtxErr := pollCtx.Err()
+		cancelPoll()
 		if err != nil {
 			if waitCtx.Err() != nil {
 				if ctx.Err() != nil {
@@ -688,7 +698,10 @@ func waitForSharing(ctx context.Context, client qurlapi.Client, local *connector
 				}
 				return nil, errors.Join(sharingServingTimeout(local.CRID, limit, last), err)
 			}
-			if !retryableSharingPollError(err) {
+			// A single read timeout is a transport miss, not the end of the
+			// readiness budget. Keep retrying while the parent budget is live.
+			// Caller cancellation and the total deadline remain terminal above.
+			if !errors.Is(pollCtxErr, context.DeadlineExceeded) && !retryableSharingPollError(err) {
 				return nil, err
 			}
 			lastPollErr = err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -22,16 +23,17 @@ const daemonJobProtocolVersion = "1"
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
-	Manager       connectorservice.UserJobManager
-	IPC           IPCClient
-	StateDir      string
-	LogDir        string
-	BinaryVersion string
-	Endpoint      string
-	ResolveHub    func() (qurl.HubBootstrap, error)
-	LookPath      func(string) (string, error)
-	ProbeStatus   func(context.Context) (IPCStatus, bool, error)
-	Reload        func(context.Context) (bool, error)
+	Manager        connectorservice.UserJobManager
+	IPC            IPCClient
+	StateDir       string
+	LogDir         string
+	BinaryVersion  string
+	InvocationPath string
+	Endpoint       string
+	ResolveHub     func() (qurl.HubBootstrap, error)
+	LookPath       func(string) (string, error)
+	ProbeStatus    func(context.Context) (IPCStatus, bool, error)
+	Reload         func(context.Context) (bool, error)
 }
 
 // NewJobController builds the production native per-user job controller.
@@ -40,7 +42,7 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveH
 		Manager:  connectorservice.NewUserJobManager(),
 		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
 		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
-		Endpoint: endpoint, ResolveHub: resolveHub, LookPath: exec.LookPath,
+		InvocationPath: os.Args[0], Endpoint: endpoint, ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
@@ -133,18 +135,10 @@ func (c *JobController) validatedDeployment() (qurl.HubBootstrap, error) {
 }
 
 func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) (connectorservice.UserJob, error) {
-	binary, err := c.LookPath("qurl")
+	binary, err := c.currentExecutablePath()
 	if err != nil {
-		return connectorservice.UserJob{}, fmt.Errorf("find installed qurl command: %w", err)
+		return connectorservice.UserJob{}, err
 	}
-	if !filepath.IsAbs(binary) {
-		binary, err = filepath.Abs(binary)
-		if err != nil {
-			return connectorservice.UserJob{}, fmt.Errorf("resolve installed qurl command path: %w", err)
-		}
-	}
-	// Keep the PATH-resolved installed command. On Homebrew, resolving its
-	// symlink would persist a versioned Cellar path that breaks on upgrade.
 	if err := prepareDaemonLogDir(c.LogDir); err != nil {
 		return connectorservice.UserJob{}, err
 	}
@@ -163,6 +157,39 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 		Arguments: arguments, StandardOut: stdoutPath, StandardErr: stderrPath,
 		ExitTimeout: 15, Umask: 0o077, RunAtLoad: true, KeepAlive: true,
 	}, nil
+}
+
+// currentExecutablePath returns the command path that launched this process,
+// not another qurl binary that happens to appear first on PATH. A path-bearing
+// invocation is made absolute without resolving symlinks, so a stable Homebrew
+// or package-manager link remains stable across upgrades. A bare invocation is
+// resolved by its exact name through PATH for the same reason.
+func (c *JobController) currentExecutablePath() (string, error) {
+	invocation := c.InvocationPath
+	if invocation == "" || invocation != strings.TrimSpace(invocation) {
+		return "", errors.New("qURL invocation path is empty or non-canonical")
+	}
+	if filepath.IsAbs(invocation) {
+		return filepath.Clean(invocation), nil
+	}
+	if filepath.Dir(invocation) != "." {
+		binary, err := filepath.Abs(invocation)
+		if err != nil {
+			return "", fmt.Errorf("resolve current qURL command path: %w", err)
+		}
+		return binary, nil
+	}
+	binary, err := c.LookPath(invocation)
+	if err != nil {
+		return "", fmt.Errorf("find current qURL command %q: %w", invocation, err)
+	}
+	if !filepath.IsAbs(binary) {
+		binary, err = filepath.Abs(binary)
+		if err != nil {
+			return "", fmt.Errorf("resolve current qURL command path: %w", err)
+		}
+	}
+	return filepath.Clean(binary), nil
 }
 
 // JobVersion combines the IPC protocol and installed qurl binary versions.

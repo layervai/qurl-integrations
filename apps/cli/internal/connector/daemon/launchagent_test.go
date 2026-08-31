@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -53,6 +54,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
+	controller.InvocationPath = "qurl"
 	controller.LookPath = func(name string) (string, error) {
 		if name != "qurl" {
 			return "", errors.New("unexpected lookup")
@@ -91,6 +93,104 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 	}
 }
 
+func TestJobControllerPersistsCurrentArtifactInsteadOfOldQURLOnPath(t *testing.T) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	absoluteBinary := filepath.Join(dir, "candidate", "qurl")
+	relativeInvocation := filepath.Join("test-artifacts", "candidate", "qurl")
+	oldBinary := filepath.Join(dir, "old-on-path", "qurl")
+
+	for _, test := range []struct {
+		name       string
+		invocation string
+		want       string
+	}{
+		{name: "absolute artifact", invocation: absoluteBinary, want: absoluteBinary},
+		{name: "relative artifact", invocation: relativeInvocation, want: filepath.Join(workingDir, relativeInvocation)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &recordingJobManager{}
+			controller := NewJobController(filepath.Join(dir, "state", test.name), filepath.Join(dir, "logs", test.name),
+				"2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+			controller.Manager = manager
+			controller.InvocationPath = test.invocation
+			controller.LookPath = func(name string) (string, error) {
+				if name == "qurl" {
+					return oldBinary, nil
+				}
+				t.Fatalf("path-bearing invocation unexpectedly searched PATH for %q", name)
+				return "", nil
+			}
+			controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+				return IPCStatus{}, false, nil
+			}
+			controller.Reload = func(context.Context) (bool, error) {
+				t.Fatal("reload ran without a live daemon")
+				return false, nil
+			}
+
+			if err := controller.Ensure(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(manager.jobs) != 1 || manager.jobs[0].BinaryPath != test.want {
+				t.Fatalf("installed binary = %#v, want current artifact %q", manager.jobs, test.want)
+			}
+			if manager.jobs[0].BinaryPath == oldBinary {
+				t.Fatalf("installed old PATH binary %q", oldBinary)
+			}
+		})
+	}
+}
+
+func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
+	dir := t.TempDir()
+	currentBinary := filepath.Join(dir, "candidate", "qurl-candidate")
+	manager := &recordingJobManager{}
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller.Manager = manager
+	controller.InvocationPath = "qurl-candidate"
+	controller.LookPath = func(name string) (string, error) {
+		if name != "qurl-candidate" {
+			t.Fatalf("looked up %q instead of the current invocation name", name)
+		}
+		return currentBinary, nil
+	}
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
+	controller.Reload = func(context.Context) (bool, error) { t.Fatal("unexpected reload"); return false, nil }
+
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.jobs) != 1 || manager.jobs[0].BinaryPath != currentBinary {
+		t.Fatalf("installed jobs = %#v, want exact invoked command %q", manager.jobs, currentBinary)
+	}
+}
+
+func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
+	dir := t.TempDir()
+	manager := &recordingJobManager{}
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller.Manager = manager
+	controller.InvocationPath = " qurl"
+	controller.LookPath = func(string) (string, error) {
+		t.Fatal("non-canonical invocation searched PATH")
+		return "", nil
+	}
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
+	controller.Reload = func(context.Context) (bool, error) { t.Fatal("unexpected reload"); return false, nil }
+
+	err := controller.Ensure(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invocation path is empty or non-canonical") {
+		t.Fatalf("Ensure error = %v, want non-canonical invocation rejection", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 {
+		t.Fatalf("invalid invocation installed jobs: ensure=%d replace=%d", len(manager.jobs), len(manager.replaced))
+	}
+}
+
 func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
@@ -125,6 +225,7 @@ func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T)
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
+	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
 		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
@@ -148,6 +249,7 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
+	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
 		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
@@ -203,6 +305,7 @@ func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testi
 	manager := &recordingJobManager{}
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
 	controller.Manager = manager
+	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
 	controller.Reload = func(context.Context) (bool, error) { t.Fatal("reload called without IPC"); return false, nil }

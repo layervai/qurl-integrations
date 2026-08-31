@@ -492,6 +492,29 @@ func TestWaitForSharingReportsLastObservedStateWhenRequestUsesDeadline(t *testin
 	}
 }
 
+func TestWaitForSharingRetriesBoundedHungPollThenServes(t *testing.T) {
+	srv := apitest.NewServer(t)
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	})
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", 7, "serving"))
+	client, err := qurlapi.New(&qurlapi.Config{BaseURL: srv.URL, APIKey: testAPIKey, Version: "wait-bounded-poll-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sharing, err := waitForSharingWithPollLimit(context.Background(), client, &connectorstate.LocalShare{
+		ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID,
+	}, 7, time.Second, 25*time.Millisecond)
+	if err != nil || sharing == nil || sharing.ConnectionState != qurlapi.ConnectionServing {
+		t.Fatalf("wait result after one hung poll = %+v, %v", sharing, err)
+	}
+	if got := len(srv.Requests()); got != 2 {
+		t.Fatalf("sharing requests = %d, want one bounded timeout and one successful retry", got)
+	}
+}
+
 func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	stateDir := connectorStateTestDir(t)
 	now := time.Now().UTC()
