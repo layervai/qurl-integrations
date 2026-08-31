@@ -127,7 +127,11 @@ func sandboxProtectedChildValues(t *testing.T, primaryAPIKey, failureAPIKey stri
 	// Read with a bare Getenv to match sandboxJourneyEnv, which is the only
 	// provisioning path for this input. If it ever moves to sandboxSecret's
 	// _FILE indirection, this degrades to scanning for nothing — silently.
-	issuerForms := qv2IssuerKeyForms(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
+	issuerKey := os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY")
+	issuerForms := qv2IssuerKeyForms(issuerKey)
+	if strings.TrimSpace(issuerKey) != "" && len(issuerForms) == 0 {
+		t.Fatal("qv2 issuer key is provisioned but yielded no scannable form; the leak scan would silently cover nothing")
+	}
 	values := make([]string, 0, 3+len(issuerForms))
 	values = append(values, primaryAPIKey, failureAPIKey, sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"))
 	return append(values, issuerForms...)
@@ -154,8 +158,16 @@ func qv2IssuerKeyForms(issuerKey string) []string {
 	if err != nil {
 		return forms
 	}
-	if keyURL := base64.RawURLEncoding.EncodeToString(der); len(keyURL) >= sandboxProtectedValueMinBytes && keyURL != keyStd {
-		forms = append(forms, keyURL)
+	// All four alphabets/paddings, because the scan is strings.Contains: the
+	// padded needle "…8PDw==" does not match an output carrying the unpadded
+	// "…8PDw", and the URL-safe and standard alphabets differ on "+/" vs "-_".
+	for _, encoding := range []*base64.Encoding{
+		base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding,
+	} {
+		form := encoding.EncodeToString(der)
+		if len(form) >= sandboxProtectedValueMinBytes && !slices.Contains(forms, form) {
+			forms = append(forms, form)
+		}
 	}
 	return forms
 }
@@ -256,6 +268,13 @@ func sandboxChildOutputRedactor() *strings.Replacer {
 		{"<hub-key>", hub.EnvServerPublicKey},
 	}
 	var pairs []string
+	// The issuer kid identifies the sandbox deployment. It is too short to be
+	// a safe exact-scan needle, but redacting it is free.
+	if kid, _, ok := strings.Cut(strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY")), "="); ok {
+		if kid = strings.TrimSpace(kid); len(kid) >= sandboxRedactedValueMinBytes {
+			pairs = append(pairs, kid, "<issuer-kid>")
+		}
+	}
 	for _, source := range sources {
 		value := strings.TrimSpace(os.Getenv(source.env))
 		if len(value) < sandboxRedactedValueMinBytes {
@@ -287,13 +306,24 @@ const sandboxRedactedValueMinBytes = 8
 // discarded — which leaves the packaged journey debuggable only by guessing.
 // The result is always valid UTF-8, including when the child itself wrote
 // invalid bytes, because go test -json carries this text.
+//
+// The ordering is load-bearing: the WHOLE buffer is redacted and scrubbed
+// before the tail is sliced. Truncating first would let a credential
+// straddling the cut print its tail in the clear, and a partial value would
+// not match the replacer. Do not "optimize" this by scrubbing only the tail.
 func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) string {
 	if redactor != nil {
 		combined = redactor.Replace(combined)
 	}
 	combined = scrubSandboxRuntimeCredentials(combined)
-	trimmed := strings.ToValidUTF8(strings.TrimRight(combined, "\n"), "")
+	raw := strings.TrimRight(combined, "\n")
+	trimmed := strings.ToValidUTF8(raw, "")
 	if strings.TrimSpace(trimmed) == "" {
+		if strings.TrimSpace(raw) != "" {
+			// Sanitizing erased everything, which is a very different fact
+			// from silence in exactly the case this excerpt exists for.
+			return "(the controlled-failure child's output was not valid UTF-8)"
+		}
 		return "(the controlled-failure child produced no output)"
 	}
 	if len(trimmed) <= sandboxFailureChildOutputTailBytes {
@@ -578,16 +608,24 @@ func TestQV2IssuerKeyFormsCoversEveryEncoding(t *testing.T) {
 	// DER whose standard and URL-safe base64 encodings differ ("+/" vs "-_").
 	der := []byte{0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0}
 	keyStd := base64.StdEncoding.EncodeToString(der)
-	keyURL := base64.RawURLEncoding.EncodeToString(der)
-	if keyStd == keyURL {
-		t.Fatal("fixture encodings coincide; this test would prove nothing")
-	}
 	issuerKey := "sandbox-kid=" + keyStd
 
+	// All four alphabet/padding combinations, because the scan is an exact
+	// strings.Contains: a padded needle never matches unpadded output, and the
+	// two alphabets differ on "+/" vs "-_".
+	encodings := []*base64.Encoding{base64.RawURLEncoding, base64.URLEncoding, base64.RawStdEncoding}
+	want := make([]string, 0, 2+len(encodings))
+	want = append(want, issuerKey, keyStd)
+	for _, encoding := range encodings {
+		want = append(want, encoding.EncodeToString(der))
+	}
+	if len(slices.Compact(slices.Clone(want))) != len(want) {
+		t.Fatalf("fixture encodings coincide (%q); this test would prove nothing", want)
+	}
 	forms := qv2IssuerKeyForms(issuerKey)
-	for _, want := range []string{issuerKey, keyStd, keyURL} {
-		if !slices.Contains(forms, want) {
-			t.Fatalf("qv2IssuerKeyForms(%q) = %q, missing %q", issuerKey, forms, want)
+	for _, form := range want {
+		if !slices.Contains(forms, form) {
+			t.Fatalf("qv2IssuerKeyForms(%q) = %q, missing %q", issuerKey, forms, form)
 		}
 	}
 
@@ -629,5 +667,57 @@ func clearSandboxRedactedEnv(t *testing.T) {
 		hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey,
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+// TestBoundedSandboxChildOutputRedactsBeforeTruncating pins the composition
+// the two other cases miss: every redaction subtest stays under the tail
+// budget and every truncation subtest uses credential-free filler, so an
+// "optimization" that sliced the tail first and scrubbed after would pass
+// both while printing the tail of a straddling credential in the clear.
+func TestBoundedSandboxChildOutputRedactsBeforeTruncating(t *testing.T) {
+	clearSandboxRedactedEnv(t)
+	t.Setenv("QURL_ENDPOINT", "https://sandbox-host.example.invalid")
+	const apiKey = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+
+	// Place the key so it STRADDLES the tail cut. A truncate-then-scrub
+	// implementation slices away its "lv_live_" prefix, so the shape rule no
+	// longer matches and the remaining key material prints in the clear. That
+	// is the exact regression this test exists for, so the fixture asserts the
+	// straddle instead of assuming it.
+	const keyStart = 300
+	combined := strings.Repeat("x", keyStart) + apiKey +
+		strings.Repeat("routine child progress line\n", 290) +
+		"failed against https://sandbox-host.example.invalid/v1\n"
+	cut := len(strings.TrimRight(combined, "\n")) - sandboxFailureChildOutputTailBytes
+	if cut <= keyStart || cut >= keyStart+len(apiKey) {
+		t.Fatalf("fixture does not straddle the cut (cut=%d, key=[%d,%d)); this test would prove nothing",
+			cut, keyStart, keyStart+len(apiKey))
+	}
+
+	got := boundedSandboxChildOutput(combined, sandboxChildOutputRedactor())
+	// Leak check first: it is the property under test, so a regression should
+	// report the exposure rather than an incidental label mismatch.
+	// A truncate-then-scrub implementation retains the part of the key past the
+	// cut, whose "lv_live_" prefix is gone so the shape rule no longer matches
+	// it. The key's final bytes are inside that remainder whatever the exact
+	// offset, so they are the needle that does not depend on off-by-one.
+	keyTail := apiKey[len(apiKey)-12:]
+	if cut-keyStart > len(apiKey)-len(keyTail) {
+		t.Fatalf("fixture cut at %d leaves less than the needle past the key start", cut)
+	}
+	for _, leaked := range []string{apiKey, keyTail, "sandbox-host.example.invalid"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("excerpt exposes %q — the buffer was truncated before it was redacted", leaked)
+		}
+	}
+	if !strings.HasPrefix(got, "(truncated to the last") {
+		t.Fatalf("excerpt was not truncated: %q", got[:min(60, len(got))])
+	}
+	// The key itself falls outside the retained tail once redaction shortens
+	// it, which is correct — the assertion that matters is that no fragment of
+	// it survived. The endpoint placeholder proves redaction still ran.
+	if !strings.Contains(got, "<sandbox-endpoint>") {
+		t.Fatalf("truncated excerpt lost its redaction placeholder: %q", got[max(0, len(got)-120):])
 	}
 }

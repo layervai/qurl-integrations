@@ -644,7 +644,8 @@ func reclaimSandboxResource(t *testing.T, cliEnv map[string]string, id string) {
 // "https://example.com?q". The journey therefore compares the normalized
 // forms rather than the raw bytes it happened to send, so a cosmetic
 // canonicalization cannot masquerade as the service resolving the wrong
-// target.
+// target. Scheme case is folded by url.Parse, which RFC 3986 §3.1 requires;
+// host case and the default port are not, and the test pins both as rejected.
 //
 // TODO(upstream-contract): this mirrors two qurl-service behaviors — that it
 // DOES fold an empty path to "/", and that it does NOT fold host case or the
@@ -686,9 +687,6 @@ func TestSameJourneyTargetURLAcceptsServiceCanonicalForm(t *testing.T) {
 	equivalent := map[string]string{
 		"canonicalized empty path": "https://example.com?qurl-private-sandbox-device-journey=17881886511",
 		"exact echo":               requested,
-		// The reverse direction: both sides are normalized, so the fold is
-		// symmetric by construction. Pinned rather than inferred.
-		"requested without the slash": "https://example.com?qurl-private-sandbox-device-journey=17881886511",
 	}
 	for name, echoed := range equivalent {
 		t.Run(name, func(t *testing.T) {
@@ -724,5 +722,11 @@ func TestSameJourneyTargetURLAcceptsServiceCanonicalForm(t *testing.T) {
 	}
 	if sameJourneyTargetURL(requested, "") || sameJourneyTargetURL("", "") {
 		t.Fatal("sameJourneyTargetURL accepted an absent requested target")
+	}
+	// The fold with the slash-less URL on the *requested* side — a genuinely
+	// different pair from the loop above, which anchors every case to the
+	// slash-bearing `requested`.
+	if !sameJourneyTargetURL(requested, "https://example.com?qurl-private-sandbox-device-journey=17881886511") {
+		t.Fatal("sameJourneyTargetURL rejected the fold when the requested side omitted the slash")
 	}
 }
