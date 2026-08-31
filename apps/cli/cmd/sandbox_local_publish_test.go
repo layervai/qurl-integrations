@@ -74,6 +74,19 @@ type connectorResourceRow struct {
 	CRID               string `json:"crid,omitempty"`
 }
 
+type sandboxListRowDoc struct {
+	CRID            string  `json:"crid"`
+	ResourceID      string  `json:"resource_id"`
+	TargetURL       string  `json:"target_url"`
+	DesiredState    string  `json:"desired_state"`
+	ConnectionState *string `json:"connection_state"`
+	ServingEpoch    *uint64 `json:"serving_epoch"`
+}
+
+type sandboxListDoc struct {
+	Resources []sandboxListRowDoc `json:"resources"`
+}
+
 var connectorRoutingIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 func mintConnectorRow(t *testing.T, slug string) connectorResourceRow {
@@ -774,24 +787,24 @@ func assertSandboxListRow(t *testing.T, binary string, env map[string]string, st
 	if res.code != 0 {
 		t.Fatalf("list local share exit = %d: %s", res.code, res.stderr.String())
 	}
-	var doc struct {
-		Resources []struct {
-			CRID            string  `json:"crid"`
-			ResourceID      string  `json:"resource_id"`
-			TargetURL       string  `json:"target_url"`
-			DesiredState    string  `json:"desired_state"`
-			ConnectionState *string `json:"connection_state"`
-			ServingEpoch    uint64  `json:"serving_epoch"`
-		} `json:"resources"`
-	}
+	var doc sandboxListDoc
 	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
 		t.Fatalf("decode list output: %v", err)
 	}
 	for _, row := range doc.Resources {
 		if row.CRID == local.CRID {
 			if row.ResourceID != local.ResourceID || row.TargetURL != local.TargetURL || row.DesiredState != "on" ||
-				row.ConnectionState != nil || row.ServingEpoch != epoch {
-				t.Fatalf("list row = %+v, want full local target, desired on, epoch %d, and no fabricated live observation", row, epoch)
+				row.ConnectionState != nil || row.ServingEpoch == nil || *row.ServingEpoch != epoch {
+				connectionState := any("<absent>")
+				if row.ConnectionState != nil {
+					connectionState = *row.ConnectionState
+				}
+				servingEpoch := any("<absent>")
+				if row.ServingEpoch != nil {
+					servingEpoch = *row.ServingEpoch
+				}
+				t.Fatalf("list row crid=%q resource_id=%q target_url=%q desired_state=%q connection_state=%v serving_epoch=%v; want full local target, desired on, epoch %d, and no fabricated live observation",
+					row.CRID, row.ResourceID, row.TargetURL, row.DesiredState, connectionState, servingEpoch, epoch)
 			}
 			return
 		}

@@ -405,8 +405,15 @@ def run_identity(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def run_credential_names(args: argparse.Namespace) -> set[str]:
-    name, _ = run_identity(args)
-    return {f"{name}/primary", f"{name}/failure"}
+    run_identity(args)
+    return {
+        run_credential_name(args.run_id, args.run_attempt, args.lane, purpose)
+        for purpose in ("primary", "failure")
+    }
+
+
+def run_credential_name(run_id: str, run_attempt: str, lane: str, purpose: str) -> str:
+    return f"qurl CLI journey v2 {run_id}/{run_attempt}/{lane}/{purpose}"
 
 
 def run_device_key_names(args: argparse.Namespace) -> set[str]:
@@ -529,6 +536,8 @@ def reconcile_run(args: argparse.Namespace) -> None:
             raise CredentialError("recorded device credential is absent from the owner inventory")
     for key_id in dict.fromkeys(key_ids):
         retry_revoke(endpoint, jwt, key_id)
+    # Cancellation cleanup can start before zero, one, or both ordinary keys
+    # exist. Reconcile every matching key, but do not require a fixed count.
     print(
         f"reconciled {connector_resources + len(resource_ids)} run resources "
         f"and {len(key_ids)} run credentials"
@@ -623,7 +632,7 @@ def create(args: argparse.Namespace) -> None:
 
     if args.purpose not in {"primary", "failure"}:
         raise CredentialError("customer credential purpose is invalid")
-    name = f"qurl CLI journey v2 {args.run_id}/{args.run_attempt}/{args.lane}/{args.purpose}"
+    name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     write_private(args.output_dir / "cleanup-jwt", jwt)
     write_private(args.output_dir / "run-name", name)

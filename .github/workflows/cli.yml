@@ -778,7 +778,10 @@ jobs:
           install -m 0600 "$credential_dir/failure/api-key" "$key_dir/failure-api-key"
           key=$(<"$key_dir/api-key")
           failure_key=$(<"$key_dir/failure-api-key")
-          [[ "$key" != "$failure_key" ]]
+          if [[ ! "$key" =~ ^lv_(live|test)_ || ! "$failure_key" =~ ^lv_(live|test)_ || "$key" == "$failure_key" ]]; then
+            echo "::error::disposable keys are malformed or not isolated" >&2
+            exit 1
+          fi
           echo "::add-mask::$key"
           echo "::add-mask::$failure_key"
           {
@@ -971,6 +974,7 @@ jobs:
         shell: pwsh
         run: |
           $expected = Join-Path $env:LOCALAPPDATA "qurl-ci-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }
           if ($env:QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected) { throw 'Windows customer install directory is not the exact run-owned path' }
           if (Test-Path -LiteralPath $expected) { Remove-Item -LiteralPath $expected -Recurse -Force }
           if (Test-Path -LiteralPath $expected) { throw 'Windows customer install directory remains after the service fence' }
