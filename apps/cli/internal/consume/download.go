@@ -32,6 +32,8 @@ const (
 	grantPropagationMaxAttempts = 5
 )
 
+var errGrantPropagationPending = errors.New("grant propagation remained pending")
+
 // DownloadTarget is a freshly verified URL and, for an acknowledged qURL
 // access grant, the conservative instant through which that grant remains
 // valid. A zero ValidUntil is a direct URL with no retained grant lifetime.
@@ -177,7 +179,7 @@ func (d *Downloader) fetch(ctx context.Context) (io.ReadCloser, error) {
 		discard(resp)
 		if d.grantIsLive(target) {
 			resp, err = d.retryLiveGrant(ctx, target)
-			if err != nil {
+			if err != nil && !errors.Is(err, errGrantPropagationPending) {
 				return nil, err
 			}
 			if resp != nil && !linkExpired(resp) {
@@ -220,13 +222,13 @@ func (d *Downloader) retryLiveGrant(ctx context.Context, target DownloadTarget) 
 	for attempt := 0; attempt < grantPropagationMaxAttempts; attempt++ {
 		remaining := deadline.Sub(d.currentTime())
 		if remaining <= 0 {
-			return nil, nil
+			return nil, errGrantPropagationPending
 		}
 		if err := d.waitFor(ctx, min(delay, remaining)); err != nil {
 			return nil, err
 		}
 		if !d.currentTime().Before(deadline) {
-			return nil, nil
+			return nil, errGrantPropagationPending
 		}
 		resp, err := d.getTarget(ctx, target.URL)
 		if err != nil {
@@ -238,7 +240,7 @@ func (d *Downloader) retryLiveGrant(ctx context.Context, target DownloadTarget) 
 		discard(resp)
 		delay = min(delay*2, grantPropagationMaxDelay)
 	}
-	return nil, nil
+	return nil, errGrantPropagationPending
 }
 
 func (d *Downloader) grantIsLive(target DownloadTarget) bool {
@@ -289,7 +291,9 @@ func (d *Downloader) mintTarget(ctx context.Context) (DownloadTarget, error) {
 func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("build download request: %w", err)
+		// URL parsing errors can echo link. Granted URLs carry short-lived
+		// authority, so keep the same fixed capability boundary as Do below.
+		return nil, fmt.Errorf("%w: invalid download link", ErrLinkFetch)
 	}
 	if d.Client == nil {
 		// Lazy-init once and keep it: the expiry retry must reach the same
@@ -298,7 +302,16 @@ func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response
 		// second dial.
 		d.Client = NewHTTPClient()
 	}
-	return d.Client.Do(req)
+	resp, err := d.Client.Do(req)
+	if err == nil {
+		return resp, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("download canceled: %w", ctxErr)
+	}
+	// net/http transport errors normally include req.URL. A granted content
+	// URL is short-lived authority, so never retain that error text or chain.
+	return nil, fmt.Errorf("%w: request failed", ErrLinkFetch)
 }
 
 func linkExpired(resp *http.Response) bool {

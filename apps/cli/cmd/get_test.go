@@ -619,6 +619,25 @@ func TestGetExpiredGrantRepeatsAccessRequest(t *testing.T) {
 	mustNeverFetchPortalPage(t, srv)
 }
 
+func TestGetDownloadErrorDoesNotExposeGrantedURL(t *testing.T) {
+	srv, _ := portalServer(t)
+	const capability = "capability-secret"
+	secretURL := srv.URL + "/" + capability + "\n"
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "out.bin")},
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code == 0 {
+		t.Fatal("get succeeded with an invalid granted URL")
+	}
+	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), capability) {
+		t.Fatalf("rendered error exposed granted authority: %q", res.stderr.String())
+	}
+}
+
 // TestGetBrowserPathNeverRequestsAccess pins that browser mode carries the
 // full link to the browser and never consults the access opener: the
 // in-browser page is exactly what a browser needs, and browser mode must

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,14 @@ type downloadHost struct {
 	// onRequest, when set, runs before each response is written.
 	onRequest func(hit int)
 	statuses  []int
+}
+
+type failingDownloadDoer struct {
+	err error
+}
+
+func (d failingDownloadDoer) Do(*http.Request) (*http.Response, error) {
+	return nil, d.err
 }
 
 func newDownloadHost(t *testing.T, payload []byte, statuses ...int) *downloadHost {
@@ -330,6 +339,39 @@ func TestDownloadGrantExpiryDuringPropagationMintsOneFreshTarget(t *testing.T) {
 	}
 	if mints != 2 || host.hits.Load() != 3 {
 		t.Errorf("mints = %d, GETs = %d; want 2 and 3", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadTransportErrorDoesNotExposeGrantedURL(t *testing.T) {
+	const secretURL = "https://download.example/capability-secret"
+	d := &Downloader{
+		Client: failingDownloadDoer{err: errors.New("Get \"" + secretURL + "\": dial failed")},
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			return DownloadTarget{URL: secretURL, ValidUntil: time.Now().Add(time.Minute)}, nil
+		},
+	}
+
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) {
+		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	}
+	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "capability-secret") {
+		t.Fatalf("transport error exposed granted authority: %q", err)
+	}
+}
+
+func TestDownloadRequestBuildErrorDoesNotExposeGrantedURL(t *testing.T) {
+	const secretURL = "https://download.example/capability-secret\n"
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: secretURL, ValidUntil: time.Now().Add(time.Minute)}, nil
+	}}
+
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) {
+		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	}
+	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "capability-secret") {
+		t.Fatalf("request-build error exposed granted authority: %q", err)
 	}
 }
 
