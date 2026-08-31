@@ -243,6 +243,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 
 	validatorTests := []string{
+		"TestCanonicalSandboxFailureRootResolvesAlias",
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
@@ -256,6 +257,8 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxGrantedRouteLifetime",
 		"TestSandboxGrantedRouteReadiness",
 		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
+		"TestSandboxLocalStateReasonDoesNotForwardHostileLogText",
+		"TestSandboxLocalStateReasonIsClosedAndUsesLatestCause",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
@@ -288,6 +291,26 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	if strings.Index(validatorStep.Run, validatorSkippedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) ||
 		strings.Index(validatorStep.Run, validatorPassedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) {
 		t.Error("public CLI workflow validator gate checks process status before PASS/SKIP diagnostics")
+	}
+
+	windowsValidatorStep := findStep("matrix", "Run Windows credential-free journey validator tests")
+	windowsValidatorJob := workflow.Jobs["matrix"]
+	if windowsValidatorJob.If != expectedCLIJobIf || windowsValidatorJob.ContinueOnError != nil ||
+		windowsValidatorStep.If != "runner.os == 'Windows'" || windowsValidatorStep.ContinueOnError != nil {
+		t.Errorf("Windows credential-free validator is bypassable: job=%#v step=%#v", windowsValidatorJob, windowsValidatorStep)
+	}
+	if fmt.Sprint(windowsValidatorStep.Env["WINDOWS_VALIDATOR_TEST_REGEX"]) != "^TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog$" ||
+		fmt.Sprint(windowsValidatorStep.Env["WINDOWS_VALIDATOR_TEST_NAME"]) != "TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog" {
+		t.Errorf("Windows credential-free validator env = %#v, want one exact test", windowsValidatorStep.Env)
+	}
+	for _, required := range []string{
+		"go test -tags=clisandbox -list $env:WINDOWS_VALIDATOR_TEST_REGEX",
+		"go test -tags=clisandbox -count=1 -json -run $env:WINDOWS_VALIDATOR_TEST_REGEX",
+		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
+	} {
+		if strings.Count(windowsValidatorStep.Run, required) != 1 {
+			t.Errorf("Windows credential-free validator does not fail closed with %q", required)
+		}
 	}
 
 	warmDaemonStep := findStep("test", "Run exact warm-daemon process contract")

@@ -248,8 +248,9 @@ jobs:
       - name: Run credential-free journey validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxDeletedCommandDiagnosticWithholdsChildOutput|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxFailureDiagnosticsAreAllowListedAndRedacted|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxGrantedRouteAccessFailureCategories|TestSandboxGrantedRouteFenceValidator|TestSandboxGrantedRouteLifetime|TestSandboxGrantedRouteReadiness|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResolveCommandDiagnosticWithholdsChildOutput|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestCanonicalSandboxFailureRootResolvesAlias|TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxDeletedCommandDiagnosticWithholdsChildOutput|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxFailureDiagnosticsAreAllowListedAndRedacted|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxGrantedRouteAccessFailureCategories|TestSandboxGrantedRouteFenceValidator|TestSandboxGrantedRouteLifetime|TestSandboxGrantedRouteReadiness|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxLocalStateReasonDoesNotForwardHostileLogText|TestSandboxLocalStateReasonIsClosedAndUsesLatestCause|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResolveCommandDiagnosticWithholdsChildOutput|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
+            TestCanonicalSandboxFailureRootResolvesAlias
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding
             TestRunSandboxLocalCLIUsesExactBinaryAndState
@@ -263,6 +264,8 @@ jobs:
             TestSandboxGrantedRouteLifetime
             TestSandboxGrantedRouteReadiness
             TestSandboxHarnessPassesInlineAPIKeyToExactBinary
+            TestSandboxLocalStateReasonDoesNotForwardHostileLogText
+            TestSandboxLocalStateReasonIsClosedAndUsesLatestCause
             TestSandboxNamespaceIsCanonicalAndSeparated
             TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
             TestSandboxPublishProcessReportsEarlyExit
@@ -527,6 +530,36 @@ jobs:
             Write-Error "exact protected Windows customer journey declaration is missing or ambiguous: $($declared -join ', ')"
             exit 1
           }
+
+      - name: Run Windows credential-free journey validator tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_VALIDATOR_TEST_REGEX: '^TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog$'
+          WINDOWS_VALIDATOR_TEST_NAME: TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog
+        run: |
+          $declared = @(
+            & go test -tags=clisandbox -list $env:WINDOWS_VALIDATOR_TEST_REGEX ./apps/cli/cmd |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $env:WINDOWS_VALIDATOR_TEST_NAME) {
+            Write-Error "exact Windows credential-free validator declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-windows-validator-events.jsonl'
+          & go test -tags=clisandbox -count=1 -json -run $env:WINDOWS_VALIDATOR_TEST_REGEX ./apps/cli/cmd |
+            Tee-Object -FilePath $eventsPath
+          $testStatus = $LASTEXITCODE
+          if ($testStatus -ne 0) { exit $testStatus }
+          $events = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json })
+          $skipped = @($events | Where-Object { $_.Test -eq $env:WINDOWS_VALIDATOR_TEST_NAME -and $_.Action -eq 'skip' })
+          $passed = @($events | Where-Object { $_.Test -eq $env:WINDOWS_VALIDATOR_TEST_NAME -and $_.Action -eq 'pass' })
+          if ($skipped.Count -ne 0 -or $passed.Count -ne 1) {
+            Write-Error 'required Windows credential-free validator must report one PASS and no SKIP'
+            exit 1
+          }
+          Remove-Item -LiteralPath $eventsPath -Force
 
       - name: Run tests
         shell: bash
