@@ -371,7 +371,10 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 		t.Fatalf("controlled-failure POSIX stop state = %+v: %v", stopped, err)
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseFence)
-	assertSandboxControlledFailureRouteFencedInputs(t, binary, cliEnv, stateDir, local.CRID, marker, &backendHits, 30*time.Second)
+	if err := controlledSandboxRouteFenceError(t, binary, cliEnv, stateDir, local.CRID, marker, &backendHits, 30*time.Second); err != nil {
+		markSandboxFailureDiagnosticFromError(err)
+		t.Fatal("controlled-failure route fence did not settle")
+	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue,
 		"--file", filepath.Join(t.TempDir(), "fenced"))

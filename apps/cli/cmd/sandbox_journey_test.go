@@ -327,6 +327,16 @@ func markSandboxFailureDiagnosticFromCommand(stdout, stderr string, commandErr e
 	}
 }
 
+func markSandboxFailureDiagnosticFromError(err error) {
+	diagnostic := sandboxFailureDiagnostic{Category: "unknown"}
+	if err != nil {
+		if parsed, ok := sandboxFailureDiagnosticFromCLIError(err.Error()); ok {
+			diagnostic.Code = parsed.Code
+		}
+	}
+	markSandboxFailureDiagnostic(diagnostic)
+}
+
 func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 	t.Run("inspection", func(t *testing.T) {
 		for _, test := range []struct {
@@ -374,6 +384,36 @@ func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 					t.Fatalf("CLI diagnostic = %#v", got)
 				}
 			})
+		}
+	})
+	t.Run("error marker never relays text", func(t *testing.T) {
+		capture := func(err error) string {
+			t.Helper()
+			reader, writer, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				t.Fatal(pipeErr)
+			}
+			original := os.Stdout
+			os.Stdout = writer
+			markSandboxFailureDiagnosticFromError(err)
+			os.Stdout = original
+			if closeErr := writer.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			raw, readErr := io.ReadAll(reader)
+			if closeErr := reader.Close(); readErr != nil || closeErr != nil {
+				t.Fatalf("read diagnostic marker: read %v, close %v", readErr, closeErr)
+			}
+			return string(raw)
+		}
+		const secret = "lv_test_marker_must_not_relay"
+		withCode := capture(errors.New(secret + ": assignment error 52028 at a private path"))
+		withoutCode := capture(errors.New(secret + ": internal endpoint did not settle"))
+		if withCode != sandboxFailureDiagnosticMarker+" unknown 52028\n" ||
+			withoutCode != sandboxFailureDiagnosticMarker+" unknown none\n" ||
+			strings.Contains(withCode+withoutCode, secret) || strings.Contains(withCode+withoutCode, "private path") ||
+			strings.Contains(withCode+withoutCode, "internal endpoint") {
+			t.Fatalf("redacted error markers = %q and %q", withCode, withoutCode)
 		}
 	})
 }

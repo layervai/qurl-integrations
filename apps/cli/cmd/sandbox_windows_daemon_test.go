@@ -359,7 +359,10 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		t.Fatalf("controlled-failure Windows stop state = %+v: %v", stopped, err)
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseFence)
-	assertWindowsSandboxRouteFenced(t, binary, cliEnv, cridValue, &backendHits)
+	if err := windowsSandboxRouteFenceError(t, binary, cliEnv, cridValue, &backendHits); err != nil {
+		markSandboxFailureDiagnosticFromError(err)
+		t.Fatal("controlled-failure Windows route fence did not settle")
+	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", filepath.Join(t.TempDir(), "fenced"))
 	if windowsSandboxExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
@@ -586,7 +589,7 @@ func assertWindowsSandboxDeleted(
 	}
 }
 
-func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) {
+func windowsSandboxRouteFenceError(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) error {
 	t.Helper()
 	time.Sleep(2 * time.Second)
 	settledHits := backendHits.Load()
@@ -596,12 +599,20 @@ func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string
 		result := runWindowsSandboxCLI(t, binary, env, "get", cridValue, "--file", destination)
 		if result.err == nil {
 			payload, _ := os.ReadFile(destination) //nolint:gosec // Isolated test destination.
-			t.Fatalf("stopped Windows qURL route succeeded with %d bytes", len(payload))
+			return fmt.Errorf("stopped Windows qURL route succeeded with %d bytes", len(payload))
 		}
 		if backendHits.Load() != settledHits {
-			t.Fatal("stopped Windows qURL route reached the local backend")
+			return errors.New("stopped Windows qURL route reached the local backend")
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
+}
+
+func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) {
+	t.Helper()
+	if err := windowsSandboxRouteFenceError(t, binary, env, cridValue, backendHits); err != nil {
+		t.Fatal(err)
 	}
 }
 

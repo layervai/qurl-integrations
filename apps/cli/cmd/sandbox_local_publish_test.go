@@ -299,7 +299,11 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 		t.Fatalf("controlled-failure stop state = %+v: %v", stopped, err)
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseFence)
-	assertSandboxControlledFailureRouteFenced(t, fixture, 30*time.Second)
+	if err := controlledSandboxRouteFenceError(t, fixture.binary, fixture.env, fixture.stateDir,
+		fixture.local.CRID, fixture.marker, &fixture.backendHits, 30*time.Second); err != nil {
+		markSandboxFailureDiagnosticFromError(err)
+		t.Fatal("controlled-failure route fence did not settle")
+	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runSandboxLocalCLI(
 		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", filepath.Join(t.TempDir(), "fenced"),
@@ -598,18 +602,20 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 
 func assertSandboxControlledFailureRouteFenced(t *testing.T, fixture *sandboxLocalFixture, limit time.Duration) {
 	t.Helper()
-	assertSandboxControlledFailureRouteFencedInputs(t, fixture.binary, fixture.env, fixture.stateDir,
-		fixture.local.CRID, fixture.marker, &fixture.backendHits, limit)
+	if err := controlledSandboxRouteFenceError(t, fixture.binary, fixture.env, fixture.stateDir,
+		fixture.local.CRID, fixture.marker, &fixture.backendHits, limit); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func assertSandboxControlledFailureRouteFencedInputs(t *testing.T, binary string, env map[string]string,
+func controlledSandboxRouteFenceError(t *testing.T, binary string, env map[string]string,
 	stateDir, crid, marker string, backendHits *atomic.Uint64, limit time.Duration,
-) {
+) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	destination := filepath.Join(t.TempDir(), "fenced-payload")
-	if err := waitSandboxRouteFence(
+	return waitSandboxRouteFence(
 		ctx,
 		sandboxRouteFencePoll,
 		sandboxRouteFenceSettle,
@@ -622,9 +628,7 @@ func assertSandboxControlledFailureRouteFencedInputs(t *testing.T, binary string
 			)
 		},
 		backendHits.Load,
-	); err != nil {
-		t.Fatal(err)
-	}
+	)
 }
 
 func assertSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, stateDir, crid string) {
