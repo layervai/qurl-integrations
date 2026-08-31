@@ -52,6 +52,7 @@ const (
 	sandboxRouteFencePoll               = 500 * time.Millisecond
 	sandboxRouteFenceSettle             = 2 * time.Second
 	sandboxRouteProbeTimeout            = 15 * time.Second
+	sandboxStoppedRouteRefusalText      = "Error: Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to.\n"
 	// Serving after stop is a security-boundary failure, not eventual
 	// convergence. Five seconds is the intentional initial hard SLO; the
 	// private journey records the real propagation time before release. The
@@ -917,20 +918,17 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 	return nil
 }
 
-func sandboxStoppedRouteRefusal(t *testing.T) string {
-	t.Helper()
+func sandboxStoppedRouteRefusal(_ *testing.T) string {
 	// TODO(upstream-contract): qurl-service currently uses this endpoint-dark
 	// response for a stopped resource. Keep the exact CLI and service contracts
 	// in lockstep if the service adds a distinct stopped-resource response.
-	// TestGoldens owns this file; TestSandboxStoppedRouteRefusalMatchesQuietGet
-	// proves the exact quiet get path used below emits the same bytes.
+	// Keep the contract in source because the packaged customer-journey harness
+	// runs without a repository checkout. TestSandboxStoppedRouteRefusalMatchesQuietGet
+	// proves the exact quiet get path used below emits the same bytes, while
+	// TestGoldens independently owns the customer-facing golden file.
 	// The endpoint-scoped text is not sufficient by itself. The live gate also
 	// requires durable off/stopped state and a stable zero-hit backend window.
-	data, err := os.ReadFile(filepath.Join("testdata", "golden", "error_dark503.plain.stderr.golden"))
-	if err != nil {
-		t.Fatalf("read stopped-route refusal golden: %v", err)
-	}
-	return string(data)
+	return sandboxStoppedRouteRefusalText
 }
 
 func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
@@ -939,6 +937,9 @@ func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{
 		"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "payload"),
 	}})
+	// The packaged harness runs without apps/cli/cmd as its working directory.
+	// Prove this contract has no repository-relative runtime dependency.
+	t.Chdir(t.TempDir())
 	if err := validateSandboxStoppedRouteRefusal(res, sandboxStoppedRouteRefusal(t)); err != nil {
 		t.Fatal(err)
 	}
