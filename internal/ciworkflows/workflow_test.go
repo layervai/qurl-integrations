@@ -361,6 +361,124 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	assertExecutableRepoScript(t, "scripts/build-cli-customer-journey-artifacts.sh")
 }
 
+func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
+	t.Parallel()
+
+	workflows := []struct {
+		name     string
+		jobID    string
+		stepName string
+	}{
+		{name: cliWorkflow, jobID: "journey-cleanup", stepName: "Revoke run resources and credentials"},
+		{name: "qurl-cli-customer-cleanup.yml", jobID: "cleanup", stepName: "Revoke exact-run resources and credentials"},
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const fakePython = `#!/usr/bin/env bash
+set -euo pipefail
+lane=
+while (( $# > 0 )); do
+  if [[ "$1" == --lane && $# -ge 2 ]]; then
+    lane=$2
+    break
+  fi
+  shift
+done
+[[ -n "$lane" ]]
+printf '%s\n' "$lane" >>"$LANE_CAPTURE"
+if [[ -n "${FAIL_LANE:-}" && "$lane" == "$FAIL_LANE" ]]; then
+  exit 17
+fi
+`
+
+	for _, subject := range workflows {
+		t.Run(subject.name, func(t *testing.T) {
+			t.Parallel()
+
+			workflow := readWorkflow(t, subject.name)
+			job := workflow.Jobs[subject.jobID]
+			if job == nil {
+				t.Fatalf("%s is missing job %q", subject.name, subject.jobID)
+			}
+			var cleanup *step
+			for index := range job.Steps {
+				if job.Steps[index].Name == subject.stepName {
+					cleanup = &job.Steps[index]
+					break
+				}
+			}
+			if cleanup == nil {
+				t.Fatalf("%s is missing step %q", subject.name, subject.stepName)
+			}
+
+			for _, test := range []struct {
+				name     string
+				failLane string
+				wantFail bool
+			}{
+				{name: "all lanes succeed"},
+				{name: "first lane fails", failLane: "linux", wantFail: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					t.Parallel()
+
+					fakeBin := t.TempDir()
+					if err := os.WriteFile(filepath.Join(fakeBin, "python3"), []byte(fakePython), 0o700); err != nil { //nolint:gosec // Test-owned executable in t.TempDir.
+						t.Fatal(err)
+					}
+					runnerTemp := t.TempDir()
+					capture := filepath.Join(runnerTemp, "lanes")
+					command := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", cleanup.Run) //nolint:gosec // Executes the checked-in workflow step with a test-owned python3.
+					command.Dir = repoRoot
+					command.Env = []string{
+						"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+						"RUNNER_TEMP=" + runnerTemp,
+						"LANE_CAPTURE=" + capture,
+						"FAIL_LANE=" + test.failLane,
+						"AUTH_CLIENT_ID=test-client",
+						"AUTH_CLIENT_SECRET=secret-value-must-not-print",
+						"AUTH_TOKEN_ENDPOINT=https://auth.example",
+						"QURL_ENDPOINT=https://sandbox.example",
+						"GITHUB_RUN_ID=700",
+						"GITHUB_RUN_ATTEMPT=2",
+						"SOURCE_RUN_ID=700",
+						"SOURCE_RUN_ATTEMPT=2",
+					}
+					output, err := command.CombinedOutput()
+					if gotFail := err != nil; gotFail != test.wantFail {
+						t.Fatalf("cleanup error = %v, want failure %t: %s", err, test.wantFail, output)
+					}
+					lanes, readErr := os.ReadFile(capture) //nolint:gosec // Test-owned path under t.TempDir.
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if got, want := string(lanes), "linux\nmacos\nwindows\n"; got != want {
+						t.Errorf("attempted lanes = %q, want %q", got, want)
+					}
+					text := string(output)
+					if strings.Contains(text, "secret-value-must-not-print") {
+						t.Error("cleanup output contains protected authority")
+					}
+					if test.wantFail {
+						for _, message := range []string{
+							"::error::run cleanup failed for linux lane",
+							"::error::run cleanup failed for one or more lanes",
+						} {
+							if !strings.Contains(text, message) {
+								t.Errorf("cleanup output is missing %q: %s", message, output)
+							}
+						}
+					} else if strings.Contains(text, "::error::") {
+						t.Errorf("successful cleanup reported an error: %s", output)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing.T) {
 	t.Parallel()
 

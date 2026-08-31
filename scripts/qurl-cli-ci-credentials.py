@@ -473,72 +473,116 @@ def reconcile_run(args: argparse.Namespace) -> None:
     credential_names = run_credential_names(args)
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
-    device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
     endpoint, jwt, _ = authenticated_owner(args)
 
-    # Delete deterministic Connector resources first. Resource inventory
-    # intentionally redacts their descriptions and tags, so a description
-    # lookup cannot recover one after abrupt runner loss.
+    failures: dict[str, int] = {}
+
+    def record_failure(category: str) -> None:
+        failures[category] = failures.get(category, 0) + 1
+
+    # Revoke run credentials before resource cleanup. The trusted M2M token,
+    # not a customer or device key, authorizes every resource deletion below.
+    # Validate each exact target before deletion, attempt every valid target,
+    # and retain only redacted failure categories for the final error.
+    key_ids: list[str] = []
+    try:
+        device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
+        credentials = paged_rows(endpoint, jwt, "/v1/api-keys", "qURL credential cleanup")
+        seen_device_ids: set[str] = set()
+        for row in credentials:
+            row_name = row.get("name")
+            key_id = row.get("key_id")
+            is_customer = row_name in credential_names
+            is_device = key_id in device_key_ids or row_name in device_key_names
+            if not is_customer and not is_device:
+                continue
+            if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
+                record_failure("credential_shape")
+                continue
+            if is_customer:
+                if row.get("kind") != "api_key" or row.get("scopes") != CUSTOMER_SCOPES:
+                    record_failure("credential_shape")
+                else:
+                    key_ids.append(key_id)
+            if is_device:
+                if (
+                    row.get("kind") != "device"
+                    or row_name not in device_key_names
+                    or row.get("scopes") != DEVICE_SCOPES
+                ):
+                    record_failure("credential_shape")
+                else:
+                    seen_device_ids.add(key_id)
+                    key_ids.append(key_id)
+        # A device key that the harness already revoked is correctly absent
+        # from the active inventory. Any still-active recorded key must be
+        # visible and have the exact device scope set before deletion.
+        missing_device_ids = device_key_ids - seen_device_ids
+        if missing_device_ids:
+            all_credentials = paged_rows(
+                endpoint, jwt, "/v1/api-keys", "qURL revoked credential cleanup", status_filter=None
+            )
+            revoked_ids = {
+                row.get("key_id")
+                for row in all_credentials
+                if row.get("status") == "revoked"
+                and row.get("kind") == "device"
+                and row.get("name") in device_key_names
+                and row.get("scopes") == DEVICE_SCOPES
+            }
+            if not missing_device_ids.issubset(revoked_ids):
+                record_failure("credential_inventory")
+    except (CredentialError, OSError, UnicodeError):
+        record_failure("credential_inventory")
+
+    unique_key_ids = sorted(set(key_ids))
+    for key_id in unique_key_ids:
+        try:
+            retry_revoke(endpoint, jwt, key_id)
+        except CredentialError:
+            record_failure("credential_revoke")
+
+    # Resource cleanup still runs after every credential outcome. Resource
+    # inventory intentionally redacts Connector descriptions and tags, so the
+    # deterministic Connector IDs recover them after abrupt runner loss.
     connector_resources = 0
     for connector_id in sorted(connector_ids):
-        if retry_connector_resource_delete(endpoint, jwt, connector_id):
-            connector_resources += 1
+        try:
+            if retry_connector_resource_delete(endpoint, jwt, connector_id):
+                connector_resources += 1
+        except CredentialError:
+            record_failure("connector_resource")
 
     # Remote-URL resources remain identifiable by the exact run description.
-    resources = paged_rows(endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None)
     resource_ids: list[str] = []
-    for row in resources:
-        if row.get("description") != description:
-            continue
-        resource_id = row.get("resource_id")
-        if not isinstance(resource_id, str):
-            raise CredentialError("run-scoped qURL resource has no resource ID")
-        resource_ids.append(resource_id)
-    for resource_id in dict.fromkeys(resource_ids):
-        retry_resource_delete(endpoint, jwt, resource_id)
+    try:
+        resources = paged_rows(endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None)
+        for row in resources:
+            if row.get("description") != description:
+                continue
+            resource_id = row.get("resource_id")
+            if not isinstance(resource_id, str):
+                record_failure("resource_shape")
+                continue
+            resource_ids.append(resource_id)
+    except CredentialError:
+        record_failure("resource_inventory")
+    unique_resource_ids = list(dict.fromkeys(resource_ids))
+    for resource_id in unique_resource_ids:
+        try:
+            retry_resource_delete(endpoint, jwt, resource_id)
+        except CredentialError:
+            record_failure("resource_delete")
 
-    credentials = paged_rows(endpoint, jwt, "/v1/api-keys", "qURL credential cleanup")
-    key_ids: list[str] = []
-    seen_device_ids: set[str] = set()
-    for row in credentials:
-        key_id = row.get("key_id")
-        if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
-            raise CredentialError("qURL credential cleanup row has a malformed key ID")
-        row_name = row.get("name")
-        if row_name in credential_names:
-            if row.get("kind") != "api_key" or row.get("scopes") != CUSTOMER_SCOPES:
-                raise CredentialError("run cleanup customer credential has an unexpected authority shape")
-            key_ids.append(key_id)
-        if key_id in device_key_ids or row_name in device_key_names:
-            if row.get("kind") != "device" or row_name not in device_key_names or row.get("scopes") != DEVICE_SCOPES:
-                raise CredentialError("run cleanup device credential has an unexpected authority shape")
-            seen_device_ids.add(key_id)
-            key_ids.append(key_id)
-    # A device key that the harness already revoked is correctly absent from
-    # the active inventory. Any still-active recorded key must be visible and
-    # have the exact device scope set before this controller can delete it.
-    missing_device_ids = device_key_ids - seen_device_ids
-    if missing_device_ids:
-        all_credentials = paged_rows(
-            endpoint, jwt, "/v1/api-keys", "qURL revoked credential cleanup", status_filter=None
-        )
-        revoked_ids = {
-            row.get("key_id")
-            for row in all_credentials
-            if row.get("status") == "revoked"
-            and row.get("kind") == "device"
-            and row.get("name") in device_key_names
-            and row.get("scopes") == DEVICE_SCOPES
-        }
-        if not missing_device_ids.issubset(revoked_ids):
-            raise CredentialError("recorded device credential is absent from the owner inventory")
-    for key_id in dict.fromkeys(key_ids):
-        retry_revoke(endpoint, jwt, key_id)
+    if failures:
+        summary = ", ".join(f"{category}={count}" for category, count in sorted(failures.items()))
+        raise CredentialError(f"run cleanup did not converge ({summary})")
+
     # Cancellation cleanup can start before zero, one, or both ordinary keys
     # exist. Reconcile every matching key, but do not require a fixed count.
     print(
-        f"reconciled {connector_resources + len(resource_ids)} run resources "
-        f"and {len(key_ids)} run credentials"
+        f"reconciled {connector_resources + len(unique_resource_ids)} run resources "
+        f"and {len(unique_key_ids)} run credentials"
     )
 
 

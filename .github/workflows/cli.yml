@@ -1072,15 +1072,23 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          reconcile_failed=0
           for lane_spec in linux:1 macos:2 windows:3; do
             IFS=: read -r lane lane_id <<<"$lane_spec"
-            python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
+            if ! python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
               --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
               --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
               --client-secret-file "$client_dir/client-secret" \
               --run-id "${GITHUB_RUN_ID}${lane_id}" --run-attempt "$GITHUB_RUN_ATTEMPT" \
-              --lane "$lane" --runtime host
+              --lane "$lane" --runtime host; then
+              echo "::error::run cleanup failed for $lane lane" >&2
+              reconcile_failed=1
+            fi
           done
+          if (( reconcile_failed != 0 )); then
+            echo "::error::run cleanup failed for one or more lanes" >&2
+            exit 1
+          fi
 
   goreleaser-check:
     name: cli / goreleaser check

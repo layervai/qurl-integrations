@@ -84,6 +84,10 @@ class FakeAPI:
         self.deleted_resources: list[str] = []
         self.operations: list[str] = []
         self.transient_key_delete = 0
+        self.failed_key_deletes: set[str] = set()
+        self.failed_resource_deletes: set[str] = set()
+        self.key_delete_attempts: list[str] = []
+        self.resource_delete_attempts: list[str] = []
 
     def __call__(
         self,
@@ -152,10 +156,13 @@ class FakeAPI:
             ]
             return 200, json.dumps({"data": rows, "meta": {"has_more": False}}).encode()
         if parsed.path.startswith("/v1/api-keys/") and method == "DELETE":
+            key_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
+            self.key_delete_attempts.append(key_id)
             if self.transient_key_delete:
                 self.transient_key_delete -= 1
                 return 503, b'{}'
-            key_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
+            if key_id in self.failed_key_deletes:
+                return 503, b'{}'
             self.deleted_keys.append(key_id)
             self.operations.append("revoke:" + key_id)
             self.keys.pop(key_id, None)
@@ -172,6 +179,9 @@ class FakeAPI:
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
             resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
             assert not resource_id.startswith("connector-cli-journey-v2-")
+            self.resource_delete_attempts.append(resource_id)
+            if resource_id in self.failed_resource_deletes:
+                return 503, b'{}'
             self.deleted_resources.append(resource_id)
             self.operations.append("delete:" + resource_id)
             for connector_id, row in list(self.connector_resources.items()):
@@ -196,6 +206,42 @@ def auth_args(root: pathlib.Path) -> argparse.Namespace:
         qurl_endpoint="https://sandbox.example",
         token_endpoint="https://auth.example/oauth/token",
     )
+
+
+def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
+    run_key_id = "key_RunKey123456"
+    failure_key_id = "key_FailKey12345"
+    device_key_id = "key_DevRun123456"
+    unrecorded_device_key_id = "key_DevFail12345"
+    fake.keys[run_key_id] = {
+        "key_id": run_key_id,
+        "kind": "api_key",
+        "name": "qurl CLI journey v2 1231/2/linux/primary",
+        "scopes": credentials.CUSTOMER_SCOPES,
+        "status": "active",
+    }
+    fake.keys[failure_key_id] = {
+        "key_id": failure_key_id,
+        "kind": "api_key",
+        "name": "qurl CLI journey v2 1231/2/linux/failure",
+        "scopes": credentials.CUSTOMER_SCOPES,
+        "status": "active",
+    }
+    fake.keys[device_key_id] = {
+        "key_id": device_key_id,
+        "kind": "device",
+        "name": "agent:qurl-journey-v2-r1231-a2-hs",
+        "scopes": credentials.DEVICE_SCOPES,
+        "status": "active",
+    }
+    fake.keys[unrecorded_device_key_id] = {
+        "key_id": unrecorded_device_key_id,
+        "kind": "device",
+        "name": "agent:qurl-journey-v2-r1231-a2-hf",
+        "scopes": credentials.DEVICE_SCOPES,
+        "status": "active",
+    }
+    return run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id
 
 
 def test_unbounded_valid_pagination() -> None:
@@ -292,9 +338,69 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
         )
 
 
+def test_resource_failure_still_revokes_every_target_credential() -> None:
+    fake = FakeAPI()
+    target_key_ids = set(add_run_credentials(fake))
+    fake.failed_resource_deletes.add("r_connector_smoke")
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+        args = auth_args(pathlib.Path(raw_root))
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    cleanup_id_dir=None,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == "run cleanup did not converge (connector_resource=1)"
+        else:
+            raise AssertionError("resource cleanup failure did not fail reconciliation")
+    assert target_key_ids.issubset(fake.deleted_keys)
+    assert fake.resource_delete_attempts.count("r_connector_smoke") == credentials.MAX_ATTEMPTS
+    assert {"r_connector_failure", "r_customer_ci"}.issubset(fake.deleted_resources)
+
+
+def test_credential_failure_still_attempts_every_target_and_resources() -> None:
+    fake = FakeAPI()
+    run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(fake)
+    fake.failed_key_deletes.add(failure_key_id)
+    fake.failed_resource_deletes.add("r_connector_smoke")
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+        args = auth_args(pathlib.Path(raw_root))
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    cleanup_id_dir=None,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == "run cleanup did not converge (connector_resource=1, credential_revoke=1)"
+        else:
+            raise AssertionError("credential cleanup failure did not fail reconciliation")
+    assert fake.key_delete_attempts.count(failure_key_id) == credentials.MAX_ATTEMPTS
+    assert {run_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
+    assert fake.resource_delete_attempts.count("r_connector_smoke") == credentials.MAX_ATTEMPTS
+    assert {"r_connector_failure", "r_customer_ci"}.issubset(fake.deleted_resources)
+
+
 def main() -> None:
     test_unbounded_valid_pagination()
     test_connector_cleanup_lookup_fails_closed()
+    test_resource_failure_still_revokes_every_target_credential()
+    test_credential_failure_still_attempts_every_target_and_resources()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
     ) == {"agent:qurl-journey-v2-r1231-a2-hs", "agent:qurl-journey-v2-r1231-a2-hf"}
@@ -353,40 +459,9 @@ def main() -> None:
         credentials.revoke_persisted(args.qurl_endpoint, recovery)
         assert (recovery / "api-key-id").read_text(encoding="utf-8") == fake.key_id
 
-        run_key_id = "key_RunKey123456"
-        failure_key_id = "key_FailKey12345"
-        device_key_id = "key_DevRun123456"
-        unrecorded_device_key_id = "key_DevFail12345"
+        run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(fake)
         unrelated_key_id = "key_OtherKey1234"
         unrelated_device_key_id = "key_OtherDev1234"
-        fake.keys[run_key_id] = {
-            "key_id": run_key_id,
-            "kind": "api_key",
-            "name": "qurl CLI journey v2 1231/2/linux/primary",
-            "scopes": credentials.CUSTOMER_SCOPES,
-            "status": "active",
-        }
-        fake.keys[failure_key_id] = {
-            "key_id": failure_key_id,
-            "kind": "api_key",
-            "name": "qurl CLI journey v2 1231/2/linux/failure",
-            "scopes": credentials.CUSTOMER_SCOPES,
-            "status": "active",
-        }
-        fake.keys[device_key_id] = {
-            "key_id": device_key_id,
-            "kind": "device",
-            "name": "agent:qurl-journey-v2-r1231-a2-hs",
-            "scopes": credentials.DEVICE_SCOPES,
-            "status": "active",
-        }
-        fake.keys[unrecorded_device_key_id] = {
-            "key_id": unrecorded_device_key_id,
-            "kind": "device",
-            "name": "agent:qurl-journey-v2-r1231-a2-hf",
-            "scopes": credentials.DEVICE_SCOPES,
-            "status": "active",
-        }
         fake.keys[unrelated_key_id] = {
             "key_id": unrelated_key_id,
             "kind": "api_key",
@@ -423,9 +498,9 @@ def main() -> None:
         assert {run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
         assert unrelated_key_id not in fake.deleted_keys
         assert unrelated_device_key_id not in fake.deleted_keys
-        first_revoke = next(index for index, operation in enumerate(fake.operations) if operation.startswith("revoke:"))
+        last_revoke = max(index for index, operation in enumerate(fake.operations) if operation.startswith("revoke:"))
         assert all(
-            fake.operations.index("delete:" + resource_id) < first_revoke
+            last_revoke < fake.operations.index("delete:" + resource_id)
             for resource_id in expected_connector_resource_ids | {"r_customer_ci"}
         )
 
@@ -449,7 +524,7 @@ def main() -> None:
                 )
             )
         except credentials.CredentialError as exc:
-            assert "unexpected authority shape" in str(exc)
+            assert str(exc) == "run cleanup did not converge (credential_shape=1)"
         else:
             raise AssertionError("malformed exact-name device credential was not rejected")
         assert malformed_device_key_id not in fake.deleted_keys
