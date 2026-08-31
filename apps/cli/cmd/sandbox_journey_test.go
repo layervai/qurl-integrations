@@ -287,16 +287,21 @@ func sandboxFailureDiagnosticFromCLIError(stderr string) (sandboxFailureDiagnost
 		if index < 0 {
 			break
 		}
-		start := offset + index + len(prefix)
+		prefixStart := offset + index
+		start := prefixStart + len(prefix)
 		end := start
 		for end < len(stderr) && stderr[end] >= '0' && stderr[end] <= '9' {
 			end++
 		}
 		candidate := stderr[start:end]
-		boundaryOK := end == len(stderr) ||
+		prefixBoundaryOK := prefixStart == 0 ||
+			!((stderr[prefixStart-1] >= '0' && stderr[prefixStart-1] <= '9') ||
+				(stderr[prefixStart-1] >= 'A' && stderr[prefixStart-1] <= 'Z') ||
+				(stderr[prefixStart-1] >= 'a' && stderr[prefixStart-1] <= 'z') || stderr[prefixStart-1] == '_')
+		codeBoundaryOK := end == len(stderr) ||
 			!((stderr[end] >= '0' && stderr[end] <= '9') || (stderr[end] >= 'A' && stderr[end] <= 'Z') ||
 				(stderr[end] >= 'a' && stderr[end] <= 'z') || stderr[end] == '_')
-		if validSandboxFailureCode(candidate) && candidate != "" && boundaryOK {
+		if validSandboxFailureCode(candidate) && candidate != "" && prefixBoundaryOK && codeBoundaryOK {
 			if code != "" {
 				return sandboxFailureDiagnostic{}, false
 			}
@@ -356,6 +361,7 @@ func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 			{name: "short", stderr: "error 5240"},
 			{name: "long", stderr: "error 524010"},
 			{name: "embedded", stderr: "error 52401secret"},
+			{name: "embedded prefix", stderr: "terror 52401"},
 			{name: "unicode", stderr: "error ５2401"},
 			{name: "multiple", stderr: "error 52201 then error 52401"},
 		} {
