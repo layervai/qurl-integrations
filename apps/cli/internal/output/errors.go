@@ -35,6 +35,10 @@ func renderErrorLines(p *Printer, err error) []string {
 
 	// Typed service postures come before the generic API-problem rendering:
 	// their chains contain an API error too, but the posture is the message.
+	var apiErr *qurlapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == "connector_stopped" {
+		return []string{head + " " + msgConnectorStopped, "", "  " + p.dim(hintConnectorStopped)}
+	}
 	if errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		return []string{head + " " + msgLinksUnavailable}
 	}
@@ -55,7 +59,6 @@ func renderErrorLines(p *Printer, err error) []string {
 		return lines
 	}
 
-	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErrorLines(p, head, apiErr)
 	}

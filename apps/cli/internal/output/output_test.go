@@ -294,10 +294,36 @@ func TestRedactionGrepProof(t *testing.T) {
 func TestRenderErrorAnatomies(t *testing.T) {
 	var buf bytes.Buffer
 
+	// A stopped Connector keeps the existing unavailable class, but the
+	// machine-readable service code selects a fixed, actionable message before
+	// the generic 503 posture. Server-controlled detail must not be repeated.
+	stopped := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{
+		StatusCode: http.StatusServiceUnavailable,
+		Code:       "connector_stopped",
+		Title:      "Connector Stopped",
+		Detail:     "internal sandbox cell us-secret-1 uses credential lv_live_NEVER_PRINT_THIS",
+	})
+	RenderError(&buf, stopped, false)
+	if got := buf.String(); got != "Error: "+msgConnectorStopped+"\n\n  "+hintConnectorStopped+"\n" {
+		t.Errorf("stopped Connector rendering = %q", got)
+	}
+	for _, banned := range []string{"sandbox", "us-secret-1", "lv_live_", "Connector Stopped"} {
+		if strings.Contains(buf.String(), banned) {
+			t.Errorf("server-controlled text %q reached the customer surface: %q", banned, buf.String())
+		}
+	}
+	if got := exitcode.FromError(stopped); got != exitcode.Unavailable {
+		t.Errorf("stopped Connector exit code = %d, want %d", got, exitcode.Unavailable)
+	}
+
+	buf.Reset()
 	// Typed dark-surface posture wins over the generic API rendering.
-	dark := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{StatusCode: 503})
+	dark := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{
+		StatusCode: http.StatusServiceUnavailable,
+		Code:       "service_unavailable",
+	})
 	RenderError(&buf, dark, false)
-	if !strings.Contains(buf.String(), "aren't available from this qURL endpoint") {
+	if got := buf.String(); got != "Error: "+msgLinksUnavailable+"\n" {
 		t.Errorf("dark rendering = %q", buf.String())
 	}
 
@@ -764,6 +790,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 	}
 	rendered := []string{
 		labelCRID,
+		msgConnectorStopped, hintConnectorStopped,
 		msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification,
 		msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict,
 		msgConnectorTokenConsumed, hintConnectorTokenConsumed,

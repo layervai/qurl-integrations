@@ -92,6 +92,17 @@ func HandlerDark503(t *testing.T) http.HandlerFunc {
 	}
 }
 
+// HandlerConnectorStopped503 answers a resolve for a stopped Connector. The
+// detail is deliberately hostile so customer-surface tests can prove that the
+// CLI selects fixed text by code and never repeats server-controlled prose.
+func HandlerConnectorStopped503(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		WriteProblem(t, w, http.StatusServiceUnavailable, "connector_stopped", "Connector Stopped",
+			"internal sandbox cell us-secret-1 uses credential lv_live_NEVER_PRINT_THIS")
+	}
+}
+
 // HandlerRevoked400 answers a resolve of a revoked (API-deleted) resource:
 // the owner-truthful 400 `revoked`, deliberately distinct from the ambiguous
 // 404 anti-oracle.

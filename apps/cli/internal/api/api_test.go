@@ -597,6 +597,31 @@ func TestResolveDark503PreservesSentinel(t *testing.T) {
 	}
 }
 
+func TestResolveStoppedConnectorPreservesProblemCodeAndDoesNotRetry(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", 2, apitest.HandlerConnectorStopped503(t))
+
+	var sleeps []time.Duration
+	client := newTestClient(t, srv, &sleeps)
+	_, err := client.Resolve(context.Background(), srv.Key.CRID, ResolveOptions{})
+	if !errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
+		t.Fatalf("err = %v, want the 503 sentinel preserved", err)
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want typed API error", err)
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable || apiErr.Code != "connector_stopped" {
+		t.Errorf("typed API error = %+v, want HTTP 503 connector_stopped", apiErr)
+	}
+	if len(sleeps) != 0 {
+		t.Errorf("stopped Connector must not be retried; slept %v", sleeps)
+	}
+	if got := len(srv.Requests()); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+}
+
 func TestTransportRetries429ThenSucceeds(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources", apitest.Handler429(t, 2), apitest.Handler429(t, 1))
