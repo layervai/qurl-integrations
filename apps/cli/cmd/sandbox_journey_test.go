@@ -116,8 +116,8 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 		t.Skipf("SKIPPED LOUDLY: live sandbox CRID journey is disarmed — missing %v. "+
 			"Arm this by setting QURL_API_KEY (a sandbox key with the qurl:agent, qurl:read, "+
 			"qurl:write, and qurl:resolve scopes), QURL_ENDPOINT (the sandbox qURL API base URL — a "+
-			"repository secret), and the QURL_SANDBOX_QV2_ISSUER_KEY / "+
-			"QURL_SANDBOX_QV2_RELAY_URL repository variables the download step's deployment "+
+			"protected input), and the protected QURL_SANDBOX_QV2_ISSUER_KEY / "+
+			"QURL_SANDBOX_QV2_RELAY_URL inputs the download step's deployment "+
 			"settings are built from.", missing)
 	}
 	return map[string]string{
@@ -182,7 +182,7 @@ func addSandboxRunIdentity(t *testing.T, env map[string]string) {
 	}
 }
 
-// journeyDeploymentFile converts the two sandbox repository variables into
+// journeyDeploymentFile converts the two protected sandbox inputs into
 // the SDK's deployment settings file and returns its path. Failures name
 // the offending variable but NEVER its value: CI logs are public, and the
 // values identify the sandbox.

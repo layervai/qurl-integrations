@@ -22,6 +22,7 @@ const (
 	sandboxControlledFailureLifecyclePhase = "controlled_failure_cleanup"
 	sandboxFailureChildArmingEnv           = "QURL_CLI_SANDBOX_FAILURE_CHILD"
 	sandboxFailureChildStateDirEnv         = "QURL_CLI_SANDBOX_FAILURE_STATE_DIR"
+	sandboxFailureAPIKeyEnv                = "QURL_CLI_SANDBOX_FAILURE_API_KEY"
 	sandboxFailureChildSentinel            = "controlled customer failure reached after route fencing"
 	sandboxFailureCleanupMarker            = "QURL_CONTROLLED_FAILURE_CLEANED"
 	sandboxFailureChildTimeout             = 3 * time.Minute
@@ -32,6 +33,14 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	t.Helper()
 	if childTestName == "" || strings.ContainsAny(childTestName, "^$[]()|*+?\\") {
 		t.Fatal("controlled-failure child test name is invalid")
+	}
+	failureAPIKey := sandboxSecret(t, sandboxFailureAPIKeyEnv)
+	if failureAPIKey == "" {
+		t.Fatalf("%s is required", sandboxFailureAPIKeyEnv)
+	}
+	primaryAPIKey := sandboxSecret(t, "QURL_API_KEY")
+	if failureAPIKey == primaryAPIKey {
+		t.Fatal("controlled-failure and primary enrollment keys must be distinct")
 	}
 	testBinary, err := os.Executable()
 	if err != nil {
@@ -52,8 +61,12 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	cmd := exec.CommandContext(ctx, testBinary, //nolint:gosec // The parent executes its own trusted, already-running test harness.
 		"-test.v", "-test.count=1", "-test.timeout=165s", "-test.run=^"+childTestName+"$")
 	cmd.Env = sandboxFailureChildEnvironment(map[string]string{
-		sandboxFailureChildArmingEnv:   "enabled",
-		sandboxFailureChildStateDirEnv: stateDir,
+		sandboxFailureChildArmingEnv:      "enabled",
+		sandboxFailureChildStateDirEnv:    stateDir,
+		"QURL_API_KEY":                    failureAPIKey,
+		"QURL_API_KEY_FILE":               "",
+		sandboxFailureAPIKeyEnv:           "",
+		sandboxFailureAPIKeyEnv + "_FILE": "",
 	})
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -67,7 +80,8 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 		t.Fatalf("controlled-failure child result: %v", err)
 	}
 	for _, secret := range []string{
-		sandboxSecret(t, "QURL_API_KEY"),
+		primaryAPIKey,
+		failureAPIKey,
 		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
 	} {
 		if secret != "" && strings.Contains(combined, secret) {
@@ -80,6 +94,29 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	}
 	assertSandboxFailureLocalCleanup(t, stateDir, crid)
 	return crid
+}
+
+func TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "primary-inline")
+	t.Setenv("QURL_API_KEY_FILE", "/protected/primary")
+	t.Setenv(sandboxFailureAPIKeyEnv, "failure-inline")
+	t.Setenv(sandboxFailureAPIKeyEnv+"_FILE", "/protected/failure")
+	got := map[string]string{}
+	for _, entry := range sandboxFailureChildEnvironment(map[string]string{
+		"QURL_API_KEY":                    "failure-exact",
+		"QURL_API_KEY_FILE":               "",
+		sandboxFailureAPIKeyEnv:           "",
+		sandboxFailureAPIKeyEnv + "_FILE": "",
+	}) {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[key] = value
+		}
+	}
+	if got["QURL_API_KEY"] != "failure-exact" || got["QURL_API_KEY_FILE"] != "" ||
+		got[sandboxFailureAPIKeyEnv] != "" || got[sandboxFailureAPIKeyEnv+"_FILE"] != "" {
+		t.Fatalf("controlled-failure credential environment = %#v", got)
+	}
 }
 
 func validateSandboxFailureChildExit(runErr error, output, childTestName string) error {

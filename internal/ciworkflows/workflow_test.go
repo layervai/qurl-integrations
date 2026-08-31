@@ -168,7 +168,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		}
 	}
 	mint, run, download := 0, 0, 0
-	var windowsSelect, windowsRun *step
+	var windowsSelect, windowsRun, windowsInstallCleanup *step
 	for index := range journey.Steps {
 		current := &journey.Steps[index]
 		switch current.Name {
@@ -176,7 +176,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			if current.Shell == "pwsh" {
 				windowsSelect = current
 			}
-		case "Mint this lane's disposable key":
+		case "Mint this lane's disposable keys":
 			mint++
 			if fmt.Sprint(current.Env["AUTH_CLIENT_ID"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}" ||
 				fmt.Sprint(current.Env["AUTH_CLIENT_SECRET"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}" {
@@ -196,6 +196,8 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 					t.Errorf("candidate step receives standing authority %q", forbidden)
 				}
 			}
+		case "Remove the Windows customer installation":
+			windowsInstallCleanup = current
 		}
 		if strings.HasPrefix(current.Uses, "actions/download-artifact@") {
 			download++
@@ -215,12 +217,49 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		strings.Contains(windowsSelect.Run, "& $harness -test.list") {
 		t.Errorf("Windows journey selector does not pass the dotted Go test flag as one native argument: %#v", windowsSelect)
 	}
+	if windowsSelect == nil || !strings.Contains(windowsSelect.Run, "$env:LOCALAPPDATA") ||
+		!strings.Contains(windowsSelect.Run, "icacls.exe $installDir /inheritance:r /grant:r") ||
+		!strings.Contains(windowsSelect.Run, "$qurl = Join-Path $installDir 'qurl.exe'") ||
+		!strings.Contains(windowsSelect.Run, "Copy-Item -LiteralPath $artifactQurl -Destination $qurl") ||
+		!strings.Contains(windowsSelect.Run, "$artifactHash -ne $installedHash") ||
+		!strings.Contains(windowsSelect.Run, "$installedVersion -ne $expectedVersion") ||
+		!strings.Contains(windowsSelect.Run, "QURL_CLI_SANDBOX_INSTALL_DIR=$installDir") ||
+		!strings.Contains(windowsSelect.Run, "QURL_CLI_SANDBOX_BINARY=$qurl") ||
+		!strings.Contains(windowsSelect.Run, "QURL_CLI_SANDBOX_QURL_BINARY=$qurl") {
+		t.Errorf("Windows journey does not install and bind the exact artifact in a protected user path: %#v", windowsSelect)
+	}
+	if windowsSelect != nil {
+		recorded := strings.Index(windowsSelect.Run, "QURL_CLI_SANDBOX_INSTALL_DIR=$installDir")
+		protected := strings.Index(windowsSelect.Run, "icacls.exe $installDir")
+		if recorded < 0 || protected < 0 || recorded > protected {
+			t.Error("Windows journey does not record its run-owned install directory before fallible protection and verification")
+		}
+	}
+	if windowsInstallCleanup == nil ||
+		windowsInstallCleanup.If != "always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success'" ||
+		!strings.Contains(windowsInstallCleanup.Run, "QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected") ||
+		!strings.Contains(windowsInstallCleanup.Run, "Remove-Item -LiteralPath $expected -Recurse -Force") ||
+		!strings.Contains(windowsInstallCleanup.Run, "Test-Path -LiteralPath $expected) { throw") {
+		t.Errorf("Windows journey does not remove the exact test installation after fencing: %#v", windowsInstallCleanup)
+	}
 	if windowsRun == nil || !strings.Contains(windowsRun.Run, `@('-test.v=true', '-test.count=1', "-test.run=$testPattern")`) ||
 		!strings.Contains(windowsRun.Run, "@testArgs 2>&1") || strings.Contains(windowsRun.Run, " -test.v ") {
 		t.Errorf("Windows journey does not pass dotted Go test flags through a native argument array: %#v", windowsRun)
 	}
 	if !strings.Contains(fmt.Sprint(journey.Env["QURL_SHARING_RUN_ID"]), "matrix.lane_id") {
 		t.Error("parallel lanes do not have distinct deterministic run IDs")
+	}
+	rawJourney := string(raw)
+	for _, required := range []string{
+		`--purpose "$purpose"`,
+		"--purpose $purpose",
+		`[[ "$key" != "$failure_key" ]]`,
+		"QURL_CLI_SANDBOX_FAILURE_API_KEY_FILE=$key_dir/failure-api-key",
+		"QURL_CLI_SANDBOX_FAILURE_API_KEY=$failureKey",
+	} {
+		if !strings.Contains(rawJourney, required) {
+			t.Errorf("customer journey does not isolate both one-time enrollment keys: missing %q", required)
+		}
 	}
 
 	cleanup := workflow.Jobs["journey-cleanup"]

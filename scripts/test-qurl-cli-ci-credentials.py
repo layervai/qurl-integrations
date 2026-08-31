@@ -312,6 +312,10 @@ def main() -> None:
         for index, lane in enumerate(("linux", "macos", "windows"), start=1)
     ]
     assert len({credentials.run_identity(item) for item in lane_identities}) == 3
+    assert credentials.run_credential_names(lane_identities[0]) == {
+        "qurl CLI journey v2 90011/3/linux/primary",
+        "qurl CLI journey v2 90011/3/linux/failure",
+    }
     assert len(set().union(*(credentials.run_device_key_names(item) for item in lane_identities))) == 6
     assert len(set().union(*(credentials.run_connector_ids(item) for item in lane_identities))) == 6
     fake = FakeAPI()
@@ -326,13 +330,14 @@ def main() -> None:
         output = root / "credential"
         output.mkdir(mode=0o700)
         create_args = argparse.Namespace(
-            **vars(args), output_dir=output, run_id="1231", run_attempt="2", lane="linux"
+            **vars(args), output_dir=output, run_id="1231", run_attempt="2", lane="linux", purpose="primary"
         )
         credentials.create(create_args)
         assert {path.name for path in output.iterdir()} == {
             "api-key", "api-key-id", "cleanup-jwt", "owner-id", "run-name"
         }
         assert (output / "owner-id").read_text(encoding="utf-8") == fake.owner
+        assert (output / "run-name").read_text(encoding="utf-8") == "qurl CLI journey v2 1231/2/linux/primary"
         fake.transient_key_delete = 1
         credentials.revoke(
             argparse.Namespace(qurl_endpoint=args.qurl_endpoint, credential_dir=output)
@@ -343,11 +348,12 @@ def main() -> None:
         recovery = root / "recovery"
         recovery.mkdir(mode=0o700)
         credentials.write_private(recovery / "cleanup-jwt", fake.jwt)
-        credentials.write_private(recovery / "run-name", "qurl CLI journey v2 1232/2/macos")
+        credentials.write_private(recovery / "run-name", "qurl CLI journey v2 1232/2/macos/failure")
         credentials.revoke_persisted(args.qurl_endpoint, recovery)
         assert (recovery / "api-key-id").read_text(encoding="utf-8") == fake.key_id
 
         run_key_id = "key_RunKey123456"
+        failure_key_id = "key_FailKey12345"
         device_key_id = "key_DevRun123456"
         unrecorded_device_key_id = "key_DevFail12345"
         unrelated_key_id = "key_OtherKey1234"
@@ -355,7 +361,14 @@ def main() -> None:
         fake.keys[run_key_id] = {
             "key_id": run_key_id,
             "kind": "api_key",
-            "name": "qurl CLI journey v2 1231/2/linux",
+            "name": "qurl CLI journey v2 1231/2/linux/primary",
+            "scopes": credentials.CUSTOMER_SCOPES,
+            "status": "active",
+        }
+        fake.keys[failure_key_id] = {
+            "key_id": failure_key_id,
+            "kind": "api_key",
+            "name": "qurl CLI journey v2 1231/2/linux/failure",
             "scopes": credentials.CUSTOMER_SCOPES,
             "status": "active",
         }
@@ -406,7 +419,7 @@ def main() -> None:
         assert set(fake.deleted_resources) == expected_connector_resource_ids | {"r_customer_ci"}
         assert "r_keep" not in fake.deleted_resources
         assert "r_redacted_tunnel" not in fake.deleted_resources
-        assert {run_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
+        assert {run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
         assert unrelated_key_id not in fake.deleted_keys
         assert unrelated_device_key_id not in fake.deleted_keys
         first_revoke = next(index for index, operation in enumerate(fake.operations) if operation.startswith("revoke:"))

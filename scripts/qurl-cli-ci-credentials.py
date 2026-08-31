@@ -25,7 +25,10 @@ DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,19}\Z")
 LANE = re.compile(r"(?:linux|macos|windows)\Z")
-RUN_NAME = re.compile(r"qurl CLI journey v2 [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/(?:linux|macos|windows)\Z")
+RUN_NAME = re.compile(
+    r"qurl CLI journey v2 [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/"
+    r"(?:linux|macos|windows)/(?:primary|failure)\Z"
+)
 CLEANUP_ID_FILE = re.compile(r"device-key-[0-9a-f]{64}\Z")
 RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 MAX_ATTEMPTS = 3
@@ -401,6 +404,11 @@ def run_identity(args: argparse.Namespace) -> tuple[str, str]:
     return name, description
 
 
+def run_credential_names(args: argparse.Namespace) -> set[str]:
+    name, _ = run_identity(args)
+    return {f"{name}/primary", f"{name}/failure"}
+
+
 def run_device_key_names(args: argparse.Namespace) -> set[str]:
     # TODO(upstream-contract): qurl-service stores each native device key as
     # "agent:" + AgentID, and the tagged harness derives AgentID from this
@@ -456,7 +464,8 @@ def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
 
 
 def reconcile_run(args: argparse.Namespace) -> None:
-    name, description = run_identity(args)
+    _, description = run_identity(args)
+    credential_names = run_credential_names(args)
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
     device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
@@ -491,7 +500,7 @@ def reconcile_run(args: argparse.Namespace) -> None:
         if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
             raise CredentialError("qURL credential cleanup row has a malformed key ID")
         row_name = row.get("name")
-        if row_name == name:
+        if row_name in credential_names:
             if row.get("kind") != "api_key" or row.get("scopes") != CUSTOMER_SCOPES:
                 raise CredentialError("run cleanup customer credential has an unexpected authority shape")
             key_ids.append(key_id)
@@ -612,7 +621,9 @@ def create(args: argparse.Namespace) -> None:
         raise CredentialError("platform lane is invalid")
     endpoint, jwt, expected_owner = authenticated_owner(args)
 
-    name = f"qurl CLI journey v2 {args.run_id}/{args.run_attempt}/{args.lane}"
+    if args.purpose not in {"primary", "failure"}:
+        raise CredentialError("customer credential purpose is invalid")
+    name = f"qurl CLI journey v2 {args.run_id}/{args.run_attempt}/{args.lane}/{args.purpose}"
     prepare_output_directory(args.output_dir)
     write_private(args.output_dir / "cleanup-jwt", jwt)
     write_private(args.output_dir / "run-name", name)
@@ -679,6 +690,7 @@ def parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--run-id", required=True)
     create_parser.add_argument("--run-attempt", required=True)
     create_parser.add_argument("--lane", required=True)
+    create_parser.add_argument("--purpose", choices=("primary", "failure"), required=True)
     create_parser.set_defaults(handler=create)
     reconcile_parser.add_argument("--run-id", required=True)
     reconcile_parser.add_argument("--run-attempt", required=True)

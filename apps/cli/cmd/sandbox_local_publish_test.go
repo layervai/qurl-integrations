@@ -775,15 +775,23 @@ func assertSandboxListRow(t *testing.T, binary string, env map[string]string, st
 		t.Fatalf("list local share exit = %d: %s", res.code, res.stderr.String())
 	}
 	var doc struct {
-		Resources []sandboxSharingDoc `json:"resources"`
+		Resources []struct {
+			CRID            string  `json:"crid"`
+			ResourceID      string  `json:"resource_id"`
+			TargetURL       string  `json:"target_url"`
+			DesiredState    string  `json:"desired_state"`
+			ConnectionState *string `json:"connection_state"`
+			ServingEpoch    uint64  `json:"serving_epoch"`
+		} `json:"resources"`
 	}
 	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
 		t.Fatalf("decode list output: %v", err)
 	}
 	for _, row := range doc.Resources {
 		if row.CRID == local.CRID {
-			if row.TargetURL != local.TargetURL || row.DesiredState != "on" || row.ConnectionState != "serving" || row.ServingEpoch != epoch {
-				t.Fatalf("list row = %+v, want full local target and on/serving epoch %d", row, epoch)
+			if row.ResourceID != local.ResourceID || row.TargetURL != local.TargetURL || row.DesiredState != "on" ||
+				row.ConnectionState != nil || row.ServingEpoch != epoch {
+				t.Fatalf("list row = %+v, want full local target, desired on, epoch %d, and no fabricated live observation", row, epoch)
 			}
 			return
 		}
