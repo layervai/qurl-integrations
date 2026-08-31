@@ -243,9 +243,14 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 
 	validatorTests := []string{
+		"TestAssembleSandboxProtectedValuesIncludesEveryIssuerForm",
+		"TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8",
+		"TestBoundedSandboxChildOutputRedactsBeforeTruncating",
+		"TestQV2IssuerKeyFormsCoversEveryEncoding",
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
+		"TestSameJourneyTargetURLAcceptsServiceCanonicalForm",
 		"TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey",
 		"TestSandboxForegroundLifecycleStateContract",
 		"TestSandboxFullCustomerLifecyclePhaseContract",

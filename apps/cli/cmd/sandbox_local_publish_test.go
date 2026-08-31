@@ -304,8 +304,8 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 	if err := json.Unmarshal(published.stdout.Bytes(), &pub); err != nil {
 		t.Fatalf("decode device-authenticated remote publish output: %v", err)
 	}
-	if pub.CRID == "" || pub.ResourceID == "" || pub.TargetURL != target || pub.FoundExisting {
-		t.Fatalf("device-authenticated remote publish = %+v, want one new URL resource", pub)
+	if pub.CRID == "" || pub.ResourceID == "" || !sameJourneyTargetURL(pub.TargetURL, target) || pub.FoundExisting {
+		t.Fatalf("device-authenticated remote publish = %+v, want one new URL resource for %q", pub, target)
 	}
 	deleted := false
 	t.Cleanup(func() {

@@ -635,3 +635,98 @@ func reclaimSandboxResource(t *testing.T, cliEnv map[string]string, id string) {
 			id, res.code, res.stderr.String())
 	}
 }
+
+// sameJourneyTargetURL reports whether the service echoed back the exact
+// resource the journey asked it to publish. qURL stores the target in its
+// canonical form, and an http(s) URL with an empty path names the same
+// resource as one with a bare "/" path under RFC 3986 scheme-based
+// normalization: publishing "https://example.com/?q" is answered with
+// "https://example.com?q". The journey therefore compares the normalized
+// forms rather than the raw bytes it happened to send, so a cosmetic
+// canonicalization cannot masquerade as the service resolving the wrong
+// target. Scheme case is folded by url.Parse, which RFC 3986 §3.1 requires;
+// host case and the default port are not, and the test pins both as rejected.
+//
+// TODO(upstream-contract): this mirrors two qurl-service behaviors — that it
+// DOES fold an empty path to "/", and that it does NOT fold host case or the
+// default port. The "host case" and "default port" cases in
+// TestSameJourneyTargetURLAcceptsServiceCanonicalForm are the tripwire: if
+// the service starts folding either, they fail with an obvious diff instead
+// of presenting as another red journey with a one-character symptom.
+func sameJourneyTargetURL(got, want string) bool {
+	normalized := func(raw string) (string, bool) {
+		if strings.TrimSpace(raw) == "" {
+			return "", false
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "", false
+		}
+		// The empty-path fold is only defined for schemes with an authority
+		// and a hierarchical path, so it stays scoped to the two the CLI
+		// publishes. Host case and default ports are deliberately NOT folded:
+		// the service does not canonicalize them today, and an assertion
+		// should stay strict about differences it has no evidence are benign.
+		if parsed.Path == "" && (parsed.Scheme == httpURLScheme || parsed.Scheme == httpsURLScheme) {
+			parsed.Path = "/"
+			parsed.RawPath = ""
+		}
+		return parsed.String(), true
+	}
+	gotNormalized, gotOK := normalized(got)
+	wantNormalized, wantOK := normalized(want)
+	return gotOK && wantOK && gotNormalized == wantNormalized
+}
+
+// TestSameJourneyTargetURLAcceptsServiceCanonicalForm pins the exact
+// difference the live journey must tolerate — and every difference it must
+// still reject. This is the credential-free guard for the comparison the
+// remote publish phases depend on.
+func TestSameJourneyTargetURLAcceptsServiceCanonicalForm(t *testing.T) {
+	const requested = "https://example.com/?qurl-private-sandbox-device-journey=17881886511"
+	equivalent := map[string]string{
+		"canonicalized empty path": "https://example.com?qurl-private-sandbox-device-journey=17881886511",
+		"exact echo":               requested,
+	}
+	for name, echoed := range equivalent {
+		t.Run(name, func(t *testing.T) {
+			if !sameJourneyTargetURL(echoed, requested) {
+				t.Fatalf("sameJourneyTargetURL(%q, %q) = false, want true", echoed, requested)
+			}
+			// Symmetric by construction: both sides are normalized.
+			if !sameJourneyTargetURL(requested, echoed) {
+				t.Fatalf("sameJourneyTargetURL(%q, %q) = false, want true", requested, echoed)
+			}
+		})
+	}
+	different := map[string]string{
+		"different query":  "https://example.com/?qurl-private-sandbox-device-journey=17881886512",
+		"different host":   "https://example.org/?qurl-private-sandbox-device-journey=17881886511",
+		"different scheme": "http://example.com/?qurl-private-sandbox-device-journey=17881886511",
+		"real path":        "https://example.com/elsewhere?qurl-private-sandbox-device-journey=17881886511",
+		"query dropped":    "https://example.com/",
+		// The two folds the helper deliberately does NOT perform. When the
+		// service starts canonicalizing either, this fails with an obvious
+		// diff instead of presenting as another red journey.
+		"host case":    "https://EXAMPLE.COM/?qurl-private-sandbox-device-journey=17881886511",
+		"default port": "https://example.com:443/?qurl-private-sandbox-device-journey=17881886511",
+		"empty":        "",
+		"not a URL":    "example.com",
+	}
+	for name, echoed := range different {
+		t.Run(name, func(t *testing.T) {
+			if sameJourneyTargetURL(echoed, requested) {
+				t.Fatalf("sameJourneyTargetURL(%q, %q) = true, want false", echoed, requested)
+			}
+		})
+	}
+	if sameJourneyTargetURL(requested, "") || sameJourneyTargetURL("", "") {
+		t.Fatal("sameJourneyTargetURL accepted an absent requested target")
+	}
+	// The fold with the slash-less URL on the *requested* side — a genuinely
+	// different pair from the loop above, which anchors every case to the
+	// slash-bearing `requested`.
+	if !sameJourneyTargetURL(requested, "https://example.com?qurl-private-sandbox-device-journey=17881886511") {
+		t.Fatal("sameJourneyTargetURL rejected the fold when the requested side omitted the slash")
+	}
+}
