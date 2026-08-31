@@ -1160,7 +1160,9 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	}
 	assertJobPermissions(t, "validate-homebrew-cask", validator.Permissions, map[string]string{"actions": "read", "contents": "read"})
 	assertJobPermissions(t, "validate-windows-release-archive", archiveValidator.Permissions, map[string]string{"actions": "read", "contents": "read"})
-	assertJobPermissions(t, "publish-cli-release", publisher.Permissions, map[string]string{"contents": "write"})
+	assertJobPermissions(t, "publish-cli-release", publisher.Permissions, map[string]string{
+		"contents": "write", "packages": "write", "id-token": "write",
+	})
 	assertJobPermissions(t, "publish-homebrew-cask", tapPublisher.Permissions, map[string]string{"actions": "read", "contents": "read"})
 	stepsFor := func(job *githubJob) map[string]*step {
 		steps := map[string]*step{}
@@ -1209,7 +1211,8 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		`brew --cache --cask "$token"`,
 		`install -m 0644 "$archive" "$cache_path"`,
 		`brew install --cask "$token"`,
-		`"$installed" version | grep -Fq "$CLI_TAG"`,
+		`reported_version=$("$installed" version | awk 'NR == 1 { print $3 }')`,
+		`[[ "$reported_version" == "$release_version" ]]`,
 		`for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do`,
 		`"$installed" "$command" --help >/dev/null`,
 	} {
@@ -1226,6 +1229,10 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	}
 	draftVerifier := releaseSteps["Verify the draft CLI carries the exact production Hub trust pin"]
 	if draftVerifier == nil ||
+		!strings.Contains(draftVerifier.Run, `"qurl_${release_version}_windows_arm64.zip"`) ||
+		!strings.Contains(draftVerifier.Run, `for filename in "${expected[@]}"; do`) ||
+		!strings.Contains(draftVerifier.Run, `reported_version=$("$native_binary" version | awk 'NR == 1 { print $3 }')`) ||
+		!strings.Contains(draftVerifier.Run, `[[ "$reported_version" != "$release_version" ]]`) ||
 		!strings.Contains(draftVerifier.Run, `for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do`) ||
 		!strings.Contains(draftVerifier.Run, `"$native_binary" "$command" --help >/dev/null`) {
 		t.Error("Linux release archive does not validate the lifecycle command roster")
@@ -1237,6 +1244,7 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		t.Fatal("Windows release archive validation is not exact and fail closed")
 	}
 	if !strings.Contains(windows.Run, "qurl_${releaseVersion}_windows_amd64.zip") ||
+		!strings.Contains(windows.Run, "$versionFields[2] -cne $releaseVersion") ||
 		!strings.Contains(windows.Run, "$env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' '") ||
 		!strings.Contains(windows.Run, "& $binary $command --help") {
 		t.Error("Windows release archive does not validate the lifecycle command roster")
@@ -1245,12 +1253,40 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		t.Errorf("release archive validator does not depend on release-cli: %v", got)
 	}
 
+	promoteImage := publisherSteps["Sign and promote the tested qurl image"]
 	releasePublish := publisherSteps["Publish the verified CLI release"]
 	if releasePublish == nil || !strings.Contains(releasePublish.Run, "--draft=false --verify-tag") {
 		t.Error("GitHub Release publication is not behind the Homebrew validator")
 	}
+	if releaseSteps["Promote and sign tested qurl image"] != nil ||
+		releaseSteps["Sign and promote the tested qurl image"] != nil || promoteImage == nil ||
+		!strings.Contains(promoteImage.Run, `docker buildx imagetools create --tag "$tagged" "$candidate"`) ||
+		!strings.Contains(promoteImage.Run, `gh release upload "$CLI_TAG"`) {
+		t.Error("versioned GHCR publication is not confined to the post-validation publisher")
+	}
+	if promoteImage != nil && strings.Index(promoteImage.Run, `gh release upload "$CLI_TAG"`) >=
+		strings.Index(promoteImage.Run, `docker buildx imagetools create --tag "$tagged" "$candidate"`) {
+		t.Error("versioned GHCR tag can be promoted before signed image metadata reaches the draft release")
+	}
+	promoteIndex, publishIndex := -1, -1
+	for index := range publisher.Steps {
+		switch publisher.Steps[index].Name {
+		case "Sign and promote the tested qurl image":
+			promoteIndex = index
+		case "Publish the verified CLI release":
+			publishIndex = index
+		}
+	}
+	if promoteIndex < 0 || publishIndex < 0 || promoteIndex >= publishIndex {
+		t.Errorf("CLI release becomes public before its exact image: promote=%d publish=%d", promoteIndex, publishIndex)
+	}
+	if release.Outputs["qurl_image_digest"] != "${{ steps.qurl_candidate.outputs.digest }}" ||
+		publisher.Env["QURL_IMAGE_DIGEST"] != "${{ needs.release-cli.outputs.qurl_image_digest }}" {
+		t.Error("post-validation publisher is not bound to the exact image candidate tested by release-cli")
+	}
 	if got := parseWorkflowNeeds(t, "publish-cli-release", publisher.Needs); !slices.Contains(got, "validate-homebrew-cask") ||
 		!slices.Contains(got, "validate-windows-release-archive") ||
+		!slices.Contains(got, "release-cli") ||
 		!strings.Contains(publisher.If, "needs.validate-windows-release-archive.result == 'success'") {
 		t.Errorf("CLI publication bypasses package validation: %v", got)
 	}
