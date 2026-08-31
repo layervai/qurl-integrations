@@ -296,6 +296,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			fixture, err := json.Marshal(map[string]any{
 				"total_count": 1,
 				"jobs":        []map[string]string{{"name": test.jobName}},
@@ -303,7 +304,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			command := exec.Command("jq", "-r", predicate) //nolint:gosec // Fixed executable and workflow-owned predicate.
+			command := exec.CommandContext(t.Context(), "jq", "-r", predicate) //nolint:gosec // Fixed executable and workflow-owned predicate.
 			command.Stdin = strings.NewReader(string(fixture))
 			output, err := command.CombinedOutput()
 			if err != nil {
@@ -327,11 +328,11 @@ else
   jq -n '{total_count:0,jobs:[]}'
 fi
 `
-	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(mockGH), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(mockGH), 0o700); err != nil { //nolint:gosec // Test-owned executable in t.TempDir.
 		t.Fatal(err)
 	}
 	resolverCommand := func(attempt string) *exec.Cmd {
-		command := exec.Command("bash", "-c", resolverRun) //nolint:gosec // Executes the repository-owned fixed workflow step.
+		command := exec.CommandContext(t.Context(), "bash", "-c", resolverRun) //nolint:gosec // Executes the repository-owned fixed workflow step.
 		command.Env = append(os.Environ(),
 			"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"GH_CAPTURE="+capturePath,
@@ -350,14 +351,14 @@ fi
 	if output, err := resolverCommand("2").CombinedOutput(); err != nil {
 		t.Fatalf("execute attempt-bound cleanup resolver: %v: %s", err, output)
 	}
-	workflowOutput, err := os.ReadFile(outputPath)
+	workflowOutput, err := os.ReadFile(outputPath) //nolint:gosec // Test-owned path in t.TempDir.
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(string(workflowOutput)) != "required=true" {
 		t.Fatalf("attempt-bound cleanup result = %q, want required=true", workflowOutput)
 	}
-	ghArguments, err := os.ReadFile(capturePath)
+	ghArguments, err := os.ReadFile(capturePath) //nolint:gosec // Test-owned path in t.TempDir.
 	if err != nil {
 		t.Fatal(err)
 	}
