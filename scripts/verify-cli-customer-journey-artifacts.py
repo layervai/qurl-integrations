@@ -8,6 +8,7 @@ import hashlib
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 
@@ -15,10 +16,54 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 VERSION = re.compile(r"v0\.0\.0-ci\.[0-9a-f]{12}\Z")
 MODULE_VERSION = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+\Z")
+EXPECTED_PLATFORMS = {
+    "qurl-linux-amd64": ("linux", "amd64"),
+    "qurl-darwin-amd64": ("darwin", "amd64"),
+    "qurl-darwin-arm64": ("darwin", "arm64"),
+    "qurl-windows-amd64.exe": ("windows", "amd64"),
+}
 
 
 def fail(message: str) -> None:
     raise ValueError(message)
+
+
+def verify_build_info(path: pathlib.Path, head_sha: str, modules: dict[str, str]) -> None:
+    result = subprocess.run(
+        ["go", "version", "-m", "-json", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    info = json.loads(result.stdout)
+    dependencies = info.get("Deps")
+    settings = info.get("Settings")
+    if not isinstance(dependencies, list) or not isinstance(settings, list):
+        fail(f"{path.name} has malformed Go build metadata")
+
+    selected: dict[str, str] = {}
+    for dependency in dependencies:
+        if not isinstance(dependency, dict) or dependency.get("Path") not in modules:
+            continue
+        module = dependency["Path"]
+        if module in selected or dependency.get("Replace") is not None:
+            fail(f"{path.name} has ambiguous metadata for {module}")
+        selected[module] = dependency.get("Version")
+    for module, version in modules.items():
+        if selected.get(module) != version:
+            fail(f"{path.name} does not contain exact {module} version {version}")
+
+    selected_settings: dict[str, str] = {}
+    for setting in settings:
+        if not isinstance(setting, dict) or setting.get("Key") not in {"GOOS", "GOARCH", "vcs.revision"}:
+            continue
+        key = setting["Key"]
+        if key in selected_settings or not isinstance(setting.get("Value"), str):
+            fail(f"{path.name} has ambiguous {key} build metadata")
+        selected_settings[key] = setting["Value"]
+    expected_os, expected_arch = EXPECTED_PLATFORMS[path.name]
+    if selected_settings != {"GOOS": expected_os, "GOARCH": expected_arch, "vcs.revision": head_sha}:
+        fail(f"{path.name} source or platform metadata is not exact")
 
 
 def main() -> int:
@@ -56,12 +101,7 @@ def main() -> int:
         not isinstance(value, str) or not MODULE_VERSION.fullmatch(value) for value in modules.values()
     ):
         fail("manifest module authority is not the dependency lock")
-    expected = {
-        "qurl-linux-amd64",
-        "qurl-darwin-amd64",
-        "qurl-darwin-arm64",
-        "qurl-windows-amd64.exe",
-    }
+    expected = set(EXPECTED_PLATFORMS)
     files = manifest["files"]
     if not isinstance(files, dict) or set(files) != expected:
         fail("manifest does not contain the exact customer artifact set")
@@ -77,6 +117,7 @@ def main() -> int:
             fail("manifest contains a malformed digest")
         if hashlib.sha256((args.artifact / name).read_bytes()).hexdigest() != digest:
             fail("downloaded customer artifact digest does not match")
+        verify_build_info(args.artifact / name, args.head_sha, modules)
     print("verified exact packaged customer artifacts")
     return 0
 
@@ -84,6 +125,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, OSError, subprocess.CalledProcessError, TypeError, ValueError) as exc:
         print(f"artifact verification failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

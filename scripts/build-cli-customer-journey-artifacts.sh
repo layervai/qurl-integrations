@@ -110,25 +110,5 @@ document = {
 )
 PY
 chmod 0400 "$manifest"
-
-python3 - "$output_dir" "$head_sha" <<'PY'
-import json
-import pathlib
-import subprocess
-import sys
-
-root = pathlib.Path(sys.argv[1])
-head = sys.argv[2]
-manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-actual = {
-    path.relative_to(root).as_posix()
-    for path in root.rglob("*")
-    if path.is_file() and path.name != "manifest.json"
-}
-if set(manifest["files"]) != actual:
-    raise SystemExit("manifest file set is incomplete")
-for name in manifest["files"]:
-    metadata = subprocess.check_output(["go", "version", "-m", str(root / name)], text=True)
-    if f"vcs.revision={head}" not in metadata:
-        raise SystemExit("customer binary source metadata is not exact")
-PY
+scripts/verify-cli-customer-journey-artifacts.py \
+  "$output_dir" "$repository" "$head_sha" "$run_id" "$run_attempt"

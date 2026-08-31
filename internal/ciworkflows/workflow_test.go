@@ -144,6 +144,7 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 		"scripts/build-cli-customer-journey-artifacts.sh",
 		"scripts/qurl-cli-ci-credentials.py",
 		"scripts/test-qurl-cli-ci-credentials.py",
+		"scripts/test-verify-cli-customer-journey-artifacts.py",
 		"scripts/verify-cli-customer-journey-artifacts.py",
 	} {
 		assertExecutableRepoScript(t, script)

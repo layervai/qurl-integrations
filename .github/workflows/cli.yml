@@ -348,8 +348,10 @@ jobs:
           python3 -m py_compile \
             scripts/qurl-cli-ci-credentials.py \
             scripts/test-qurl-cli-ci-credentials.py \
+            scripts/test-verify-cli-customer-journey-artifacts.py \
             scripts/verify-cli-customer-journey-artifacts.py
           python3 scripts/test-qurl-cli-ci-credentials.py
+          python3 scripts/test-verify-cli-customer-journey-artifacts.py
 
   govulncheck:
     name: cli / govulncheck
