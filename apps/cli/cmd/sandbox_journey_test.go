@@ -279,6 +279,12 @@ func sandboxFailureDiagnosticFromInspection(raw []byte) (sandboxFailureDiagnosti
 	return diagnostic, true
 }
 
+func sandboxFailureASCIIIdentifierByte(character byte) bool {
+	return (character >= '0' && character <= '9') ||
+		(character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z') || character == '_'
+}
+
 func sandboxFailureDiagnosticFromCLIError(stderr string) (sandboxFailureDiagnostic, bool) {
 	const prefix = "error "
 	var code string
@@ -294,13 +300,8 @@ func sandboxFailureDiagnosticFromCLIError(stderr string) (sandboxFailureDiagnost
 			end++
 		}
 		candidate := stderr[start:end]
-		prefixBoundaryOK := prefixStart == 0 ||
-			!((stderr[prefixStart-1] >= '0' && stderr[prefixStart-1] <= '9') ||
-				(stderr[prefixStart-1] >= 'A' && stderr[prefixStart-1] <= 'Z') ||
-				(stderr[prefixStart-1] >= 'a' && stderr[prefixStart-1] <= 'z') || stderr[prefixStart-1] == '_')
-		codeBoundaryOK := end == len(stderr) ||
-			!((stderr[end] >= '0' && stderr[end] <= '9') || (stderr[end] >= 'A' && stderr[end] <= 'Z') ||
-				(stderr[end] >= 'a' && stderr[end] <= 'z') || stderr[end] == '_')
+		prefixBoundaryOK := prefixStart == 0 || !sandboxFailureASCIIIdentifierByte(stderr[prefixStart-1])
+		codeBoundaryOK := end == len(stderr) || !sandboxFailureASCIIIdentifierByte(stderr[end])
 		if validSandboxFailureCode(candidate) && candidate != "" && prefixBoundaryOK && codeBoundaryOK {
 			if code != "" {
 				return sandboxFailureDiagnostic{}, false

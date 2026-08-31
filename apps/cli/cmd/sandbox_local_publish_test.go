@@ -600,14 +600,6 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	return fixture
 }
 
-func assertSandboxControlledFailureRouteFenced(t *testing.T, fixture *sandboxLocalFixture, limit time.Duration) {
-	t.Helper()
-	if err := controlledSandboxRouteFenceError(t, fixture.binary, fixture.env, fixture.stateDir,
-		fixture.local.CRID, fixture.marker, &fixture.backendHits, limit); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func controlledSandboxRouteFenceError(t *testing.T, binary string, env map[string]string,
 	stateDir, crid, marker string, backendHits *atomic.Uint64, limit time.Duration,
 ) error {
