@@ -89,6 +89,27 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		// The SDK error contains its internal recovery phase and numeric wire
 		// code. Neither helps a customer fix the rejected account credential.
 		headline, hint, includeDetail = msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected):
+		headline, hint, includeDetail = msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired):
+		headline, hint, includeDetail = msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryExpired):
+		headline, hint, includeDetail = msgConnectorRecoveryExpired, hintConnectorRecoveryExpired, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryCandidateConflict):
+		headline, hint, includeDetail = msgConnectorRecoveryConflict, hintConnectorRecoveryConflict, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryCandidatePersistence):
+		headline, hint, includeDetail = msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryRequestRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryInvalidResponse):
+		headline, hint, includeDetail = msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryRateLimited),
+		errors.Is(err, qurl.ErrCredentialReplacementUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryGrantRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryRetryRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		headline, hint, includeDetail = msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable, false
 	// qurl-go's assignment taxonomy follows the local configuration posture.
 	case errors.Is(err, qurl.ErrAssignmentBootstrapConsumed):
 		headline, hint = msgConnectorTokenConsumed, hintConnectorTokenConsumed

@@ -417,6 +417,18 @@ func classifyShareFailure(err error) (category, code string) {
 	if err == nil {
 		return diagnosticFailureUnknown, ""
 	}
+	// These recovery wrappers carry a cause, but their top-level state is more
+	// useful than that cause. For example, a completed credential replacement
+	// can wrap an assignment identity denial while it waits for the refreshed
+	// assignment. That is assignment recovery, not a second identity failure.
+	switch {
+	case errors.Is(err, qurl.ErrCredentialRecoveryCandidatePersistence):
+		return diagnosticFailureLocalState, ""
+	case errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		return diagnosticFailureAssignment, ""
+	case errors.Is(err, qurl.ErrCredentialRecoveryExpired):
+		return diagnosticFailureIdentity, ""
+	}
 	var deny *qurl.ServerDenyError
 	if errors.As(err, &deny) {
 		return diagnosticFailurePlatformDenied, deny.ErrCode
@@ -426,7 +438,20 @@ func classifyShareFailure(err error) (category, code string) {
 	// refusal from an untyped daemon or network timeout.
 	var recovery *qurl.CredentialRecoveryError
 	if errors.As(err, &recovery) {
-		return diagnosticFailureIdentity, recovery.Code
+		switch {
+		case errors.Is(err, qurl.ErrRecoveryCredentialRejected),
+			errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected),
+			errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired):
+			return diagnosticFailureIdentity, recovery.Code
+		case errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired):
+			return diagnosticFailureAssignment, recovery.Code
+		default:
+			// The remaining closed recovery results are authenticated
+			// platform outcomes: temporary authority failure, rate limiting,
+			// invalid request, rejected grant, or candidate conflict. They are
+			// not proof of a bad device identity or a local network failure.
+			return diagnosticFailurePlatformDenied, recovery.Code
+		}
 	}
 	var assignment *qurl.AssignmentError
 	if errors.As(err, &assignment) {
@@ -443,7 +468,7 @@ func classifyShareFailure(err error) (category, code string) {
 	for _, sentinel := range []error{
 		qurl.ErrAssignmentIdentityRejected, qurl.ErrAssignmentKeyRejected,
 		qurl.ErrAssignmentBootstrapConsumed, qurl.ErrRecoveryCredentialRejected,
-		qurl.ErrCredentialRecoveryIdentityRejected,
+		qurl.ErrCredentialRecoveryIdentityRejected, qurl.ErrCredentialRecoveryRevokeRequired,
 		qurl.ErrInvalidAgentState, qurl.ErrInsecureAgentStatePermissions,
 		qurl.ErrRegistrationInvalidInput, qurl.ErrKeyRejected,
 	} {
@@ -455,6 +480,7 @@ func classifyShareFailure(err error) (category, code string) {
 		qurl.ErrAssignmentUnavailable, qurl.ErrAssignmentRecoveryRequired,
 		qurl.ErrAssignmentReassignmentRequired, qurl.ErrAssignmentRateLimited,
 		qurl.ErrAssignmentLeaseExpired, qurl.ErrNativeSessionOperationLeaseMargin,
+		qurl.ErrCredentialRecoveryAssignmentRequired,
 	} {
 		if errors.Is(err, sentinel) {
 			return diagnosticFailureAssignment, ""
@@ -471,6 +497,16 @@ func classifyShareFailure(err error) (category, code string) {
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) || errors.Is(err, os.ErrPermission) {
 		return diagnosticFailureLocalState, ""
+	}
+	for _, sentinel := range []error{
+		qurl.ErrCredentialRecoveryUnavailable, qurl.ErrCredentialRecoveryRateLimited,
+		qurl.ErrCredentialReplacementUnavailable, qurl.ErrCredentialRecoveryGrantRejected,
+		qurl.ErrCredentialRecoveryRequestRejected, qurl.ErrCredentialRecoveryCandidateConflict,
+		qurl.ErrCredentialRecoveryRetryRequired, qurl.ErrCredentialRecoveryInvalidResponse,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailurePlatformDenied, ""
+		}
 	}
 	if errors.Is(err, ErrResourceGone) || errors.Is(err, connectorshare.ErrResourceGone) {
 		return diagnosticFailureResourceUnavailable, ""

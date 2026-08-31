@@ -185,6 +185,10 @@ func TestOpenNativeRegisteredClient_OneTimeAccountEnrollment(t *testing.T) {
 				t.Fatalf("enrollment provider = %q, %v", credential, providerErr)
 			}
 		}
+		recoveryCredential, providerErr := cfg.RecoveryCredentialProvider(ctx)
+		if providerErr != nil || recoveryCredential != testAPIKey {
+			t.Fatalf("recovery provider = %q, %v; want the explicit login account key", recoveryCredential, providerErr)
+		}
 		return runtime, nil
 	}
 

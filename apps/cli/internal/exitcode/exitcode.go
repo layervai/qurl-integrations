@@ -296,17 +296,38 @@ func connectorSentinelCode(err error) (int, bool) {
 		return Config, true
 	case errors.Is(err, sessionconfig.ErrConfig):
 		return Config, true
+	case errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		// Recovery already committed a new device credential. A nested refresh
+		// cause must not relabel that completed transition as an authentication
+		// failure; the saved runtime needs a later assignment refresh.
+		return Unavailable, true
 	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
 		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),
 		errors.Is(err, qurl.ErrAssignmentIdentityRejected),
 		errors.Is(err, qurl.ErrRecoveryCredentialRejected),
-		errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected):
+		errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryExpired):
 		// The enrollment token is this surface's credential, and all three of
 		// these are the platform refusing the credential or the identity it
 		// vouches for — the Auth row's "the service rejected the credential",
 		// a stable authentication posture for scripts.
 		return Auth, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryCandidateConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryUnavailable),
+		errors.Is(err, qurl.ErrCredentialReplacementUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryGrantRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryRetryRequired):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryInvalidResponse):
+		return ServerError, true
 	case errors.Is(err, qurl.ErrAssignmentRequestRejected):
 		// 52205/52109 reject the request itself rather than the credential:
 		// "an operand or request the service rejected as invalid" is the

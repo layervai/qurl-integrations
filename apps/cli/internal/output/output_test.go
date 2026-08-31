@@ -442,6 +442,85 @@ func TestConnectorRecoveryCredentialRenderingHidesSDKInternals(t *testing.T) {
 	}
 }
 
+func TestConnectorRecoveryTaxonomyRenderingHidesEveryWirePhase(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		phase    string
+		sentinel error
+		headline string
+		hint     string
+	}{
+		{"hub unavailable", "52400", "hub_issue_recovery", qurl.ErrCredentialRecoveryUnavailable, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"hub identity rejected", "52402", "hub_issue_recovery", qurl.ErrCredentialRecoveryIdentityRejected, msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected},
+		{"revoke required", "52403", "hub_issue_recovery", qurl.ErrCredentialRecoveryRevokeRequired, msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired},
+		{"rate limited", "52404", "hub_issue_recovery", qurl.ErrCredentialRecoveryRateLimited, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"hub invalid", "52405", "hub_issue_recovery", qurl.ErrCredentialRecoveryRequestRejected, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+		{"assignment required", "52406", "hub_issue_recovery", qurl.ErrCredentialRecoveryAssignmentRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"replacement unavailable", "52410", "assigned_cell_complete_recovery", qurl.ErrCredentialReplacementUnavailable, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"grant rejected", "52411", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryGrantRejected, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"cell identity rejected", "52412", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryIdentityRejected, msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected},
+		{"candidate conflict", "52413", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryCandidateConflict, msgConnectorRecoveryConflict, hintConnectorRecoveryConflict},
+		{"cell invalid", "52414", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryRequestRejected, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := errors.Join(
+				&qurl.CredentialRecoveryError{Code: test.code, Phase: test.phase},
+				test.sentinel,
+			)
+			if test.code == "52400" || test.code == "52404" || test.code == "52410" {
+				err = &qurl.CredentialRecoveryRetryRequiredError{
+					Phase: test.phase, Attempts: 3, Elapsed: time.Second, Last: err,
+				}
+			}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("recover rejected native identity: %w", err), false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{test.phase, test.code, "qurl:"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("recovery rendering exposed SDK detail %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorRecoveryStateRenderingHidesSDKDetails(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"persistence", qurl.ErrCredentialRecoveryCandidatePersistence, msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence},
+		{"invalid response", qurl.ErrCredentialRecoveryInvalidResponse, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+		{"expired", qurl.ErrCredentialRecoveryExpired, msgConnectorRecoveryExpired, hintConnectorRecoveryExpired},
+		{"retry exhausted", qurl.ErrCredentialRecoveryRetryRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"refresh required", qurl.ErrCredentialRecoveredAssignmentRefreshRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("recover rejected native identity: internal phase: %w", test.err), false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "internal phase") || strings.Contains(got, "qurl:") {
+				t.Fatalf("recovery rendering exposed SDK detail:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestConnectorResourceRenderings(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -537,6 +616,13 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
 		msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled,
 		msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected,
+		msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected,
+		msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired,
+		msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable,
+		msgConnectorRecoveryConflict, hintConnectorRecoveryConflict,
+		msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence,
+		msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid,
+		msgConnectorRecoveryExpired, hintConnectorRecoveryExpired,
 		msgConnectorIdentityRejected, hintConnectorIdentityRejected,
 		msgConnectorQuotaExceeded, hintConnectorQuotaExceeded,
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,

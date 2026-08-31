@@ -91,7 +91,28 @@ const (
 	hintConnectorSessionConfig = "Hint: update to the latest qURL CLI and sign in again. Do not add cloud or database settings, and do not edit the Connector state files."
 
 	msgConnectorRecoveryCredentialRejected  = "The qURL platform refused the account credential used to recover this registered device."
-	hintConnectorRecoveryCredentialRejected = "Hint: run `qurl login` with a current qURL API key, then retry. Do not delete or edit the local Connector state files."
+	hintConnectorRecoveryCredentialRejected = "Hint: run `qurl login` with a current qURL API key. If qURL accepts that key but recovery is still refused, keep the local Connector state unchanged, wait a short time, retry, and then contact LayerV support if it continues."
+
+	msgConnectorRecoveryIdentityRejected  = "The qURL platform could not verify this registered device for credential recovery."
+	hintConnectorRecoveryIdentityRejected = "Hint: keep the local Connector state unchanged and run `qurl login` with the account that owns this device. If the problem continues, contact LayerV support."
+
+	msgConnectorRecoveryRevokeRequired  = "The qURL platform reports that this device credential is still active, so it did not replace it."
+	hintConnectorRecoveryRevokeRequired = "Hint: do not delete or edit the local Connector state. Retry once, then contact LayerV support if the platform still reports conflicting device state."
+
+	msgConnectorRecoveryUnavailable  = "The qURL platform could not finish registered-device recovery right now."
+	hintConnectorRecoveryUnavailable = "Hint: keep the local Connector state unchanged and run the same command again after a short wait. The CLI will resume the saved recovery safely; contact LayerV support if it continues."
+
+	msgConnectorRecoveryConflict  = "The saved replacement credential conflicts with the platform's current recovery state, so qURL stopped safely."
+	hintConnectorRecoveryConflict = "Hint: do not delete or edit the local Connector state. Contact LayerV support before you retry or reprovision this device."
+
+	msgConnectorRecoveryPersistence  = "qURL could not safely save the replacement credential on this machine, so recovery stopped."
+	hintConnectorRecoveryPersistence = "Hint: check free disk space and access to the qURL state directory, then retry without deleting or editing the saved Connector state."
+
+	msgConnectorRecoveryInvalid  = "The qURL platform and this CLI did not agree on the registered-device recovery response, so qURL stopped safely."
+	hintConnectorRecoveryInvalid = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if it continues."
+
+	msgConnectorRecoveryExpired  = "The safe recovery period for this registered device has ended."
+	hintConnectorRecoveryExpired = "Hint: keep the local Connector state unchanged and contact LayerV support to recover or deliberately reprovision this device."
 
 	// Native assigned-cell resource setup. These messages deliberately call
 	// the capability a Connector resource, distinct from enrollment and from
@@ -234,6 +255,20 @@ func CustomerMessages() []string {
 		hintConnectorSessionConfig,
 		msgConnectorRecoveryCredentialRejected,
 		hintConnectorRecoveryCredentialRejected,
+		msgConnectorRecoveryIdentityRejected,
+		hintConnectorRecoveryIdentityRejected,
+		msgConnectorRecoveryRevokeRequired,
+		hintConnectorRecoveryRevokeRequired,
+		msgConnectorRecoveryUnavailable,
+		hintConnectorRecoveryUnavailable,
+		msgConnectorRecoveryConflict,
+		hintConnectorRecoveryConflict,
+		msgConnectorRecoveryPersistence,
+		hintConnectorRecoveryPersistence,
+		msgConnectorRecoveryInvalid,
+		hintConnectorRecoveryInvalid,
+		msgConnectorRecoveryExpired,
+		hintConnectorRecoveryExpired,
 		msgConnectorResourceInvalidRequest,
 		hintConnectorResourceInvalidRequest,
 		msgConnectorResourceUnavailable,

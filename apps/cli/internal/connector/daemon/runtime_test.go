@@ -537,20 +537,55 @@ func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) 
 	}
 }
 
-func TestClassifyShareFailurePreservesIdentityTaxonomyCodes(t *testing.T) {
+func TestClassifyShareFailurePreservesRecoveryTaxonomyCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		sentinel error
+		category string
+	}{
+		{"hub unavailable", "52400", qurl.ErrCredentialRecoveryUnavailable, diagnosticFailurePlatformDenied},
+		{"credential rejected", "52401", qurl.ErrRecoveryCredentialRejected, diagnosticFailureIdentity},
+		{"hub identity rejected", "52402", qurl.ErrCredentialRecoveryIdentityRejected, diagnosticFailureIdentity},
+		{"revoke required", "52403", qurl.ErrCredentialRecoveryRevokeRequired, diagnosticFailureIdentity},
+		{"rate limited", "52404", qurl.ErrCredentialRecoveryRateLimited, diagnosticFailurePlatformDenied},
+		{"hub request rejected", "52405", qurl.ErrCredentialRecoveryRequestRejected, diagnosticFailurePlatformDenied},
+		{"assignment required", "52406", qurl.ErrCredentialRecoveryAssignmentRequired, diagnosticFailureAssignment},
+		{"replacement unavailable", "52410", qurl.ErrCredentialReplacementUnavailable, diagnosticFailurePlatformDenied},
+		{"grant rejected", "52411", qurl.ErrCredentialRecoveryGrantRejected, diagnosticFailurePlatformDenied},
+		{"cell identity rejected", "52412", qurl.ErrCredentialRecoveryIdentityRejected, diagnosticFailureIdentity},
+		{"candidate conflict", "52413", qurl.ErrCredentialRecoveryCandidateConflict, diagnosticFailurePlatformDenied},
+		{"cell request rejected", "52414", qurl.ErrCredentialRecoveryRequestRejected, diagnosticFailurePlatformDenied},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			phase := "hub_issue_recovery"
+			if test.code >= "52410" {
+				phase = "assigned_cell_complete_recovery"
+			}
+			err := errors.Join(
+				&qurl.CredentialRecoveryError{Code: test.code, Phase: phase},
+				test.sentinel,
+			)
+			if test.code == "52400" || test.code == "52404" || test.code == "52410" {
+				err = &qurl.CredentialRecoveryRetryRequiredError{
+					Phase: phase, Attempts: 3, Elapsed: time.Second, Last: err,
+				}
+			}
+			category, code := classifyShareFailure(err)
+			if category != test.category || code != test.code {
+				t.Fatalf("classification=%q/%q, want %s/%s", category, code, test.category, test.code)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailurePreservesAssignmentIdentityCode(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 		code string
 	}{
-		{
-			name: "credential recovery",
-			err: errors.Join(
-				&qurl.CredentialRecoveryError{Code: "52401", Phase: "hub_issue_recovery"},
-				qurl.ErrRecoveryCredentialRejected,
-			),
-			code: "52401",
-		},
 		{
 			name: "assignment identity",
 			err: errors.Join(
@@ -565,6 +600,28 @@ func TestClassifyShareFailurePreservesIdentityTaxonomyCodes(t *testing.T) {
 			category, code := classifyShareFailure(test.err)
 			if category != diagnosticFailureIdentity || code != test.code {
 				t.Fatalf("classification=%q/%q, want identity/%s", category, code, test.code)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailureRecoverySentinelsWithoutWireEnvelope(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		category string
+	}{
+		{"expired", qurl.ErrCredentialRecoveryExpired, diagnosticFailureIdentity},
+		{"assignment refresh", qurl.ErrCredentialRecoveredAssignmentRefreshRequired, diagnosticFailureAssignment},
+		{"candidate persistence", qurl.ErrCredentialRecoveryCandidatePersistence, diagnosticFailureLocalState},
+		{"retry exhausted", qurl.ErrCredentialRecoveryRetryRequired, diagnosticFailurePlatformDenied},
+		{"invalid response", qurl.ErrCredentialRecoveryInvalidResponse, diagnosticFailurePlatformDenied},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			category, code := classifyShareFailure(fmt.Errorf("recover native identity: %w", test.err))
+			if category != test.category || code != "" {
+				t.Fatalf("classification=%q/%q, want %s with no code", category, code, test.category)
 			}
 		})
 	}

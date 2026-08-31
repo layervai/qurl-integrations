@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-go/crid"
 	"github.com/layervai/qurl-go/qurl"
@@ -101,11 +102,24 @@ var sdkSentinels = map[string]struct {
 	// Each choice is argued at its case in connectorSentinelCode.
 	// The enrollment token is this surface's credential: refusing it, or the
 	// identity it vouches for, is the Auth row.
-	"qurl.ErrAssignmentKeyRejected":              {qurl.ErrAssignmentKeyRejected, Auth},
-	"qurl.ErrAssignmentBootstrapConsumed":        {qurl.ErrAssignmentBootstrapConsumed, Auth},
-	"qurl.ErrAssignmentIdentityRejected":         {qurl.ErrAssignmentIdentityRejected, Auth},
-	"qurl.ErrRecoveryCredentialRejected":         {qurl.ErrRecoveryCredentialRejected, Auth},
-	"qurl.ErrCredentialRecoveryIdentityRejected": {qurl.ErrCredentialRecoveryIdentityRejected, Auth},
+	"qurl.ErrAssignmentKeyRejected":                        {qurl.ErrAssignmentKeyRejected, Auth},
+	"qurl.ErrAssignmentBootstrapConsumed":                  {qurl.ErrAssignmentBootstrapConsumed, Auth},
+	"qurl.ErrAssignmentIdentityRejected":                   {qurl.ErrAssignmentIdentityRejected, Auth},
+	"qurl.ErrRecoveryCredentialRejected":                   {qurl.ErrRecoveryCredentialRejected, Auth},
+	"qurl.ErrCredentialRecoveryIdentityRejected":           {qurl.ErrCredentialRecoveryIdentityRejected, Auth},
+	"qurl.ErrCredentialRecoveryExpired":                    {qurl.ErrCredentialRecoveryExpired, Auth},
+	"qurl.ErrCredentialRecoveryRevokeRequired":             {qurl.ErrCredentialRecoveryRevokeRequired, Conflict},
+	"qurl.ErrCredentialRecoveryCandidateConflict":          {qurl.ErrCredentialRecoveryCandidateConflict, Conflict},
+	"qurl.ErrCredentialRecoveryRequestRejected":            {qurl.ErrCredentialRecoveryRequestRejected, InvalidInput},
+	"qurl.ErrCredentialRecoveryRateLimited":                {qurl.ErrCredentialRecoveryRateLimited, RateLimited},
+	"qurl.ErrCredentialRecoveryUnavailable":                {qurl.ErrCredentialRecoveryUnavailable, Unavailable},
+	"qurl.ErrCredentialReplacementUnavailable":             {qurl.ErrCredentialReplacementUnavailable, Unavailable},
+	"qurl.ErrCredentialRecoveryAssignmentRequired":         {qurl.ErrCredentialRecoveryAssignmentRequired, Unavailable},
+	"qurl.ErrCredentialRecoveryGrantRejected":              {qurl.ErrCredentialRecoveryGrantRejected, Unavailable},
+	"qurl.ErrCredentialRecoveryRetryRequired":              {qurl.ErrCredentialRecoveryRetryRequired, Unavailable},
+	"qurl.ErrCredentialRecoveredAssignmentRefreshRequired": {qurl.ErrCredentialRecoveredAssignmentRefreshRequired, Unavailable},
+	"qurl.ErrCredentialRecoveryInvalidResponse":            {qurl.ErrCredentialRecoveryInvalidResponse, ServerError},
+	"qurl.ErrCredentialRecoveryCandidatePersistence":       {qurl.ErrCredentialRecoveryCandidatePersistence, General},
 	// The request, not the credential, was rejected — a valid token minted for
 	// another Connector lands here.
 	"qurl.ErrAssignmentRequestRejected": {qurl.ErrAssignmentRequestRejected, InvalidInput},
@@ -142,6 +156,28 @@ func TestSentinelMapping(t *testing.T) {
 	}
 	for name, row := range sdkSentinels {
 		assertCode(t, name, row.err, row.code)
+	}
+}
+
+func TestRecoveredAssignmentRefreshKeepsUnavailableExitCode(t *testing.T) {
+	err := &qurl.CredentialRecoveredAssignmentRefreshRequiredError{
+		Cause: errors.Join(&qurl.AssignmentError{Code: "52201"}, qurl.ErrAssignmentIdentityRejected),
+	}
+	if got := FromError(err); got != Unavailable {
+		t.Fatalf("recovered assignment refresh exit code = %d, want %d", got, Unavailable)
+	}
+}
+
+func TestCredentialRecoveryRetryKeepsLastAuthenticatedExitCode(t *testing.T) {
+	last := errors.Join(
+		&qurl.CredentialRecoveryError{Code: "52404", Phase: "hub_issue_recovery"},
+		qurl.ErrCredentialRecoveryRateLimited,
+	)
+	err := &qurl.CredentialRecoveryRetryRequiredError{
+		Phase: "hub_issue_recovery", Attempts: 3, Elapsed: time.Minute, Last: last,
+	}
+	if got := FromError(err); got != RateLimited {
+		t.Fatalf("credential recovery retry exit code = %d, want %d", got, RateLimited)
 	}
 }
 
