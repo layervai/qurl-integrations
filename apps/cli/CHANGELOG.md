@@ -38,21 +38,21 @@
 
 ### Features
 
-* **cli:** add sandbox matched-cohort lifecycle authority ([#1256](https://github.com/layervai/qurl-integrations/issues/1256)) ([7a1b061](https://github.com/layervai/qurl-integrations/commit/7a1b0613d527de8924c59f72aed91fc8a08fb190))
-* **cli:** use shared sandbox fixed canaries ([#1259](https://github.com/layervai/qurl-integrations/issues/1259)) ([78b0254](https://github.com/layervai/qurl-integrations/commit/78b025404be1d52e9fe9144a28812b71dcd80b96))
+* **cli:** add isolated lifecycle validation authority ([#1256](https://github.com/layervai/qurl-integrations/issues/1256)) ([7a1b061](https://github.com/layervai/qurl-integrations/commit/7a1b0613d527de8924c59f72aed91fc8a08fb190))
+* **cli:** stabilize lifecycle validation with fixed test identities ([#1259](https://github.com/layervai/qurl-integrations/issues/1259)) ([78b0254](https://github.com/layervai/qurl-integrations/commit/78b025404be1d52e9fe9144a28812b71dcd80b96))
 
 ## [1.7.0](https://github.com/layervai/qurl-integrations/compare/v1.6.2...v1.7.0) (2026-08-21)
 
 
 ### Features
 
-* **cli:** resolve Connector resources through native NHP ([79c7358](https://github.com/layervai/qurl-integrations/commit/79c735821c64dd7ce2f0590a8258ada8cc2e5402))
+* **cli:** resolve Connector resources through the qURL platform ([79c7358](https://github.com/layervai/qurl-integrations/commit/79c735821c64dd7ce2f0590a8258ada8cc2e5402))
 
 
 ### Bug Fixes
 
-* **cli:** pin Connector proof to sandbox origin ([#1242](https://github.com/layervai/qurl-integrations/issues/1242)) ([13cde81](https://github.com/layervai/qurl-integrations/commit/13cde8130a06fd0e212db1b345559daec8bb3d5e))
-* **cli:** pin proof to the sandbox NHP Hub ([#1243](https://github.com/layervai/qurl-integrations/issues/1243)) ([f39ac2e](https://github.com/layervai/qurl-integrations/commit/f39ac2ed477e9f33dc83b075447e6e5f4742655e))
+* **cli:** bind Connector validation to its deployment ([#1242](https://github.com/layervai/qurl-integrations/issues/1242)) ([13cde81](https://github.com/layervai/qurl-integrations/commit/13cde8130a06fd0e212db1b345559daec8bb3d5e))
+* **cli:** pin Connector validation to the trusted platform endpoint ([#1243](https://github.com/layervai/qurl-integrations/issues/1243)) ([f39ac2e](https://github.com/layervai/qurl-integrations/commit/f39ac2ed477e9f33dc83b075447e6e5f4742655e))
 
 ## [1.6.2](https://github.com/layervai/qurl-integrations/compare/v1.6.1...v1.6.2) (2026-08-20)
 
@@ -122,7 +122,7 @@
 
 ### Features
 
-* **cli:** port the knock-only connector supervisor and link the FRP fork ([#1127](https://github.com/layervai/qurl-integrations/issues/1127)) ([047e1e5](https://github.com/layervai/qurl-integrations/commit/047e1e512f19f5f7fd76ab46a7d30de3359facd7))
+* **cli:** add the local Connector session supervisor ([#1127](https://github.com/layervai/qurl-integrations/issues/1127)) ([047e1e5](https://github.com/layervai/qurl-integrations/commit/047e1e512f19f5f7fd76ab46a7d30de3359facd7))
 * **cli:** qurl connector run — serve a local app through the qURL platform ([#1130](https://github.com/layervai/qurl-integrations/issues/1130)) ([dcc40ee](https://github.com/layervai/qurl-integrations/commit/dcc40eeb3ef1006ec99814dc3c0dfedb0cfcf859))
 
 

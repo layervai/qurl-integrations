@@ -7,16 +7,52 @@ verify a download before trusting it. Release *process* mechanics
 header and [README → Releases](README.md#releases); this document is the
 consumer-facing contract.
 
+## Required CLI customer-journey gate
+
+Pull-request CI builds and verifies the packaged CLI artifacts without access
+to live credentials. After the exact change reaches `main`, a trusted
+customer-journey workflow accepts only the matching same-repository `push`
+SHA. It runs the exact packaged artifacts on Linux, macOS, and Windows. A CLI
+release stays blocked until that exact `main` result passes. The smoke must
+begin with a fresh local state directory and an ordinary account key piped to
+`qurl login`. Every later command must use only the stored device identity.
+
+The required journey is: login, warm `whoami`, remote-URL publish with status
+and inspect, loopback publish, status, inspect, list, public-route response,
+stop, route fencing, start, restart, background-daemon restart and resume on a
+supported desktop platform, delete, and credential/resource cleanup. The
+Windows CI matrix must also build and run
+the released command surface and its real Task Scheduler integration. Unit
+tests, compiled tagged tests, source receipts, and artifact attestations support
+this gate; they do not replace the live journey.
+
+Live inputs belong only in a protected, `main`-only environment. Each platform
+lane must use an isolated test owner and a disposable minimum-scope credential.
+Candidate code must never receive the authority that creates those
+credentials. Pull-request jobs must not use the live environment. Lane-local
+cleanup and an independent `always()` cleanup job must delete every created
+resource and revoke every disposable credential on success, failure, or
+cancellation.
+
+CLI release publication also fails closed until the exact production
+connection settings are embedded and independently verified in the packaged
+artifacts. The GitHub Release stays draft and the Homebrew tap stays on its
+prior version until all customer-journey, artifact, image, and signature checks
+pass. Do not bypass this gate or publish a build without its required
+connection settings.
+
 ## What a CLI release ships
 
-Merging the CLI's release-please PR tags `vX.Y.Z` and creates the GitHub
-Release; the `release-cli` job then runs GoReleaser, which attaches:
+Merging the CLI's release-please PR tags `vX.Y.Z` and creates a draft GitHub
+Release. The `release-cli` job runs GoReleaser, verifies the result, publishes
+the GitHub Release, and then updates Homebrew. The release attaches:
 
 | Asset | What it is |
 |---|---|
-| `qurl_<version>_<os>_<arch>.tar.gz` / `.zip` | Binary + LICENSE + man pages + completions (`windows` ships as `.zip`) |
+| `qurl_<version>_<os>_<arch>.tar.gz` | Binary + LICENSE + man pages + completions for macOS and Linux |
+| `qurl_<version>_windows_<arch>.zip` | `qurl.exe` + LICENSE + man pages + completions for Windows |
 | `qurl_<version>_linux_<arch>.deb` / `.rpm` | Linux packages |
-| `qurl_<version>_<os>_<arch>.tar.gz.sbom.json` (`.zip.sbom.json` for windows) | Per-archive SPDX 2.3 SBOM (syft) |
+| `<release-archive>.sbom.json` | Per-archive SPDX 2.3 SBOM (syft), including Windows `.zip` archives |
 | `checksums.txt` | SHA-256 manifest of every archive, package, and SBOM |
 | `checksums.txt.sigstore.json` | Keyless Sigstore signature bundle over `checksums.txt` |
 | `qurl-image.txt` | Exact tested multi-architecture `ghcr.io/layervai/qurl@sha256:...` image reference |
@@ -133,11 +169,13 @@ the signature verification above covers them too. Inspect one with
 `jq '.packages[] | .name + " " + .versionInfo'`, or feed it to any
 SPDX-aware scanner (e.g. `grype sbom:./qurl_<version>_linux_amd64.tar.gz.sbom.json`).
 
-## Homebrew, install.sh, deb/rpm
+## Homebrew, install.sh, Windows zip, deb/rpm
 
 `brew install layervai/tap/qurl`, `scripts/install.sh`, and the Linux
 packages all consume the same signed release: the cask pins the archive
 SHA-256 published at release time, and `install.sh` verifies its
 download against `checksums.txt` before installing. The manual recipe
 above is for verifying those checksums' provenance — or any directly
-downloaded artifact — yourself.
+downloaded artifact — yourself. Windows users download the architecture-
+specific `.zip`, verify it against the same signed `checksums.txt`, extract
+`qurl.exe`, and add its directory to their user `PATH`.

@@ -9,28 +9,38 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
-// SocketFile is the fixed owner-only IPC socket name below the state directory.
+// SocketFile is the fixed logical IPC socket name. Unix uses it directly below
+// short state directories and includes it in the identity of a bounded path
+// for long state directories.
 const SocketFile = "daemon.sock"
+
+// StateSocketPath returns the stable platform IPC address for one state
+// namespace. Unix keeps the socket below short state paths and uses a bounded,
+// owner-only per-user runtime path when the state path cannot fit sockaddr_un.
+// Windows hashes this path into its named-pipe address as before.
+func StateSocketPath(stateDir string) string {
+	path := filepath.Join(strings.TrimSpace(stateDir), SocketFile)
+	return platformStateSocketPath(path)
+}
 
 // ErrAlreadyRunning reports a live or ambiguously stale daemon socket.
 var ErrAlreadyRunning = errors.New("qURL share daemon is already running")
 
-var dialUnixSocket = func(path string, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout("unix", path, timeout)
-}
-
 var probeIPCStatus = func(c IPCClient, ctx context.Context) (*http.Response, bool, error) {
 	return c.do(ctx, http.MethodGet, "/status")
 }
+
+// The Unix socket path becomes visible between bind and the immediate chmod
+// to 0600. WaitReady may retry that one closed startup state, but ordinary
+// status and reload calls still fail closed on it.
+var errIPCSocketRestrictionPending = errors.New("share daemon socket restriction is not complete")
 
 // IPCServer exposes daemon status and reconciliation over an owner-only socket.
 type IPCServer struct {
@@ -51,22 +61,14 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	if err := connectorstate.EnsureDirMode(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("secure share daemon socket directory: %w", err)
 	}
-	if err := prepareSocket(path); err != nil {
-		return err
-	}
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", path)
+	listener, cleanup, err := listenDaemonIPC(ctx, path)
 	if err != nil {
-		return fmt.Errorf("listen on share daemon socket: %w", err)
+		return err
 	}
 	defer func() {
 		retErr = errors.Join(retErr, listener.Close())
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			retErr = errors.Join(retErr, err)
-		}
+		retErr = errors.Join(retErr, cleanup())
 	}()
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("restrict share daemon socket: %w", err)
-	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
@@ -78,9 +80,10 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(struct {
-			JobVersion string            `json:"job_version"`
-			Running    map[string]string `json:"running"`
-		}{JobVersion: s.JobVersion, Running: s.Manager.Running()})
+			JobVersion string                        `json:"job_version"`
+			Running    map[string]string             `json:"running"`
+			Resources  map[string]ResourceDiagnostic `json:"resources"`
+		}{JobVersion: s.JobVersion, Running: s.Manager.Running(), Resources: s.Manager.Diagnostics()})
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	serveDone := make(chan error, 1)
@@ -106,13 +109,22 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 	}
 }
 
+const ipcRequestTimeout = 5 * time.Second
+
 // IPCClient talks to an already-running local share daemon.
-type IPCClient struct{ SocketPath string }
+type IPCClient struct {
+	SocketPath string
+	// requestTimeout is test-only configuration. Production calls use the
+	// fixed bounded timeout so an unresponsive daemon cannot block lifecycle
+	// commands after their cloud operation has completed.
+	requestTimeout time.Duration
+}
 
 // IPCStatus is the daemon version handshake and active resource set.
 type IPCStatus struct {
-	JobVersion string            `json:"job_version"`
-	Running    map[string]string `json:"running"`
+	JobVersion string                        `json:"job_version"`
+	Running    map[string]string             `json:"running"`
+	Resources  map[string]ResourceDiagnostic `json:"resources"`
 }
 
 // Status reads the daemon handshake without starting it.
@@ -153,12 +165,75 @@ func decodeIPCStatus(reader io.Reader) (IPCStatus, error) {
 	if status.Running == nil {
 		return IPCStatus{}, errors.New("decode share daemon status: running map is missing")
 	}
+	if status.Resources == nil {
+		return IPCStatus{}, errors.New("decode share daemon status: resources map is missing")
+	}
 	for resourceID, crid := range status.Running {
 		if strings.TrimSpace(resourceID) == "" || resourceID != strings.TrimSpace(resourceID) || strings.TrimSpace(crid) == "" || crid != strings.TrimSpace(crid) {
 			return IPCStatus{}, errors.New("decode share daemon status: running resource identity is invalid")
 		}
 	}
+	for resourceID, diagnostic := range status.Resources {
+		if err := validateResourceDiagnostic(resourceID, &diagnostic); err != nil {
+			return IPCStatus{}, err
+		}
+	}
 	return status, nil
+}
+
+func validateResourceDiagnostic(resourceID string, diagnostic *ResourceDiagnostic) error {
+	if diagnostic == nil || strings.TrimSpace(resourceID) == "" || resourceID != strings.TrimSpace(resourceID) ||
+		!validDiagnosticState(diagnostic.State) || diagnostic.LastTransition.IsZero() ||
+		diagnostic.LastTransition != diagnostic.LastTransition.UTC() || diagnostic.RetryAttempt < 0 ||
+		!validDiagnosticCategory(diagnostic.FailureCategory) || !validDiagnosticCode(diagnostic.FailureCode) {
+		return errors.New("decode share daemon status: resource diagnostic is invalid")
+	}
+	if diagnostic.State == diagnosticStateRetrying &&
+		(diagnostic.FailureCategory == "" || diagnostic.NextRetryAt == nil) {
+		return errors.New("decode share daemon status: retry diagnostic is incomplete")
+	}
+	if diagnostic.NextRetryAt != nil &&
+		(diagnostic.NextRetryAt.IsZero() || *diagnostic.NextRetryAt != diagnostic.NextRetryAt.UTC()) {
+		return errors.New("decode share daemon status: retry time is invalid")
+	}
+	return nil
+}
+
+func validDiagnosticState(state string) bool {
+	switch state {
+	case diagnosticStateStarting, diagnosticStateRetrying, diagnosticStateServing, diagnosticStateFailed,
+		diagnosticStateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiagnosticCategory(category string) bool {
+	switch category {
+	case "", diagnosticFailureAssignment, diagnosticFailureEnrollment, diagnosticFailureIdentity,
+		diagnosticFailureLocalState, diagnosticFailureNetwork, diagnosticFailurePeerTimeout,
+		diagnosticFailurePlatformDenied, diagnosticFailureResourceUnavailable,
+		diagnosticFailureUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validDiagnosticCode(code string) bool {
+	if code == "" {
+		return true
+	}
+	if len(code) != 5 {
+		return false
+	}
+	for _, character := range code {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ReloadIfRunning requests reconciliation without starting an absent daemon.
@@ -181,12 +256,16 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 		return err
 	}
 	delay := 10 * time.Millisecond
+	restrictionRetries := 8
 	for {
 		response, running, err := probeIPCStatus(c, ctx)
 		if err != nil {
-			return err
+			if !errors.Is(err, errIPCSocketRestrictionPending) || restrictionRetries == 0 {
+				return err
+			}
+			restrictionRetries--
 		}
-		if response != nil {
+		if err == nil && response != nil {
 			_ = response.Body.Close()
 			if !running {
 				return errors.New("share daemon readiness returned a response without a running socket")
@@ -196,7 +275,7 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 			}
 			return nil
 		}
-		if running {
+		if err == nil && running {
 			return errors.New("share daemon readiness reported a running socket without a response")
 		}
 		timer := time.NewTimer(delay)
@@ -217,22 +296,21 @@ func (c IPCClient) do(ctx context.Context, method, path string) (*http.Response,
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err := os.Lstat(socket); errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	} else if err != nil {
-		return nil, false, err
-	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return dialDaemonIPC(ctx, socket)
 	}}
 	defer transport.CloseIdleConnections()
 	request, err := http.NewRequestWithContext(ctx, method, "http://qurl.local"+path, http.NoBody)
 	if err != nil {
 		return nil, true, err
 	}
-	response, err := (&http.Client{Transport: transport}).Do(request)
+	timeout := c.requestTimeout
+	if timeout <= 0 {
+		timeout = ipcRequestTimeout
+	}
+	response, err := (&http.Client{Transport: transport, Timeout: timeout}).Do(request)
 	if err != nil {
-		if isUnavailableSocketError(err) {
+		if isUnavailableIPCError(err) {
 			return nil, false, nil
 		}
 		return nil, true, err
@@ -245,37 +323,8 @@ func validateSocketPath(raw string) (string, error) {
 	if !filepath.IsAbs(path) || path == string(filepath.Separator) {
 		return "", errors.New("share daemon socket path must be absolute")
 	}
-	if len(path) > 100 {
-		return "", errors.New("share daemon socket path is too long")
+	if err := validatePlatformIPCPath(path); err != nil {
+		return "", err
 	}
 	return path, nil
-}
-
-func prepareSocket(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
-		return errors.New("refuse non-socket share daemon IPC path")
-	}
-	conn, dialErr := dialUnixSocket(path, 200*time.Millisecond)
-	if dialErr == nil {
-		_ = conn.Close()
-		return ErrAlreadyRunning
-	}
-	if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
-		return fmt.Errorf("%w: existing daemon socket could not be confirmed stale: %w", ErrAlreadyRunning, dialErr)
-	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove stale share daemon socket: %w", err)
-	}
-	return nil
-}
-
-func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }

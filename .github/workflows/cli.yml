@@ -75,24 +75,22 @@ jobs:
               # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
-              # The callback path is intentionally CLI-impacting: any trust or
-              # schema change must mint a fresh artifact and pass the complete
-              # exact-artifact journey, not only the generic scripts workflow.
               - 'apps/cli/**'
               - 'go.mod'
               - 'go.sum'
               - '.golangci.yml'
               - '.goreleaser.yml'
               - '.github/workflows/cli.yml'
-              - '.github/workflows/qurl-cli-customer-journey-result.yml'
+              - '.github/workflows/qurl-cli-customer-cleanup.yml'
               - '.github/workflows/release-please.yml'
-              - 'scripts/accept-cli-customer-journey-result.sh'
-              - 'scripts/build-sandbox-matched-cohort-pr-artifacts.sh'
-              - 'scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh'
-              - 'scripts/resolve-sandbox-artifact-qurl-go-source.sh'
-              - 'scripts/resolve-sandbox-artifact-qurl-go-source_test.sh'
+              - 'scripts/build-cli-customer-journey-artifacts.sh'
+              - 'scripts/qurl-cli-ci-credentials.py'
+              - 'scripts/remove-sensitive-tree.sh'
+              - 'scripts/test-qurl-cli-ci-credentials.py'
+              - 'scripts/test-remove-sensitive-tree.sh'
               - 'scripts/extract-qurl-image-attestations.sh'
-              - 'scripts/test-accept-cli-customer-journey-result.sh'
+              - 'scripts/check-exact-cli-release-gate.sh'
+              - 'scripts/test-check-exact-cli-release-gate.sh'
 
   lint:
     name: cli / lint
@@ -100,6 +98,8 @@ jobs:
     timeout-minutes: 20
     needs: changes
     if: needs.changes.outputs.cli == 'true'
+    env:
+      GOLANGCI_LINT_VERSION: v2.12.2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -109,19 +109,39 @@ jobs:
           cache: true
 
       - name: Verify golangci-lint config
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 config verify
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@"${GOLANGCI_LINT_VERSION}" config verify
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
           verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
           args: --timeout=5m ./apps/cli/...
+
+      - name: Verify installed golangci-lint version
+        run: |
+          installed_version="v$(golangci-lint version --short)"
+          if [ "$installed_version" != "$GOLANGCI_LINT_VERSION" ]; then
+            echo "::error::golangci-lint version is $installed_version, want $GOLANGCI_LINT_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Cross-lint Windows CLI sources
+        run: |
+          command -v golangci-lint
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 golangci-lint run --timeout=5m ./apps/cli/...
+
+      # The pinned action above installs the exact binary used by both raw
+      # cross-platform invocations.
+      - name: golangci-lint tagged journey tests
+        run: |
+          command -v golangci-lint
+          golangci-lint run --build-tags=clisandbox,clisoak --timeout=5m ./apps/cli/...
 
   test:
     name: cli / test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30 # This job compiles separate race, coverage, and tagged CLI test variants.
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     steps:
@@ -137,38 +157,211 @@ jobs:
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
             ./apps/cli/...
 
-      # 40 is the intentional initial floor, not the target. The v2 rebuild
-      # replaces this tree, so pinning an ambition floor (85) to the old tree
-      # would be red on day one for coverage the rebuild is about to delete.
-      # Raise this — and the mirrored floor in Makefile `check-cli` — once the
-      # v2 code lands. The pre-v2 tree measured 71.9% when this gate shipped.
+      # This is an independent named release gate, not an accidental repeat of
+      # the coverage run. Keep the lifecycle result visible and stable on every
+      # CLI pull request.
+      - name: Run CRID lifecycle unit tests
+        shell: bash
+        env:
+          LIFECYCLE_TEST_REGEX: '^(TestDaemonServesTwoResourcesAndStopsOneIndependently|TestLinuxStartRotatesEpochAfterLocalTerminalDisable|TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership|TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly|TestPublishNewMachineTakeoverRotatesEpochOnce|TestRestartReconcilesAmbiguousAppliedPostWithoutReplay|TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch|TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon|TestStartFailsImmediatelyWhenServingEpochAdvances)$'
+          LIFECYCLE_TEST_NAMES: |-
+            TestDaemonServesTwoResourcesAndStopsOneIndependently
+            TestLinuxStartRotatesEpochAfterLocalTerminalDisable
+            TestLocalPublishCompensatesSetupFailureBeforeDaemonOwnership
+            TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly
+            TestPublishNewMachineTakeoverRotatesEpochOnce
+            TestRestartReconcilesAmbiguousAppliedPostWithoutReplay
+            TestRestartSetupFailureAlwaysCompensatesAdvancedEpoch
+            TestShareLifecycleCommandsConvergeCloudRegistryAndDaemon
+            TestStartFailsImmediatelyWhenServingEpochAdvances
+        run: |
+          set -euo pipefail
+          actual_tests="$(
+            go test -race -list "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd |
+              sed -n '/^Test/p' |
+              LC_ALL=C sort
+          )"
+          if [[ "$actual_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then
+            echo "::error::CRID lifecycle test declarations differ from the required set"
+            diff -u \
+              <(printf '%s\n' "$LIFECYCLE_TEST_NAMES") \
+              <(printf '%s\n' "$actual_tests")
+            exit 1
+          fi
+          lifecycle_events=$(mktemp)
+          trap 'rm -f "$lifecycle_events"' EXIT
+          lifecycle_status=0
+          go test -race -count=1 -json -run "$LIFECYCLE_TEST_REGEX" ./apps/cli/cmd \
+            >"$lifecycle_events" || lifecycle_status=$?
+          jq -j 'select(.Output != null) | .Output' "$lifecycle_events"
+          passed_tests="$(
+            jq -r --arg regex "$LIFECYCLE_TEST_REGEX" \
+              'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' \
+              "$lifecycle_events" |
+              LC_ALL=C sort
+          )"
+          skipped_tests="$(
+            jq -r --arg regex "$LIFECYCLE_TEST_REGEX" \
+              'select(.Action == "skip" and ((.Test // "") | test($regex))) | .Test' \
+              "$lifecycle_events" |
+              LC_ALL=C sort
+          )"
+          if [[ -n "$skipped_tests" ]]; then
+            echo "::error::required CRID lifecycle tests skipped"
+            printf '%s\n' "$skipped_tests"
+            exit 1
+          fi
+          if [[ "$passed_tests" != "$LIFECYCLE_TEST_NAMES" ]]; then
+            echo "::error::required CRID lifecycle tests did not all report PASS"
+            diff -u \
+              <(printf '%s\n' "$LIFECYCLE_TEST_NAMES") \
+              <(printf '%s\n' "$passed_tests")
+            exit 1
+          fi
+          if (( lifecycle_status != 0 )); then
+            echo "::error::CRID lifecycle test process failed with status $lifecycle_status"
+            exit "$lifecycle_status"
+          fi
+
+      # The v2 CLI currently measures above 72%. Keep a small platform and
+      # toolchain margin while making material regressions fail the PR.
       - name: Check coverage threshold
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${COVERAGE}%"
-          if ! awk -v c="$COVERAGE" 'BEGIN { exit !(c+0 >= 40) }' </dev/null; then
-            echo "::error::Coverage ${COVERAGE}% is below 40% threshold"
+          if ! awk -v c="$COVERAGE" 'BEGIN { exit !(c+0 >= 70) }' </dev/null; then
+            echo "::error::Coverage ${COVERAGE}% is below 70% threshold"
             exit 1
           fi
 
       - name: Vet
         run: go vet ./apps/cli/...
 
-      # Credentialed sandbox journeys run in the private orchestrator. Public
-      # CI still compiles every tagged test so API and platform drift fail here.
-      - name: Compile private sandbox test surface
-        run: go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
+      # The live jobs below run only on trusted main. Pull-request CI still
+      # compiles every tagged test so API and platform drift fail before merge.
+      - name: Compile the live journey test surface
+        run: go test -race -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
 
-      - name: Test sandbox matched-cohort artifact contract
+      # These tests need no service credentials or live infrastructure. They
+      # execute the exact-artifact process and lifecycle validation helpers on
+      # the Ubuntu runner where their POSIX fixture is supported.
+      - name: Run credential-free journey validator tests
         shell: bash
+        env:
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_NAMES: |-
+            TestReadSandboxSecretFileFailsClosed
+            TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding
+            TestRunSandboxLocalCLIUsesExactBinaryAndState
+            TestSandboxForegroundLifecycleStateContract
+            TestSandboxFullCustomerLifecyclePhaseContract
+            TestSandboxHarnessPassesInlineAPIKeyToExactBinary
+            TestSandboxNamespaceIsCanonicalAndSeparated
+            TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
+            TestSandboxPublishProcessReportsEarlyExit
+            TestSandboxPublishReadinessWaitsForCompleteCRIDLine
+            TestSandboxResourceCleanupIsSafeBeforePublish
+            TestSandboxRunIdentityBindsOnlyImmutableHardenedImage
+            TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure
+            TestSandboxStoppedRouteRefusalMatchesQuietGet
+            TestValidateSandboxCLIBinary
+            TestValidateSandboxDeviceIdentity
+            TestValidateSandboxRouteFence
+            TestValidateSandboxSharingTransitionRequiresAdvancedEpoch
+        run: |
+          set -euo pipefail
+          actual_tests="$(
+            go test -race -tags=clisandbox -list "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd |
+              sed -n '/^Test/p' |
+              LC_ALL=C sort
+          )"
+          if [[ "$actual_tests" != "$VALIDATOR_TEST_NAMES" ]]; then
+            echo "::error::credential-free validator declarations differ from the required set"
+            diff -u <(printf '%s\n' "$VALIDATOR_TEST_NAMES") <(printf '%s\n' "$actual_tests")
+            exit 1
+          fi
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          validator_status=0
+          go test -race -tags=clisandbox -count=1 -json \
+            -run "$VALIDATOR_TEST_REGEX" ./apps/cli/cmd >"$events" || validator_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg regex "$VALIDATOR_TEST_REGEX" \
+            'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' "$events" | LC_ALL=C sort)"
+          skipped="$(jq -r --arg regex "$VALIDATOR_TEST_REGEX" \
+            'select(.Action == "skip" and ((.Test // "") | test($regex))) | .Test' "$events" | LC_ALL=C sort)"
+          if [[ -n "$skipped" ]]; then
+            echo "::error::required credential-free validators skipped"
+            printf '%s\n' "$skipped"
+            exit 1
+          fi
+          if [[ "$passed" != "$VALIDATOR_TEST_NAMES" ]]; then
+            echo "::error::required credential-free validators did not all report PASS"
+            diff -u <(printf '%s\n' "$VALIDATOR_TEST_NAMES") <(printf '%s\n' "$passed")
+            exit 1
+          fi
+          if (( validator_status != 0 )); then
+            echo "::error::credential-free validator test process failed with status $validator_status"
+            exit "$validator_status"
+          fi
+
+      - name: Run exact warm-daemon process contract
+        shell: bash
+        env:
+          WARM_DAEMON_TEST_REGEX: '^TestExactWarmDaemonProcessContract$'
+          WARM_DAEMON_TEST_NAME: TestExactWarmDaemonProcessContract
+        run: |
+          set -euo pipefail
+          actual_test="$(go test -race -tags='clisandbox clisoak' -list "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd | sed -n '/^Test/p')"
+          [[ "$actual_test" == "$WARM_DAEMON_TEST_NAME" ]] || {
+            echo "::error::exact warm-daemon declaration is missing or ambiguous"
+            exit 1
+          }
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          warm_daemon_status=0
+          go test -race -tags='clisandbox clisoak' -count=1 -json \
+            -run "$WARM_DAEMON_TEST_REGEX" ./apps/cli/cmd >"$events" || warm_daemon_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg regex "$WARM_DAEMON_TEST_REGEX" \
+            'select(.Action == "pass" and ((.Test // "") | test($regex))) | .Test' "$events")"
+          skipped="$(jq -r --arg regex "$WARM_DAEMON_TEST_REGEX" \
+            'select(.Action == "skip" and ((.Test // "") | test($regex))) | .Test' "$events")"
+          if [[ -n "$skipped" ]]; then
+            echo "::error::required exact warm-daemon test skipped"
+            printf '%s\n' "$skipped"
+            exit 1
+          fi
+          if [[ "$passed" != "$WARM_DAEMON_TEST_NAME" ]]; then
+            echo "::error::exact warm-daemon contract did not report one PASS"
+            diff -u <(printf '%s\n' "$WARM_DAEMON_TEST_NAME") <(printf '%s\n' "$passed")
+            exit 1
+          fi
+          if (( warm_daemon_status != 0 )); then
+            echo "::error::exact warm-daemon test process failed with status $warm_daemon_status"
+            exit "$warm_daemon_status"
+          fi
+
+      - name: Check customer-journey support scripts
+        shell: bash
+        env:
+          # The verifier invokes the artifact builder after the Python checks.
+          # Keep bytecode outside the checkout so the builder's clean-tree
+          # guard still verifies the exact committed source.
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/qurl-cli-pycache
         run: |
           shellcheck \
-            scripts/build-sandbox-matched-cohort-pr-artifacts.sh \
-            scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh \
-            scripts/resolve-sandbox-artifact-qurl-go-source.sh \
-            scripts/resolve-sandbox-artifact-qurl-go-source_test.sh
-          scripts/build-sandbox-matched-cohort-pr-artifacts_test.sh
-          scripts/resolve-sandbox-artifact-qurl-go-source_test.sh
+            scripts/build-cli-customer-journey-artifacts.sh \
+            scripts/check-exact-cli-release-gate.sh \
+            scripts/remove-sensitive-tree.sh \
+            scripts/test-remove-sensitive-tree.sh \
+            scripts/test-check-exact-cli-release-gate.sh
+          bash scripts/test-check-exact-cli-release-gate.sh
+          bash scripts/test-remove-sensitive-tree.sh
+          python3 -m py_compile \
+            scripts/qurl-cli-ci-credentials.py \
+            scripts/test-qurl-cli-ci-credentials.py
+          python3 scripts/test-qurl-cli-ci-credentials.py
 
   govulncheck:
     name: cli / govulncheck
@@ -202,12 +395,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      # Switch the v2 suite will read to know it is running under CI's
-      # cross-platform harness with a real OS keyring available. Today's tests
-      # ignore it; exporting it now keeps this job's contract stable when the
-      # v2 code lands.
-      QURL_TEST_HARNESS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -216,154 +403,136 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The live credential-store smoke needs an unlocked keyring on every OS.
-      # CI keyrings start locked on macOS and absent on Linux; Windows
-      # Credential Manager works headless as-is.
-      - name: Set up macOS keychain
-        if: runner.os == 'macOS'
-        shell: bash
+      - name: Scan Windows CLI dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          # Ephemeral CI keychain: throwaway random password, auto-lock timeout
-          # cleared, made the default so keyring libraries find it unlocked.
-          password="$(uuidgen)"
-          security create-keychain -p "$password" qurl-ci.keychain
-          security set-keychain-settings qurl-ci.keychain
-          security default-keychain -s qurl-ci.keychain
-          security unlock-keychain -p "$password" qurl-ci.keychain
+          go tool govulncheck ./apps/cli/...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Set up Linux keyring (gnome-keyring over D-Bus)
-        if: runner.os == 'Linux'
-        shell: bash
-        timeout-minutes: 5
+
+      - name: Build and smoke the Windows CLI executable
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          select_fallback_mirrors() {
-            local status
-            echo "::warning::Switching Linux package downloads away from the slow Azure mirror"
-            # TODO(upstream-contract): actions/runner-images routes apt through
-            # /etc/apt/apt-mirrors.txt and configure-apt-sources.sh writes one
-            # URI plus a tab-delimited priority on each mirror-list line.
-            if printf '%s\tpriority:%s\n' \
-              'https://archive.ubuntu.com/ubuntu/' '1' \
-              'https://security.ubuntu.com/ubuntu/' '2' | \
-              sudo -n tee /etc/apt/apt-mirrors.txt >/dev/null; then
-              return 0
-            else
-              status=$?
-            fi
-            echo "::error::Unable to select the bounded Ubuntu package mirror fallback"
-            return "$status"
-          }
-
-          install_keyring_packages() {
-            local attempt status
-            for attempt in 1 2; do
-              echo "Installing Linux keyring packages (attempt ${attempt}/2)"
-              if sudo -n env DEBIAN_FRONTEND=noninteractive \
-                timeout --signal=TERM --kill-after=10s 90s \
-                apt-get \
-                  -o Acquire::Retries=2 \
-                  -o Acquire::http::Timeout=20 \
-                  -o Acquire::https::Timeout=20 \
-                  -o DPkg::Lock::Timeout=30 \
-                  -o Dpkg::Use-Pty=0 \
-                  install -y --no-install-recommends gnome-keyring dbus; then
-                return 0
-              else
-                status=$?
-              fi
-              echo "::warning::Linux keyring package install attempt ${attempt}/2 failed with exit ${status}"
-              if [ "$attempt" -lt 2 ]; then
-                # runner-images already routes apt through this mirror list;
-                # the TODO(upstream-contract) above tracks that dependency.
-                # A slow-but-responsive Azure endpoint does not trigger apt's
-                # own failover, so make the official Ubuntu mirrors explicit
-                # before the one remaining bounded attempt.
-                if ! select_fallback_mirrors; then
-                  return 1
-                fi
-                sleep 5
-              fi
-            done
-            echo "::error::Linux keyring package install failed after 2 bounded attempts"
-            return "$status"
-          }
-
-          # Hosted images already carry D-Bus and may eventually carry
-          # gnome-keyring too. Avoid an unnecessary apt index refresh: the
-          # image's configured Azure mirror can stall indefinitely while
-          # fetching package indexes or archives. The image's package metadata
-          # is sufficient for installing its own release packages, and a slow
-          # first download gets one retry through the official Ubuntu mirrors.
-          if ! command -v gnome-keyring-daemon >/dev/null 2>&1 || ! command -v dbus-run-session >/dev/null 2>&1; then
-            install_keyring_packages
-          fi
-          for command in gnome-keyring-daemon dbus-run-session; do
-            if ! command -v "$command" >/dev/null 2>&1; then
-              echo "::error::Linux keyring setup completed without required command: ${command}"
+          $binary = Join-Path $env:RUNNER_TEMP 'qurl.exe'
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '0'
+          go build -o $binary ./apps/cli/cmd/
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $help = & $binary help | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($command in @('daemon', 'inspect', 'restart', 'start', 'status', 'stop')) {
+            if ($help -notmatch "(?m)^\s+$command\s") {
+              Write-Error "Windows qurl help is missing the $command command"
               exit 1
-            fi
-          done
-          # gnome-keyring-daemon cannot create/unlock the default collection
-          # unless the keyrings directory already exists with owner-only
-          # permissions. This preparation (and the unlock in the test step)
-          # is zalando/go-keyring's own CI recipe — the upstream-proven shape.
-          mkdir -p "$HOME/.cache/"
-          mkdir -p "$HOME/.local/share/keyrings/"
-          chmod -R 700 "$HOME/.local/"
-          # Arms the dbus-run-session wrapper in the test step below: the
-          # daemon must be unlocked inside the same session the tests run in,
-          # so the wrapper cannot live in this step.
-          echo "QURL_CLI_KEYRING_DBUS=1" >> "$GITHUB_ENV"
+            }
+          }
+          & $binary version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $arm64Binary = Join-Path $env:RUNNER_TEMP 'qurl-arm64.exe'
+          $env:GOARCH = 'arm64'
+          go build -o $arm64Binary ./apps/cli/cmd/
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath $arm64Binary -PathType Leaf)) {
+            Write-Error 'Windows arm64 qurl build did not produce qurl-arm64.exe'
+            exit 1
+          }
+
+      - name: Run pinned Windows Task Scheduler integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QURL_WINDOWS_USER_JOB_INTEGRATION: '1'
+        run: |
+          $testName = 'TestWindowsUserJobIntegration'
+          $testPattern = '^TestWindowsUserJobIntegration$'
+          $testPackage = 'github.com/layervai/qurl-connector/pkg/service'
+          $declared = @(
+            & go test -list $testPattern $testPackage |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
+            Write-Error "exact Windows Task Scheduler integration declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-windows-user-job-events.jsonl'
+          & go test -count=1 -json -run $testPattern $testPackage |
+            Tee-Object -FilePath $eventsPath
+          $testStatus = $LASTEXITCODE
+          if ($testStatus -ne 0) { exit $testStatus }
+          $events = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json })
+          $skipped = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' })
+          $passed = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' })
+          if ($skipped.Count -ne 0 -or $passed.Count -ne 1) {
+            Write-Error 'required Windows Task Scheduler integration must report one PASS and no SKIP'
+            exit 1
+          }
+          Remove-Item -LiteralPath $eventsPath -Force
+
+      - name: Run pinned Windows named-pipe owner integration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testName = 'TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown'
+          $testPattern = '^TestWindowsIPCServerReadinessReloadSecondDaemonAndShutdown$'
+          $testPackage = './apps/cli/internal/connector/daemon'
+          $declared = @(
+            & go test -list $testPattern $testPackage |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
+            Write-Error "exact Windows named-pipe owner integration declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
+          $eventsPath = Join-Path $env:RUNNER_TEMP 'qurl-windows-named-pipe-events.jsonl'
+          & go test -count=1 -json -run $testPattern $testPackage |
+            Tee-Object -FilePath $eventsPath
+          $testStatus = $LASTEXITCODE
+          if ($testStatus -ne 0) { exit $testStatus }
+          $events = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json })
+          $skipped = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'skip' })
+          $passed = @($events | Where-Object { $_.Test -eq $testName -and $_.Action -eq 'pass' })
+          if ($skipped.Count -ne 0 -or $passed.Count -ne 1) {
+            Write-Error 'required Windows named-pipe owner integration must report one PASS and no SKIP'
+            exit 1
+          }
+          Remove-Item -LiteralPath $eventsPath -Force
+
+      - name: Compile the live journey test surface on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go test -tags=clisandbox -run '^$' -count=1 ./apps/cli/...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testName = 'TestSandboxWindowsDefaultDaemonFullCustomerLifecycle'
+          $testPattern = '^TestSandboxWindowsDefaultDaemonFullCustomerLifecycle$'
+          $declared = @(
+            & go test -tags=clisandbox -list $testPattern ./apps/cli/cmd |
+              Where-Object { $_ -match '^Test' }
+          )
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($declared.Count -ne 1 -or $declared[0] -ne $testName) {
+            Write-Error "exact protected Windows customer journey declaration is missing or ambiguous: $($declared -join ', ')"
+            exit 1
+          }
 
       - name: Run tests
         shell: bash
-        run: |
-          if [ "${QURL_CLI_KEYRING_DBUS:-}" = "1" ]; then
-            # The unlock password must be non-empty and piped to the daemon
-            # inside the same D-Bus session the tests run in; an empty
-            # password leaves the Secret Service refusing every store with
-            # "failed to unlock correct collection
-            # '/org/freedesktop/secrets/aliases/default'". The incantation is
-            # copied from zalando/go-keyring's own CI (a throwaway password
-            # for an ephemeral runner keyring, not a secret). -eo pipefail
-            # makes a failed unlock redden this step itself instead of
-            # surfacing as a confusing failure inside the tests.
-            dbus-run-session -- bash -c "set -eo pipefail; echo 'somecredstorepass' | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/..."
-          else
-            go test -count=1 ./apps/cli/...
-          fi
+        run: go test -count=1 ./apps/cli/...
 
-  sandbox-customer-artifacts:
-    name: cli / sandbox matched-cohort artifacts
+  customer-artifacts:
+    name: cli / customer journey artifacts
     runs-on: ubuntu-latest
     needs: changes
-    timeout-minutes: 15
-    # NHP post-deploy consumes an artifact from the exact current main SHA.
-    # Therefore every main push must produce one even when this push did not
-    # change CLI paths. PRs keep the normal CLI-impacting path boundary.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || needs.changes.outputs.cli == 'true'
+    timeout-minutes: 20
+    if: needs.changes.outputs.cli == 'true'
     permissions:
       contents: read
     steps:
-      # Artifacts from a fork must never become executable input to the
-      # protected NHP journey that consumes this producer in the next PR.
-      # Keep the reporting job present and red instead of hiding it behind a
-      # job-level condition.
-      - name: Require the trusted artifact producer
-        env:
-          CALLER_EVENT: ${{ github.event_name }}
-          CALLER_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-        run: |
-          set -euo pipefail
-          case "$CALLER_EVENT" in
-            pull_request|push) ;;
-            *) echo "::error::unsupported artifact producer event: $CALLER_EVENT"; exit 1 ;;
-          esac
-          if [ "$CALLER_REPOSITORY" != "layervai/qurl-integrations" ]; then
-            echo "::error::the protected artifact producer does not accept a fork"
-            exit 1
-          fi
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -374,37 +543,484 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build exact sandbox customer artifacts
-        env:
-          CALLER_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          GH_TOKEN: ${{ github.token }}
+      # These are v0.0.0-ci artifacts. A fresh public fixture exercises the
+      # packaged trust path without loading any deployment or release input.
+      - name: Select ephemeral artifact trust root
         run: |
           set -euo pipefail
-          QURL_GO_SOURCE_SHA=$(scripts/resolve-sandbox-artifact-qurl-go-source.sh)
-          scripts/build-sandbox-matched-cohort-pr-artifacts.sh \
-            "$RUNNER_TEMP/sandbox-matched-cohort-pr-artifacts" \
-            "$GITHUB_REPOSITORY" "$CALLER_HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            "$QURL_GO_SOURCE_SHA"
+          private_key=$RUNNER_TEMP/qurl-ci-hub-private-key.der
+          public_der=$RUNNER_TEMP/qurl-ci-hub-public-key.der
+          key_file=$RUNNER_TEMP/qurl-ci-hub-public-key
+          cleanup() {
+            rm -f -- "$private_key" "$public_der" "$key_file"
+          }
+          trap cleanup EXIT
+          openssl genpkey -algorithm X25519 -outform DER -out "$private_key"
+          openssl pkey -inform DER -in "$private_key" -pubout -outform DER -out "$public_der"
+          tail -c 32 "$public_der" >"$key_file"
+          [ "$(wc -c <"$key_file" | tr -d ' ')" = 32 ]
+          {
+            echo "QURL_RELEASE_HUB_PUBLIC_KEY_B64=$(openssl base64 -A -in "$key_file")"
+            echo "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256=$(sha256sum "$key_file" | awk '{print $1}')"
+          } >>"$GITHUB_ENV"
 
-      - name: Upload exact sandbox customer binaries
+      - name: Build exact packaged customer artifacts once
+        run: |
+          set -euo pipefail
+          scripts/build-cli-customer-journey-artifacts.sh "$RUNNER_TEMP/qurl-customer-journey"
+
+      - name: Upload exact packaged customer artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sandbox-matched-cohort-binaries
-          path: ${{ runner.temp }}/sandbox-matched-cohort-pr-artifacts/lifecycle-artifact/
+          name: qurl-customer-journey-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qurl-customer-journey/
           if-no-files-found: error
           include-hidden-files: false
           compression-level: 0
-          retention-days: 30
+          retention-days: 7
 
-      - name: Upload exact sandbox customer source receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+  journey:
+    # Keep the check context stable. GitHub appends the matrix values to each
+    # parallel lane in the run UI.
+    name: cli / customer journey
+    needs: [changes, customer-artifacts]
+    if: github.event_name == 'push' && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: linux
+            lane_id: 1
+            os: ubuntu-latest
+            test_name: TestSandboxLinuxDefaultDaemonLifecycle
+          - lane: macos
+            lane_id: 2
+            os: macos-latest
+            test_name: TestSandboxMacOSDefaultDaemonLifecycle
+          - lane: windows
+            lane_id: 3
+            os: windows-latest
+            test_name: TestSandboxWindowsDefaultDaemonFullCustomerLifecycle
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    environment: cli-customer-journey
+    permissions:
+      contents: read
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
+      QURL_JOURNEY_QV2_ISSUER_KEY: ${{ vars.QURL_JOURNEY_QV2_ISSUER_KEY }}
+      QURL_JOURNEY_QV2_RELAY_URL: ${{ vars.QURL_JOURNEY_QV2_RELAY_URL }}
+      QURL_JOURNEY_HUB_HOST: ${{ vars.QURL_JOURNEY_HUB_HOST }}
+      QURL_JOURNEY_HUB_PORT: ${{ vars.QURL_JOURNEY_HUB_PORT }}
+      QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ vars.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
+      AUTH_TOKEN_ENDPOINT: ${{ vars.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
+      QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
+      QURL_SHARING_RUNTIME: host
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: sandbox-matched-cohort-source-receipt
-          path: ${{ runner.temp }}/sandbox-matched-cohort-pr-artifacts/source-receipt-artifact/
-          if-no-files-found: error
-          include-hidden-files: false
-          compression-level: 0
-          retention-days: 30
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-customer-journey-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qurl-customer-journey
+          digest-mismatch: error
+
+      - name: Start the Linux user service manager
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          user_id=$(id -u)
+          user_name=$(id -un)
+          runtime_dir=/run/user/$user_id
+          sudo loginctl enable-linger "$user_name"
+          sudo systemctl start "user@${user_id}.service"
+          for _ in $(seq 1 50); do
+            [[ -S "$runtime_dir/bus" ]] && break
+            sleep 0.2
+          done
+          [[ -S "$runtime_dir/bus" ]]
+          {
+            echo "XDG_RUNTIME_DIR=$runtime_dir"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus"
+          } >>"$GITHUB_ENV"
+
+      - name: Build the trusted journey harness
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GOFLAGS: -mod=readonly
+          GOWORK: off
+        run: go test -c -trimpath -tags=clisandbox -o "$RUNNER_TEMP/qurl-customer-journey.test" ./apps/cli/cmd
+
+      - name: Build the trusted journey harness
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GOFLAGS: -mod=readonly
+          GOWORK: off
+        run: go test -c -trimpath -tags=clisandbox -o "$env:RUNNER_TEMP/qurl-customer-journey.test.exe" ./apps/cli/cmd
+
+      - name: Select this runner's packaged artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir=$RUNNER_TEMP/qurl-customer-journey
+          observed=$(find "$artifact_dir" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
+          expected=$'qurl-darwin-amd64\nqurl-darwin-arm64\nqurl-linux-amd64\nqurl-windows-amd64.exe'
+          [[ "$observed" == "$expected" ]]
+          case "$RUNNER_OS/$(uname -m)" in
+            Linux/x86_64) suffix=linux-amd64 ;;
+            macOS/x86_64) suffix=darwin-amd64 ;;
+            macOS/arm64) suffix=darwin-arm64 ;;
+            *) echo "::error::unsupported journey runner platform" >&2; exit 1 ;;
+          esac
+          qurl=$artifact_dir/qurl-$suffix
+          harness=$RUNNER_TEMP/qurl-customer-journey.test
+          chmod 0500 "$qurl" "$harness"
+          selected=$("$harness" -test.list '^${{ matrix.test_name }}$')
+          [[ "$selected" == '${{ matrix.test_name }}' ]]
+          expected_version="v0.0.0-ci.${GITHUB_SHA:0:12}"
+          [[ "$("$qurl" version | awk '{print $3}')" == "$expected_version" ]]
+          {
+            echo "QURL_CLI_SANDBOX_BINARY=$qurl"
+            echo "QURL_CLI_SANDBOX_QURL_BINARY=$qurl"
+            echo "QURL_CUSTOMER_JOURNEY_TEST=$harness"
+          } >>"$GITHUB_ENV"
+
+      - name: Select this runner's packaged artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'qurl-customer-journey'
+          $observed = @(
+            Get-ChildItem -LiteralPath $artifactDir -File |
+              ForEach-Object Name |
+              Sort-Object
+          )
+          $expected = @('qurl-darwin-amd64', 'qurl-darwin-arm64', 'qurl-linux-amd64', 'qurl-windows-amd64.exe')
+          if (Compare-Object $expected $observed) { throw 'customer artifact set is not exact' }
+          $qurl = Join-Path $artifactDir 'qurl-windows-amd64.exe'
+          $harness = Join-Path $env:RUNNER_TEMP 'qurl-customer-journey.test.exe'
+          $selected = @(& $harness -test.list '^${{ matrix.test_name }}$')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($selected.Count -ne 1 -or $selected[0] -ne '${{ matrix.test_name }}') {
+            throw 'selected customer journey is not in the trusted harness'
+          }
+          $expectedVersion = "v0.0.0-ci.$($env:GITHUB_SHA.Substring(0, 12))"
+          $actualVersion = ((& $qurl version) -split '\s+')[2]
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($actualVersion -ne $expectedVersion) { throw 'packaged CLI version does not match the exact source' }
+          "QURL_CLI_SANDBOX_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_CLI_SANDBOX_QURL_BINARY=$qurl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QURL_CUSTOMER_JOURNEY_TEST=$harness" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # The M2M authority exists only in this trusted setup step. The journey
+      # receives one disposable ordinary key and no M2M token or client secret.
+      - name: Mint this lane's disposable key
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          client_dir=$RUNNER_TEMP/qurl-journey-auth
+          credential_dir=$RUNNER_TEMP/qurl-journey-credential
+          key_dir=$RUNNER_TEMP/qurl-customer-key
+          cleanup_id_dir=$RUNNER_TEMP/qurl-journey-cleanup-ids
+          cleanup_authority() {
+            scripts/remove-sensitive-tree.sh "$client_dir" "$credential_dir"
+          }
+          trap cleanup_authority EXIT
+          mkdir -m 0700 "$client_dir" "$credential_dir" "$key_dir" "$cleanup_id_dir"
+          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
+          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
+          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          python3 scripts/qurl-cli-ci-credentials.py create \
+            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+            --client-secret-file "$client_dir/client-secret" --output-dir "$credential_dir" \
+            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
+            --lane '${{ matrix.lane }}'
+          install -m 0600 "$credential_dir/api-key" "$key_dir/api-key"
+          key=$(<"$key_dir/api-key")
+          echo "::add-mask::$key"
+          {
+            echo "QURL_API_KEY_FILE=$key_dir/api-key"
+            echo "QURL_CLI_CI_CLEANUP_ID_DIR=$cleanup_id_dir"
+          } >>"$GITHUB_ENV"
+
+      - name: Mint this lane's disposable key
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+        run: |
+          $clientDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-auth'
+          $credentialDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-credential'
+          $keyDir = Join-Path $env:RUNNER_TEMP 'qurl-customer-key'
+          $cleanupIDDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-cleanup-ids'
+          try {
+            foreach ($path in @($clientDir, $credentialDir, $keyDir, $cleanupIDDir)) {
+              New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null
+              & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            $clientIDFile = Join-Path $clientDir 'client-id'
+            $clientSecretFile = Join-Path $clientDir 'client-secret'
+            [IO.File]::WriteAllText($clientIDFile, $env:AUTH_CLIENT_ID)
+            [IO.File]::WriteAllText($clientSecretFile, $env:AUTH_CLIENT_SECRET)
+            Remove-Item Env:AUTH_CLIENT_ID, Env:AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
+            python scripts/qurl-cli-ci-credentials.py create `
+              --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
+              --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
+              --client-secret-file $clientSecretFile --output-dir $credentialDir `
+              --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
+              --lane '${{ matrix.lane }}'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $apiKeyFile = Join-Path $keyDir 'api-key'
+            Copy-Item -LiteralPath (Join-Path $credentialDir 'api-key') -Destination $apiKeyFile -ErrorAction Stop
+            $key = [IO.File]::ReadAllText($apiKeyFile)
+            if ($key -notmatch '^lv_(?:live|test)_') { throw 'disposable key is malformed' }
+            Write-Output "::add-mask::$key"
+            "QURL_API_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "QURL_CLI_CI_CLEANUP_ID_DIR=$cleanupIDDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            foreach ($path in @($clientDir, $credentialDir)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+              if (Test-Path -LiteralPath $path) { throw 'standing authority remained on the journey runner' }
+            }
+          }
+
+      - name: Run the packaged customer journey
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          QURL_SANDBOX_QV2_ISSUER_KEY: ${{ env.QURL_JOURNEY_QV2_ISSUER_KEY }}
+          QURL_SANDBOX_QV2_RELAY_URL: ${{ env.QURL_JOURNEY_QV2_RELAY_URL }}
+          QURL_CONNECTOR_HUB_HOST: ${{ env.QURL_JOURNEY_HUB_HOST }}
+          QURL_CONNECTOR_HUB_PORT: ${{ env.QURL_JOURNEY_HUB_PORT }}
+          QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ env.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
+          QURL_CLI_SANDBOX_LINUX_DAEMON: ${{ matrix.lane == 'linux' && 'enabled' || '' }}
+          QURL_CLI_SANDBOX_MACOS_DAEMON: ${{ matrix.lane == 'macos' && 'enabled' || '' }}
+        run: |
+          set -euo pipefail
+          output=$RUNNER_TEMP/qurl-customer-journey.out
+          status=0
+          set +e
+          "$QURL_CUSTOMER_JOURNEY_TEST" -test.v -test.count=1 -test.run '^${{ matrix.test_name }}$' \
+            2>&1 | tee "$output"
+          status=${PIPESTATUS[0]}
+          set -e
+          pass_count=$(awk -v name='${{ matrix.test_name }}' '$0 ~ "^--- PASS: " name " \\(" { count++ } END { print count + 0 }' "$output")
+          skip_count=$(awk '$0 ~ /^[[:space:]]*--- SKIP:/ { count++ } END { print count + 0 }' "$output")
+          [[ "$pass_count" == 1 && "$skip_count" == 0 && "$status" == 0 ]] || {
+            echo "::error::customer journey must report one exact PASS, no SKIP, and exit zero" >&2
+            exit 1
+          }
+
+      - name: Run the packaged customer journey
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QURL_SANDBOX_QV2_ISSUER_KEY: ${{ env.QURL_JOURNEY_QV2_ISSUER_KEY }}
+          QURL_SANDBOX_QV2_RELAY_URL: ${{ env.QURL_JOURNEY_QV2_RELAY_URL }}
+          QURL_CONNECTOR_HUB_HOST: ${{ env.QURL_JOURNEY_HUB_HOST }}
+          QURL_CONNECTOR_HUB_PORT: ${{ env.QURL_JOURNEY_HUB_PORT }}
+          QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ env.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
+          QURL_CLI_SANDBOX_WINDOWS_DAEMON: enabled
+        run: |
+          $testName = '${{ matrix.test_name }}'
+          $output = @(& $env:QURL_CUSTOMER_JOURNEY_TEST -test.v -test.count=1 -test.run "^$testName$" 2>&1)
+          $status = $LASTEXITCODE
+          $output | Write-Output
+          $passPattern = '^--- PASS: ' + [Regex]::Escape($testName) + ' \('
+          $passCount = @($output | Where-Object { $_ -match $passPattern }).Count
+          $skipCount = @($output | Where-Object { $_ -match '^\s*--- SKIP:' }).Count
+          if ($passCount -ne 1 -or $skipCount -ne 0 -or $status -ne 0) {
+            throw 'customer journey must report one exact PASS, no SKIP, and exit zero'
+          }
+
+      - id: fence-posix-service
+        name: Fence the POSIX background service
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)
+              unit=ai.layerv.qurl.share-daemon.service
+              systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+              rm -f -- "$HOME/.config/systemd/user/$unit"
+              systemctl --user daemon-reload
+              ! systemctl --user is-active --quiet "$unit"
+              ;;
+            macOS)
+              service="gui/$(id -u)/ai.layerv.qurl.share-daemon"
+              launchctl bootout "$service" >/dev/null 2>&1 || true
+              rm -f -- "$HOME/Library/LaunchAgents/ai.layerv.qurl.share-daemon.plist"
+              ! launchctl print "$service" >/dev/null 2>&1
+              ;;
+            *) exit 1 ;;
+          esac
+
+      - id: fence-windows-service
+        name: Fence the Windows background service
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $label = 'ai.layerv.qurl.share-daemon'
+          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $sha = [Security.Cryptography.SHA256]::Create()
+          try { $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("$sid`0$label")) } finally { $sha.Dispose() }
+          $suffix = -join $digest[0..7].ForEach({ $_.ToString('x2') })
+          $taskName = "$label.$suffix"
+          $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+          if ($null -ne $task) {
+            Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null
+            Stop-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            do {
+              $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+              if ($null -eq $task -or $task.State -ne 'Running') { break }
+              Start-Sleep -Milliseconds 200
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if ($null -ne $task -and $task.State -eq 'Running') { throw 'qURL scheduled task did not stop' }
+            if ($null -ne $task) { Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop }
+          }
+          if ($null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+            throw 'qURL scheduled task remains installed'
+          }
+
+      - id: remove-posix-key
+        name: Remove the local disposable key
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/qurl-customer-key"
+
+      - id: remove-windows-key
+        name: Remove the local disposable key
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'qurl-customer-key'
+          if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+          if (Test-Path -LiteralPath $path) { throw 'local disposable key remains on the journey runner' }
+          "QURL_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Reconcile this lane after the POSIX service fence
+        if: always() && runner.os != 'Windows' && steps.fence-posix-service.outcome == 'success' && steps.remove-posix-key.outcome == 'success'
+        shell: bash
+        env:
+          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          client_dir=$RUNNER_TEMP/qurl-journey-auth
+          cleanup_id_dir=$RUNNER_TEMP/qurl-journey-cleanup-ids
+          cleanup() { scripts/remove-sensitive-tree.sh "$client_dir" "$cleanup_id_dir"; }
+          trap cleanup EXIT
+          mkdir -m 0700 "$client_dir"
+          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
+          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
+          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
+            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+            --client-secret-file "$client_dir/client-secret" \
+            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
+            --lane '${{ matrix.lane }}' --runtime host --cleanup-id-dir "$cleanup_id_dir"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true
+          fi
+
+      - name: Reconcile this lane after the Windows service fence
+        if: always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success' && steps.remove-windows-key.outcome == 'success'
+        shell: pwsh
+        env:
+          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+        run: |
+          $clientDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-auth'
+          $cleanupIDDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-cleanup-ids'
+          try {
+            New-Item -ItemType Directory -Path $clientDir -ErrorAction Stop | Out-Null
+            & icacls.exe $clientDir /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $clientIDFile = Join-Path $clientDir 'client-id'
+            $clientSecretFile = Join-Path $clientDir 'client-secret'
+            [IO.File]::WriteAllText($clientIDFile, $env:AUTH_CLIENT_ID)
+            [IO.File]::WriteAllText($clientSecretFile, $env:AUTH_CLIENT_SECRET)
+            Remove-Item Env:AUTH_CLIENT_ID, Env:AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
+            python scripts/qurl-cli-ci-credentials.py reconcile-run `
+              --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
+              --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
+              --client-secret-file $clientSecretFile `
+              --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
+              --lane '${{ matrix.lane }}' --runtime host --cleanup-id-dir $cleanupIDDir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            foreach ($path in @($clientDir, $cleanupIDDir)) {
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+              if (Test-Path -LiteralPath $path) { throw 'cleanup state remained on the journey runner' }
+            }
+          }
+
+  journey-cleanup:
+    name: cli / customer journey cleanup
+    needs: [changes, journey]
+    if: always() && github.event_name == 'push' && needs.changes.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cli-customer-journey-cleanup
+    permissions:
+      contents: read
+    env:
+      QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
+      AUTH_TOKEN_ENDPOINT: ${{ vars.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Revoke run resources and credentials
+        env:
+          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          client_dir=$RUNNER_TEMP/qurl-journey-auth
+          cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
+          trap cleanup EXIT
+          mkdir -m 0700 "$client_dir"
+          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
+          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
+          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          for lane_spec in linux:1 macos:2 windows:3; do
+            IFS=: read -r lane lane_id <<<"$lane_spec"
+            python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
+              --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+              --client-secret-file "$client_dir/client-secret" \
+              --run-id "${GITHUB_RUN_ID}${lane_id}" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --lane "$lane" --runtime host
+          done
 
   goreleaser-check:
     name: cli / goreleaser check
@@ -532,7 +1148,7 @@ jobs:
     permissions: {}
     # Every CLI quality gate must be listed here; cli / required only
     # validates jobs in this needs set. display_names below is annotation-only.
-    needs: [changes, lint, test, govulncheck, matrix, sandbox-customer-artifacts, goreleaser-check, image-smoke]
+    needs: [changes, lint, test, govulncheck, matrix, customer-artifacts, journey, journey-cleanup, goreleaser-check, image-smoke]
     if: always()
     steps:
       - name: Verify CLI CI result
@@ -540,6 +1156,7 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CLI_CHANGED: ${{ needs.changes.outputs.cli }}
+          LIVE_REQUIRED: ${{ github.event_name == 'push' }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -574,8 +1191,14 @@ jobs:
               matrix)
                 echo "cli / matrix"
                 ;;
-              sandbox-customer-artifacts)
-                echo "cli / sandbox matched-cohort artifacts"
+              customer-artifacts)
+                echo "cli / customer journey artifacts"
+                ;;
+              journey)
+                echo "cli / customer journey"
+                ;;
+              journey-cleanup)
+                echo "cli / customer journey cleanup"
                 ;;
               goreleaser-check)
                 echo "cli / goreleaser check"
@@ -597,6 +1220,16 @@ jobs:
               # The change detector is checked above; it is not a CLI quality gate.
               continue
             fi
+            if [[ "$job" == journey || "$job" == journey-cleanup ]]; then
+              if [[ "$LIVE_REQUIRED" == true && "$result" != success ]]; then
+                echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+                failed=1
+              elif [[ "$LIVE_REQUIRED" != true && "$result" != skipped && "$result" != success ]]; then
+                echo "::error::$(display_name "$job") concluded ${result:-<empty>} on a pull request"
+                failed=1
+              fi
+              continue
+            fi
             if [ "$result" != "success" ]; then
               # CLI-impacting changes require every quality gate listed in
               # needs to run and pass; skipped/cancelled is a failed gate.
@@ -606,3 +1239,39 @@ jobs:
           done <<<"$needs_rows"
 
           exit "$failed"
+
+  signal-cli-release:
+    name: cli / signal exact release
+    needs: [changes, required]
+    if: github.event_name == 'push' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Continue an exact draft CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(jq -er '."apps/cli" | select(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$"))' \
+            .release-please-manifest.json)
+          cli_tag="v${version}"
+          tag_sha=$(git rev-parse --verify "${cli_tag}^{commit}" 2>/dev/null || true)
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "No exact CLI release belongs to this source SHA."
+            exit 0
+          fi
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$cli_tag")
+          [[ $(jq -er '.draft | select(type == "boolean")' <<<"$release") == true ]] || {
+            echo "The exact CLI release is already public."
+            exit 0
+          }
+          gh workflow run release-please.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            --field "cli_tag=$cli_tag" --field "source_sha=$GITHUB_SHA"

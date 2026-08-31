@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +20,15 @@ import (
 
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
+
+func testNativeSessionConfig(ownerID string) (connectorshare.NativeSessionOperationAuthority, error) {
+	return connectorshare.NativeSessionOperationAuthority{OwnerID: ownerID}, nil
+}
 
 type headlessTestFactory struct {
 	started chan struct{}
@@ -91,35 +98,51 @@ func TestHiddenTestCRIDValidatorIsStrictAndCredentialFree(t *testing.T) {
 }
 
 func TestLoadHeadlessBootstrapWarmStartDoesNotRequireToken(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
-	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config, credential, err := loadHeadlessBootstrap(stateDir, configPath, filepath.Join(t.TempDir(), "absent-token"))
+	writeHeadlessAgentState(t, stateDir, true)
+	config, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, filepath.Join(t.TempDir(), "absent-token"))
 	if err != nil || config == nil || credential != "" {
 		t.Fatalf("warm bootstrap = %+v, credential=%q, err=%v", config, credential, err)
 	}
 }
 
+func TestLoadHeadlessBootstrapIncompleteStateReusesEnrollmentToken(t *testing.T) {
+	stateDir := connectorStateTestDir(t)
+	configPath := writeHeadlessConfigFixture(t)
+	writeHeadlessAgentState(t, stateDir, false)
+	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
+	if err := os.WriteFile(tokenPath, []byte("same-one-time-value\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	config, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, tokenPath)
+	if err != nil || config == nil || credential != "same-one-time-value" {
+		t.Fatalf("incomplete bootstrap = %+v, credential=%q, err=%v", config, credential, err)
+	}
+	if _, _, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, ""); err == nil ||
+		!strings.Contains(err.Error(), "resume an incomplete") {
+		t.Fatalf("missing incomplete-state token error = %v", err)
+	}
+}
+
 func TestLoadHeadlessBootstrapFirstStartRequiresReadOnlyToken(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
 	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
 	if err := os.WriteFile(tokenPath, []byte("one-time-value\n"), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	_, credential, err := loadHeadlessBootstrap(stateDir, configPath, tokenPath)
+	_, credential, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, tokenPath)
 	if err != nil || credential != "one-time-value" {
 		t.Fatalf("first bootstrap credential=%q, err=%v", credential, err)
 	}
-	if _, _, err := loadHeadlessBootstrap(stateDir, configPath, ""); err == nil || !strings.Contains(err.Error(), "required for first") {
+	if _, _, err := loadHeadlessBootstrap(context.Background(), stateDir, configPath, ""); err == nil || !strings.Contains(err.Error(), "required for first") {
 		t.Fatalf("missing first token error = %v", err)
 	}
 }
 
 func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	configPath := writeHeadlessConfigFixture(t)
 	tokenPath := filepath.Join(t.TempDir(), "enrollment-token")
 	const credential = "secret-one-time-value"
@@ -132,12 +155,16 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 		if config.EnrollmentCredential != credential {
 			t.Fatalf("enrollment credential = %q", config.EnrollmentCredential)
 		}
+		if config.SessionOperations.OwnerID != "own_cli_fixture" {
+			t.Fatalf("native session authority = %#v", config.SessionOperations)
+		}
 		return nil, errors.Join(errors.New("native bootstrap rejected"), qurl.ErrAssignmentKeyRejected)
 	}
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	err := runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, tokenPath)
 	if err == nil || !strings.Contains(err.Error(), "native bootstrap rejected") {
@@ -146,8 +173,14 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 	if strings.Contains(err.Error(), credential) {
 		t.Fatalf("error exposed enrollment credential: %v", err)
 	}
-	if _, statErr := os.Lstat(filepath.Join(stateDir, connectorstate.LocalSharesFile)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("local registry exists after failed native bootstrap: %v", statErr)
+	registry, openErr := connectorstate.OpenLocalShareRegistry(stateDir)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	shares, listErr := registry.List(context.Background())
+	ownerID, ownerPresent, ownerErr := registry.OwnerID(context.Background())
+	if listErr != nil || len(shares) != 0 || ownerErr != nil || ownerPresent || ownerID != "" {
+		t.Fatalf("failed bootstrap durable state = shares %+v list %v owner %q/%v/%v", shares, listErr, ownerID, ownerPresent, ownerErr)
 	}
 }
 
@@ -171,7 +204,14 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+		if !verifyOwner {
+			t.Fatal("first headless bootstrap did not request authenticated owner verification")
+		}
+		if apiConfig == nil || apiConfig.BaseURL != "https://api.example.com" || apiConfig.Version != "test" ||
+			apiConfig.Verbose == nil || apiConfig.Sleep == nil || apiConfig.NewRequestID == nil {
+			t.Fatalf("headless registered-client config = %+v, want endpoint, version, and observability hooks", apiConfig)
+		}
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
 		}
@@ -182,9 +222,11 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	}
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
-		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
+		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
+		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -199,7 +241,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	if attempts.Load() != 3 {
 		t.Fatalf("native bootstrap attempts=%d, want 3 in one process", attempts.Load())
 	}
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +270,39 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	}
 }
 
+func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
+	originalWait := waitHeadlessNativeRetry
+	t.Cleanup(func() { waitHeadlessNativeRetry = originalWait })
+	waitHeadlessNativeRetry = func(context.Context, time.Duration) error { return nil }
+
+	var logs bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	const secret = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+	factory := &headlessTestFactory{started: make(chan struct{})}
+	attempts := 0
+	got, err := openHeadlessSessionFactory(context.Background(), func(context.Context) (connectordaemon.SessionFactory, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("temporary native failure for " + secret)
+		}
+		return factory, nil
+	})
+	if err != nil || got != factory || attempts != 2 {
+		t.Fatalf("headless open = %T, attempts=%d, err=%v", got, attempts, err)
+	}
+	text := logs.String()
+	if !strings.Contains(text, "headless share daemon bootstrap failed; retrying") ||
+		!strings.Contains(text, "attempt=1") || !strings.Contains(text, "retry_in=250ms") {
+		t.Fatalf("retry log missing context: %q", text)
+	}
+	if strings.Contains(text, secret) || !strings.Contains(text, "lv_***") {
+		t.Fatalf("retry log did not redact credential: %q", text)
+	}
+}
+
 func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	stateDir, err := os.MkdirTemp("/tmp", "qurl-headless-warm-")
 	if err != nil {
@@ -239,21 +314,22 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	registry, err := openOwnedTestShareRegistry(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := registry.Put(context.Background(), &config.Shares[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeHeadlessAgentState(t, stateDir, true)
 
 	originalBuilder := buildNativeSessionFactory
 	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 	factory := &headlessTestFactory{started: make(chan struct{})}
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ string) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+		if verifyOwner {
+			t.Fatal("warm headless restart repeated authenticated owner verification")
+		}
 		if cfg.EnrollmentCredential != "" {
 			t.Fatalf("warm restart retained enrollment credential %q", cfg.EnrollmentCredential)
 		}
@@ -263,6 +339,7 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -298,13 +375,13 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 		{name: "additional resource", extra: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			stateDir := t.TempDir()
+			stateDir := connectorStateTestDir(t)
 			configPath := writeHeadlessConfigFixture(t)
 			config, err := connectorstate.LoadHeadlessConfig(configPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+			registry, err := openOwnedTestShareRegistry(stateDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -317,14 +394,12 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			if err := registry.Put(context.Background(), &other); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(stateDir, connectorstate.AgentStateFile), []byte("persisted"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeHeadlessAgentState(t, stateDir, true)
 
 			originalBuilder := buildNativeSessionFactory
 			t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 			var opens atomic.Int32
-			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, string) (connectordaemon.SessionFactory, error) {
+			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool) (connectordaemon.SessionFactory, error) {
 				opens.Add(1)
 				return &headlessTestFactory{started: make(chan struct{})}, nil
 			}
@@ -332,6 +407,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 				version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 				resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 				resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+				resolveSessionConfig: testNativeSessionConfig,
 			}
 			err = runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, "")
 			if err == nil || !strings.Contains(err.Error(), "dedicated state volume") {
@@ -355,7 +431,8 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 func writeHeadlessConfigFixture(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "share.yaml")
-	data := `version: 1
+	data := `version: 2
+owner_id: own_cli_fixture
 shares:
   - crid: qhpviqz46qwcvx56glfatm3p3ooccwfcf2it4sdgjervwdkapykw2j2vj4uq
     resource_id: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA
@@ -372,4 +449,30 @@ shares:
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeHeadlessAgentState(t *testing.T, stateDir string, complete bool) {
+	t.Helper()
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdkStore, err := store.Handoff()
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	state := &qurl.AgentState{AgentID: "headless-test-agent"}
+	if complete {
+		registeredAt := time.Now().UTC()
+		state.RegisteredAt = &registeredAt
+		state.DeviceAPIKey = "lv_device_headless_test"
+	}
+	if err := sdkStore.SaveAgentState(context.Background(), state); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

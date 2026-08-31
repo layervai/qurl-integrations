@@ -1,18 +1,117 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-connector/pkg/agentstate"
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
+
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
+
+type lockedLogBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(data)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+type failingResourceAdmitter struct{ err error }
+
+func (a *failingResourceAdmitter) Admit(context.Context, string, string) (connectorshare.Admission, error) {
+	return connectorshare.Admission{}, a.err
+}
+
+func (*failingResourceAdmitter) Retire(context.Context, connectorshare.Admission) error { return nil }
+func (*failingResourceAdmitter) MarkServingHealthy() error                              { return nil }
+func (*failingResourceAdmitter) Close() error                                           { return nil }
+
+func TestNativeSessionFactoryLogsClassifiedRetryWithoutStoppingSession(t *testing.T) {
+	const secret = "lv_live_SUPERSECRETVALUE0000001"
+	attemptErr := errors.Join(errors.New("classified native attempt failure from Bearer "+secret),
+		&qurl.ServerDenyError{ErrCode: "52005"})
+	admitter := &failingResourceAdmitter{err: attemptErr}
+	common, err := DefaultFRPCommon(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewNativeSessionFactory(admitter, common, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	share := daemonShare("retry", 1, "on")
+	session, err := factory.Start(context.Background(), &share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(logs.String(), "classified native attempt failure") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	got := logs.String()
+	for _, want := range []string{"share daemon session attempt failed; retrying", share.CRID, "classified native attempt failure", "Bearer ***", "retry_in="} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("retry log %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("retry log contains a credential: %q", got)
+	}
+	diagnostic, ok := session.(diagnosticSession)
+	if !ok {
+		t.Fatal("native session does not expose redacted diagnostics")
+	}
+	state := diagnostic.Diagnostic()
+	if state.State != "retrying" || state.FailureCategory != "platform_denied" ||
+		state.FailureCode != "52005" || state.RetryAttempt != 1 || state.NextRetryAt == nil {
+		t.Fatalf("retry diagnostic = %#v", state)
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.Stop(stopCtx); err != nil {
+		t.Fatalf("stop retrying session: %v", err)
+	}
+}
+
+func TestNativeSessionCancellationFilterKeepsIndependentShutdownFailure(t *testing.T) {
+	failure := errors.New("retire native admission after shutdown")
+	wrappedCancellation := fmt.Errorf("resource runner stopped: %w", context.Canceled)
+	got := withoutExpectedNativeSessionCancellation(errors.Join(wrappedCancellation, failure))
+	if !errors.Is(got, failure) || errors.Is(got, context.Canceled) {
+		t.Fatalf("filtered native shutdown error = %v, want only %v", got, failure)
+	}
+	if got := withoutExpectedNativeSessionCancellation(errors.Join(wrappedCancellation)); got != nil {
+		t.Fatalf("filtered expected native cancellation = %v, want nil", got)
+	}
+}
 
 type closeTrackingFactory struct {
 	delegate *fakeFactory
@@ -90,9 +189,6 @@ func newCloseTrackingFactory() *closeTrackingFactory {
 }
 
 func TestDaemonIPCIsReadyWhileNativeAssignmentRecoveryContinues(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("local sharing IPC is unsupported on Windows")
-	}
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
 	started := make(chan struct{})
 	recovered := make(chan struct{})
@@ -174,6 +270,73 @@ func TestDeferredSessionFactoryRetriesFailedInitialization(t *testing.T) {
 	}
 	if delegate.closes.Load() != 1 {
 		t.Fatalf("successful delegate closes=%d, want 1", delegate.closes.Load())
+	}
+}
+
+func TestDeferredSessionFactoryKeepsSuccessfulRuntimeContextUntilClose(t *testing.T) {
+	delegate := newCloseTrackingFactory()
+	var runtimeCtx context.Context
+	factory, err := NewDeferredSessionFactory(func(ctx context.Context) (SessionFactory, error) {
+		runtimeCtx = ctx
+		return delegate, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := daemonShare("context-lifetime", 1, "on")
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	session, err := factory.Start(startCtx, &share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelStart()
+	if runtimeCtx == nil || runtimeCtx.Err() != nil {
+		t.Fatalf("runtime context after Start caller cancellation = %v, want live context", runtimeCtx)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	if err := session.Stop(stopCtx); err != nil {
+		stopCancel()
+		t.Fatal(err)
+	}
+	stopCancel()
+	if err := factory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(runtimeCtx.Err(), context.Canceled) {
+		t.Fatalf("runtime context after Close = %v, want canceled", runtimeCtx.Err())
+	}
+	if delegate.closes.Load() != 1 {
+		t.Fatalf("successful delegate closes=%d, want 1", delegate.closes.Load())
+	}
+}
+
+func TestDeferredSessionFactoryRejectsDelegateCompletedAfterCallerCancellation(t *testing.T) {
+	delegate := newCloseTrackingFactory()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	factory, err := NewDeferredSessionFactory(func(context.Context) (SessionFactory, error) {
+		close(started)
+		<-release
+		return delegate, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	share := daemonShare("canceled-initialization", 1, "on")
+	go func() {
+		_, startErr := factory.Start(startCtx, &share)
+		done <- startErr
+	}()
+	<-started
+	cancelStart()
+	close(release)
+	if startErr := <-done; !errors.Is(startErr, context.Canceled) {
+		t.Fatalf("Start error = %v, want caller cancellation", startErr)
+	}
+	if delegate.closes.Load() != 1 {
+		t.Fatalf("delegate completed after cancellation closes=%d, want 1", delegate.closes.Load())
 	}
 }
 
@@ -363,5 +526,228 @@ func TestDeferredSessionFactoryConcurrentCloseWaitsForOneCleanup(t *testing.T) {
 	}
 	if delegate.closes.Load() != 1 {
 		t.Fatalf("delegate closes=%d, want 1", delegate.closes.Load())
+	}
+}
+
+func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) {
+	category, code := classifyShareFailure(errors.Join(
+		qurl.ErrNativeSessionOperationLeaseMargin,
+		errors.New("assignment has insufficient journal margin"),
+	))
+	if category != diagnosticFailureAssignment || code != "" {
+		t.Fatalf("classification=%q/%q, want assignment with no public code", category, code)
+	}
+}
+
+func TestClassifyShareFailureAlwaysProducesIPCCompatibleDiagnostic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{name: "five-digit deny", err: &qurl.ServerDenyError{ErrCode: "52005"}, wantCode: "52005"},
+		{name: "short deny", err: &qurl.ServerDenyError{ErrCode: "7"}},
+		{name: "nondecimal deny", err: &qurl.ServerDenyError{ErrCode: "52x05"}},
+		{
+			name: "invalid recovery code",
+			err: errors.Join(
+				&qurl.CredentialRecoveryError{Code: "52401x", Phase: "hub_issue_recovery"},
+				qurl.ErrRecoveryCredentialRejected,
+			),
+		},
+		{
+			name: "invalid assignment code",
+			err: errors.Join(
+				&qurl.AssignmentError{Code: "522010"},
+				qurl.ErrAssignmentIdentityRejected,
+			),
+		},
+		{
+			name: "invalid completion code",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "5230x"},
+				qurl.ErrCompletionRequestRejected,
+			),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			category, code := classifyShareFailure(test.err)
+			if code != test.wantCode {
+				t.Fatalf("classification code = %q, want %q", code, test.wantCode)
+			}
+			now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+			next := now.Add(time.Second)
+			encoded, err := json.Marshal(IPCStatus{
+				JobVersion: "1/test",
+				Running:    map[string]string{"resource": "crid"},
+				Resources: map[string]ResourceDiagnostic{"resource": {
+					State: diagnosticStateRetrying, LastTransition: now,
+					FailureCategory: category, FailureCode: code,
+					RetryAttempt: 1, NextRetryAt: &next,
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := decodeIPCStatus(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatalf("classified diagnostic did not survive IPC decode: %v", err)
+			}
+			if got := status.Resources["resource"].FailureCode; got != test.wantCode {
+				t.Fatalf("round-trip code = %q, want %q", got, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailurePreservesRecoveryTaxonomyCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		sentinel error
+		category string
+	}{
+		{"hub unavailable", "52400", qurl.ErrCredentialRecoveryUnavailable, diagnosticFailurePlatformDenied},
+		{"credential rejected", "52401", qurl.ErrRecoveryCredentialRejected, diagnosticFailureIdentity},
+		{"hub identity rejected", "52402", qurl.ErrCredentialRecoveryIdentityRejected, diagnosticFailureIdentity},
+		{"revoke required", "52403", qurl.ErrCredentialRecoveryRevokeRequired, diagnosticFailureIdentity},
+		{"rate limited", "52404", qurl.ErrCredentialRecoveryRateLimited, diagnosticFailurePlatformDenied},
+		{"hub request rejected", "52405", qurl.ErrCredentialRecoveryRequestRejected, diagnosticFailurePlatformDenied},
+		{"assignment required", "52406", qurl.ErrCredentialRecoveryAssignmentRequired, diagnosticFailureAssignment},
+		{"replacement unavailable", "52410", qurl.ErrCredentialReplacementUnavailable, diagnosticFailurePlatformDenied},
+		{"grant rejected", "52411", qurl.ErrCredentialRecoveryGrantRejected, diagnosticFailurePlatformDenied},
+		{"cell identity rejected", "52412", qurl.ErrCredentialRecoveryIdentityRejected, diagnosticFailureIdentity},
+		{"candidate conflict", "52413", qurl.ErrCredentialRecoveryCandidateConflict, diagnosticFailurePlatformDenied},
+		{"cell request rejected", "52414", qurl.ErrCredentialRecoveryRequestRejected, diagnosticFailurePlatformDenied},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			phase := "hub_issue_recovery"
+			if test.code >= "52410" {
+				phase = "assigned_cell_complete_recovery"
+			}
+			err := errors.Join(
+				&qurl.CredentialRecoveryError{Code: test.code, Phase: phase},
+				test.sentinel,
+			)
+			if test.code == "52400" || test.code == "52404" || test.code == "52410" {
+				err = &qurl.CredentialRecoveryRetryRequiredError{
+					Phase: phase, Attempts: 3, Elapsed: time.Second, Last: err,
+				}
+			}
+			category, code := classifyShareFailure(err)
+			if category != test.category || code != test.code {
+				t.Fatalf("classification=%q/%q, want %s/%s", category, code, test.category, test.code)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailurePreservesAssignmentIdentityCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{
+			name: "assignment identity",
+			err: errors.Join(
+				&qurl.AssignmentError{Code: "52201"},
+				qurl.ErrAssignmentIdentityRejected,
+			),
+			code: "52201",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			category, code := classifyShareFailure(test.err)
+			if category != diagnosticFailureIdentity || code != test.code {
+				t.Fatalf("classification=%q/%q, want identity/%s", category, code, test.code)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailureRecoverySentinelsWithoutWireEnvelope(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		category string
+	}{
+		{"expired", qurl.ErrCredentialRecoveryExpired, diagnosticFailureIdentity},
+		{"assignment refresh", qurl.ErrCredentialRecoveredAssignmentRefreshRequired, diagnosticFailureAssignment},
+		{"candidate persistence", qurl.ErrCredentialRecoveryCandidatePersistence, diagnosticFailureLocalState},
+		{"retry exhausted", qurl.ErrCredentialRecoveryRetryRequired, diagnosticFailurePlatformDenied},
+		{"invalid response", qurl.ErrCredentialRecoveryInvalidResponse, diagnosticFailurePlatformDenied},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			category, code := classifyShareFailure(fmt.Errorf("recover native identity: %w", test.err))
+			if category != test.category || code != "" {
+				t.Fatalf("classification=%q/%q, want %s with no code", category, code, test.category)
+			}
+		})
+	}
+}
+
+func TestClassifyShareFailurePreservesPublicEnrollmentTaxonomy(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		category string
+		code     string
+	}{
+		{
+			name: "peer timeout",
+			err: errors.Join(
+				&qurl.EndpointNoReplyError{Endpoint: "private.invalid:443", Attempts: 3, Elapsed: time.Second},
+				qurl.ErrRegistrationRecoveryRequired,
+			),
+			category: diagnosticFailurePeerTimeout,
+		},
+		{"device credential", &qurl.NativeCredentialRecoveryRequiredError{AgentID: "private-agent", Cause: qurl.ErrDeviceCredentialMissing}, diagnosticFailureIdentity, ""},
+		{"registration recovery", qurl.ErrRegistrationRecoveryRequired, diagnosticFailureEnrollment, ""},
+		{"registration disabled", qurl.ErrRegistrationDisabled, diagnosticFailurePlatformDenied, ""},
+		{"local persistence", qurl.ErrAgentCompletionCandidatePersistence, diagnosticFailureLocalState, ""},
+		{"invalid session operation", qurl.ErrInvalidNativeSessionOperation, diagnosticFailureLocalState, ""},
+		{"operation conflict", agentstate.ErrSessionOperationConflict, diagnosticFailureLocalState, ""},
+		{"operation journal", agentstate.ErrSessionOperationJournalCorrupt, diagnosticFailureLocalState, ""},
+		{
+			name: "completion identity code",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "52301"},
+				qurl.ErrCompletionIdentityRejected,
+			),
+			category: diagnosticFailureIdentity,
+			code:     "52301",
+		},
+		{
+			name: "completion request code",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "52304"},
+				qurl.ErrCompletionRequestRejected,
+			),
+			category: diagnosticFailureEnrollment,
+			code:     "52304",
+		},
+		{
+			name: "unrecognized completion code hidden",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "99999"},
+				qurl.ErrCompletionRequestRejected,
+			),
+			category: diagnosticFailureEnrollment,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			category, code := classifyShareFailure(fmt.Errorf("run Connector: %w", test.err))
+			if category != test.category || code != test.code {
+				t.Fatalf("classification=%q/%q, want %s/%s", category, code, test.category, test.code)
+			}
+		})
 	}
 }

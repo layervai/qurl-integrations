@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/crid"
@@ -95,7 +96,7 @@ func (row *sharingRow) UnmarshalJSON(data []byte) error {
 	if delim, ok := last.(json.Delim); !ok || delim != '}' {
 		return errors.New("sharing row object is incomplete")
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("sharing row has trailing JSON")
 		}
@@ -149,7 +150,7 @@ type envelopeMeta struct {
 	RequestID     string `json:"request_id"`
 	NextCursor    string `json:"next_cursor"`
 	HasMore       bool   `json:"has_more"`
-	FoundExisting bool   `json:"found_existing"`
+	FoundExisting *bool  `json:"found_existing"`
 }
 
 // publishRequest is the pinned publish wire shape: type is required and
@@ -164,7 +165,7 @@ type publishRequest struct {
 
 // Publish registers targetURL as a protected URL resource. This is a direct
 // call rather than the SDK's ProtectURL because the pinned platform contract
-// requires the explicit `type: url` discriminator, which qurl-go v0.5.3 does
+// requires the explicit `type: url` discriminator, which qurl-go v0.8.1 does
 // not send.
 func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error) {
 	if err := validateTargetURL(targetURL); err != nil {
@@ -177,7 +178,10 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		Tags:        opts.Tags,
 		Alias:       opts.Alias,
 	}
-	reply, err := c.doREST(ctx, http.MethodPost, "/v1/resources", body)
+	// Publish has no service idempotency key. A rate-limit response is usually
+	// pre-application, but the client cannot prove that a replay would not mint
+	// a duplicate resource, so it is deliberately single-shot.
+	reply, err := c.doRESTOnce(ctx, http.MethodPost, "/v1/resources", body)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +198,12 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 	if strings.TrimSpace(env.Data.ResourceID) == "" {
 		return nil, fmt.Errorf("%w: publish response missing resource_id", qurl.ErrInvalidAPIResponse)
 	}
-	foundExisting := env.Meta.FoundExisting
+	if strings.TrimSpace(env.Data.CRID) == "" {
+		return nil, fmt.Errorf("%w: publish response missing crid", qurl.ErrInvalidAPIResponse)
+	}
+	if err := resourceidentity.ValidatePair(env.Data.CRID, env.Data.ResourceID); err != nil {
+		return nil, fmt.Errorf("%w: publish response identity: %w", qurl.ErrInvalidAPIResponse, err)
+	}
 	return &Published{
 		CRID:          env.Data.CRID,
 		ResourceID:    env.Data.ResourceID,
@@ -202,7 +211,7 @@ func (c *client) Publish(ctx context.Context, targetURL string, opts PublishOpti
 		Status:        env.Data.Status,
 		CreatedAt:     env.Data.CreatedAt,
 		ExpiresAt:     env.Data.ExpiresAt,
-		FoundExisting: &foundExisting,
+		FoundExisting: env.Meta.FoundExisting,
 	}, nil
 }
 
@@ -228,7 +237,7 @@ func validateTargetURL(target string) error {
 	return nil
 }
 
-// List fetches one page of the caller's resources. qurl-go v0.5.3 has no
+// List fetches one page of the caller's resources. qurl-go has no
 // generic list surface (its slug lookup is connector-only), so this is a
 // direct call on the same /v1/resources endpoint through the shared
 // transport.
@@ -290,17 +299,10 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 		return nil, err
 	}
 	if reply.status != http.StatusOK {
-		problem := reply.problem()
-		var apiErr *Error
-		// Some deployed edges predate the owner-facing single-resource GET
-		// route and answer that path with an unstructured 404. Only that exact
-		// route-level absence may use the paged list compatibility path. A
-		// structured not_found response is an authoritative missing resource
-		// and must not trigger an account-wide scan.
-		if !errors.As(problem, &apiErr) || apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "" {
-			return nil, problem
-		}
-		return c.findResourceInList(ctx, id)
+		// The v2 CLI requires the owner-facing detail route. A 404 is
+		// authoritative; do not hide a missing route with an account-wide list
+		// scan or retain compatibility with an unreleased edge contract.
+		return nil, reply.problem()
 	}
 	var env struct {
 		Data *struct {
@@ -317,65 +319,22 @@ func (c *client) Resource(ctx context.Context, id string) (*ResourceSummary, err
 	if id != row.CRID && id != row.ResourceID {
 		return nil, fmt.Errorf("%w: resource detail identity does not match the request", qurl.ErrInvalidAPIResponse)
 	}
-	if row.CRID != "" {
-		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
-			return nil, fmt.Errorf("%w: resource detail identity: %w", qurl.ErrInvalidAPIResponse, err)
-		}
-	}
 	return summarizeResourceRow(row, "resource detail")
 }
 
-func (c *client) findResourceInList(ctx context.Context, id string) (*ResourceSummary, error) {
-	const (
-		pageLimit       = 100
-		maximumPageRead = 100
-	)
-	cursor := ""
-	seen := map[string]struct{}{}
-	for pageNumber := 0; pageNumber < maximumPageRead; pageNumber++ {
-		page, err := c.List(ctx, ListOptions{Limit: pageLimit, Cursor: cursor})
-		if err != nil {
-			return nil, err
-		}
-		for i := range page.Items {
-			item := &page.Items[i]
-			if item.CRID != id && item.ResourceID != id {
-				continue
-			}
-			if item.CRID != "" {
-				if err := resourceidentity.ValidatePair(item.CRID, item.ResourceID); err != nil {
-					return nil, fmt.Errorf("%w: resource list lookup identity: %w", qurl.ErrInvalidAPIResponse, err)
-				}
-			}
-			return item, nil
-		}
-		if !page.HasMore {
-			return nil, &Error{StatusCode: http.StatusNotFound, Code: "not_found", Title: "Resource Not Found"}
-		}
-		next := strings.TrimSpace(page.NextCursor)
-		if next == "" {
-			return nil, fmt.Errorf("%w: resource list lookup has_more without a cursor", qurl.ErrInvalidAPIResponse)
-		}
-		if _, exists := seen[next]; exists {
-			return nil, fmt.Errorf("%w: resource list lookup repeated its cursor", qurl.ErrInvalidAPIResponse)
-		}
-		seen[next] = struct{}{}
-		cursor = next
-	}
-	return nil, fmt.Errorf("%w: resource list lookup exceeded %d pages", qurl.ErrInvalidAPIResponse, maximumPageRead)
-}
-
 func summarizeResourceRow(row *resourceRow, source string) (*ResourceSummary, error) {
-	if row == nil || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
-		return nil, fmt.Errorf("%w: %s has missing type or status", qurl.ErrInvalidAPIResponse, source)
+	if row == nil || strings.TrimSpace(row.ResourceID) == "" || strings.TrimSpace(row.Type) == "" || strings.TrimSpace(row.Status) == "" {
+		return nil, fmt.Errorf("%w: %s has missing resource_id, type, or status", qurl.ErrInvalidAPIResponse, source)
+	}
+	if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
+		return nil, fmt.Errorf("%w: %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
 	}
 	if row.Type == "tunnel" {
-		if err := resourceidentity.ValidatePair(row.CRID, row.ResourceID); err != nil {
-			return nil, fmt.Errorf("%w: tunnel %s identity: %w", qurl.ErrInvalidAPIResponse, source, err)
-		}
 		if row.DesiredState != DesiredStateOn && row.DesiredState != DesiredStateOff {
 			return nil, fmt.Errorf("%w: tunnel %s has invalid desired_state %q", qurl.ErrInvalidAPIResponse, source, row.DesiredState)
 		}
+		// TODO(upstream-contract): keep this desired-state/epoch invariant in
+		// lockstep with the qurl-service tunnel resource contract.
 		if row.DesiredState == DesiredStateOn && row.ServingEpoch == 0 {
 			return nil, fmt.Errorf("%w: desired-on tunnel %s has zero serving_epoch", qurl.ErrInvalidAPIResponse, source)
 		}
@@ -400,9 +359,20 @@ func (c *client) SetSharing(ctx context.Context, id string, desired DesiredState
 	if desired != DesiredStateOn && desired != DesiredStateOff {
 		return nil, fmt.Errorf("%w: desired_state must be on or off", qurl.ErrInvalidResourceRequest)
 	}
-	return c.doSharing(ctx, http.MethodPut, id, struct {
+	// Stopping can retain the current serving epoch because the epoch fences a
+	// serving generation, not the desired-off transition. Starting a stopped
+	// share uses RestartSharing so it must advance to a new fenced generation.
+	// In both cases, require the response to confirm the requested state.
+	sharing, err := c.doSharing(ctx, http.MethodPut, id, struct {
 		DesiredState DesiredState `json:"desired_state"`
-	}{DesiredState: desired}, true)
+	}{DesiredState: desired}, false)
+	if err != nil {
+		return nil, err
+	}
+	if sharing.DesiredState != desired {
+		return nil, fmt.Errorf("%w: sharing response desired_state %q does not match requested state %q", qurl.ErrInvalidAPIResponse, sharing.DesiredState, desired)
+	}
+	return sharing, nil
 }
 
 // RestartSharing rotates the serving epoch and leaves the resource desired on.
@@ -480,6 +450,8 @@ func validateSharingRow(row sharingRow) error {
 	if strings.TrimSpace(row.CRID) == "" {
 		return fmt.Errorf("%w: sharing response missing crid", qurl.ErrInvalidAPIResponse)
 	}
+	// TODO(upstream-contract): keep these durable and observed state
+	// combinations in lockstep with qurl-service sharing responses.
 	switch row.ConnectionState {
 	case ConnectionStopped:
 		if row.DesiredState != DesiredStateOff {
@@ -510,10 +482,11 @@ func validateSharingRow(row sharingRow) error {
 // treated as success. If the platform ever starts answering 410 for a
 // delete on a tombstoned row, widen this switch in lockstep.
 func (c *client) Delete(ctx context.Context, id string) (*DeleteResult, error) {
-	if strings.TrimSpace(id) == "" {
+	id = strings.TrimSpace(id)
+	if id == "" {
 		return nil, fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)
 	}
-	reply, err := c.doREST(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil)
+	reply, err := c.doRESTOnce(ctx, http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -546,15 +519,17 @@ func (c *client) doREST(ctx context.Context, method, path string, body any) (*re
 }
 
 // doRESTOnce preserves the normal authorization/identity headers but disables
-// transport replay for a non-idempotent request such as sharing restart.
+// transport replay for a write with no service idempotency key. This includes
+// writes whose desired state is idempotent but whose lost response is still
+// ambiguous to the caller.
 func (c *client) doRESTOnce(ctx context.Context, method, path string, body any) (*restReply, error) {
 	return c.doRESTRequest(ctx, method, path, body, nil, false)
 }
 
 // doRESTWithHeaders is doREST plus request-specific headers. Shared headers
-// (including authorization) still come from the same transport seam; this
-// narrow variant exists for contracts such as Idempotency-Key that cannot be
-// represented in a JSON body.
+// (including authorization and the transport-owned X-Request-Id) still come
+// from the same transport seam; this narrow variant exists for contracts such
+// as Idempotency-Key that cannot be represented in a JSON body.
 func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, body any, headers http.Header) (*restReply, error) {
 	return c.doRESTRequest(ctx, method, path, body, headers, true)
 }
@@ -581,14 +556,25 @@ func (c *client) doRESTRequest(ctx context.Context, method, path string, body an
 			req.Header.Add(name, value)
 		}
 	}
-	if err := c.authorize(ctx, req); err != nil {
-		return nil, err
-	}
+	req = withRequestRetryIntent(req, allowRetry)
 	var resp *http.Response
-	if allowRetry {
-		resp, err = c.transport.Do(req)
+	if c.registeredDoer != nil {
+		// The registered doer owns request authorization and delegates to the
+		// shared transport. The request context carries this caller's retry
+		// intent through qurl-go's Do-only registered transport seam.
+		resp, err = c.registeredDoer.Do(req)
 	} else {
-		resp, err = c.transport.DoOnce(req)
+		if c.authorize == nil {
+			return nil, fmt.Errorf("%w: API client has no request authority", qurl.ErrInvalidClientConfig)
+		}
+		if err := c.authorize(ctx, req); err != nil {
+			return nil, err
+		}
+		if allowRetry {
+			resp, err = c.transport.Do(req)
+		} else {
+			resp, err = c.transport.DoOnce(req)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -650,10 +636,10 @@ func (r *restReply) problem() error {
 	if e.Code == "" && e.Title == "" && e.Detail == "" {
 		e.Detail = bodySnippet(r.body)
 	}
-	if v := strings.TrimSpace(r.header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			e.RetryAfter = secs
-		}
+	// TODO(upstream-contract): qURL API responses use Retry-After seconds, not
+	// HTTP-date. retryDelay uses the same parser below.
+	if secs, ok := parseRetryAfterSeconds(r.header.Get("Retry-After")); ok && secs > 0 {
+		e.RetryAfter = secs
 	}
 	return e
 }
@@ -661,7 +647,13 @@ func (r *restReply) problem() error {
 const maxSnippet = 256
 
 func bodySnippet(body []byte) string {
-	fields := strings.Fields(strings.ToValidUTF8(string(body), "\uFFFD"))
+	clean := strings.Map(func(r rune) rune {
+		if !unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, strings.ToValidUTF8(string(body), "\uFFFD"))
+	fields := strings.Fields(clean)
 	snippet := strings.Join(fields, " ")
 	if len(snippet) > maxSnippet {
 		end := maxSnippet

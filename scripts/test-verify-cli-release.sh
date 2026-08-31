@@ -138,7 +138,7 @@ expect_summary() {
 # --- the release exists: the common case, and it must say nothing alarming
 
 write_manifest 1.4.0
-run_case released 0 'apps/cli 1.4.0 is released as v1.4.0' '::error::'
+run_case released 0 'apps/cli 1.4.0 exists as v1.4.0' '::error::'
 expect_gh_calls released 1
 expect_argv released 'repos/layervai/qurl-integrations/releases/tags/v1.4.0'
 # The CLI is the one component tagged without a component prefix. A guard that
@@ -147,7 +147,7 @@ refute_argv released 'cli-v1.4.0'
 
 # The tag follows the manifest rather than a hardcoded version.
 write_manifest 2.0.0
-run_case released-other-version 0 'apps/cli 2.0.0 is released as v2.0.0' '::error::'
+run_case released-other-version 0 'apps/cli 2.0.0 exists as v2.0.0' '::error::'
 expect_argv released-other-version 'releases/tags/v2.0.0'
 
 # --- the release is absent: the drop, with the whole recovery attached

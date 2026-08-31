@@ -5,8 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -16,6 +17,7 @@ import (
 	"github.com/layervai/qurl-go/crid"
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
@@ -25,21 +27,69 @@ import (
 
 var openShareNativeRuntime = connectorshare.OpenNativeRuntime
 
+type nativeRegisteredIdentityReader func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config) (*qurlapi.Identity, error)
+
+func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.NativeRuntime, config *qurlapi.Config) (*qurlapi.Identity, error) {
+	store, err := runtime.Handoff()
+	if err != nil {
+		return nil, err
+	}
+	client, err := qurlapi.NewRegistered(ctx, config, store)
+	if err != nil {
+		return nil, err
+	}
+	return client.Me(ctx)
+}
+
 const connectorRefreshModeAuto = "auto"
 
-var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, version string) (connectordaemon.SessionFactory, error) {
+var errNativeSessionOwnerVerification = errors.New("registered Connector owner verification failed")
+
+var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	if apiConfig == nil {
+		return nil, errors.New("qURL daemon registered-client configuration is missing")
+	}
+	// TODO(upstream-contract): OpenNativeRuntime must not execute session
+	// operations. qurl-connector consumes that authority only when
+	// NewNativeAdmitter takes the runtime, after this owner check.
 	runtime, err := openShareNativeRuntime(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	admitter, err := connectorshare.NewNativeAdmitter(runtime)
+	if verifyOwner {
+		if err := verifyNativeSessionOwner(ctx, runtime, apiConfig, cfg.SessionOperations.OwnerID, readNativeRegisteredIdentity); err != nil {
+			return nil, errors.Join(err, runtime.Close())
+		}
+	}
+	admitter, err := connectorshare.NewNativeAdmitter(ctx, runtime)
 	if err != nil {
 		return nil, errors.Join(err, runtime.Close())
 	}
 	if common == nil {
 		return nil, errors.Join(errors.New("qURL daemon FRP configuration is invalid"), admitter.Close())
 	}
-	return connectordaemon.NewNativeSessionFactory(admitter, common, version)
+	return connectordaemon.NewNativeSessionFactory(admitter, common, apiConfig.Version)
+}
+
+func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, apiConfig *qurlapi.Config, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
+	expectedOwner = strings.TrimSpace(expectedOwner)
+	if expectedOwner == "" {
+		return fmt.Errorf("%w: session-operation owner authority is empty", errNativeSessionOwnerVerification)
+	}
+	if readIdentity == nil {
+		return fmt.Errorf("%w: identity reader is unavailable", errNativeSessionOwnerVerification)
+	}
+	identity, err := readIdentity(ctx, runtime, apiConfig)
+	if err != nil {
+		return fmt.Errorf("verify registered Connector owner: %w", err)
+	}
+	if identity == nil || strings.TrimSpace(identity.OwnerID) == "" {
+		return fmt.Errorf("%w: qURL account identity response is empty", errNativeSessionOwnerVerification)
+	}
+	if identity.OwnerID != expectedOwner {
+		return fmt.Errorf("%w: configured owner %q does not match authenticated owner %q", errNativeSessionOwnerVerification, expectedOwner, identity.OwnerID)
+	}
+	return nil
 }
 
 var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) error {
@@ -53,18 +103,27 @@ var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) err
 	}
 }
 
-// daemonCmd is an implementation surface for the per-user LaunchAgent. It is
-// intentionally hidden: customers manage shares with publish/start/stop and
-// never need to supervise this process themselves.
+// daemonCmd exposes the long-running engine for headless deployments and
+// foreground supervision. Ordinary Linux, macOS, and Windows users normally
+// let publish/start manage the native per-user background job.
 func daemonCmd(opts *globalOpts) *cobra.Command {
-	cmd := &cobra.Command{Use: "daemon", Hidden: true, Args: noArgs}
+	cmd := &cobra.Command{
+		Use:   "daemon",
+		Short: "Run the local sharing daemon",
+		Long: `Run the local sharing daemon directly.
+
+On Linux, macOS, and Windows, qurl publish and qurl start normally manage the
+per-user daemon for you. Use daemon run for a headless deployment or when
+another service manager owns the process.`,
+		Args: noArgs,
+	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
 	var hubHost, hubServerPublicKeyB64 string
 	var hubPort int
 	run := &cobra.Command{
-		Use:    "run",
-		Hidden: true,
-		Args:   noArgs,
+		Use:   "run",
+		Short: "Run the daemon in the foreground",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
@@ -92,12 +151,16 @@ func daemonCmd(opts *globalOpts) *cobra.Command {
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
-	run.Flags().StringVar(&headlessConfig, "headless-config", "", "declarative headless share configuration")
-	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "first-bootstrap enrollment credential file")
+	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
+	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
+	// root.go's persistent pre-run hook reads these before settings resolution,
+	// so a first-start rejection reaches the native supervisor's durable log.
+	run.Flags().String("job-stdout-log", "", "native background-job stdout log")
+	run.Flags().String("job-stderr-log", "", "native background-job stderr log")
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64"} {
+	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -154,7 +217,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	headless, enrollmentCredential, err := loadHeadlessBootstrap(stateDir, headlessConfigPath, enrollmentTokenPath)
+	headless, enrollmentCredential, err := loadHeadlessBootstrap(ctx, stateDir, headlessConfigPath, enrollmentTokenPath)
 	if err != nil {
 		return err
 	}
@@ -163,19 +226,22 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	if headless != nil {
-		if err := validateHeadlessRegistryOwnership(ctx, registry, &headless.Shares[0]); err != nil {
-			return err
-		}
+	ownerID, ownerBound, err := daemonOwner(ctx, registry, headless)
+	if err != nil {
+		return err
 	}
-	hubBootstrap := qurl.HubBootstrap{}
-	if hubOverride != nil {
-		hubBootstrap = *hubOverride
-	} else {
-		hubBootstrap, err = opts.resolveHubBootstrap()
-		if err != nil {
-			return err
-		}
+	// The headless YAML is declarative input, not an authority. Authenticate
+	// its owner through the registered device before the first durable bind.
+	// Once bound, daemonOwner enforces exact continuity without adding a REST
+	// dependency to every warm daemon restart.
+	verifyOwner := headless != nil && !ownerBound
+	sessionOperations, err := opts.resolveSessionConfig(ownerID)
+	if err != nil {
+		return err
+	}
+	hubBootstrap, err := daemonHubBootstrap(opts, hubOverride)
+	if err != nil {
+		return err
 	}
 	origin, err := agent.ResourceSDKOrigin(opts.resolvedEndpoint)
 	if err != nil {
@@ -190,19 +256,28 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		return err
 	}
 	openFactory := func(initCtx context.Context) (connectordaemon.SessionFactory, error) {
+		apiConfig := &qurlapi.Config{
+			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
+			Sleep: opts.sleep, NewRequestID: opts.newRequestID,
+		}
 		return buildNativeSessionFactory(initCtx, connectorshare.NativeRuntimeConfig{
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
-		}, common, opts.version)
+			SessionOperations: sessionOperations,
+		}, common, apiConfig, verifyOwner)
 	}
 	var factory connectordaemon.SessionFactory
 	var closeFactory func() error
 	if headless != nil {
 		// Native bootstrap succeeds before the share becomes runnable. This avoids
-		// persisting a desired-on row after a bad/missing one-time credential.
+		// persisting owner or desired-on state after a bad/missing one-time
+		// credential.
 		factory, err = openHeadlessSessionFactory(ctx, openFactory)
 		enrollmentCredential = ""
+		if err == nil && !ownerBound {
+			err = registry.BindOwner(ctx, headless.OwnerID)
+		}
 		if err == nil {
 			err = registry.Put(ctx, &headless.Shares[0])
 		}
@@ -232,10 +307,41 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	}
 	opts.redirectFRPLogs()
 	server := &connectordaemon.IPCServer{
-		SocketPath: filepath.Join(stateDir, connectordaemon.SocketFile),
+		SocketPath: connectordaemon.StateSocketPath(stateDir),
 		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
+}
+
+func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistry, headless *connectorstate.HeadlessConfig) (ownerID string, bound bool, err error) {
+	if headless != nil {
+		ownerID, present, err := registry.OwnerID(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		if present && ownerID != headless.OwnerID {
+			return "", false, errors.New("headless share config belongs to a different durable account owner; use a dedicated state volume")
+		}
+		if err := validateHeadlessRegistryOwnership(ctx, registry, &headless.Shares[0]); err != nil {
+			return "", false, err
+		}
+		return headless.OwnerID, present, nil
+	}
+	ownerID, present, err := registry.OwnerID(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if !present {
+		return "", false, errors.New("qURL share daemon has no durable account owner; run `qurl login` and publish a local app first, or use --headless-config with --enrollment-token-file")
+	}
+	return ownerID, true, nil
+}
+
+func daemonHubBootstrap(opts *globalOpts, override *qurl.HubBootstrap) (qurl.HubBootstrap, error) {
+	if override != nil {
+		return *override, nil
+	}
+	return opts.resolveHubBootstrap()
 }
 
 func exactDaemonHubOverride(host string, port int, serverPublicKeyB64 string) (qurl.HubBootstrap, bool, error) {
@@ -301,13 +407,20 @@ func openHeadlessSessionFactory(ctx context.Context, open func(context.Context) 
 		if ctx.Err() != nil {
 			return nil, errors.Join(err, ctx.Err())
 		}
-		if connectorshare.IsPermanentNativeOpenError(err) {
+		if isPermanentHeadlessNativeOpenError(err) {
 			return nil, err
 		}
-		if err := waitHeadlessNativeRetry(ctx, headlessNativeRetryDelay(attempt)); err != nil {
+		delay := headlessNativeRetryDelay(attempt)
+		slog.WarnContext(ctx, "headless share daemon bootstrap failed; retrying",
+			"attempt", attempt, "retry_in", delay, "error", qurlapi.Redact(err.Error()))
+		if err := waitHeadlessNativeRetry(ctx, delay); err != nil {
 			return nil, err
 		}
 	}
+}
+
+func isPermanentHeadlessNativeOpenError(err error) bool {
+	return errors.Is(err, errNativeSessionOwnerVerification) || connectorshare.IsPermanentNativeOpenError(err)
 }
 
 func headlessNativeRetryDelay(attempt int) time.Duration {
@@ -324,7 +437,7 @@ func headlessNativeRetryDelay(attempt int) time.Duration {
 	return delay
 }
 
-func loadHeadlessBootstrap(stateDir, configPath, tokenPath string) (*connectorstate.HeadlessConfig, string, error) {
+func loadHeadlessBootstrap(ctx context.Context, stateDir, configPath, tokenPath string) (*connectorstate.HeadlessConfig, string, error) {
 	if configPath == "" {
 		if tokenPath != "" {
 			return nil, "", errors.New("--enrollment-token-file requires --headless-config")
@@ -335,12 +448,32 @@ func loadHeadlessBootstrap(stateDir, configPath, tokenPath string) (*connectorst
 	if err != nil {
 		return nil, "", err
 	}
-	_, stateErr := os.Lstat(filepath.Join(stateDir, connectorstate.AgentStateFile))
+	stateStore, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("inspect native agent state before headless bootstrap: %w", err)
+	}
+	defer func() { _ = stateStore.Close() }()
+	sdkStore, err := stateStore.Handoff()
+	if err != nil {
+		return nil, "", fmt.Errorf("inspect native agent state before headless bootstrap: %w", err)
+	}
+	state, stateErr := sdkStore.LoadAgentState(ctx)
 	switch {
 	case stateErr == nil:
-		// Warm starts never reopen or require the one-time credential file.
-		return config, "", nil
-	case errors.Is(stateErr, os.ErrNotExist):
+		if state != nil && state.RegisteredAt != nil && strings.TrimSpace(state.DeviceAPIKey) != "" {
+			// A complete warm identity uses only its device keypair and device
+			// credential. The one-time enrollment token is not reopened.
+			return config, "", nil
+		}
+		if tokenPath == "" {
+			return nil, "", errors.New("--enrollment-token-file is required to resume an incomplete headless bootstrap")
+		}
+		credential, err := connectorstate.ReadEnrollmentCredential(tokenPath)
+		if err != nil {
+			return nil, "", err
+		}
+		return config, credential, nil
+	case errors.Is(stateErr, qurl.ErrAgentStateNotFound):
 		if tokenPath == "" {
 			return nil, "", errors.New("--enrollment-token-file is required for first headless bootstrap")
 		}

@@ -10,12 +10,47 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
+
+type untouchedAgentStateStore struct{}
+
+func (untouchedAgentStateStore) LoadAgentState(context.Context) (*qurl.AgentState, error) {
+	panic("cleartext endpoint validation loaded registered state")
+}
+
+func (untouchedAgentStateStore) SaveAgentState(context.Context, *qurl.AgentState) error {
+	panic("cleartext endpoint validation saved registered state")
+}
+
+func TestClientConstructorsRejectCleartextNonLoopbackBaseURL(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func() error
+	}{
+		{name: "account", open: func() error {
+			_, err := New(&Config{BaseURL: "http://api.example.com", APIKey: "lv_test_boundary", Version: "test"})
+			return err
+		}},
+		{name: "registered", open: func() error {
+			_, err := NewRegistered(context.Background(), &Config{
+				BaseURL: "http://api.example.com", Version: "test",
+			}, untouchedAgentStateStore{})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.open(); !errors.Is(err, qurl.ErrInvalidClientConfig) {
+				t.Fatalf("cleartext non-loopback endpoint error = %v, want ErrInvalidClientConfig", err)
+			}
+		})
+	}
+}
 
 func TestSharingLifecycleWireContract(t *testing.T) {
 	srv := apitest.NewServer(t)
@@ -86,6 +121,34 @@ func TestSharingLifecycleFailsClosedOnInvalidState(t *testing.T) {
 	}
 	if _, err := client.SetSharing(context.Background(), srv.Key.CRID, "maybe"); !errors.Is(err, qurl.ErrInvalidResourceRequest) {
 		t.Fatalf("invalid desired input error = %v", err)
+	}
+}
+
+func TestSetSharingRejectsResponseThatDidNotApplyRequestedState(t *testing.T) {
+	tests := []struct {
+		name                string
+		requested, returned DesiredState
+		connection          ConnectionState
+	}{
+		{name: "requested on returned off", requested: DesiredStateOn, returned: DesiredStateOff, connection: ConnectionStopped},
+		{name: "requested off returned on", requested: DesiredStateOff, returned: DesiredStateOn, connection: ConnectionServing},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodPut, path, func(w http.ResponseWriter, _ *http.Request) {
+				apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+					"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID,
+					"desired_state": test.returned, "serving_epoch": 7,
+					"connection_state": test.connection,
+				}, nil)
+			})
+			client := newTestClient(t, srv, nil)
+			if _, err := client.SetSharing(context.Background(), srv.Key.CRID, test.requested); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+				t.Fatalf("SetSharing mismatch error = %v, want ErrInvalidAPIResponse", err)
+			}
+		})
 	}
 }
 
@@ -194,6 +257,30 @@ func TestRestartSharingNeverReplaysRateLimit(t *testing.T) {
 	}
 }
 
+func TestPublishNeverReplaysRateLimit(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open func(*testing.T, *apitest.Server) Client
+	}{
+		{name: "account", open: func(t *testing.T, srv *apitest.Server) Client { return newTestClient(t, srv, nil) }},
+		{name: "registered", open: newRegisteredTestClient},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.ScriptRepeat(http.MethodPost, "/v1/resources", maxAttempts, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", "0")
+				apitest.WriteProblem(t, w, http.StatusTooManyRequests, "rate_limited", "Rate limited", "publish result is ambiguous")
+			})
+			if _, err := test.open(t, srv).Publish(context.Background(), "https://example.com", PublishOptions{}); err == nil {
+				t.Fatal("Publish unexpectedly succeeded")
+			}
+			if got := len(srv.Requests()); got != 1 {
+				t.Fatalf("publish requests = %d, want one", got)
+			}
+		})
+	}
+}
+
 func TestRestartSharingNeverReplaysTransportError(t *testing.T) {
 	var attempts int
 	c, err := New(&Config{
@@ -211,6 +298,48 @@ func TestRestartSharingNeverReplaysTransportError(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("restart attempts=%d, want exactly one", attempts)
+	}
+}
+
+func TestManagementMutationsDeclareExplicitNoReplay(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(*testing.T, Client) error
+	}{
+		{name: "set sharing", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.SetSharing(context.Background(), apitest.FixedResourceKey(t).CRID, DesiredStateOn)
+			return err
+		}},
+		{name: "delete", call: func(t *testing.T, c Client) error {
+			t.Helper()
+			_, err := c.Delete(context.Background(), apitest.FixedResourceKey(t).CRID)
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			attempts := 0
+			client, err := New(&Config{
+				BaseURL: "https://api.invalid", APIKey: "key", Version: "test",
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					attempts++
+					allowRetry, explicit := req.Context().Value(requestRetryIntentKey{}).(bool)
+					if !explicit || allowRetry {
+						t.Errorf("retry intent explicit/allowed = %t/%t, want true/false", explicit, allowRetry)
+					}
+					return nil, errors.New("response lost")
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.call(t, client); err == nil {
+				t.Fatal("management mutation unexpectedly succeeded")
+			}
+			if attempts != 1 {
+				t.Fatalf("management mutation attempts = %d, want one", attempts)
+			}
+		})
 	}
 }
 
@@ -294,6 +423,21 @@ func TestListRejectsInvalidTunnelIdentity(t *testing.T) {
 	}
 }
 
+func TestListRejectsMismatchedURLIdentity(t *testing.T) {
+	key := apitest.GenerateResourceKey(t)
+	other := apitest.GenerateResourceKey(t)
+	srv := apitest.NewServerWithKey(t, key)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": key.ResourceID, "crid": other.CRID,
+			"type": "url", "status": "active",
+		}}, map[string]any{"has_more": false})
+	})
+	if _, err := newTestClient(t, srv, nil).List(context.Background(), ListOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("List error = %v, want invalid API response", err)
+	}
+}
+
 // testRequestID is the harness's fixed X-Request-Id value.
 const testRequestID = "unit-req"
 
@@ -319,6 +463,7 @@ func newTestClient(t *testing.T, srv *apitest.Server, sleeps *[]time.Duration) C
 
 func TestPublishSendsPinnedWireShape(t *testing.T) {
 	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(false)
 	client := newTestClient(t, srv, nil)
 
 	// The mock enforces the pinned contract (type=url + target_url required),
@@ -344,6 +489,55 @@ func TestPublishSendsPinnedWireShape(t *testing.T) {
 	}
 	if res.FoundExisting == nil || !*res.FoundExisting {
 		t.Errorf("replayed publish FoundExisting = %v, want known true", res.FoundExisting)
+	}
+}
+
+func TestPublishRejectsCRIDThatDoesNotCommitToResourceID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	other := apitest.GenerateResourceKey(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID,
+			"crid":        other.CRID,
+			"target_url":  "https://example.com/data",
+			"status":      "active",
+		}, nil)
+	})
+	client := newTestClient(t, srv, nil)
+	if _, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("mismatched publish identity error = %v, want ErrInvalidAPIResponse", err)
+	}
+	if got := len(srv.Requests()); got != 1 {
+		t.Fatalf("mismatched publish requests = %d, want one", got)
+	}
+}
+
+func TestPublishRejectsMissingCRID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusCreated, map[string]any{
+			"resource_id": srv.Key.ResourceID,
+			"target_url":  "https://example.com",
+			"status":      "active",
+		}, nil)
+	})
+	_, err := newTestClient(t, srv, nil).Publish(context.Background(), "https://example.com", PublishOptions{})
+	if !errors.Is(err, qurl.ErrInvalidAPIResponse) || !strings.Contains(err.Error(), "missing crid") {
+		t.Fatalf("missing publish CRID error = %v, want invalid API response", err)
+	}
+}
+
+func TestPublishPreservesOmittedFoundExistingAsUnknown(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.OmitPublishFoundExisting()
+	client := newTestClient(t, srv, nil)
+
+	res, err := client.Publish(context.Background(), "https://example.com/data", PublishOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FoundExisting != nil {
+		t.Errorf("omitted FoundExisting = %v, want unknown", *res.FoundExisting)
 	}
 }
 
@@ -473,9 +667,54 @@ func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 	if d := retryDelay(resp, 2); d != time.Second {
 		t.Errorf("unparseable Retry-After delay = %v", d)
 	}
+	resp.Header.Set("Retry-After", "0")
+	if d := retryDelay(resp, 1); d != 500*time.Millisecond {
+		t.Errorf("zero Retry-After delay = %v, want fallback", d)
+	}
 	resp.Header.Set("Retry-After", "3600")
 	if d := retryDelay(resp, 1); d != maxRetryAfter {
 		t.Errorf("capped delay = %v, want %v", d, maxRetryAfter)
+	}
+	resp.Header.Set("Retry-After", "9223372037")
+	if d := retryDelay(resp, 1); d != maxRetryAfter {
+		t.Errorf("overflowing duration delay = %v, want %v", d, maxRetryAfter)
+	}
+	resp.Header.Set("Retry-After", "18446744073709551615")
+	if d := retryDelay(resp, 1); d != maxRetryAfter {
+		t.Errorf("maximum uint64 delay = %v, want %v", d, maxRetryAfter)
+	}
+}
+
+func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		path     string
+		basePath string
+		want     bool
+	}{
+		{name: "exact", path: "/v1/resources/qexample/resolve", want: true},
+		{name: "exact with base path", path: "/proxy/v1/resources/qexample/resolve", basePath: "/proxy", want: true},
+		{name: "wrong base path", path: "/other/v1/resources/qexample/resolve", basePath: "/proxy"},
+		{name: "empty resource", path: "/v1/resources//resolve"},
+		{name: "nested resource", path: "/v1/resources/qexample/sessions/resolve"},
+		{name: "different version", path: "/v2/resources/qexample/resolve"},
+		{name: "unrelated suffix", path: "/v1/admin/resolve"},
+		{name: "trailing slash", path: "/v1/resources/qexample/resolve/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, err := http.NewRequestWithContext(
+				context.Background(), http.MethodPost, "https://api.example"+tc.path, http.NoBody,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := retrySafeRequest(req, tc.basePath); got != tc.want {
+				t.Errorf("retrySafeRequest(%q) = %t, want %t", tc.path, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -486,7 +725,7 @@ func TestDeleteIsIdempotent(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
 
-	result, err := client.Delete(context.Background(), srv.Key.CRID)
+	result, err := client.Delete(context.Background(), " \t"+srv.Key.CRID+"\r\n")
 	if err != nil || result.AlreadyGone {
 		t.Fatalf("fresh delete: result=%+v err=%v", result, err)
 	}
@@ -536,17 +775,19 @@ func TestDark503IsNeverAutoRetried(t *testing.T) {
 
 func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	srv := apitest.NewServer(t)
+	other := apitest.GenerateResourceKey(t)
 	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("status"); got != "active" {
 			t.Errorf("status param = %q", got)
 		}
 		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{
 			{
-				"resource_id": "r1", "crid": "c1", "target_url": "https://a.example",
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "target_url": "https://a.example",
 				"type": "url", "status": "active",
 				"description": "nightly export", "tags": []string{"ops", "nightly"},
 			},
-			{"resource_id": "r2", "target_url": "https://b.example", "type": "url", "status": "revoked"},
+			{"resource_id": other.ResourceID, "crid": other.CRID,
+				"target_url": "https://b.example", "type": "url", "status": "revoked"},
 		}, map[string]any{"next_cursor": "cur2", "has_more": true})
 	})
 	client := newTestClient(t, srv, nil)
@@ -558,8 +799,8 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	if len(page.Items) != 2 || page.NextCursor != "cur2" || !page.HasMore {
 		t.Errorf("page = %+v", page)
 	}
-	if page.Items[1].CRID != "" || page.Items[1].ResourceID != "r2" {
-		t.Errorf("row without crid must survive projection: %+v", page.Items[1])
+	if page.Items[1].CRID != other.CRID || page.Items[1].ResourceID != other.ResourceID {
+		t.Errorf("second row identity = %+v", page.Items[1])
 	}
 	// The publish-time metadata is what a sweeper recognizes a row by, so it
 	// has to survive the projection rather than being dropped on the floor.
@@ -571,6 +812,21 @@ func TestListParsesEnvelopeAndCursor(t *testing.T) {
 	// synthesized ones — an empty description is not a description.
 	if got := page.Items[1]; got.Type != "url" || got.Description != "" || got.Tags != nil {
 		t.Errorf("row without metadata gained some: %+v", got)
+	}
+}
+
+func TestListRejectsURLWithoutCRID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID,
+			"type":        "url",
+			"status":      "active",
+		}}, map[string]any{"has_more": false})
+	})
+	_, err := newTestClient(t, srv, nil).List(context.Background(), ListOptions{})
+	if !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("URL list without CRID = %v, want invalid API response", err)
 	}
 }
 
@@ -599,6 +855,20 @@ func TestResourceParsesURLDetailEnvelope(t *testing.T) {
 	}
 }
 
+func TestListRejectsMissingResourceID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": " ", "target_url": "https://a.example", "type": "url", "status": "active",
+		}}, map[string]any{"has_more": false})
+	})
+	client := newTestClient(t, srv, nil)
+
+	if _, err := client.List(context.Background(), ListOptions{}); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Fatalf("missing resource_id err = %v", err)
+	}
+}
+
 func TestResourceRejectsDetailIdentityMismatch(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, _ *http.Request) {
@@ -614,24 +884,20 @@ func TestResourceRejectsDetailIdentityMismatch(t *testing.T) {
 	}
 }
 
-func TestResourceFallsBackToListOnlyForUnstructuredRoute404(t *testing.T) {
+func TestResourceDoesNotScanAfterUnstructuredNotFound(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
 	client := newTestClient(t, srv, nil)
 
-	resource, err := client.Resource(context.Background(), srv.Key.CRID)
-	if err != nil {
-		t.Fatal(err)
+	_, err := client.Resource(context.Background(), srv.Key.CRID)
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("unstructured not-found err = %v", err)
 	}
-	if resource.CRID != srv.Key.CRID || resource.ResourceID != srv.Key.ResourceID || resource.Type != "url" {
-		t.Fatalf("list fallback resource = %+v", resource)
-	}
-	requests := srv.Requests()
-	if len(requests) != 2 || requests[0].Path != "/v1/resources/"+srv.Key.CRID ||
-		requests[1].Path != "/v1/resources" || requests[1].Query != "limit=100" {
-		t.Fatalf("resource fallback requests = %#v", requests)
+	if requests := srv.Requests(); len(requests) != 1 {
+		t.Fatalf("unstructured not-found triggered list fallback: %#v", requests)
 	}
 }
 
@@ -692,6 +958,11 @@ func TestProblemErrorParsesPinnedEnvelope(t *testing.T) {
 	if !errors.As(limited, &e) || e.RetryAfter != 7 {
 		t.Errorf("retry-after: %+v", e)
 	}
+	retryHeader.Set("Retry-After", "3600")
+	limited = (&restReply{status: 429, header: retryHeader, body: []byte(`{}`)}).problem()
+	if !errors.As(limited, &e) || e.RetryAfter != 3600 {
+		t.Errorf("full user-facing retry-after: %+v", e)
+	}
 }
 
 func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
@@ -705,6 +976,15 @@ func TestBodySnippetIsBoundedValidUTF8(t *testing.T) {
 	}
 	if got := bodySnippet([]byte{'o', 'k', 0xff, 'x'}); !utf8.ValidString(got) || !strings.Contains(got, "\uFFFD") {
 		t.Fatalf("invalid response bytes were not sanitized: %q", got)
+	}
+	got = bodySnippet([]byte("bad\x1b[31m\x7f\u202Eresponse"))
+	if !strings.Contains(got, "\uFFFD") {
+		t.Fatalf("response controls were not replaced: %q", got)
+	}
+	for _, r := range got {
+		if !unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			t.Fatalf("response snippet retained control rune %U: %q", r, got)
+		}
 	}
 }
 
@@ -834,13 +1114,28 @@ func TestMeFailureCodes(t *testing.T) {
 }
 
 func TestRedact(t *testing.T) {
-	in := "key lv_live_abc123DEF456ghi789jkl and Bearer lv_test_zzz999yyy888xxx777www here"
-	got := Redact(in)
-	if strings.Contains(got, "abc123DEF") || strings.Contains(got, "zzz999") {
-		t.Fatalf("secrets survived: %q", got)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "alphanumeric API key and bearer",
+			in:   "key lv_live_abc123DEF456ghi789jkl and Bearer lv_test_zzz999yyy888xxx777www here",
+			want: "key lv_*** and Bearer *** here",
+		},
+		{
+			name: "complete URL-safe API key alphabet",
+			in:   "key lv_live_Ab3-QRSTUVWXYZ0123456789_abcdefghijklmno here",
+			want: "key lv_*** here",
+		},
 	}
-	if !strings.Contains(got, "lv_***") {
-		t.Errorf("marker missing: %q", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := Redact(test.in); got != test.want {
+				t.Fatalf("Redact() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -333,25 +334,21 @@ func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 	}
 }
 
-// TestPublishNoCRIDKeepsResourceID pins the fallback the no-CRID warning
-// names: when the service mints no CRID, the text document must still carry
-// an identifier, so the resource id row comes back for exactly that case.
-func TestPublishNoCRIDKeepsResourceID(t *testing.T) {
+// TestPublishNoCRIDFailsClosed pins the current service contract: a successful
+// publish must contain the permanent public identity that the command exists
+// to return. Do not silently accept an older, partial response.
+func TestPublishNoCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishOmitCRID(true)
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
-	if res.code != 0 {
-		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	if res.code == 0 {
+		t.Fatalf("exit = 0, stdout: %s", res.stdout.String())
 	}
-	// tabwriter turns the label's tab into padding, so assert the label and
-	// the value separately rather than a single tab-joined string that can
-	// never match.
-	stdout := res.stdout.String()
-	if !strings.Contains(stdout, "Resource ID:") || !strings.Contains(stdout, srv.Key.ResourceID) {
-		t.Errorf("no-CRID publish must still show the labeled resource id, got %q", stdout)
+	if res.stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want no partial publish identity", res.stdout.String())
 	}
-	if !strings.Contains(res.stderr.String(), "did not return a CRID") {
-		t.Errorf("expected the no-CRID warning, got %q", res.stderr.String())
+	if !strings.Contains(res.stderr.String(), "publish response missing crid") {
+		t.Errorf("stderr = %q, want missing-CRID cause", res.stderr.String())
 	}
 }
 
@@ -456,11 +453,34 @@ func TestListWarnsAndOmitsTargetsWhenLocalStateIsUnavailable(t *testing.T) {
 	if strings.Contains(res.stdout.String(), "127.0.0.1") {
 		t.Fatalf("list fabricated a local target:\n%s", res.stdout.String())
 	}
-	if got := strings.Count(res.stderr.String(), "Local sharing state is unavailable; local targets were omitted."); got != 1 {
+	if got := strings.Count(res.stderr.String(), "Local sharing state is invalid or inaccessible; local targets were omitted: corrupt local registry"); got != 1 {
 		t.Fatalf("warning count=%d stderr=%q", got, res.stderr.String())
 	}
 	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {
 		t.Fatalf("list requests=%#v, want only authoritative list", requests)
+	}
+}
+
+func TestListDoesNotWarnWhenThisPlatformHasNoDefaultLocalStateDirectory(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+			"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+			"status": "active", "desired_state": "on", "serving_epoch": 7,
+		}}, map[string]any{"has_more": false})
+	})
+	res := runCLI(t, &runOpts{
+		args:           []string{"--endpoint", srv.URL, "list"},
+		localSharesErr: connectorstate.ErrNoDefaultStateDir,
+	})
+	if res.code != 0 {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), "Local sharing state") {
+		t.Fatalf("list warned when local state is not supported on this platform: %q", res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), srv.Key.CRID) {
+		t.Fatalf("list omitted the remote Connector row: %q", res.stdout.String())
 	}
 }
 
@@ -474,6 +494,15 @@ func TestEnrichTunnelListReturnsParentCancellation(t *testing.T) {
 	page := &qurlapi.ResourcePage{Items: []qurlapi.ResourceSummary{{Type: "tunnel"}}}
 	if err := enrichTunnelList(ctx, opts, page); !errors.Is(err, context.Canceled) {
 		t.Fatalf("enrichTunnelList()=%v, want parent cancellation", err)
+	}
+}
+
+func TestDefaultLocalShareLoaderUsesConfiguredStateDirectoryResolver(t *testing.T) {
+	want := errors.New("configured state directory unavailable")
+	opts := &globalOpts{resolveShareStateDir: func(string) (string, error) { return "", want }}
+	opts.applyDefaults()
+	if _, err := opts.loadLocalShares(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("loadLocalShares() = %v, want configured resolver error", err)
 	}
 }
 
@@ -495,6 +524,50 @@ func TestListQuietSkipsLocalRegistryAndSharingReads(t *testing.T) {
 	}
 	if requests := srv.Requests(); len(requests) != 1 || requests[0].Path != "/v1/resources" {
 		t.Fatalf("quiet list requests = %#v, want only resource list", requests)
+	}
+}
+
+func TestListJSONQuietKeepsLocalTunnelTargets(t *testing.T) {
+	srv := apitest.NewServer(t)
+	run := func(t *testing.T, quiet bool) string {
+		t.Helper()
+		srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+			apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{{
+				"resource_id": srv.Key.ResourceID, "crid": srv.Key.CRID, "type": "tunnel",
+				"status": "active", "desired_state": "on", "serving_epoch": 1,
+			}}, map[string]any{"has_more": false})
+		})
+		args := []string{"--endpoint", srv.URL, "--output", "json"}
+		if quiet {
+			args = append(args, "--quiet")
+		}
+		args = append(args, "list")
+		loads := 0
+		res := runCLI(t, &runOpts{
+			args: args,
+			localShares: []connectorstate.LocalShare{{
+				ResourceID: srv.Key.ResourceID,
+				CRID:       srv.Key.CRID,
+				TargetURL:  "http://127.0.0.1:3000",
+			}},
+			localSharesLoads: &loads,
+		})
+		if res.code != 0 {
+			t.Fatalf("JSON list: code=%d stdout=%q stderr=%q", res.code, res.stdout.String(), res.stderr.String())
+		}
+		if loads != 1 {
+			t.Fatalf("local registry loads = %d, want one", loads)
+		}
+		return res.stdout.String()
+	}
+
+	regular := run(t, false)
+	quiet := run(t, true)
+	if quiet != regular {
+		t.Fatalf("--quiet changed JSON list output:\nregular: %s\nquiet: %s", regular, quiet)
+	}
+	if !strings.Contains(quiet, `"target_url": "http://127.0.0.1:3000"`) {
+		t.Fatalf("JSON list omitted local tunnel target: %s", quiet)
 	}
 }
 
@@ -691,13 +764,55 @@ func TestInsecureEndpointWarning(t *testing.T) {
 		"http://192.0.2.10":         true,
 		"https://api.example.com":   false,
 		"http://localhost:8080":     false,
-		"http://api.localhost:8080": false,
+		"http://LOCALHOST:8080":     false,
+		"http://api.localhost:8080": true,
 		"http://127.0.0.1:8080":     false,
 		"http://[::1]:8080":         false,
 	}
 	for endpoint, wantWarn := range cases {
 		if got := insecureEndpointWarning(endpoint) != ""; got != wantWarn {
 			t.Errorf("insecureEndpointWarning(%q) warned=%t, want %t", endpoint, got, wantWarn)
+		}
+	}
+}
+
+func TestRegisteredClientWarnsOnceForCleartextRemoteEndpoint(t *testing.T) {
+	var stderr bytes.Buffer
+	opts := &globalOpts{
+		resolvedEndpoint: "http://api.example.com",
+		resolvedFormat:   output.FormatText,
+		streams:          &output.Streams{Out: io.Discard, Err: &stderr},
+	}
+	opts.openAPIClient = func(context.Context) (qurlapi.Client, error) {
+		// Repeat the gate here to model a recovery path that also opens an account
+		// client, then return an inert loopback client without sending a request.
+		opts.warnInsecureEndpoint()
+		return qurlapi.New(&qurlapi.Config{BaseURL: "http://127.0.0.1", APIKey: testAPIKey})
+	}
+	if _, err := opts.newClient(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stderr.String(), "Warning:"); got != 1 {
+		t.Fatalf("cleartext registered-client warnings = %d, want one; stderr=%q", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "authorization credential would travel unencrypted") {
+		t.Fatalf("registered-client warning does not cover its device credential: %q", stderr.String())
+	}
+}
+
+func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"daemon", "run", "--help"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	for _, public := range []string{"--state-dir", "--headless-config", "--enrollment-token-file"} {
+		if !strings.Contains(res.stdout.String(), public) {
+			t.Errorf("daemon run help lost supported public input %q", public)
+		}
+	}
+	for _, hidden := range []string{"--job-version", "--job-stdout-log", "--job-stderr-log"} {
+		if strings.Contains(res.stdout.String(), hidden) {
+			t.Errorf("daemon run help exposes internal supervision flag %q", hidden)
 		}
 	}
 }

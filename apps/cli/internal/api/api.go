@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -57,6 +58,14 @@ type Client interface {
 	// platform contract (no repository reads server-side), so login can
 	// validate keys with it and whoami can call it freely.
 	Me(ctx context.Context) (*Identity, error)
+}
+
+// AccountClient adds the one account-authorized bootstrap operation. The CLI
+// keeps this capability only while it consumes a user-supplied account key;
+// steady-state commands use Client from NewRegistered.
+type AccountClient interface {
+	Client
+	MintAgentEnrollmentToken(ctx context.Context, opts MintAgentEnrollmentTokenOptions) (*AgentEnrollmentToken, error)
 }
 
 // PublishOptions carries the optional publish metadata.
@@ -146,18 +155,17 @@ type ResourcePage struct {
 // necessarily "never set". Type is not redacted and is always populated —
 // legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	CRID            string
-	ResourceID      string
-	TargetURL       string
-	Type            string
-	Status          string
-	DesiredState    DesiredState
-	ServingEpoch    uint64
-	ConnectionState ConnectionState
-	Description     string
-	Tags            []string
-	CreatedAt       *time.Time
-	ExpiresAt       *time.Time
+	CRID         string
+	ResourceID   string
+	TargetURL    string
+	Type         string
+	Status       string
+	DesiredState DesiredState
+	ServingEpoch uint64
+	Description  string
+	Tags         []string
+	CreatedAt    *time.Time
+	ExpiresAt    *time.Time
 }
 
 // DesiredState is the durable customer intent for a tunnel resource.
@@ -203,33 +211,45 @@ type Config struct {
 	// Verbose, when non-nil, receives one already-redacted diagnostic line
 	// per transport event.
 	Verbose func(format string, args ...any)
-	// Sleep is used between 429 retries; nil means time.Sleep. Tests inject
-	// a recorder.
+	// Sleep overrides the context-aware retry timer. Nil uses that timer; tests
+	// inject a recorder when they do not need cancellation behavior.
 	Sleep func(time.Duration)
 	// NewRequestID mints the X-Request-Id value; nil means a random one.
 	NewRequestID func() string
-	// HTTPClient is the underlying HTTP client; nil means a client with a
-	// 30-second timeout that refuses redirects (credentials must not follow
-	// a Location header to another origin).
+	// HTTPClient is the underlying HTTP client. Nil, or an injected client with
+	// Timeout zero, gets a 30-second bound for each HTTP attempt. A nonzero
+	// timeout is preserved. A retryable logical request can span multiple
+	// attempts and bounded backoffs. Redirects are always refused because
+	// credentials must not follow a Location header to another origin.
 	HTTPClient *http.Client
 }
 
 type client struct {
-	sdk       *qurl.Client
-	transport *transport
-	baseURL   string
-	authorize func(context.Context, *http.Request) error
+	sdk            *qurl.Client
+	transport      *transport
+	registeredDoer qurl.HTTPDoer
+	baseURL        string
+	authorize      func(context.Context, *http.Request) error
 }
+
+// registeredClient exposes exactly Client. The concrete implementation also
+// owns the account-only agent-enrollment method for New, but wrapping the
+// narrow interface prevents a registered caller from recovering that method
+// through a type assertion.
+type registeredClient struct{ Client }
 
 // New builds the one Client implementation. The same decorated transport
 // serves both the SDK-backed calls and the direct REST calls, so headers,
 // retry, and redaction cannot diverge between them.
-func New(cfg *Config) (Client, error) {
+func New(cfg *Config) (AccountClient, error) {
 	if cfg == nil || cfg.BaseURL == "" {
 		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
 	}
 	tr := newTransport(cfg)
 	provider := qurl.BearerToken(cfg.APIKey)
+	// TODO(upstream-contract): the pinned qurl-go WithBaseURL contract rejects
+	// cleartext non-loopback API origins before this bearer provider can send a
+	// request. TestNewRejectsCleartextNonLoopbackBaseURL pins that boundary here.
 	sdk, err := qurl.NewClient(provider,
 		qurl.WithBaseURL(cfg.BaseURL),
 		qurl.WithHTTPClient(tr),
@@ -243,6 +263,42 @@ func New(cfg *Config) (Client, error) {
 		baseURL:   trimBaseURL(cfg.BaseURL),
 		authorize: provider.Authorize,
 	}, nil
+}
+
+// NewRegistered builds the steady-state CLI client from the sealed native
+// agent state. The account API key is not accepted or retained on this path;
+// qurl-go loads the narrow device credential and keeps its exact route and
+// origin boundary around direct REST calls.
+func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore) (Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: context must not be nil", qurl.ErrInvalidClientConfig)
+	}
+	if cfg == nil || cfg.BaseURL == "" {
+		return nil, fmt.Errorf("%w: base URL must not be empty", qurl.ErrInvalidClientConfig)
+	}
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		return nil, fmt.Errorf("%w: account API key is not valid for registered-client open", qurl.ErrInvalidClientConfig)
+	}
+	tr := newTransport(cfg)
+	// TODO(upstream-contract): the pinned qurl-go WithAgentClientBaseURL contract
+	// applies the same HTTPS-or-loopback gate to the device credential before it
+	// loads state or sends a request. The local API contract test pins this too.
+	sdk, err := qurl.OpenRegisteredAgent(ctx, store,
+		qurl.WithAgentClientBaseURL(cfg.BaseURL),
+		qurl.WithAgentClientHTTPClient(tr),
+	)
+	if err != nil {
+		return nil, err
+	}
+	doer, err := sdk.RegisteredAgentResourceHTTPDoer()
+	if err != nil {
+		return nil, err
+	}
+	core := &client{
+		sdk: sdk, transport: tr, registeredDoer: doer,
+		baseURL: trimBaseURL(cfg.BaseURL),
+	}
+	return &registeredClient{Client: core}, nil
 }
 
 // Resolve delegates to the SDK's ResolveResource and carries its VerifyCRID
@@ -272,7 +328,7 @@ func (c *client) Resolve(ctx context.Context, id string, opts ResolveOptions) (*
 // errors.Is against qurl.ErrTemporaryAccessLinksDisabled (and friends) keeps
 // working on the mapped error.
 //
-// Upstream SDK asks (qurl-go v0.5.3's APIError carries only
+// Upstream SDK asks (qurl-go's APIError carries only
 // StatusCode/Code/Type/Title/Detail — qurl/client.go:1345): RequestID, so
 // SDK-path failures can print a request id like direct-path ones do; and
 // RetryAfter, so SDK-path 429s that outlive the transport's bounded retry can

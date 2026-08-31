@@ -18,8 +18,11 @@ builds:
     binary: qurl
     env:
       - CGO_ENABLED=0
+    # Release workflows must pass TestReleaseHubPinEnvironment before this
+    # build. `index` deliberately leaves credential-free local snapshots dark;
+    # it is not a substitute for the fail-closed release gate.
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ index .Env "QURL_RELEASE_HUB_PUBLIC_KEY_B64" }}
     goos:
       - linux
       - darwin
@@ -33,19 +36,22 @@ archives:
     ids:
       - qurl
     name_template: "qurl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     files:
       - LICENSE
       - manpages/*
       - completions/*
-    format_overrides:
-      - goos: windows
-        formats: [zip]
 
 checksum:
   name_template: "checksums.txt"
 
 # Per-archive SPDX SBOMs (syft): one `<archive>.sbom.json` per
-# tar.gz/zip, uploaded as a release asset and listed in checksums.txt, so the
+# release archive, uploaded as a release asset and listed in checksums.txt, so the
 # checksum signature below transitively covers every SBOM document.
 sboms:
   - artifacts: archive
@@ -107,23 +113,28 @@ changelog:
 #    sanity instead.
 homebrew_casks:
   - name: qurl
+    # Generate the exact cask in dist, but publish it only after every release
+    # artifact and signature check passes. The release workflow performs the
+    # final compare-and-swap update of the tap.
+    skip_upload: true
     repository:
       owner: layervai
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
-    homepage: "https://layerv.ai"
-    description: "qURL CLI - manage secure links from the command line"
+    homepage: "https://layerv.ai/"
+    description: "Publish and access protected resources"
     license: "MIT"
     url:
       verified: github.com/layervai/qurl-integrations/releases/download
     manpages:
       - manpages/qurl-completion.1
+      - manpages/qurl-daemon-run.1
+      - manpages/qurl-daemon.1
       - manpages/qurl-delete.1
       - manpages/qurl-get.1
+      - manpages/qurl-inspect.1
       - manpages/qurl-list.1
       - manpages/qurl-login.1
-      - manpages/qurl-logout.1
       - manpages/qurl-publish.1
       - manpages/qurl-resolve.1
       - manpages/qurl-restart.1
@@ -139,10 +150,7 @@ homebrew_casks:
       fish: completions/qurl.fish
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"]
-          end
+        install: 'system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"] if OS.mac?'
 
 nfpms:
   - id: qurl
@@ -167,6 +175,10 @@ release:
   # is the current default — pinned because the handshake breaks if the
   # default ever changes.
   mode: keep-existing
+  # release-please creates a draft and the exact tag. Keep that release draft
+  # while GoReleaser uploads and the workflow verifies its artifacts.
+  draft: true
+  use_existing_draft: true
   # Make re-runs idempotent: without this, re-running the release-cli job
   # after a partial upload 422s on the assets that did make it.
   replace_existing_artifacts: true

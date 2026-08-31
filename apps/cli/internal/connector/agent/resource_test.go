@@ -1,5 +1,3 @@
-//go:build !windows
-
 package agent
 
 import (
@@ -15,11 +13,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	qurl "github.com/layervai/qurl-go/qurl"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -38,9 +38,28 @@ func testNativeResource(t *testing.T, connectorID string) *qurl.ConnectorResourc
 	digest := sha256.Sum256(der)
 	return &qurl.ConnectorResource{
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+		CRID:               apitest.DeriveCRID(t, der, apitest.VersionProduction),
 		ConnectorRoutingID: "c-" + routingIDEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "nhp-resource-a",
 		Slug:               connectorID,
+	}
+}
+
+func TestResolveResourceRejectsMissingCRID(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "missing-crid")
+	resource.CRID = ""
+	installResourceResolver(t, func(context.Context, *qurl.AgentRuntimeBinding,
+		*qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption,
+	) (*qurl.ConnectorResourceResolution, error) {
+		return &qurl.ConnectorResourceResolution{Resource: resource}, nil
+	})
+	_, err := ResolveResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, resource.Slug)
+	if !errors.Is(err, state.ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+		t.Fatalf("missing native CRID = %v, want terminal verification error", err)
+	}
+	if pending := pendingRequestFromDisk(t, store, resource.Slug); pending != nil {
+		t.Fatalf("missing native CRID retained request: %+v", pending)
 	}
 }
 
@@ -53,15 +72,21 @@ func installResourceResolver(t *testing.T, resolver func(context.Context, *qurl.
 
 func openResourceTestStore(t *testing.T) *state.Store {
 	t.Helper()
-	store, err := state.Open(t.TempDir())
+	store, err := state.Open(resourceTestStateDir(t))
 	if err != nil {
-		if errors.Is(err, qurl.ErrAgentStateContinuity) {
-			t.Skipf("pinned agent state unavailable: %v", err)
-		}
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+func resourceTestStateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := state.EnsureDirMode(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func pendingRequestFromDisk(t *testing.T, store *state.Store, connectorID string) map[string]any {
@@ -120,12 +145,9 @@ func TestResolveResourcePersistsBeforeDispatchAndCommitsCompleteBinding(t *testi
 }
 
 func TestResolveResourceLostResponseReplaysExactNonceThenWarmStartPinsIdentity(t *testing.T) {
-	dir := t.TempDir()
+	dir := resourceTestStateDir(t)
 	store, err := state.Open(dir)
 	if err != nil {
-		if errors.Is(err, qurl.ErrAgentStateContinuity) {
-			t.Skipf("pinned agent state unavailable: %v", err)
-		}
 		t.Fatal(err)
 	}
 	defer func() { _ = store.Close() }()

@@ -7,48 +7,61 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
+	// defaultHTTPClientTimeout bounds each HTTP attempt when an embedding
+	// client does not provide an explicit nonzero timeout.
+	defaultHTTPClientTimeout = 30 * time.Second
 	// maxAttempts bounds the transient retry loop: one initial attempt plus
 	// two retries.
 	maxAttempts = 3
 	// maxRetryAfter caps each Retry-After wait before the CLI retries a
 	// replayable transient 429 or idempotent 503 response.
-	maxRetryAfter = 15 * time.Second
+	maxRetryAfter        = 15 * time.Second
+	maxRetryAfterSeconds = uint64(maxRetryAfter / time.Second)
 	// drainLimit bounds how much of a discarded retry response is read for
 	// connection reuse.
 	drainLimit = 512 << 10
 )
 
 // transport decorates every request — SDK-issued and direct alike — with the
-// CLI's headers and bounded transient retry. A 429 is retryable for any
-// replayable request. A 503 is retryable only when the caller supplied an
-// Idempotency-Key, which proves a replay cannot duplicate the mutation; dark
-// deployment 503s on ordinary calls remain single-shot. It implements
-// qurl.HTTPDoer.
+// CLI's headers and bounded transient retry. A 429 is retryable only for an
+// allowlisted read-like request or when the caller supplied an Idempotency-Key.
+// A 503 requires the key. It implements qurl.HTTPDoer.
 type transport struct {
 	next         *http.Client
 	userAgent    string
 	newRequestID func() string
 	sleep        func(time.Duration)
 	verbose      func(format string, args ...any)
+	basePath     string
+}
+
+type requestRetryIntentKey struct{}
+
+func withRequestRetryIntent(req *http.Request, allowRetry bool) *http.Request {
+	return req.WithContext(context.WithValue(req.Context(), requestRetryIntentKey{}, allowRetry))
 }
 
 func newTransport(cfg *Config) *transport {
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				// Surface 3xx to the caller instead of forwarding the
-				// Authorization header to a different URL.
-				return http.ErrUseLastResponse
-			},
+	// Copy an injected client so the CLI can enforce its credential boundary
+	// without mutating caller-owned test or embedding state. Redirect refusal
+	// applies to every client, not only the default: net/http can otherwise
+	// forward an Authorization header to a Location selected by the server.
+	httpClient := &http.Client{Timeout: defaultHTTPClientTimeout}
+	if cfg.HTTPClient != nil {
+		*httpClient = *cfg.HTTPClient
+		if httpClient.Timeout == 0 {
+			httpClient.Timeout = defaultHTTPClientTimeout
 		}
+	}
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	newRequestID := cfg.NewRequestID
 	if newRequestID == nil {
@@ -60,16 +73,36 @@ func newTransport(cfg *Config) *transport {
 		newRequestID: newRequestID,
 		// nil means the context-aware timer path in backoff; tests inject a
 		// recorder.
-		sleep:   cfg.Sleep,
-		verbose: cfg.Verbose,
+		sleep:    cfg.Sleep,
+		verbose:  cfg.Verbose,
+		basePath: apiBasePath(cfg.BaseURL),
 	}
 }
 
+func apiBasePath(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(parsed.EscapedPath(), "/")
+}
+
 // Do sends req with the CLI headers set, retrying bounded transient responses.
-// The X-Request-Id stays constant across retries of one logical request so the
+// Direct CLI REST calls carry their explicit retry intent in the request
+// context because qurl-go's registered HTTPDoer exposes only Do. SDK-issued
+// requests have no marker and default fail-closed: only read-only methods or
+// requests with an Idempotency-Key can retry. The
+// X-Request-Id stays constant across retries of one logical request so the
 // service can correlate them.
 func (t *transport) Do(req *http.Request) (*http.Response, error) {
-	return t.do(req, true)
+	// TODO(upstream-contract): qurl-go's registered HTTPDoer exposes only Do,
+	// not DoOnce. Keep carrying the caller's explicit intent through the
+	// request context until the upstream interface can express it directly.
+	allowRetry, explicit := req.Context().Value(requestRetryIntentKey{}).(bool)
+	if !explicit {
+		allowRetry = retrySafeRequest(req, t.basePath)
+	}
+	return t.do(req, allowRetry)
 }
 
 // DoOnce applies the same headers and redaction as Do but never replays the
@@ -80,20 +113,21 @@ func (t *transport) DoOnce(req *http.Request) (*http.Response, error) {
 }
 
 func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, error) {
-	req.Header.Set("User-Agent", t.userAgent)
-	req.Header.Set("X-Request-Id", t.newRequestID())
+	request := req.Clone(req.Context())
+	request.Header.Set("User-Agent", t.userAgent)
+	request.Header.Set("X-Request-Id", t.newRequestID())
 
 	for attempt := 1; ; attempt++ {
-		t.verbosef("> %s %s", req.Method, req.URL.Path)
-		resp, err := t.next.Do(req)
+		t.verbosef("> %s %s", request.Method, request.URL.Path)
+		resp, err := t.next.Do(request)
 		if err != nil {
 			return nil, err
 		}
-		if !allowRetry || !retryableResponse(req, resp) || attempt >= maxAttempts {
+		if !allowRetry || !retryableResponse(request, resp, t.basePath) || attempt >= maxAttempts {
 			t.verbosef("< HTTP %d", resp.StatusCode)
 			return resp, nil
 		}
-		replay, ok := replayableBody(req)
+		replay, ok := replayableBody(request)
 		if !ok {
 			t.verbosef("< HTTP %d", resp.StatusCode)
 			return resp, nil
@@ -101,7 +135,7 @@ func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, erro
 		wait := retryDelay(resp, attempt)
 		discardResponse(resp)
 		t.verbosef("< HTTP %d, retrying in %s", resp.StatusCode, wait)
-		if err := t.backoff(req.Context(), wait); err != nil {
+		if err := t.backoff(request.Context(), wait); err != nil {
 			return nil, err
 		}
 		if replay != nil {
@@ -109,16 +143,55 @@ func (t *transport) do(req *http.Request, allowRetry bool) (*http.Response, erro
 			if err != nil {
 				return nil, err
 			}
-			req.Body = body
+			request.Body = body
 		}
 	}
 }
 
-func retryableResponse(req *http.Request, resp *http.Response) bool {
+func retryableResponse(req *http.Request, resp *http.Response, basePath string) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
+		return retrySafeRequest(req, basePath)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		// TODO(upstream-contract): qurl-service must deduplicate every route
+		// that accepts Idempotency-Key for longer than this transport's maximum
+		// two-minute attempt-and-backoff span. The reviewed API-key mint path
+		// retains its atomic body-bound replay record for 24 hours.
+		return strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+	}
+}
+
+func retrySafeRequest(req *http.Request, basePath string) bool {
+	// TODO(upstream-contract): qurl-service must deduplicate every route that
+	// accepts Idempotency-Key for longer than this transport's maximum
+	// two-minute attempt-and-backoff span. The reviewed API-key mint path
+	// retains its atomic body-bound replay record for 24 hours.
+	if strings.TrimSpace(req.Header.Get("Idempotency-Key")) != "" {
 		return true
 	}
-	return resp.StatusCode == http.StatusServiceUnavailable && strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	case http.MethodPost:
+		// Resolve mints a short-lived link but does not change the resource.
+		// qurl-go owns this request and cannot carry our private context marker,
+		// so keep the one reviewed SDK write-like route explicit here. A 503
+		// still requires an Idempotency-Key in retryableResponse.
+		resource, ok := strings.CutPrefix(req.URL.EscapedPath(), basePath+"/v1/resources/")
+		if !ok {
+			return false
+		}
+		resource, ok = strings.CutSuffix(resource, "/resolve")
+		return ok && resource != "" && !strings.Contains(resource, "/")
+	default:
+		return false
+	}
 }
 
 // backoff waits out one retry delay, context-aware: cancellation during the
@@ -159,17 +232,31 @@ func replayableBody(req *http.Request) (func() (io.ReadCloser, error), bool) {
 
 // retryDelay honors a parseable Retry-After seconds value (capped) and falls
 // back to a small linear backoff otherwise.
+// TODO(upstream-contract): qURL API responses use the delta-seconds form. If
+// the service adopts HTTP-date, update parseRetryAfterSeconds and its tests.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
-	if v := strings.TrimSpace(resp.Header.Get("Retry-After")); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
-			d := time.Duration(secs) * time.Second
-			if d > maxRetryAfter {
-				return maxRetryAfter
-			}
-			return d
+	if secs, ok := parseRetryAfterSeconds(resp.Header.Get("Retry-After")); ok && secs > 0 {
+		if secs >= maxRetryAfterSeconds {
+			return maxRetryAfter
 		}
+		return time.Duration(secs) * time.Second
 	}
 	return time.Duration(attempt) * 500 * time.Millisecond
+}
+
+// parseRetryAfterSeconds parses the service's delta-seconds form without
+// changing its value. The transport applies its short wait cap separately;
+// an error shown after retries are exhausted retains the server's full hint.
+func parseRetryAfterSeconds(value string) (uint64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	seconds, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return seconds, true
 }
 
 func discardResponse(resp *http.Response) {

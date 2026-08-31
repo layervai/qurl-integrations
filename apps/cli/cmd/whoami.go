@@ -1,24 +1,23 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/spf13/cobra"
 )
 
-// whoamiCmd reports the account and key identity behind the configured
-// credential, via the platform's identity echo. Deliberately cheap: it shows
-// identity only — no plan or usage data — so it is safe to call from scripts
-// and shell prompts.
+// whoamiCmd reports the account and device identity behind the registered
+// machine credential, via the platform's identity echo.
 func whoamiCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
-		Short: "Show which qURL account your key belongs to",
-		Long: `Show who the configured qURL API key is: the account it belongs to and
-the key's own identity (id, kind, scopes, expiry).
+		Short: "Show which qURL account this device belongs to",
+		Long: `Show the qURL account and registered device identity used by this machine.
 
-The key is resolved the same way every command resolves it — QURL_API_KEY
-first, then the key "qurl login" stored — and checked against the qURL
-service, so whoami also confirms the key still works. It shows identity
-only: no plan or usage details.
+The command opens the same durable device identity as publish, list, resolve,
+and lifecycle commands, then checks it against the qURL service. It does not
+read an account API key on a warm start. If this machine is not enrolled, run
+"qurl login" or set QURL_API_KEY for one-time bootstrap.
 
 Useful for checking which account a script will act as before it publishes
 anything.`,
@@ -27,13 +26,19 @@ anything.`,
   qurl whoami -q`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
-			id, err := client.Me(cmd.Context())
-			if err != nil {
-				return err
+			id := opts.registeredIdentity
+			if id == nil {
+				id, err = client.Me(cmd.Context())
+				if err != nil {
+					return err
+				}
+			}
+			if id == nil {
+				return errors.New("qURL account identity response is empty")
 			}
 			return opts.printer().WhoAmI(id)
 		},

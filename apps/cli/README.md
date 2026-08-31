@@ -25,6 +25,11 @@ brew install layervai/tap/qurl
 qurl version
 ```
 
+On Windows, download the Windows `.zip` from the
+[latest release](https://github.com/layervai/qurl-integrations/releases),
+extract `qurl.exe`, add its directory to your user `PATH`, and run
+`qurl version` in PowerShell.
+
 Local lifecycle commands require qURL CLI 2.0.0 or newer. If the version is older,
 update the tap and upgrade the CLI before continuing:
 
@@ -45,8 +50,9 @@ step 4. Then run:
 qurl login
 ```
 
-Paste the key at the hidden prompt. The CLI validates it before saving it in a
-secure credential store (your OS keyring when one is available).
+Paste the key at the hidden prompt. The CLI validates it, enrolls this machine,
+and then discards it. qurl stores the restricted device identity in its
+owner-only native state; it does not store the account API key.
 
 ### 3. Start your app, then publish it
 
@@ -79,9 +85,9 @@ keeps the share available and resumes it after login, sleep, wake, or a network
 change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
 back on. Publishing the same target later reuses the same CRID.
 
-Background lifecycle management is currently available on macOS. On Linux,
-add `--foreground`; the command then owns the share until it exits. Local app
-sharing is not supported on Windows. Remote qURL commands remain available.
+Background lifecycle management is available on Linux, macOS, and Windows.
+Linux uses the native systemd user manager. Use `--foreground` for CI,
+debugging, or a process that another service manager owns.
 
 ### 4. Open or share it
 
@@ -119,14 +125,19 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
-The CLI supports remote qURL commands on every released platform. Local
-background sharing is currently macOS-only. Linux local publish requires
-`--foreground`; `start` and `restart` cannot create a background job. Windows
-supports remote qURL commands but not local app sharing.
+The CLI supports remote and local background qURL commands on macOS, Windows,
+and Linux. Linux uses the native systemd user manager and reports a clear error
+when that manager is unavailable.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
 and install it with `dpkg -i` / `rpm -i`.
+
+**Windows** — download the Windows `.zip` for your architecture from the
+[latest release](https://github.com/layervai/qurl-integrations/releases),
+extract `qurl.exe`, and put its directory on your user `PATH`. The first local
+`publish` or `start` installs an owner-only per-user Task Scheduler job. It
+does not require administrator access or store an account API key.
 
 **Prebuilt binaries** — download the archive for your OS and architecture
 (`linux`, `darwin`, `windows` × `amd64`, `arm64`) from the
@@ -142,42 +153,59 @@ qurl version
 
 ## Authentication
 
-Commands that contact qURL use an API key (`lv_live_…` for production,
-`lv_test_…` for test). Create one in the
-[qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the scopes for
-the commands you plan to use:
-
-| What you want to do | Scope |
-|---------------------|-------|
-| Publish a local app | `qurl:agent` |
-| Publish or delete a remote URL | `qurl:write` |
-| Resolve or open a CRID | `qurl:resolve` |
-| List resources | `qurl:read` |
+The CLI uses a registered device identity for ordinary commands. To enroll the
+device, create an account API key (`lv_live_…` for production, `lv_test_…` for
+test) in the [qURL dashboard](https://layerv.ai/qurl/dashboard/keys/) with the
+`qurl:agent` scope, then run `qurl login`.
 
 There is deliberately no `--api-key` flag — command-line arguments leak into
-shell history and process lists. The CLI looks for the key in this order:
+shell history and process lists. `qurl login` reads it from a hidden prompt or
+piped standard input. Scripts and CI can set `QURL_API_KEY` or
+`QURL_API_KEY_FILE` for the same first bootstrap or for an explicit recovery.
 
-1. `QURL_API_KEY` environment variable — recommended for scripts and CI.
-   When set, nothing on disk is read or written.
-2. The key `qurl login` stored: in your OS keyring (Keychain on macOS,
-   Credential Manager on Windows, the freedesktop Secret Service on Linux),
-   or — only where no keyring is available — in `~/.config/qurl/token`, a
-   file readable by your user alone. Commands warn when the key is served
-   from that file. Other LayerV tools (the SDK, the Connector) read only
-   that file, never the keyring — so on keyring machines, give them the
-   key via `QURL_API_KEY` rather than expecting them to see `qurl login`'s.
+`QURL_API_KEY_FILE` must be an exact absolute path. Its contents must be the
+key bytes followed by one LF or CRLF line ending, with no BOM, spaces, or
+second newline.
+On Unix, the file must be owned by you, have mode `0400` or `0600`, and have
+exactly one hard link. Create it with
+`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`.
 
-`qurl login` checks the key before storing it, so a mistyped key fails
-immediately. `qurl logout` removes the stored key from every place it may sit,
-and `qurl whoami` shows which account and key identity the configured
-credential maps to.
+On Windows, `QURL_API_KEY_FILE` must name a file that is owned by the current
+user and has a protected, owner-only ACL. PowerShell's normal CRLF line ending
+is accepted. To write UTF-8 without a BOM:
 
-The first local publish needs a login key with `qurl:agent`. The CLI uses that
-authority only to mint a Connector-bound, one-shot enrollment credential; it
-keeps the credential in memory and the native enrollment exchanges it for a
-restricted device identity. A warm start reuses that device identity and does
-not read the login key or mint another enrollment credential. Remote publish,
-resolve, and list continue to work with their existing narrower scopes.
+```powershell
+[IO.File]::WriteAllText($path, $key + "`n", [Text.UTF8Encoding]::new($false))
+```
+
+Create the file inside an owner-only temporary directory, remove ACL
+inheritance from the file, and remove the file immediately after `qurl login`.
+The CLI rejects an inherited or broadly readable ACL with the exact failing
+ACL condition. For most Windows CI jobs, use the one-command `QURL_API_KEY`
+environment value instead; qurl consumes it only for enrollment and does not
+store it.
+
+The CLI validates the account key and uses it once to enroll a restricted
+device identity. Only that device identity and its restricted credential enter
+the owner-only local state directory. The account API key and one-time
+enrollment credential remain in memory and are not stored by qurl. A warm
+command reuses the device identity and does not read `QURL_API_KEY`.
+
+`qurl whoami` checks the registered device and shows its account.
+
+Authenticated commands need the owner-only local state directory to remain
+writable. `QURL_API_KEY` can bootstrap missing or explicitly rejected device
+credentials, but it is not a steady-state bypass for that durable identity.
+Each authenticated command verifies the saved device identity with the qURL
+platform before it calls the resource API. If the platform cannot verify that
+identity, read-only commands such as `qurl list` are unavailable too. An
+account API key does not bypass this boundary.
+
+One native state directory belongs to one account. To switch accounts, first
+revoke the registered device key in the qURL dashboard. Then move or remove the
+complete state directory and run `qurl login` with the other account. Do not
+edit or delete individual state files; qurl rejects cross-account reuse and
+prints the exact directory and device-key ID needed for this recovery.
 
 ## Configuration
 
@@ -217,14 +245,38 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl stop <CRID>` | Turn off a local share without deleting it |
 | `qurl restart <CRID>` | Rotate and restart a local share |
 | `qurl status <CRID>` | Show desired and platform-observed sharing state |
+| `qurl inspect <CRID>` | Inspect the same authoritative resource or sharing state |
+| `qurl daemon run` | Run the local sharing daemon directly for headless or supervised use |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
-| `qurl whoami` | Show which account and key identity your credential maps to |
+| `qurl login` | Enroll this device with a one-time account key |
+| `qurl whoami` | Show which account this registered device belongs to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
 Run `qurl <command> --help` for the full help text; installed man pages
 cover the same surface (`man qurl`, `man qurl-publish`, …).
+
+### qurl daemon run
+
+`qurl daemon run` lets another service manager own the long-running process.
+With no headless flags, it serves the local shares already stored under
+`--state-dir`.
+
+Generated Docker, Kubernetes, and other headless deployment instructions can
+also supply `--headless-config <share.yaml>`. This is a non-secret, read-only
+version 2 YAML file for exactly one share. Use the generated file as-is; its
+identifiers bind the deployment to that share.
+
+The first start of a new state volume also requires
+`--enrollment-token-file <path>`. This file contains a one-time enrollment
+credential, not an account API key. It must be a read-only regular file or a
+Kubernetes projected-secret link, and only its owner or the process's dedicated
+group can read it. Keep the same file available until the first start finishes.
+If bootstrap stops before registration finishes, retry with the same still-valid
+one-time credential. In the next deployment revision, remove the flag but keep
+the secret recoverable. Verify that the warm start connects, then remove the
+secret mount and delete the one-time secret. A complete warm start does not read
+or require that file.
 
 Commands that take a CRID assess it locally first: a likely typo (bad
 checksum, wrong alphabet) is warned about and still forwarded — the server
@@ -340,9 +392,9 @@ machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
 Direct downloads use the deployment settings shipped with the CLI. On a
-deployment they don't cover — the sandbox, or a self-hosted platform —
-set `QURL_DEPLOYMENT` to the path of that deployment's settings file (ask
-whoever runs the deployment for it). Without usable settings, `get
+self-hosted or custom deployment, set `QURL_DEPLOYMENT` to the path of that
+deployment's settings file (ask whoever runs the deployment for it). Without
+usable settings, `get
 --file` fails loudly with exit code 3 rather than downloading the wrong
 thing; browser mode needs no settings at all.
 
@@ -411,7 +463,7 @@ without a terminal the command refuses rather than hanging. Deleting an
 already-deleted resource succeeds idempotently and says so (JSON sets
 `already_gone`).
 
-### qurl start / stop / restart / status
+### qurl start / stop / restart / status / inspect
 
 Local shares are durable desired state, managed by their full CRID:
 
@@ -420,23 +472,28 @@ qurl stop <CRID>
 qurl start <CRID>
 qurl restart <CRID>
 qurl status <CRID>
+qurl inspect <CRID>
 ```
 
 `stop` disables the cloud route first and then tells an already-running local
 daemon to reconcile; it never starts the daemon. `start` is idempotent and
 requires the saved local target to be reachable. `restart` always advances the
-serving epoch so stale registrations cannot keep routing. `status` works for
-remote resources too and includes the local target only when this machine owns
-one.
+serving epoch so stale sessions cannot keep serving. `status` and
+`inspect` use the same authoritative view. Both work for remote resources and
+include the local target only when this machine owns one.
 
-The daemon uses one resource-bound NHP admission and FRP session per share. It
-recovers assignment, sleep/wake, and network failures automatically with
-persisted bounded backoff. Customers never need a refresh approval flag. On
-macOS the first local `publish` or `start` installs an owner-only LaunchAgent;
-the stable Homebrew `qurl` path survives upgrades, and a binary-version change
-reloads the resident daemon deliberately. Ordinary lifecycle commands reload
-desired state over the local owner-only socket without restarting healthy
-sibling shares.
+Custom deployments must support the current CLI resource-status API. The CLI
+does not scan the full account inventory when one resource-status request
+fails.
+
+The daemon keeps each share independent. It recovers assignment, sleep/wake,
+and network failures automatically with persisted bounded backoff. Customers
+never need a refresh approval flag. On macOS the first local `publish` or
+`start` installs an owner-only LaunchAgent. On Windows it installs a
+least-privilege per-user Task Scheduler job. The installed `qurl` path survives
+normal upgrades, and a binary-version change reloads the resident daemon
+deliberately. Ordinary lifecycle commands reload desired state over an
+owner-only local control channel without restarting healthy sibling shares.
 
 `qurl list` prints every full CRID. For locally registered tunnel rows it also
 prints the canonical loopback target and durable desired state. The paged list
@@ -445,18 +502,13 @@ does not make one live API request per row, so its observed column is
 `connecting`, or `serving` observation. If the owner-only local registry is
 unavailable, list omits local targets and emits one warning.
 
-### qurl login / logout / whoami
+### qurl login / whoami
 
-`qurl login` reads the key from piped stdin or a hidden interactive
-prompt — never as an argument — validates its shape, checks it against
-the qURL service, and only then stores it (OS keyring preferred, the
-`~/.config/qurl/token` fallback where no keyring exists — see
-[Authentication](#authentication)). `qurl logout` removes the stored key
-from every backend that holds it; it does not touch `QURL_API_KEY` in
-your environment. `qurl whoami` shows the account and the key's own
-identity (id, kind, scopes, expiry) — identity only, no plan or usage
-data, so it is cheap enough for scripts and shell prompts (`--quiet`
-prints just the owner id).
+`qurl login` reads the account key from piped stdin or a hidden interactive
+prompt — never as an argument — validates it, enrolls the registered device,
+checks that the device belongs to the same account, and discards the account
+key. `qurl whoami` checks the registered device and shows its account identity
+only, with no plan or usage data. `--quiet` prints just the owner id.
 
 ```bash
 op read op://team/qurl/key | qurl login
@@ -541,8 +593,8 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 
 Every command's `-o json` document uses field names owned by this repo —
 a stable contract independent of upstream renames. Fields that only
-sometimes apply (`found_existing`, `already_gone`, a missing `crid` on
-older deployments) are omitted rather than emitted empty.
+sometimes apply (`found_existing`, `already_gone`) are omitted rather than
+emitted empty. Every resource result requires a verified `crid`.
 
 For `qurl list`, **`has_more` — not `next_cursor` presence — is the
 pagination terminator.** The service legitimately serves short and even

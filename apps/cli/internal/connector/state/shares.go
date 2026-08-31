@@ -23,11 +23,21 @@ const (
 	// LocalSharesFile is the owner-only durable desired-state registry.
 	LocalSharesFile = "local_shares.json"
 
-	localSharesVersion  = 1
+	localSharesVersion  = 2
 	localSharesMaxItems = 1024
 	localSharesMaxBytes = 1 << 20
 	desiredStateOn      = "on"
 	desiredStateOff     = "off"
+)
+
+var (
+	// ErrLocalShareOwnerConflict marks an attempt to retarget one durable
+	// native identity namespace to a different account.
+	ErrLocalShareOwnerConflict = errors.New("local share account owner conflicts with the native identity namespace")
+	// ErrLocalShareVersionUnsupported marks a registry written with another
+	// schema version. v2 deliberately does not migrate prerelease state.
+	ErrLocalShareVersionUnsupported = errors.New("local share registry version is unsupported")
+	errLocalShareUnchanged          = errors.New("local share registry is unchanged")
 )
 
 // LocalShare is the non-secret local half of one tunnel resource. The qURL
@@ -50,6 +60,7 @@ type LocalShare struct {
 
 type localSharesState struct {
 	Version int                   `json:"version"`
+	OwnerID string                `json:"owner_id,omitempty"`
 	Shares  map[string]LocalShare `json:"shares"`
 }
 
@@ -59,9 +70,46 @@ type localSharesState struct {
 // another's updates.
 type LocalShareRegistry struct{ dir string }
 
+// BindOwner durably binds this native identity namespace to the account owner
+// authenticated during initial publish. The owner is non-secret, but changing
+// it would retarget every native operation, so an existing binding is
+// immutable.
+func (r *LocalShareRegistry) BindOwner(ctx context.Context, ownerID string) (retErr error) {
+	ownerID = strings.TrimSpace(ownerID)
+	if !validLocalOwnerID(ownerID) {
+		return errors.New("local share account owner is invalid")
+	}
+	state, unlock, err := r.loadLocked(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	if state.OwnerID != "" && state.OwnerID != ownerID {
+		return fmt.Errorf("%w: bound to %q, requested %q", ErrLocalShareOwnerConflict, state.OwnerID, ownerID)
+	}
+	if state.OwnerID == ownerID {
+		return nil
+	}
+	state.OwnerID = ownerID
+	return writeLocalShares(r.dir, state)
+}
+
+// OwnerID returns the durable account owner without reading an API key. A
+// warm daemon uses this value with trusted build/deployment configuration, so
+// steady-state native operations require only the device keypair.
+func (r *LocalShareRegistry) OwnerID(ctx context.Context) (ownerID string, present bool, err error) {
+	state, unlock, err := r.loadLocked(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = unlock() }()
+	return state.OwnerID, state.OwnerID != "", nil
+}
+
 // ReadLocalSharesIfPresent reads an existing registry without creating the
-// state directory or registry. Read-only commands use this path so `qurl list`
-// and help never bootstrap the local daemon/runtime as a side effect.
+// state directory or registry. Resource reads use it only after registered
+// authentication so a remote-only result never creates local share rows or a
+// daemon control surface as a side effect.
 func ReadLocalSharesIfPresent(ctx context.Context, dir string) ([]LocalShare, bool, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -100,6 +148,9 @@ func (r *LocalShareRegistry) Put(ctx context.Context, candidate *LocalShare) err
 		return err
 	}
 	return r.update(ctx, func(state *localSharesState) error {
+		if state.OwnerID == "" {
+			return errors.New("local share account owner must be bound before a share is stored")
+		}
 		if existing, ok := state.Shares[share.ResourceID]; ok {
 			if existing.CRID != share.CRID || existing.ConnectorID != share.ConnectorID ||
 				existing.ConnectorRoutingID != share.ConnectorRoutingID || existing.KnockResourceID != share.KnockResourceID {
@@ -144,6 +195,10 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 		if epoch == share.ServingEpoch && desired != share.DesiredState {
 			return fmt.Errorf("refuse contradictory desired state %q at serving epoch %d", desired, epoch)
 		}
+		updated = share
+		if epoch == share.ServingEpoch {
+			return errLocalShareUnchanged
+		}
 		share.DesiredState = desired
 		share.ServingEpoch = epoch
 		share.UpdatedAt = time.Now().UTC()
@@ -151,15 +206,18 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 		updated = share
 		return nil
 	})
-	return &updated, err
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
-// DisableTerminal records a fail-closed local stop after the resource's
-// currently running session receives a permanent terminal denial. Unlike
-// SetDesired, this transition is not an authoritative cloud lifecycle
-// response: it may only turn the exact stored epoch from on to off. It never
-// advances an epoch, changes identity/target data, or turns sharing on.
-func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epoch uint64) (*LocalShare, error) {
+// DisableAtCurrentEpoch records a fail-closed local stop without rotating the
+// serving epoch. It is used after either a permanent terminal denial for the
+// current session or an authoritative idempotent cloud-off response. It may
+// only turn the exact stored epoch from on to off; it never advances an epoch,
+// changes identity or target data, or turns sharing on.
+func (r *LocalShareRegistry) DisableAtCurrentEpoch(ctx context.Context, id string, epoch uint64) (*LocalShare, error) {
 	var updated LocalShare
 	err := r.update(ctx, func(state *localSharesState) error {
 		key, share, ok := findLocalShare(state.Shares, id)
@@ -167,10 +225,14 @@ func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epo
 			return os.ErrNotExist
 		}
 		if epoch != share.ServingEpoch {
-			return fmt.Errorf("refuse terminal disable for serving epoch %d while local epoch is %d", epoch, share.ServingEpoch)
+			return fmt.Errorf("refuse local disable for serving epoch %d while local epoch is %d", epoch, share.ServingEpoch)
 		}
 		if share.DesiredState != desiredStateOn && share.DesiredState != desiredStateOff {
 			return fmt.Errorf("invalid local share desired state %q", share.DesiredState)
+		}
+		updated = share
+		if share.DesiredState == desiredStateOff {
+			return errLocalShareUnchanged
 		}
 		share.DesiredState = desiredStateOff
 		share.UpdatedAt = time.Now().UTC()
@@ -178,10 +240,13 @@ func (r *LocalShareRegistry) DisableTerminal(ctx context.Context, id string, epo
 		updated = share
 		return nil
 	})
-	return &updated, err
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
-// Get resolves one row by public resource ID or CRID.
+// Get resolves one row by public resource ID, CRID, or internal Connector ID.
 func (r *LocalShareRegistry) Get(ctx context.Context, id string) (*LocalShare, error) {
 	state, unlock, err := r.loadLocked(ctx)
 	if err != nil {
@@ -195,7 +260,8 @@ func (r *LocalShareRegistry) Get(ctx context.Context, id string) (*LocalShare, e
 	return &share, nil
 }
 
-// List returns a stable snapshot of every local share.
+// List returns one locked point-in-time snapshot of every local share. The
+// item order is unspecified because callers key rows by resource identity.
 func (r *LocalShareRegistry) List(ctx context.Context) ([]LocalShare, error) {
 	state, unlock, err := r.loadLocked(ctx)
 	if err != nil {
@@ -209,12 +275,12 @@ func (r *LocalShareRegistry) List(ctx context.Context) ([]LocalShare, error) {
 	return items, nil
 }
 
-// Delete removes one row by public resource ID or CRID.
+// Delete removes one row by public resource ID, CRID, or internal Connector ID.
 func (r *LocalShareRegistry) Delete(ctx context.Context, id string) error {
 	return r.update(ctx, func(state *localSharesState) error {
 		key, _, ok := findLocalShare(state.Shares, id)
 		if !ok {
-			return nil
+			return errLocalShareUnchanged
 		}
 		delete(state.Shares, key)
 		return nil
@@ -228,6 +294,9 @@ func (r *LocalShareRegistry) update(ctx context.Context, mutate func(*localShare
 	}
 	defer func() { retErr = errors.Join(retErr, unlock()) }()
 	if err := mutate(&state); err != nil {
+		if errors.Is(err, errLocalShareUnchanged) {
+			return nil
+		}
 		return err
 	}
 	return writeLocalShares(r.dir, state)
@@ -275,8 +344,11 @@ func loadLocalShares(dir string) (localSharesState, error) {
 	if err != nil {
 		return localSharesState{}, fmt.Errorf("inspect local share registry: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !connectorResourceOwnerOK(info) || info.Mode().Perm() != connectorResourceFileMode {
-		return localSharesState{}, errors.New("local share registry must be an owner-owned non-symlink regular 0600 file")
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return localSharesState{}, errors.New("local share registry must be a non-symlink regular file")
+	}
+	if err := validateConnectorResourceFile(path, info); err != nil {
+		return localSharesState{}, fmt.Errorf("validate local share registry: %w", err)
 	}
 	if info.Size() > localSharesMaxBytes {
 		return localSharesState{}, fmt.Errorf("local share registry exceeds %d bytes", localSharesMaxBytes)
@@ -300,6 +372,9 @@ func loadLocalShares(dir string) (localSharesState, error) {
 	}
 	state, err := decodeLocalShares(data)
 	if err != nil {
+		if errors.Is(err, ErrLocalShareVersionUnsupported) {
+			return localSharesState{}, fmt.Errorf("%w at %q; this CLI does not migrate old state: revoke any device key stored with it in the qURL dashboard, then move or remove the complete state directory and run `qurl login` again", err, path)
+		}
 		return localSharesState{}, fmt.Errorf("decode local share registry: %w", err)
 	}
 	return state, nil
@@ -343,8 +418,11 @@ func writeLocalShares(dir string, state localSharesState) error {
 	}
 	path := filepath.Join(dir, LocalSharesFile)
 	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !connectorResourceOwnerOK(info) || info.Mode().Perm() != connectorResourceFileMode {
-			return errors.New("local share registry must remain an owner-owned non-symlink regular 0600 file")
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("local share registry must remain a non-symlink regular file")
+		}
+		if err := validateConnectorResourceFile(path, info); err != nil {
+			return fmt.Errorf("validate local share registry before write: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -353,11 +431,20 @@ func writeLocalShares(dir string, state localSharesState) error {
 }
 
 func validateLocalSharesState(state localSharesState) error {
-	if state.Version != localSharesVersion || state.Shares == nil {
+	if state.Version != localSharesVersion {
+		return fmt.Errorf("%w: got %d, want %d", ErrLocalShareVersionUnsupported, state.Version, localSharesVersion)
+	}
+	if state.Shares == nil {
 		return errors.New("local share registry has an unsupported shape")
 	}
 	if len(state.Shares) > localSharesMaxItems {
 		return fmt.Errorf("local share registry is limited to %d entries", localSharesMaxItems)
+	}
+	if state.OwnerID != "" && !validLocalOwnerID(state.OwnerID) {
+		return errors.New("local share registry account owner is invalid")
+	}
+	if len(state.Shares) > 0 && state.OwnerID == "" {
+		return errors.New("local share registry with shares has no account owner")
 	}
 	crids := map[string]string{}
 	connectorIDs := map[string]string{}
@@ -379,6 +466,18 @@ func validateLocalSharesState(state localSharesState) error {
 		connectorIDs[share.ConnectorID] = key
 	}
 	return nil
+}
+
+func validLocalOwnerID(ownerID string) bool {
+	if ownerID == "" || len(ownerID) > 256 || strings.TrimSpace(ownerID) != ownerID || !utf8.ValidString(ownerID) {
+		return false
+	}
+	for _, char := range ownerID {
+		if char < 0x20 || char == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validateLocalShare(share *LocalShare) error {
@@ -435,20 +534,13 @@ func validateLocalShareTarget(share *LocalShare) error {
 		return errors.New("local share target must be a plain loopback HTTP origin")
 	}
 	host := parsed.Hostname()
-	if host != share.LocalIP || !isLoopbackHost(host) {
-		return errors.New("local share target host is not the recorded loopback address")
+	ip := net.ParseIP(host)
+	if host != share.LocalIP || ip == nil || !ip.IsLoopback() {
+		return errors.New("local share target host must be the recorded literal loopback IP address")
 	}
 	port, err := strconv.Atoi(parsed.Port())
 	if err != nil || port != share.LocalPort || port < 1 || port > 65535 {
 		return errors.New("local share target port is invalid")
 	}
 	return nil
-}
-
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

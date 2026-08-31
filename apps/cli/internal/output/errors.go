@@ -13,6 +13,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -44,6 +45,16 @@ func renderErrorLines(p *Printer, err error) []string {
 		return lines
 	}
 
+	var userMessage interface{ UserMessage() string }
+	if errors.As(err, &userMessage) {
+		lines := []string{head + " " + userMessage.UserMessage()}
+		var apiErr *qurlapi.Error
+		if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+			lines = append(lines, "  "+p.dim("Request ID: "+apiErr.RequestID))
+		}
+		return lines
+	}
+
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErrorLines(p, head, apiErr)
@@ -53,25 +64,91 @@ func renderErrorLines(p *Printer, err error) []string {
 
 // connectorErrorLines is the customer-language translation of the Connector
 // lifecycle sentinels and of qurl-go's enrollment/assignment taxonomy: a
-// plain-language headline, the operator-facing detail (the wrapped error text,
-// which stays technical and is where env names and reasons live), and the one
-// §17.1 hint. Two postures omit the detail block — token-required, whose
-// headline and hint already carry everything the wrapped message says, and
-// request-rejected, whose SDK text prescribes the wrong remedy in SDK
-// vocabulary (see its case).
+// plain-language headline, an optional operator-facing detail, and the one
+// §17.1 hint. Errors whose SDK text can contain private routing, identity, or
+// protocol details omit that block and use only fixed customer language.
 //
 // Every case matches with errors.Is, so a sentinel keeps rendering after the
 // enroll/refresh path wraps it (`refresh native assignment binding: %w`) or
 // after the SDK returns it inside an *AssignmentError. A mapping that only
 // fired on a bare sentinel would be dead code on the real path.
-func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
+func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) { //nolint:gocyclo // Keep ordered terminal-cause rendering in one boundary.
 	headline, hint, includeDetail := "", "", true
 	if resourceHeadline, resourceHint, ok := connectorResourceErrorPosture(err); ok {
-		return renderConnectorPosture(p, head, err, resourceHeadline, resourceHint, true), true
+		return renderConnectorResourcePosture(p, head, err, resourceHeadline, resourceHint), true
 	}
 	switch {
 	case errors.Is(err, hub.ErrConfig):
-		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
+		headline, hint, includeDetail = msgConnectorHubConfig, hintConnectorHubConfig, false
+	case errors.Is(err, sessionconfig.ErrConfig):
+		headline, hint = msgConnectorSessionConfig, hintConnectorSessionConfig
+	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
+		errors.Is(err, qurl.ErrCredentialRecoveryRequired):
+		// NativeCredentialRecoveryRequiredError names the durable agent and Go
+		// recovery APIs. Neither belongs on the CLI customer surface.
+		headline, hint, includeDetail = msgConnectorDeviceCredential, hintConnectorDeviceCredential, false
+	case errors.Is(err, qurl.ErrEndpointNoReply):
+		// EndpointNoReplyError names the private logical destination and offers
+		// topology-specific SDK guidance. Match it before wrappers such as an
+		// assignment recovery error so that detail cannot leak through them.
+		headline, hint, includeDetail = msgConnectorPeerTimeout, hintConnectorPeerTimeout, false
+	case errors.Is(err, qurl.ErrRecoveryCredentialRejected):
+		// The SDK error contains its internal recovery phase and numeric wire
+		// code. Neither helps a customer fix the rejected account credential.
+		headline, hint, includeDetail = msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected):
+		headline, hint, includeDetail = msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired):
+		headline, hint, includeDetail = msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryExpired):
+		headline, hint, includeDetail = msgConnectorRecoveryExpired, hintConnectorRecoveryExpired, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryCandidateConflict):
+		headline, hint, includeDetail = msgConnectorRecoveryConflict, hintConnectorRecoveryConflict, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryCandidatePersistence):
+		headline, hint, includeDetail = msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryRequestRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryInvalidResponse):
+		headline, hint, includeDetail = msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid, false
+	case errors.Is(err, qurl.ErrCredentialRecoveryUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryRateLimited),
+		errors.Is(err, qurl.ErrCredentialReplacementUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryGrantRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryRetryRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		headline, hint, includeDetail = msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable, false
+	case errors.Is(err, qurl.ErrInvalidRegisterConfig):
+		headline, hint, includeDetail = msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig, false
+	case errors.Is(err, qurl.ErrAgentBindingPersistence),
+		errors.Is(err, qurl.ErrAgentCompletionCandidatePersistence),
+		errors.Is(err, qurl.ErrAgentSetupLock):
+		headline, hint, includeDetail = msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence, false
+	case errors.Is(err, qurl.ErrRegistrationRecoveryRequired),
+		errors.Is(err, qurl.ErrRegistrationRateLimited),
+		errors.Is(err, qurl.ErrAssignmentTicketExpired),
+		errors.Is(err, qurl.ErrCompletionUnavailable),
+		errors.Is(err, qurl.ErrCompletionRecoveryRequired):
+		headline, hint, includeDetail = msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable, false
+	case errors.Is(err, qurl.ErrKeyRejected):
+		headline, hint, includeDetail = msgConnectorTokenRejected, hintConnectorTokenRejected, false
+	case errors.Is(err, qurl.ErrBootstrapSetupKeyConsumed):
+		headline, hint, includeDetail = msgConnectorTokenConsumed, hintConnectorTokenConsumed, false
+	case errors.Is(err, qurl.ErrCompletionIdentityRejected):
+		headline, hint, includeDetail = msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity, false
+	case errors.Is(err, qurl.ErrAgentIdentityConflict),
+		errors.Is(err, qurl.ErrCompletionCredentialConflict):
+		headline, hint, includeDetail = msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict, false
+	case errors.Is(err, qurl.ErrRegistrationInvalidInput),
+		errors.Is(err, qurl.ErrCompletionRequestRejected):
+		headline, hint, includeDetail = msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid, false
+	case errors.Is(err, qurl.ErrRegistrationDisabled):
+		headline, hint, includeDetail = msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled, false
+	case errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
+		headline, hint, includeDetail = msgConnectorDeviceQuota, hintConnectorDeviceQuota, false
+	case errors.Is(err, qurl.ErrAssignmentTicketInvalid),
+		errors.Is(err, qurl.ErrRegisterReplyMalformed),
+		errors.Is(err, qurl.ErrRegistrationKeyKindDisallowed):
+		headline, hint, includeDetail = msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch, false
 	// qurl-go's assignment taxonomy follows the local configuration posture.
 	case errors.Is(err, qurl.ErrAssignmentBootstrapConsumed):
 		headline, hint = msgConnectorTokenConsumed, hintConnectorTokenConsumed
@@ -131,6 +208,31 @@ func renderConnectorPosture(p *Printer, head string, err error, headline, hint s
 	return lines
 }
 
+// renderConnectorResourcePosture keeps the SDK and local continuity detail
+// behind the customer boundary. The native result code is the only dynamic
+// value admitted here: qurl-go defines it as a non-secret five-digit support
+// code and does not attach a peer, request nonce, credential, or endpoint.
+func renderConnectorResourcePosture(p *Printer, head string, err error, headline, hint string) []string {
+	lines := []string{head + " " + headline}
+	if code := connectorResourceCode(err); code != "" {
+		lines = append(lines, "", "  "+p.dim(labelConnectorErrorCode+" "+code))
+	}
+	return append(lines, "", "  "+p.dim(hint))
+}
+
+func connectorResourceCode(err error) string {
+	var discovery *qurl.ConnectorResourceDiscoveryError
+	if !errors.As(err, &discovery) || discovery == nil || len(discovery.Code) != 5 {
+		return ""
+	}
+	for _, character := range discovery.Code {
+		if character < '0' || character > '9' {
+			return ""
+		}
+	}
+	return discovery.Code
+}
+
 func connectorResourceErrorPosture(err error) (headline, hint string, ok bool) {
 	switch {
 	case errors.Is(err, state.ErrConnectorResourceVerification):
@@ -159,7 +261,11 @@ func connectorResourceErrorPosture(err error) (headline, hint string, ok bool) {
 }
 
 // apiErrorLines is the RFC 7807 anatomy: headline with status, detail
-// paragraph, sorted invalid fields, one hint, request id.
+// paragraph, sorted invalid fields, one hint, request id. Title, Detail, and
+// InvalidFields are the qURL service's public error contract and are rendered
+// as supplied. Credential redaction still applies at RenderError; do not add a
+// heuristic topology sanitizer here because it would silently rewrite that
+// public contract.
 func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 	headline := apiErr.Title
 	if headline == "" {
@@ -201,6 +307,8 @@ func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 // condition, not a permissions problem, and says so.
 func errorHint(apiErr *qurlapi.Error) string {
 	switch {
+	case apiErr.AgentEnrollmentScopeRequired():
+		return hintEnrollmentScope
 	case apiErr.ConnectorEnrollmentScopeRequired():
 		return hintConnectorEnrollmentScope
 	case strings.EqualFold(apiErr.Code, "revoked"):

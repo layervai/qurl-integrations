@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
 func TestLoadHeadlessConfigStrictContract(t *testing.T) {
@@ -20,11 +18,13 @@ func TestLoadHeadlessConfigStrictContract(t *testing.T) {
 	}{
 		{name: "valid", data: valid},
 		{name: "unknown field", data: valid + "\nfuture: true\n", want: "field future not found"},
-		{name: "duplicate key", data: strings.Replace(valid, "version: 1", "version: 1\nversion: 1", 1), want: "already defined"},
-		{name: "multiple documents", data: valid + "\n---\nversion: 1\n", want: "more than one YAML document"},
-		{name: "zero shares", data: "version: 1\nshares: []\n", want: "exactly one share"},
-		{name: "two shares", data: valid + strings.TrimPrefix(valid, "version: 1\nshares:\n"), want: "exactly one share"},
+		{name: "duplicate key", data: strings.Replace(valid, "version: 2", "version: 2\nversion: 2", 1), want: "already defined"},
+		{name: "multiple documents", data: valid + "\n---\nversion: 2\n", want: "more than one YAML document"},
+		{name: "zero shares", data: "version: 2\nowner_id: owner-one\nshares: []\n", want: "exactly one share"},
+		{name: "missing owner", data: strings.Replace(valid, "owner_id: owner-one\n", "", 1), want: "account owner"},
+		{name: "two shares", data: valid + strings.TrimPrefix(valid, "version: 2\nowner_id: owner-one\nshares:\n"), want: "exactly one share"},
 		{name: "off", data: strings.Replace(valid, "desired_state: on", "desired_state: off", 1), want: "desired_state on"},
+		{name: "localhost is not canonical", data: strings.ReplaceAll(valid, "127.0.0.1", "localhost"), want: "literal loopback IP address"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,6 +41,24 @@ func TestLoadHeadlessConfigStrictContract(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPinnedFilesRequireAbsoluteCleanPaths(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		read func(string) error
+	}{
+		{name: "config", read: func(path string) error { _, err := LoadHeadlessConfig(path); return err }},
+		{name: "credential", read: func(path string) error { _, err := ReadEnrollmentCredential(path); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, path := range []string{"relative-file", " relative-file", filepath.Join(t.TempDir(), "child") + string(filepath.Separator) + ".." + string(filepath.Separator) + "file"} {
+				if err := test.read(path); err == nil || !strings.Contains(err.Error(), "absolute, clean path") {
+					t.Fatalf("path %q error = %v", path, err)
+				}
 			}
 		})
 	}
@@ -99,6 +117,21 @@ func TestReadOnlyProjectedFilesAndCredentialSafety(t *testing.T) {
 	if _, err := ReadEnrollmentCredential(large); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversize credential error = %v", err)
 	}
+
+	unsafeParent := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(unsafeParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credential := filepath.Join(unsafeParent, "credential")
+	if err := os.WriteFile(credential, []byte("secret"), 0o400); err != nil { // #nosec G306 -- secure file inside an intentionally unsafe parent.
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeParent, 0o777); err != nil { // #nosec G302 -- intentionally unsafe parent fixture.
+		t.Fatal(err)
+	}
+	if _, err := ReadEnrollmentCredential(credential); err == nil || !strings.Contains(err.Error(), "parent directory") {
+		t.Fatalf("writable parent error = %v", err)
+	}
 }
 
 func TestProjectedFileSwapFailsClosed(t *testing.T) {
@@ -128,21 +161,4 @@ func TestProjectedFileSwapFailsClosed(t *testing.T) {
 	if _, err := ReadEnrollmentCredential(link); err == nil || !strings.Contains(err.Error(), "changed while it was opened") {
 		t.Fatalf("swap error = %v", err)
 	}
-}
-
-func testHeadlessYAML(t *testing.T) string {
-	t.Helper()
-	binding := testResourceBinding(t, "headless-app")
-	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
-	return "version: 1\nshares:\n" +
-		"  - crid: " + binding.CRID + "\n" +
-		"    resource_id: " + binding.ResourceID + "\n" +
-		"    connector_id: " + binding.ConnectorID + "\n" +
-		"    connector_routing_id: " + binding.ConnectorRoutingID + "\n" +
-		"    knock_resource_id: " + binding.KnockResourceID + "\n" +
-		"    target_url: http://127.0.0.1:8080\n" +
-		"    local_ip: 127.0.0.1\n" +
-		"    local_port: 8080\n" +
-		"    desired_state: on\n" +
-		"    serving_epoch: 1\n"
 }

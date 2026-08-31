@@ -1,6 +1,7 @@
 package output
 
 import (
+	"errors"
 	"fmt"
 	"text/tabwriter"
 	"time"
@@ -39,18 +40,19 @@ type resolveJSON struct {
 // (the text table deliberately omits them — see List). A sweeper identifying
 // throwaway rows by the label their publisher gave them reads this document.
 type listItemJSON struct {
-	CRID            string                  `json:"crid,omitempty"`
-	ResourceID      string                  `json:"resource_id"`
-	TargetURL       string                  `json:"target_url,omitempty"`
-	Type            string                  `json:"type,omitempty"`
-	Status          string                  `json:"status,omitempty"`
-	DesiredState    qurlapi.DesiredState    `json:"desired_state,omitempty"`
-	ConnectionState qurlapi.ConnectionState `json:"connection_state,omitempty"`
-	ServingEpoch    *uint64                 `json:"serving_epoch,omitempty"`
-	Description     string                  `json:"description,omitempty"`
-	Tags            []string                `json:"tags,omitempty"`
-	CreatedAt       *time.Time              `json:"created_at,omitempty"`
-	ExpiresAt       *time.Time              `json:"expires_at,omitempty"`
+	CRID       string `json:"crid,omitempty"`
+	ResourceID string `json:"resource_id"`
+	// TargetURL is the owner-visible URL for URL resources and the target
+	// from this machine's local registry for tunnel resources when present.
+	TargetURL    string               `json:"target_url,omitempty"`
+	Type         string               `json:"type,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	DesiredState qurlapi.DesiredState `json:"desired_state,omitempty"`
+	ServingEpoch *uint64              `json:"serving_epoch,omitempty"`
+	Description  string               `json:"description,omitempty"`
+	Tags         []string             `json:"tags,omitempty"`
+	CreatedAt    *time.Time           `json:"created_at,omitempty"`
+	ExpiresAt    *time.Time           `json:"expires_at,omitempty"`
 }
 
 type listJSON struct {
@@ -78,6 +80,31 @@ type sharingJSON struct {
 	DesiredState    qurlapi.DesiredState    `json:"desired_state"`
 	ConnectionState qurlapi.ConnectionState `json:"connection_state"`
 	ServingEpoch    uint64                  `json:"serving_epoch"`
+}
+
+type sharingInspectionJSON struct {
+	sharingJSON
+	DaemonState     string     `json:"daemon_state"`
+	LastTransition  *time.Time `json:"last_transition,omitempty"`
+	FailureCategory string     `json:"failure_category,omitempty"`
+	FailureCode     string     `json:"failure_code,omitempty"`
+	RetryAttempt    int        `json:"retry_attempt"`
+	NextRetryAt     *time.Time `json:"next_retry_at,omitempty"`
+	TargetHealth    string     `json:"local_target_health"`
+}
+
+// SharingInspection is the redacted diagnostic view assembled by the command
+// from cloud state, owner-only local state, and owner-only daemon IPC.
+type SharingInspection struct {
+	TargetURL       string
+	State           *qurlapi.Sharing
+	DaemonState     string
+	LastTransition  *time.Time
+	FailureCategory string
+	FailureCode     string
+	RetryAttempt    int
+	NextRetryAt     *time.Time
+	TargetHealth    string
 }
 
 type resourceStatusJSON struct {
@@ -121,7 +148,7 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 			FoundExisting: res.FoundExisting,
 		})
 	case p.quiet:
-		_, err := fmt.Fprintln(p.out, primaryID(res.CRID, res.ResourceID))
+		_, err := fmt.Fprintln(p.out, res.CRID)
 		return err
 	default:
 		return p.publishText(res)
@@ -156,6 +183,63 @@ func (p *Printer) Sharing(target string, state *qurlapi.Sharing) error {
 	}
 }
 
+// InspectSharing renders useful local diagnostics without endpoint topology,
+// credentials, session receipts, or raw internal errors.
+func (p *Printer) InspectSharing(inspection *SharingInspection) error {
+	if inspection == nil {
+		return errors.New("qURL sharing inspection is incomplete")
+	}
+	state := inspection.State
+	if state == nil {
+		return errors.New("qURL sharing inspection is incomplete")
+	}
+	switch {
+	case p.format == FormatJSON:
+		return p.writeJSON(sharingInspectionJSON{
+			sharingJSON: sharingJSON{
+				CRID: state.CRID, ResourceID: state.ResourceID, TargetURL: inspection.TargetURL,
+				DesiredState: state.DesiredState, ConnectionState: state.ConnectionState,
+				ServingEpoch: state.ServingEpoch,
+			},
+			DaemonState: inspection.DaemonState, LastTransition: inspection.LastTransition,
+			FailureCategory: inspection.FailureCategory, FailureCode: inspection.FailureCode,
+			RetryAttempt: inspection.RetryAttempt, NextRetryAt: inspection.NextRetryAt,
+			TargetHealth: inspection.TargetHealth,
+		})
+	case p.quiet:
+		_, err := fmt.Fprintln(p.out, state.CRID)
+		return err
+	default:
+		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
+		ew := &errWriter{w: tw}
+		ew.printf("%s\t%s\n", p.bold("CRID:"), state.CRID)
+		if inspection.TargetURL != "" {
+			ew.printf("%s\t%s\n", p.bold("Target:"), inspection.TargetURL)
+		}
+		ew.printf("%s\t%s\n", p.bold("Desired:"), state.DesiredState)
+		ew.printf("%s\t%s\n", p.bold("Observed:"), state.ConnectionState)
+		ew.printf("%s\t%d\n", p.bold("Serving epoch:"), state.ServingEpoch)
+		ew.printf("%s\t%s\n", p.bold("Daemon:"), inspection.DaemonState)
+		ew.printf("%s\t%s\n", p.bold("Local target:"), inspection.TargetHealth)
+		if inspection.LastTransition != nil {
+			ew.printf("%s\t%s\n", p.bold("Last transition:"), inspection.LastTransition.UTC().Format(time.RFC3339))
+		}
+		if inspection.FailureCategory != "" {
+			ew.printf("%s\t%s\n", p.bold("Failure category:"), inspection.FailureCategory)
+		}
+		if inspection.FailureCode != "" {
+			ew.printf("%s\t%s\n", p.bold("Failure code:"), inspection.FailureCode)
+		}
+		if inspection.RetryAttempt > 0 {
+			ew.printf("%s\t%d\n", p.bold("Retry attempt:"), inspection.RetryAttempt)
+		}
+		if inspection.NextRetryAt != nil {
+			ew.printf("%s\t%s\n", p.bold("Next retry:"), inspection.NextRetryAt.UTC().Format(time.RFC3339))
+		}
+		return ew.flush(tw)
+	}
+}
+
 // ResourceStatus renders the stable state of a non-Connector resource. URL
 // resources do not have desired/observed serving epochs; their lifecycle is
 // active until delete, revoke, expiry, or tombstone changes the resource row.
@@ -168,12 +252,12 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 			CreatedAt: resource.CreatedAt, ExpiresAt: resource.ExpiresAt,
 		})
 	case p.quiet:
-		_, err := fmt.Fprintln(p.out, primaryID(resource.CRID, resource.ResourceID))
+		_, err := fmt.Fprintln(p.out, resource.CRID)
 		return err
 	default:
 		tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 		ew := &errWriter{w: tw}
-		ew.printf("%s\t%s\n", p.bold("CRID:"), primaryID(resource.CRID, resource.ResourceID))
+		ew.printf("%s\t%s\n", p.bold("CRID:"), resource.CRID)
 		if resource.TargetURL != "" {
 			ew.printf("%s\t%s\n", p.bold("Target:"), resource.TargetURL)
 		}
@@ -189,13 +273,10 @@ func (p *Printer) ResourceStatus(resource *qurlapi.ResourceSummary) error {
 	}
 }
 
-// publishText renders the publish document. The raw platform resource id is
-// deliberately absent whenever a CRID exists: the CRID is the customer-facing
-// identity, and nothing in the CLI accepts a resource id as input. It comes
-// back only when the service minted no CRID, so the document still carries
-// some identifier — the same fallback --quiet makes through primaryID, and
-// the one cmd's no-CRID warning points the reader at. JSON always keeps the
-// raw field.
+// publishText renders the publish document. The raw platform resource ID is
+// deliberately absent: the CRID is the customer-facing identity, and nothing
+// in the CLI accepts a resource ID as input. JSON keeps the raw field for
+// machine-readable diagnostics.
 func (p *Printer) publishText(res *qurlapi.Published) error {
 	headline := "Published"
 	if foundExisting(res) {
@@ -210,9 +291,6 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
-	if res.CRID == "" && res.ResourceID != "" {
-		twe.printf("  %s\t%s\n", p.bold("Resource ID:"), res.ResourceID)
-	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}
@@ -233,9 +311,7 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	if foundExisting(res) && res.CRID != "" {
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
-	if res.CRID != "" {
-		ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
-	}
+	ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	return ew.flush(nil)
 }
 
@@ -316,18 +392,17 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 				servingEpoch = &epoch
 			}
 			out.Resources = append(out.Resources, listItemJSON{
-				CRID:            item.CRID,
-				ResourceID:      item.ResourceID,
-				TargetURL:       item.TargetURL,
-				Type:            item.Type,
-				Status:          item.Status,
-				DesiredState:    item.DesiredState,
-				ConnectionState: item.ConnectionState,
-				ServingEpoch:    servingEpoch,
-				Description:     item.Description,
-				Tags:            item.Tags,
-				CreatedAt:       item.CreatedAt,
-				ExpiresAt:       item.ExpiresAt,
+				CRID:         item.CRID,
+				ResourceID:   item.ResourceID,
+				TargetURL:    item.TargetURL,
+				Type:         item.Type,
+				Status:       item.Status,
+				DesiredState: item.DesiredState,
+				ServingEpoch: servingEpoch,
+				Description:  item.Description,
+				Tags:         item.Tags,
+				CreatedAt:    item.CreatedAt,
+				ExpiresAt:    item.ExpiresAt,
 			})
 		}
 		return p.writeJSON(out)
@@ -335,7 +410,7 @@ func (p *Printer) List(page *qurlapi.ResourcePage) error {
 		ew := &errWriter{w: p.out}
 		for i := range page.Items {
 			item := &page.Items[i]
-			ew.printf("%s\n", primaryID(item.CRID, item.ResourceID))
+			ew.printf("%s\n", item.CRID)
 		}
 		return ew.flush(nil)
 	default:
@@ -365,16 +440,13 @@ func (p *Printer) listText(page *qurlapi.ResourcePage) error {
 		desired, observed := "-", item.Status
 		if item.Type == "tunnel" {
 			desired = string(item.DesiredState)
-			observed = string(item.ConnectionState)
+			observed = "unknown"
 			if desired == "" {
 				desired = "unknown"
 			}
-			if observed == "" {
-				observed = "unknown"
-			}
 		}
 		ew.printf("%s\t%s\t%s\t%s\t%s\t%s\n",
-			primaryID(item.CRID, item.ResourceID),
+			item.CRID,
 			item.TargetURL,
 			desired,
 			observed,
@@ -454,13 +526,4 @@ func (p *Printer) Downloaded(crid, path string, bytes int64) error {
 		_, _ = fmt.Fprintf(p.err, msgSavedTo+"\n", path, bytes)
 		return nil
 	}
-}
-
-// primaryID prefers the CRID and falls back to the resource ID for rows the
-// service has not (yet) minted a CRID for.
-func primaryID(crid, resourceID string) string {
-	if crid != "" {
-		return crid
-	}
-	return resourceID
 }

@@ -1,4 +1,4 @@
-//go:build clisandbox
+//go:build clisandbox && (linux || darwin)
 
 package main
 
@@ -42,6 +42,20 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 	if loaded.AgentID != wantAgentID {
 		return errors.New("durable agent identity does not match the canonical run namespace")
 	}
+	if loaded.PrivateKeyB64 == "" || loaded.PublicKeyB64 == "" || loaded.RegisteredAt == nil ||
+		loaded.DeviceAPIKey == "" || loaded.DeviceAPIKeyID == "" {
+		return errors.New("durable device identity is incomplete")
+	}
+	switch qurl.RegistrationKeyKind(loaded.EnrollmentCredentialKind) {
+	case qurl.RegistrationKeyKindAccount, qurl.RegistrationKeyKindBootstrap:
+		// Both kinds are owner-scoped by the qurl-go native session-operation
+		// contract. The CLI uses a one-shot agent enrollment token, which NHP
+		// records as bootstrap without making it connector-scoped.
+	case qurl.RegistrationKeyKindConnectorBootstrap, qurl.RegistrationKeyKindAgent:
+		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account or bootstrap", loaded.EnrollmentCredentialKind)
+	default:
+		return fmt.Errorf("durable device enrollment kind = %q, want owner-scoped account or bootstrap", loaded.EnrollmentCredentialKind)
+	}
 	if wantDeviceKeyID != "" && loaded.DeviceAPIKeyID != wantDeviceKeyID {
 		return errors.New("durable device credential identity changed across lifecycle restart")
 	}
@@ -49,17 +63,33 @@ func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDev
 }
 
 func TestValidateSandboxDeviceIdentity(t *testing.T) {
-	valid := &qurl.AgentState{AgentID: "qurl-share-r1-a1-hs", DeviceAPIKeyID: "key-1"}
-	if err := validateSandboxDeviceIdentity(valid, valid.AgentID, valid.DeviceAPIKeyID); err != nil {
-		t.Fatalf("valid identity: %v", err)
+	registeredAt := time.Now().UTC()
+	validAccount := &qurl.AgentState{
+		AgentID: "qurl-share-r1-a1-hs", PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt,
+		DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-1", EnrollmentCredentialKind: string(qurl.RegistrationKeyKindAccount),
+	}
+	validBootstrap := *validAccount
+	validBootstrap.EnrollmentCredentialKind = string(qurl.RegistrationKeyKindBootstrap)
+	for name, valid := range map[string]*qurl.AgentState{
+		"account":   validAccount,
+		"bootstrap": &validBootstrap,
+	} {
+		t.Run("valid_"+name, func(t *testing.T) {
+			if err := validateSandboxDeviceIdentity(valid, valid.AgentID, valid.DeviceAPIKeyID); err != nil {
+				t.Fatalf("valid owner-scoped identity: %v", err)
+			}
+		})
 	}
 	for name, loaded := range map[string]*qurl.AgentState{
 		"missing":          nil,
-		"wrong agent":      {AgentID: "other", DeviceAPIKeyID: "key-1"},
-		"wrong credential": {AgentID: valid.AgentID, DeviceAPIKeyID: "key-2"},
+		"incomplete":       {AgentID: validAccount.AgentID},
+		"wrong agent":      {AgentID: "other"},
+		"wrong credential": {AgentID: validAccount.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: "key-2", EnrollmentCredentialKind: string(qurl.RegistrationKeyKindAccount)},
+		"connector scope":  {AgentID: validAccount.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: validAccount.DeviceAPIKeyID, EnrollmentCredentialKind: string(qurl.RegistrationKeyKindConnectorBootstrap)},
+		"retired agent":    {AgentID: validAccount.AgentID, PrivateKeyB64: "private", PublicKeyB64: "public", RegisteredAt: &registeredAt, DeviceAPIKey: "device-secret", DeviceAPIKeyID: validAccount.DeviceAPIKeyID, EnrollmentCredentialKind: string(qurl.RegistrationKeyKindAgent)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSandboxDeviceIdentity(loaded, valid.AgentID, valid.DeviceAPIKeyID); err == nil {
+			if err := validateSandboxDeviceIdentity(loaded, validAccount.AgentID, validAccount.DeviceAPIKeyID); err == nil {
 				t.Fatal("invalid durable identity accepted")
 			}
 		})
@@ -87,10 +117,12 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 		t.Fatalf("load protected sandbox API key: %v", err)
 	}
 	cliEnv := sandboxJourneyEnv(t)
+	addSandboxRunIdentity(t, cliEnv)
 	endpoint := cliEnv["QURL_ENDPOINT"]
 	if cliEnv["QURL_API_KEY"] != apiKey {
 		t.Fatal("sandbox API key sources disagree")
 	}
+	delete(cliEnv, "QURL_API_KEY")
 
 	namespaceA, err := sandboxNamespace("sibling-a")
 	if err != nil {
@@ -122,24 +154,50 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 			t.Fatalf("secure sibling state directory: %v", err)
 		}
 	}
+	enrollSandboxSiblingDevice(t, binary, cliEnv, stateDirA, namespaceA, apiKey)
+	recoveryOwnsA := false
+	t.Cleanup(func() {
+		if recoveryOwnsA {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxCleanupTimeout)
+		defer cancel()
+		if err := cleanupSandboxSiblingAuthority(ctx, endpoint, cleanupJWT, namespaceA, stateDirA, productionSandboxSiblingCleanupOps()); err != nil {
+			t.Error(err)
+		}
+	})
 	processA := startSandboxPublishProcess(t, binary, cliEnv, namespaceA, stateDirA, targetA.URL)
 	processA.registerRecoveryCleanup(t, endpoint, cleanupJWT, namespaceA, stateDirA, productionSandboxSiblingCleanupOps())
+	recoveryOwnsA = true
 	cridA := processA.waitReady(t)
 	assertSandboxSiblingIdentity(t, namespaceA, stateDirA)
+	enrollSandboxSiblingDevice(t, binary, cliEnv, stateDirB, namespaceB, apiKey)
+	recoveryOwnsB := false
+	t.Cleanup(func() {
+		if recoveryOwnsB {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxCleanupTimeout)
+		defer cancel()
+		if err := cleanupSandboxSiblingAuthority(ctx, endpoint, cleanupJWT, namespaceB, stateDirB, productionSandboxSiblingCleanupOps()); err != nil {
+			t.Error(err)
+		}
+	})
 	processB := startSandboxPublishProcess(t, binary, cliEnv, namespaceB, stateDirB, targetB.URL)
 	processB.registerRecoveryCleanup(t, endpoint, cleanupJWT, namespaceB, stateDirB, productionSandboxSiblingCleanupOps())
+	recoveryOwnsB = true
 	cridB := processB.waitReady(t)
 	assertSandboxSiblingIdentity(t, namespaceB, stateDirB)
 	if cridA == cridB {
 		t.Fatalf("siblings published the same CRID %q", cridA)
 	}
 
-	assertSandboxGetBytes(t, binary, cliEnv, cridA, bodyA)
-	assertSandboxGetBytes(t, binary, cliEnv, cridB, bodyB)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirA, cridA, bodyA)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirB, cridB, bodyB)
 	firstAStopped := processA.stopAndValidate(t, apiKey, cleanupJWT)
 	processB.requireRunning(t, "after sibling A stop")
 	processB.requireSharingState(t, "on", "serving")
-	assertSandboxGetBytes(t, binary, cliEnv, cridB, bodyB)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirB, cridB, bodyB)
 
 	replacementA := startSandboxPublishProcess(t, binary, cliEnv, namespaceA, stateDirA, targetA.URL)
 	replacementCRIDA := replacementA.waitReady(t)
@@ -149,13 +207,46 @@ func TestSandboxLocalPublishSiblingContinuity(t *testing.T) {
 	if replacementA.servingState.ServingEpoch <= firstAStopped.ServingEpoch {
 		t.Fatalf("replacement A serving epoch = %d, want greater than stopped epoch %d", replacementA.servingState.ServingEpoch, firstAStopped.ServingEpoch)
 	}
-	assertSandboxGetBytes(t, binary, cliEnv, cridA, bodyA)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirA, cridA, bodyA)
 	processB.requireRunning(t, "after sibling A replacement")
 	processB.requireSharingState(t, "on", "serving")
-	assertSandboxGetBytes(t, binary, cliEnv, cridB, bodyB)
+	assertSandboxGetBytes(t, binary, cliEnv, stateDirB, cridB, bodyB)
 
 	replacementA.stopAndValidate(t, apiKey, cleanupJWT)
 	processB.stopAndValidate(t, apiKey, cleanupJWT)
+}
+
+func enrollSandboxSiblingDevice(
+	t *testing.T,
+	binary string,
+	baseEnv map[string]string,
+	stateDir string,
+	namespace sandboxRunNamespace,
+	bootstrapKey string,
+) {
+	t.Helper()
+	env := cloneSandboxEnv(baseEnv)
+	env[state.EnvAgentID] = namespace.AgentID
+	login := runSandboxLocalCLIInput(t, binary, env, stateDir, bootstrapKey+"\n", "-o", "json", "login")
+	if login.code != 0 {
+		t.Fatalf("one-time sibling %s login exit = %d: %s", namespace.ConnectorID, login.code, login.stderr.String())
+	}
+	var enrolled struct {
+		OwnerID        string `json:"owner_id"`
+		AuthType       string `json:"auth_type"`
+		DeviceEnrolled bool   `json:"device_enrolled"`
+	}
+	if err := json.Unmarshal(login.stdout.Bytes(), &enrolled); err != nil {
+		t.Fatalf("decode one-time sibling %s login: %v", namespace.ConnectorID, err)
+	}
+	if enrolled.OwnerID == "" || enrolled.AuthType == "" || !enrolled.DeviceEnrolled {
+		t.Fatalf("one-time sibling %s login returned incomplete identity: %+v", namespace.ConnectorID, enrolled)
+	}
+	assertSandboxSiblingIdentity(t, namespace, stateDir)
+	whoami := runSandboxLocalCLI(t, binary, env, stateDir, "-o", "json", "whoami")
+	if whoami.code != 0 {
+		t.Fatalf("warm sibling %s whoami exit = %d: %s", namespace.ConnectorID, whoami.code, whoami.stderr.String())
+	}
 }
 
 type lockedSandboxBuffer struct {
@@ -219,7 +310,9 @@ func startSandboxPublishProcess(
 		label: namespace.ConnectorID, binary: binary, baseEnv: cloneSandboxEnv(baseEnv),
 		stateDir: stateDir, done: make(chan struct{}),
 	}
-	p.cmd = exec.CommandContext(context.Background(), binary, "--endpoint", baseEnv["QURL_ENDPOINT"], "--quiet", "publish", targetURL, "--id", namespace.ConnectorID, "--foreground") //nolint:gosec // The protected test validates the fixed binary path and supplies closed arguments.
+	//nolint:gosec // The protected test validates the fixed binary path and supplies closed arguments.
+	p.cmd = exec.CommandContext(context.Background(), binary, "--endpoint", baseEnv["QURL_ENDPOINT"], "--quiet", "publish", targetURL,
+		"--id", namespace.ConnectorID, "--description", sandboxJourneyResourceDescription(t, baseEnv), "--foreground")
 	p.cmd.Env = sandboxCommandEnv(env)
 	p.cmd.Stdout = &p.stdout
 	p.cmd.Stderr = &p.stderr
@@ -302,16 +395,15 @@ func (p *sandboxPublishProcess) waitForSharingState(t *testing.T, desired, obser
 	last := "status was not attempted"
 	for time.Now().Before(deadline) {
 		doc, err := p.readSharingState()
-		if err == nil {
-			if doc.CRID != p.crid || doc.ResourceID == "" || doc.ServingEpoch == 0 {
-				last = "status returned an incomplete resource identity"
-			} else if doc.DesiredState == desired && doc.ConnectionState == observed {
-				return doc
-			} else {
-				last = fmt.Sprintf("status is %s/%s at epoch %d", doc.DesiredState, doc.ConnectionState, doc.ServingEpoch)
-			}
-		} else {
+		switch {
+		case err != nil:
 			last = err.Error()
+		case doc.CRID != p.crid || doc.ResourceID == "" || doc.ServingEpoch == 0:
+			last = "status returned an incomplete resource identity"
+		case doc.DesiredState == desired && doc.ConnectionState == observed:
+			return doc
+		default:
+			last = fmt.Sprintf("status is %s/%s at epoch %d", doc.DesiredState, doc.ConnectionState, doc.ServingEpoch)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -341,6 +433,16 @@ func (p *sandboxPublishProcess) readSharingState() (sandboxSharingDoc, error) {
 
 func (p *sandboxPublishProcess) stopAndValidate(t *testing.T, secrets ...string) sandboxSharingDoc {
 	t.Helper()
+	p.interruptAndValidate(t, secrets...)
+	stopped := p.waitForSharingState(t, "off", "stopped")
+	if stopped.ServingEpoch <= p.servingState.ServingEpoch {
+		t.Fatalf("sandbox publish %s stopped epoch = %d, want greater than serving epoch %d", p.label, stopped.ServingEpoch, p.servingState.ServingEpoch)
+	}
+	return stopped
+}
+
+func (p *sandboxPublishProcess) interruptAndValidate(t *testing.T, secrets ...string) {
+	t.Helper()
 	if p.stopped {
 		t.Fatalf("sandbox publish %s was stopped twice", p.label)
 	}
@@ -357,30 +459,44 @@ func (p *sandboxPublishProcess) stopAndValidate(t *testing.T, secrets ...string)
 	p.waitMu.Lock()
 	waitErr := p.waitErr
 	p.waitMu.Unlock()
-	var exitErr *exec.ExitError
-	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
-		t.Fatalf("sandbox publish %s exit = %v, want 130 after interrupt\nstderr: %s", p.label, waitErr, p.stderr.String())
-	}
 	stderr := p.stderr.String()
 	stdout := p.stdout.String()
-	if err := validateSandboxForegroundExit(stdout, stderr, p.crid, secrets...); err != nil {
+	if err := validateSandboxForegroundExit(waitErr, stdout, stderr, p.crid, secrets...); err != nil {
 		t.Fatalf("sandbox publish %s stop: %v\nstderr: %s", p.label, err, stderr)
 	}
-	stopped := p.waitForSharingState(t, "off", "stopped")
-	if stopped.ServingEpoch <= p.servingState.ServingEpoch {
-		t.Fatalf("sandbox publish %s stopped epoch = %d, want greater than serving epoch %d", p.label, stopped.ServingEpoch, p.servingState.ServingEpoch)
-	}
-	return stopped
 }
 
-func validateSandboxForegroundExit(stdout, stderr, crid string, secrets ...string) error {
+func validateSandboxForegroundExit(waitErr error, stdout, stderr, crid string, secrets ...string) error {
+	if err := validateSandboxInterruptedExit(waitErr); err != nil {
+		return fmt.Errorf("foreground publish %w", err)
+	}
 	if stdout != crid+"\n" {
 		return errors.New("foreground publish did not print exactly one complete CRID line")
 	}
+	return validateSandboxProtectedProcessOutput(stdout, stderr, secrets...)
+}
+
+func validateSandboxInterruptedExit(waitErr error) error {
+	if waitErr == nil {
+		return errors.New("exit = nil, want 130 after interrupt")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 130 {
+		return fmt.Errorf("exit = %w, want 130 after interrupt", waitErr)
+	}
+	return nil
+}
+
+func validateSandboxProtectedProcessOutput(stdout, stderr string, secrets ...string) error {
 	for _, secret := range secrets {
 		if secret != "" && strings.Contains(stdout+stderr, secret) {
-			return errors.New("foreground publish exposed a protected credential")
+			return errors.New("sandbox process exposed a protected credential")
 		}
+	}
+	// TODO(upstream-contract): Keep these retired assignment-approval markers
+	// in lockstep with qurl-connector's removed approval UX.
+	if strings.Contains(stdout+stderr, "refresh-mode") || strings.Contains(stdout+stderr, "explicit approval") {
+		return errors.New("sandbox process exposed retired assignment-approval UX")
 	}
 	return nil
 }
@@ -468,6 +584,9 @@ func cleanupSandboxSiblingAuthority(
 		// serialized next-run sweeper still has authority to retry.
 		return fmt.Errorf("sandbox sibling resource cleanup: %w", err)
 	}
+	if cleanupJWT == "" {
+		return nil
+	}
 	if err := ops.revokeDevice(ctx, endpoint, cleanupJWT, loaded.DeviceAPIKeyID); err != nil {
 		return fmt.Errorf("sandbox sibling device cleanup: %w", err)
 	}
@@ -523,21 +642,20 @@ func deleteSandboxSiblingResource(ctx context.Context, endpoint, connectorID, de
 	return nil
 }
 
-func assertSandboxGetBytes(t *testing.T, binary string, baseEnv map[string]string, crid, want string) {
+func assertSandboxGetBytes(t *testing.T, binary string, baseEnv map[string]string, stateDir, crid, want string) {
 	t.Helper()
 	destination := filepath.Join(t.TempDir(), "download")
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxProcessTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "--endpoint", baseEnv["QURL_ENDPOINT"], "--quiet", "get", crid, "--file", destination) //nolint:gosec // The protected test validates the fixed binary and CRID.
-	cmd.Env = sandboxCommandEnv(baseEnv)
+	env := cloneSandboxEnv(baseEnv)
+	env[state.EnvStateDirPrimary] = stateDir
+	cmd.Env = sandboxCommandEnv(env)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("get %s failed: %v\nstdout: %s\nstderr: %s", crid, err, stdout.String(), stderr.String())
-	}
-	if secret := baseEnv["QURL_API_KEY"]; secret != "" && strings.Contains(stdout.String()+stderr.String(), secret) {
-		t.Fatal("get command exposed the protected API key")
 	}
 	got, err := os.ReadFile(destination) //nolint:gosec // destination is an exact test-owned TempDir child.
 	if err != nil {
@@ -607,17 +725,21 @@ func validateSandboxCLIBinary(raw string) (string, error) {
 	if !ok {
 		return "", errors.New("customer CLI binary metadata is unavailable")
 	}
-	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); err != nil {
+	if err := validateSandboxCLIBinaryMetadata(info.Mode(), stat.Uid, uint64(os.Geteuid()), sandboxUnsigned64(stat.Nlink)); err != nil {
 		return "", err
 	}
 	return resolved, nil
 }
 
-func validateSandboxCLIBinaryMetadata(mode os.FileMode, ownerUID, effectiveUID uint32, links uint64) error {
+func sandboxUnsigned64[T ~uint16 | ~uint32 | ~uint64](value T) uint64 {
+	return uint64(value)
+}
+
+func validateSandboxCLIBinaryMetadata(mode os.FileMode, ownerUID uint32, effectiveUID, links uint64) error {
 	if !mode.IsRegular() || mode.Perm()&0o111 == 0 || mode.Perm()&0o022 != 0 || links != 1 {
 		return errors.New("customer CLI binary must be one non-writable executable regular file")
 	}
-	if ownerUID != effectiveUID && ownerUID != 0 {
+	if uint64(ownerUID) != effectiveUID && ownerUID != 0 {
 		return errors.New("customer CLI binary must be owned by the current user or root")
 	}
 	return nil
@@ -688,24 +810,38 @@ func TestValidateSandboxCLIBinary(t *testing.T) {
 
 func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
-	if err := validateSandboxForegroundExit(crid+"\n", "", crid, "api-secret"); err != nil {
+	exit130 := exec.CommandContext(context.Background(), "sh", "-c", "exit 130").Run()
+	if err := validateSandboxInterruptedExit(exit130); err != nil {
+		t.Fatalf("exit-130 fixture: %v", err)
+	}
+	if err := validateSandboxForegroundExit(exit130, crid+"\n", "", crid, "api-secret"); err != nil {
 		t.Fatal(err)
 	}
 	for name, fixture := range map[string]struct {
-		stdout string
-		stderr string
-		secret string
+		waitErr error
+		stdout  string
+		stderr  string
+		secret  string
 	}{
-		"partial CRID":  {stdout: crid[:20]},
-		"extra output":  {stdout: crid + "\nextra\n"},
-		"stdout secret": {stdout: crid + "\napi-secret", secret: "api-secret"},
-		"stderr secret": {stdout: crid + "\n", stderr: "api-secret", secret: "api-secret"},
+		"success exit":        {waitErr: nil, stdout: crid + "\n"},
+		"wrong exit":          {waitErr: exec.CommandContext(context.Background(), "sh", "-c", "exit 1").Run(), stdout: crid + "\n"},
+		"partial CRID":        {waitErr: exit130, stdout: crid[:20]},
+		"extra output":        {waitErr: exit130, stdout: crid + "\nextra\n"},
+		"stdout secret":       {waitErr: exit130, stdout: crid + "\napi-secret", secret: "api-secret"},
+		"stderr secret":       {waitErr: exit130, stdout: crid + "\n", stderr: "api-secret", secret: "api-secret"},
+		"retired approval UX": {waitErr: exit130, stdout: crid + "\n", stderr: "explicit approval"},
+		"retired refresh UX":  {waitErr: exit130, stdout: crid + "\n", stderr: "refresh-mode"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSandboxForegroundExit(fixture.stdout, fixture.stderr, crid, fixture.secret); err == nil {
+			if err := validateSandboxForegroundExit(fixture.waitErr, fixture.stdout, fixture.stderr, crid, fixture.secret); err == nil {
 				t.Fatal("invalid foreground exit accepted")
 			}
 		})
+	}
+	for _, retiredUX := range []string{"explicit approval", "refresh-mode"} {
+		if err := validateSandboxProtectedProcessOutput(retiredUX, ""); err == nil {
+			t.Fatalf("retired daemon stdout %q was accepted", retiredUX)
+		}
 	}
 	if err := validateSandboxDownloadedBytes([]byte("changed"), []byte("sibling")); err == nil {
 		t.Fatal("sibling byte drift accepted")
@@ -734,16 +870,23 @@ func TestSandboxPublishProcessReportsEarlyExit(t *testing.T) {
 	if _, err := process.waitReadyResult(time.Second); err == nil || !strings.Contains(err.Error(), "exited before readiness") {
 		t.Fatalf("early-exit readiness result = %v", err)
 	}
+	registryCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := waitSandboxLocalShareRegistry(registryCtx, process.stateDir, time.Hour, process); err == nil ||
+		!strings.Contains(err.Error(), "foreground publish exited before persisting a local share") {
+		t.Fatalf("early-exit local registry result = %v", err)
+	}
 }
 
 func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 	for _, fixture := range []struct {
-		name   string
-		script string
-		wait   time.Duration
-		want   string
+		name        string
+		script      string
+		wait        time.Duration
+		waitForExit bool
+		want        string
 	}{
-		{name: "enrolled then early exit", script: "#!/bin/sh\nexit 7\n", wait: time.Second, want: "exited before readiness"},
+		{name: "enrolled then early exit", script: "#!/bin/sh\nexit 7\n", wait: time.Second, waitForExit: true, want: "exited before readiness"},
 		{name: "enrolled then readiness timeout", script: "#!/bin/sh\nexec sleep 60\n", wait: 50 * time.Millisecond, want: "did not become ready"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -753,7 +896,7 @@ func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 			namespace := sandboxRunNamespace{
 				AgentID: "qurl-share-r1-a1-ha", ConnectorID: "connector-sandbox-local-publish-recovery",
 			}
-			stateDir := t.TempDir()
+			stateDir := connectorStateTestDir(t)
 			writeSandboxSiblingStateFixture(t, stateDir, namespace.AgentID)
 			binary := filepath.Join(t.TempDir(), "qurl")
 			if err := os.WriteFile(binary, []byte(fixture.script), 0o600); err != nil {
@@ -786,6 +929,13 @@ func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 					return nil
 				},
 			})
+			if fixture.waitForExit {
+				select {
+				case <-process.done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("early-exit recovery fixture did not terminate")
+				}
+			}
 			if _, err := process.waitReadyResult(fixture.wait); err == nil || !strings.Contains(err.Error(), fixture.want) {
 				t.Fatalf("readiness result = %v, want %q", err, fixture.want)
 			}
@@ -794,7 +944,7 @@ func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
 }
 
 func TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := connectorStateTestDir(t)
 	namespace := sandboxRunNamespace{AgentID: "qurl-share-r1-a1-ha", ConnectorID: "connector-recovery"}
 	writeSandboxSiblingStateFixture(t, stateDir, namespace.AgentID)
 	revoked := false
@@ -839,8 +989,15 @@ func writeSandboxSiblingStateFixture(t *testing.T, stateDir, agentID string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registeredAt := time.Unix(1700000000, 0).UTC()
 	if err := store.SaveAgentState(context.Background(), &qurl.AgentState{
-		AgentID: agentID, DeviceAPIKeyID: "device-key-id", DeviceAPIKey: "device-secret",
+		AgentID:                  agentID,
+		PrivateKeyB64:            "private",
+		PublicKeyB64:             "public",
+		RegisteredAt:             &registeredAt,
+		DeviceAPIKeyID:           "device-key-id",
+		DeviceAPIKey:             "device-secret",
+		EnrollmentCredentialKind: "account",
 	}); err != nil {
 		_ = store.Close()
 		t.Fatal(err)

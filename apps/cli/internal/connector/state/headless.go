@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -14,7 +15,7 @@ import (
 )
 
 const (
-	headlessConfigVersion  = 1
+	headlessConfigVersion  = 2
 	headlessConfigMaxBytes = 1 << 20
 	enrollmentMaxBytes     = 16 << 10
 )
@@ -33,6 +34,7 @@ const (
 // container and per-user installs converge on one registry and one runtime.
 type HeadlessConfig struct {
 	Version int          `yaml:"version"`
+	OwnerID string       `yaml:"owner_id"`
 	Shares  []LocalShare `yaml:"shares"`
 }
 
@@ -63,12 +65,12 @@ func LoadHeadlessConfig(path string) (*HeadlessConfig, error) {
 	if config.Version != headlessConfigVersion {
 		return nil, fmt.Errorf("headless share config version %d is unsupported", config.Version)
 	}
+	if !validLocalOwnerID(config.OwnerID) {
+		return nil, errors.New("headless share config account owner is invalid")
+	}
 	if len(config.Shares) != 1 {
 		return nil, errors.New("headless share config requires exactly one share")
 	}
-	resourceIDs := make(map[string]struct{}, len(config.Shares))
-	crids := make(map[string]struct{}, len(config.Shares))
-	connectorIDs := make(map[string]struct{}, len(config.Shares))
 	for i := range config.Shares {
 		share := &config.Shares[i]
 		if err := ValidateLocalShareDefinition(share); err != nil {
@@ -77,18 +79,6 @@ func LoadHeadlessConfig(path string) (*HeadlessConfig, error) {
 		if share.DesiredState != "on" {
 			return nil, fmt.Errorf("headless share config shares[%d] must have desired_state on", i)
 		}
-		if _, exists := resourceIDs[share.ResourceID]; exists {
-			return nil, fmt.Errorf("headless share config shares[%d] duplicates resource_id", i)
-		}
-		if _, exists := crids[share.CRID]; exists {
-			return nil, fmt.Errorf("headless share config shares[%d] duplicates CRID", i)
-		}
-		if _, exists := connectorIDs[share.ConnectorID]; exists {
-			return nil, fmt.Errorf("headless share config shares[%d] duplicates connector_id", i)
-		}
-		resourceIDs[share.ResourceID] = struct{}{}
-		crids[share.CRID] = struct{}{}
-		connectorIDs[share.ConnectorID] = struct{}{}
 	}
 	return &config, nil
 }
@@ -117,9 +107,11 @@ func ReadEnrollmentCredential(path string) (string, error) {
 }
 
 func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, errors.New("file path is empty")
+	if err := validatePinnedFilePath(path); err != nil {
+		return nil, err
+	}
+	if err := validatePinnedFileParent(path); err != nil {
+		return nil, err
 	}
 	before, err := os.Lstat(path)
 	if err != nil {
@@ -142,7 +134,14 @@ func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	if !opened.Mode().IsRegular() || opened.Mode().Perm()&0o022 != 0 {
+	if !opened.Mode().IsRegular() {
+		return nil, errors.New("resolved file must be regular and not writable by group or other users")
+	}
+	writableByAnotherUser, err := pinnedFileWritableByAnotherUser(file, opened)
+	if err != nil {
+		return nil, err
+	}
+	if writableByAnotherUser {
 		return nil, errors.New("resolved file must be regular and not writable by group or other users")
 	}
 	if policy == bearerCredential {
@@ -170,4 +169,12 @@ func readPinnedFile(path string, limit int64, policy pinnedFilePolicy) ([]byte, 
 		return nil, fmt.Errorf("file exceeds %d bytes", limit)
 	}
 	return data, nil
+}
+
+func validatePinnedFilePath(path string) error {
+	if path == "" || path != strings.TrimSpace(path) || strings.ContainsAny(path, "\x00\r\n") ||
+		!filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("file path must be an absolute, clean path")
+	}
+	return nil
 }

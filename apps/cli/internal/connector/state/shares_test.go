@@ -1,5 +1,3 @@
-//go:build !windows
-
 package state
 
 import (
@@ -8,18 +6,104 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
+func openOwnedLocalShareRegistry(dir string) (*LocalShareRegistry, error) {
+	registry, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.BindOwner(context.Background(), "owner-test"); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
+func TestLocalShareRegistryBindsOwnerBeforeShares(t *testing.T) {
+	dir := secureStateTestDir(t)
+	registry, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, present, err := registry.OwnerID(context.Background())
+	if err != nil || present || owner != "" {
+		t.Fatalf("empty owner = %q, %v, %v", owner, present, err)
+	}
+	binding := testResourceBinding(t, "owner-binding")
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionTest)
+	share := LocalShare{
+		CRID: binding.CRID, ResourceID: binding.ResourceID,
+		ConnectorID: binding.ConnectorID, ConnectorRoutingID: binding.ConnectorRoutingID,
+		KnockResourceID: binding.KnockResourceID,
+		TargetURL:       "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
+		DesiredState: "on", ServingEpoch: 1,
+	}
+	if err := registry.Put(context.Background(), &share); err == nil {
+		t.Fatal("share was stored before its account owner was bound")
+	}
+	if err := registry.BindOwner(context.Background(), "owner-one"); err != nil {
+		t.Fatal(err)
+	}
+	beforeIdempotentBind, err := os.Stat(filepath.Join(dir, LocalSharesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.BindOwner(context.Background(), "owner-one"); err != nil {
+		t.Fatalf("idempotent owner binding: %v", err)
+	}
+	afterIdempotentBind, err := os.Stat(filepath.Join(dir, LocalSharesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeIdempotentBind, afterIdempotentBind) {
+		t.Fatal("idempotent owner binding replaced the durable registry file")
+	}
+	if err := registry.BindOwner(context.Background(), "owner-two"); err == nil {
+		t.Fatal("account owner drift was accepted")
+	}
+	if err := registry.Put(context.Background(), &share); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, present, err = reopened.OwnerID(context.Background())
+	if err != nil || !present || owner != "owner-one" {
+		t.Fatalf("durable owner = %q, %v, %v", owner, present, err)
+	}
+}
+
+func TestLocalShareRegistryRejectsOldVersionWithSafeRecovery(t *testing.T) {
+	dir := secureStateTestDir(t)
+	path := filepath.Join(dir, LocalSharesFile)
+	if err := os.WriteFile(path, []byte(`{"version":1,"owner_id":"owner-old","shares":{}}`), connectorResourceFileMode); err != nil {
+		t.Fatal(err)
+	}
+	secureConnectorStateFixtureFile(t, path)
+	_, _, err := ReadLocalSharesIfPresent(context.Background(), dir)
+	if !errors.Is(err, ErrLocalShareVersionUnsupported) {
+		t.Fatalf("old registry error = %v, want version sentinel", err)
+	}
+	for _, want := range []string{strconv.Quote(path), "does not migrate old state", "revoke any device key", "move or remove the complete state directory", "qurl login"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("old registry error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestLocalShareRegistryJourney(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +124,7 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+	if !info.Mode().IsRegular() || (!isWindows(t) && info.Mode().Perm() != 0o600) {
 		t.Fatalf("registry mode = %v", info.Mode())
 	}
 	updated, err := registry.SetDesired(context.Background(), binding.CRID, "on", 2)
@@ -49,6 +133,21 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 	}
 	if updated.DesiredState != "on" || updated.ServingEpoch != 2 {
 		t.Fatalf("updated = %+v", updated)
+	}
+	beforeIdempotentSet, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err = registry.SetDesired(context.Background(), binding.CRID, "on", 2)
+	if err != nil || updated.DesiredState != "on" || updated.ServingEpoch != 2 {
+		t.Fatalf("idempotent desired-state update = %+v, %v", updated, err)
+	}
+	afterIdempotentSet, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeIdempotentSet, afterIdempotentSet) {
+		t.Fatal("idempotent desired-state update replaced the durable registry file")
 	}
 	got, err := registry.Get(context.Background(), binding.ConnectorID)
 	if err != nil || got.ResourceID != binding.ResourceID || got.TargetURL != share.TargetURL {
@@ -64,14 +163,28 @@ func TestLocalShareRegistryJourney(t *testing.T) {
 	if _, err := registry.Get(context.Background(), binding.CRID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Get after delete = %v", err)
 	}
+	beforeAbsentDelete, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Delete(context.Background(), binding.ResourceID); err != nil {
+		t.Fatalf("idempotent delete: %v", err)
+	}
+	afterAbsentDelete, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeAbsentDelete, afterAbsentDelete) {
+		t.Fatal("absent delete replaced the durable registry file")
+	}
 }
 
 func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,8 +200,8 @@ func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
 	if err := registry.Put(context.Background(), &share); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.SetDesired(context.Background(), share.CRID, "off", 6); err == nil {
-		t.Fatal("stale epoch was accepted")
+	if updated, err := registry.SetDesired(context.Background(), share.CRID, "off", 6); err == nil || updated != nil {
+		t.Fatalf("stale epoch result = %+v, %v; want nil row and an error", updated, err)
 	}
 	share.TargetURL = "http://192.0.2.1:3000"
 	share.LocalIP = "192.0.2.1"
@@ -97,12 +210,12 @@ func TestLocalShareRegistryRejectsStaleEpochAndUnsafeTarget(t *testing.T) {
 	}
 }
 
-func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T) {
-	dir := t.TempDir()
+func TestLocalShareRegistryDisableAtCurrentEpochIsFailClosedAndExact(t *testing.T) {
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,30 +231,42 @@ func TestLocalShareRegistryTerminalDisableIsFailClosedAndEpochExact(t *testing.T
 	if err := registry.Put(context.Background(), &share); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.DisableTerminal(context.Background(), share.ResourceID, 6); err == nil {
-		t.Fatal("terminal disable accepted an older session epoch")
+	if disabled, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 6); err == nil || disabled != nil {
+		t.Fatalf("older local disable result = %+v, %v; want nil row and an error", disabled, err)
 	}
-	if _, err := registry.DisableTerminal(context.Background(), share.ResourceID, 8); err == nil {
-		t.Fatal("terminal disable advanced the authoritative epoch")
+	if disabled, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 8); err == nil || disabled != nil {
+		t.Fatalf("newer local disable result = %+v, %v; want nil row and an error", disabled, err)
 	}
-	disabled, err := registry.DisableTerminal(context.Background(), share.ResourceID, 7)
+	disabled, err := registry.DisableAtCurrentEpoch(context.Background(), share.ResourceID, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if disabled.DesiredState != "off" || disabled.ServingEpoch != 7 || disabled.TargetURL != share.TargetURL || disabled.ConnectorRoutingID != share.ConnectorRoutingID {
-		t.Fatalf("terminal disable changed more than local intent: %+v", disabled)
+		t.Fatalf("local disable changed more than local intent: %+v", disabled)
 	}
-	if _, err := registry.DisableTerminal(context.Background(), share.CRID, 7); err != nil {
-		t.Fatalf("idempotent terminal disable: %v", err)
+	transitionTime := disabled.UpdatedAt
+	disabledAgain, err := registry.DisableAtCurrentEpoch(context.Background(), share.CRID, 7)
+	if err != nil {
+		t.Fatalf("idempotent local disable: %v", err)
+	}
+	if !disabledAgain.UpdatedAt.Equal(transitionTime) {
+		t.Fatalf("idempotent local disable changed transition time from %s to %s", transitionTime, disabledAgain.UpdatedAt)
+	}
+	storedAgain, err := registry.Get(context.Background(), share.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !storedAgain.UpdatedAt.Equal(transitionTime) {
+		t.Fatalf("idempotent local disable persisted transition time %s, want %s", storedAgain.UpdatedAt, transitionTime)
 	}
 }
 
 func TestLocalShareRegistryRejectsOutOfOrderAndIdentityChanges(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,11 +320,11 @@ func TestLocalShareRegistryRejectsOutOfOrderAndIdentityChanges(t *testing.T) {
 }
 
 func TestLocalShareRegistryConcurrentResponsesConvergeToHighestEpoch(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
-	registry, err := OpenLocalShareRegistry(dir)
+	registry, err := openOwnedLocalShareRegistry(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +384,7 @@ func TestDecodeLocalSharesRequiresUpdatedAt(t *testing.T) {
 }
 
 func TestLocalShareRegistryRefusesSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureStateTestDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only directory mode, not a file mode.
 		t.Fatal(err)
 	}
@@ -268,7 +393,7 @@ func TestLocalShareRegistryRefusesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(dir, LocalSharesFile)); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	registry, err := OpenLocalShareRegistry(dir)
 	if err != nil {

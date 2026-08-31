@@ -1,5 +1,3 @@
-//go:build !windows
-
 package state
 
 import (
@@ -35,12 +33,14 @@ func testResourceBinding(t *testing.T, connectorID string) ConnectorResourceBind
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(der)
-	return ConnectorResourceBinding{
+	binding := ConnectorResourceBinding{
 		ConnectorID:        connectorID,
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
 		ConnectorRoutingID: "c-" + testRoutingEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "nhp-target-" + connectorID,
 	}
+	binding.CRID = testBindingCRID(t, &binding, apitest.VersionProduction)
+	return binding
 }
 
 func testBindingCRID(t *testing.T, binding *ConnectorResourceBinding, version byte) string {
@@ -66,7 +66,7 @@ func TestConnectorResourceTransactionPersistsExactRequestAndWarmContinuity(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != connectorResourceFileMode || !info.Mode().IsRegular() {
+	if (!isWindows(t) && info.Mode().Perm() != connectorResourceFileMode) || !info.Mode().IsRegular() {
 		t.Fatalf("state mode = %v, want regular 0600", info.Mode())
 	}
 	if err := tx.Close(); err != nil {
@@ -99,6 +99,33 @@ func TestConnectorResourceTransactionPersistsExactRequestAndWarmContinuity(t *te
 	}
 	if warmRequest.ExpectedResourceID != binding.ResourceID {
 		t.Fatalf("warm expected resource = %q, want %q", warmRequest.ExpectedResourceID, binding.ResourceID)
+	}
+}
+
+func TestRetireConnectorResourcePreservesIdentityAndBlocksReuse(t *testing.T) {
+	store := openTestStore(t)
+	binding := testResourceBinding(t, "deleted-api")
+	binding.CRID = testBindingCRID(t, &binding, 1)
+	commitTestBinding(t, store, &binding)
+
+	retired, err := store.RetireConnectorResource(context.Background(), binding.CRID)
+	if err != nil || !retired {
+		t.Fatalf("RetireConnectorResource() = %t, %v, want true", retired, err)
+	}
+	got, gotRetired, found, err := store.ConnectorResourceBinding(context.Background(), binding.ConnectorID)
+	if err != nil || !found || !gotRetired || got != binding {
+		t.Fatalf("ConnectorResourceBinding() = %+v retired=%t found=%t err=%v", got, gotRetired, found, err)
+	}
+	if _, err := store.BeginConnectorResource(context.Background(), binding.ConnectorID); !errors.Is(err, ErrConnectorResourceRetired) {
+		t.Fatalf("BeginConnectorResource() = %v, want retired error", err)
+	}
+	retired, err = store.RetireConnectorResource(context.Background(), binding.ResourceID)
+	if err != nil || !retired {
+		t.Fatalf("idempotent RetireConnectorResource() = %t, %v", retired, err)
+	}
+	retired, err = store.RetireConnectorResource(context.Background(), "unknown-public-id")
+	if err != nil || retired {
+		t.Fatalf("unknown RetireConnectorResource() = %t, %v, want false", retired, err)
 	}
 }
 
@@ -166,6 +193,9 @@ func TestConnectorResourceTransactionLockIsCrossHandleAndContextBounded(t *testi
 
 func TestConnectorResourceLockRejectsUnsafeEntries(t *testing.T) {
 	t.Run("wrong permissions", func(t *testing.T) {
+		if isWindows(t) {
+			t.Skip("POSIX mode rejection is a Unix contract")
+		}
 		store := openTestStore(t)
 		path := filepath.Join(store.Dir(), connectorResourcesLock)
 		if err := os.WriteFile(path, nil, 0o644); err != nil { //nolint:gosec // intentionally unsafe mode exercises rejection.
@@ -193,7 +223,7 @@ func TestConnectorResourceLockRejectsUnsafeEntries(t *testing.T) {
 func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 	validBinding := testResourceBinding(t, "safe-api")
 	validNonce := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	valid := `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}}}`
+	valid := `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`
 	validBindingState := emptyConnectorResourcesState()
 	validBindingState.Bindings[validBinding.ConnectorID] = validBinding
 	validBindingJSON, err := encodeConnectorResources(validBindingState)
@@ -208,27 +238,28 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		name string
 		data string
 	}{
-		{name: "unknown top field", data: `{"version":1,"bindings":{},"pending":{},"extra":true}`},
-		{name: "noncanonical top field casing", data: `{"Version":1,"bindings":{},"pending":{}}`},
-		{name: "unknown nested field", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","extra":true}}}`},
-		{name: "noncanonical nested field casing", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"Connector_ID":"safe-api","request_nonce":"` + validNonce + `"}}}`},
-		{name: "duplicate", data: `{"version":1,"version":1,"bindings":{},"pending":{}}`},
-		{name: "duplicate nested", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","connector_id":"safe-api","request_nonce":"` + validNonce + `"}}}`},
-		{name: "unsupported version", data: `{"version":2,"bindings":{},"pending":{}}`},
-		{name: "missing map", data: `{"version":1,"bindings":{}}`},
-		{name: "null map", data: `{"version":1,"bindings":null,"pending":{}}`},
-		{name: "null optional expected identity", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":null}}}`},
-		{name: "empty optional expected identity", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":""}}}`},
-		{name: "null optional crid", data: `{"version":1,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":null}},"pending":{}}`},
-		{name: "empty optional crid", data: `{"version":1,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":""}},"pending":{}}`},
-		{name: "excessive nesting", data: `{"version":1,"bindings":[[[[[[[[[[]]]]]]]]]],"pending":{}}`},
+		{name: "unknown top field", data: `{"version":2,"bindings":{},"pending":{},"retired":{},"extra":true}`},
+		{name: "noncanonical top field casing", data: `{"Version":2,"bindings":{},"pending":{},"retired":{}}`},
+		{name: "unknown nested field", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","extra":true}},"retired":{}}`},
+		{name: "noncanonical nested field casing", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"Connector_ID":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`},
+		{name: "duplicate", data: `{"version":2,"version":2,"bindings":{},"pending":{},"retired":{}}`},
+		{name: "duplicate nested", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","connector_id":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`},
+		{name: "unsupported v1", data: `{"version":1,"bindings":{},"pending":{},"retired":{}}`},
+		{name: "missing pending map", data: `{"version":2,"bindings":{},"retired":{}}`},
+		{name: "missing retired map", data: `{"version":2,"bindings":{},"pending":{}}`},
+		{name: "null map", data: `{"version":2,"bindings":null,"pending":{},"retired":{}}`},
+		{name: "null optional expected identity", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":null}},"retired":{}}`},
+		{name: "empty optional expected identity", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":""}},"retired":{}}`},
+		{name: "null optional crid", data: `{"version":2,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":null}},"pending":{},"retired":{}}`},
+		{name: "empty optional crid", data: `{"version":2,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":""}},"pending":{},"retired":{}}`},
+		{name: "excessive nesting", data: `{"version":2,"bindings":[[[[[[[[[[]]]]]]]]]],"pending":{},"retired":{}}`},
 		{name: "invalid raw UTF-8", data: string(invalidUTF8)},
 		{name: "lone high surrogate", data: string(loneHighSurrogate)},
 		{name: "lone low surrogate", data: string(loneLowSurrogate)},
 		{name: "broken surrogate pair", data: string(brokenSurrogatePair)},
-		{name: "bad nonce", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"bad"}}}`},
-		{name: "map key mismatch", data: `{"version":1,"bindings":{},"pending":{"wrong-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}}}`},
-		{name: "expected without binding", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":"` + validBinding.ResourceID + `"}}}`},
+		{name: "bad nonce", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"bad"}},"retired":{}}`},
+		{name: "map key mismatch", data: `{"version":2,"bindings":{},"pending":{"wrong-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`},
+		{name: "expected without binding", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":"` + validBinding.ResourceID + `"}},"retired":{}}`},
 		{name: "trailing value", data: valid + `{}`},
 	}
 	for _, test := range tests {
@@ -238,6 +269,7 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.data), connectorResourceFileMode); err != nil {
 				t.Fatal(err)
 			}
+			secureConnectorStateFixtureFile(t, path)
 			if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || !strings.Contains(err.Error(), "invalid Connector resource state") {
 				t.Fatalf("corrupt state error = %v", err)
 			}
@@ -245,6 +277,9 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 	}
 
 	t.Run("wrong permissions", func(t *testing.T) {
+		if isWindows(t) {
+			t.Skip("POSIX mode rejection is a Unix contract")
+		}
 		store := openTestStore(t)
 		path := filepath.Join(store.Dir(), ConnectorResourcesFile)
 		if err := os.WriteFile(path, []byte(valid), 0o644); err != nil { //nolint:gosec // intentionally unsafe mode proves the fail-closed read.
@@ -264,7 +299,7 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(store.Dir(), ConnectorResourcesFile)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || (!isWindows(t) && !strings.Contains(err.Error(), "non-symlink")) {
 			t.Fatalf("symlink error = %v", err)
 		}
 	})
@@ -275,6 +310,7 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		if err := os.WriteFile(path, make([]byte, connectorResourcesMaxBytes+1), connectorResourceFileMode); err != nil {
 			t.Fatal(err)
 		}
+		secureConnectorStateFixtureFile(t, path)
 		if _, err := store.BeginConnectorResource(context.Background(), "safe-api"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Fatalf("oversize error = %v", err)
 		}
@@ -321,38 +357,55 @@ func TestConnectorResourceKnockIDWireBound(t *testing.T) {
 	}
 }
 
-func TestConnectorResourceCommitCRIDEnrichmentAndOmission(t *testing.T) {
-	t.Run("CRID enrichment", func(t *testing.T) {
+func TestConnectorResourceCommitRejectsMissingCRID(t *testing.T) {
+	t.Run("fresh binding", func(t *testing.T) {
 		store := openTestStore(t)
 		binding := testResourceBinding(t, "stable-api")
-		commitTestBinding(t, store, &binding)
-
-		binding.CRID = testBindingCRID(t, &binding, apitest.VersionProduction)
-		commitTestBinding(t, store, &binding)
+		binding.CRID = ""
+		tx, err := store.BeginConnectorResource(context.Background(), binding.ConnectorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tx.Commit(&binding)
+		if closeErr := tx.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if !errors.Is(err, ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+			t.Fatalf("missing fresh CRID commit = %v, want terminal verification error", err)
+		}
 		loaded, err := loadConnectorResources(store.Dir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := loaded.Bindings[binding.ConnectorID].CRID; got != binding.CRID {
-			t.Fatalf("enriched CRID = %q, want %q", got, binding.CRID)
+		if len(loaded.Bindings) != 0 || len(loaded.Pending) != 0 {
+			t.Fatalf("missing fresh CRID changed state: %+v", loaded)
 		}
 	})
 
-	t.Run("omitted CRID is preserved", func(t *testing.T) {
+	t.Run("warm binding", func(t *testing.T) {
 		store := openTestStore(t)
 		binding := testResourceBinding(t, "stable-api")
-		binding.CRID = testBindingCRID(t, &binding, apitest.VersionProduction)
 		commitTestBinding(t, store, &binding)
 
 		omitted := binding
 		omitted.CRID = ""
-		commitTestBinding(t, store, &omitted)
+		tx, err := store.BeginConnectorResource(context.Background(), binding.ConnectorID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tx.Commit(&omitted)
+		if closeErr := tx.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if !errors.Is(err, ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "crid is required") {
+			t.Fatalf("missing warm CRID commit = %v, want terminal verification error", err)
+		}
 		loaded, err := loadConnectorResources(store.Dir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := loaded.Bindings[binding.ConnectorID].CRID; got != binding.CRID {
-			t.Fatalf("CRID after omission = %q, want preserved %q", got, binding.CRID)
+		if got := loaded.Bindings[binding.ConnectorID]; got != binding || len(loaded.Pending) != 0 {
+			t.Fatalf("missing warm CRID changed accepted state: %+v", loaded)
 		}
 	})
 }
@@ -471,6 +524,7 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 				second := testResourceBinding(t, "orders-api")
 				commitTestBinding(t, store, &first)
 				second.ResourceID = first.ResourceID
+				second.CRID = first.CRID
 				return preparedCase{
 					connectorID: second.ConnectorID, response: &second,
 					expectedBinding: map[string]ConnectorResourceBinding{first.ConnectorID: first},
@@ -496,13 +550,14 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := secureStateTestDir(t)
 			store := openTestStoreAt(t, dir)
 			prepared := tc.prepare(t, store)
 			tx, err := store.BeginConnectorResource(context.Background(), prepared.connectorID)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = tx.Close() }()
 			originalRequest := *tx.Request()
 			err = tx.Commit(prepared.response)
 			if err == nil || !errors.Is(err, tc.kind) || !strings.Contains(err.Error(), tc.detail) {
@@ -556,6 +611,9 @@ func TestConnectorResourceCommitContradictionsAreTypedTerminalAcrossRestart(t *t
 }
 
 func TestConnectorResourceCommitContradictionReportsAndRecoversFromDiscardFailure(t *testing.T) {
+	if isWindows(t) {
+		t.Skip("POSIX read-only mode injection is a Unix contract")
+	}
 	store := openTestStore(t)
 	tx, err := store.BeginConnectorResource(context.Background(), "stable-api")
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -85,6 +86,29 @@ func UsageError(err error) error {
 	return &usageError{err: err}
 }
 
+// invalidInputError keeps a customer-specific message while retaining the
+// underlying service problem for diagnostics and request-id rendering.
+type invalidInputError struct {
+	message string
+	cause   error
+}
+
+func (e *invalidInputError) Error() string { return e.message }
+func (e *invalidInputError) Unwrap() error { return e.cause }
+
+// UserMessage returns the operation-specific text that must win over the
+// wrapped generic service problem during terminal rendering.
+func (e *invalidInputError) UserMessage() string { return e.message }
+
+// InvalidInputError marks a valid command whose operand is not supported by
+// that operation. It maps to the stable InvalidInput exit code.
+func InvalidInputError(message string, cause error) error {
+	if cause == nil {
+		cause = errors.New(message)
+	}
+	return &invalidInputError{message: message, cause: cause}
+}
+
 // notImplementedError marks a feature absent from this build (exit 1, by the
 // table's General row: the command is valid, the capability just is not
 // shipped yet).
@@ -126,6 +150,10 @@ func FromError(err error) int {
 	var usage *usageError
 	if errors.As(err, &usage) {
 		return Usage
+	}
+	var invalidInput *invalidInputError
+	if errors.As(err, &invalidInput) {
+		return InvalidInput
 	}
 	var notImpl *notImplementedError
 	if errors.As(err, &notImpl) {
@@ -233,7 +261,7 @@ func cliSentinelCode(err error) (int, bool) {
 		return Unavailable, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
-	case errors.Is(err, auth.ErrCredentialConflict):
+	case errors.Is(err, auth.ErrCredentialConflict), errors.Is(err, auth.ErrDeviceAccountConflict):
 		return Conflict, true
 	case errors.Is(err, config.ErrInvalidProfileName),
 		errors.Is(err, config.ErrConfigFile),
@@ -245,7 +273,7 @@ func cliSentinelCode(err error) (int, bool) {
 }
 
 // connectorSentinelCode maps the native local-share lifecycle sentinels.
-func connectorSentinelCode(err error) (int, bool) {
+func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the closed connector sentinel-to-exit-code mapping in one boundary.
 	if code, ok := connectorResourceSentinelCode(err); ok {
 		return code, true
 	}
@@ -254,6 +282,10 @@ func connectorSentinelCode(err error) (int, bool) {
 		return Conflict, true
 	case errors.Is(err, connectordaemon.ErrResourceGone):
 		return NotFound, true
+	case errors.Is(err, state.ErrLocalShareOwnerConflict):
+		return Conflict, true
+	case errors.Is(err, state.ErrLocalShareVersionUnsupported):
+		return Config, true
 	case errors.Is(err, state.ErrNoDefaultStateDir):
 		return Config, true
 	case errors.Is(err, hub.ErrConfig):
@@ -262,15 +294,75 @@ func connectorSentinelCode(err error) (int, bool) {
 		// lives in the environment: the config files row is the closest
 		// remedy class, and Usage would wrongly blame the command line.
 		return Config, true
+	case errors.Is(err, sessionconfig.ErrConfig):
+		return Config, true
+	case errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		// Recovery already committed a new device credential. A nested refresh
+		// cause must not relabel that completed transition as an authentication
+		// failure; the saved runtime needs a later assignment refresh.
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
+		errors.Is(err, qurl.ErrCredentialRecoveryRequired):
+		return Auth, true
+	case errors.Is(err, qurl.ErrEndpointNoReply):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrInvalidRegisterConfig):
+		return Config, true
+	case errors.Is(err, qurl.ErrAgentBindingPersistence),
+		errors.Is(err, qurl.ErrAgentCompletionCandidatePersistence),
+		errors.Is(err, qurl.ErrAgentSetupLock):
+		return General, true
+	case errors.Is(err, qurl.ErrKeyRejected),
+		errors.Is(err, qurl.ErrBootstrapSetupKeyConsumed),
+		errors.Is(err, qurl.ErrCompletionIdentityRejected):
+		return Auth, true
+	case errors.Is(err, qurl.ErrAgentIdentityConflict),
+		errors.Is(err, qurl.ErrCompletionCredentialConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrRegistrationDisabled),
+		errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded):
+		return Forbidden, true
+	case errors.Is(err, qurl.ErrRegistrationRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrRegistrationRecoveryRequired),
+		errors.Is(err, qurl.ErrAssignmentTicketExpired),
+		errors.Is(err, qurl.ErrCompletionUnavailable),
+		errors.Is(err, qurl.ErrCompletionRecoveryRequired):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrRegistrationInvalidInput),
+		errors.Is(err, qurl.ErrCompletionRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrAssignmentTicketInvalid),
+		errors.Is(err, qurl.ErrRegisterReplyMalformed),
+		errors.Is(err, qurl.ErrRegistrationKeyKindDisallowed):
+		return ServerError, true
 	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
 		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),
-		errors.Is(err, qurl.ErrAssignmentIdentityRejected):
+		errors.Is(err, qurl.ErrAssignmentIdentityRejected),
+		errors.Is(err, qurl.ErrRecoveryCredentialRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryExpired):
 		// The enrollment token is this surface's credential, and all three of
 		// these are the platform refusing the credential or the identity it
 		// vouches for — the Auth row's "the service rejected the credential",
 		// a stable authentication posture for scripts.
 		return Auth, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryCandidateConflict):
+		return Conflict, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRequestRejected):
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryRateLimited):
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryUnavailable),
+		errors.Is(err, qurl.ErrCredentialReplacementUnavailable),
+		errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired),
+		errors.Is(err, qurl.ErrCredentialRecoveryGrantRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryRetryRequired):
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrCredentialRecoveryInvalidResponse):
+		return ServerError, true
 	case errors.Is(err, qurl.ErrAssignmentRequestRejected):
 		// 52205/52109 reject the request itself rather than the credential:
 		// "an operand or request the service rejected as invalid" is the
@@ -320,6 +412,10 @@ func connectorResourceSentinelCode(err error) (int, bool) {
 	case errors.Is(err, state.ErrConnectorResourceStateConflict):
 		// The authenticated response aliases a different Connector already in
 		// this owner's durable state: valid identities in conflicting state.
+		return Conflict, true
+	case errors.Is(err, state.ErrConnectorResourceRetired):
+		// A deleted Connector ID is valid but cannot be reused. The caller must
+		// select a successor instead of retrying or changing credentials.
 		return Conflict, true
 	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceRequest),
 		errors.Is(err, qurl.ErrConnectorResourceRequestRejected):

@@ -11,11 +11,11 @@ const (
 	// posture, not a user mistake.
 	msgLinksUnavailable = "Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to."
 
-	// msgNoCredential renders the missing-API-key condition.
-	msgNoCredential = "No qURL API key is configured."
+	// msgNoCredential renders the missing registered-device bootstrap condition.
+	msgNoCredential = "This machine is not enrolled with qURL."
 
-	hintNoCredential  = "Hint: set QURL_API_KEY, or run `qurl login` to store a key on this machine."
-	hintUnauthorized  = "Hint: the service rejected your API key. Check QURL_API_KEY, or ask your qURL administrator for a new key."
+	hintNoCredential  = "Hint: run `qurl login`, or set QURL_API_KEY for one-time device enrollment."
+	hintUnauthorized  = "Hint: the service rejected this device identity. Run `qurl login` with a current account API key."
 	hintNotFound      = "Hint: the CRID may be mistyped, expired, or no longer published. Ask whoever shared it for a current one."
 	hintQuotaExceeded = "Hint: you've reached your plan's limit. See https://layerv.ai/pricing to raise it."
 	hintRetryAfter    = "Retry after %ds."
@@ -30,7 +30,8 @@ const (
 
 	// hintScope covers a key that authenticates but cannot resolve.
 	hintScope                    = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access."
-	hintConnectorEnrollmentScope = "Hint: log in with an API key that includes qurl:agent. The CLI uses it only to mint a one-shot Connector enrollment credential."
+	hintEnrollmentScope          = "Hint: log in with an API key that includes qurl:agent. The CLI uses it only to mint a one-time device enrollment credential."
+	hintConnectorEnrollmentScope = "Hint: this registered device is not allowed to publish local apps. Contact your qURL administrator."
 
 	// hintFrozen is the account-standing message for 403 account_frozen: the
 	// key is fine, the account is paused — a materially different situation
@@ -40,30 +41,20 @@ const (
 
 	// hintExpired tells an expired key apart from a rejected one: the remedy
 	// is a new key, not a retyped one.
-	hintExpired = "Hint: this API key has expired. Create a new key in the qURL console and run `qurl login` again."
+	hintExpired = "Hint: this API key has expired. Create a new key in the qURL dashboard and run `qurl login` again."
 
 	// hintKeyInvalid covers the platform's explicit not-a-key answer. Unlike
 	// the generic 401 hint it does not steer to QURL_API_KEY: the key in
 	// hand — typed at login or stored — is the thing the service refused.
-	hintKeyInvalid = "Hint: the qURL service doesn't recognize this API key. Re-copy it from the qURL console, then run `qurl login` again (or update QURL_API_KEY if that's where it lives)."
-
-	// Storage backend labels used in login/logout confirmations.
-	labelKeyring        = "OS keyring"
-	labelCredentialFile = "credential file"
+	hintKeyInvalid = "Hint: the qURL service doesn't recognize this API key. Re-copy it from the qURL dashboard, then run `qurl login` again (or update QURL_API_KEY if that's where it lives)."
 
 	// labelCRID prefixes the copyable identity line every document that has
 	// a CRID ends with, so publish and the Connector serve note cannot drift
 	// into two spellings of the same label.
 	labelCRID = "CRID:"
 
-	// msgLoggedInAs opens the login confirmation; %s is the account.
-	msgLoggedInAs = "Logged in as %s."
-
-	// msgLoggedOut confirms removal; %s lists the storage that held the key.
-	msgLoggedOut = "Logged out. Removed your qURL API key from the %s."
-
-	// msgNothingStored is logout's idempotent no-op note (still exit 0).
-	msgNothingStored = "No qURL API key is stored on this machine; nothing to remove."
+	// msgDeviceEnrolled opens the login confirmation; %s is the account.
+	msgDeviceEnrolled = "Enrolled this device for %s."
 
 	// msgSavedTo confirms a completed download: destination, then size.
 	msgSavedTo = "Saved to %s (%d bytes)."
@@ -78,17 +69,76 @@ const (
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
 
-	// msgConnectorHubConfig renders hub.ErrConfig. The detail block names the
-	// exact variable; this headline places the problem.
-	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
+	// msgConnectorHubConfig renders hub.ErrConfig without exposing deployment
+	// topology or the hidden inputs used by custom builds.
+	msgConnectorHubConfig = "This qURL CLI is missing required built-in connection settings, so local sharing can't start."
 
-	hintConnectorHubConfig = "Hint: production builds ship this configuration built in — install an official qURL release, or for a custom deployment set QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 together."
+	hintConnectorHubConfig = "Hint: install or reinstall an official qURL release. For a custom deployment, use the release supplied by your qURL administrator."
+
+	labelConnectorErrorCode = "Error code:"
+
+	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
+	hintConnectorSessionConfig = "Hint: update to the latest qURL CLI and sign in again. Do not add cloud or database settings, and do not edit the Connector state files."
+
+	msgConnectorDeviceCredential  = "This machine's saved qURL device credential cannot be used safely."
+	hintConnectorDeviceCredential = "Hint: keep the local Connector state unchanged and run `qurl login` with a current qURL API key. If the problem continues, wait a short time, retry, and contact LayerV support."
+
+	msgConnectorPeerTimeout  = "The qURL platform did not answer this Connector before the network timeout."
+	hintConnectorPeerTimeout = "Hint: keep the local Connector state unchanged, check this machine's outbound network access, and retry after a short wait. Contact LayerV support if the problem continues."
+
+	msgConnectorRecoveryCredentialRejected  = "The qURL platform refused the account credential used to recover this registered device."
+	hintConnectorRecoveryCredentialRejected = "Hint: run `qurl login` with a current qURL API key. If qURL accepts that key but recovery is still refused, keep the local Connector state unchanged, wait a short time, retry, and then contact LayerV support if it continues."
+
+	msgConnectorRecoveryIdentityRejected  = "The qURL platform could not verify this registered device for credential recovery."
+	hintConnectorRecoveryIdentityRejected = "Hint: keep the local Connector state unchanged and run `qurl login` with the account that owns this device. If the problem continues, contact LayerV support."
+
+	msgConnectorRecoveryRevokeRequired  = "The qURL platform reports that this device credential is still active, so it did not replace it."
+	hintConnectorRecoveryRevokeRequired = "Hint: do not delete or edit the local Connector state. Retry once, then contact LayerV support if the platform still reports conflicting device state."
+
+	msgConnectorRecoveryUnavailable  = "The qURL platform could not finish registered-device recovery right now."
+	hintConnectorRecoveryUnavailable = "Hint: keep the local Connector state unchanged and run the same command again after a short wait. The CLI will resume the saved recovery safely; contact LayerV support if it continues."
+
+	msgConnectorRecoveryConflict  = "The saved replacement credential conflicts with the platform's current recovery state, so qURL stopped safely."
+	hintConnectorRecoveryConflict = "Hint: do not delete or edit the local Connector state. Contact LayerV support before you retry or reprovision this device."
+
+	msgConnectorRecoveryPersistence  = "qURL could not safely save the replacement credential on this machine, so recovery stopped."
+	hintConnectorRecoveryPersistence = "Hint: check free disk space and access to the qURL state directory, then retry without deleting or editing the saved Connector state."
+
+	msgConnectorRecoveryInvalid  = "The qURL platform and this CLI did not agree on the registered-device recovery response, so qURL stopped safely."
+	hintConnectorRecoveryInvalid = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if it continues."
+
+	msgConnectorRecoveryExpired  = "The safe recovery period for this registered device has ended."
+	hintConnectorRecoveryExpired = "Hint: keep the local Connector state unchanged and contact LayerV support to recover or deliberately reprovision this device."
+
+	msgConnectorEnrollmentConfig  = "qURL could not start this Connector's device enrollment because the CLI's local enrollment settings are invalid."
+	hintConnectorEnrollmentConfig = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if the problem continues."
+
+	msgConnectorEnrollmentUnavailable  = "This Connector's device enrollment did not finish before its safe retry period ended."
+	hintConnectorEnrollmentUnavailable = "Hint: keep the local Connector state unchanged and run the same command again after a short wait. The CLI will safely resume the saved enrollment."
+
+	msgConnectorEnrollmentIdentity  = "The qURL platform could not verify this Connector during device enrollment."
+	hintConnectorEnrollmentIdentity = "Hint: keep the local Connector state unchanged, run `qurl login` with a current API key for the owning account, and retry. Contact LayerV support if it continues."
+
+	msgConnectorEnrollmentConflict  = "This Connector's local identity conflicts with the platform's current device enrollment state, so qURL stopped safely."
+	hintConnectorEnrollmentConflict = "Hint: do not delete or edit the local Connector state. Contact LayerV support before you retry or enroll this machine again."
+
+	msgConnectorEnrollmentInvalid  = "The qURL platform refused this Connector's device enrollment request."
+	hintConnectorEnrollmentInvalid = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if the platform still refuses the request."
+
+	msgConnectorEnrollmentMismatch  = "The qURL platform and this CLI did not agree on this Connector's device enrollment, so qURL stopped safely."
+	hintConnectorEnrollmentMismatch = "Hint: update to the latest qURL CLI, keep the local Connector state unchanged, and retry. Contact LayerV support if the problem continues."
+
+	msgConnectorDeviceQuota  = "This qURL account has reached its limit on active device credentials for Connector enrollment."
+	hintConnectorDeviceQuota = "Hint: ask your qURL administrator to revoke an unused device credential or raise the limit, then run the command again."
+
+	msgConnectorEnrollmentPersistence  = "qURL could not safely save this Connector's device enrollment state on this machine, so it stopped."
+	hintConnectorEnrollmentPersistence = "Hint: keep the local Connector state unchanged, make sure no other qURL command is changing it, and check free disk space and directory access before you retry."
 
 	// Native assigned-cell resource setup. These messages deliberately call
 	// the capability a Connector resource, distinct from enrollment and from
 	// the longer-lived cell assignment.
 	msgConnectorResourceInvalidRequest  = "This Connector's saved resource request is invalid, so it stopped instead of sending or changing it."
-	hintConnectorResourceInvalidRequest = "Hint: update to the latest qURL CLI and run the same command again. If it still fails, do not edit the state file; contact LayerV support with the detail above."
+	hintConnectorResourceInvalidRequest = "Hint: update to the latest qURL CLI and run the same command again. If it still fails, do not edit the state file; contact LayerV support."
 
 	msgConnectorResourceUnavailable  = "The qURL platform couldn't set up this Connector's resource right now."
 	hintConnectorResourceUnavailable = "Hint: run the same command again after a short wait. The CLI saved the exact request and will safely replay it; if the problem persists, check this machine's outbound network access and contact LayerV support."
@@ -103,13 +153,13 @@ const (
 	hintConnectorResourceQuota = "Hint: remove a Connector resource you no longer use with the qURL management tools, or ask your qURL administrator to raise the limit, then run the command again."
 
 	msgConnectorResourceInvalidResponse  = "The qURL platform answered this Connector's resource request in a way this version can't accept, so it stopped instead of guessing."
-	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support with the detail above."
+	hintConnectorResourceInvalidResponse = "Hint: this is a problem on the qURL platform side, not on this machine. Keep the state directory unchanged and contact LayerV support."
 
 	msgConnectorResourceLocalVerification  = "The qURL platform's answer did not match this Connector's saved request or resource identity, so the CLI refused the answer and stopped."
-	hintConnectorResourceLocalVerification = "Hint: do not delete or edit the state file to accept a different identity. Contact LayerV support with the detail above before running this Connector again."
+	hintConnectorResourceLocalVerification = "Hint: do not delete or edit the state file to accept a different identity. Contact LayerV support before running this Connector again."
 
 	msgConnectorResourceLocalConflict  = "The qURL platform's answer reused an identity already saved for a different Connector ID, so the CLI kept the earlier identity and stopped."
-	hintConnectorResourceLocalConflict = "Hint: confirm each Connector uses its intended --id and state directory. Do not edit the state file to bypass this check; contact your qURL administrator or LayerV support with the detail above."
+	hintConnectorResourceLocalConflict = "Hint: confirm each Connector uses its intended --id and state directory. Do not edit the state file to bypass this check; contact your qURL administrator or LayerV support."
 
 	// Enrollment and platform-assignment renderings for the qurl-go
 	// assignment taxonomy. Without these the SDK's own text reaches the
@@ -162,7 +212,7 @@ const (
 	// (52203).
 	msgConnectorQuotaExceeded = "Your qURL account has reached its limit on enrolled Connectors, so this machine can't be added."
 
-	hintConnectorQuotaExceeded = "Hint: retire a Connector you no longer use in the qURL console, or ask your qURL administrator to raise the limit, then run the command again."
+	hintConnectorQuotaExceeded = "Hint: retire a Connector you no longer use in the qURL dashboard, or ask your qURL administrator to raise the limit, then run the command again."
 
 	// msgConnectorAssignmentUnavailable renders the four sentinels whose
 	// customer story and next step are identical — the platform could not
@@ -206,20 +256,56 @@ func CustomerMessages() []string {
 		hintRevoked,
 		hintRetired,
 		hintScope,
+		hintEnrollmentScope,
 		hintFrozen,
 		hintExpired,
 		hintKeyInvalid,
-		labelKeyring,
-		labelCredentialFile,
 		labelCRID,
-		msgLoggedInAs,
-		msgLoggedOut,
-		msgNothingStored,
+		msgDeviceEnrolled,
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
+		labelConnectorErrorCode,
+		msgConnectorSessionConfig,
+		hintConnectorSessionConfig,
+		msgConnectorDeviceCredential,
+		hintConnectorDeviceCredential,
+		msgConnectorPeerTimeout,
+		hintConnectorPeerTimeout,
+		msgConnectorRecoveryCredentialRejected,
+		hintConnectorRecoveryCredentialRejected,
+		msgConnectorRecoveryIdentityRejected,
+		hintConnectorRecoveryIdentityRejected,
+		msgConnectorRecoveryRevokeRequired,
+		hintConnectorRecoveryRevokeRequired,
+		msgConnectorRecoveryUnavailable,
+		hintConnectorRecoveryUnavailable,
+		msgConnectorRecoveryConflict,
+		hintConnectorRecoveryConflict,
+		msgConnectorRecoveryPersistence,
+		hintConnectorRecoveryPersistence,
+		msgConnectorRecoveryInvalid,
+		hintConnectorRecoveryInvalid,
+		msgConnectorRecoveryExpired,
+		hintConnectorRecoveryExpired,
+		msgConnectorEnrollmentConfig,
+		hintConnectorEnrollmentConfig,
+		msgConnectorEnrollmentUnavailable,
+		hintConnectorEnrollmentUnavailable,
+		msgConnectorEnrollmentIdentity,
+		hintConnectorEnrollmentIdentity,
+		msgConnectorEnrollmentConflict,
+		hintConnectorEnrollmentConflict,
+		msgConnectorEnrollmentInvalid,
+		hintConnectorEnrollmentInvalid,
+		msgConnectorEnrollmentMismatch,
+		hintConnectorEnrollmentMismatch,
+		msgConnectorDeviceQuota,
+		hintConnectorDeviceQuota,
+		msgConnectorEnrollmentPersistence,
+		hintConnectorEnrollmentPersistence,
 		msgConnectorResourceInvalidRequest,
 		hintConnectorResourceInvalidRequest,
 		msgConnectorResourceUnavailable,

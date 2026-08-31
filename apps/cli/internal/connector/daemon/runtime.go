@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
+	qurl "github.com/layervai/qurl-go/qurl"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -42,17 +49,18 @@ type NativeSessionFactory struct {
 type DeferredSessionFactory struct {
 	initialize func(context.Context) (SessionFactory, error)
 
-	mu           sync.Mutex
-	delegate     SessionFactory
-	initializing bool
-	ready        chan struct{}
-	initCancel   context.CancelFunc
-	closed       bool
-	closing      bool
-	closeDone    chan struct{}
-	closeErr     error
-	activeStarts int
-	cond         *sync.Cond
+	mu             sync.Mutex
+	delegate       SessionFactory
+	delegateCancel context.CancelFunc
+	initializing   bool
+	ready          chan struct{}
+	initCancel     context.CancelFunc
+	closed         bool
+	closing        bool
+	closeDone      chan struct{}
+	closeErr       error
+	activeStarts   int
+	cond           *sync.Cond
 }
 
 // NewDeferredSessionFactory delays native runtime initialization until needed.
@@ -94,7 +102,11 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 			}
 		}
 		initialize := f.initialize
-		initCtx, cancel := context.WithCancel(ctx)
+		// Initialization follows this Start call until it finishes, but a
+		// successful native runtime must not retain the caller context. Close
+		// owns the independent lifetime cancellation after successful handoff.
+		initCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		stopCallerCancel := context.AfterFunc(ctx, cancel)
 		f.initializing = true
 		f.ready = make(chan struct{})
 		f.initCancel = cancel
@@ -102,16 +114,25 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		f.mu.Unlock()
 
 		delegate, err := initialize(initCtx)
-		cancel()
+		settleInitializationCaller(ctx, cancel, stopCallerCancel)
 		if err == nil && delegate == nil {
 			err = errors.New("deferred share session factory initialized without a delegate")
+		}
+		if err == nil {
+			err = initCtx.Err()
 		}
 
 		f.mu.Lock()
 		closed := f.closed
 		if err == nil && !closed {
 			f.delegate = delegate
+			// The successful native runtime owns this context for its full
+			// lifetime. Canceling the one-shot initialization context here would
+			// close the admitter before the first resource admission.
+			f.delegateCancel = cancel
 			f.initialize = nil
+		} else {
+			cancel()
 		}
 		f.initCancel = nil
 		if closed && delegate != nil {
@@ -134,6 +155,15 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 			return nil, err
 		}
 		continue
+	}
+}
+
+func settleInitializationCaller(ctx context.Context, cancel context.CancelFunc, stopCallerCancel func() bool) {
+	if !stopCallerCancel() || ctx.Err() != nil {
+		// Either the cancellation callback has started or cancellation won the
+		// handoff before the callback ran. Complete its effect synchronously so
+		// the factory cannot cache that delegate as successful.
+		cancel()
 	}
 }
 
@@ -192,8 +222,13 @@ func (f *DeferredSessionFactory) Close() error {
 	}
 	delegate := f.delegate
 	f.delegate = nil
+	delegateCancel := f.delegateCancel
+	f.delegateCancel = nil
 	priorErr := f.closeErr
 	f.mu.Unlock()
+	if delegateCancel != nil {
+		delegateCancel()
+	}
 	closeErr := closeSessionFactory(delegate)
 	f.mu.Lock()
 	f.closeErr = errors.Join(priorErr, closeErr)
@@ -248,6 +283,12 @@ func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.
 	if err != nil {
 		return nil, err
 	}
+	// The manager owns the returned session and stops it explicitly. Retaining
+	// a one-shot Reconcile context would couple a healthy route to that call.
+	runCtx, cancel := context.WithCancel(context.Background())
+	session := &nativeSession{cancel: cancel, done: make(chan struct{}), diagnostic: ResourceDiagnostic{
+		State: diagnosticStateStarting, LastTransition: time.Now().UTC(),
+	}}
 	runner, err := connectorshare.NewResourceRunner(connectorshare.ResourceConfig{
 		KnockResourceID: local.KnockResourceID,
 		ResourceID:      local.ResourceID,
@@ -257,15 +298,18 @@ func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.
 			// A failed marker clear is deliberately retried on the next serving
 			// cycle. It must not tear down a healthy route or its siblings.
 			_ = f.admitter.MarkServingHealthy()
+			session.recordServing()
+		},
+		OnRetry: func(err error, wait time.Duration) {
+			session.recordRetry(err, wait)
+			slog.WarnContext(runCtx, "share daemon session attempt failed; retrying",
+				"crid", local.CRID, "retry_in", wait, "error", qurlapi.Redact(err.Error()))
 		},
 	})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	// The manager owns the returned session and stops it explicitly. Retaining
-	// a one-shot Reconcile context would couple a healthy route to that call.
-	runCtx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel is retained by nativeSession.Stop.
-	session := &nativeSession{cancel: cancel, done: make(chan struct{})}
 	go session.run(runCtx, runner)
 	return session, nil
 }
@@ -282,22 +326,56 @@ type nativeSession struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu   sync.Mutex
-	err  error
-	once sync.Once
+	mu         sync.Mutex
+	err        error
+	once       sync.Once
+	diagnostic ResourceDiagnostic
 }
 
 func (s *nativeSession) run(ctx context.Context, runner *connectorshare.ResourceRunner) {
 	err := runner.Run(ctx)
 	if errors.Is(err, connectorshare.ErrResourceGone) {
 		err = errors.Join(ErrResourceGone, err)
-	} else if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-		err = nil
+	} else if ctx.Err() != nil {
+		err = withoutExpectedNativeSessionCancellation(err)
 	}
 	s.mu.Lock()
 	s.err = err
+	s.diagnostic.State = diagnosticStateStopped
+	if err != nil {
+		s.diagnostic.State = diagnosticStateFailed
+		s.diagnostic.FailureCategory, s.diagnostic.FailureCode = classifyShareFailure(err)
+	}
+	s.diagnostic.LastTransition = time.Now().UTC()
+	s.diagnostic.NextRetryAt = nil
 	s.mu.Unlock()
 	close(s.done)
+}
+
+func withoutExpectedNativeSessionCancellation(err error) error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		kept := make([]error, 0, len(joined.Unwrap()))
+		for _, cause := range joined.Unwrap() {
+			if cause = withoutExpectedNativeSessionCancellation(cause); cause != nil {
+				kept = append(kept, cause)
+			}
+		}
+		return errors.Join(kept...)
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		cause := wrapped.Unwrap()
+		if !errors.Is(cause, context.Canceled) {
+			return err
+		}
+		return withoutExpectedNativeSessionCancellation(cause)
+	}
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 // Done closes after the resource runner exits.
@@ -308,6 +386,200 @@ func (s *nativeSession) Err() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.err
+}
+
+// Diagnostic returns the current redacted state for owner-only IPC.
+func (s *nativeSession) Diagnostic() ResourceDiagnostic {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.diagnostic
+}
+
+func (s *nativeSession) recordServing() {
+	s.mu.Lock()
+	s.diagnostic = ResourceDiagnostic{State: diagnosticStateServing, LastTransition: time.Now().UTC()}
+	s.mu.Unlock()
+}
+
+func (s *nativeSession) recordRetry(err error, wait time.Duration) {
+	now := time.Now().UTC()
+	next := now.Add(wait)
+	category, code := classifyShareFailure(err)
+	s.mu.Lock()
+	s.diagnostic.State = diagnosticStateRetrying
+	s.diagnostic.LastTransition = now
+	s.diagnostic.FailureCategory = category
+	s.diagnostic.FailureCode = code
+	s.diagnostic.RetryAttempt++
+	s.diagnostic.NextRetryAt = &next
+	s.mu.Unlock()
+}
+
+func classifyShareFailure(err error) (category, code string) { //nolint:gocognit,gocyclo // Keep the closed failure taxonomy in one precedence-ordered boundary.
+	if err == nil {
+		return diagnosticFailureUnknown, ""
+	}
+	// This typed observation is more precise than the operation wrappers that
+	// can contain it. It does not claim whether the peer or the path was at
+	// fault, and it exposes no destination.
+	if errors.Is(err, qurl.ErrEndpointNoReply) {
+		return diagnosticFailurePeerTimeout, ""
+	}
+	// These recovery wrappers carry a cause, but their top-level state is more
+	// useful than that cause. For example, a completed credential replacement
+	// can wrap an assignment identity denial while it waits for the refreshed
+	// assignment. That is assignment recovery, not a second identity failure.
+	switch {
+	case errors.Is(err, qurl.ErrCredentialRecoveryCandidatePersistence):
+		return diagnosticFailureLocalState, ""
+	case errors.Is(err, qurl.ErrCredentialRecoveredAssignmentRefreshRequired):
+		return diagnosticFailureAssignment, ""
+	case errors.Is(err, qurl.ErrCredentialRecoveryExpired):
+		return diagnosticFailureIdentity, ""
+	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
+		errors.Is(err, qurl.ErrCredentialRecoveryRequired):
+		return diagnosticFailureIdentity, ""
+	}
+	var deny *qurl.ServerDenyError
+	if errors.As(err, &deny) {
+		return diagnosticFailurePlatformDenied, safeDiagnosticCode(deny.ErrCode)
+	}
+	// Credential recovery is an identity-stage operation. Keep its closed,
+	// non-secret code so inspect can distinguish an authenticated recovery
+	// refusal from an untyped daemon or network timeout.
+	var recovery *qurl.CredentialRecoveryError
+	if errors.As(err, &recovery) {
+		switch {
+		case errors.Is(err, qurl.ErrRecoveryCredentialRejected),
+			errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected),
+			errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired):
+			return diagnosticFailureIdentity, safeDiagnosticCode(recovery.Code)
+		case errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired):
+			return diagnosticFailureAssignment, safeDiagnosticCode(recovery.Code)
+		default:
+			// The remaining closed recovery results are authenticated
+			// platform outcomes: temporary authority failure, rate limiting,
+			// invalid request, rejected grant, or candidate conflict. They are
+			// not proof of a bad device identity or a local network failure.
+			return diagnosticFailurePlatformDenied, safeDiagnosticCode(recovery.Code)
+		}
+	}
+	var assignment *qurl.AssignmentError
+	if errors.As(err, &assignment) {
+		// AssignmentError also carries the identity and enrollment-credential
+		// denials. Classify those before the broad assignment family while
+		// retaining the safe closed-taxonomy code.
+		if errors.Is(err, qurl.ErrAssignmentIdentityRejected) ||
+			errors.Is(err, qurl.ErrAssignmentKeyRejected) ||
+			errors.Is(err, qurl.ErrAssignmentBootstrapConsumed) {
+			return diagnosticFailureIdentity, safeDiagnosticCode(assignment.Code)
+		}
+		return diagnosticFailureAssignment, safeDiagnosticCode(assignment.Code)
+	}
+	var completion *qurl.CompletionError
+	if errors.As(err, &completion) {
+		category := diagnosticFailureEnrollment
+		switch {
+		case errors.Is(err, qurl.ErrCompletionIdentityRejected):
+			category = diagnosticFailureIdentity
+		case errors.Is(err, qurl.ErrDeviceKeyQuotaExceeded),
+			errors.Is(err, qurl.ErrCompletionCredentialConflict):
+			category = diagnosticFailurePlatformDenied
+		}
+		code := safeDiagnosticCode(completion.Code)
+		if !strings.HasPrefix(code, "523") {
+			code = ""
+		}
+		return category, code
+	}
+	for _, sentinel := range []error{
+		qurl.ErrAssignmentIdentityRejected, qurl.ErrAssignmentKeyRejected,
+		qurl.ErrAssignmentBootstrapConsumed, qurl.ErrRecoveryCredentialRejected,
+		qurl.ErrCredentialRecoveryIdentityRejected, qurl.ErrCredentialRecoveryRevokeRequired,
+		qurl.ErrInvalidAgentState, qurl.ErrInsecureAgentStatePermissions,
+		qurl.ErrKeyRejected, qurl.ErrBootstrapSetupKeyConsumed,
+		qurl.ErrCompletionIdentityRejected, qurl.ErrAgentIdentityConflict,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureIdentity, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrAssignmentUnavailable, qurl.ErrAssignmentRecoveryRequired,
+		qurl.ErrAssignmentReassignmentRequired, qurl.ErrAssignmentRateLimited,
+		qurl.ErrAssignmentLeaseExpired, qurl.ErrNativeSessionOperationLeaseMargin,
+		qurl.ErrCredentialRecoveryAssignmentRequired,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureAssignment, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrRegistrationRecoveryRequired, qurl.ErrRegistrationRateLimited,
+		qurl.ErrAssignmentTicketInvalid, qurl.ErrAssignmentTicketExpired,
+		qurl.ErrRegistrationInvalidInput,
+		qurl.ErrRegisterReplyMalformed, qurl.ErrRegistrationKeyKindDisallowed,
+		qurl.ErrCompletionUnavailable, qurl.ErrCompletionRequestRejected,
+		qurl.ErrCompletionRecoveryRequired,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureEnrollment, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrInvalidRegisterConfig, qurl.ErrAgentBindingPersistence,
+		qurl.ErrAgentCompletionCandidatePersistence, qurl.ErrAgentSetupLock,
+		qurl.ErrInvalidNativeSessionOperation, agentstate.ErrSessionOperationConflict,
+		agentstate.ErrSessionOperationJournalCorrupt,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureLocalState, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurl.ErrRegistrationDisabled, qurl.ErrDeviceKeyQuotaExceeded,
+		qurl.ErrCompletionCredentialConflict,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailurePlatformDenied, ""
+		}
+	}
+	for _, sentinel := range []error{
+		nativeudp.ErrResolve, nativeudp.ErrTransport,
+		nativeudp.ErrNoReply, context.DeadlineExceeded,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureNetwork, ""
+		}
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, os.ErrPermission) {
+		return diagnosticFailureLocalState, ""
+	}
+	for _, sentinel := range []error{
+		qurl.ErrCredentialRecoveryUnavailable, qurl.ErrCredentialRecoveryRateLimited,
+		qurl.ErrCredentialReplacementUnavailable, qurl.ErrCredentialRecoveryGrantRejected,
+		qurl.ErrCredentialRecoveryRequestRejected, qurl.ErrCredentialRecoveryCandidateConflict,
+		qurl.ErrCredentialRecoveryRetryRequired, qurl.ErrCredentialRecoveryInvalidResponse,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailurePlatformDenied, ""
+		}
+	}
+	if errors.Is(err, ErrResourceGone) || errors.Is(err, connectorshare.ErrResourceGone) {
+		return diagnosticFailureResourceUnavailable, ""
+	}
+	return diagnosticFailureUnknown, ""
+}
+
+// safeDiagnosticCode keeps the daemon producer inside the exact IPC contract.
+// qurl-go accepts a wider authenticated decimal error grammar for some NHP
+// replies, but inspect exposes only the closed five-digit public taxonomy.
+func safeDiagnosticCode(code string) string {
+	if !validDiagnosticCode(code) {
+		return ""
+	}
+	return code
 }
 
 // Stop cancels and joins the resource runner.

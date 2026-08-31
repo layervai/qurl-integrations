@@ -9,11 +9,6 @@ const exampleCRID = "aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledf
 // referenced by both the commands and the jargon-gate test, so the strings a
 // customer sees and the strings the gate vets can never drift apart.
 const (
-	// msgKeyringUnavailable is the file-fallback warning: emitted by login
-	// when the key had to be stored in the fallback file, and once per
-	// invocation by any command that reads the key from that file.
-	msgKeyringUnavailable = "OS keyring storage isn't available on this system; your qURL API key is kept in a file only your user can read (mode 0600)"
-
 	// msgVerifyMismatch is printed (stderr only) when a resolve response
 	// fails CRID verification; nothing is emitted on stdout and the exit
 	// code is 12.
@@ -21,7 +16,7 @@ const (
 
 	// msgVerifyMissing covers a resolve response that carried nothing to
 	// verify against; same fail-closed contract as msgVerifyMismatch.
-	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. This endpoint may be too old for verified resolution"
+	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. Try again; if it keeps happening, contact qURL support"
 
 	// msgNeedsYes is the non-interactive guard for destructive commands.
 	msgNeedsYes = "confirmation required: re-run with --yes (interactive confirmation needs a terminal)"
@@ -29,13 +24,9 @@ const (
 	// msgDeleteCanceled acknowledges a declined confirmation prompt.
 	msgDeleteCanceled = "Canceled — nothing was deleted."
 
-	// msgNoCRIDReturned warns when publish succeeds but the service minted
-	// no CRID (older deployments).
-	msgNoCRIDReturned = "The service did not return a CRID for this resource; use the resource ID shown above until it does."
-
-	// msgInsecureEndpoint warns that a plain-http non-loopback endpoint
-	// sends the API key unencrypted. Loopback endpoints never warn.
-	msgInsecureEndpoint = "your API key would travel unencrypted: %s uses plain http on a non-local address — use https"
+	// msgInsecureEndpoint warns that a plain-http non-loopback endpoint sends
+	// an authorization credential unencrypted. Loopback endpoints never warn.
+	msgInsecureEndpoint = "your authorization credential would travel unencrypted: %s uses plain http on a non-local address — use https"
 
 	// msgTTLClamped reports the service granting a shorter link lifetime
 	// than requested.
@@ -71,12 +62,10 @@ const (
 // package can emit, for the jargon gate.
 func customerMessages() []string {
 	return []string{
-		msgKeyringUnavailable,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgNeedsYes,
 		msgDeleteCanceled,
-		msgNoCRIDReturned,
 		msgTTLClamped,
 		msgNoKeyProvided,
 		msgAlreadyGone,

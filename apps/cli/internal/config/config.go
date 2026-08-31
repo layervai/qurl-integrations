@@ -3,9 +3,9 @@
 //
 //	command-line flag > environment variable > profile/config file > built-in default
 //
-// Config files never hold secrets: the API key lives in the credential store
-// (or the QURL_API_KEY environment variable), and a config file that tries to
-// smuggle one in is rejected outright rather than silently honored.
+// Config files never hold secrets: an API key is accepted only for one-time
+// login or through QURL_API_KEY/QURL_API_KEY_FILE bootstrap, and a config file
+// that tries to smuggle one in is rejected rather than silently honored.
 package config
 
 import (
@@ -35,7 +35,7 @@ var (
 	// ErrConfigFile reports a config file that exists but cannot be read or parsed.
 	ErrConfigFile = errors.New("cli: invalid config file")
 	// ErrSecretInConfig reports a config file carrying an api_key entry.
-	// Config files never hold secrets; the credential store and QURL_API_KEY do.
+	// Config files never hold secrets; login and explicit bootstrap inputs do.
 	ErrSecretInConfig = errors.New("cli: config files must not contain an API key")
 )
 
@@ -169,9 +169,9 @@ func loadFile(p string) (*Config, error) {
 }
 
 // rejectSecrets refuses config files that carry credential-shaped keys. The
-// v2 contract is that config files hold no secrets, so an api_key entry left
-// over from an older setup is surfaced loudly instead of silently ignored —
-// silence would leave a live credential sitting in a plaintext file.
+// v2 contract is that config files hold no secrets, so an api_key entry is
+// surfaced loudly instead of silently ignored. Silence would leave a live
+// credential sitting in a plaintext file.
 func rejectSecrets(data []byte, path string) error {
 	var raw map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {

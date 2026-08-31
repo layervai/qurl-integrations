@@ -32,7 +32,7 @@ const (
 	ConnectorResourcesFile = "connector_resources.json"
 	connectorResourcesLock = ".connector_resources.lock"
 
-	connectorResourcesVersion  = 1
+	connectorResourcesVersion  = 2
 	connectorResourcesMaxBytes = 1 << 20
 	connectorResourcesMaxItems = 1024
 	connectorResourceFileMode  = 0o600
@@ -50,6 +50,9 @@ var (
 	// Treat it as a fail-closed verification failure, never as replacement
 	// authority for the previously accepted identity.
 	ErrConnectorResourceVerification = errors.New("connector resource response failed durable-state verification")
+	// ErrConnectorResourceRetired prevents a deliberately deleted Connector ID
+	// from being sent again as an implicit resource-reclamation request.
+	ErrConnectorResourceRetired = errors.New("connector resource was deliberately retired")
 )
 
 // ConnectorResourceCommitError rejects an authenticated response that
@@ -79,7 +82,7 @@ func (e *ConnectorResourceCommitError) Unwrap() error { return e.kind }
 type ConnectorResourceBinding struct {
 	ConnectorID        string `json:"connector_id"`
 	ResourceID         string `json:"resource_id"`
-	CRID               string `json:"crid,omitempty"`
+	CRID               string `json:"crid"`
 	ConnectorRoutingID string `json:"connector_routing_id"`
 	KnockResourceID    string `json:"knock_resource_id"`
 }
@@ -97,6 +100,7 @@ type connectorResourcesState struct {
 	Version  int                                        `json:"version"`
 	Bindings map[string]ConnectorResourceBinding        `json:"bindings"`
 	Pending  map[string]PendingConnectorResourceRequest `json:"pending"`
+	Retired  map[string]bool                            `json:"retired"`
 }
 
 // ConnectorResourceTransaction owns the process and cross-process lock for
@@ -166,6 +170,9 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 	if err := s.validateContinuityLocked(); err != nil {
 		return nil, err
 	}
+	if current.Retired[connectorID] {
+		return nil, fmt.Errorf("%w: Connector ID %q", ErrConnectorResourceRetired, connectorID)
+	}
 	pending, ok := current.Pending[connectorID]
 	if !ok {
 		expected := ""
@@ -199,6 +206,102 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 		},
 		unlock: unlock,
 	}, nil
+}
+
+// ConnectorResourceBinding returns the durable binding and retirement state
+// for one exact Connector ID. It never searches by a remote-supplied alias.
+func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string) (_ ConnectorResourceBinding, retired, found bool, retErr error) {
+	if s == nil {
+		return ConnectorResourceBinding{}, false, false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	if err := validateConnectorID(connectorID); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	if ctx == nil {
+		return ConnectorResourceBinding{}, false, false, errors.New("read Connector resource binding: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	unlock, err := acquireConnectorResourcesLock(ctx, s.dir)
+	if err != nil {
+		return ConnectorResourceBinding{}, false, false, fmt.Errorf("lock Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	current, err := loadConnectorResources(s.dir)
+	if err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return ConnectorResourceBinding{}, false, false, err
+	}
+	binding, found := current.Bindings[connectorID]
+	return binding, current.Retired[connectorID], found, nil
+}
+
+// RetireConnectorResource records a completed user-authorized deletion by any
+// exact local public identity. The accepted binding remains available only to
+// derive a new default Connector ID; BeginConnectorResource refuses its reuse.
+func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired bool, retErr error) {
+	if s == nil {
+		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("retire Connector resource: identity is empty")
+	}
+	if ctx == nil {
+		return false, errors.New("retire Connector resource: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, err
+	}
+	unlock, err := acquireConnectorResourcesLock(ctx, s.dir)
+	if err != nil {
+		return false, fmt.Errorf("lock Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	current, err := loadConnectorResources(s.dir)
+	if err != nil {
+		return false, err
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, err
+	}
+	connectorID := ""
+	for candidateID, binding := range current.Bindings {
+		if id == candidateID || id == binding.ResourceID || id == binding.CRID {
+			if connectorID != "" && connectorID != candidateID {
+				return false, errors.New("retire Connector resource: public identity is ambiguous in durable state")
+			}
+			connectorID = candidateID
+		}
+	}
+	if connectorID == "" {
+		return false, nil
+	}
+	if current.Retired[connectorID] {
+		return true, nil
+	}
+	current.Retired[connectorID] = true
+	delete(current.Pending, connectorID)
+	if err := writeConnectorResources(s.dir, current); err != nil {
+		return false, fmt.Errorf("retire Connector resource state: %w", err)
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return false, fmt.Errorf("validate state continuity after retiring Connector resource: %w", err)
+	}
+	return true, nil
 }
 
 // Request returns a copy of the exact durable LST request.
@@ -238,12 +341,7 @@ func (t *ConnectorResourceTransaction) Commit(binding *ConnectorResourceBinding)
 		if existing.ConnectorRoutingID != committed.ConnectorRoutingID || existing.KnockResourceID != committed.KnockResourceID {
 			return t.rejectCommit(ErrConnectorResourceVerification, "authenticated response changed the cached routing or knock binding")
 		}
-		switch {
-		case existing.CRID != "" && committed.CRID == "":
-			// CRID is optional in an authenticated response. Preserve a
-			// previously key-verified value when a warm response omits it.
-			committed.CRID = existing.CRID
-		case existing.CRID != "" && committed.CRID != existing.CRID:
+		if committed.CRID != existing.CRID {
 			return t.rejectCommit(ErrConnectorResourceVerification, "authenticated response changed the cached CRID")
 		}
 	}
@@ -330,6 +428,7 @@ func emptyConnectorResourcesState() connectorResourcesState {
 		Version:  connectorResourcesVersion,
 		Bindings: make(map[string]ConnectorResourceBinding),
 		Pending:  make(map[string]PendingConnectorResourceRequest),
+		Retired:  make(map[string]bool),
 	}
 }
 
@@ -345,11 +444,8 @@ func loadConnectorResources(dir string) (connectorResourcesState, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return connectorResourcesState{}, errors.New("connector resource state must be a non-symlink regular file")
 	}
-	if !connectorResourceOwnerOK(info) {
-		return connectorResourcesState{}, errors.New("connector resource state must be owned by the current user")
-	}
-	if info.Mode().Perm() != connectorResourceFileMode {
-		return connectorResourcesState{}, fmt.Errorf("connector resource state has mode %04o, want %04o", info.Mode().Perm(), connectorResourceFileMode)
+	if err := validateConnectorResourceFile(path, info); err != nil {
+		return connectorResourcesState{}, err
 	}
 	if info.Size() > connectorResourcesMaxBytes {
 		return connectorResourcesState{}, fmt.Errorf("connector resource state exceeds %d bytes", connectorResourcesMaxBytes)
@@ -422,11 +518,11 @@ func validateConnectorResourcesState(state connectorResourcesState) error {
 	if state.Version != connectorResourcesVersion {
 		return fmt.Errorf("unsupported version %d", state.Version)
 	}
-	if state.Bindings == nil || state.Pending == nil {
-		return errors.New("bindings and pending maps are required")
+	if state.Bindings == nil || state.Pending == nil || state.Retired == nil {
+		return errors.New("bindings, pending, and retired maps are required")
 	}
-	if len(state.Bindings) > connectorResourcesMaxItems || len(state.Pending) > connectorResourcesMaxItems {
-		return fmt.Errorf("bindings and pending are limited to %d entries each", connectorResourcesMaxItems)
+	if len(state.Bindings) > connectorResourcesMaxItems || len(state.Pending) > connectorResourcesMaxItems || len(state.Retired) > connectorResourcesMaxItems {
+		return fmt.Errorf("bindings, pending, and retired are limited to %d entries each", connectorResourcesMaxItems)
 	}
 	resourceOwners := make(map[string]string, len(state.Bindings))
 	routingOwners := make(map[string]string, len(state.Bindings))
@@ -461,6 +557,21 @@ func validateConnectorResourcesState(state connectorResourcesState) error {
 			return fmt.Errorf("pending %q asserts an identity without a cached binding", key)
 		}
 	}
+	return validateRetiredConnectorResources(state)
+}
+
+func validateRetiredConnectorResources(state connectorResourcesState) error {
+	for key, retired := range state.Retired {
+		if !retired {
+			return fmt.Errorf("retired Connector %q must have value true", key)
+		}
+		if _, exists := state.Bindings[key]; !exists {
+			return fmt.Errorf("retired Connector %q has no accepted binding", key)
+		}
+		if _, pending := state.Pending[key]; pending {
+			return fmt.Errorf("retired Connector %q still has a pending request", key)
+		}
+	}
 	return nil
 }
 
@@ -481,11 +592,12 @@ func validateBinding(binding *ConnectorResourceBinding) error {
 	if !validKnockResourceID(binding.KnockResourceID) {
 		return errors.New("knock resource ID is not canonical")
 	}
-	if binding.CRID != "" {
-		matched, err := crid.KeyMatches(binding.CRID, der)
-		if err != nil || !matched {
-			return errors.New("crid does not match the public resource identity")
-		}
+	if strings.TrimSpace(binding.CRID) == "" {
+		return errors.New("crid is required")
+	}
+	matched, err := crid.KeyMatches(binding.CRID, der)
+	if err != nil || !matched {
+		return errors.New("crid does not match the public resource identity")
 	}
 	return nil
 }
@@ -513,6 +625,8 @@ func validateConnectorID(id string) error {
 	return nil
 }
 
+// TODO(upstream-contract): replace this copy when qurl-connector exports its
+// canonical Connector ID validator.
 func mustCompileConnectorIDPattern() func(string) bool {
 	return func(value string) bool {
 		if len(value) < 3 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
@@ -584,11 +698,8 @@ func validateConnectorResourcesWriteTarget(path string) error {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return errors.New("connector resource state must be a non-symlink regular file")
 		}
-		if info.Mode().Perm() != connectorResourceFileMode {
-			return fmt.Errorf("connector resource state has mode %04o, want %04o", info.Mode().Perm(), connectorResourceFileMode)
-		}
-		if !connectorResourceOwnerOK(info) {
-			return errors.New("connector resource state must be owned by the current user")
+		if err := validateConnectorResourceFile(path, info); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect Connector resource state before write: %w", err)
@@ -602,7 +713,7 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 		return fmt.Errorf("generate Connector resource state temporary name: %w", err)
 	}
 	tmpPath := filepath.Join(dir, "."+ConnectorResourcesFile+".tmp-"+hex.EncodeToString(suffix))
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, connectorResourceFileMode) //nolint:gosec // G302,G304: fixed 0600 in the pinned owner-only state dir.
+	tmp, err := createConnectorResourceTemp(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create Connector resource state temporary file: %w", err)
 	}
@@ -620,9 +731,6 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 		}
 		retErr = errors.Join(retErr, removeErr, syncDir(dir))
 	}()
-	if err := tmp.Chmod(connectorResourceFileMode); err != nil {
-		return fmt.Errorf("set Connector resource state temporary permissions: %w", err)
-	}
 	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write Connector resource state temporary file: %w", err)
 	}
@@ -633,7 +741,7 @@ func replaceConnectorResources(dir, path string, data []byte) (retErr error) {
 		return fmt.Errorf("close Connector resource state temporary file: %w", err)
 	}
 	closed = true
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := commitConnectorResourceRename(tmpPath, path); err != nil {
 		return fmt.Errorf("commit Connector resource state rename: %w", err)
 	}
 	committed = true
@@ -791,7 +899,7 @@ func rejectNonCanonicalResourceFields(data []byte) error {
 	}
 	for key := range envelope {
 		switch key {
-		case jsonFieldVersion, "bindings", "pending":
+		case jsonFieldVersion, "bindings", "pending", "retired":
 		default:
 			return fmt.Errorf("unknown field %q", key)
 		}

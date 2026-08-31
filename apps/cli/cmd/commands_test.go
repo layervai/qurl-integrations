@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +44,22 @@ func TestVersionOutputShape(t *testing.T) {
 	}
 }
 
+func TestReleaseNativeTrustVerifierIsHiddenAndFailsClosedInDarkBuild(t *testing.T) {
+	help := runCLI(t, &runOpts{args: []string{"version", "--help"}})
+	if help.code != 0 || strings.Contains(help.stdout.String(), "verify-release-native-trust") {
+		t.Fatalf("version help exposed the release verifier: code=%d stdout=%q stderr=%q", help.code, help.stdout.String(), help.stderr.String())
+	}
+	result := runCLI(t, &runOpts{args: []string{"version", "--verify-release-native-trust"}})
+	if result.code == 0 || result.stdout.Len() != 0 || !strings.Contains(result.stderr.String(), "missing required built-in connection settings") {
+		t.Fatalf("dark release verifier = code=%d stdout=%q stderr=%q", result.code, result.stdout.String(), result.stderr.String())
+	}
+	for _, forbidden := range []string{"Hub", "QURL_CONNECTOR_HUB_", "server public key"} {
+		if strings.Contains(result.stderr.String(), forbidden) {
+			t.Fatalf("dark release verifier exposed %q: stderr=%q", forbidden, result.stderr.String())
+		}
+	}
+}
+
 // TestHelpLeadsWithTheOneCommandLocalJourney protects the first-run UX. The
 // command reference can stay precise without making a new user read Connector
 // internals before seeing the ordinary localhost path.
@@ -72,10 +90,13 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On macOS", "background daemon", "On Linux", "--foreground", "Local app sharing is not supported", "Windows", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
+	}
+	if strings.Contains(publishHelp, "outside macOS and Linux") {
+		t.Errorf("publish help still says Windows is unsupported:\n%s", publishHelp)
 	}
 	for _, jargon := range []string{"FRP", "proxy registration", "one-shot enrollment", "native device identity"} {
 		if strings.Contains(publishHelp, jargon) {
@@ -141,6 +162,19 @@ func TestREADMECarriesACompleteLocalQuickstart(t *testing.T) {
 	}
 }
 
+func TestREADMEAPIKeyFileRecipeMatchesUnixSecurityContract(t *testing.T) {
+	readme := readCLIREADME(t)
+	for _, want := range []string{
+		"have mode `0400` or `0600`",
+		"exactly one hard link",
+		`(umask 077; printf '%s\n' "$QURL_API_KEY" > "$path")`,
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("CLI README API-key file recipe missing %q", want)
+		}
+	}
+}
+
 // TestREADMEQuickstartOutputMatchesPrinter keeps the walkthrough honest: its
 // success block is the production plain-text formatter's exact byte stream,
 // not a hand-maintained approximation that can drift from the CLI.
@@ -166,6 +200,18 @@ func TestREADMEQuickstartOutputMatchesPrinter(t *testing.T) {
 	want := "```text\n" + stdout.String() + "```"
 	if !strings.Contains(readme, want) {
 		t.Fatalf("CLI README output is not the production formatter's exact output:\n%s", stdout.String())
+	}
+}
+
+func TestREADMEHeadlessEnrollmentRecoveryContract(t *testing.T) {
+	readme := strings.Join(strings.Fields(readCLIREADME(t)), " ")
+	for _, want := range []string{
+		"If bootstrap stops before registration finishes, retry with the same still-valid one-time credential.",
+		"A complete warm start does not read or require that file.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("CLI README lost interrupted-enrollment guidance %q", want)
+		}
 	}
 }
 
@@ -215,17 +261,20 @@ func TestBackgroundSharePlatformContract(t *testing.T) {
 	if err := requireBackgroundShareSupport("darwin"); err != nil {
 		t.Fatalf("darwin background share support: %v", err)
 	}
-	err := requireBackgroundShareSupport("linux")
-	if err == nil || !strings.Contains(err.Error(), "supported only on macOS") || !strings.Contains(err.Error(), "--foreground") {
-		t.Fatalf("linux background share error = %v", err)
+	if err := requireBackgroundShareSupport("windows"); err != nil {
+		t.Fatalf("windows background share support: %v", err)
 	}
-	if err := requireBackgroundShareSupport("windows"); err == nil || !strings.Contains(err.Error(), "macOS and Linux only") {
-		t.Fatalf("windows background share error = %v", err)
+	if err := requireBackgroundShareSupport("linux"); err != nil {
+		t.Fatalf("linux background share support: %v", err)
+	}
+	err := requireBackgroundShareSupport("plan9")
+	if err == nil || !strings.Contains(err.Error(), "local app sharing is supported on macOS, Linux, and Windows only") {
+		t.Fatalf("unsupported background share error = %v", err)
 	}
 }
 
 func TestLocalSharePlatformContractFailsBeforeStateOrNetwork(t *testing.T) {
-	for _, goos := range []string{"darwin", "linux"} {
+	for _, goos := range []string{"darwin", "linux", "windows"} {
 		if err := requireLocalShareSupport(goos); err != nil {
 			t.Fatalf("%s local share support: %v", goos, err)
 		}
@@ -236,9 +285,27 @@ func TestLocalSharePlatformContractFailsBeforeStateOrNetwork(t *testing.T) {
 		{"restart", exampleCRID},
 		{"daemon", "run"},
 	} {
-		res := runCLI(t, &runOpts{args: args, platformGOOS: "windows"})
-		if res.code != 1 || !strings.Contains(res.stderr.String(), "local app sharing is supported on macOS and Linux only") {
-			t.Fatalf("windows %v = exit %d stderr %q", args, res.code, res.stderr.String())
+		res := runCLI(t, &runOpts{args: args, platformGOOS: "plan9"})
+		if res.code != 1 || !strings.Contains(res.stderr.String(), "local app sharing is supported on macOS, Linux, and Windows only") {
+			t.Fatalf("unsupported platform %v = exit %d stderr %q", args, res.code, res.stderr.String())
+		}
+	}
+}
+
+func TestWindowsLocalShareCommandsReachRuntimeSeams(t *testing.T) {
+	seamErr := errors.New("Windows runtime seam reached")
+	for _, args := range [][]string{
+		{"publish", "http://127.0.0.1:3000", "--foreground"},
+		{"start", exampleCRID},
+		{"restart", exampleCRID},
+		{"daemon", "run"},
+	} {
+		res := runCLI(t, &runOpts{
+			args: args, platformGOOS: "windows", shareStateDirErr: seamErr,
+			preflightTarget: func(context.Context, string, int) error { return nil },
+		})
+		if res.code != 1 || !strings.Contains(res.stderr.String(), seamErr.Error()) {
+			t.Fatalf("Windows %v did not reach the state/runtime seam: exit %d stderr %q", args, res.code, res.stderr.String())
 		}
 	}
 }
@@ -466,9 +533,13 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "resolve", "get", "list", "start", "stop", "restart", "status", "delete", "login", "logout", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "resolve", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}
+	}
+	daemon := runCLI(t, &runOpts{args: []string{"daemon", "--help"}})
+	if daemon.code != 0 || !strings.Contains(daemon.stdout.String(), "run") || !strings.Contains(daemon.stdout.String(), "headless") {
+		t.Errorf("daemon help does not expose its run mode:\n%s\n%s", daemon.stdout.String(), daemon.stderr.String())
 	}
 }

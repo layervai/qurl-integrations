@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func listCmd(opts *globalOpts) *cobra.Command {
@@ -29,7 +32,7 @@ observation. Pages continue with --cursor when there are more results.`,
   qurl list --quiet | xargs -n1 qurl resolve --quiet`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := opts.newClient()
+			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -42,7 +45,10 @@ observation. Pages continue with --cursor when there are more results.`,
 			if err != nil {
 				return err
 			}
-			if !opts.quiet {
+			// JSON is the same structured document with or without --quiet.
+			// Keep its local tunnel targets stable; only quiet text skips the
+			// registry read because it prints identifiers alone.
+			if !opts.quiet || opts.resolvedFormat == output.FormatJSON {
 				if err := enrichTunnelList(cmd.Context(), opts, page); err != nil {
 					return err
 				}
@@ -62,7 +68,7 @@ observation. Pages continue with --cursor when there are more results.`,
 func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.ResourcePage) error {
 	tunnelRows := make([]int, 0, len(page.Items))
 	for index := range page.Items {
-		if page.Items[index].Type == "tunnel" {
+		if page.Items[index].Type == connectorResourceType {
 			tunnelRows = append(tunnelRows, index)
 		}
 	}
@@ -74,14 +80,16 @@ func enrichTunnelList(ctx context.Context, opts *globalOpts, page *qurlapi.Resou
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		opts.printer().Warnf("Local sharing state is unavailable; local targets were omitted.")
+		if errors.Is(err, connectorstate.ErrNoDefaultStateDir) {
+			return nil
+		}
+		opts.printer().Warnf("Local sharing state is invalid or inaccessible; local targets were omitted: %v", err)
 		return nil
 	}
-	localTargets := make(map[string]string, len(shares)*2)
+	localTargets := make(map[string]string, len(shares))
 	for index := range shares {
 		share := &shares[index]
 		localTargets[share.ResourceID] = share.TargetURL
-		localTargets[share.CRID] = share.TargetURL
 	}
 	for _, index := range tunnelRows {
 		if target := localTargets[page.Items[index].ResourceID]; target != "" {

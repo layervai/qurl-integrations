@@ -19,7 +19,9 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -194,14 +196,6 @@ func TestQuietProjections(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := p.Publish(&qurlapi.Published{ResourceID: "rid-only"}); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "rid-only\n" {
-		t.Errorf("quiet publish without CRID = %q", out.String())
-	}
-
-	out.Reset()
 	if err := p.Resolve(&qurlapi.Resolved{QURL: "https://qurl.link/#x"}); err != nil {
 		t.Fatal(err)
 	}
@@ -331,9 +325,22 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	if strings.Index(rendered, "alias:") > strings.Index(rendered, "target_url:") {
 		t.Errorf("invalid fields not sorted:\n%s", rendered)
 	}
+
+	buf.Reset()
+	custom := exitcode.InvalidInputError("stop applies only to a local qURL Connector", &qurlapi.Error{
+		StatusCode: http.StatusBadRequest,
+		Title:      "Invalid Input",
+		RequestID:  "req_stop",
+	})
+	RenderError(&buf, custom, false)
+	rendered = buf.String()
+	if !strings.Contains(rendered, "stop applies only to a local qURL Connector") ||
+		!strings.Contains(rendered, "Request ID: req_stop") || strings.Contains(rendered, "Invalid Input") {
+		t.Errorf("custom invalid-input rendering = %q", rendered)
+	}
 }
 
-func TestRenderConnectorEnrollmentScopeRemedy(t *testing.T) {
+func TestRenderEnrollmentScopeRemedy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
 	}))
@@ -357,7 +364,7 @@ func TestRenderConnectorEnrollmentScopeRemedy(t *testing.T) {
 	var buf bytes.Buffer
 	RenderError(&buf, fmt.Errorf("bootstrap local Connector: %w", err), false)
 	got := buf.String()
-	if !strings.Contains(got, "qurl:agent") || !strings.Contains(got, "one-shot Connector enrollment credential") {
+	if !strings.Contains(got, "registered device") || !strings.Contains(got, "publish local apps") {
 		t.Errorf("operation-specific remedy missing:\n%s", got)
 	}
 	if strings.Contains(got, hintScope) {
@@ -416,36 +423,289 @@ func TestConnectorAssignmentRenderings(t *testing.T) {
 	}
 }
 
-func TestConnectorResourceRenderings(t *testing.T) {
-	cases := []struct {
+func TestConnectorRecoveryCredentialRenderingHidesSDKInternals(t *testing.T) {
+	err := errors.Join(
+		&qurl.CredentialRecoveryError{Code: "52401", Phase: "hub_issue_recovery"},
+		qurl.ErrRecoveryCredentialRejected,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("recover rejected native identity: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"hub_issue_recovery", "52401", "qurl:"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("recovery rendering exposed SDK detail %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorRecoveryTaxonomyRenderingHidesEveryWirePhase(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		phase    string
+		sentinel error
+		headline string
+		hint     string
+	}{
+		{"hub unavailable", "52400", "hub_issue_recovery", qurl.ErrCredentialRecoveryUnavailable, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"hub identity rejected", "52402", "hub_issue_recovery", qurl.ErrCredentialRecoveryIdentityRejected, msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected},
+		{"revoke required", "52403", "hub_issue_recovery", qurl.ErrCredentialRecoveryRevokeRequired, msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired},
+		{"rate limited", "52404", "hub_issue_recovery", qurl.ErrCredentialRecoveryRateLimited, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"hub invalid", "52405", "hub_issue_recovery", qurl.ErrCredentialRecoveryRequestRejected, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+		{"assignment required", "52406", "hub_issue_recovery", qurl.ErrCredentialRecoveryAssignmentRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"replacement unavailable", "52410", "assigned_cell_complete_recovery", qurl.ErrCredentialReplacementUnavailable, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"grant rejected", "52411", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryGrantRejected, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"cell identity rejected", "52412", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryIdentityRejected, msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected},
+		{"candidate conflict", "52413", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryCandidateConflict, msgConnectorRecoveryConflict, hintConnectorRecoveryConflict},
+		{"cell invalid", "52414", "assigned_cell_complete_recovery", qurl.ErrCredentialRecoveryRequestRejected, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := errors.Join(
+				&qurl.CredentialRecoveryError{Code: test.code, Phase: test.phase},
+				test.sentinel,
+			)
+			if test.code == "52400" || test.code == "52404" || test.code == "52410" {
+				err = &qurl.CredentialRecoveryRetryRequiredError{
+					Phase: test.phase, Attempts: 3, Elapsed: time.Second, Last: err,
+				}
+			}
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("recover rejected native identity: %w", err), false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{test.phase, test.code, "qurl:"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("recovery rendering exposed SDK detail %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorRecoveryStateRenderingHidesSDKDetails(t *testing.T) {
+	tests := []struct {
 		name     string
 		err      error
 		headline string
 		hint     string
 	}{
-		{"invalid local request", qurl.ErrInvalidNativeConnectorResourceRequest, msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
-		{"request rejected", qurl.ErrConnectorResourceRequestRejected, msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
-		{"identity rejected", qurl.ErrConnectorResourceIdentityRejected, msgConnectorIdentityRejected, hintConnectorIdentityRejected},
-		{"entitlement", qurl.ErrConnectorResourceEntitlementDenied, msgConnectorResourceEntitlement, hintConnectorResourceEntitlement},
-		{"continuity conflict", qurl.ErrConnectorResourceIdentityConflict, msgConnectorResourceConflict, hintConnectorResourceConflict},
-		{"quota", qurl.ErrConnectorResourceQuotaExceeded, msgConnectorResourceQuota, hintConnectorResourceQuota},
-		{"rate limited", qurl.ErrConnectorResourceRateLimited, msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
-		{"unavailable", qurl.ErrConnectorResourceUnavailable, msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
-		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},
-		{"local verification", state.ErrConnectorResourceVerification, msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification},
-		{"local cross-Connector conflict", state.ErrConnectorResourceStateConflict, msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict},
+		{"persistence", qurl.ErrCredentialRecoveryCandidatePersistence, msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence},
+		{"invalid response", qurl.ErrCredentialRecoveryInvalidResponse, msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid},
+		{"expired", qurl.ErrCredentialRecoveryExpired, msgConnectorRecoveryExpired, hintConnectorRecoveryExpired},
+		{"retry exhausted", qurl.ErrCredentialRecoveryRetryRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+		{"refresh required", qurl.ErrCredentialRecoveredAssignmentRefreshRequired, msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			RenderError(&buf, fmt.Errorf("recover rejected native identity: internal phase: %w", test.err), false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "internal phase") || strings.Contains(got, "qurl:") {
+				t.Fatalf("recovery rendering exposed SDK detail:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestConnectorDeviceCredentialRenderingHidesIdentityAndSDKAdvice(t *testing.T) {
+	err := &qurl.NativeCredentialRecoveryRequiredError{
+		AgentID: "agent-private-identity",
+		Cause:   fmt.Errorf("internal recovery phase: %w", qurl.ErrDeviceCredentialMissing),
+	}
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("open registered runtime: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorDeviceCredential, hintConnectorDeviceCredential} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("device credential rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"agent-private-identity", "RecoverAgentRuntime", "internal recovery phase", "qurl:", "X25519"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("device credential rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorPeerTimeoutRenderingHidesEndpointAndTopology(t *testing.T) {
+	err := errors.Join(
+		&qurl.EndpointNoReplyError{
+			Endpoint: "private-cell.sandbox.invalid:443",
+			Attempts: 4,
+			Elapsed:  3 * time.Second,
+			Last:     errors.New("private route dropped UDP"),
+		},
+		qurl.ErrAssignmentRecoveryRequired,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("refresh assignment: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorPeerTimeout, hintConnectorPeerTimeout} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("peer-timeout rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"private-cell", "sandbox", "private route", "source-fenced", "qurl:", "UDP"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("peer-timeout rendering exposed %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestConnectorEnrollmentRenderingsHideSDKInternals(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"invalid local config", qurl.ErrInvalidRegisterConfig, msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig},
+		{"binding persistence", qurl.ErrAgentBindingPersistence, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"candidate persistence", qurl.ErrAgentCompletionCandidatePersistence, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"setup lock", qurl.ErrAgentSetupLock, msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence},
+		{"REG recovery", qurl.ErrRegistrationRecoveryRequired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"REG rate limited", qurl.ErrRegistrationRateLimited, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"ticket expired", qurl.ErrAssignmentTicketExpired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"completion unavailable", qurl.ErrCompletionUnavailable, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"completion recovery", qurl.ErrCompletionRecoveryRequired, msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable},
+		{"key rejected", qurl.ErrKeyRejected, msgConnectorTokenRejected, hintConnectorTokenRejected},
+		{"bootstrap consumed", qurl.ErrBootstrapSetupKeyConsumed, msgConnectorTokenConsumed, hintConnectorTokenConsumed},
+		{"completion identity", qurl.ErrCompletionIdentityRejected, msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity},
+		{"agent identity conflict", qurl.ErrAgentIdentityConflict, msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict},
+		{"completion conflict", qurl.ErrCompletionCredentialConflict, msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict},
+		{"REG invalid input", qurl.ErrRegistrationInvalidInput, msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid},
+		{"completion rejected", qurl.ErrCompletionRequestRejected, msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid},
+		{"registration disabled", qurl.ErrRegistrationDisabled, msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled},
+		{"device quota", qurl.ErrDeviceKeyQuotaExceeded, msgConnectorDeviceQuota, hintConnectorDeviceQuota},
+		{"ticket invalid", qurl.ErrAssignmentTicketInvalid, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+		{"reply malformed", qurl.ErrRegisterReplyMalformed, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+		{"key kind disallowed", qurl.ErrRegistrationKeyKindDisallowed, msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := fmt.Errorf(
+				"private assigned-cell phase for agent-private; call WithAgentRuntimeHeadlessEnrollment; code 52399: %w",
+				test.err,
+			)
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			got := buf.String()
+			for _, want := range []string{test.headline, test.hint} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("enrollment rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{"assigned-cell", "agent-private", "WithAgentRuntime", "52399", "qurl:"} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("enrollment rendering exposed %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorResourceRenderings(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		code     string
+		headline string
+		hint     string
+	}{
+		{"invalid local request", qurl.ErrInvalidNativeConnectorResourceRequest, "", msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"request rejected", qurl.ErrConnectorResourceRequestRejected, "52506", msgConnectorResourceInvalidRequest, hintConnectorResourceInvalidRequest},
+		{"identity rejected", qurl.ErrConnectorResourceIdentityRejected, "52501", msgConnectorIdentityRejected, hintConnectorIdentityRejected},
+		{"entitlement", qurl.ErrConnectorResourceEntitlementDenied, "52502", msgConnectorResourceEntitlement, hintConnectorResourceEntitlement},
+		{"continuity conflict", qurl.ErrConnectorResourceIdentityConflict, "52503", msgConnectorResourceConflict, hintConnectorResourceConflict},
+		{"quota", qurl.ErrConnectorResourceQuotaExceeded, "52504", msgConnectorResourceQuota, hintConnectorResourceQuota},
+		{"rate limited", qurl.ErrConnectorResourceRateLimited, "52505", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"unavailable", qurl.ErrConnectorResourceUnavailable, "52500", msgConnectorResourceUnavailable, hintConnectorResourceUnavailable},
+		{"invalid response", qurl.ErrInvalidNativeConnectorResourceResponse, "", msgConnectorResourceInvalidResponse, hintConnectorResourceInvalidResponse},
+		{"local verification", state.ErrConnectorResourceVerification, "", msgConnectorResourceLocalVerification, hintConnectorResourceLocalVerification},
+		{"local cross-Connector conflict", state.ErrConnectorResourceStateConflict, "", msgConnectorResourceLocalConflict, hintConnectorResourceLocalConflict},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			for _, err := range []error{test.err, fmt.Errorf("connector setup: %w", test.err)} {
+			poison := "assigned cell private-cell.example:443 returned LRT during routing/knock with QURL_CONNECTOR_HUB_HOST and qurl: raw detail"
+			err := fmt.Errorf("%s: %w", poison, test.err)
+			if test.code != "" {
+				err = errors.Join(err, &qurl.ConnectorResourceDiscoveryError{Code: test.code})
+			}
+			for _, rendering := range []struct {
+				err      error
+				wantCode bool
+			}{
+				{err: test.err},
+				{err: err, wantCode: test.code != ""},
+			} {
 				var buf bytes.Buffer
-				RenderError(&buf, err, false)
+				RenderError(&buf, rendering.err, false)
 				got := buf.String()
 				if !strings.Contains(got, test.headline) || !strings.Contains(got, test.hint) {
 					t.Fatalf("rendered error missing customer posture:\n%s", got)
 				}
+				if rendering.wantCode && !strings.Contains(got, labelConnectorErrorCode+" "+test.code) {
+					t.Fatalf("rendered error missing safe support code %q:\n%s", test.code, got)
+				}
+				for _, forbidden := range []string{
+					"assigned cell", "private-cell.example", "LRT", "routing/knock",
+					"QURL_CONNECTOR_HUB_HOST", "qurl: raw detail",
+				} {
+					if strings.Contains(got, forbidden) {
+						t.Fatalf("resource rendering exposed %q:\n%s", forbidden, got)
+					}
+				}
 			}
 		})
+	}
+
+	t.Run("malformed support code stays hidden", func(t *testing.T) {
+		err := errors.Join(
+			qurl.ErrConnectorResourceUnavailable,
+			&qurl.ConnectorResourceDiscoveryError{Code: "host1"},
+		)
+		var buf bytes.Buffer
+		RenderError(&buf, err, false)
+		if got := buf.String(); strings.Contains(got, "host1") || strings.Contains(got, labelConnectorErrorCode) {
+			t.Fatalf("malformed support code reached customer output:\n%s", got)
+		}
+	})
+}
+
+func TestConnectorHubConfigRenderingHidesTopology(t *testing.T) {
+	err := fmt.Errorf(
+		"%w: private-cell.example:443 Hub server public key via QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT",
+		hub.ErrConfig,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, err, false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorHubConfig, hintConnectorHubConfig} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Hub configuration rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{
+		"private-cell.example", "Hub", "server public key", "QURL_CONNECTOR_HUB_", ":443",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Hub configuration rendering exposed %q:\n%s", forbidden, got)
+		}
 	}
 }
 
@@ -510,6 +770,24 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorTokenRejected, hintConnectorTokenRejected,
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
 		msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled,
+		msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected,
+		msgConnectorRecoveryIdentityRejected, hintConnectorRecoveryIdentityRejected,
+		msgConnectorRecoveryRevokeRequired, hintConnectorRecoveryRevokeRequired,
+		msgConnectorRecoveryUnavailable, hintConnectorRecoveryUnavailable,
+		msgConnectorRecoveryConflict, hintConnectorRecoveryConflict,
+		msgConnectorRecoveryPersistence, hintConnectorRecoveryPersistence,
+		msgConnectorRecoveryInvalid, hintConnectorRecoveryInvalid,
+		msgConnectorRecoveryExpired, hintConnectorRecoveryExpired,
+		msgConnectorDeviceCredential, hintConnectorDeviceCredential,
+		msgConnectorPeerTimeout, hintConnectorPeerTimeout,
+		msgConnectorEnrollmentConfig, hintConnectorEnrollmentConfig,
+		msgConnectorEnrollmentUnavailable, hintConnectorEnrollmentUnavailable,
+		msgConnectorEnrollmentIdentity, hintConnectorEnrollmentIdentity,
+		msgConnectorEnrollmentConflict, hintConnectorEnrollmentConflict,
+		msgConnectorEnrollmentInvalid, hintConnectorEnrollmentInvalid,
+		msgConnectorEnrollmentMismatch, hintConnectorEnrollmentMismatch,
+		msgConnectorDeviceQuota, hintConnectorDeviceQuota,
+		msgConnectorEnrollmentPersistence, hintConnectorEnrollmentPersistence,
 		msgConnectorIdentityRejected, hintConnectorIdentityRejected,
 		msgConnectorQuotaExceeded, hintConnectorQuotaExceeded,
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
@@ -615,6 +893,9 @@ func TestListJSONCarriesZeroTunnelEpochButNotURLLifecycleFields(t *testing.T) {
 	}
 	if got := document.Resources[0]["desired_state"]; got != "off" {
 		t.Fatalf("tunnel desired_state = %#v, want off", got)
+	}
+	if _, ok := document.Resources[0]["connection_state"]; ok {
+		t.Fatalf("list fabricated a live tunnel observation: %#v", document.Resources[0])
 	}
 	if _, ok := document.Resources[1]["serving_epoch"]; ok {
 		t.Fatalf("URL row emitted tunnel serving_epoch: %#v", document.Resources[1])

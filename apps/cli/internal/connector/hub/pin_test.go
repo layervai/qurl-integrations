@@ -3,6 +3,8 @@ package hub
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -85,6 +87,72 @@ func TestFingerprintSHA256Hex(t *testing.T) {
 	want := "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
 	if got != want {
 		t.Fatalf("FingerprintSHA256Hex(zero key) = %q, want %q", got, want)
+	}
+}
+
+func TestReleaseHubPinEnvironment(t *testing.T) {
+	keyB64, fingerprint, skip, err := releaseHubPinInputs(
+		os.Getenv("QURL_RELEASE_HUB_PUBLIC_KEY_B64"),
+		os.Getenv("QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"),
+		os.Getenv("QURL_REQUIRE_RELEASE_HUB_PIN") == "1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skip {
+		t.Skip("release Hub pin inputs are not present")
+	}
+	key, err := DecodeServerPublicKeyB64(keyB64)
+	if err != nil {
+		t.Fatalf("release Hub public key %v", err)
+	}
+	if got := FingerprintSHA256Hex(key); got != fingerprint {
+		t.Fatalf("release Hub public-key fingerprint = %q, want configured fingerprint", got)
+	}
+}
+
+func releaseHubPinInputs(keyB64, fingerprint string, required bool) (normalizedKeyB64, normalizedFingerprint string, skip bool, err error) {
+	if keyB64 != strings.TrimSpace(keyB64) || fingerprint != strings.TrimSpace(fingerprint) {
+		return "", "", false, errors.New("release Hub public key and fingerprint must not have surrounding whitespace")
+	}
+	if keyB64 == "" && fingerprint == "" && !required {
+		return "", "", true, nil
+	}
+	if keyB64 == "" || fingerprint == "" {
+		return "", "", false, errors.New("release Hub public key and fingerprint must both be non-empty")
+	}
+	return keyB64, fingerprint, false, nil
+}
+
+func TestReleaseHubPinInputs(t *testing.T) {
+	tests := []struct {
+		name, key, fingerprint string
+		required, wantSkip     bool
+		wantErr                bool
+	}{
+		{name: "dark optional", wantSkip: true},
+		{name: "dark required", required: true, wantErr: true},
+		{name: "key only optional", key: "key", wantErr: true},
+		{name: "key only required", key: "key", required: true, wantErr: true},
+		{name: "fingerprint only optional", fingerprint: "fingerprint", wantErr: true},
+		{name: "fingerprint only required", fingerprint: "fingerprint", required: true, wantErr: true},
+		{name: "configured optional", key: "key", fingerprint: "fingerprint"},
+		{name: "configured required", key: "key", fingerprint: "fingerprint", required: true},
+		{name: "key leading whitespace", key: " key", fingerprint: "fingerprint", wantErr: true},
+		{name: "key trailing whitespace", key: "key ", fingerprint: "fingerprint", wantErr: true},
+		{name: "fingerprint leading whitespace", key: "key", fingerprint: " fingerprint", wantErr: true},
+		{name: "fingerprint trailing whitespace", key: "key", fingerprint: "fingerprint\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, fingerprint, skip, err := releaseHubPinInputs(tt.key, tt.fingerprint, tt.required)
+			if (err != nil) != tt.wantErr || skip != tt.wantSkip {
+				t.Fatalf("releaseHubPinInputs() = (%q, %q, %t, %v), want skip=%t err=%t", key, fingerprint, skip, err, tt.wantSkip, tt.wantErr)
+			}
+			if err == nil && !skip && (key != "key" || fingerprint != "fingerprint") {
+				t.Fatalf("releaseHubPinInputs() normalized values = (%q, %q), want (key, fingerprint)", key, fingerprint)
+			}
+		})
 	}
 }
 

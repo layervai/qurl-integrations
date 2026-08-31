@@ -4,9 +4,10 @@
 # (include-component-in-tag: false on any other package would mint a second
 # bare-tag version stream that collides with the tag contract scripts/
 # install.sh and GoReleaser depend on — see .github/workflows/
-# release-please.yml's header), and the CLI declares no component. Nothing
-# else checks these invariants before merge; drift otherwise surfaces only
-# post-merge inside the release workflow or, worse, in the public installer.
+# release-please.yml's header), the CLI declares no component, and CLI releases
+# stay draft while their exact artifacts are verified. Nothing else checks
+# these invariants before merge; drift otherwise surfaces only post-merge
+# inside the release workflow or, worse, in the public installer.
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
@@ -65,8 +66,14 @@ if "component" in cli:
         f"(found component: {cli['component']!r})"
     )
 
+if cli.get("draft") is not True or cli.get("force-tag-creation") is not True:
+    raise SystemExit(
+        "apps/cli must create a draft release and its exact tag before the "
+        "release job: set draft=true and force-tag-creation=true"
+    )
+
 print(
     "release-please config/manifest in sync; bare v* tag reserved to apps/cli; "
-    "apps/cli declares no component"
+    "apps/cli declares no component and creates a tagged draft release"
 )
 EOF
