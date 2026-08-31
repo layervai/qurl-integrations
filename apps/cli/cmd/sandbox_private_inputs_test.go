@@ -141,6 +141,9 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 		!strings.HasPrefix(first.ConnectorID, "connector-sandbox-local-publish-") || len(first.AgentID) > 64 {
 		t.Fatalf("namespace = %+v", first)
 	}
+	if first.ConnectorID != "connector-sandbox-local-publish-755de9f48bb9bab132dc1c5e" {
+		t.Fatalf("smoke Connector ID = %q; trusted cleanup derivation would drift", first.ConnectorID)
+	}
 	seen := map[sandboxRunNamespace]bool{first: true}
 	for _, tc := range []struct{ runtime, label string }{
 		{"hardened_container", "smoke"}, {"host", "soak"}, {"host", "crid"}, {"host", "sibling-a"}, {"host", "sibling-b"}, {"host", "failure"},

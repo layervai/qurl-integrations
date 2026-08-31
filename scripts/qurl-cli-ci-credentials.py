@@ -27,6 +27,7 @@ POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,19}\Z")
 LANE = re.compile(r"(?:linux|macos|windows)\Z")
 RUN_NAME = re.compile(r"qurl CLI CI [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/(?:linux|macos|windows)\Z")
 CLEANUP_ID_FILE = re.compile(r"device-key-[0-9a-f]{64}\Z")
+RUN_CONNECTOR_ID = re.compile(r"connector-sandbox-local-publish-[0-9a-f]{24}\Z")
 MAX_ATTEMPTS = 3
 
 
@@ -291,6 +292,49 @@ def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
     raise CredentialError("qURL resource cleanup did not converge after bounded retries") from last_error
 
 
+def retry_connector_resource_delete(endpoint: str, jwt: str, connector_id: str) -> bool:
+    if not RUN_CONNECTOR_ID.fullmatch(connector_id):
+        raise CredentialError("run Connector cleanup ID is malformed")
+    last_error: Exception | None = None
+    resource_id = ""
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            query = urllib.parse.urlencode({"slug": connector_id})
+            status, response = qurl_json(endpoint, jwt, "GET", "/v1/resources?" + query)
+            if status != 200:
+                if status != 429 and status < 500:
+                    raise CredentialError("qURL Connector cleanup lookup was rejected")
+                raise CredentialError("qURL Connector cleanup lookup was temporarily rejected")
+            rows = response.get("data")
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise CredentialError("qURL Connector cleanup lookup is malformed")
+            if not rows:
+                return False
+            if len(rows) != 1:
+                raise CredentialError("qURL Connector cleanup lookup is ambiguous")
+            row = rows[0]
+            resource_id = row.get("resource_id", "")
+            if (
+                not isinstance(resource_id, str)
+                or not resource_id
+                or resource_id != resource_id.strip()
+                or len(resource_id) > 512
+                or row.get("slug") != connector_id
+                or row.get("type") != "tunnel"
+                or row.get("status") != "active"
+            ):
+                raise CredentialError("qURL Connector cleanup row has an unexpected shape")
+            break
+        except CredentialError as exc:
+            last_error = exc
+        if attempt + 1 < MAX_ATTEMPTS:
+            time.sleep(attempt + 1)
+    else:
+        raise CredentialError("qURL Connector cleanup lookup did not converge after bounded retries") from last_error
+    retry_resource_delete(endpoint, jwt, resource_id)
+    return True
+
+
 def paged_rows(
     endpoint: str,
     jwt: str,
@@ -345,33 +389,6 @@ def identify(args: argparse.Namespace) -> None:
     print("verified one dedicated CI owner")
 
 
-def sweep(args: argparse.Namespace) -> None:
-    endpoint, jwt, _ = authenticated_owner(args)
-
-    resources = paged_rows(
-        endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None
-    )
-    resource_ids: list[str] = []
-    for row in resources:
-        resource_id = row.get("resource_id")
-        if not isinstance(resource_id, str):
-            raise CredentialError("qURL resource cleanup row has no resource ID")
-        resource_ids.append(resource_id)
-    for resource_id in dict.fromkeys(resource_ids):
-        retry_resource_delete(endpoint, jwt, resource_id)
-
-    credentials = paged_rows(endpoint, jwt, "/v1/api-keys", "qURL credential cleanup")
-    key_ids: list[str] = []
-    for row in credentials:
-        key_id = row.get("key_id")
-        if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
-            raise CredentialError("qURL credential cleanup row has a malformed key ID")
-        key_ids.append(key_id)
-    for key_id in dict.fromkeys(key_ids):
-        retry_revoke(endpoint, jwt, key_id)
-    print(f"reconciled {len(resource_ids)} resources and {len(key_ids)} credentials")
-
-
 def run_identity(args: argparse.Namespace) -> tuple[str, str]:
     if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(args.run_attempt):
         raise CredentialError("run identity must use canonical positive integers")
@@ -395,6 +412,21 @@ def run_device_key_names(args: argparse.Namespace) -> set[str]:
         f"agent:qurl-share-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
         for label_code in ("s", "f")
     }
+
+
+def run_connector_ids(args: argparse.Namespace) -> set[str]:
+    # The protected journey creates exactly one normal and one controlled-
+    # failure Connector. Derive their IDs from the same public test inputs as
+    # the Go harness so the trusted controller can remove either resource even
+    # if the runner stops before it records a CRID or resource ID.
+    run_identity(args)
+    result: set[str] = set()
+    for label in ("smoke", "failure"):
+        material = "\x00".join(
+            ("qurl-sharing-sandbox-v1", args.run_id, args.run_attempt, args.runtime, label)
+        ).encode("utf-8")
+        result.add("connector-sandbox-local-publish-" + hashlib.sha256(material).hexdigest()[:24])
+    return result
 
 
 def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
@@ -426,9 +458,19 @@ def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
 def reconcile_run(args: argparse.Namespace) -> None:
     name, description = run_identity(args)
     device_key_names = run_device_key_names(args)
+    connector_ids = run_connector_ids(args)
     device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
     endpoint, jwt, _ = authenticated_owner(args)
 
+    # Delete deterministic Connector resources first. Resource inventory
+    # intentionally redacts their descriptions and tags, so a description
+    # lookup cannot recover one after abrupt runner loss.
+    connector_resources = 0
+    for connector_id in sorted(connector_ids):
+        if retry_connector_resource_delete(endpoint, jwt, connector_id):
+            connector_resources += 1
+
+    # Remote-URL resources remain identifiable by the exact run description.
     resources = paged_rows(endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None)
     resource_ids: list[str] = []
     for row in resources:
@@ -478,7 +520,10 @@ def reconcile_run(args: argparse.Namespace) -> None:
             raise CredentialError("recorded device credential is absent from the owner inventory")
     for key_id in dict.fromkeys(key_ids):
         retry_revoke(endpoint, jwt, key_id)
-    print(f"reconciled {len(resource_ids)} run resources and {len(key_ids)} run credentials")
+    print(
+        f"reconciled {connector_resources + len(resource_ids)} run resources "
+        f"and {len(key_ids)} run credentials"
+    )
 
 
 def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
@@ -622,7 +667,7 @@ def parser() -> argparse.ArgumentParser:
     create_parser = commands.add_parser("create")
     identify_parser = commands.add_parser("identify")
     reconcile_parser = commands.add_parser("reconcile-run")
-    for current in (create_parser, identify_parser, commands.add_parser("sweep"), reconcile_parser):
+    for current in (create_parser, identify_parser, reconcile_parser):
         current.add_argument("--token-endpoint", required=True)
         current.add_argument("--audience", required=True)
         current.add_argument("--qurl-endpoint", required=True)
@@ -630,8 +675,6 @@ def parser() -> argparse.ArgumentParser:
         current.add_argument("--client-secret-file", type=pathlib.Path, required=True)
     identify_parser.add_argument("--output-file", type=pathlib.Path, required=True)
     identify_parser.set_defaults(handler=identify)
-    sweep_parser = commands.choices["sweep"]
-    sweep_parser.set_defaults(handler=sweep)
     create_parser.add_argument("--output-dir", type=pathlib.Path, required=True)
     create_parser.add_argument("--run-id", required=True)
     create_parser.add_argument("--run-attempt", required=True)

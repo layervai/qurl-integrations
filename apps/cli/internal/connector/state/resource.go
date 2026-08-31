@@ -32,7 +32,7 @@ const (
 	ConnectorResourcesFile = "connector_resources.json"
 	connectorResourcesLock = ".connector_resources.lock"
 
-	connectorResourcesVersion  = 1
+	connectorResourcesVersion  = 2
 	connectorResourcesMaxBytes = 1 << 20
 	connectorResourcesMaxItems = 1024
 	connectorResourceFileMode  = 0o600
@@ -100,7 +100,7 @@ type connectorResourcesState struct {
 	Version  int                                        `json:"version"`
 	Bindings map[string]ConnectorResourceBinding        `json:"bindings"`
 	Pending  map[string]PendingConnectorResourceRequest `json:"pending"`
-	Retired  map[string]bool                            `json:"retired,omitempty"`
+	Retired  map[string]bool                            `json:"retired"`
 }
 
 // ConnectorResourceTransaction owns the process and cross-process lock for
@@ -289,9 +289,6 @@ func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired
 	}
 	if connectorID == "" {
 		return false, nil
-	}
-	if current.Retired == nil {
-		current.Retired = make(map[string]bool)
 	}
 	if current.Retired[connectorID] {
 		return true, nil
@@ -507,9 +504,6 @@ func decodeConnectorResources(data []byte) (connectorResourcesState, error) {
 	var state connectorResourcesState
 	if err := decoder.Decode(&state); err != nil {
 		return connectorResourcesState{}, err
-	}
-	if state.Retired == nil {
-		state.Retired = make(map[string]bool)
 	}
 	if err := rejectTrailingJSON(decoder); err != nil {
 		return connectorResourcesState{}, err

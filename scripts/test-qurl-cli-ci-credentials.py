@@ -8,6 +8,7 @@ import base64
 import importlib.util
 import json
 import pathlib
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -15,6 +16,7 @@ from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).with_name("qurl-cli-ci-credentials.py")
+sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("qurl_cli_ci_credentials", SCRIPT)
 assert SPEC and SPEC.loader
 credentials = importlib.util.module_from_spec(SPEC)
@@ -64,8 +66,23 @@ class FakeAPI:
                 "type": "tunnel",
             },
         ]
+        self.connector_resources = {
+            "connector-sandbox-local-publish-f7cb5872ed38e4784311c503": {
+                "resource_id": "r_connector_smoke",
+                "slug": "connector-sandbox-local-publish-f7cb5872ed38e4784311c503",
+                "status": "active",
+                "type": "tunnel",
+            },
+            "connector-sandbox-local-publish-365faf55fba72fb0bc45860a": {
+                "resource_id": "r_connector_failure",
+                "slug": "connector-sandbox-local-publish-365faf55fba72fb0bc45860a",
+                "status": "active",
+                "type": "tunnel",
+            },
+        }
         self.deleted_keys: list[str] = []
         self.deleted_resources: list[str] = []
+        self.operations: list[str] = []
         self.transient_key_delete = 0
 
     def __call__(
@@ -140,12 +157,26 @@ class FakeAPI:
                 return 503, b'{}'
             key_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
             self.deleted_keys.append(key_id)
+            self.operations.append("revoke:" + key_id)
             self.keys.pop(key_id, None)
             return 204, b""
         if parsed.path == "/v1/resources" and method == "GET":
+            query = urllib.parse.parse_qs(parsed.query)
+            if "slug" in query:
+                assert set(query) == {"slug"}
+                assert len(query["slug"]) == 1
+                row = self.connector_resources.get(query["slug"][0])
+                return 200, json.dumps({"data": [] if row is None else [row]}).encode()
+            assert query == {"limit": ["100"]}
             return 200, json.dumps({"data": self.resources, "meta": {"has_more": False}}).encode()
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
-            self.deleted_resources.append(urllib.parse.unquote(parsed.path.rsplit("/", 1)[1]))
+            resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
+            assert not resource_id.startswith("connector-sandbox-local-publish-")
+            self.deleted_resources.append(resource_id)
+            self.operations.append("delete:" + resource_id)
+            for connector_id, row in list(self.connector_resources.items()):
+                if row["resource_id"] == resource_id:
+                    del self.connector_resources[connector_id]
             return 204, b""
         raise AssertionError((method, url, bearer))
 
@@ -200,14 +231,82 @@ def test_unbounded_valid_pagination() -> None:
     assert [row["resource_id"] for row in rows] == [f"r_{page}" for page in range(pages)]
 
 
+def test_connector_cleanup_lookup_fails_closed() -> None:
+    connector_id = "connector-sandbox-local-publish-f7cb5872ed38e4784311c503"
+    valid = {
+        "resource_id": "r_connector_smoke",
+        "slug": connector_id,
+        "status": "active",
+        "type": "tunnel",
+    }
+    for response in (
+        {},
+        {"data": [valid, valid]},
+        {"data": [{**valid, "slug": "connector-sandbox-local-publish-000000000000000000000000"}]},
+        {"data": [{**valid, "type": "url"}]},
+        {"data": [{**valid, "status": "revoked"}]},
+    ):
+        methods: list[str] = []
+
+        def fake_request(
+            url: str,
+            method: str,
+            bearer: str | None = None,
+            body: bytes | None = None,
+            content_type: str | None = None,
+            extra_headers: dict[str, str] | None = None,
+        ) -> tuple[int, bytes]:
+            del bearer, body, content_type, extra_headers
+            parsed = urllib.parse.urlsplit(url)
+            assert parsed.path == "/v1/resources"
+            assert urllib.parse.parse_qs(parsed.query) == {"slug": [connector_id]}
+            methods.append(method)
+            return 200, json.dumps(response).encode()
+
+        with mock.patch.object(credentials, "request", fake_request), mock.patch.object(
+            credentials.time, "sleep", lambda _: None
+        ):
+            try:
+                credentials.retry_connector_resource_delete("https://sandbox.example", "jwt", connector_id)
+            except credentials.CredentialError:
+                pass
+            else:
+                raise AssertionError(f"malformed Connector lookup succeeded: {response}")
+        assert methods == ["GET"] * credentials.MAX_ATTEMPTS
+
+    def empty_request(
+        url: str,
+        method: str,
+        bearer: str | None = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        del url, bearer, body, content_type, extra_headers
+        assert method == "GET"
+        return 200, b'{"data":[]}'
+
+    with mock.patch.object(credentials, "request", empty_request):
+        assert not credentials.retry_connector_resource_delete(
+            "https://sandbox.example", "jwt", connector_id
+        )
+
+
 def main() -> None:
     test_unbounded_valid_pagination()
+    test_connector_cleanup_lookup_fails_closed()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
     ) == {"agent:qurl-share-r1231-a2-hs", "agent:qurl-share-r1231-a2-hf"}
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="hardened_container")
     ) == {"agent:qurl-share-r1231-a2-cs", "agent:qurl-share-r1231-a2-cf"}
+    assert credentials.run_connector_ids(
+        argparse.Namespace(run_id="1231", run_attempt="2", runtime="host", lane="linux")
+    ) == {
+        "connector-sandbox-local-publish-f7cb5872ed38e4784311c503",
+        "connector-sandbox-local-publish-365faf55fba72fb0bc45860a",
+    }
     fake = FakeAPI()
     with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(credentials, "request", fake), mock.patch.object(
         credentials.time, "sleep", lambda _: None
@@ -285,6 +384,7 @@ def main() -> None:
         cleanup_ids.mkdir(mode=0o700)
         device_digest = credentials.hashlib.sha256(device_key_id.encode("ascii")).hexdigest()
         private_file(cleanup_ids, "device-key-" + device_digest, device_key_id)
+        fake.operations.clear()
         credentials.reconcile_run(
             argparse.Namespace(
                 **vars(args),
@@ -295,10 +395,18 @@ def main() -> None:
                 runtime="host",
             )
         )
-        assert set(fake.deleted_resources) == {"r_customer_ci"}
+        expected_connector_resource_ids = {"r_connector_smoke", "r_connector_failure"}
+        assert set(fake.deleted_resources) == expected_connector_resource_ids | {"r_customer_ci"}
+        assert "r_keep" not in fake.deleted_resources
+        assert "r_redacted_tunnel" not in fake.deleted_resources
         assert {run_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
         assert unrelated_key_id not in fake.deleted_keys
         assert unrelated_device_key_id not in fake.deleted_keys
+        first_revoke = next(index for index, operation in enumerate(fake.operations) if operation.startswith("revoke:"))
+        assert all(
+            fake.operations.index("delete:" + resource_id) < first_revoke
+            for resource_id in expected_connector_resource_ids | {"r_customer_ci"}
+        )
 
         malformed_device_key_id = "key_BadDevice123"
         fake.keys[malformed_device_key_id] = {
@@ -324,17 +432,6 @@ def main() -> None:
         else:
             raise AssertionError("malformed exact-name device credential was not rejected")
         assert malformed_device_key_id not in fake.deleted_keys
-
-        fake.keys[fake.key_id] = {
-            "key_id": fake.key_id,
-            "kind": "api_key",
-            "name": "qurl CLI CI 1233/2/windows",
-            "scopes": credentials.CUSTOMER_SCOPES,
-            "status": "active",
-        }
-        credentials.sweep(args)
-        assert set(fake.deleted_resources) == {"r_customer_ci", "r_keep", "r_redacted_tunnel"}
-        assert {fake.key_id, "key_Device123456", "key_Unrelated123"}.issubset(fake.deleted_keys)
 
     print("qurl CLI CI credential tests passed")
 

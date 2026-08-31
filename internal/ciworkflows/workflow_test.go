@@ -107,7 +107,8 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 	}
 	assertJobPermissions(t, cliCustomerArtifactsJobID, job.Permissions, map[string]string{"contents": "read"})
 
-	var checkout, build, upload *step
+	var checkout, pullRequestPin, productionPin, build, upload *step
+	pullRequestPinIndex, productionPinIndex, buildIndex := -1, -1, -1
 	for index := range job.Steps {
 		current := &job.Steps[index]
 		switch {
@@ -116,8 +117,15 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 				t.Fatal("artifact producer has more than one checkout")
 			}
 			checkout = current
+		case current.Name == "Select pull-request artifact trust root":
+			pullRequestPin = current
+			pullRequestPinIndex = index
+		case current.Name == "Select production artifact trust root":
+			productionPin = current
+			productionPinIndex = index
 		case current.Name == "Build exact packaged customer artifacts once":
 			build = current
+			buildIndex = index
 		case current.Name == "Upload exact packaged customer artifacts":
 			upload = current
 		}
@@ -130,9 +138,27 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 		!strings.Contains(build.Run, "$CALLER_HEAD_SHA") {
 		t.Errorf("artifact build is not SHA-bound: %#v", build)
 	}
-	if build != nil && (fmt.Sprint(build.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"]) != "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}" ||
-		fmt.Sprint(build.Env["QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"]) != "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}") {
-		t.Errorf("artifact build does not use the exact production Hub-pin inputs: %#v", build.Env)
+	if pullRequestPin == nil || pullRequestPin.If != "github.event_name == 'pull_request'" ||
+		!strings.Contains(pullRequestPin.Run, "openssl rand 32") ||
+		!strings.Contains(pullRequestPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_B64") ||
+		!strings.Contains(pullRequestPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256") ||
+		strings.Contains(fmt.Sprint(pullRequestPin.Env)+pullRequestPin.Run, "secrets.") {
+		t.Errorf("pull-request artifact pin is not fresh and secret-free: %#v", pullRequestPin)
+	}
+	if productionPin == nil || productionPin.If != "github.event_name == 'push'" ||
+		fmt.Sprint(productionPin.Env["PROD_HUB_PUBLIC_KEY_B64"]) != "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}" ||
+		fmt.Sprint(productionPin.Env["PROD_HUB_PUBLIC_KEY_SHA256"]) != "${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}" ||
+		!strings.Contains(productionPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_B64=$PROD_HUB_PUBLIC_KEY_B64") ||
+		!strings.Contains(productionPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256=$PROD_HUB_PUBLIC_KEY_SHA256") {
+		t.Errorf("main artifact pin does not use the exact production inputs: %#v", productionPin)
+	}
+	if pullRequestPinIndex < 0 || productionPinIndex < 0 || buildIndex < 0 ||
+		pullRequestPinIndex >= buildIndex || productionPinIndex >= buildIndex {
+		t.Error("artifact trust roots are not selected before the one build")
+	}
+	if build != nil && (build.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"] != nil ||
+		build.Env["QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"] != nil) {
+		t.Errorf("artifact build directly loads a standing trust-root input: %#v", build.Env)
 	}
 	if upload == nil ||
 		upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
@@ -228,7 +254,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	}
 	if contract.Concurrency.Group != "qurl-cli-customer-journey-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}" ||
 		contract.Concurrency.CancelInProgress == nil || *contract.Concurrency.CancelInProgress {
-		t.Errorf("trusted journey concurrency is not exact-run and non-cancelling: %#v", contract.Concurrency)
+		t.Errorf("trusted journey concurrency is not exact-run and non-canceling: %#v", contract.Concurrency)
 	}
 
 	var resolver *step
@@ -909,7 +935,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	wantConcurrency := "${{ github.event_name == 'push' && 'release-please-maintenance' || format('release-please-continuation-{0}-{1}', inputs.cli_tag, inputs.source_sha || 'operator') }}"
 	if releaseConcurrency.Concurrency.Group != wantConcurrency || releaseConcurrency.Concurrency.CancelInProgress == nil ||
 		*releaseConcurrency.Concurrency.CancelInProgress {
-		t.Errorf("release concurrency = %#v, want separate non-cancelling maintenance and exact continuation groups",
+		t.Errorf("release concurrency = %#v, want separate non-canceling maintenance and exact continuation groups",
 			releaseConcurrency.Concurrency)
 	}
 
@@ -992,7 +1018,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	if needs := parseWorkflowNeeds(t, "release-cli", releaseCLI.Needs); !slices.Equal(needs, []string{"cli-release-gate"}) {
 		t.Errorf("release-cli.needs = %v, want only cli-release-gate", needs)
 	}
-	wantReleaseIf := "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'"
+	wantReleaseIf := "!cancelled() && needs.cli-release-gate.result == 'success' && needs.cli-release-gate.outputs.required == 'true'" //nolint:misspell // GitHub expression function spelling.
 	if got := strings.Join(strings.Fields(releaseCLI.If), " "); got != wantReleaseIf {
 		t.Errorf("release-cli.if = %q, want %q", got, wantReleaseIf)
 	}

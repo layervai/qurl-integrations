@@ -344,7 +344,24 @@ jobs:
         run: |
           set -euo pipefail
           cd orchestrator/apps/cli/cmd
-          "$QURL_CUSTOMER_JOURNEY_TEST" -test.v -test.count=1 -test.run '^${{ matrix.test_name }}$'
+          journey_output=$RUNNER_TEMP/qurl-customer-journey.out
+          journey_status=0
+          set +e
+          "$QURL_CUSTOMER_JOURNEY_TEST" -test.v -test.count=1 -test.run '^${{ matrix.test_name }}$' \
+            2>&1 | tee "$journey_output"
+          journey_status=${PIPESTATUS[0]}
+          set -e
+          test_name='${{ matrix.test_name }}'
+          pass_count=$(awk -v name="$test_name" '$0 ~ "^--- PASS: " name " \\(" { count++ } END { print count + 0 }' "$journey_output")
+          skip_count=$(awk '$0 ~ /^[[:space:]]*--- SKIP:/ { count++ } END { print count + 0 }' "$journey_output")
+          if [[ "$pass_count" != 1 || "$skip_count" != 0 ]]; then
+            echo "::error::packaged customer journey must report one exact top-level PASS and no SKIP" >&2
+            exit 1
+          fi
+          if (( journey_status != 0 )); then
+            echo "::error::packaged customer journey exited with status $journey_status" >&2
+            exit "$journey_status"
+          fi
 
       - name: Run the packaged customer journey
         if: runner.os == 'Windows'
@@ -353,8 +370,17 @@ jobs:
           QURL_CLI_SANDBOX_WINDOWS_DAEMON: enabled
         run: |
           Set-Location orchestrator/apps/cli/cmd
-          & $env:QURL_CUSTOMER_JOURNEY_TEST -test.v -test.count=1 -test.run '^${{ matrix.test_name }}$'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testName = '${{ matrix.test_name }}'
+          $journeyOutput = @(& $env:QURL_CUSTOMER_JOURNEY_TEST -test.v -test.count=1 -test.run "^$testName$" 2>&1)
+          $journeyStatus = $LASTEXITCODE
+          $journeyOutput | Write-Output
+          $passPattern = '^--- PASS: ' + [Regex]::Escape($testName) + ' \('
+          $passCount = @($journeyOutput | Where-Object { $_ -match $passPattern }).Count
+          $skipCount = @($journeyOutput | Where-Object { $_ -match '^\s*--- SKIP:' }).Count
+          if ($passCount -ne 1 -or $skipCount -ne 0) {
+            throw 'packaged customer journey must report one exact top-level PASS and no SKIP'
+          }
+          if ($journeyStatus -ne 0) { exit $journeyStatus }
 
       # A candidate daemon runs as this runner's user. It must be absent before
       # a later step puts M2M cleanup authority on the same machine.

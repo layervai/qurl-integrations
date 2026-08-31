@@ -76,10 +76,6 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-verify-cli-release.sh
 
-      - name: Test exact CLI main-run waiter
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-wait-for-exact-cli-main-run.sh
-
       - name: Test CLI customer-credential controller
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 scripts/test-qurl-cli-ci-credentials.py

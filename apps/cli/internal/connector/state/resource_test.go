@@ -223,7 +223,7 @@ func TestConnectorResourceLockRejectsUnsafeEntries(t *testing.T) {
 func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 	validBinding := testResourceBinding(t, "safe-api")
 	validNonce := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	valid := `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}}}`
+	valid := `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`
 	validBindingState := emptyConnectorResourcesState()
 	validBindingState.Bindings[validBinding.ConnectorID] = validBinding
 	validBindingJSON, err := encodeConnectorResources(validBindingState)
@@ -238,27 +238,28 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		name string
 		data string
 	}{
-		{name: "unknown top field", data: `{"version":1,"bindings":{},"pending":{},"extra":true}`},
-		{name: "noncanonical top field casing", data: `{"Version":1,"bindings":{},"pending":{}}`},
-		{name: "unknown nested field", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","extra":true}}}`},
-		{name: "noncanonical nested field casing", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"Connector_ID":"safe-api","request_nonce":"` + validNonce + `"}}}`},
-		{name: "duplicate", data: `{"version":1,"version":1,"bindings":{},"pending":{}}`},
-		{name: "duplicate nested", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","connector_id":"safe-api","request_nonce":"` + validNonce + `"}}}`},
-		{name: "unsupported version", data: `{"version":2,"bindings":{},"pending":{}}`},
-		{name: "missing map", data: `{"version":1,"bindings":{}}`},
-		{name: "null map", data: `{"version":1,"bindings":null,"pending":{}}`},
-		{name: "null optional expected identity", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":null}}}`},
-		{name: "empty optional expected identity", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":""}}}`},
-		{name: "null optional crid", data: `{"version":1,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":null}},"pending":{}}`},
-		{name: "empty optional crid", data: `{"version":1,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":""}},"pending":{}}`},
-		{name: "excessive nesting", data: `{"version":1,"bindings":[[[[[[[[[[]]]]]]]]]],"pending":{}}`},
+		{name: "unknown top field", data: `{"version":2,"bindings":{},"pending":{},"retired":{},"extra":true}`},
+		{name: "noncanonical top field casing", data: `{"Version":2,"bindings":{},"pending":{},"retired":{}}`},
+		{name: "unknown nested field", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","extra":true}},"retired":{}}`},
+		{name: "noncanonical nested field casing", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"Connector_ID":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`},
+		{name: "duplicate", data: `{"version":2,"version":2,"bindings":{},"pending":{},"retired":{}}`},
+		{name: "duplicate nested", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","connector_id":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`},
+		{name: "unsupported v1", data: `{"version":1,"bindings":{},"pending":{},"retired":{}}`},
+		{name: "missing pending map", data: `{"version":2,"bindings":{},"retired":{}}`},
+		{name: "missing retired map", data: `{"version":2,"bindings":{},"pending":{}}`},
+		{name: "null map", data: `{"version":2,"bindings":null,"pending":{},"retired":{}}`},
+		{name: "null optional expected identity", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":null}},"retired":{}}`},
+		{name: "empty optional expected identity", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":""}},"retired":{}}`},
+		{name: "null optional crid", data: `{"version":2,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":null}},"pending":{},"retired":{}}`},
+		{name: "empty optional crid", data: `{"version":2,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":""}},"pending":{},"retired":{}}`},
+		{name: "excessive nesting", data: `{"version":2,"bindings":[[[[[[[[[[]]]]]]]]]],"pending":{},"retired":{}}`},
 		{name: "invalid raw UTF-8", data: string(invalidUTF8)},
 		{name: "lone high surrogate", data: string(loneHighSurrogate)},
 		{name: "lone low surrogate", data: string(loneLowSurrogate)},
 		{name: "broken surrogate pair", data: string(brokenSurrogatePair)},
-		{name: "bad nonce", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"bad"}}}`},
-		{name: "map key mismatch", data: `{"version":1,"bindings":{},"pending":{"wrong-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}}}`},
-		{name: "expected without binding", data: `{"version":1,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":"` + validBinding.ResourceID + `"}}}`},
+		{name: "bad nonce", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"bad"}},"retired":{}}`},
+		{name: "map key mismatch", data: `{"version":2,"bindings":{},"pending":{"wrong-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `"}},"retired":{}}`},
+		{name: "expected without binding", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":"` + validBinding.ResourceID + `"}},"retired":{}}`},
 		{name: "trailing value", data: valid + `{}`},
 	}
 	for _, test := range tests {
