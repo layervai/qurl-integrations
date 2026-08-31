@@ -139,9 +139,12 @@ func TestCLICustomerJourneyArtifactsAreExactAndHermetic(t *testing.T) {
 		t.Errorf("artifact build is not SHA-bound: %#v", build)
 	}
 	if pullRequestPin == nil || pullRequestPin.If != "github.event_name == 'pull_request'" ||
-		!strings.Contains(pullRequestPin.Run, "openssl rand 32") ||
+		!strings.Contains(pullRequestPin.Run, "openssl genpkey -algorithm X25519") ||
+		!strings.Contains(pullRequestPin.Run, "openssl pkey -inform DER") ||
+		!strings.Contains(pullRequestPin.Run, "tail -c 32") ||
 		!strings.Contains(pullRequestPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_B64") ||
 		!strings.Contains(pullRequestPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256") ||
+		strings.Contains(pullRequestPin.Run, "openssl rand 32") ||
 		strings.Contains(fmt.Sprint(pullRequestPin.Env)+pullRequestPin.Run, "secrets.") {
 		t.Errorf("pull-request artifact pin is not fresh and secret-free: %#v", pullRequestPin)
 	}
