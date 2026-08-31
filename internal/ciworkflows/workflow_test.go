@@ -153,10 +153,29 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if !slices.Contains(parseWorkflowNeeds(t, "journey", journey.Needs), cliCustomerArtifactsJobID) {
 		t.Error("journey can run without the one artifact build")
 	}
+	journeySecretSources := map[string]string{
+		"QURL_ENDPOINT":                   "${{ secrets.QURL_JOURNEY_ENDPOINT }}",
+		"QURL_JOURNEY_QV2_ISSUER_KEY":     "${{ secrets.QURL_JOURNEY_QV2_ISSUER_KEY }}",
+		"QURL_JOURNEY_QV2_RELAY_URL":      "${{ secrets.QURL_JOURNEY_QV2_RELAY_URL }}",
+		"QURL_JOURNEY_HUB_HOST":           "${{ secrets.QURL_JOURNEY_HUB_HOST }}",
+		"QURL_JOURNEY_HUB_PORT":           "${{ secrets.QURL_JOURNEY_HUB_PORT }}",
+		"QURL_JOURNEY_HUB_PUBLIC_KEY_B64": "${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}",
+		"AUTH_TOKEN_ENDPOINT":             "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}",
+	}
+	for name, source := range journeySecretSources {
+		if fmt.Sprint(journey.Env[name]) != source {
+			t.Errorf("journey topology source %s = %q, want protected secret %q", name, journey.Env[name], source)
+		}
+	}
 	mint, run, download := 0, 0, 0
+	var windowsSelect, windowsRun *step
 	for index := range journey.Steps {
 		current := &journey.Steps[index]
 		switch current.Name {
+		case "Select this runner's packaged artifact":
+			if current.Shell == "pwsh" {
+				windowsSelect = current
+			}
 		case "Mint this lane's disposable key":
 			mint++
 			if fmt.Sprint(current.Env["AUTH_CLIENT_ID"]) != "${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}" ||
@@ -165,6 +184,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			}
 		case "Run the packaged customer journey":
 			run++
+			if current.Shell == "pwsh" {
+				windowsRun = current
+			}
 			encoded, err := yaml.Marshal(current)
 			if err != nil {
 				t.Fatal(err)
@@ -189,6 +211,14 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if mint != 2 || run != 2 || download != 1 {
 		t.Errorf("journey steps = mint %d, run %d, download %d", mint, run, download)
 	}
+	if windowsSelect == nil || !strings.Contains(windowsSelect.Run, `"-test.list=$listPattern"`) ||
+		strings.Contains(windowsSelect.Run, "& $harness -test.list") {
+		t.Errorf("Windows journey selector does not pass the dotted Go test flag as one native argument: %#v", windowsSelect)
+	}
+	if windowsRun == nil || !strings.Contains(windowsRun.Run, `@('-test.v=true', '-test.count=1', "-test.run=$testPattern")`) ||
+		!strings.Contains(windowsRun.Run, "@testArgs 2>&1") || strings.Contains(windowsRun.Run, " -test.v ") {
+		t.Errorf("Windows journey does not pass dotted Go test flags through a native argument array: %#v", windowsRun)
+	}
 	if !strings.Contains(fmt.Sprint(journey.Env["QURL_SHARING_RUN_ID"]), "matrix.lane_id") {
 		t.Error("parallel lanes do not have distinct deterministic run IDs")
 	}
@@ -197,6 +227,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if cleanup.If != "always() && github.event_name == 'push' && needs.changes.outputs.cli == 'true'" ||
 		contract.Jobs["journey-cleanup"].Environment != "cli-customer-journey-cleanup" {
 		t.Errorf("terminal cleanup is not an exact protected main gate: if=%q", cleanup.If)
+	}
+	if fmt.Sprint(cleanup.Env["AUTH_TOKEN_ENDPOINT"]) != "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}" {
+		t.Errorf("terminal cleanup exposes its token endpoint through a non-secret source: %#v", cleanup.Env)
 	}
 	required := workflow.Jobs[requiredJobID]
 	for _, needed := range []string{"journey", "journey-cleanup"} {
@@ -213,6 +246,11 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	for _, forbidden := range []string{"actions/download-artifact", "actions/upload-artifact", "qurl-integrations-infra", "ops-routines"} {
 		if strings.Contains(fallbackSource, forbidden) {
 			t.Errorf("cancellation cleanup retains unnecessary coupling %q", forbidden)
+		}
+	}
+	for _, source := range []string{string(raw), fallbackSource} {
+		if strings.Contains(source, "vars.QURL_JOURNEY_") {
+			t.Error("customer journey workflow exposes protected topology through an unmasked Actions variable")
 		}
 	}
 	if _, err := os.Stat(filepath.Join("..", "..", ".github", "workflows", "qurl-cli-customer-journey.yml")); !os.IsNotExist(err) {

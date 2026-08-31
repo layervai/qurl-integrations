@@ -608,12 +608,12 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      QURL_JOURNEY_QV2_ISSUER_KEY: ${{ vars.QURL_JOURNEY_QV2_ISSUER_KEY }}
-      QURL_JOURNEY_QV2_RELAY_URL: ${{ vars.QURL_JOURNEY_QV2_RELAY_URL }}
-      QURL_JOURNEY_HUB_HOST: ${{ vars.QURL_JOURNEY_HUB_HOST }}
-      QURL_JOURNEY_HUB_PORT: ${{ vars.QURL_JOURNEY_HUB_PORT }}
-      QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ vars.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
-      AUTH_TOKEN_ENDPOINT: ${{ vars.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      QURL_JOURNEY_QV2_ISSUER_KEY: ${{ secrets.QURL_JOURNEY_QV2_ISSUER_KEY }}
+      QURL_JOURNEY_QV2_RELAY_URL: ${{ secrets.QURL_JOURNEY_QV2_RELAY_URL }}
+      QURL_JOURNEY_HUB_HOST: ${{ secrets.QURL_JOURNEY_HUB_HOST }}
+      QURL_JOURNEY_HUB_PORT: ${{ secrets.QURL_JOURNEY_HUB_PORT }}
+      QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
+      AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
       QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
       QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
       QURL_SHARING_RUNTIME: host
@@ -712,9 +712,11 @@ jobs:
           if (Compare-Object $expected $observed) { throw 'customer artifact set is not exact' }
           $qurl = Join-Path $artifactDir 'qurl-windows-amd64.exe'
           $harness = Join-Path $env:RUNNER_TEMP 'qurl-customer-journey.test.exe'
-          $selected = @(& $harness -test.list '^${{ matrix.test_name }}$')
+          $testName = '${{ matrix.test_name }}'
+          $listPattern = '^' + [Regex]::Escape($testName) + '$'
+          $selected = @(& $harness "-test.list=$listPattern")
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($selected.Count -ne 1 -or $selected[0] -ne '${{ matrix.test_name }}') {
+          if ($selected.Count -ne 1 -or $selected[0] -ne $testName) {
             throw 'selected customer journey is not in the trusted harness'
           }
           $expectedVersion = "v0.0.0-ci.$($env:GITHUB_SHA.Substring(0, 12))"
@@ -844,7 +846,9 @@ jobs:
           QURL_CLI_SANDBOX_WINDOWS_DAEMON: enabled
         run: |
           $testName = '${{ matrix.test_name }}'
-          $output = @(& $env:QURL_CUSTOMER_JOURNEY_TEST -test.v -test.count=1 -test.run "^$testName$" 2>&1)
+          $testPattern = '^' + [Regex]::Escape($testName) + '$'
+          $testArgs = @('-test.v=true', '-test.count=1', "-test.run=$testPattern")
+          $output = @(& $env:QURL_CUSTOMER_JOURNEY_TEST @testArgs 2>&1)
           $status = $LASTEXITCODE
           $output | Write-Output
           $passPattern = '^--- PASS: ' + [Regex]::Escape($testName) + ' \('
@@ -991,7 +995,7 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      AUTH_TOKEN_ENDPOINT: ${{ vars.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -157,7 +157,7 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 	connectorID := namespace.ConnectorID
 	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, device.DeviceAPIKey)
 	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
-		"--id", connectorID, "--description", sandboxJourneyResourceDescription(t, cliEnv))
+		"--id", connectorID)
 	cridValue := strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
 		t.Fatalf("default Windows background publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
@@ -297,7 +297,7 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	defer backend.Close()
 	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], namespace.ConnectorID, device.DeviceAPIKey)
 	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
-		"--id", namespace.ConnectorID, "--description", sandboxJourneyResourceDescription(t, cliEnv))
+		"--id", namespace.ConnectorID)
 	cridValue = strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
 		t.Fatalf("controlled-failure Windows publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)

@@ -172,7 +172,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	connectorID := namespace.ConnectorID
 	registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], connectorID, loadedAfterLogin.DeviceAPIKey)
 	publish := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
-		"--id", connectorID, "--description", sandboxJourneyResourceDescription(t, cliEnv))
+		"--id", connectorID)
 	cridValue := strings.TrimSpace(publish.stdout)
 	if publish.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
 		t.Fatalf("default background publish = stdout %q, stderr %q, error %v", publish.stdout, publish.stderr, publish.err)
@@ -305,7 +305,7 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 	defer backend.Close()
 	registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], namespace.ConnectorID, device.DeviceAPIKey)
 	published := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
-		"--id", namespace.ConnectorID, "--description", sandboxJourneyResourceDescription(t, cliEnv))
+		"--id", namespace.ConnectorID)
 	cridValue = strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
 		t.Fatalf("controlled-failure POSIX publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
