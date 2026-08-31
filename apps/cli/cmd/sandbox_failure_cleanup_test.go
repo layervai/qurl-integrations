@@ -259,6 +259,11 @@ var sandboxRuntimeCredentialPatterns = []struct {
 	// prefix and printing the remainder, which reads as redacted while still
 	// leaking material.
 	{regexp.MustCompile(`#[^\s"'<>]{16,}`), "#<redacted>"},
+	// qv2.ParseFragment receives the fragment with the "#" already stripped,
+	// so anything quoting the body it was handed carries the secret and
+	// signature past the rule above. Over-masking is the safe direction and
+	// "qv2." is distinctive enough not to fire on ordinary output.
+	{regexp.MustCompile(`qv2\.[^\s"'<>]+`), "<redacted-qv2-fragment>"},
 	{regexp.MustCompile(`lv_(?:live|test)_[^\s"'<>]{8,}`), "lv_<redacted>"},
 	{regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{8,}\.[^\s"'<>]+`), "<redacted-jwt>"},
 }
@@ -307,8 +312,13 @@ func sandboxChildOutputRedactor() *strings.Replacer {
 		if err != nil || parsed.Host == "" {
 			continue
 		}
-		pairs = append(pairs, parsed.Host, source.placeholder)
-		if hostname := parsed.Hostname(); hostname != "" && hostname != parsed.Host {
+		// The floor applies to the DERIVED authority too: a long URL with a
+		// short host ("https://a.io/some/long/path") would otherwise
+		// contribute "a.io" as a needle and rewrite ordinary output.
+		if len(parsed.Host) >= sandboxRedactedValueMinBytes {
+			pairs = append(pairs, parsed.Host, source.placeholder)
+		}
+		if hostname := parsed.Hostname(); hostname != parsed.Host && len(hostname) >= sandboxRedactedValueMinBytes {
 			pairs = append(pairs, hostname, source.placeholder)
 		}
 	}
@@ -630,6 +640,21 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 			t.Fatalf("boundedSandboxChildOutput = %q, want %q", got, line)
 		}
 	})
+	t.Run("scrubs a fragment logged without its hash", func(t *testing.T) {
+		// qv2.ParseFragment is handed the body with the "#" already stripped,
+		// so its errors quote the credential without one.
+		const secret, sig = "c2VjcmV0LW1hdGVyaWFsLXg", "c2lnbmF0dXJlLW1hdGVyaWFs"
+		got := boundedSandboxChildOutput(
+			`invalid fragment "qv2.Y2xhaW1zLW1hdGVyaWFs.`+secret+"."+sig+`": bad signature`, nil)
+		for _, leaked := range []string{secret, sig, "Y2xhaW1zLW1hdGVyaWFs"} {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("hash-less fragment still exposes %q: %q", leaked, got)
+			}
+		}
+		if !strings.Contains(got, "<redacted-qv2-fragment>") || !strings.Contains(got, "bad signature") {
+			t.Fatalf("hash-less fragment scrub lost the diagnostic: %q", got)
+		}
+	})
 	t.Run("a shape hit masks the whole token", func(t *testing.T) {
 		// Standard rather than URL-safe base64: the "+" and "/" are outside
 		// any sane character class, so a class-bounded rule would mask the
@@ -781,8 +806,11 @@ func TestBoundedSandboxChildOutputRedactsBeforeTruncating(t *testing.T) {
 			t.Fatalf("excerpt exposes %q — the buffer was truncated before it was redacted", leaked)
 		}
 	}
-	if !strings.HasPrefix(got, "(truncated to the last") {
-		t.Fatalf("excerpt was not truncated: %q", got[:min(60, len(got))])
+	// Pin the exact label: "(truncated to the last" matches both the line and
+	// byte paths, so a prefix check would not notice the case drifting onto
+	// the other one.
+	if !strings.HasPrefix(got, "(truncated to the last lines)") {
+		t.Fatalf("excerpt did not take the line-boundary path: %q", got[:min(60, len(got))])
 	}
 	// The key itself falls outside the retained tail once redaction shortens
 	// it, which is correct — the assertion that matters is that no fragment of
