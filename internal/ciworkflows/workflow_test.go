@@ -186,9 +186,9 @@ func TestCLICustomerJourneySupportChecksKeepSourceClean(t *testing.T) {
 }
 
 // TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel binds the live gate
-// to the completed CLI workflow while keeping elevated credential creation in
-// default-branch code. Linux, macOS, and Windows consume the same immutable
-// candidate bundle in independent matrix legs.
+// to one exact same-repository main push while keeping pull-request jobs
+// uncredentialed. Linux, macOS, and Windows consume the same immutable main
+// bundle in independent matrix legs.
 func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	t.Parallel()
 
@@ -217,9 +217,17 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	}
 	if resolver == nil ||
 		!strings.Contains(resolver.Run, "\"$SOURCE_REPOSITORY\" == \"$GITHUB_REPOSITORY\"") ||
+		!strings.Contains(resolver.Run, "\"$WORKFLOW_REPOSITORY\" == \"$GITHUB_REPOSITORY\"") ||
+		!strings.Contains(resolver.Run, "\"$SOURCE_EVENT\" == push") ||
+		!strings.Contains(resolver.Run, "\"$DEFAULT_REF\" == refs/heads/main") ||
+		!strings.Contains(resolver.Run, "\"$SOURCE_BRANCH\" == main") ||
+		!strings.Contains(resolver.Run, "^[0-9a-f]{40}$") ||
 		!strings.Contains(resolver.Run, "cli / customer journey artifacts") ||
 		!strings.Contains(resolver.Run, ".total_count > 100") {
-		t.Errorf("trusted resolver does not bind one same-repository artifact producer: %#v", resolver)
+		t.Errorf("trusted resolver does not bind one exact same-repository main artifact producer: %#v", resolver)
+	}
+	if resolver.Env["SOURCE_HEAD_SHA"] != "${{ github.event.workflow_run.head_sha }}" {
+		t.Errorf("trusted resolver source SHA = %#v", resolver.Env["SOURCE_HEAD_SHA"])
 	}
 
 	var contract struct {
@@ -227,6 +235,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 			WorkflowRun struct {
 				Workflows []string `yaml:"workflows"`
 				Types     []string `yaml:"types"`
+				Branches  []string `yaml:"branches"`
 			} `yaml:"workflow_run"`
 		} `yaml:"on"`
 		Jobs map[string]struct {
@@ -249,7 +258,8 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 		t.Fatalf("decode trusted journey contract: %v", err)
 	}
 	if !slices.Equal(contract.On.WorkflowRun.Workflows, []string{"cli: Build and Test"}) ||
-		!slices.Equal(contract.On.WorkflowRun.Types, []string{"completed"}) {
+		!slices.Equal(contract.On.WorkflowRun.Types, []string{"completed"}) ||
+		!slices.Equal(contract.On.WorkflowRun.Branches, []string{"main"}) {
 		t.Errorf("trusted journey trigger = %#v", contract.On.WorkflowRun)
 	}
 	matrix := contract.Jobs["journey"]
@@ -287,7 +297,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	}
 	assertJobPermissions(t, "journey", journey.Permissions, map[string]string{"actions": "read", "contents": "read"})
 
-	var checkout, candidateDownload, credentialDownload, verify *step
+	var checkout, sourceDownload, credentialDownload, verify *step
 	harnessBuilds := 0
 	selectedTestChecks := 0
 	customerRuns := 0
@@ -299,7 +309,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 			checkout = current
 		case strings.HasPrefix(current.Uses, "actions/download-artifact@"):
 			if current.With["run-id"] == "${{ github.event.workflow_run.id }}" {
-				candidateDownload = current
+				sourceDownload = current
 			} else {
 				credentialDownload = current
 			}
@@ -327,21 +337,21 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 			}
 		}
 	}
-	if checkout == nil || checkout.With["ref"] != "${{ github.sha }}" ||
+	if checkout == nil || checkout.With["ref"] != "${{ github.event.workflow_run.head_sha }}" ||
 		checkout.With["path"] != "orchestrator" || checkout.With["persist-credentials"] != false {
-		t.Errorf("trusted orchestrator checkout is not default-branch exact and credential-free: %#v", checkout)
+		t.Errorf("trusted orchestrator checkout is not source-main exact and credential-free: %#v", checkout)
 	}
-	if candidateDownload == nil || candidateDownload.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
-		candidateDownload.With["run-id"] != "${{ github.event.workflow_run.id }}" ||
-		candidateDownload.With["digest-mismatch"] != "error" {
-		t.Errorf("candidate artifact download is not exact: %#v", candidateDownload)
+	if sourceDownload == nil || sourceDownload.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+		sourceDownload.With["run-id"] != "${{ github.event.workflow_run.id }}" ||
+		sourceDownload.With["digest-mismatch"] != "error" {
+		t.Errorf("main artifact download is not exact: %#v", sourceDownload)
 	}
 	if credentialDownload == nil || credentialDownload.With["name"] != "qurl-customer-key-${{ github.run_id }}-${{ matrix.lane }}" ||
 		credentialDownload.With["digest-mismatch"] != "error" {
 		t.Errorf("per-lane credential download is not exact: %#v", credentialDownload)
 	}
 	if verify == nil || !strings.Contains(verify.Run, "verify-cli-customer-journey-artifacts.py") {
-		t.Errorf("candidate artifact verification is missing: %#v", verify)
+		t.Errorf("main artifact verification is missing: %#v", verify)
 	}
 	if harnessBuilds != 2 || selectedTestChecks != 2 || customerRuns != 2 || cleanupSteps != 2 {
 		t.Errorf("trusted harness/selection/customer/local cleanup step counts = %d/%d/%d/%d, want 2/2/2/2", harnessBuilds, selectedTestChecks, customerRuns, cleanupSteps)
@@ -352,7 +362,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	}
 	for _, forbidden := range []string{"AUTH0_CLIENT", "cleanup-jwt", "QURL_CLI_SANDBOX_CLEANUP_JWT"} {
 		if strings.Contains(string(journeyText), forbidden) {
-			t.Errorf("candidate runner receives standing authority %q", forbidden)
+			t.Errorf("live journey runner receives standing authority %q", forbidden)
 		}
 	}
 	if contract.Jobs["mint"].Environment != "cli-connector-resource-sandbox-controller" ||
@@ -360,7 +370,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 		t.Errorf("standing-authority jobs do not use the main-only controller environment")
 	}
 	if contract.Jobs["journey"].Environment != "cli-connector-resource-sandbox" {
-		t.Errorf("candidate jobs do not keep the customer-journey environment separate")
+		t.Errorf("live journey jobs do not keep the customer-journey environment separate")
 	}
 	assertJobPermissions(t, "mint", mint.Permissions, map[string]string{"actions": "write", "contents": "read"})
 	assertJobPermissions(t, "cleanup", cleanup.Permissions, map[string]string{"actions": "write", "contents": "read"})
@@ -375,14 +385,50 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"qurl-cli-ci-credentials.py sweep", "qurl-cli-ci-credentials.py create", "Revoke partial mint on failure"} {
+	for _, required := range []string{
+		"qurl-cli-ci-credentials.py identify", "qurl-cli-ci-credentials.py sweep",
+		"qurl-cli-ci-credentials.py create", "Revoke partial mint on failure",
+	} {
 		if !strings.Contains(string(mintText), required) {
 			t.Errorf("trusted mint path is missing %q", required)
 		}
 	}
-	for _, required := range []string{"qurl-cli-ci-credentials.py sweep", "Delete transient customer-key artifacts"} {
+	mintSource := string(mintText)
+	identifyAt := strings.Index(mintSource, "qurl-cli-ci-credentials.py identify")
+	sweepAt := strings.Index(mintSource, "qurl-cli-ci-credentials.py sweep")
+	createAt := strings.Index(mintSource, "qurl-cli-ci-credentials.py create")
+	uploadAt := strings.Index(mintSource, "actions/upload-artifact@")
+	if identifyAt < 0 || sweepAt <= identifyAt || createAt <= sweepAt || uploadAt <= createAt {
+		t.Errorf("trusted mint order does not verify owners, sweep, create, then upload")
+	}
+	for _, required := range []string{
+		"qurl-cli-ci-credentials.py identify", "qurl-cli-ci-credentials.py sweep",
+		"cleanup owners are not distinct", "Delete transient customer-key artifacts",
+	} {
 		if !strings.Contains(string(cleanupText), required) {
 			t.Errorf("trusted cleanup path is missing %q", required)
+		}
+	}
+	cleanupSource := string(cleanupText)
+	if strings.Index(cleanupSource, "qurl-cli-ci-credentials.py identify") >=
+		strings.Index(cleanupSource, "qurl-cli-ci-credentials.py sweep") {
+		t.Error("trusted cleanup sweeps before it verifies distinct owners")
+	}
+	for jobName, current := range map[string]*githubJob{"mint": mint, "cleanup": cleanup} {
+		checkoutCount := 0
+		for index := range current.Steps {
+			currentStep := &current.Steps[index]
+			if !strings.HasPrefix(currentStep.Uses, checkoutActionPrefix) {
+				continue
+			}
+			checkoutCount++
+			if currentStep.With["ref"] != "${{ github.event.workflow_run.head_sha }}" ||
+				currentStep.With["persist-credentials"] != false {
+				t.Errorf("%s checkout is not exact and credential-free: %#v", jobName, currentStep)
+			}
+		}
+		if checkoutCount != 1 {
+			t.Errorf("%s checkout count = %d, want 1", jobName, checkoutCount)
 		}
 	}
 
@@ -390,7 +436,10 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	for _, required := range []string{
 		"qURL Customer Journey / exact CLI artifact",
 		"layerv.qurl-cli-customer-journey.v1:${SOURCE_RUN_ID}:${SOURCE_RUN_ATTEMPT}:${HEAD_SHA}",
-		"QURL_SANDBOX_AUTH0_CLIENT_ID", "QURL_SANDBOX_AUTH0_CLIENT_SECRET",
+		"QURL_SANDBOX_AUTH0_CLIENT_ID_LINUX", "QURL_SANDBOX_AUTH0_CLIENT_SECRET_LINUX",
+		"QURL_SANDBOX_AUTH0_CLIENT_ID_MACOS", "QURL_SANDBOX_AUTH0_CLIENT_SECRET_MACOS",
+		"QURL_SANDBOX_AUTH0_CLIENT_ID_WINDOWS", "QURL_SANDBOX_AUTH0_CLIENT_SECRET_WINDOWS",
+		"declare -A owner_lanes=()", "platform lanes do not have distinct dedicated owners",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("trusted customer journey is missing %q", required)
@@ -399,6 +448,7 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 	for _, forbidden := range []string{
 		"qurl-integrations-infra", "ops-routines", "DEPLOY_DISPATCHER",
 		"amazonaws.com", "AWS_ACCESS_KEY", "AWS_SECRET",
+		"secrets.QURL_SANDBOX_AUTH0_CLIENT_ID }}", "secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET }}",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("trusted customer journey retains forbidden cross-repository or AWS authority %q", forbidden)

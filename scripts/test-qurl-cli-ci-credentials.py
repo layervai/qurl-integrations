@@ -7,7 +7,6 @@ import argparse
 import base64
 import importlib.util
 import json
-import os
 import pathlib
 import tempfile
 import time
@@ -47,7 +46,6 @@ class FakeAPI:
         self.keys: dict[str, dict[str, object]] = {}
         self.resources = [
             {
-                "description": credentials.JOURNEY_DESCRIPTION,
                 "resource_id": "r_customer_ci",
                 "status": "active",
                 "target_url": "https://example.com/?qurl-private-sandbox-device-journey=1",
@@ -124,7 +122,7 @@ class FakeAPI:
                 {
                     "key_id": "key_Device123456",
                     "kind": "device",
-                    "name": credentials.DEVICE_KEY_NAME,
+                    "name": "qURL CLI registered device",
                     "status": "active",
                 },
                 {
@@ -168,13 +166,50 @@ def auth_args(root: pathlib.Path) -> argparse.Namespace:
     )
 
 
+def test_unbounded_valid_pagination() -> None:
+    pages = 5
+
+    def fake_request(
+        url: str,
+        method: str,
+        bearer: str | None = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        del bearer, body, content_type, extra_headers
+        assert method == "GET"
+        parsed = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        assert "status" not in query
+        page = int(query.get("cursor", ["0"])[0])
+        response = {
+            "data": [{"resource_id": f"r_{page}"}],
+            "meta": {
+                "has_more": page + 1 < pages,
+                "next_cursor": str(page + 1) if page + 1 < pages else "",
+            },
+        }
+        return 200, json.dumps(response).encode()
+
+    with mock.patch.object(credentials, "request", fake_request):
+        rows = credentials.paged_rows(
+            "https://sandbox.example", "jwt", "/v1/resources", "test", status_filter=None
+        )
+    assert [row["resource_id"] for row in rows] == [f"r_{page}" for page in range(pages)]
+
+
 def main() -> None:
+    test_unbounded_valid_pagination()
     fake = FakeAPI()
     with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(credentials, "request", fake), mock.patch.object(
         credentials.time, "sleep", lambda _: None
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
+        owner_output = root / "owner-id"
+        credentials.identify(argparse.Namespace(**vars(args), output_file=owner_output))
+        assert owner_output.read_text(encoding="utf-8") == fake.owner
         output = root / "credential"
         output.mkdir(mode=0o700)
         create_args = argparse.Namespace(
@@ -182,8 +217,9 @@ def main() -> None:
         )
         credentials.create(create_args)
         assert {path.name for path in output.iterdir()} == {
-            "api-key", "api-key-id", "cleanup-jwt", "run-name"
+            "api-key", "api-key-id", "cleanup-jwt", "owner-id", "run-name"
         }
+        assert (output / "owner-id").read_text(encoding="utf-8") == fake.owner
         fake.transient_key_delete = 1
         credentials.revoke(
             argparse.Namespace(qurl_endpoint=args.qurl_endpoint, credential_dir=output)
@@ -205,11 +241,8 @@ def main() -> None:
             "status": "active",
         }
         credentials.sweep(args)
-        assert "r_customer_ci" in fake.deleted_resources
-        assert "r_redacted_tunnel" in fake.deleted_resources
-        assert "r_keep" not in fake.deleted_resources
-        assert "key_Device123456" in fake.deleted_keys
-        assert "key_Unrelated123" not in fake.deleted_keys
+        assert set(fake.deleted_resources) == {"r_customer_ci", "r_keep", "r_redacted_tunnel"}
+        assert {fake.key_id, "key_Device123456", "key_Unrelated123"}.issubset(fake.deleted_keys)
 
     print("qurl CLI CI credential tests passed")
 

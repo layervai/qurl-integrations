@@ -26,11 +26,6 @@ POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,19}\Z")
 LANE = re.compile(r"(?:linux|macos|windows)\Z")
 RUN_NAME = re.compile(r"qurl CLI CI [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/(?:linux|macos|windows)\Z")
 MAX_ATTEMPTS = 3
-MAX_PAGES = 3
-MAX_SWEEP_ITEMS = 250
-RUN_KEY_PREFIX = "qurl CLI CI "
-DEVICE_KEY_NAME = "qURL CLI registered device"
-JOURNEY_DESCRIPTION = "qurl-integrations cli sandbox e2e journey (self-cleaning; safe to delete)"
 
 
 class CredentialError(RuntimeError):
@@ -294,12 +289,20 @@ def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
     raise CredentialError("qURL resource cleanup did not converge after bounded retries") from last_error
 
 
-def paged_rows(endpoint: str, jwt: str, path: str, label: str) -> list[dict[str, Any]]:
+def paged_rows(
+    endpoint: str,
+    jwt: str,
+    path: str,
+    label: str,
+    status_filter: str | None = "active",
+) -> list[dict[str, Any]]:
     cursor = ""
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
-    for _ in range(MAX_PAGES):
-        query = {"limit": "100", "status": "active"}
+    while True:
+        query = {"limit": "100"}
+        if status_filter is not None:
+            query["status"] = status_filter
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(endpoint, jwt, "GET", path + "?" + urllib.parse.urlencode(query))
@@ -310,8 +313,6 @@ def paged_rows(endpoint: str, jwt: str, path: str, label: str) -> list[dict[str,
         if any(not isinstance(row, dict) for row in rows):
             raise CredentialError(f"{label} inventory contains a malformed row")
         result.extend(rows)
-        if len(result) > MAX_SWEEP_ITEMS:
-            raise CredentialError(f"{label} inventory exceeded its item bound")
         has_more = meta.get("has_more", False)
         next_cursor = meta.get("next_cursor", "")
         if not isinstance(has_more, bool) or not isinstance(next_cursor, str) or has_more != bool(next_cursor):
@@ -322,36 +323,38 @@ def paged_rows(endpoint: str, jwt: str, path: str, label: str) -> list[dict[str,
             raise CredentialError(f"{label} inventory repeated a cursor")
         seen.add(next_cursor)
         cursor = next_cursor
-    raise CredentialError(f"{label} inventory exceeded its page bound")
 
 
-def sweep(args: argparse.Namespace) -> None:
+def authenticated_owner(args: argparse.Namespace) -> tuple[str, str, str]:
     endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
     args.token_endpoint = https_origin(args.token_endpoint, "Auth0 token endpoint")
     jwt, expected_owner = auth0_token(args)
     m2m = identity(endpoint, jwt)
     if m2m.get("auth_type") != "jwt" or m2m.get("owner_id") != expected_owner:
         raise CredentialError("qURL rejected the dedicated CI owner")
+    return endpoint, jwt, expected_owner
 
-    resources = paged_rows(endpoint, jwt, "/v1/resources", "qURL resource cleanup")
+
+def identify(args: argparse.Namespace) -> None:
+    _, _, expected_owner = authenticated_owner(args)
+    if not args.output_file.is_absolute() or args.output_file == pathlib.Path(args.output_file.anchor):
+        raise CredentialError("owner output must be an absolute non-root path")
+    write_private(args.output_file, expected_owner)
+    print("verified one dedicated CI owner")
+
+
+def sweep(args: argparse.Namespace) -> None:
+    endpoint, jwt, _ = authenticated_owner(args)
+
+    resources = paged_rows(
+        endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None
+    )
     resource_ids: list[str] = []
     for row in resources:
-        target = row.get("target_url")
-        description = row.get("description")
-        owned_remote = (
-            description == JOURNEY_DESCRIPTION
-            and isinstance(target, str)
-            and target.startswith("https://example.com/?qurl-private-sandbox-device-journey=")
-        )
-        # Management reads intentionally redact the connector slug. The M2M
-        # owner is dedicated to this gate, so every active tunnel row under
-        # that owner is disposable CI state.
-        owned_connector = row.get("type") == "tunnel"
-        if owned_remote or owned_connector:
-            resource_id = row.get("resource_id")
-            if not isinstance(resource_id, str):
-                raise CredentialError("qURL resource cleanup row has no resource ID")
-            resource_ids.append(resource_id)
+        resource_id = row.get("resource_id")
+        if not isinstance(resource_id, str):
+            raise CredentialError("qURL resource cleanup row has no resource ID")
+        resource_ids.append(resource_id)
     for resource_id in dict.fromkeys(resource_ids):
         retry_resource_delete(endpoint, jwt, resource_id)
 
@@ -359,12 +362,9 @@ def sweep(args: argparse.Namespace) -> None:
     key_ids: list[str] = []
     for row in credentials:
         key_id = row.get("key_id")
-        kind = row.get("kind")
-        name = row.get("name")
         if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
             raise CredentialError("qURL credential cleanup row has a malformed key ID")
-        if kind == "device" or (kind == "api_key" and isinstance(name, str) and name.startswith(RUN_KEY_PREFIX)):
-            key_ids.append(key_id)
+        key_ids.append(key_id)
     for key_id in dict.fromkeys(key_ids):
         retry_revoke(endpoint, jwt, key_id)
     print(f"reconciled {len(resource_ids)} resources and {len(key_ids)} credentials")
@@ -450,21 +450,17 @@ def revoke_persisted(endpoint: str, directory: pathlib.Path) -> None:
 
 
 def create(args: argparse.Namespace) -> None:
-    endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
-    args.token_endpoint = https_origin(args.token_endpoint, "Auth0 token endpoint")
     if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(args.run_attempt):
         raise CredentialError("run identity must use canonical positive integers")
     if not LANE.fullmatch(args.lane):
         raise CredentialError("platform lane is invalid")
-    jwt, expected_owner = auth0_token(args)
-    m2m = identity(endpoint, jwt)
-    if m2m.get("auth_type") != "jwt" or m2m.get("owner_id") != expected_owner:
-        raise CredentialError("qURL rejected the dedicated CI owner")
+    endpoint, jwt, expected_owner = authenticated_owner(args)
 
     name = f"qurl CLI CI {args.run_id}/{args.run_attempt}/{args.lane}"
     prepare_output_directory(args.output_dir)
     write_private(args.output_dir / "cleanup-jwt", jwt)
     write_private(args.output_dir / "run-name", name)
+    write_private(args.output_dir / "owner-id", expected_owner)
     try:
         key_id, api_key = mint_ordinary_key(endpoint, jwt, name)
         write_private(args.output_dir / "api-key-id", key_id)
@@ -513,12 +509,15 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
     create_parser = commands.add_parser("create")
-    for current in (create_parser, commands.add_parser("sweep")):
+    identify_parser = commands.add_parser("identify")
+    for current in (create_parser, identify_parser, commands.add_parser("sweep")):
         current.add_argument("--token-endpoint", required=True)
         current.add_argument("--audience", required=True)
         current.add_argument("--qurl-endpoint", required=True)
         current.add_argument("--client-id-file", type=pathlib.Path, required=True)
         current.add_argument("--client-secret-file", type=pathlib.Path, required=True)
+    identify_parser.add_argument("--output-file", type=pathlib.Path, required=True)
+    identify_parser.set_defaults(handler=identify)
     sweep_parser = commands.choices["sweep"]
     sweep_parser.set_defaults(handler=sweep)
     create_parser.add_argument("--output-dir", type=pathlib.Path, required=True)

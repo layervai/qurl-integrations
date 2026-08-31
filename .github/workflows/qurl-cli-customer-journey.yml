@@ -1,19 +1,23 @@
 name: "qURL CLI Customer Journey"
 
-# workflow_run loads this file from the default branch. Pull-request code can
-# produce the candidate artifact, but it cannot change this credentialed job.
+# workflow_run loads this file from the default branch. This live workflow
+# accepts only an exact same-repository push to main. Pull requests build the
+# same packaged artifacts without credentials; the live journey starts only
+# after that source reaches main and remains a required pre-release gate.
 # `cli-connector-resource-sandbox-controller` must allow only `main`, have no
-# required reviewer, hold QURL_SANDBOX_AUTH0_CLIENT_ID and
-# QURL_SANDBOX_AUTH0_CLIENT_SECRET as environment secrets, and hold
-# QURL_SANDBOX_AUTH0_TOKEN_ENDPOINT as an environment variable. The separate
-# `cli-connector-resource-sandbox` environment owns candidate-only Hub values
-# and can retain its reviewer rule. The controller M2M client must own only
-# disposable CI state, grant exactly qurl:agent, qurl:read, and qurl:write, and
-# issue access tokens with a lifetime from one through two hours.
+# required reviewer, and hold six environment secrets: a distinct Auth0 client
+# ID and secret for each Linux, macOS, and Windows lane. Each client must map to
+# a different sandbox-only owner that contains no state outside this gate. The
+# environment also holds QURL_SANDBOX_AUTH0_TOKEN_ENDPOINT as a variable. The
+# separate `cli-connector-resource-sandbox` environment owns the private live
+# journey inputs and can retain its reviewer rule. Every controller M2M client
+# grants exactly qurl:agent, qurl:read, and qurl:write and issues access tokens
+# with a lifetime from one through two hours.
 on:
   workflow_run:
     workflows: ["cli: Build and Test"]
     types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -36,19 +40,28 @@ jobs:
       - id: producer
         name: Require one exact artifact producer
         env:
+          DEFAULT_REF: ${{ github.ref }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
         run: |
           set -euo pipefail
-          [[ "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {
-            echo "::error::customer journeys accept only same-repository source" >&2
+          [[ "$DEFAULT_REF" == refs/heads/main && "$SOURCE_BRANCH" == main ]] || {
+            echo "::error::customer journeys accept only an exact main push" >&2
             exit 1
           }
-          [[ "$SOURCE_EVENT" == pull_request || "$SOURCE_EVENT" == push ]] || {
-            echo "::error::customer journey source event is unsupported" >&2
+          [[ "$SOURCE_EVENT" == push && "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
+            "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {
+            echo "::error::customer journeys accept only a same-repository push" >&2
+            exit 1
+          }
+          [[ "$SOURCE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::customer journey source SHA is not exact" >&2
             exit 1
           }
           jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100")
@@ -95,36 +108,67 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - name: Mint three isolated customer keys
         env:
-          AUTH0_CLIENT_ID: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID }}
-          AUTH0_CLIENT_SECRET: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET }}
+          AUTH0_CLIENT_ID_LINUX: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID_LINUX }}
+          AUTH0_CLIENT_SECRET_LINUX: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET_LINUX }}
+          AUTH0_CLIENT_ID_MACOS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID_MACOS }}
+          AUTH0_CLIENT_SECRET_MACOS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET_MACOS }}
+          AUTH0_CLIENT_ID_WINDOWS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID_WINDOWS }}
+          AUTH0_CLIENT_SECRET_WINDOWS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET_WINDOWS }}
         run: |
           set -euo pipefail
           client_dir=$RUNNER_TEMP/qurl-cli-ci-auth0
           mkdir -m 0700 "$client_dir"
-          printf %s "$AUTH0_CLIENT_ID" >"$client_dir/id"
-          printf %s "$AUTH0_CLIENT_SECRET" >"$client_dir/secret"
-          chmod 0600 "$client_dir/id" "$client_dir/secret"
-          unset AUTH0_CLIENT_ID AUTH0_CLIENT_SECRET
-          python3 scripts/qurl-cli-ci-credentials.py sweep \
-            --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/id" \
-            --client-secret-file "$client_dir/secret"
+          for lane in linux macos windows; do
+            uppercase_lane=${lane^^}
+            id_name=AUTH0_CLIENT_ID_$uppercase_lane
+            secret_name=AUTH0_CLIENT_SECRET_$uppercase_lane
+            printf %s "${!id_name}" >"$client_dir/$lane-id"
+            printf %s "${!secret_name}" >"$client_dir/$lane-secret"
+            chmod 0600 "$client_dir/$lane-id" "$client_dir/$lane-secret"
+            unset "$id_name" "$secret_name"
+          done
+          declare -A owner_lanes=()
+          for lane in linux macos windows; do
+            python3 scripts/qurl-cli-ci-credentials.py identify \
+              --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/$lane-id" \
+              --client-secret-file "$client_dir/$lane-secret" \
+              --output-file "$client_dir/$lane-owner"
+            owner_id=$(<"$client_dir/$lane-owner")
+            [[ -z "${owner_lanes[$owner_id]:-}" ]] || {
+              echo "::error::platform lanes do not have distinct dedicated owners" >&2
+              exit 1
+            }
+            owner_lanes[$owner_id]=$lane
+          done
+          [[ ${#owner_lanes[@]} -eq 3 ]] || {
+            echo "::error::platform owner verification is incomplete" >&2
+            exit 1
+          }
           for lane_spec in linux:1 macos:2 windows:3; do
             IFS=: read -r lane lane_id <<<"$lane_spec"
+            python3 scripts/qurl-cli-ci-credentials.py sweep \
+              --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/$lane-id" \
+              --client-secret-file "$client_dir/$lane-secret"
             credential_dir=$RUNNER_TEMP/qurl-cli-ci-credential-$lane
             bundle_dir=$RUNNER_TEMP/qurl-cli-ci-bundle-$lane
             mkdir -m 0700 "$credential_dir" "$bundle_dir"
             python3 scripts/qurl-cli-ci-credentials.py create \
               --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/id" \
-              --client-secret-file "$client_dir/secret" --output-dir "$credential_dir" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/$lane-id" \
+              --client-secret-file "$client_dir/$lane-secret" --output-dir "$credential_dir" \
               --run-id "${SOURCE_RUN_ID}${lane_id}" --run-attempt "$SOURCE_RUN_ATTEMPT" \
               --lane "$lane"
+            cmp -s "$client_dir/$lane-owner" "$credential_dir/owner-id" || {
+              echo "::error::platform owner changed during credential creation" >&2
+              exit 1
+            }
             echo "::add-mask::$(<"$credential_dir/api-key")"
             install -m 0600 "$credential_dir/api-key" "$bundle_dir/api-key"
           done
@@ -229,12 +273,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           path: orchestrator
           persist-credentials: false
 
-      # The candidate pull request supplies only qurl. The credentialed test
-      # harness comes from this workflow's trusted default-branch revision.
+      # The exact main push supplies both qurl and this harness. Pull-request
+      # artifacts never enter a job that has private live-journey inputs.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: orchestrator/go.mod
@@ -399,7 +443,7 @@ jobs:
     if: always() && needs.resolve.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Cleanup must never wait for a second manual approval after a candidate
+    # Cleanup must never wait for a second manual approval after a journey
     # failure. This is the same main-only controller environment used by mint.
     environment: cli-connector-resource-sandbox-controller
     permissions:
@@ -411,25 +455,52 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - name: Revoke run resources and credentials
         env:
-          AUTH0_CLIENT_ID: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID }}
-          AUTH0_CLIENT_SECRET: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET }}
+          AUTH0_CLIENT_ID_LINUX: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID_LINUX }}
+          AUTH0_CLIENT_SECRET_LINUX: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET_LINUX }}
+          AUTH0_CLIENT_ID_MACOS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID_MACOS }}
+          AUTH0_CLIENT_SECRET_MACOS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET_MACOS }}
+          AUTH0_CLIENT_ID_WINDOWS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_ID_WINDOWS }}
+          AUTH0_CLIENT_SECRET_WINDOWS: ${{ secrets.QURL_SANDBOX_AUTH0_CLIENT_SECRET_WINDOWS }}
         run: |
           set -euo pipefail
           client_dir=$RUNNER_TEMP/qurl-cli-ci-auth0
           mkdir -m 0700 "$client_dir"
-          printf %s "$AUTH0_CLIENT_ID" >"$client_dir/id"
-          printf %s "$AUTH0_CLIENT_SECRET" >"$client_dir/secret"
-          chmod 0600 "$client_dir/id" "$client_dir/secret"
-          unset AUTH0_CLIENT_ID AUTH0_CLIENT_SECRET
-          python3 scripts/qurl-cli-ci-credentials.py sweep \
-            --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/id" \
-            --client-secret-file "$client_dir/secret"
+          declare -A owner_lanes=()
+          for lane in linux macos windows; do
+            uppercase_lane=${lane^^}
+            id_name=AUTH0_CLIENT_ID_$uppercase_lane
+            secret_name=AUTH0_CLIENT_SECRET_$uppercase_lane
+            printf %s "${!id_name}" >"$client_dir/$lane-id"
+            printf %s "${!secret_name}" >"$client_dir/$lane-secret"
+            chmod 0600 "$client_dir/$lane-id" "$client_dir/$lane-secret"
+            unset "$id_name" "$secret_name"
+            python3 scripts/qurl-cli-ci-credentials.py identify \
+              --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/$lane-id" \
+              --client-secret-file "$client_dir/$lane-secret" \
+              --output-file "$client_dir/$lane-owner"
+            owner_id=$(<"$client_dir/$lane-owner")
+            [[ -z "${owner_lanes[$owner_id]:-}" ]] || {
+              echo "::error::cleanup owners are not distinct" >&2
+              exit 1
+            }
+            owner_lanes[$owner_id]=$lane
+          done
+          [[ ${#owner_lanes[@]} -eq 3 ]] || {
+            echo "::error::cleanup owner verification is incomplete" >&2
+            exit 1
+          }
+          for lane in linux macos windows; do
+            python3 scripts/qurl-cli-ci-credentials.py sweep \
+              --token-endpoint "$AUTH0_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/$lane-id" \
+              --client-secret-file "$client_dir/$lane-secret"
+          done
 
       - name: Delete transient customer-key artifacts
         if: always()
