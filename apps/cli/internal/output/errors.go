@@ -35,6 +35,12 @@ func renderErrorLines(p *Printer, err error) []string {
 
 	// Typed service postures come before the generic API-problem rendering:
 	// their chains contain an API error too, but the posture is the message.
+	var apiErr *qurlapi.Error
+	// TODO(upstream-contract): This code is owned by qurl-service. Keep the
+	// fixed redacted rendering in lockstep with that API contract.
+	if errors.As(err, &apiErr) && strings.EqualFold(apiErr.Code, "connector_stopped") {
+		return []string{head + " " + msgConnectorStopped, "", "  " + p.dim(hintConnectorStopped)}
+	}
 	if errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		return []string{head + " " + msgLinksUnavailable}
 	}
@@ -55,7 +61,6 @@ func renderErrorLines(p *Printer, err error) []string {
 		return lines
 	}
 
-	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErrorLines(p, head, apiErr)
 	}

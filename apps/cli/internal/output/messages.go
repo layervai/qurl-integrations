@@ -11,6 +11,9 @@ const (
 	// posture, not a user mistake.
 	msgLinksUnavailable = "Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to."
 
+	msgConnectorStopped  = "This qURL Connector is stopped."
+	hintConnectorStopped = "Hint: run `qurl start <CRID>`, then try again."
+
 	// msgNoCredential renders the missing registered-device bootstrap condition.
 	msgNoCredential = "This machine is not enrolled with qURL."
 
@@ -247,6 +250,8 @@ func CustomerMessages() []string {
 	return []string{
 		errorPrefix,
 		msgLinksUnavailable,
+		msgConnectorStopped,
+		hintConnectorStopped,
 		msgNoCredential,
 		hintNoCredential,
 		hintUnauthorized,

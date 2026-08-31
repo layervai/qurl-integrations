@@ -243,6 +243,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 
 	validatorTests := []string{
+		"TestCanonicalSandboxFailureRootResolvesAlias",
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
@@ -256,6 +257,8 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxGrantedRouteLifetime",
 		"TestSandboxGrantedRouteReadiness",
 		"TestSandboxHarnessPassesInlineAPIKeyToExactBinary",
+		"TestSandboxLocalStateReasonDoesNotForwardHostileLogText",
+		"TestSandboxLocalStateReasonIsClosedAndUsesLatestCause",
 		"TestSandboxNamespaceIsCanonicalAndSeparated",
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
@@ -288,6 +291,26 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	if strings.Index(validatorStep.Run, validatorSkippedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) ||
 		strings.Index(validatorStep.Run, validatorPassedCheck) >= strings.Index(validatorStep.Run, validatorStatusCheck) {
 		t.Error("public CLI workflow validator gate checks process status before PASS/SKIP diagnostics")
+	}
+
+	windowsValidatorStep := findStep("matrix", "Run Windows credential-free journey validator tests")
+	windowsValidatorJob := workflow.Jobs["matrix"]
+	if windowsValidatorJob.If != expectedCLIJobIf || windowsValidatorJob.ContinueOnError != nil ||
+		windowsValidatorStep.If != "runner.os == 'Windows'" || windowsValidatorStep.ContinueOnError != nil {
+		t.Errorf("Windows credential-free validator is bypassable: job=%#v step=%#v", windowsValidatorJob, windowsValidatorStep)
+	}
+	if fmt.Sprint(windowsValidatorStep.Env["WINDOWS_VALIDATOR_TEST_REGEX"]) != "^TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog$" ||
+		fmt.Sprint(windowsValidatorStep.Env["WINDOWS_VALIDATOR_TEST_NAME"]) != "TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog" {
+		t.Errorf("Windows credential-free validator env = %#v, want one exact test", windowsValidatorStep.Env)
+	}
+	for _, required := range []string{
+		"go test -tags=clisandbox -list $env:WINDOWS_VALIDATOR_TEST_REGEX",
+		"go test -tags=clisandbox -count=1 -json -run $env:WINDOWS_VALIDATOR_TEST_REGEX",
+		"$skipped.Count -ne 0 -or $passed.Count -ne 1",
+	} {
+		if strings.Count(windowsValidatorStep.Run, required) != 1 {
+			t.Errorf("Windows credential-free validator does not fail closed with %q", required)
+		}
 	}
 
 	warmDaemonStep := findStep("test", "Run exact warm-daemon process contract")
@@ -422,7 +445,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				`--pattern 'qurl_*_darwin_*.tar.gz'`,
 				`--pattern 'qurl_*_linux_*.tar.gz'`,
 				`--pattern 'qurl_*_windows_*.zip'`,
-				`if (( ${#archives[@]} != 6 ))`,
+				`if (( ${#archives[@]} != ${#expected[@]} ))`,
 				`grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
 				`Byte presence covers every release archive`,
 				`version --verify-release-native-trust`,
@@ -437,7 +460,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				switch candidate.Name {
 				case "Verify release signature (self-test)":
 					signatureIndex = index
-				case "Promote and sign tested qurl image":
+				case "Promote and sign tested qurl image", "Sign and promote the tested qurl image":
 					imageIndex = index
 				case "Validate generated Homebrew cask":
 					caskValidationIndex = index
@@ -453,8 +476,11 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 					}
 				}
 			}
-			if caskValidationIndex <= releaseVerifierStepIndex || caskValidationIndex <= signatureIndex || caskValidationIndex <= imageIndex {
-				t.Errorf("%s validates the generated cask before every artifact gate (cask=%d archive=%d signature=%d image=%d)", target.file, caskValidationIndex, releaseVerifierStepIndex, signatureIndex, imageIndex)
+			if imageIndex >= 0 {
+				t.Errorf("%s promotes the versioned qurl image before native package validation", target.file)
+			}
+			if caskValidationIndex <= releaseVerifierStepIndex || caskValidationIndex <= signatureIndex {
+				t.Errorf("%s validates the generated cask before local artifact gates (cask=%d archive=%d signature=%d)", target.file, caskValidationIndex, releaseVerifierStepIndex, signatureIndex)
 			}
 			if caskStageIndex <= caskValidationIndex {
 				t.Errorf("%s stages the Homebrew bundle before local validation (stage=%d validate=%d)", target.file, caskStageIndex, caskValidationIndex)
@@ -474,6 +500,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				}
 			}
 			if !strings.Contains(fmt.Sprint(publisher.Steps), `gh release edit "$CLI_TAG"`) ||
+				!strings.Contains(fmt.Sprint(publisher.Steps), "Sign and promote the tested qurl image") ||
 				!strings.Contains(fmt.Sprint(tapPublisher.Steps), `gh api --method PUT "repos/${tap_repo}/contents/${cask_path}"`) {
 				t.Errorf("%s publication jobs do not preserve release then tap publication", target.file)
 			}
