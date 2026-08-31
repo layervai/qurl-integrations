@@ -82,6 +82,9 @@ concurrency:
 
 permissions: {}
 
+env:
+  QURL_RELEASE_LIFECYCLE_COMMANDS: start stop restart status inspect daemon
+
 jobs:
   release-please:
     if: github.event_name == 'push'
@@ -435,6 +438,9 @@ jobs:
             echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
             exit 1
           fi
+          for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do
+            "$native_binary" "$command" --help >/dev/null
+          done
 
       - name: Set up QEMU for qurl image smoke
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
@@ -603,6 +609,8 @@ jobs:
             exit 1
           }
 
+      # Linux is validated above on this native runner. Stage the Darwin and
+      # Windows outputs so their native runners test the same GoReleaser bytes.
       - name: Stage the Homebrew validation bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -610,6 +618,7 @@ jobs:
           path: |
             dist/homebrew/Casks/qurl.rb
             dist/qurl_*_darwin_*.tar.gz
+            dist/qurl_*_windows_amd64.zip
           if-no-files-found: error
           include-hidden-files: false
           compression-level: 0
@@ -692,6 +701,9 @@ jobs:
           installed="$(command -v qurl)"
           [[ -x "$installed" ]]
           "$installed" version | grep -Fq "$CLI_TAG"
+          for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do
+            "$installed" "$command" --help >/dev/null
+          done
 
       - name: Upload the audited and installed cask
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -710,11 +722,52 @@ jobs:
           [[ -z "${QURL_HOMEBREW_TAP_LINK:-}" || ! -L "$QURL_HOMEBREW_TAP_LINK" ]] || unlink "$QURL_HOMEBREW_TAP_LINK"
           [[ -z "${QURL_HOMEBREW_CACHE_PATH:-}" || ! -f "$QURL_HOMEBREW_CACHE_PATH" ]] || unlink "$QURL_HOMEBREW_CACHE_PATH"
 
+  validate-windows-release-archive:
+    name: Validate exact Windows release archive
+    needs: [release-cli, cli-release-gate]
+    if: >-
+      !cancelled() && needs.release-cli.result == 'success' &&
+      needs.cli-release-gate.outputs.required == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+    steps:
+      - name: Download the staged Windows release archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: qurl-homebrew-validation-${{ needs.cli-release-gate.outputs.source_sha }}
+          path: ${{ runner.temp }}/qurl-release-archive-validation
+          digest-mismatch: error
+
+      - name: Validate the exact Windows archive command roster
+        shell: pwsh
+        run: |
+          $releaseVersion = $env:CLI_TAG.TrimStart('v')
+          $archive = Join-Path $env:RUNNER_TEMP "qurl-release-archive-validation/qurl_${releaseVersion}_windows_amd64.zip"
+          $extracted = Join-Path $env:RUNNER_TEMP 'qurl-release-windows'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'exact Windows release archive is missing' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $extracted -ErrorAction Stop
+          $binary = Join-Path $extracted 'qurl.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Windows release archive has no qurl.exe' }
+          $reportedVersion = & $binary version
+          if ($LASTEXITCODE -ne 0 -or $reportedVersion -notmatch [Regex]::Escape($env:CLI_TAG)) {
+            throw 'Windows release archive reports the wrong version'
+          }
+          foreach ($command in ($env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' ')) {
+            & $binary $command --help *> $null
+            if ($LASTEXITCODE -ne 0) { throw "Windows release archive does not expose $command" }
+          }
+
   publish-cli-release:
     name: Publish the verified CLI release
-    needs: [validate-homebrew-cask, cli-release-gate]
+    needs: [validate-homebrew-cask, validate-windows-release-archive, cli-release-gate]
     if: >-
       !cancelled() && needs.validate-homebrew-cask.result == 'success' &&
+      needs.validate-windows-release-archive.result == 'success' &&
       needs.cli-release-gate.outputs.required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5

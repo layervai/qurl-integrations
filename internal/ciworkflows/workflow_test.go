@@ -1130,23 +1130,36 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	assertExecutableRepoScript(t, "scripts/check-exact-cli-release-gate.sh")
 }
 
-// TestCLIReleaseValidatesTheCaskBeforePublication keeps the exact generated
-// cask on the recoverable side of both publication lines. A dedicated macOS
-// job applies Homebrew's safe layout corrections, audits the cask, and installs
-// its exact staged archive. Only those validated bytes can publish afterward.
-func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
+// TestCLIReleaseValidatesPackagesBeforePublication keeps each exact native
+// package on the recoverable side of both publication lines. The macOS job
+// installs the staged Homebrew cask, Linux reuses the downloaded release
+// archive, and Windows runs its staged archive before publication.
+func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	t.Parallel()
+
+	var globals struct {
+		Env map[string]string `yaml:"env"`
+	}
+	if err := yaml.Unmarshal(readWorkflowBytes(t, releasePleaseWorkflow), &globals); err != nil {
+		t.Fatal(err)
+	}
+	const commandRoster = "start stop restart status inspect daemon"
+	if globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"] != commandRoster {
+		t.Errorf("release lifecycle command roster = %q, want %q", globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"], commandRoster)
+	}
 
 	workflow := readWorkflow(t, releasePleaseWorkflow)
 	release := workflow.Jobs["release-cli"]
 	validator := workflow.Jobs["validate-homebrew-cask"]
+	archiveValidator := workflow.Jobs["validate-windows-release-archive"]
 	publisher := workflow.Jobs["publish-cli-release"]
 	tapPublisher := workflow.Jobs["publish-homebrew-cask"]
-	if release == nil || validator == nil || publisher == nil || tapPublisher == nil {
-		t.Fatalf("release Homebrew chain is incomplete: release=%t validator=%t publisher=%t tap=%t",
-			release != nil, validator != nil, publisher != nil, tapPublisher != nil)
+	if release == nil || validator == nil || archiveValidator == nil || publisher == nil || tapPublisher == nil {
+		t.Fatalf("release package chain is incomplete: release=%t homebrew=%t archives=%t publisher=%t tap=%t",
+			release != nil, validator != nil, archiveValidator != nil, publisher != nil, tapPublisher != nil)
 	}
 	assertJobPermissions(t, "validate-homebrew-cask", validator.Permissions, map[string]string{"actions": "read", "contents": "read"})
+	assertJobPermissions(t, "validate-windows-release-archive", archiveValidator.Permissions, map[string]string{"actions": "read", "contents": "read"})
 	assertJobPermissions(t, "publish-cli-release", publisher.Permissions, map[string]string{"contents": "write"})
 	assertJobPermissions(t, "publish-homebrew-cask", tapPublisher.Permissions, map[string]string{"actions": "read", "contents": "read"})
 	stepsFor := func(job *githubJob) map[string]*step {
@@ -1158,6 +1171,7 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 	}
 	releaseSteps := stepsFor(release)
 	validatorSteps := stepsFor(validator)
+	archiveSteps := stepsFor(archiveValidator)
 	publisherSteps := stepsFor(publisher)
 	tapSteps := stepsFor(tapPublisher)
 	validateName := "Validate generated Homebrew cask"
@@ -1178,7 +1192,8 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 	}
 	if releaseSteps[stageName].Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
 		releaseSteps[stageName].With["if-no-files-found"] != "error" ||
-		!strings.Contains(fmt.Sprint(releaseSteps[stageName].With["path"]), "dist/qurl_*_darwin_*.tar.gz") {
+		!strings.Contains(fmt.Sprint(releaseSteps[stageName].With["path"]), "dist/qurl_*_darwin_*.tar.gz") ||
+		!strings.Contains(fmt.Sprint(releaseSteps[stageName].With["path"]), "dist/qurl_*_windows_amd64.zip") {
 		t.Errorf("staged Homebrew bundle is not exact: %#v", releaseSteps[stageName])
 	}
 
@@ -1195,6 +1210,8 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 		`install -m 0644 "$archive" "$cache_path"`,
 		`brew install --cask "$token"`,
 		`"$installed" version | grep -Fq "$CLI_TAG"`,
+		`for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do`,
+		`"$installed" "$command" --help >/dev/null`,
 	} {
 		if !strings.Contains(audit.Run, fragment) {
 			t.Errorf("Homebrew pre-publication validator does not enforce %q", fragment)
@@ -1207,13 +1224,35 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 	if got := parseWorkflowNeeds(t, "validate-homebrew-cask", validator.Needs); !slices.Contains(got, "release-cli") {
 		t.Errorf("Homebrew validator does not depend on release-cli: %v", got)
 	}
+	draftVerifier := releaseSteps["Verify the draft CLI carries the exact production Hub trust pin"]
+	if draftVerifier == nil ||
+		!strings.Contains(draftVerifier.Run, `for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do`) ||
+		!strings.Contains(draftVerifier.Run, `"$native_binary" "$command" --help >/dev/null`) {
+		t.Error("Linux release archive does not validate the lifecycle command roster")
+	}
+	download := archiveSteps["Download the staged Windows release archive"]
+	windows := archiveSteps["Validate the exact Windows archive command roster"]
+	if download == nil || download.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+		download.With["digest-mismatch"] != "error" || windows == nil {
+		t.Fatal("Windows release archive validation is not exact and fail closed")
+	}
+	if !strings.Contains(windows.Run, "qurl_${releaseVersion}_windows_amd64.zip") ||
+		!strings.Contains(windows.Run, "$env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' '") ||
+		!strings.Contains(windows.Run, "& $binary $command --help") {
+		t.Error("Windows release archive does not validate the lifecycle command roster")
+	}
+	if got := parseWorkflowNeeds(t, "validate-windows-release-archive", archiveValidator.Needs); !slices.Contains(got, "release-cli") {
+		t.Errorf("release archive validator does not depend on release-cli: %v", got)
+	}
 
 	releasePublish := publisherSteps["Publish the verified CLI release"]
 	if releasePublish == nil || !strings.Contains(releasePublish.Run, "--draft=false --verify-tag") {
 		t.Error("GitHub Release publication is not behind the Homebrew validator")
 	}
-	if got := parseWorkflowNeeds(t, "publish-cli-release", publisher.Needs); !slices.Contains(got, "validate-homebrew-cask") {
-		t.Errorf("CLI publication bypasses Homebrew validation: %v", got)
+	if got := parseWorkflowNeeds(t, "publish-cli-release", publisher.Needs); !slices.Contains(got, "validate-homebrew-cask") ||
+		!slices.Contains(got, "validate-windows-release-archive") ||
+		!strings.Contains(publisher.If, "needs.validate-windows-release-archive.result == 'success'") {
+		t.Errorf("CLI publication bypasses package validation: %v", got)
 	}
 
 	tapPublish := tapSteps["Publish the audited Homebrew cask"]
@@ -1228,7 +1267,8 @@ func TestCLIReleaseValidatesTheCaskBeforePublication(t *testing.T) {
 		}
 	}
 	for id, candidate := range map[string]*githubJob{
-		"release-cli": release, "validate-homebrew-cask": validator, "publish-cli-release": publisher,
+		"release-cli": release, "validate-homebrew-cask": validator,
+		"validate-windows-release-archive": archiveValidator, "publish-cli-release": publisher,
 	} {
 		encoded, err := yaml.Marshal(candidate)
 		if err != nil {
