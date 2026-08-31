@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // downloadHost is a scriptable link host: statuses queues per-request
@@ -181,6 +183,121 @@ func TestSaveToExpirySurvivingRetryFails(t *testing.T) {
 	}
 	mustNotExist(t, dest)
 	mustNotExist(t, dest+partSuffix)
+}
+
+func TestDownloadLiveGrantRetriesSameURL(t *testing.T) {
+	payload := []byte("grant converged")
+	host := newDownloadHost(t, payload, http.StatusGone, 0)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			return DownloadTarget{URL: host.URL, ValidUntil: now.Add(time.Minute)}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if got := out.String(); got != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+	if mints != 1 || host.hits.Load() != 2 {
+		t.Errorf("mints = %d, GETs = %d; want 1 and 2", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadLiveGrantRetryIsBounded(t *testing.T) {
+	host := newDownloadHost(t, nil,
+		http.StatusGone, http.StatusGone, http.StatusGone,
+		http.StatusGone, http.StatusGone, http.StatusGone)
+	now := time.Unix(1_700_000_000, 0)
+	started := now
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			return DownloadTarget{URL: host.URL, ValidUntil: now.Add(time.Minute)}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) {
+		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	}
+	if mints != 1 || host.hits.Load() != 1+grantPropagationMaxAttempts {
+		t.Errorf("mints = %d, GETs = %d; want 1 and at most %d", mints, host.hits.Load(), 1+grantPropagationMaxAttempts)
+	}
+	if elapsed := now.Sub(started); elapsed > grantPropagationWindow {
+		t.Errorf("retry elapsed = %s, want at most %s", elapsed, grantPropagationWindow)
+	}
+}
+
+func TestDownloadLiveGrantRetryHonorsCancellation(t *testing.T) {
+	host := newDownloadHost(t, nil, http.StatusGone)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			return DownloadTarget{URL: host.URL, ValidUntil: now.Add(time.Minute)}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(ctx context.Context, _ time.Duration) error {
+			cancel()
+			return ctx.Err()
+		},
+	}
+
+	_, err := d.StreamTo(ctx, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if mints != 1 || host.hits.Load() != 1 {
+		t.Errorf("mints = %d, GETs = %d; want 1 and 1", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadExpiredGrantMintsOneFreshTarget(t *testing.T) {
+	payload := []byte("fresh grant")
+	host := newDownloadHost(t, payload, http.StatusGone, 0)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			validUntil := now
+			if mints == 2 {
+				validUntil = now.Add(time.Minute)
+			}
+			return DownloadTarget{URL: host.URL, ValidUntil: validUntil}, nil
+		},
+		now: func() time.Time { return now },
+	}
+
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if got := out.String(); got != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+	if mints != 2 || host.hits.Load() != 2 {
+		t.Errorf("mints = %d, GETs = %d; want 2 and 2", mints, host.hits.Load())
+	}
 }
 
 func TestSaveToNonExpiryStatusDoesNotRetry(t *testing.T) {

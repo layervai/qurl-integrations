@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -142,6 +143,32 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 		return opts.enterPortal(ctx, link)
 	}
+	// fetchTarget preserves the lifetime of an acknowledged NHP grant. An
+	// immediate 410 can then converge on that same grant without opening a
+	// second session. Lifetime-free direct callers retain the existing
+	// one-fresh-link retry through fetchURL.
+	fetchTarget := func(ctx context.Context) (consume.DownloadTarget, error) {
+		if opts.enterPortalGrant == nil {
+			url, err := fetchURL(ctx)
+			return consume.DownloadTarget{URL: url}, err
+		}
+		link, err := mint(ctx)
+		if err != nil {
+			return consume.DownloadTarget{}, err
+		}
+		if !consume.NeedsAccessGrant(link) {
+			return consume.DownloadTarget{URL: link}, nil
+		}
+		started := time.Now()
+		grant, err := opts.enterPortalGrant(ctx, link)
+		if err != nil {
+			return consume.DownloadTarget{}, err
+		}
+		return consume.DownloadTarget{
+			URL:        grant.ContentURL,
+			ValidUntil: started.Add(time.Duration(grant.OpenSeconds) * time.Second),
+		}, nil
+	}
 
 	switch action {
 	case consume.ActionOpenBrowser:
@@ -150,11 +177,11 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		}
 		return openInBrowser(ctx, opts, printer, resolved)
 	case consume.ActionStreamStdout:
-		downloader := &consume.Downloader{Mint: fetchURL}
+		downloader := &consume.Downloader{MintTarget: fetchTarget}
 		_, err := downloader.StreamTo(ctx, opts.streams.Out)
 		return err
 	case consume.ActionSaveFile:
-		downloader := &consume.Downloader{Mint: fetchURL}
+		downloader := &consume.Downloader{MintTarget: fetchTarget}
 		n, err := downloader.SaveTo(ctx, flags.file, flags.force)
 		if err != nil {
 			return err

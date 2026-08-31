@@ -567,10 +567,7 @@ func TestGetDirectLinkDownloadsWithoutAccessRequest(t *testing.T) {
 	}
 }
 
-// TestGetExpiryRetryRepeatsAccessRequest extends the T3 retry contract to
-// the access flow: a 410 on the granted content URL re-resolves, re-runs
-// verification, and asks for access again — never reuses the stale grant.
-func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
+func TestGetLiveGrantRetriesWithoutSecondAccessRequest(t *testing.T) {
 	srv, link := portalServer(t)
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 	dest := filepath.Join(t.TempDir(), "out.bin")
@@ -578,9 +575,36 @@ func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			granted = append(granted, got)
-			return srv.URL + apitest.DownloadPath, nil
+			return consume.AccessGrant{ContentURL: srv.URL + apitest.DownloadPath, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if len(granted) != 1 || granted[0] != link {
+		t.Fatalf("access requests = %q, want the minted link exactly once", granted)
+	}
+	if got := readTestFile(t, dest); string(got) != apitest.DefaultDownloadPayload {
+		t.Errorf("downloaded file = %q, want the granted content payload", got)
+	}
+	mustNeverFetchPortalPage(t, srv)
+}
+
+// A grant with no retained lifetime is expired for retry purposes. A 410 then
+// gets exactly one fresh verified resolve and access request.
+func TestGetExpiredGrantRepeatsAccessRequest(t *testing.T) {
+	srv, link := portalServer(t)
+	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var granted []string
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
+			granted = append(granted, got)
+			return consume.AccessGrant{ContentURL: srv.URL + apitest.DownloadPath}, nil
 		},
 	})
 	if res.code != 0 {
