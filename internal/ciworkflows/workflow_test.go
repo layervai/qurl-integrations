@@ -296,6 +296,10 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 			t.Errorf("source resolver is missing %q", required)
 		}
 	}
+	if resolve.Outputs["source_sha"] != "${{ steps.producer.outputs.source_sha }}" ||
+		strings.Count(resolver.Run, "source_sha=$SOURCE_HEAD_SHA") != 2 {
+		t.Errorf("source resolver does not emit its validated SHA on both accepted paths: outputs=%v", resolve.Outputs)
+	}
 
 	assertJobPermissions(t, "workflow", workflow.Permissions, map[string]string{"contents": "read"})
 	for jobName, want := range map[string]map[string]string{
@@ -363,6 +367,35 @@ func TestCLIExactArtifactCustomerJourneyIsTrustedAndParallel(t *testing.T) {
 		if checkouts != 1 {
 			t.Errorf("%s checkout count = %d, want one", jobName, checkouts)
 		}
+	}
+	const trustedResultStepIf = "needs.resolve.result == 'success' && steps.record.outputs.conclusion == 'success'"
+	var resultRecord, resultCheckout, resultSignal *step
+	resultRecordIndex, resultCheckoutIndex := -1, -1
+	resultCheckouts, resultSignals := 0, 0
+	for index := range result.Steps {
+		current := &result.Steps[index]
+		switch {
+		case current.ID == "record":
+			resultRecord = current
+			resultRecordIndex = index
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			resultCheckout = current
+			resultCheckoutIndex = index
+			resultCheckouts++
+		case current.Name == "Signal an exact CLI release that is ready to continue":
+			resultSignal = current
+			resultSignals++
+		}
+	}
+	if resultRecord == nil || resultCheckout == nil || resultCheckouts != 1 || resultRecordIndex >= resultCheckoutIndex ||
+		resultCheckout.If != trustedResultStepIf ||
+		resultCheckout.With["ref"] != "${{ needs.resolve.outputs.source_sha }}" ||
+		resultCheckout.With["persist-credentials"] != false {
+		t.Errorf("write-capable result checkout is not gated on the validated source: record=%#v checkout=%#v", resultRecord, resultCheckout)
+	}
+	if resultSignal == nil || resultSignals != 1 || resultSignal.If != trustedResultStepIf ||
+		fmt.Sprint(resultSignal.Env["HEAD_SHA"]) != "${{ needs.resolve.outputs.source_sha }}" {
+		t.Errorf("release signal is not gated on the validated passing source: %#v", resultSignal)
 	}
 
 	var sourceDownload, verify *step

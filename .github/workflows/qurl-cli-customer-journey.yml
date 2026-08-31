@@ -38,6 +38,7 @@ jobs:
       contents: read
     outputs:
       required: ${{ steps.producer.outputs.required }}
+      source_sha: ${{ steps.producer.outputs.source_sha }}
     steps:
       - id: producer
         name: Require one exact artifact producer
@@ -77,14 +78,20 @@ jobs:
           ' <<<"$jobs")
           conclusion=$(jq -r '.conclusion' <<<"$producer")
           if [[ "$conclusion" == skipped && "$SOURCE_CONCLUSION" == success ]]; then
-            echo "required=false" >>"$GITHUB_OUTPUT"
+            {
+              echo "required=false"
+              echo "source_sha=$SOURCE_HEAD_SHA"
+            } >>"$GITHUB_OUTPUT"
             exit 0
           fi
           [[ "$conclusion" == success && "$SOURCE_CONCLUSION" == success ]] || {
             echo "::error::source CLI workflow did not pass the exact artifact producer and quality gates" >&2
             exit 1
           }
-          echo "required=true" >>"$GITHUB_OUTPUT"
+          {
+            echo "required=true"
+            echo "source_sha=$SOURCE_HEAD_SHA"
+          } >>"$GITHUB_OUTPUT"
 
   journey:
     name: Customer journey / ${{ matrix.lane }}
@@ -623,12 +630,6 @@ jobs:
       checks: write
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
       - id: record
         name: Record the exact source result
         env:
@@ -664,14 +665,22 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input request.json >/dev/null
           echo "conclusion=$conclusion" >>"$GITHUB_OUTPUT"
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.resolve.result == 'success' && steps.record.outputs.conclusion == 'success'
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       # release-please creates the draft release independently. If it already
       # exists for this exact SHA, this is the second event and starts the
       # continuation. Otherwise release-please will signal after it creates
       # the draft. No job waits for the other event.
       - name: Signal an exact CLI release that is ready to continue
+        if: needs.resolve.result == 'success' && steps.record.outputs.conclusion == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ needs.resolve.outputs.source_sha }}
         run: |
           set -euo pipefail
           version=$(jq -er '.["apps/cli"] | select(type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$"))' \
