@@ -34,14 +34,7 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	if childTestName == "" || strings.ContainsAny(childTestName, "^$[]()|*+?\\") {
 		t.Fatal("controlled-failure child test name is invalid")
 	}
-	failureAPIKey := sandboxSecret(t, sandboxFailureAPIKeyEnv)
-	if failureAPIKey == "" {
-		t.Fatalf("%s is required", sandboxFailureAPIKeyEnv)
-	}
-	primaryAPIKey := sandboxSecret(t, "QURL_API_KEY")
-	if failureAPIKey == primaryAPIKey {
-		t.Fatal("controlled-failure and primary enrollment keys must be distinct")
-	}
+	primaryAPIKey, failureAPIKey := requireSandboxFailureCredentials(t)
 	testBinary, err := os.Executable()
 	if err != nil {
 		t.Fatalf("locate trusted customer-journey harness: %v", err)
@@ -90,6 +83,19 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	}
 	assertSandboxFailureLocalCleanup(t, stateDir, crid)
 	return crid
+}
+
+func requireSandboxFailureCredentials(t *testing.T) (primaryAPIKey, failureAPIKey string) {
+	t.Helper()
+	primaryAPIKey = sandboxSecret(t, "QURL_API_KEY")
+	failureAPIKey = sandboxSecret(t, sandboxFailureAPIKeyEnv)
+	if primaryAPIKey == "" || failureAPIKey == "" {
+		t.Fatalf("QURL_API_KEY and %s are required before the full lifecycle starts", sandboxFailureAPIKeyEnv)
+	}
+	if failureAPIKey == primaryAPIKey {
+		t.Fatal("controlled-failure and primary enrollment keys must be distinct")
+	}
+	return primaryAPIKey, failureAPIKey
 }
 
 func TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey(t *testing.T) {

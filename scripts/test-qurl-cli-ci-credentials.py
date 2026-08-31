@@ -311,11 +311,12 @@ def main() -> None:
         argparse.Namespace(run_id="9001" + str(index), run_attempt="3", runtime="host", lane=lane)
         for index, lane in enumerate(("linux", "macos", "windows"), start=1)
     ]
-    assert len({credentials.run_identity(item) for item in lane_identities}) == 3
+    assert len({credentials.run_description(item) for item in lane_identities}) == 3
     assert credentials.run_credential_names(lane_identities[0]) == {
         "qurl CLI journey v2 90011/3/linux/primary",
         "qurl CLI journey v2 90011/3/linux/failure",
     }
+    assert len(set().union(*(credentials.run_credential_names(item) for item in lane_identities))) == 6
     assert len(set().union(*(credentials.run_device_key_names(item) for item in lane_identities))) == 6
     assert len(set().union(*(credentials.run_connector_ids(item) for item in lane_identities))) == 6
     fake = FakeAPI()

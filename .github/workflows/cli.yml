@@ -969,12 +969,14 @@ jobs:
           "QURL_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CLI_SANDBOX_FAILURE_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # Keep the exact install until the scheduled task is proven stopped;
+      # deleting it earlier could leave a live task pointing at a missing binary.
       - name: Remove the Windows customer installation
         if: always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success'
         shell: pwsh
         run: |
-          $expected = Join-Path $env:LOCALAPPDATA "qurl-ci-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
           if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }
+          $expected = Join-Path $env:LOCALAPPDATA "qurl-ci-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
           if ($env:QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected) { throw 'Windows customer install directory is not the exact run-owned path' }
           if (Test-Path -LiteralPath $expected) { Remove-Item -LiteralPath $expected -Recurse -Force }
           if (Test-Path -LiteralPath $expected) { throw 'Windows customer install directory remains after the service fence' }

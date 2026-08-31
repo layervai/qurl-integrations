@@ -75,16 +75,15 @@ type connectorResourceRow struct {
 }
 
 type sandboxListRowDoc struct {
-	CRID            string  `json:"crid"`
-	ResourceID      string  `json:"resource_id"`
-	TargetURL       string  `json:"target_url"`
-	DesiredState    string  `json:"desired_state"`
-	ConnectionState *string `json:"connection_state"`
-	ServingEpoch    *uint64 `json:"serving_epoch"`
+	CRID         string  `json:"crid"`
+	ResourceID   string  `json:"resource_id"`
+	TargetURL    string  `json:"target_url"`
+	DesiredState string  `json:"desired_state"`
+	ServingEpoch *uint64 `json:"serving_epoch"`
 }
 
 type sandboxListDoc struct {
-	Resources []sandboxListRowDoc `json:"resources"`
+	Resources []json.RawMessage `json:"resources"`
 }
 
 var connectorRoutingIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
@@ -169,6 +168,7 @@ func testSandboxFullCustomerLifecycleSmoke(t *testing.T) {
 	if os.Getenv(localPublishSandboxArming) != "enabled" {
 		t.Skipf("SKIPPED LOUDLY: unified local-publish sandbox smoke is disarmed — %s != enabled", localPublishSandboxArming)
 	}
+	requireSandboxFailureCredentials(t)
 	fixture := startSandboxLocalPublish(t, "smoke")
 	defer fixture.interruptAndValidate(t)
 	binary, cliEnv, stateDir, local := fixture.binary, fixture.env, fixture.stateDir, fixture.local
@@ -791,20 +791,29 @@ func assertSandboxListRow(t *testing.T, binary string, env map[string]string, st
 	if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
 		t.Fatalf("decode list output: %v", err)
 	}
-	for _, row := range doc.Resources {
+	for _, rawRow := range doc.Resources {
+		var row sandboxListRowDoc
+		if err := json.Unmarshal(rawRow, &row); err != nil {
+			t.Fatalf("decode list row: %v", err)
+		}
 		if row.CRID == local.CRID {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(rawRow, &fields); err != nil {
+				t.Fatalf("decode list row fields: %v", err)
+			}
+			connectionState, hasConnectionState := fields["connection_state"]
 			if row.ResourceID != local.ResourceID || row.TargetURL != local.TargetURL || row.DesiredState != "on" ||
-				row.ConnectionState != nil || row.ServingEpoch == nil || *row.ServingEpoch != epoch {
-				connectionState := any("<absent>")
-				if row.ConnectionState != nil {
-					connectionState = *row.ConnectionState
+				hasConnectionState || row.ServingEpoch == nil || *row.ServingEpoch != epoch {
+				connectionStateValue := "<absent>"
+				if hasConnectionState {
+					connectionStateValue = string(connectionState)
 				}
 				servingEpoch := any("<absent>")
 				if row.ServingEpoch != nil {
 					servingEpoch = *row.ServingEpoch
 				}
 				t.Fatalf("list row crid=%q resource_id=%q target_url=%q desired_state=%q connection_state=%v serving_epoch=%v; want full local target, desired on, epoch %d, and no fabricated live observation",
-					row.CRID, row.ResourceID, row.TargetURL, row.DesiredState, connectionState, servingEpoch, epoch)
+					row.CRID, row.ResourceID, row.TargetURL, row.DesiredState, connectionStateValue, servingEpoch, epoch)
 			}
 			return
 		}

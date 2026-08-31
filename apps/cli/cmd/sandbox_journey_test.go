@@ -31,7 +31,8 @@ import (
 // protected main workflow can compile and run it from the exact integrations
 // commit without storing credentials here.
 //
-// Credential contract (all four required before this suite runs anything):
+// Credential contract (four common inputs; full lifecycle entrypoints also
+// require the isolated failure key before they start live work):
 //
 //	QURL_API_KEY  — a sandbox API key holding the qurl:agent, qurl:read,
 //	    qurl:write, and qurl:resolve scopes. The CLI reads it only for
@@ -43,6 +44,8 @@ import (
 //	    secret).
 //	QURL_SANDBOX_QV2_RELAY_URL — the sandbox's platform access URL (a
 //	    protected environment secret).
+//	QURL_CLI_SANDBOX_FAILURE_API_KEY — a second one-time account key used
+//	    only by the controlled-failure child in the full lifecycle.
 //
 // The last two become a QURL_DEPLOYMENT settings file for the download
 // step: `get --file` opens fragment-credential links through the platform

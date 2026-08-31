@@ -275,11 +275,18 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if windowsInstallCleanup == nil ||
 		windowsInstallCleanup.If != "always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success'" ||
-		!strings.Contains(windowsInstallCleanup.Run, "IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)") ||
+		!strings.Contains(windowsInstallCleanup.Run, "if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }") ||
 		!strings.Contains(windowsInstallCleanup.Run, "QURL_CLI_SANDBOX_INSTALL_DIR -ne $expected") ||
 		!strings.Contains(windowsInstallCleanup.Run, "Remove-Item -LiteralPath $expected -Recurse -Force") ||
 		!strings.Contains(windowsInstallCleanup.Run, "Test-Path -LiteralPath $expected) { throw") {
 		t.Errorf("Windows journey does not remove the exact test installation after fencing: %#v", windowsInstallCleanup)
+	}
+	if windowsInstallCleanup != nil {
+		guarded := strings.Index(windowsInstallCleanup.Run, "if ([string]::IsNullOrWhiteSpace($env:QURL_CLI_SANDBOX_INSTALL_DIR)) { return }")
+		derived := strings.Index(windowsInstallCleanup.Run, "$expected = Join-Path")
+		if guarded < 0 || derived < 0 || guarded > derived {
+			t.Error("Windows journey derives an install path before it proves one was recorded")
+		}
 	}
 	if windowsRun == nil || !strings.Contains(windowsRun.Run, `@('-test.v=true', '-test.count=1', "-test.run=$testPattern")`) ||
 		!strings.Contains(windowsRun.Run, "@testArgs 2>&1") || strings.Contains(windowsRun.Run, " -test.v ") {

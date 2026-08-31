@@ -392,20 +392,18 @@ def identify(args: argparse.Namespace) -> None:
     print("verified one dedicated CI owner")
 
 
-def run_identity(args: argparse.Namespace) -> tuple[str, str]:
+def run_description(args: argparse.Namespace) -> str:
     if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(args.run_attempt):
         raise CredentialError("run identity must use canonical positive integers")
     if not LANE.fullmatch(args.lane):
         raise CredentialError("platform lane is invalid")
     if args.runtime not in {"host", "hardened_container"}:
         raise CredentialError("journey runtime is invalid")
-    name = f"qurl CLI journey v2 {args.run_id}/{args.run_attempt}/{args.lane}"
-    description = f"qurl CLI journey v2 resource {args.run_id}/{args.run_attempt}/{args.runtime}"
-    return name, description
+    return f"qurl CLI journey v2 resource {args.run_id}/{args.run_attempt}/{args.runtime}"
 
 
 def run_credential_names(args: argparse.Namespace) -> set[str]:
-    run_identity(args)
+    run_description(args)
     return {
         run_credential_name(args.run_id, args.run_attempt, args.lane, purpose)
         for purpose in ("primary", "failure")
@@ -434,7 +432,7 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
     # failure Connector. Derive their IDs from the same public test inputs as
     # the Go harness so the trusted controller can remove either resource even
     # if the runner stops before it records a CRID or resource ID.
-    run_identity(args)
+    run_description(args)
     result: set[str] = set()
     for label in ("smoke", "failure"):
         material = "\x00".join(
@@ -471,7 +469,7 @@ def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
 
 
 def reconcile_run(args: argparse.Namespace) -> None:
-    _, description = run_identity(args)
+    description = run_description(args)
     credential_names = run_credential_names(args)
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)

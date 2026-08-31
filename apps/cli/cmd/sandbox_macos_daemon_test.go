@@ -59,6 +59,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if os.Getenv(arming) != "enabled" {
 		t.Skipf("SKIPPED LOUDLY: %s qURL daemon sandbox journey is disarmed — %s != enabled", platform, arming)
 	}
+	requireSandboxFailureCredentials(t)
 	binaryInput := strings.TrimSpace(os.Getenv("QURL_CLI_SANDBOX_QURL_BINARY"))
 	if binaryInput == "" {
 		t.Fatal("QURL_CLI_SANDBOX_QURL_BINARY is required")
