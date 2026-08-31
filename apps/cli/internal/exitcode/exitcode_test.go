@@ -101,9 +101,11 @@ var sdkSentinels = map[string]struct {
 	// Each choice is argued at its case in connectorSentinelCode.
 	// The enrollment token is this surface's credential: refusing it, or the
 	// identity it vouches for, is the Auth row.
-	"qurl.ErrAssignmentKeyRejected":       {qurl.ErrAssignmentKeyRejected, Auth},
-	"qurl.ErrAssignmentBootstrapConsumed": {qurl.ErrAssignmentBootstrapConsumed, Auth},
-	"qurl.ErrAssignmentIdentityRejected":  {qurl.ErrAssignmentIdentityRejected, Auth},
+	"qurl.ErrAssignmentKeyRejected":              {qurl.ErrAssignmentKeyRejected, Auth},
+	"qurl.ErrAssignmentBootstrapConsumed":        {qurl.ErrAssignmentBootstrapConsumed, Auth},
+	"qurl.ErrAssignmentIdentityRejected":         {qurl.ErrAssignmentIdentityRejected, Auth},
+	"qurl.ErrRecoveryCredentialRejected":         {qurl.ErrRecoveryCredentialRejected, Auth},
+	"qurl.ErrCredentialRecoveryIdentityRejected": {qurl.ErrCredentialRecoveryIdentityRejected, Auth},
 	// The request, not the credential, was rejected — a valid token minted for
 	// another Connector lands here.
 	"qurl.ErrAssignmentRequestRejected": {qurl.ErrAssignmentRequestRejected, InvalidInput},

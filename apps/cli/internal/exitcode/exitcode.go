@@ -299,7 +299,9 @@ func connectorSentinelCode(err error) (int, bool) {
 	// qurl-go's enrollment/assignment taxonomy.
 	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
 		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),
-		errors.Is(err, qurl.ErrAssignmentIdentityRejected):
+		errors.Is(err, qurl.ErrAssignmentIdentityRejected),
+		errors.Is(err, qurl.ErrRecoveryCredentialRejected),
+		errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected):
 		// The enrollment token is this surface's credential, and all three of
 		// these are the platform refusing the credential or the identity it
 		// vouches for — the Auth row's "the service rejected the credential",

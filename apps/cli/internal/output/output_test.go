@@ -422,6 +422,26 @@ func TestConnectorAssignmentRenderings(t *testing.T) {
 	}
 }
 
+func TestConnectorRecoveryCredentialRenderingHidesSDKInternals(t *testing.T) {
+	err := errors.Join(
+		&qurl.CredentialRecoveryError{Code: "52401", Phase: "hub_issue_recovery"},
+		qurl.ErrRecoveryCredentialRejected,
+	)
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("recover rejected native identity: %w", err), false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recovery rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"hub_issue_recovery", "52401", "qurl:"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("recovery rendering exposed SDK detail %q:\n%s", forbidden, got)
+		}
+	}
+}
+
 func TestConnectorResourceRenderings(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -516,6 +536,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		msgConnectorTokenRejected, hintConnectorTokenRejected,
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
 		msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled,
+		msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected,
 		msgConnectorIdentityRejected, hintConnectorIdentityRejected,
 		msgConnectorQuotaExceeded, hintConnectorQuotaExceeded,
 		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,

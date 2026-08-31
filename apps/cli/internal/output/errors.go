@@ -85,6 +85,10 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
 	case errors.Is(err, sessionconfig.ErrConfig):
 		headline, hint = msgConnectorSessionConfig, hintConnectorSessionConfig
+	case errors.Is(err, qurl.ErrRecoveryCredentialRejected):
+		// The SDK error contains its internal recovery phase and numeric wire
+		// code. Neither helps a customer fix the rejected account credential.
+		headline, hint, includeDetail = msgConnectorRecoveryCredentialRejected, hintConnectorRecoveryCredentialRejected, false
 	// qurl-go's assignment taxonomy follows the local configuration posture.
 	case errors.Is(err, qurl.ErrAssignmentBootstrapConsumed):
 		headline, hint = msgConnectorTokenConsumed, hintConnectorTokenConsumed

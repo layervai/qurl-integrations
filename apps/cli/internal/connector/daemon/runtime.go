@@ -421,12 +421,29 @@ func classifyShareFailure(err error) (category, code string) {
 	if errors.As(err, &deny) {
 		return diagnosticFailurePlatformDenied, deny.ErrCode
 	}
+	// Credential recovery is an identity-stage operation. Keep its closed,
+	// non-secret code so inspect can distinguish an authenticated recovery
+	// refusal from an untyped daemon or network timeout.
+	var recovery *qurl.CredentialRecoveryError
+	if errors.As(err, &recovery) {
+		return diagnosticFailureIdentity, recovery.Code
+	}
 	var assignment *qurl.AssignmentError
 	if errors.As(err, &assignment) {
+		// AssignmentError also carries the identity and enrollment-credential
+		// denials. Classify those before the broad assignment family while
+		// retaining the safe closed-taxonomy code.
+		if errors.Is(err, qurl.ErrAssignmentIdentityRejected) ||
+			errors.Is(err, qurl.ErrAssignmentKeyRejected) ||
+			errors.Is(err, qurl.ErrAssignmentBootstrapConsumed) {
+			return diagnosticFailureIdentity, assignment.Code
+		}
 		return diagnosticFailureAssignment, assignment.Code
 	}
 	for _, sentinel := range []error{
 		qurl.ErrAssignmentIdentityRejected, qurl.ErrAssignmentKeyRejected,
+		qurl.ErrAssignmentBootstrapConsumed, qurl.ErrRecoveryCredentialRejected,
+		qurl.ErrCredentialRecoveryIdentityRejected,
 		qurl.ErrInvalidAgentState, qurl.ErrInsecureAgentStatePermissions,
 		qurl.ErrRegistrationInvalidInput, qurl.ErrKeyRejected,
 	} {

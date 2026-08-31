@@ -90,6 +90,9 @@ const (
 	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
 	hintConnectorSessionConfig = "Hint: update to the latest qURL CLI and sign in again. Do not add cloud or database settings, and do not edit the Connector state files."
 
+	msgConnectorRecoveryCredentialRejected  = "The qURL platform refused the account credential used to recover this registered device."
+	hintConnectorRecoveryCredentialRejected = "Hint: run `qurl login` with a current qURL API key, then retry. Do not delete or edit the local Connector state files."
+
 	// Native assigned-cell resource setup. These messages deliberately call
 	// the capability a Connector resource, distinct from enrollment and from
 	// the longer-lived cell assignment.
@@ -229,6 +232,8 @@ func CustomerMessages() []string {
 		hintConnectorHubConfig,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,
+		msgConnectorRecoveryCredentialRejected,
+		hintConnectorRecoveryCredentialRejected,
 		msgConnectorResourceInvalidRequest,
 		hintConnectorResourceInvalidRequest,
 		msgConnectorResourceUnavailable,

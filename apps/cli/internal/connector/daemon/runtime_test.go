@@ -536,3 +536,36 @@ func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) 
 		t.Fatalf("classification=%q/%q, want assignment with no public code", category, code)
 	}
 }
+
+func TestClassifyShareFailurePreservesIdentityTaxonomyCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code string
+	}{
+		{
+			name: "credential recovery",
+			err: errors.Join(
+				&qurl.CredentialRecoveryError{Code: "52401", Phase: "hub_issue_recovery"},
+				qurl.ErrRecoveryCredentialRejected,
+			),
+			code: "52401",
+		},
+		{
+			name: "assignment identity",
+			err: errors.Join(
+				&qurl.AssignmentError{Code: "52201"},
+				qurl.ErrAssignmentIdentityRejected,
+			),
+			code: "52201",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			category, code := classifyShareFailure(test.err)
+			if category != diagnosticFailureIdentity || code != test.code {
+				t.Fatalf("classification=%q/%q, want identity/%s", category, code, test.code)
+			}
+		})
+	}
+}
