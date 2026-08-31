@@ -470,13 +470,27 @@ func windowsSandboxLifecycle(t *testing.T, binary string, env map[string]string,
 	t.Helper()
 	result := runWindowsSandboxCLI(t, binary, env, "-o", "json", command, cridValue)
 	if result.err != nil {
-		t.Fatalf("Windows qurl %s: %v; stderr %q", command, result.err, result.stderr)
+		reason := readWindowsSandboxLocalStateReason(env[connectorstate.EnvStateDirPrimary])
+		t.Fatalf("Windows qurl %s: %v; stderr %q; closed daemon reason %s", command, result.err, result.stderr, reason)
 	}
 	var document windowsSandboxSharingDoc
 	if err := json.Unmarshal([]byte(result.stdout), &document); err != nil {
 		t.Fatalf("decode Windows qurl %s output: %v", command, err)
 	}
 	return document
+}
+
+func readWindowsSandboxLocalStateReason(stateDir string) string {
+	var logs strings.Builder
+	for _, name := range []string{"share-daemon.log", "share-daemon.err.log"} {
+		raw, err := os.ReadFile(filepath.Join(stateDir, "logs", name)) //nolint:gosec // Exact test-owned protected state path.
+		if err != nil {
+			continue
+		}
+		logs.Write(raw)
+		logs.WriteByte('\n')
+	}
+	return sandboxLocalStateReason(logs.String())
 }
 
 func validateWindowsSandboxSharingTransition(document windowsSandboxSharingDoc, desired, observed string, priorEpoch uint64) error { //nolint:gocritic // Keep validation on one immutable decoded snapshot.

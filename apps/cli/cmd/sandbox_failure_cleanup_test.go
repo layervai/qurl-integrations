@@ -37,6 +37,46 @@ type sandboxFailureDiagnostic struct {
 	Code     string
 }
 
+// sandboxLocalStateReason converts the daemon's private, redacted log text
+// into one closed test-only reason. The live journey may print the returned
+// value, but never the source line: paths, resource IDs, and deployment
+// endpoints in that line stay out of CI output.
+func sandboxLocalStateReason(logText string) string {
+	type marker struct {
+		text   string
+		reason string
+	}
+	markers := []marker{
+		{text: "native session operation journal is corrupt", reason: "operation_journal_corrupt"},
+		{text: "native session operation state conflict", reason: "operation_conflict"},
+		{text: "qurl: invalid native session operation", reason: "invalid_session_operation"},
+		{text: "qurl: agent binding persistence failed", reason: "agent_binding_persistence"},
+		{text: "qurl: native completion candidate durability is unknown", reason: "completion_persistence"},
+		{text: "qurl: agent state setup lock failed", reason: "agent_state_lock"},
+	}
+
+	lower := strings.ToLower(logText)
+	// A daemon can recover from an earlier reason before the command fails on
+	// a later one. Classify only the latest retry record so stale log history
+	// cannot be reported as the current cause.
+	const retryRecord = "share daemon session attempt failed; retrying"
+	if start := strings.LastIndex(lower, retryRecord); start >= 0 {
+		lower = lower[start:]
+		if end := strings.IndexByte(lower, '\n'); end >= 0 {
+			lower = lower[:end]
+		}
+	}
+	latestIndex := -1
+	reason := "unclassified_local_state"
+	for _, candidate := range markers {
+		if index := strings.LastIndex(lower, candidate.text); index > latestIndex {
+			latestIndex = index
+			reason = candidate.reason
+		}
+	}
+	return reason
+}
+
 type sandboxFailurePhase string
 
 const (
@@ -353,6 +393,59 @@ func TestSandboxFailureDiagnosticsAreAllowListedAndRedacted(t *testing.T) {
 			t.Fatalf("protected child-output validation = %q", err)
 		}
 	})
+}
+
+func TestSandboxLocalStateReasonIsClosedAndUsesLatestCause(t *testing.T) {
+	const privateDetail = `C:\Users\runner\private-state\native_session_operation.json cell0.private.example`
+	tests := []struct {
+		name string
+		log  string
+		want string
+	}{
+		{name: "journal", log: privateDetail + ": native session operation journal is corrupt", want: "operation_journal_corrupt"},
+		{name: "conflict", log: "NATIVE SESSION OPERATION STATE CONFLICT: " + privateDetail, want: "operation_conflict"},
+		{name: "invalid operation", log: "prepare: qurl: invalid native session operation: " + privateDetail, want: "invalid_session_operation"},
+		{name: "binding persistence", log: "qurl: agent binding persistence failed: " + privateDetail, want: "agent_binding_persistence"},
+		{name: "completion persistence", log: "qurl: native completion candidate durability is unknown: " + privateDetail, want: "completion_persistence"},
+		{name: "state lock", log: "qurl: agent state setup lock failed: " + privateDetail, want: "agent_state_lock"},
+		{name: "latest wins", log: "qurl: invalid native session operation then native session operation state conflict", want: "operation_conflict"},
+		{
+			name: "latest retry does not reuse stale reason",
+			log: "share daemon session attempt failed; retrying qurl: invalid native session operation\n" +
+				"share daemon session attempt failed; retrying arbitrary later cause",
+			want: "unclassified_local_state",
+		},
+		{name: "unknown", log: "arbitrary private failure: " + privateDetail, want: "unclassified_local_state"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := sandboxLocalStateReason(test.log)
+			if got != test.want {
+				t.Fatalf("sandboxLocalStateReason() = %q, want %q", got, test.want)
+			}
+			if strings.Contains(got, privateDetail) || strings.Contains(got, "runner") || strings.Contains(got, "private.example") {
+				t.Fatalf("closed local-state reason exposed private input: %q", got)
+			}
+		})
+	}
+}
+
+func TestSandboxLocalStateReasonDoesNotForwardHostileLogText(t *testing.T) {
+	hostile := strings.Join([]string{
+		"lv_live_secret-that-must-not-escape",
+		"::error title=forged::forged workflow command",
+		"\x1b[31mterminal-control\x1b[0m",
+		`C:\Users\runner\private-state cell0.private.example`,
+	}, "\n")
+	got := sandboxLocalStateReason(hostile + "\nqurl: invalid native session operation: " + hostile)
+	if got != "invalid_session_operation" {
+		t.Fatalf("hostile local-state reason = %q, want closed invalid_session_operation", got)
+	}
+	for _, forbidden := range []string{"lv_live_", "::error", "\x1b", "runner", "private.example"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("closed local-state reason exposed hostile fragment %q: %q", forbidden, got)
+		}
+	}
 }
 
 func sandboxFailureChildEnvironment(overrides map[string]string) []string {
