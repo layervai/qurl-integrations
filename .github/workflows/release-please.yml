@@ -456,6 +456,7 @@ jobs:
             echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
             exit 1
           fi
+          # GoReleaser injects its v-stripped .Version into native archives.
           reported_version=$("$native_binary" version | awk 'NR == 1 { print $3 }')
           if [[ "$reported_version" != "$release_version" ]]; then
             echo "::error::Linux release archive reports ${reported_version}, want ${release_version}" >&2
@@ -698,6 +699,7 @@ jobs:
           brew install --cask "$token"
           installed="$(command -v qurl)"
           [[ -x "$installed" ]]
+          # GoReleaser injects its v-stripped .Version into native archives.
           reported_version=$("$installed" version | awk 'NR == 1 { print $3 }')
           [[ "$reported_version" == "$release_version" ]] || {
             echo "::error::Homebrew-installed CLI reports ${reported_version}, want ${release_version}" >&2
@@ -755,9 +757,13 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $extracted -ErrorAction Stop
           $binary = Join-Path $extracted 'qurl.exe'
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Windows release archive has no qurl.exe' }
-          $versionLine = (& $binary version | Select-Object -First 1)
-          if ($LASTEXITCODE -ne 0 -or -not $versionLine) {
-            throw 'Windows release archive reports the wrong version'
+          $versionOutput = & $binary version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release archive qurl version exited $LASTEXITCODE"
+          }
+          $versionLine = $versionOutput | Select-Object -First 1
+          if (-not $versionLine) {
+            throw 'Windows release archive printed no version line'
           }
           $versionFields = $versionLine.Trim() -split '\s+'
           if ($versionFields.Count -lt 3 -or $versionFields[2] -cne $releaseVersion) {
@@ -787,6 +793,13 @@ jobs:
       QURL_IMAGE_DIGEST: ${{ needs.release-cli.outputs.qurl_image_digest }}
       QURL_IMAGE_ALREADY_TAGGED: ${{ needs.release-cli.outputs.qurl_image_already_tagged }}
     steps:
+      - name: Require the canonical release branch
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::CLI publication must run from refs/heads/main, got ${GITHUB_REF}" >&2
+            exit 1
+          }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.CLI_TAG }}

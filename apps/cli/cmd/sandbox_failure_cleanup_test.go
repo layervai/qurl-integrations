@@ -33,6 +33,7 @@ const (
 	sandboxFailureLoginExitMarker          = "QURL_CONTROLLED_FAILURE_LOGIN_EXIT"
 	sandboxFailureLoginExitTimeout         = "timeout"
 	sandboxFailureLoginExitUnknown         = "unknown"
+	sandboxLocalStateUnclassified          = "unclassified_local_state"
 	sandboxFailureChildTimeout             = 3 * time.Minute
 	sandboxFailureDaemonStopTimeout        = 15 * time.Second
 )
@@ -73,7 +74,7 @@ func sandboxLocalStateReason(logText string) string {
 	if start := strings.LastIndex(lower, retryRecord); start >= 0 {
 		lower = lower[start:]
 	}
-	reason := "unclassified_local_state"
+	reason := sandboxLocalStateUnclassified
 	for _, line := range strings.Split(lower, "\n") {
 		firstIndex := len(line)
 		lineReason := ""
@@ -146,7 +147,10 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	if err != nil {
 		t.Fatalf("resolve trusted customer-journey harness: %v", err)
 	}
-	root := t.TempDir()
+	root, err := canonicalSandboxFailureRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve canonical controlled-failure state root: %v", err)
+	}
 	stateDir := filepath.Join(root, "failure-state")
 	if err := connectorstate.EnsureDirMode(stateDir); err != nil {
 		t.Fatalf("create controlled-failure state directory: %v", err)
@@ -181,6 +185,36 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	}
 	assertSandboxFailureLocalCleanup(t, stateDir, crid)
 	return crid
+}
+
+func canonicalSandboxFailureRoot(root string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {
+		return "", errors.New("controlled-failure state root resolved to a noncanonical path")
+	}
+	return resolved, nil
+}
+
+func TestCanonicalSandboxFailureRootResolvesAlias(t *testing.T) {
+	target := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "state-root-alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("create state-root alias: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := canonicalSandboxFailureRoot(alias)
+	if err != nil {
+		t.Fatalf("canonicalSandboxFailureRoot() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("canonicalSandboxFailureRoot() = %q, want %q", got, want)
+	}
 }
 
 func requireSandboxFailureCredentials(t *testing.T) (primaryAPIKey, failureAPIKey string) {
@@ -489,9 +523,9 @@ func TestSandboxLocalStateReasonIsClosedAndUsesLatestCause(t *testing.T) {
 			name: "latest retry does not reuse stale reason",
 			log: "share daemon session attempt failed; retrying qurl: invalid native session operation\n" +
 				"share daemon session attempt failed; retrying arbitrary later cause",
-			want: "unclassified_local_state",
+			want: sandboxLocalStateUnclassified,
 		},
-		{name: "unknown", log: "arbitrary private failure: " + privateDetail, want: "unclassified_local_state"},
+		{name: "unknown", log: "arbitrary private failure: " + privateDetail, want: sandboxLocalStateUnclassified},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

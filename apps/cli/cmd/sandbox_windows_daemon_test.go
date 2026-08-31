@@ -482,16 +482,34 @@ func windowsSandboxLifecycle(t *testing.T, binary string, env map[string]string,
 }
 
 func readWindowsSandboxLocalStateReason(stateDir string) string {
-	var logs strings.Builder
+	reason := sandboxLocalStateUnclassified
 	for _, name := range []string{"share-daemon.log", "share-daemon.err.log"} {
 		raw, err := os.ReadFile(filepath.Join(stateDir, "logs", name)) //nolint:gosec // Exact test-owned protected state path.
 		if err != nil {
 			continue
 		}
-		logs.Write(raw)
-		logs.WriteByte('\n')
+		if candidate := sandboxLocalStateReason(string(raw)); candidate != sandboxLocalStateUnclassified {
+			reason = candidate
+		}
 	}
-	return sandboxLocalStateReason(logs.String())
+	return reason
+}
+
+func TestReadWindowsSandboxLocalStateReasonKeepsClassifiedPrimaryLog(t *testing.T) {
+	stateDir := t.TempDir()
+	logsDir := filepath.Join(stateDir, "logs")
+	if err := os.Mkdir(logsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logsDir, "share-daemon.log"), []byte("qurl: agent state setup lock failed: private detail\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logsDir, "share-daemon.err.log"), []byte("share daemon session attempt failed; retrying unrelated cause\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readWindowsSandboxLocalStateReason(stateDir); got != "agent_state_lock" {
+		t.Fatalf("readWindowsSandboxLocalStateReason() = %q, want agent_state_lock", got)
+	}
 }
 
 func validateWindowsSandboxSharingTransition(document windowsSandboxSharingDoc, desired, observed string, priorEpoch uint64) error { //nolint:gocritic // Keep validation on one immutable decoded snapshot.

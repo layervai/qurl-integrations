@@ -299,7 +299,7 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	// the generic 503 posture. Server-controlled detail must not be repeated.
 	stopped := fmt.Errorf("%w: %w", qurl.ErrTemporaryAccessLinksDisabled, &qurlapi.Error{
 		StatusCode: http.StatusServiceUnavailable,
-		Code:       "connector_stopped",
+		Code:       "CoNnEcToR_StOpPeD",
 		Title:      "Connector Stopped",
 		Detail:     "internal sandbox cell us-secret-1 uses credential lv_live_NEVER_PRINT_THIS",
 	})

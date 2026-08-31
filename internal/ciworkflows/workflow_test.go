@@ -1244,6 +1244,9 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		t.Fatal("Windows release archive validation is not exact and fail closed")
 	}
 	if !strings.Contains(windows.Run, "qurl_${releaseVersion}_windows_amd64.zip") ||
+		!strings.Contains(windows.Run, "$versionOutput = & $binary version") ||
+		!strings.Contains(windows.Run, "$versionLine = $versionOutput | Select-Object -First 1") ||
+		strings.Contains(windows.Run, "(& $binary version | Select-Object -First 1)") ||
 		!strings.Contains(windows.Run, "$versionFields[2] -cne $releaseVersion") ||
 		!strings.Contains(windows.Run, "$env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' '") ||
 		!strings.Contains(windows.Run, "& $binary $command --help") {
@@ -1254,7 +1257,11 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	}
 
 	promoteImage := publisherSteps["Sign and promote the tested qurl image"]
+	publisherBranch := publisherSteps["Require the canonical release branch"]
 	releasePublish := publisherSteps["Publish the verified CLI release"]
+	if publisherBranch == nil || !strings.Contains(publisherBranch.Run, `[ "$GITHUB_REF" = refs/heads/main ]`) {
+		t.Error("post-validation publisher does not fail closed outside refs/heads/main")
+	}
 	if releasePublish == nil || !strings.Contains(releasePublish.Run, "--draft=false --verify-tag") {
 		t.Error("GitHub Release publication is not behind the Homebrew validator")
 	}
