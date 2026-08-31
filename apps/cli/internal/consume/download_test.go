@@ -300,6 +300,39 @@ func TestDownloadExpiredGrantMintsOneFreshTarget(t *testing.T) {
 	}
 }
 
+func TestDownloadGrantExpiryDuringPropagationMintsOneFreshTarget(t *testing.T) {
+	payload := []byte("fresh after retained grant expired")
+	host := newDownloadHost(t, payload, http.StatusGone, http.StatusGone, 0)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			validUntil := now.Add(time.Minute)
+			if mints == 1 {
+				validUntil = now.Add(150 * time.Millisecond)
+			}
+			return DownloadTarget{URL: host.URL, ValidUntil: validUntil}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if got := out.String(); got != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+	if mints != 2 || host.hits.Load() != 3 {
+		t.Errorf("mints = %d, GETs = %d; want 2 and 3", mints, host.hits.Load())
+	}
+}
+
 func TestSaveToNonExpiryStatusDoesNotRetry(t *testing.T) {
 	host := newDownloadHost(t, []byte("never"), http.StatusInternalServerError)
 	dest := filepath.Join(t.TempDir(), "out.bin")
