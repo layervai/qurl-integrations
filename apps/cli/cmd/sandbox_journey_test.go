@@ -654,7 +654,12 @@ func sameJourneyTargetURL(got, want string) bool {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return "", false
 		}
-		if parsed.Path == "" {
+		// The empty-path fold is only defined for schemes with an authority
+		// and a hierarchical path, so it stays scoped to the two the CLI
+		// publishes. Host case and default ports are deliberately NOT folded:
+		// the service does not canonicalize them today, and an assertion
+		// should stay strict about differences it has no evidence are benign.
+		if parsed.Path == "" && (parsed.Scheme == httpURLScheme || parsed.Scheme == httpsURLScheme) {
 			parsed.Path = "/"
 			parsed.RawPath = ""
 		}

@@ -5,14 +5,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -69,23 +72,23 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	// that output is validated or reported. A child that both leaked a secret
 	// and stopped early has to fail as a leak, and the diagnostic below must
 	// never be the thing that prints one.
-	for _, secret := range []string{
-		primaryAPIKey,
-		failureAPIKey,
-		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
-		strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY")),
-	} {
+	for _, secret := range sandboxProtectedChildValues(t, primaryAPIKey, failureAPIKey) {
 		if secret != "" && strings.Contains(combined, secret) {
 			t.Fatal("controlled-failure child exposed a protected credential")
 		}
 	}
+	redactor := sandboxChildOutputRedactor()
 	if err := validateSandboxFailureChildExit(runErr, combined, childTestName); err != nil {
 		t.Fatalf("controlled-failure child result: %v\ncontrolled-failure child output:\n%s",
-			err, boundedSandboxChildOutput(combined))
+			err, boundedSandboxChildOutput(combined, redactor))
 	}
 	crid, err := sandboxFailureCleanedCRID(combined)
 	if err != nil {
-		t.Fatalf("controlled-failure cleanup marker: %v", err)
+		// The child reached its controlled failure but never published a
+		// clean cleanup marker. That is the same blindness the excerpt above
+		// exists to remove, so report it the same way.
+		t.Fatalf("controlled-failure cleanup marker: %v\ncontrolled-failure child output:\n%s",
+			err, boundedSandboxChildOutput(combined, redactor))
 	}
 	assertSandboxFailureLocalCleanup(t, stateDir, crid)
 	return crid
@@ -102,6 +105,44 @@ func requireSandboxFailureCredentials(t *testing.T) (primaryAPIKey, failureAPIKe
 		t.Fatal("controlled-failure and primary enrollment keys must be distinct")
 	}
 	return primaryAPIKey, failureAPIKey
+}
+
+// sandboxProtectedValueMinBytes is the shortest needle worth scanning for. A
+// one- or two-character value matches ordinary output and would report a leak
+// that never happened, so a degenerate secret is skipped instead.
+const sandboxProtectedValueMinBytes = 16
+
+// sandboxProtectedChildValues is every statically known secret the child must
+// keep out of its own output. The qv2 issuer key needs more than one form: it
+// arrives as "<kid>=<standard-base64 key>", journeyDeploymentFile re-encodes
+// that same key material base64url into the SDK settings file the child reads,
+// and either the whole string or the key half alone can surface on its own.
+func sandboxProtectedChildValues(t *testing.T, primaryAPIKey, failureAPIKey string) []string {
+	t.Helper()
+	values := []string{
+		primaryAPIKey,
+		failureAPIKey,
+		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
+	}
+	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
+	if issuerKey == "" {
+		return values
+	}
+	values = append(values, issuerKey)
+	_, keyStd, ok := strings.Cut(issuerKey, "=")
+	keyStd = strings.TrimSpace(keyStd)
+	if !ok || len(keyStd) < sandboxProtectedValueMinBytes {
+		return values
+	}
+	values = append(values, keyStd)
+	der, err := base64.StdEncoding.DecodeString(keyStd)
+	if err != nil {
+		return values
+	}
+	if keyURL := base64.RawURLEncoding.EncodeToString(der); len(keyURL) >= sandboxProtectedValueMinBytes {
+		values = append(values, keyURL)
+	}
+	return values
 }
 
 func TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey(t *testing.T) {
@@ -150,12 +191,48 @@ func sandboxFailureChildCredentialOverrides(failureAPIKey string) map[string]str
 
 const sandboxFailureChildOutputTailBytes = 8 << 10
 
+// sandboxChildOutputRedactor masks the protected identifiers a failing child
+// routinely embeds in transport errors. The exact-value scan in
+// runSandboxFailureChild can only prove the absence of credentials it knows
+// statically; the sandbox hostname and relay URL are deliberately not public
+// either, and a request URL carries them into the log verbatim. Failing on
+// those would be wrong — they appear in routine output — so they are redacted
+// rather than treated as a leak.
+func sandboxChildOutputRedactor() *strings.Replacer {
+	var pairs []string
+	for placeholder, raw := range map[string]string{
+		"<sandbox-endpoint>": os.Getenv("QURL_ENDPOINT"),
+		"<sandbox-relay>":    os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"),
+	} {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		pairs = append(pairs, value, placeholder)
+		if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+			pairs = append(pairs, parsed.Host, placeholder)
+			if hostname := parsed.Hostname(); hostname != "" && hostname != parsed.Host {
+				pairs = append(pairs, hostname, placeholder)
+			}
+		}
+	}
+	if len(pairs) == 0 {
+		return strings.NewReplacer()
+	}
+	return strings.NewReplacer(pairs...)
+}
+
 // boundedSandboxChildOutput returns the tail of the child's already
-// leak-checked output. The parent reports it whenever the child stopped before
-// the controlled failure, because the child's own reason is otherwise
-// discarded — which leaves the packaged journey debuggable only by guessing.
-// The tail is cut at a line boundary so the excerpt is never a partial rune.
-func boundedSandboxChildOutput(combined string) string {
+// leak-checked output, with the protected host identifiers redacted. The
+// parent reports it whenever the child stopped before the controlled failure,
+// because the child's own reason is otherwise discarded — which leaves the
+// packaged journey debuggable only by guessing. A truncated tail is cut at a
+// line boundary when the excerpt contains one, and otherwise has any partial
+// leading rune dropped, so the excerpt is always valid UTF-8.
+func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) string {
+	if redactor != nil {
+		combined = redactor.Replace(combined)
+	}
 	trimmed := strings.TrimRight(combined, "\n")
 	if strings.TrimSpace(trimmed) == "" {
 		return "(the controlled-failure child produced no output)"
@@ -165,9 +242,9 @@ func boundedSandboxChildOutput(combined string) string {
 	}
 	tail := trimmed[len(trimmed)-sandboxFailureChildOutputTailBytes:]
 	if index := strings.IndexByte(tail, '\n'); index >= 0 {
-		tail = tail[index+1:]
+		return "(truncated to the last lines)\n" + tail[index+1:]
 	}
-	return "(truncated to the last lines)\n" + tail
+	return "(truncated to the last bytes)\n" + strings.ToValidUTF8(tail, "")
 }
 
 func validateSandboxFailureChildExit(runErr error, output, childTestName string) error {
@@ -310,4 +387,85 @@ func assertSandboxFailureLocalCleanup(t *testing.T, stateDir, crid string) {
 	if err := waitSandboxFailureDaemonStopped(stateDir, time.Second); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8 covers every branch of
+// the diagnostic the parent prints when the controlled-failure child stops
+// early. That excerpt only ever runs on the live push-only lane, and only once
+// the child has already failed, so a defect in it would surface exactly when
+// the diagnostic is needed most — and as a confusing excerpt rather than a
+// test failure.
+func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
+	t.Run("no output", func(t *testing.T) {
+		for _, empty := range []string{"", "\n\n", "   \n"} {
+			if got := boundedSandboxChildOutput(empty, nil); got != "(the controlled-failure child produced no output)" {
+				t.Fatalf("boundedSandboxChildOutput(%q) = %q", empty, got)
+			}
+		}
+	})
+	t.Run("under budget is verbatim", func(t *testing.T) {
+		if got := boundedSandboxChildOutput("first\nsecond\n", nil); got != "first\nsecond" {
+			t.Fatalf("boundedSandboxChildOutput = %q, want the trimmed original", got)
+		}
+	})
+	t.Run("truncates at a line boundary", func(t *testing.T) {
+		got := boundedSandboxChildOutput(strings.Repeat("filler line\n", 2000)+"last line", nil)
+		if !strings.HasPrefix(got, "(truncated to the last lines)\n") {
+			t.Fatalf("truncated excerpt lost its label: %q", got[:min(60, len(got))])
+		}
+		if !strings.HasSuffix(got, "last line") || strings.Contains(got, "\nfiller line\nfiller") == false {
+			t.Fatalf("truncated excerpt did not keep the tail: %q", got[len(got)-40:])
+		}
+		if body := strings.TrimPrefix(got, "(truncated to the last lines)\n"); !strings.HasPrefix(body, "filler line") {
+			t.Fatalf("excerpt did not resume at a line boundary: %q", body[:min(40, len(body))])
+		}
+	})
+	t.Run("single long line stays valid UTF-8", func(t *testing.T) {
+		// The tail budget is a fixed byte count, so a 2-byte rune can never
+		// be cut mid-way: the cut offset and every rune start share the same
+		// parity, and the excerpt comes out accidentally valid. "…" is three
+		// bytes, which breaks that alignment. The assertion below pins it, so
+		// this case cannot silently go vacuous if the budget changes.
+		// No newline anywhere, so the line-boundary path cannot apply.
+		oneLongLine := strings.Repeat("…", 4096)
+		cut := len(oneLongLine) - sandboxFailureChildOutputTailBytes
+		if cut <= 0 || utf8.RuneStart(oneLongLine[cut]) {
+			t.Fatalf("fixture does not cut mid-rune at offset %d; this case would prove nothing", cut)
+		}
+		got := boundedSandboxChildOutput(oneLongLine, nil)
+		if !strings.HasPrefix(got, "(truncated to the last bytes)\n") {
+			t.Fatalf("no-newline excerpt lost its label: %q", got[:min(60, len(got))])
+		}
+		if !utf8.ValidString(got) {
+			t.Fatal("no-newline excerpt is not valid UTF-8")
+		}
+	})
+	t.Run("redacts protected identifiers", func(t *testing.T) {
+		t.Setenv("QURL_ENDPOINT", "https://sandbox-host.example.invalid")
+		t.Setenv("QURL_SANDBOX_QV2_RELAY_URL", "https://relay-host.example.invalid/relay")
+		redactor := sandboxChildOutputRedactor()
+		got := boundedSandboxChildOutput(
+			`Post "https://sandbox-host.example.invalid/v1/resources": dial relay-host.example.invalid: refused`,
+			redactor,
+		)
+		for _, secret := range []string{"sandbox-host.example.invalid", "relay-host.example.invalid"} {
+			if strings.Contains(got, secret) {
+				t.Fatalf("excerpt still exposes %q: %q", secret, got)
+			}
+		}
+		if !strings.Contains(got, "<sandbox-endpoint>") || !strings.Contains(got, "<sandbox-relay>") {
+			t.Fatalf("excerpt lost its redaction placeholders: %q", got)
+		}
+		if !strings.Contains(got, "refused") {
+			t.Fatalf("redaction destroyed the diagnostic: %q", got)
+		}
+	})
+	t.Run("absent identifiers redact nothing", func(t *testing.T) {
+		t.Setenv("QURL_ENDPOINT", "")
+		t.Setenv("QURL_SANDBOX_QV2_RELAY_URL", "")
+		const line = "plain child failure"
+		if got := boundedSandboxChildOutput(line, sandboxChildOutputRedactor()); got != line {
+			t.Fatalf("boundedSandboxChildOutput = %q, want %q", got, line)
+		}
+	})
 }

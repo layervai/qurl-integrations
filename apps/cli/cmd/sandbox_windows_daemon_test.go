@@ -596,7 +596,12 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		if err := json.Unmarshal([]byte(result.stdout), &status); err != nil {
 			t.Fatalf("decode Windows remote %s output: %v", command, err)
 		}
-		if status.CRID != resource.CRID || status.ResourceID != resource.ResourceID || status.TargetURL != target ||
+		// Compare the service's echo against the publish echo, matching
+		// assertRemoteStatusAndInspect on the POSIX lane. status and inspect
+		// return the same canonical target publish already returned, so the
+		// requested string is not the right side of this comparison.
+		if status.CRID != resource.CRID || status.ResourceID != resource.ResourceID ||
+			status.TargetURL != resource.TargetURL ||
 			status.Type != "url" || status.Status != "active" {
 			t.Fatalf("Windows remote %s = %+v, want active URL %+v", command, status, resource)
 		}
