@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -631,11 +632,31 @@ func TestGetDownloadErrorDoesNotExposeGrantedURL(t *testing.T) {
 			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
 		},
 	})
-	if res.code != exitcode.Unavailable {
-		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
+	if res.code != exitcode.ServerError {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.ServerError, res.stderr.String())
 	}
 	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), capability) {
 		t.Fatalf("rendered error exposed granted authority: %q", res.stderr.String())
+	}
+}
+
+func TestGetDownloadTransportErrorIsRedactedAndUnavailable(t *testing.T) {
+	srv, _ := portalServer(t)
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	secretURL := closed.URL + "/capability-secret"
+	closed.Close()
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "out.bin")},
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != exitcode.Unavailable {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), "capability-secret") {
+		t.Fatalf("rendered transport error exposed granted authority: %q", res.stderr.String())
 	}
 }
 

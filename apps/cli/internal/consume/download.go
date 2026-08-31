@@ -293,7 +293,7 @@ func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response
 	if err != nil {
 		// URL parsing errors can echo link. Granted URLs carry short-lived
 		// authority, so keep the same fixed capability boundary as Do below.
-		return nil, fmt.Errorf("%w: invalid download link", ErrLinkUnavailable)
+		return nil, fmt.Errorf("%w: invalid download link", ErrLinkFetch)
 	}
 	if d.Client == nil {
 		// Lazy-init once and keep it: the expiry retry must reach the same
