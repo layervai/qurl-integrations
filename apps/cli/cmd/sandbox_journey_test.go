@@ -645,6 +645,13 @@ func reclaimSandboxResource(t *testing.T, cliEnv map[string]string, id string) {
 // forms rather than the raw bytes it happened to send, so a cosmetic
 // canonicalization cannot masquerade as the service resolving the wrong
 // target.
+//
+// TODO(upstream-contract): this mirrors two qurl-service behaviors — that it
+// DOES fold an empty path to "/", and that it does NOT fold host case or the
+// default port. The "host case" and "default port" cases in
+// TestSameJourneyTargetURLAcceptsServiceCanonicalForm are the tripwire: if
+// the service starts folding either, they fail with an obvious diff instead
+// of presenting as another red journey with a one-character symptom.
 func sameJourneyTargetURL(got, want string) bool {
 	normalized := func(raw string) (string, bool) {
 		if strings.TrimSpace(raw) == "" {
@@ -679,11 +686,18 @@ func TestSameJourneyTargetURLAcceptsServiceCanonicalForm(t *testing.T) {
 	equivalent := map[string]string{
 		"canonicalized empty path": "https://example.com?qurl-private-sandbox-device-journey=17881886511",
 		"exact echo":               requested,
+		// The reverse direction: both sides are normalized, so the fold is
+		// symmetric by construction. Pinned rather than inferred.
+		"requested without the slash": "https://example.com?qurl-private-sandbox-device-journey=17881886511",
 	}
 	for name, echoed := range equivalent {
 		t.Run(name, func(t *testing.T) {
 			if !sameJourneyTargetURL(echoed, requested) {
 				t.Fatalf("sameJourneyTargetURL(%q, %q) = false, want true", echoed, requested)
+			}
+			// Symmetric by construction: both sides are normalized.
+			if !sameJourneyTargetURL(requested, echoed) {
+				t.Fatalf("sameJourneyTargetURL(%q, %q) = false, want true", requested, echoed)
 			}
 		})
 	}

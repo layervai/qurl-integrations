@@ -124,6 +124,9 @@ const sandboxProtectedValueMinBytes = 16
 // and either the whole string or the key half alone can surface on its own.
 func sandboxProtectedChildValues(t *testing.T, primaryAPIKey, failureAPIKey string) []string {
 	t.Helper()
+	// Read with a bare Getenv to match sandboxJourneyEnv, which is the only
+	// provisioning path for this input. If it ever moves to sandboxSecret's
+	// _FILE indirection, this degrades to scanning for nothing — silently.
 	issuerForms := qv2IssuerKeyForms(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
 	values := make([]string, 0, 3+len(issuerForms))
 	values = append(values, primaryAPIKey, failureAPIKey, sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"))
@@ -203,12 +206,37 @@ func sandboxFailureChildCredentialOverrides(failureAPIKey string) map[string]str
 
 const sandboxFailureChildOutputTailBytes = 8 << 10
 
-// sandboxCredentialFragmentPattern matches the credential a minted qURL link
-// carries after "#". The journey never logs one deliberately, but the child's
-// excerpt is a raw slab of its output rather than a curated message, so the
-// fragment is scrubbed structurally instead of by enumerating values the
-// parent cannot know.
-var sandboxCredentialFragmentPattern = regexp.MustCompile(`#[A-Za-z0-9_\-]{16,}={0,2}`)
+// sandboxRuntimeCredentialPatterns removes the credentials the child mints at
+// runtime, which no exact-value scan can cover because the parent never sees
+// them. Each is matched structurally, by shape:
+//
+//   - A minted qURL link's fragment. qv2.ParseFragment defines it as four
+//     dot-separated parts, "qv2.<claims>.<secret>.<sig>", so the dots are part
+//     of the credential — a word-character-only class would mask "qv2" and
+//     print the secret and signature in the clear.
+//   - A qURL API key or one-shot enrollment token ("lv_live_"/"lv_test_").
+//   - A JWT, which is the shape the cleanup and enrollment paths return.
+//
+// TODO(upstream-contract): keep the fragment shape in lockstep with qurl-go's
+// qv2.ParseFragment and the key prefixes with qurl-service's credential
+// grammar. A change upstream degrades this to a partial mask, which reads as
+// redacted while still leaking material.
+var sandboxRuntimeCredentialPatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`#[A-Za-z0-9_\-.~%]{16,}={0,2}`), "#<redacted>"},
+	{regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9_\-]{8,}={0,2}`), "lv_<redacted>"},
+	{regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+`), "<redacted-jwt>"},
+}
+
+// scrubSandboxRuntimeCredentials applies every shape above.
+func scrubSandboxRuntimeCredentials(text string) string {
+	for _, rule := range sandboxRuntimeCredentialPatterns {
+		text = rule.pattern.ReplaceAllString(text, rule.replacement)
+	}
+	return text
+}
 
 // sandboxChildOutputRedactor masks the protected identifiers a failing child
 // routinely embeds in transport errors. The exact-value scan in
@@ -263,7 +291,7 @@ func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) stri
 	if redactor != nil {
 		combined = redactor.Replace(combined)
 	}
-	combined = sandboxCredentialFragmentPattern.ReplaceAllString(combined, "#<redacted>")
+	combined = scrubSandboxRuntimeCredentials(combined)
 	trimmed := strings.ToValidUTF8(strings.TrimRight(combined, "\n"), "")
 	if strings.TrimSpace(trimmed) == "" {
 		return "(the controlled-failure child produced no output)"
@@ -275,7 +303,7 @@ func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) stri
 	// Resume at a line boundary, but not when the first newline sits so late
 	// that the excerpt would be nearly empty — which is exactly the one-huge-
 	// line case where the tail matters most.
-	if index := strings.IndexByte(tail, '\n'); index >= 0 && len(tail)-index > sandboxFailureChildOutputTailBytes/2 {
+	if index := strings.IndexByte(tail, '\n'); index >= 0 && index < sandboxFailureChildOutputTailBytes/2 {
 		return "(truncated to the last lines)\n" + tail[index+1:]
 	}
 	return "(truncated to the last bytes)\n" + strings.ToValidUTF8(tail, "")
@@ -475,14 +503,18 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 		}
 	})
 	t.Run("redacts protected identifiers", func(t *testing.T) {
+		clearSandboxRedactedEnv(t)
 		t.Setenv("QURL_ENDPOINT", "https://sandbox-host.example.invalid")
-		t.Setenv("QURL_SANDBOX_QV2_RELAY_URL", "https://relay-host.example.invalid/relay")
+		// Port-bearing on purpose: a transport error prints the bare hostname
+		// in some places and host:port in others, so both forms must go.
+		t.Setenv("QURL_SANDBOX_QV2_RELAY_URL", "https://relay-host.example.invalid:8443/relay")
 		redactor := sandboxChildOutputRedactor()
 		got := boundedSandboxChildOutput(
-			`Post "https://sandbox-host.example.invalid/v1/resources": dial relay-host.example.invalid: refused`,
+			`Post "https://sandbox-host.example.invalid/v1/resources": dial relay-host.example.invalid:8443 `+
+				`(resolved relay-host.example.invalid): refused`,
 			redactor,
 		)
-		for _, secret := range []string{"sandbox-host.example.invalid", "relay-host.example.invalid"} {
+		for _, secret := range []string{"sandbox-host.example.invalid", "relay-host.example.invalid:8443", "relay-host.example.invalid"} {
 			if strings.Contains(got, secret) {
 				t.Fatalf("excerpt still exposes %q: %q", secret, got)
 			}
@@ -494,17 +526,30 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 			t.Fatalf("redaction destroyed the diagnostic: %q", got)
 		}
 	})
-	t.Run("scrubs minted link credentials", func(t *testing.T) {
-		// A minted link carries a live credential in its fragment. The parent
-		// cannot enumerate one — the child mints it at runtime — so it is
-		// removed structurally rather than by exact-value scan.
+	t.Run("scrubs runtime-minted credentials", func(t *testing.T) {
+		// These are the exact shapes the child mints at runtime, which no
+		// exact-value scan can cover. The fragment fixture uses qv2's real
+		// four-part "qv2.<claims>.<secret>.<sig>" grammar on purpose: a
+		// single-run fixture would pass against a word-character-only class
+		// that leaves the secret and signature in the clear.
+		const (
+			secret = "c2VjcmV0LW1hdGVyaWFsLXg"
+			sig    = "c2lnbmF0dXJlLW1hdGVyaWFs"
+			apiKey = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+			jwt    = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjbGVhbnVwIn0.c2lnbmF0dXJl"
+		)
+		fragment := "#qv2.Y2xhaW1zLW1hdGVyaWFs." + secret + "." + sig
 		got := boundedSandboxChildOutput(
-			"resolve failed for https://example.invalid/abc#Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5 after 3 tries", nil)
-		if strings.Contains(got, "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5") {
-			t.Fatalf("excerpt still exposes a minted link credential: %q", got)
+			"resolve https://example.invalid/abc"+fragment+" with "+apiKey+" and "+jwt+" after 3 tries", nil)
+		for _, leaked := range []string{secret, sig, apiKey, jwt, "Y2xhaW1zLW1hdGVyaWFs"} {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("excerpt still exposes runtime credential material %q: %q", leaked, got)
+			}
 		}
-		if !strings.Contains(got, "#<redacted>") || !strings.Contains(got, "after 3 tries") {
-			t.Fatalf("fragment scrub lost the diagnostic: %q", got)
+		for _, want := range []string{"#<redacted>", "lv_<redacted>", "<redacted-jwt>", "after 3 tries"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("scrub lost %q from the diagnostic: %q", want, got)
+			}
 		}
 	})
 	t.Run("keeps short fragments that are not credentials", func(t *testing.T) {
@@ -514,8 +559,10 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 		}
 	})
 	t.Run("absent identifiers redact nothing", func(t *testing.T) {
-		t.Setenv("QURL_ENDPOINT", "")
-		t.Setenv("QURL_SANDBOX_QV2_RELAY_URL", "")
+		// Clear all five, not just two: on the armed lane the Hub values are
+		// set, and this subtest would otherwise pass only because the fixture
+		// happens not to contain one.
+		clearSandboxRedactedEnv(t)
 		const line = "plain child failure"
 		if got := boundedSandboxChildOutput(line, sandboxChildOutputRedactor()); got != line {
 			t.Fatalf("boundedSandboxChildOutput = %q, want %q", got, line)
@@ -570,4 +617,17 @@ func TestQV2IssuerKeyFormsCoversEveryEncoding(t *testing.T) {
 			}
 		}
 	})
+}
+
+// clearSandboxRedactedEnv empties every input sandboxChildOutputRedactor
+// reads, so a subtest asserting redaction behavior controls all of them
+// rather than inheriting whatever the armed lane provisioned.
+func clearSandboxRedactedEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"QURL_ENDPOINT", "QURL_SANDBOX_QV2_RELAY_URL",
+		hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey,
+	} {
+		t.Setenv(name, "")
+	}
 }
