@@ -253,9 +253,14 @@ var sandboxRuntimeCredentialPatterns = []struct {
 	pattern     *regexp.Regexp
 	replacement string
 }{
-	{regexp.MustCompile(`#[A-Za-z0-9_\-.~%]{16,}={0,2}`), "#<redacted>"},
-	{regexp.MustCompile(`lv_(?:live|test)_[A-Za-z0-9_\-]{8,}={0,2}`), "lv_<redacted>"},
-	{regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+`), "<redacted-jwt>"},
+	// Each rule runs to the end of the TOKEN, not to the end of a character
+	// class. A class-bounded match stops at the first out-of-class byte — a
+	// "+" or "/" from standard rather than URL-safe base64, say — masking the
+	// prefix and printing the remainder, which reads as redacted while still
+	// leaking material.
+	{regexp.MustCompile(`#[^\s"'<>]{16,}`), "#<redacted>"},
+	{regexp.MustCompile(`lv_(?:live|test)_[^\s"'<>]{8,}`), "lv_<redacted>"},
+	{regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{8,}\.[^\s"'<>]+`), "<redacted-jwt>"},
 }
 
 // scrubSandboxRuntimeCredentials applies every shape above.
@@ -317,18 +322,6 @@ func sandboxChildOutputRedactor() *strings.Replacer {
 // secret on their own; the rule excludes them rather than protecting them.
 const sandboxRedactedValueMinBytes = 8
 
-// boundedSandboxChildOutput returns the tail of the child's already
-// leak-checked output, with the protected identifiers redacted and any minted
-// link credential scrubbed. The parent reports it whenever the child stopped
-// before the controlled failure, because the child's own reason is otherwise
-// discarded — which leaves the packaged journey debuggable only by guessing.
-// The result is always valid UTF-8, including when the child itself wrote
-// invalid bytes, because go test -json carries this text.
-//
-// The ordering is load-bearing: the WHOLE buffer is redacted and scrubbed
-// before the tail is sliced. Truncating first would let a credential
-// straddling the cut print its tail in the clear, and a partial value would
-// not match the replacer. Do not "optimize" this by scrubbing only the tail.
 // safeSandboxChildText is the one pipeline every piece of child-derived text
 // must pass through before it reaches the log — the excerpt AND the error
 // strings printed beside it. validateSandboxFailureChildExit and
@@ -351,6 +344,18 @@ func sandboxChildExcerpt(stdout, stderr string, redactor *strings.Replacer) stri
 		"\ncontrolled-failure child stderr:\n" + boundedSandboxChildOutput(stderr, redactor)
 }
 
+// boundedSandboxChildOutput returns the tail of the child's already
+// leak-checked output, with the protected identifiers redacted and any minted
+// link credential scrubbed. The parent reports it whenever the child stopped
+// before the controlled failure, because the child's own reason is otherwise
+// discarded — which leaves the packaged journey debuggable only by guessing.
+// The result is always valid UTF-8, including when the child itself wrote
+// invalid bytes, because go test -json carries this text.
+//
+// The ordering is load-bearing: the WHOLE buffer is redacted and scrubbed
+// before the tail is sliced. Truncating first would let a credential
+// straddling the cut print its tail in the clear, and a partial value would
+// not match the replacer. Do not "optimize" this by scrubbing only the tail.
 func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) string {
 	combined = safeSandboxChildText(combined, redactor)
 	raw := strings.TrimRight(combined, "\n")
@@ -625,10 +630,36 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 			t.Fatalf("boundedSandboxChildOutput = %q, want %q", got, line)
 		}
 	})
+	t.Run("a shape hit masks the whole token", func(t *testing.T) {
+		// Standard rather than URL-safe base64: the "+" and "/" are outside
+		// any sane character class, so a class-bounded rule would mask the
+		// prefix and print the rest — redacted-looking, still leaking.
+		const tail = "aa+bb/cc+dd/ee"
+		got := boundedSandboxChildOutput("GET /x#qv2.Y2xhaW1zLW1hdGVyaWFs."+tail+" failed", nil)
+		// A class-bounded rule stops at the first "+", so it masks through
+		// "aa" and prints the rest. Assert on that surviving remainder — the
+		// whole `tail` is absent either way, which is why it proves nothing.
+		if strings.Contains(got, "bb/cc+dd/ee") || strings.Contains(got, "Y2xhaW1zLW1hdGVyaWFs") {
+			t.Fatalf("shape hit masked only part of the token: %q", got)
+		}
+		if !strings.Contains(got, "#<redacted>") || !strings.Contains(got, "failed") {
+			t.Fatalf("token mask lost the diagnostic: %q", got)
+		}
+	})
+	t.Run("all-invalid output says so, not silence", func(t *testing.T) {
+		// The branch that distinguishes "the child wrote garbage" from "the
+		// child wrote nothing" — reachable only from bytes that are invalid
+		// to begin with, which no other case supplies.
+		if got := boundedSandboxChildOutput("\xff\xfe\xfd", nil); got != "(the controlled-failure child's output was not valid UTF-8)" {
+			t.Fatalf("boundedSandboxChildOutput on invalid bytes = %q", got)
+		}
+	})
 	t.Run("absent identifiers redact nothing", func(t *testing.T) {
-		// Clear all five, not just two: on the armed lane the Hub values are
-		// set, and this subtest would otherwise pass only because the fixture
-		// happens not to contain one.
+		// Clear all six, not just two: on the armed lane the Hub values and
+		// the issuer key are set, and this subtest would otherwise pass only
+		// because the fixture happens not to contain one. The derived issuer
+		// kid is prepended to the replacer, so it wins overlap resolution
+		// against every other entry.
 		clearSandboxRedactedEnv(t)
 		const line = "plain child failure"
 		if got := boundedSandboxChildOutput(line, sandboxChildOutputRedactor()); got != line {
@@ -656,7 +687,9 @@ func TestQV2IssuerKeyFormsCoversEveryEncoding(t *testing.T) {
 	for _, encoding := range encodings {
 		want = append(want, encoding.EncodeToString(der))
 	}
-	if len(slices.Compact(slices.Clone(want))) != len(want) {
+	unique := slices.Clone(want)
+	slices.Sort(unique) // Compact only collapses ADJACENT duplicates.
+	if len(slices.Compact(unique)) != len(want) {
 		t.Fatalf("fixture encodings coincide (%q); this test would prove nothing", want)
 	}
 	forms := qv2IssuerKeyForms(issuerKey)
@@ -700,7 +733,7 @@ func TestQV2IssuerKeyFormsCoversEveryEncoding(t *testing.T) {
 func clearSandboxRedactedEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"QURL_ENDPOINT", "QURL_SANDBOX_QV2_RELAY_URL",
+		"QURL_ENDPOINT", "QURL_SANDBOX_QV2_RELAY_URL", "QURL_SANDBOX_QV2_ISSUER_KEY",
 		hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey,
 	} {
 		t.Setenv(name, "")
