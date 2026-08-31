@@ -492,12 +492,16 @@ def reconcile_run(args: argparse.Namespace) -> None:
         for row in credentials:
             row_name = row.get("name")
             key_id = row.get("key_id")
+            if (
+                not isinstance(key_id, str)
+                or not KEY_ID.fullmatch(key_id)
+                or not isinstance(row_name, str)
+            ):
+                record_failure("credential_shape")
+                continue
             is_customer = row_name in credential_names
             is_device = key_id in device_key_ids or row_name in device_key_names
             if not is_customer and not is_device:
-                continue
-            if not isinstance(key_id, str) or not KEY_ID.fullmatch(key_id):
-                record_failure("credential_shape")
                 continue
             if is_customer:
                 if row.get("kind") != "api_key" or row.get("scopes") != CUSTOMER_SCOPES:
@@ -522,14 +526,25 @@ def reconcile_run(args: argparse.Namespace) -> None:
             all_credentials = paged_rows(
                 endpoint, jwt, "/v1/api-keys", "qURL revoked credential cleanup", status_filter=None
             )
-            revoked_ids = {
-                row.get("key_id")
-                for row in all_credentials
-                if row.get("status") == "revoked"
-                and row.get("kind") == "device"
-                and row.get("name") in device_key_names
-                and row.get("scopes") == DEVICE_SCOPES
-            }
+            revoked_ids: set[str] = set()
+            for row in all_credentials:
+                key_id = row.get("key_id")
+                row_name = row.get("name")
+                is_recorded = isinstance(key_id, str) and key_id in missing_device_ids
+                is_named_device = isinstance(row_name, str) and row_name in device_key_names
+                if not is_recorded and not is_named_device:
+                    continue
+                if (
+                    not isinstance(key_id, str)
+                    or not KEY_ID.fullmatch(key_id)
+                    or not isinstance(row_name, str)
+                    or row.get("kind") != "device"
+                    or row.get("scopes") != DEVICE_SCOPES
+                ):
+                    record_failure("credential_shape")
+                    continue
+                if row.get("status") == "revoked":
+                    revoked_ids.add(key_id)
             if not missing_device_ids.issubset(revoked_ids):
                 record_failure("credential_inventory")
     except (CredentialError, OSError, UnicodeError):

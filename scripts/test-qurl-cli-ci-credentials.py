@@ -46,6 +46,7 @@ class FakeAPI:
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_customer-key"
         self.keys: dict[str, dict[str, object]] = {}
+        self.extra_credentials: list[dict[str, object]] = []
         self.resources = [
             {
                 "description": "qurl CLI journey v2 resource 1231/2/host",
@@ -140,7 +141,7 @@ class FakeAPI:
             self.keys[self.key_id] = row
             return 201, json.dumps({"data": row}).encode()
         if parsed.path == "/v1/api-keys" and method == "GET":
-            rows = list(self.keys.values()) + [
+            rows = list(self.keys.values()) + self.extra_credentials + [
                 {
                     "key_id": "key_Device123456",
                     "kind": "device",
@@ -154,6 +155,10 @@ class FakeAPI:
                     "status": "active",
                 },
             ]
+            status_filter = urllib.parse.parse_qs(parsed.query).get("status", [])
+            if status_filter:
+                assert len(status_filter) == 1
+                rows = [row for row in rows if row.get("status") == status_filter[0]]
             return 200, json.dumps({"data": rows, "meta": {"has_more": False}}).encode()
         if parsed.path.startswith("/v1/api-keys/") and method == "DELETE":
             key_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
@@ -396,11 +401,113 @@ def test_credential_failure_still_attempts_every_target_and_resources() -> None:
     assert {"r_connector_failure", "r_customer_ci"}.issubset(fake.deleted_resources)
 
 
+def test_unhashable_inventory_fields_remain_bounded() -> None:
+    active_fake = FakeAPI()
+    run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(active_fake)
+    active_fake.extra_credentials.extend(
+        (
+            {
+                "key_id": {"unexpected": "object"},
+                "kind": "api_key",
+                "name": "qurl CLI journey v2 1231/2/linux/primary",
+                "scopes": credentials.CUSTOMER_SCOPES,
+                "status": "active",
+            },
+            {
+                "key_id": device_key_id,
+                "kind": "device",
+                "name": ["unexpected", "array"],
+                "scopes": credentials.DEVICE_SCOPES,
+                "status": "active",
+            },
+        )
+    )
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", active_fake
+    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        cleanup_ids = root / "active-cleanup-ids"
+        cleanup_ids.mkdir(mode=0o700)
+        digest = credentials.hashlib.sha256(device_key_id.encode("ascii")).hexdigest()
+        private_file(cleanup_ids, "device-key-" + digest, device_key_id)
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    cleanup_id_dir=cleanup_ids,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == "run cleanup did not converge (credential_shape=2)"
+        else:
+            raise AssertionError("malformed active credential inventory did not fail closed")
+    assert {run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id}.issubset(
+        active_fake.deleted_keys
+    )
+    assert {"r_connector_smoke", "r_connector_failure", "r_customer_ci"}.issubset(
+        active_fake.deleted_resources
+    )
+
+    revoked_fake = FakeAPI()
+    recorded_key_id = "key_ListName1234"
+    revoked_fake.extra_credentials.extend(
+        (
+            {
+                "key_id": recorded_key_id,
+                "kind": "device",
+                "name": ["unexpected", "array"],
+                "scopes": credentials.DEVICE_SCOPES,
+                "status": "revoked",
+            },
+            {
+                "key_id": {"unexpected": "object"},
+                "kind": "device",
+                "name": "agent:qurl-journey-v2-r1231-a2-hf",
+                "scopes": credentials.DEVICE_SCOPES,
+                "status": "revoked",
+            },
+        )
+    )
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", revoked_fake
+    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        cleanup_ids = root / "cleanup-ids"
+        cleanup_ids.mkdir(mode=0o700)
+        digest = credentials.hashlib.sha256(recorded_key_id.encode("ascii")).hexdigest()
+        private_file(cleanup_ids, "device-key-" + digest, recorded_key_id)
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    cleanup_id_dir=cleanup_ids,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == "run cleanup did not converge (credential_inventory=1, credential_shape=2)"
+        else:
+            raise AssertionError("malformed revoked credential inventory did not fail closed")
+    assert {"r_connector_smoke", "r_connector_failure", "r_customer_ci"}.issubset(
+        revoked_fake.deleted_resources
+    )
+
+
 def main() -> None:
     test_unbounded_valid_pagination()
     test_connector_cleanup_lookup_fails_closed()
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()
+    test_unhashable_inventory_fields_remain_bounded()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
     ) == {"agent:qurl-journey-v2-r1231-a2-hs", "agent:qurl-journey-v2-r1231-a2-hf"}
