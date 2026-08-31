@@ -243,6 +243,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 
 	validatorTests := []string{
+		"TestAssembleSandboxProtectedValuesIncludesEveryIssuerForm",
 		"TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8",
 		"TestBoundedSandboxChildOutputRedactsBeforeTruncating",
 		"TestQV2IssuerKeyFormsCoversEveryEncoding",
