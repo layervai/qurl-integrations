@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -240,6 +241,10 @@ func validSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) bool {
 }
 
 func markSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) {
+	writeSandboxFailureDiagnostic(os.Stdout, diagnostic)
+}
+
+func writeSandboxFailureDiagnostic(w io.Writer, diagnostic sandboxFailureDiagnostic) {
 	if !validSandboxFailureDiagnostic(diagnostic) {
 		panic("invalid controlled-failure diagnostic")
 	}
@@ -247,7 +252,7 @@ func markSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) {
 	if diagnostic.Code != "" {
 		code = diagnostic.Code
 	}
-	_, _ = fmt.Fprintf(os.Stdout, "%s %s %s\n", sandboxFailureDiagnosticMarker, diagnostic.Category, code)
+	_, _ = fmt.Fprintf(w, "%s %s %s\n", sandboxFailureDiagnosticMarker, diagnostic.Category, code)
 }
 
 func sandboxFailureLastPhase(output string) sandboxFailurePhase {

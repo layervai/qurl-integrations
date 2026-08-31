@@ -328,13 +328,17 @@ func markSandboxFailureDiagnosticFromCommand(stdout, stderr string, commandErr e
 }
 
 func markSandboxFailureDiagnosticFromError(err error) {
+	writeSandboxFailureDiagnosticFromError(os.Stdout, err)
+}
+
+func writeSandboxFailureDiagnosticFromError(w io.Writer, err error) {
 	diagnostic := sandboxFailureDiagnostic{Category: "unknown"}
 	if err != nil {
 		if parsed, ok := sandboxFailureDiagnosticFromCLIError(err.Error()); ok {
 			diagnostic.Code = parsed.Code
 		}
 	}
-	markSandboxFailureDiagnostic(diagnostic)
+	writeSandboxFailureDiagnostic(w, diagnostic)
 }
 
 func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
@@ -389,22 +393,9 @@ func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 	t.Run("error marker never relays text", func(t *testing.T) {
 		capture := func(err error) string {
 			t.Helper()
-			reader, writer, pipeErr := os.Pipe()
-			if pipeErr != nil {
-				t.Fatal(pipeErr)
-			}
-			original := os.Stdout
-			os.Stdout = writer
-			markSandboxFailureDiagnosticFromError(err)
-			os.Stdout = original
-			if closeErr := writer.Close(); closeErr != nil {
-				t.Fatal(closeErr)
-			}
-			raw, readErr := io.ReadAll(reader)
-			if closeErr := reader.Close(); readErr != nil || closeErr != nil {
-				t.Fatalf("read diagnostic marker: read %v, close %v", readErr, closeErr)
-			}
-			return string(raw)
+			var output bytes.Buffer
+			writeSandboxFailureDiagnosticFromError(&output, err)
+			return output.String()
 		}
 		const secret = "lv_test_marker_must_not_relay"
 		withCode := capture(errors.New(secret + ": assignment error 52028 at a private path"))
