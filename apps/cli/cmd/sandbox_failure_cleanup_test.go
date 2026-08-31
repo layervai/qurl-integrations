@@ -66,6 +66,11 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// Stdout/Stderr are buffers, so os/exec uses pipes and Wait blocks until
+	// every write end closes — including any the packaged CLI's daemon
+	// inherited. Without this, killing the child on the deadline would not
+	// return, and the timeout excerpt below could never print.
+	cmd.WaitDelay = 10 * time.Second
 	runErr := cmd.Run()
 	combined := stdout.String() + stderr.String()
 	// Prove the child kept every protected value out of its own output before
@@ -78,21 +83,25 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 		}
 	}
 	redactor := sandboxChildOutputRedactor()
-	excerpt := sandboxChildExcerpt(stdout.String(), stderr.String(), redactor)
+	// Lazy: the happy path never prints this, and the child can emit megabytes
+	// of -test.v output that would otherwise be copied and regex-scanned for
+	// nothing. The redact-before-truncate ordering is inside the helper, so
+	// deferring the call does not weaken it.
+	excerpt := func() string { return sandboxChildExcerpt(stdout.String(), stderr.String(), redactor) }
 	// A hung child is the harder case to diagnose blind, not the easier one,
 	// so the timeout gets the same excerpt. The scan above already gated it.
 	if ctx.Err() != nil {
-		t.Fatalf("controlled-failure child exceeded %s\n%s", sandboxFailureChildTimeout, excerpt)
+		t.Fatalf("controlled-failure child exceeded %s\n%s", sandboxFailureChildTimeout, excerpt())
 	}
 	if err := validateSandboxFailureChildExit(runErr, combined, childTestName); err != nil {
-		t.Fatalf("controlled-failure child result: %s\n%s", safeSandboxChildText(err.Error(), redactor), excerpt)
+		t.Fatalf("controlled-failure child result: %s\n%s", safeSandboxChildText(err.Error(), redactor), excerpt())
 	}
 	crid, err := sandboxFailureCleanedCRID(combined)
 	if err != nil {
 		// The child reached its controlled failure but never published a
 		// clean cleanup marker. That is the same blindness the excerpt above
 		// exists to remove, so report it the same way.
-		t.Fatalf("controlled-failure cleanup marker: %s\n%s", safeSandboxChildText(err.Error(), redactor), excerpt)
+		t.Fatalf("controlled-failure cleanup marker: %s\n%s", safeSandboxChildText(err.Error(), redactor), excerpt())
 	}
 	assertSandboxFailureLocalCleanup(t, stateDir, crid)
 	return crid
@@ -123,34 +132,18 @@ const sandboxProtectedValueMinBytes = 16
 // arrives as "<kid>=<standard-base64 key>", journeyDeploymentFile re-encodes
 // that same key material base64url into the SDK settings file the child reads,
 // and either the whole string or the key half alone can surface on its own.
+// sandboxProtectedChildValues is every BEARER credential the child must keep
+// out of its own output. These fail closed: the run aborts without printing.
+//
+// The qv2 issuer key is deliberately NOT here. Its key half is public SPKI
+// DER — journeyDeploymentFile decodes it and writes it as spki_der_b64 — so
+// its sensitivity is deployment identification, exactly like the kid's. An
+// SDK diagnostic quoting its own settings file would otherwise abort the lane
+// with "exposed a protected credential", which misdescribes what happened.
+// Both halves are redacted instead; see sandboxRedactionPairs.
 func sandboxProtectedChildValues(t *testing.T, primaryAPIKey, failureAPIKey string) []string {
 	t.Helper()
-	// Read with a bare Getenv to match sandboxJourneyEnv, which is the only
-	// provisioning path for this input. If it ever moves to sandboxSecret's
-	// _FILE indirection, this degrades to scanning for nothing — which is why
-	// the assembly below is a pure function a credential-free test can pin.
-	issuerKey := os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY")
-	values := assembleSandboxProtectedValues(
-		primaryAPIKey, failureAPIKey, sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"), issuerKey)
-	if strings.TrimSpace(issuerKey) != "" && len(values) <= sandboxPrimaryProtectedValueCount {
-		t.Fatal("qv2 issuer key is provisioned but yielded no scannable form; the leak scan would silently cover nothing")
-	}
-	return values
-}
-
-// sandboxPrimaryProtectedValueCount is the number of values that are always
-// scanned regardless of the issuer key: the primary key, the failure key and
-// the cleanup JWT.
-const sandboxPrimaryProtectedValueCount = 3
-
-// assembleSandboxProtectedValues is the credential-free half of the scan's
-// input: it pins that every derived issuer-key form actually reaches the
-// needle list, which is the wiring a live-only helper cannot test.
-func assembleSandboxProtectedValues(primaryAPIKey, failureAPIKey, cleanupJWT, issuerKey string) []string {
-	forms := qv2IssuerKeyForms(issuerKey)
-	values := make([]string, 0, sandboxPrimaryProtectedValueCount+len(forms))
-	values = append(values, primaryAPIKey, failureAPIKey, cleanupJWT)
-	return append(values, forms...)
+	return []string{primaryAPIKey, failureAPIKey, sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT")}
 }
 
 // qv2IssuerKeyForms returns every form the qv2 issuer key can surface in: the
@@ -284,26 +277,40 @@ func scrubSandboxRuntimeCredentials(text string) string {
 // verbatim. Failing on those would be wrong — they appear in routine output —
 // so they are redacted rather than treated as a leak.
 func sandboxChildOutputRedactor() *strings.Replacer {
-	// Ordered, not a map. strings.NewReplacer resolves overlapping needles by
-	// argument order, so if two inputs share a host the earlier entry's
-	// placeholder deterministically wins; map iteration would pick at random.
-	sources := []struct{ placeholder, env string }{
-		{"<sandbox-endpoint>", "QURL_ENDPOINT"},
-		{"<sandbox-relay>", "QURL_SANDBOX_QV2_RELAY_URL"},
-		{"<hub-host>", hub.EnvHost},
-		{"<hub-port>", hub.EnvPort},
-		{"<hub-key>", hub.EnvServerPublicKey},
-	}
+	return strings.NewReplacer(sandboxRedactionPairs(
+		os.Getenv("QURL_ENDPOINT"), os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"),
+		os.Getenv(hub.EnvHost), os.Getenv(hub.EnvPort), os.Getenv(hub.EnvServerPublicKey),
+		os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"),
+	)...)
+}
+
+// sandboxRedactionPairs is the credential-free half of the redactor: the
+// ordering below is behavior, not arrangement, so it is a pure function a test
+// can pin.
+//
+// strings.NewReplacer resolves overlapping needles by argument order, so every
+// issuer-key FORM must precede the kid derived from the same variable. The
+// full "<kid>=<key>" string starts where the kid does; if the kid came first
+// it would win that position and leave the key material printed beside a
+// "<issuer-kid>" placeholder that reads as redacted.
+func sandboxRedactionPairs(endpoint, relay, hubHost, hubPort, hubKey, issuerKey string) []string {
 	var pairs []string
-	// The issuer kid identifies the sandbox deployment. It is too short to be
-	// a safe exact-scan needle, but redacting it is free.
-	if kid, _, ok := strings.Cut(strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY")), "="); ok {
+	for _, form := range qv2IssuerKeyForms(issuerKey) {
+		pairs = append(pairs, form, "<issuer-key>")
+	}
+	if kid, _, ok := strings.Cut(strings.TrimSpace(issuerKey), "="); ok {
 		if kid = strings.TrimSpace(kid); len(kid) >= sandboxRedactedValueMinBytes {
 			pairs = append(pairs, kid, "<issuer-kid>")
 		}
 	}
-	for _, source := range sources {
-		value := strings.TrimSpace(os.Getenv(source.env))
+	for _, source := range []struct{ placeholder, value string }{
+		{"<sandbox-endpoint>", endpoint},
+		{"<sandbox-relay>", relay},
+		{"<hub-host>", hubHost},
+		{"<hub-port>", hubPort},
+		{"<hub-key>", hubKey},
+	} {
+		value := strings.TrimSpace(source.value)
 		if len(value) < sandboxRedactedValueMinBytes {
 			continue
 		}
@@ -322,7 +329,7 @@ func sandboxChildOutputRedactor() *strings.Replacer {
 			pairs = append(pairs, hostname, source.placeholder)
 		}
 	}
-	return strings.NewReplacer(pairs...)
+	return pairs
 }
 
 // sandboxRedactedValueMinBytes keeps a short or absent identifier out of the
@@ -820,21 +827,77 @@ func TestBoundedSandboxChildOutputRedactsBeforeTruncating(t *testing.T) {
 	}
 }
 
-// TestAssembleSandboxProtectedValuesIncludesEveryIssuerForm pins the wiring
-// between the derivation and the scan. qv2IssuerKeyForms is covered on its
-// own, but nothing otherwise proves its output reaches the needle list — and
-// a break there degrades the leak scan silently rather than loudly.
-func TestAssembleSandboxProtectedValuesIncludesEveryIssuerForm(t *testing.T) {
+// TestSandboxRedactionPairsCoverEverySource pins the redactor's inputs and,
+// more importantly, their ORDER. strings.NewReplacer resolves overlaps by
+// argument order, so an issuer key placed after its own kid would leave the
+// key material printed beside an "<issuer-kid>" placeholder that reads as
+// redacted. Nothing else in the suite exercises the Hub sources or the kid.
+func TestSandboxRedactionPairsCoverEverySource(t *testing.T) {
+	const (
+		endpoint = "https://sandbox-host.example.invalid"
+		relay    = "https://relay-host.example.invalid:8443/relay"
+		hubHost  = "hub-host.example.invalid"
+		hubPort  = "62206"
+		hubKey   = "aGViLXNlcnZlci1wdWJsaWMta2V5LW1hdGVyaWFs"
+		kid      = "sandbox-kid-long"
+	)
 	der := []byte{0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0}
-	issuerKey := "sandbox-kid=" + base64.StdEncoding.EncodeToString(der)
-	got := assembleSandboxProtectedValues("primary-key", "failure-key", "cleanup-jwt", issuerKey)
+	keyStd := base64.StdEncoding.EncodeToString(der)
+	issuerKey := kid + "=" + keyStd
+	redactor := strings.NewReplacer(sandboxRedactionPairs(endpoint, relay, hubHost, hubPort, hubKey, issuerKey)...)
 
-	for _, want := range append([]string{"primary-key", "failure-key", "cleanup-jwt"}, qv2IssuerKeyForms(issuerKey)...) {
-		if !slices.Contains(got, want) {
-			t.Fatalf("assembleSandboxProtectedValues = %q, missing %q", got, want)
+	for name, test := range map[string]struct{ in, wantGone, wantPlaceholder string }{
+		"endpoint":     {"POST " + endpoint + "/v1", endpoint, "<sandbox-endpoint>"},
+		"relay host":   {"dial relay-host.example.invalid:8443", "relay-host.example.invalid", "<sandbox-relay>"},
+		"hub host":     {"knock " + hubHost, hubHost, "<hub-host>"},
+		"hub key":      {"peer " + hubKey, hubKey, "<hub-key>"},
+		"issuer key":   {"settings " + keyStd, keyStd, "<issuer-key>"},
+		"issuer kid":   {"kid " + kid + " unknown", kid, "<issuer-kid>"},
+		"whole issuer": {"env " + issuerKey, keyStd, "<issuer-key>"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := redactor.Replace(test.in)
+			if strings.Contains(got, test.wantGone) {
+				t.Fatalf("redactor left %q in %q", test.wantGone, got)
+			}
+			if !strings.Contains(got, test.wantPlaceholder) {
+				t.Fatalf("redactor did not apply %s: %q", test.wantPlaceholder, got)
+			}
+		})
+	}
+	// The full "<kid>=<key>" must resolve as one issuer-key match, not as the
+	// kid followed by naked key material.
+	if got := redactor.Replace(issuerKey); strings.Contains(got, keyStd) || strings.Contains(got, "<issuer-kid>=") {
+		t.Fatalf("kid won overlap resolution against its own key: %q", got)
+	}
+	// A Hub port is 2-5 digits and must stay below the floor, or the replacer
+	// would rewrite ordinary numbers.
+	if got := redactor.Replace("served 62206 requests"); got != "served 62206 requests" {
+		t.Fatalf("short value became a redaction needle: %q", got)
+	}
+}
+
+// TestSandboxChildExcerptBoundsEachStream pins the property sandboxChildExcerpt
+// exists for: a chatty stderr must not evict the go test stdout naming which
+// subtest the child reached. Concatenating the streams and keeping one tail
+// passes every other test in this file.
+func TestSandboxChildExcerptBoundsEachStream(t *testing.T) {
+	const stdoutLine = "=== RUN   TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild"
+	stderr := strings.Repeat("noisy stderr line\n", 2000)
+	if len(stderr) <= sandboxFailureChildOutputTailBytes {
+		t.Fatal("fixture stderr does not exceed the budget; this test would prove nothing")
+	}
+	got := sandboxChildExcerpt(stdoutLine+"\n", stderr, nil)
+
+	if !strings.Contains(got, stdoutLine) {
+		t.Fatalf("a chatty stderr evicted the stdout the excerpt exists to surface: %q", got[:min(200, len(got))])
+	}
+	for _, label := range []string{"controlled-failure child stdout:", "controlled-failure child stderr:"} {
+		if !strings.Contains(got, label) {
+			t.Fatalf("excerpt is missing the %q label", label)
 		}
 	}
-	if bare := assembleSandboxProtectedValues("primary-key", "failure-key", "cleanup-jwt", ""); len(bare) != sandboxPrimaryProtectedValueCount {
-		t.Fatalf("assembleSandboxProtectedValues without an issuer key = %q, want the three primary values", bare)
+	if strings.Index(got, "child stdout:") > strings.Index(got, "child stderr:") {
+		t.Fatal("excerpt reports stderr before stdout")
 	}
 }

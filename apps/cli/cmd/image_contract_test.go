@@ -243,7 +243,6 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 
 	validatorTests := []string{
-		"TestAssembleSandboxProtectedValuesIncludesEveryIssuerForm",
 		"TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8",
 		"TestBoundedSandboxChildOutputRedactsBeforeTruncating",
 		"TestQV2IssuerKeyFormsCoversEveryEncoding",
@@ -251,6 +250,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
 		"TestSameJourneyTargetURLAcceptsServiceCanonicalForm",
+		"TestSandboxChildExcerptBoundsEachStream",
 		"TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey",
 		"TestSandboxForegroundLifecycleStateContract",
 		"TestSandboxFullCustomerLifecyclePhaseContract",
@@ -259,6 +259,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
 		"TestSandboxPublishReadinessWaitsForCompleteCRIDLine",
+		"TestSandboxRedactionPairsCoverEverySource",
 		"TestSandboxResourceCleanupIsSafeBeforePublish",
 		"TestSandboxRunIdentityBindsOnlyImmutableHardenedImage",
 		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",
