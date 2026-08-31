@@ -246,6 +246,7 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 	productCleanupComplete := false
 	registerSandboxFailureFinalCleanup(t, stateDir, &crid, &productCleanupComplete)
 
+	markSandboxFailurePhase(sandboxFailurePhaseSetup)
 	fixture := startSandboxLocalPublishInState(t, "failure", stateDir)
 	crid = fixture.local.CRID
 	t.Cleanup(func() {
@@ -273,15 +274,20 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 	})
 	t.Cleanup(func() { fixture.interruptAndValidate(t) })
 
+	markSandboxFailurePhase(sandboxFailurePhaseReadiness)
 	initial := waitSandboxSharingState(t, fixture.binary, fixture.env, stateDir, crid, "on", "serving", time.Minute)
+	markSandboxFailurePhase(sandboxFailurePhaseRoute)
 	assertSandboxLocalRoute(t, fixture.binary, fixture.env, stateDir, crid, fixture.marker, time.Minute)
+	markSandboxFailurePhase(sandboxFailurePhaseStop)
 	stopped := decodeSandboxSharing(t, runSandboxLocalCLI(
 		t, fixture.binary, fixture.env, stateDir, "-o", "json", "stop", crid,
 	))
 	if err := validateSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
 		t.Fatalf("controlled-failure stop state = %+v: %v", stopped, err)
 	}
+	markSandboxFailurePhase(sandboxFailurePhaseFence)
 	assertSandboxControlledFailureRouteFenced(t, fixture, 30*time.Second)
+	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runSandboxLocalCLI(
 		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", filepath.Join(t.TempDir(), "fenced"),
 	)
@@ -293,7 +299,12 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 
 func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map[string]string, stateDir string) {
 	t.Helper()
-	target := fmt.Sprintf("https://example.com/?qurl-private-sandbox-device-journey=%d", time.Now().UnixNano())
+	suffix := fmt.Sprintf("qurl-private-sandbox-device-journey=%d", time.Now().UnixNano())
+	target := "https://example.com/?" + suffix
+	// TODO(upstream-contract): qurl-service normalizes an empty root path from
+	// "/" to "". Keep the common customer input above and assert its explicit
+	// canonical form so a service contract change fails with useful evidence.
+	canonicalTarget := "https://example.com?" + suffix
 	description := sandboxJourneyResourceDescription(t, cliEnv)
 	published := runSandboxLocalCLI(t, binary, cliEnv, stateDir,
 		"-o", "json", "publish", target, "--description", description)
@@ -304,7 +315,7 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 	if err := json.Unmarshal(published.stdout.Bytes(), &pub); err != nil {
 		t.Fatalf("decode device-authenticated remote publish output: %v", err)
 	}
-	if pub.CRID == "" || pub.ResourceID == "" || pub.TargetURL != target || pub.FoundExisting {
+	if pub.CRID == "" || pub.ResourceID == "" || pub.TargetURL != canonicalTarget || pub.FoundExisting {
 		t.Fatalf("device-authenticated remote publish = %+v, want one new URL resource", pub)
 	}
 	deleted := false
@@ -378,16 +389,13 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 	}
 
 	resolved := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "resolve", pub.CRID)
-	if resolved.code != 0 {
-		t.Fatalf("device-authenticated remote resolve exit = %d: %s", resolved.code, resolved.stderr.String())
-	}
-	link := strings.TrimSuffix(resolved.stdout.String(), "\n")
-	parsed, err := url.Parse(link)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || link+"\n" != resolved.stdout.String() {
-		t.Fatalf("device-authenticated remote resolve did not return one HTTPS link: %v", err)
-	}
-	if resolved.stderr.Len() != 0 {
-		t.Fatalf("device-authenticated remote resolve wrote unexpected stderr: %s", resolved.stderr.String())
+	if _, err := validateSandboxResolveCommandResult(
+		"device-authenticated remote resolve",
+		resolved.code,
+		resolved.stdout.String(),
+		resolved.stderr.String(),
+	); err != nil {
+		t.Fatal(err)
 	}
 
 	destination := filepath.Join(t.TempDir(), "remote-url-payload")
@@ -419,10 +427,13 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 		t.Fatalf("device-authenticated remote re-delete exit = %d: %s", redeleted.code, redeleted.stderr.String())
 	}
 	revoked := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "resolve", pub.CRID)
-	if revoked.code != exitcode.NotFound || revoked.stdout.Len() != 0 ||
-		!strings.Contains(strings.ToLower(revoked.stderr.String()), "deleted") {
-		t.Fatalf("device-authenticated resolve after delete = exit %d, stdout %q, stderr %q",
-			revoked.code, revoked.stdout.String(), revoked.stderr.String())
+	if err := validateSandboxDeletedCommandResult(
+		"device-authenticated resolve",
+		revoked.code,
+		revoked.stdout.String(),
+		revoked.stderr.String(),
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -604,10 +615,13 @@ func assertSandboxControlledFailureRouteFencedInputs(t *testing.T, binary string
 func assertSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, stateDir, crid string) {
 	t.Helper()
 	result := runSandboxLocalCLI(t, binary, env, stateDir, "resolve", crid)
-	if result.code != exitcode.NotFound || result.stdout.Len() != 0 ||
-		!strings.Contains(strings.ToLower(result.stderr.String()), "deleted") {
-		t.Fatalf("controlled-failure remote cleanup = exit %d, stdout %q, stderr %q",
-			result.code, result.stdout.String(), result.stderr.String())
+	if err := validateSandboxDeletedCommandResult(
+		"controlled-failure resolve",
+		result.code,
+		result.stdout.String(),
+		result.stderr.String(),
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

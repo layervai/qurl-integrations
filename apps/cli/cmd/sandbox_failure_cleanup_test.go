@@ -25,9 +25,39 @@ const (
 	sandboxFailureAPIKeyEnv                = "QURL_CLI_SANDBOX_FAILURE_API_KEY"
 	sandboxFailureChildSentinel            = "controlled customer failure reached after route fencing"
 	sandboxFailureCleanupMarker            = "QURL_CONTROLLED_FAILURE_CLEANED"
+	sandboxFailurePhaseMarker              = "QURL_CONTROLLED_FAILURE_PHASE"
 	sandboxFailureChildTimeout             = 3 * time.Minute
 	sandboxFailureDaemonStopTimeout        = 15 * time.Second
 )
+
+type sandboxFailurePhase string
+
+const (
+	sandboxFailurePhaseSetup      sandboxFailurePhase = "setup"
+	sandboxFailurePhaseLogin      sandboxFailurePhase = "login"
+	sandboxFailurePhaseIdentity   sandboxFailurePhase = "identity"
+	sandboxFailurePhaseService    sandboxFailurePhase = "service"
+	sandboxFailurePhasePublish    sandboxFailurePhase = "publish"
+	sandboxFailurePhaseReadiness  sandboxFailurePhase = "readiness"
+	sandboxFailurePhaseRoute      sandboxFailurePhase = "route"
+	sandboxFailurePhaseStop       sandboxFailurePhase = "stop"
+	sandboxFailurePhaseFence      sandboxFailurePhase = "fence"
+	sandboxFailurePhaseStoppedGet sandboxFailurePhase = "stopped_get"
+	sandboxFailurePhaseUnknown    sandboxFailurePhase = "unknown"
+)
+
+var sandboxFailurePhases = map[sandboxFailurePhase]struct{}{
+	sandboxFailurePhaseSetup:      {},
+	sandboxFailurePhaseLogin:      {},
+	sandboxFailurePhaseIdentity:   {},
+	sandboxFailurePhaseService:    {},
+	sandboxFailurePhasePublish:    {},
+	sandboxFailurePhaseReadiness:  {},
+	sandboxFailurePhaseRoute:      {},
+	sandboxFailurePhaseStop:       {},
+	sandboxFailurePhaseFence:      {},
+	sandboxFailurePhaseStoppedGet: {},
+}
 
 func runSandboxFailureChild(t *testing.T, childTestName string) string {
 	t.Helper()
@@ -65,17 +95,12 @@ func runSandboxFailureChild(t *testing.T, childTestName string) string {
 		t.Fatalf("controlled-failure child exceeded %s", sandboxFailureChildTimeout)
 	}
 	combined := stdout.String() + stderr.String()
-	if err := validateSandboxFailureChildExit(runErr, combined, childTestName); err != nil {
-		t.Fatalf("controlled-failure child result: %v", err)
-	}
-	for _, secret := range []string{
+	if err := validateSandboxFailureChildResult(runErr, combined, childTestName, []string{
 		primaryAPIKey,
 		failureAPIKey,
 		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
-	} {
-		if secret != "" && strings.Contains(combined, secret) {
-			t.Fatal("controlled-failure child exposed a protected credential")
-		}
+	}); err != nil {
+		t.Fatalf("controlled-failure child result: %v", err)
 	}
 	crid, err := sandboxFailureCleanedCRID(combined)
 	if err != nil {
@@ -151,12 +176,74 @@ func validateSandboxFailureChildExit(runErr error, output, childTestName string)
 		return errors.New("child did not return a bounded test failure")
 	}
 	if !strings.Contains(output, sandboxFailureChildSentinel) {
-		return errors.New("child did not reach the controlled customer failure")
+		return sandboxFailureMissingSentinelError(output)
 	}
 	if !strings.Contains(output, "--- FAIL: "+childTestName) {
 		return errors.New("child output did not identify the selected failing test")
 	}
 	return nil
+}
+
+func validateSandboxFailureChildResult(runErr error, output, childTestName string, secrets []string) error {
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(output, secret) {
+			return errors.New("child exposed a protected credential")
+		}
+	}
+	return validateSandboxFailureChildExit(runErr, output, childTestName)
+}
+
+func markSandboxFailurePhase(phase sandboxFailurePhase) {
+	if _, ok := sandboxFailurePhases[phase]; !ok {
+		panic("invalid controlled-failure phase")
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "%s %s\n", sandboxFailurePhaseMarker, phase)
+}
+
+func sandboxFailureLastPhase(output string) sandboxFailurePhase {
+	last := sandboxFailurePhaseUnknown
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		value, found := strings.CutPrefix(line, sandboxFailurePhaseMarker+" ")
+		if !found {
+			continue
+		}
+		phase := sandboxFailurePhase(value)
+		if _, ok := sandboxFailurePhases[phase]; ok {
+			last = phase
+		}
+	}
+	return last
+}
+
+func sandboxFailureMissingSentinelError(output string) error {
+	return fmt.Errorf("child did not reach the controlled customer failure (last phase: %s)", sandboxFailureLastPhase(output))
+}
+
+func TestSandboxFailureDiagnosticsAreAllowListedAndRedacted(t *testing.T) {
+	const secret = "lv_test_captured_child_secret"
+	t.Run("last recognized phase", func(t *testing.T) {
+		output := strings.Join([]string{
+			sandboxFailurePhaseMarker + " " + string(sandboxFailurePhaseLogin),
+			sandboxFailurePhaseMarker + " " + secret,
+			"arbitrary child detail " + secret,
+			sandboxFailurePhaseMarker + " " + string(sandboxFailurePhasePublish),
+			"    " + sandboxFailurePhaseMarker + " " + string(sandboxFailurePhaseStoppedGet),
+		}, "\n")
+		if got := sandboxFailureLastPhase(output); got != sandboxFailurePhasePublish {
+			t.Fatalf("last controlled-failure phase = %q, want %q", got, sandboxFailurePhasePublish)
+		}
+		err := sandboxFailureMissingSentinelError(output)
+		if strings.Contains(err.Error(), secret) || err.Error() != "child did not reach the controlled customer failure (last phase: publish)" {
+			t.Fatalf("redacted controlled-failure diagnostic = %q", err)
+		}
+	})
+	t.Run("secret scan precedes exit validation", func(t *testing.T) {
+		err := validateSandboxFailureChildResult(errors.New("not an exit error"), "arbitrary child detail "+secret, "ChildTest", []string{secret})
+		if err == nil || err.Error() != "child exposed a protected credential" || strings.Contains(err.Error(), secret) {
+			t.Fatalf("protected child-output validation = %q", err)
+		}
+	})
 }
 
 func sandboxFailureChildEnvironment(overrides map[string]string) []string {

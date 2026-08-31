@@ -250,6 +250,20 @@ func TestGrantedContentURL(t *testing.T) {
 	}
 }
 
+func TestAccessGrantRetainsServerLifetime(t *testing.T) {
+	t.Parallel()
+	grant, err := accessGrantFromHandle(&qurl.ResourceHandle{
+		ResourceURL: "https://origin.qurl.link/content",
+		OpenSeconds: 300,
+	})
+	if err != nil || grant.ContentURL != "https://origin.qurl.link/content" || grant.OpenSeconds != 300 {
+		t.Fatalf("access grant = URL %q, lifetime %d, error %v", grant.ContentURL, grant.OpenSeconds, err)
+	}
+	if _, err := accessGrantFromHandle(nil); !errors.Is(err, ErrUnopenableLink) {
+		t.Fatalf("nil access handle error = %v, want ErrUnopenableLink", err)
+	}
+}
+
 // TestClassifyAccessError pins the full SDK-fault mapping, including the
 // pass-through default for faults outside the access taxonomy.
 func TestClassifyAccessError(t *testing.T) {

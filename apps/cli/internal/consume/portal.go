@@ -95,16 +95,45 @@ type AccessOpener struct {
 	LookupEnv func(string) (string, bool)
 }
 
+// AccessGrant is a verified, reachable content URL and its server-reported
+// access lifetime. ContentURL carries access authority and must never enter a
+// diagnostic.
+type AccessGrant struct {
+	ContentURL  string
+	OpenSeconds uint32
+}
+
 // Open verifies link, asks the platform for access, and returns the granted
 // content URL. Every failure is mapped to a customer-language sentinel; a
 // link the platform cannot serve headlessly fails loudly here and nothing
 // is ever downloaded in its place.
 func (o *AccessOpener) Open(ctx context.Context, link string) (string, error) {
+	grant, err := o.Grant(ctx, link)
+	if err != nil {
+		return "", err
+	}
+	return grant.ContentURL, nil
+}
+
+// Grant is Open with the safe lifetime metadata retained for callers that
+// must prove the access session remains valid across a bounded operation.
+func (o *AccessOpener) Grant(ctx context.Context, link string) (AccessGrant, error) {
 	handle, err := o.enter(ctx, link)
 	if err != nil {
-		return "", classifyAccessError(err)
+		return AccessGrant{}, classifyAccessError(err)
 	}
-	return grantedContentURL(handle.ResourceURL)
+	return accessGrantFromHandle(handle)
+}
+
+func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
+	if handle == nil {
+		return AccessGrant{}, fmt.Errorf("%w — the access grant was empty", ErrUnopenableLink)
+	}
+	contentURL, err := grantedContentURL(handle.ResourceURL)
+	if err != nil {
+		return AccessGrant{}, err
+	}
+	return AccessGrant{ContentURL: contentURL, OpenSeconds: handle.OpenSeconds}, nil
 }
 
 // grantedContentURL admits only web URLs as download targets: the granted
