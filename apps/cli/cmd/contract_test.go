@@ -273,6 +273,48 @@ func TestResolveAfterDeleteIsOwnerTruthful(t *testing.T) {
 	}
 }
 
+// TestGetAndStatusAfterDeleteAreOwnerTruthful pins the other two customer
+// commands used by the protected deletion journey. Both must preserve the
+// revoked condition without creating output or download artifacts.
+func TestGetAndStatusAfterDeleteAreOwnerTruthful(t *testing.T) {
+	assertDeleted := func(t *testing.T, res *runResult) {
+		t.Helper()
+		hasDeletedHint := strings.Contains(strings.ToLower(res.stderr.String()), "deleted")
+		if res.code != 5 || res.stdout.Len() != 0 || !hasDeletedHint {
+			t.Fatalf(
+				"deleted command = exit %d, stdout %d bytes, stderr %d bytes, deleted diagnostic %t",
+				res.code,
+				res.stdout.Len(),
+				res.stderr.Len(),
+				hasDeletedHint,
+			)
+		}
+	}
+
+	t.Run("get", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerRevoked400(t))
+		downloadDir := t.TempDir()
+		res := runCLI(t, &runOpts{args: []string{
+			"--endpoint", srv.URL,
+			"get", srv.Key.CRID,
+			"--file", filepath.Join(downloadDir, "deleted-payload"),
+		}})
+		assertDeleted(t, res)
+		entries, err := os.ReadDir(downloadDir)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("deleted get left %d download artifacts: %v", len(entries), err)
+		}
+	})
+
+	t.Run("status", func(t *testing.T) {
+		srv := apitest.NewServer(t)
+		srv.Script(http.MethodGet, "/v1/resources/"+srv.Key.CRID+"/sharing", apitest.HandlerRevoked400(t))
+		res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "status", srv.Key.CRID}})
+		assertDeleted(t, res)
+	})
+}
+
 // TestResolveInsufficientScope pins the dedicated-scope failure UX.
 func TestResolveInsufficientScope(t *testing.T) {
 	srv := apitest.NewServer(t)

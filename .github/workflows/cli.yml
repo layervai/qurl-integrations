@@ -248,19 +248,26 @@ jobs:
       - name: Run credential-free journey validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxDeletedCommandDiagnosticWithholdsChildOutput|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxFailureDiagnosticsAreAllowListedAndRedacted|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxGrantedRouteAccessFailureCategories|TestSandboxGrantedRouteFenceValidator|TestSandboxGrantedRouteLifetime|TestSandboxGrantedRouteReadiness|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResolveCommandDiagnosticWithholdsChildOutput|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding
             TestRunSandboxLocalCLIUsesExactBinaryAndState
+            TestSandboxDeletedCommandDiagnosticWithholdsChildOutput
             TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey
+            TestSandboxFailureDiagnosticsAreAllowListedAndRedacted
             TestSandboxForegroundLifecycleStateContract
             TestSandboxFullCustomerLifecyclePhaseContract
+            TestSandboxGrantedRouteAccessFailureCategories
+            TestSandboxGrantedRouteFenceValidator
+            TestSandboxGrantedRouteLifetime
+            TestSandboxGrantedRouteReadiness
             TestSandboxHarnessPassesInlineAPIKeyToExactBinary
             TestSandboxNamespaceIsCanonicalAndSeparated
             TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
             TestSandboxPublishProcessReportsEarlyExit
             TestSandboxPublishReadinessWaitsForCompleteCRIDLine
+            TestSandboxResolveCommandDiagnosticWithholdsChildOutput
             TestSandboxResourceCleanupIsSafeBeforePublish
             TestSandboxRunIdentityBindsOnlyImmutableHardenedImage
             TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure

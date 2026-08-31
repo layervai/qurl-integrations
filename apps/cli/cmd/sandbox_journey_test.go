@@ -23,7 +23,6 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // T6 live sandbox CRID journey: the design doc's §28.1/§28.3 manual
@@ -508,23 +507,9 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 func assertResolveJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
 	t.Helper()
 	res := runSandboxCLI(ctx, t, cliEnv, "resolve", id)
-	if res.code != 0 {
-		t.Fatalf("resolve exit = %d, want 0 (a non-zero here means the sandbox refused or the answer failed verification)\nstderr: %s", res.code, res.stderr.String())
-	}
-	out := res.stdout.String()
-	link := strings.TrimSuffix(out, "\n")
-	if link == "" || link+"\n" != out || strings.ContainsAny(link, " \n\t") {
-		t.Fatalf("piped resolve stdout = %q, want exactly one bare link and a newline", out)
-	}
-	parsed, err := url.Parse(link)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		t.Fatalf("resolved link %q is not a live https URL: %v", link, err)
-	}
-	// The environment guard must stay quiet: a test CRID against the
-	// configured (non-production) sandbox endpoint is the matched case, so
-	// ANY stderr here is a spurious warning.
-	if res.stderr.Len() != 0 {
-		t.Fatalf("resolve wrote %q to stderr; a test CRID at the sandbox endpoint must resolve without warnings", res.stderr.String())
+	link, err := validateSandboxResolveCommandResult("resolve", res.code, res.stdout.String(), res.stderr.String())
+	if err != nil {
+		t.Fatal(err)
 	}
 	return link
 }
@@ -611,13 +596,13 @@ func assertDeleteJourney(ctx context.Context, t *testing.T, cliEnv map[string]st
 	}
 
 	res = runSandboxCLI(ctx, t, cliEnv, "resolve", id)
-	if res.code != exitcode.NotFound {
-		t.Fatalf("resolve after delete exit = %d, want %d (the platform's gone family)\nstdout: %q\nstderr: %s",
-			res.code, exitcode.NotFound, res.stdout.String(), res.stderr.String())
-	}
-	mustEmptyStdout(t, res)
-	if !strings.Contains(strings.ToLower(res.stderr.String()), "deleted") {
-		t.Errorf("owner-truthful revoked path: stderr = %q never says the resource was deleted", res.stderr.String())
+	if err := validateSandboxDeletedCommandResult(
+		"resolve",
+		res.code,
+		res.stdout.String(),
+		res.stderr.String(),
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

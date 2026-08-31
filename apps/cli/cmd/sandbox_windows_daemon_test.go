@@ -208,11 +208,17 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		if backendHits.Load() < 3 {
 			t.Fatalf("Windows local backend saw %d route hits, want at least one before and after lifecycle changes", backendHits.Load())
 		}
+		resolvedBeforeDelete := runWindowsSandboxCLI(t, binary, cliEnv, "resolve", cridValue)
+		if resolvedBeforeDelete.err != nil || strings.TrimSpace(resolvedBeforeDelete.stdout) == "" {
+			t.Fatal("Windows resolve before Connector delete failed; private details withheld")
+		}
+		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, resolvedBeforeDelete.stdout, marker, backendHits.Load)
 
 		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 		if deleted.err != nil {
 			t.Fatalf("delete Windows local share while serving: %v; stderr %q", deleted.err, deleted.stderr)
 		}
+		assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
 		shares, present, readErr := connectorstate.ReadLocalSharesIfPresent(context.Background(), stateDir)
 		if readErr != nil || !present {
 			t.Fatalf("read Windows registry after delete = (present %v, %v)", present, readErr)
@@ -222,6 +228,7 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 				t.Fatalf("deleted Windows CRID %s remains in local daemon registry", cridValue)
 			}
 		}
+		assertWindowsSandboxDeleted(t, binary, cliEnv, cridValue)
 	})
 	if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
 		t.Fatalf("remove qURL Task Scheduler job after successful journey: %v", err)
@@ -237,6 +244,7 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	var cridValue string
 	productCleanupComplete := false
 	registerSandboxFailureFinalCleanup(t, stateDir, &cridValue, &productCleanupComplete)
+	markSandboxFailurePhase(sandboxFailurePhaseSetup)
 
 	binaryInput := strings.TrimSpace(os.Getenv("QURL_CLI_SANDBOX_BINARY"))
 	if binaryInput == "" {
@@ -268,10 +276,12 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
 	bootstrapKey := cliEnv["QURL_API_KEY"]
 	delete(cliEnv, "QURL_API_KEY")
+	markSandboxFailurePhase(sandboxFailurePhaseLogin)
 	login := runWindowsSandboxCLIInput(t, binary, cliEnv, bootstrapKey+"\n", "-o", "json", "login")
 	if login.err != nil {
 		t.Fatalf("controlled-failure Windows login: %v; stderr %q", login.err, login.stderr)
 	}
+	markSandboxFailurePhase(sandboxFailurePhaseIdentity)
 	device := loadWindowsSandboxAgentState(t, stateDir)
 	recordSandboxCleanupDeviceKey(t, device.DeviceAPIKeyID)
 	if cleanupJWT != "" {
@@ -279,6 +289,7 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	}
 	assertWindowsSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
+	markSandboxFailurePhase(sandboxFailurePhaseService)
 	jobManager := connectorservice.NewUserJobManager()
 	if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
 		t.Fatalf("remove Windows controlled-failure Task Scheduler job: %v", err)
@@ -297,6 +308,7 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	}))
 	defer backend.Close()
 	registerWindowsSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], namespace.ConnectorID, device.DeviceAPIKey)
+	markSandboxFailurePhase(sandboxFailurePhasePublish)
 	published := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
 		"--id", namespace.ConnectorID)
 	cridValue = strings.TrimSpace(published.stdout)
@@ -327,14 +339,19 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		productCleanupComplete = true
 	})
 
+	markSandboxFailurePhase(sandboxFailurePhaseReadiness)
 	local := waitWindowsSandboxShare(t, stateDir, cridValue, time.Minute)
 	initial := waitWindowsSandboxState(t, binary, cliEnv, cridValue, "on", "serving", time.Minute)
+	markSandboxFailurePhase(sandboxFailurePhaseRoute)
 	assertWindowsSandboxRoute(t, binary, cliEnv, cridValue, marker, time.Minute)
+	markSandboxFailurePhase(sandboxFailurePhaseStop)
 	stopped := windowsSandboxLifecycle(t, binary, cliEnv, "stop", cridValue)
 	if err := validateWindowsSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
 		t.Fatalf("controlled-failure Windows stop state = %+v: %v", stopped, err)
 	}
+	markSandboxFailurePhase(sandboxFailurePhaseFence)
 	assertWindowsSandboxRouteFenced(t, binary, cliEnv, cridValue, &backendHits)
+	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", filepath.Join(t.TempDir(), "fenced"))
 	if windowsSandboxExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
 		!strings.Contains(strings.ToLower(failedGet.stderr), "aren't available") {
@@ -395,10 +412,13 @@ func windowsSandboxExitCode(err error) int {
 func assertWindowsSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, cridValue string) {
 	t.Helper()
 	result := runWindowsSandboxCLI(t, binary, env, "resolve", cridValue)
-	if windowsSandboxExitCode(result.err) != exitcode.NotFound || result.stdout != "" ||
-		!strings.Contains(strings.ToLower(result.stderr), "deleted") {
-		t.Fatalf("controlled-failure Windows remote cleanup = error %v, stdout %q, stderr %q",
-			result.err, result.stdout, result.stderr)
+	if err := validateSandboxDeletedCommandResult(
+		"controlled-failure Windows resolve",
+		windowsSandboxExitCode(result.err),
+		result.stdout,
+		result.stderr,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -522,6 +542,39 @@ func assertWindowsSandboxRoute(t *testing.T, binary string, env map[string]strin
 	t.Fatalf("Windows public qURL route for %s did not deliver local backend bytes: %s", cridValue, last)
 }
 
+func assertWindowsSandboxDeleted(
+	t *testing.T,
+	binary string,
+	env map[string]string,
+	cridValue string,
+) {
+	t.Helper()
+	downloadDir := t.TempDir()
+	destination := filepath.Join(downloadDir, "deleted-payload")
+	for _, check := range []struct {
+		name string
+		args []string
+	}{
+		{name: "resolve", args: []string{"resolve", cridValue}},
+		{name: "get", args: []string{"get", cridValue, "--file", destination}},
+		{name: "status", args: []string{"status", cridValue}},
+	} {
+		result := runWindowsSandboxCLI(t, binary, env, check.args...)
+		if err := validateSandboxDeletedCommandResult(
+			"Windows "+check.name,
+			windowsSandboxExitCode(result.err),
+			result.stdout,
+			result.stderr,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(downloadDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("Windows get after Connector delete left %d download artifacts: %v", len(entries), err)
+	}
+}
+
 func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) {
 	t.Helper()
 	time.Sleep(2 * time.Second)
@@ -565,7 +618,12 @@ func assertWindowsSandboxListContains(t *testing.T, binary string, env map[strin
 
 func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]string) {
 	t.Helper()
-	target := fmt.Sprintf("https://example.com/?qurl-private-windows-journey=%d", time.Now().UnixNano())
+	suffix := fmt.Sprintf("qurl-private-windows-journey=%d", time.Now().UnixNano())
+	target := "https://example.com/?" + suffix
+	// TODO(upstream-contract): qurl-service normalizes an empty root path from
+	// "/" to "". Keep the common customer input above and assert its explicit
+	// canonical form so a service contract change fails with useful evidence.
+	canonicalTarget := "https://example.com?" + suffix
 	published := runWindowsSandboxCLI(t, binary, env, "-o", "json", "publish", target,
 		"--description", sandboxJourneyResourceDescription(t, env))
 	if published.err != nil {
@@ -575,7 +633,7 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 	if err := json.Unmarshal([]byte(published.stdout), &resource); err != nil {
 		t.Fatalf("decode Windows remote publish output: %v", err)
 	}
-	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != target || resource.FoundExisting {
+	if resource.CRID == "" || resource.ResourceID == "" || resource.TargetURL != canonicalTarget || resource.FoundExisting {
 		t.Fatalf("Windows remote publish = %+v, want one new URL resource", resource)
 	}
 	deleted := false
@@ -596,19 +654,20 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		if err := json.Unmarshal([]byte(result.stdout), &status); err != nil {
 			t.Fatalf("decode Windows remote %s output: %v", command, err)
 		}
-		if status.CRID != resource.CRID || status.ResourceID != resource.ResourceID || status.TargetURL != target ||
+		if status.CRID != resource.CRID || status.ResourceID != resource.ResourceID || status.TargetURL != canonicalTarget ||
 			status.Type != "url" || status.Status != "active" {
 			t.Fatalf("Windows remote %s = %+v, want active URL %+v", command, status, resource)
 		}
 	}
 	assertWindowsSandboxListContains(t, binary, env, resource.CRID)
 	resolved := runWindowsSandboxCLI(t, binary, env, "resolve", resource.CRID)
-	if resolved.err != nil {
-		t.Fatalf("Windows remote resolve: %v; stderr %q", resolved.err, resolved.stderr)
-	}
-	parsed, err := url.Parse(strings.TrimSpace(resolved.stdout))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		t.Fatalf("Windows remote resolve did not return one HTTPS link: %v", err)
+	if _, err := validateSandboxResolveCommandResult(
+		"Windows remote resolve",
+		windowsSandboxExitCode(resolved.err),
+		resolved.stdout,
+		resolved.stderr,
+	); err != nil {
+		t.Fatal(err)
 	}
 	destination := filepath.Join(t.TempDir(), "remote-payload")
 	downloaded := runWindowsSandboxCLI(t, binary, env, "get", resource.CRID, "--file", destination)
@@ -633,8 +692,13 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		t.Fatalf("Windows remote idempotent re-delete: %v; stderr %q", redeleted.err, redeleted.stderr)
 	}
 	revoked := runWindowsSandboxCLI(t, binary, env, "resolve", resource.CRID)
-	if revoked.err == nil || revoked.stdout != "" || !strings.Contains(strings.ToLower(revoked.stderr), "deleted") {
-		t.Fatalf("Windows resolve after delete = error %v, stdout %q, stderr %q", revoked.err, revoked.stdout, revoked.stderr)
+	if err := validateSandboxDeletedCommandResult(
+		"Windows remote resolve",
+		windowsSandboxExitCode(revoked.err),
+		revoked.stdout,
+		revoked.stderr,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

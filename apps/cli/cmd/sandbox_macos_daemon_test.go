@@ -217,11 +217,17 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if backendHits.Load() < 3 {
 		t.Fatalf("local backend saw %d route hits, want at least one before and after lifecycle changes", backendHits.Load())
 	}
+	resolvedBeforeDelete := runExternalSandboxCLI(t, binary, cliEnv, "resolve", cridValue)
+	if resolvedBeforeDelete.err != nil || strings.TrimSpace(resolvedBeforeDelete.stdout) == "" {
+		t.Fatal("resolve before Connector delete failed; private details withheld")
+	}
+	grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, resolvedBeforeDelete.stdout, marker, backendHits.Load)
 
 	deleted := runExternalSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 	if deleted.err != nil {
 		t.Fatalf("delete while daemon is serving: %v; stderr %q", deleted.err, deleted.stderr)
 	}
+	assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
 	shares, present, err := connectorstate.ReadLocalSharesIfPresent(context.Background(), stateDir)
 	if err != nil || !present {
 		t.Fatalf("read local registry after delete = (present %v, %v)", present, err)
@@ -231,6 +237,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 			t.Fatalf("deleted CRID %s remains in local daemon registry", cridValue)
 		}
 	}
+	assertExternalSandboxDeleted(t, binary, cliEnv, cridValue)
 }
 
 // TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild drives the exact
@@ -242,6 +249,7 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 	var cridValue string
 	productCleanupComplete := false
 	registerSandboxFailureFinalCleanup(t, stateDir, &cridValue, &productCleanupComplete)
+	markSandboxFailurePhase(sandboxFailurePhaseSetup)
 
 	binaryInput := strings.TrimSpace(os.Getenv("QURL_CLI_SANDBOX_QURL_BINARY"))
 	if binaryInput == "" {
@@ -273,10 +281,12 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 	cliEnv["PATH"] = filepath.Dir(binary) + string(os.PathListSeparator) + os.Getenv("PATH")
 	bootstrapKey := cliEnv["QURL_API_KEY"]
 	delete(cliEnv, "QURL_API_KEY")
+	markSandboxFailurePhase(sandboxFailurePhaseLogin)
 	login := runExternalSandboxCLIInput(t, binary, cliEnv, bootstrapKey+"\n", "-o", "json", "login")
 	if login.err != nil {
 		t.Fatalf("controlled-failure POSIX login: %v; stderr %q", login.err, login.stderr)
 	}
+	markSandboxFailurePhase(sandboxFailurePhaseIdentity)
 	device := loadSandboxAgentState(t, stateDir)
 	if err := validateSandboxDeviceIdentity(device, namespace.AgentID, ""); err != nil {
 		t.Fatalf("controlled-failure POSIX durable identity: %v", err)
@@ -287,6 +297,7 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 	}
 	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
+	markSandboxFailurePhase(sandboxFailurePhaseService)
 	jobManager := connectorservice.NewUserJobManager()
 	if err := jobManager.Remove(connectordaemon.DaemonJobLabel); err != nil {
 		t.Fatalf("remove POSIX controlled-failure user job: %v", err)
@@ -305,6 +316,7 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 	}))
 	defer backend.Close()
 	registerSandboxResourceCleanup(t, cliEnv["QURL_ENDPOINT"], namespace.ConnectorID, device.DeviceAPIKey)
+	markSandboxFailurePhase(sandboxFailurePhasePublish)
 	published := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
 		"--id", namespace.ConnectorID)
 	cridValue = strings.TrimSpace(published.stdout)
@@ -335,18 +347,23 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 		productCleanupComplete = true
 	})
 
+	markSandboxFailurePhase(sandboxFailurePhaseReadiness)
 	local := waitExternalSandboxShare(t, stateDir, cridValue, time.Minute)
 	status, statusErr := jobManager.Status(connectordaemon.DaemonJobLabel)
 	if statusErr != nil || !status.Installed || !status.Running {
 		t.Fatalf("controlled-failure POSIX user job = %+v, %v; want installed and running", status, statusErr)
 	}
 	initial := waitExternalSandboxState(t, binary, cliEnv, cridValue, "on", "serving", time.Minute)
+	markSandboxFailurePhase(sandboxFailurePhaseRoute)
 	assertExternalSandboxRoute(t, binary, cliEnv, cridValue, marker, time.Minute)
+	markSandboxFailurePhase(sandboxFailurePhaseStop)
 	stopped := externalSandboxLifecycle(t, binary, cliEnv, "stop", cridValue)
 	if err := validateSandboxSharingTransition(stopped, "off", "stopped", initial.ServingEpoch); err != nil {
 		t.Fatalf("controlled-failure POSIX stop state = %+v: %v", stopped, err)
 	}
+	markSandboxFailurePhase(sandboxFailurePhaseFence)
 	assertSandboxControlledFailureRouteFencedInputs(t, binary, cliEnv, stateDir, local.CRID, marker, &backendHits, 30*time.Second)
+	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue,
 		"--file", filepath.Join(t.TempDir(), "fenced"))
 	if sandboxExternalExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
@@ -540,4 +557,37 @@ func assertExternalSandboxRoute(t *testing.T, binary string, env map[string]stri
 		time.Sleep(time.Second)
 	}
 	t.Fatalf("public qURL route for %s did not deliver the local backend bytes: %s", cridValue, last)
+}
+
+func assertExternalSandboxDeleted(
+	t *testing.T,
+	binary string,
+	env map[string]string,
+	cridValue string,
+) {
+	t.Helper()
+	downloadDir := t.TempDir()
+	destination := filepath.Join(downloadDir, "deleted-payload")
+	for _, check := range []struct {
+		name string
+		args []string
+	}{
+		{name: "resolve", args: []string{"resolve", cridValue}},
+		{name: "get", args: []string{"get", cridValue, "--file", destination}},
+		{name: "status", args: []string{"status", cridValue}},
+	} {
+		result := runExternalSandboxCLI(t, binary, env, check.args...)
+		if err := validateSandboxDeletedCommandResult(
+			check.name,
+			sandboxExternalExitCode(result.err),
+			result.stdout,
+			result.stderr,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(downloadDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("get after Connector delete left %d download artifacts: %v", len(entries), err)
+	}
 }
