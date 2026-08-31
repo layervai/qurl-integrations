@@ -216,13 +216,7 @@ func controllableLocalShare(ctx context.Context, registry localShareRegistry, id
 }
 
 func requireBackgroundShareSupport(goos string) error {
-	if err := requireLocalShareSupport(goos); err != nil {
-		return err
-	}
-	if goos == "darwin" || goos == "windows" {
-		return nil
-	}
-	return fmt.Errorf("background local sharing is currently supported only on macOS and Windows; use qurl publish --foreground on %s", goos)
+	return requireLocalShareSupport(goos)
 }
 
 func requireLocalShareSupport(goos string) error {

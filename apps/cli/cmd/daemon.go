@@ -104,17 +104,17 @@ var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) err
 }
 
 // daemonCmd exposes the long-running engine for headless deployments and
-// foreground supervision. Ordinary macOS and Windows users normally let
-// publish/start manage the native per-user background job.
+// foreground supervision. Ordinary Linux, macOS, and Windows users normally
+// let publish/start manage the native per-user background job.
 func daemonCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run the local sharing daemon",
 		Long: `Run the local sharing daemon directly.
 
-On macOS and Windows, qurl publish and qurl start normally manage the per-user
-daemon for you. Use daemon run for a headless deployment or when another
-service manager owns the process.`,
+On Linux, macOS, and Windows, qurl publish and qurl start normally manage the
+per-user daemon for you. Use daemon run for a headless deployment or when
+another service manager owns the process.`,
 		Args: noArgs,
 	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string

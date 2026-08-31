@@ -9,8 +9,7 @@ import (
 )
 
 // DefaultLogDir keeps non-macOS Unix logs inside the explicit, owner-bound
-// state namespace. Linux currently uses foreground sharing, but stop still
-// constructs the controller that signals that process over IPC.
+// state namespace used by Linux foreground and systemd-managed daemons.
 func DefaultLogDir(stateDir string) (string, error) {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" || !filepath.IsAbs(stateDir) || filepath.Clean(stateDir) != stateDir {

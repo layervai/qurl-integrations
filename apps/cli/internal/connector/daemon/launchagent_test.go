@@ -20,8 +20,11 @@ func testHubResolver() (qurl.HubBootstrap, error) {
 }
 
 type recordingJobManager struct {
-	jobs     []connectorservice.UserJob
-	replaced []connectorservice.UserJob
+	jobs        []connectorservice.UserJob
+	replaced    []connectorservice.UserJob
+	status      *connectorservice.ServiceStatus
+	statusErr   error
+	statusCalls int
 }
 
 func (m *recordingJobManager) Ensure(job connectorservice.UserJob) error { //nolint:gocritic // interface requires a value.
@@ -33,11 +36,18 @@ func (m *recordingJobManager) Replace(job connectorservice.UserJob) error { //no
 	return nil
 }
 func (*recordingJobManager) Remove(string) error { return nil }
-func (*recordingJobManager) Status(string) (connectorservice.ServiceStatus, error) {
+func (m *recordingJobManager) Status(string) (connectorservice.ServiceStatus, error) {
+	m.statusCalls++
+	if m.statusErr != nil {
+		return connectorservice.ServiceStatus{}, m.statusErr
+	}
+	if m.status != nil {
+		return *m.status, nil
+	}
 	return connectorservice.ServiceStatus{Installed: true, Running: true}, nil
 }
 
-func TestJobControllerPersistsStableInstalledCommandPath(t *testing.T) {
+func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T) {
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
@@ -49,26 +59,16 @@ func TestJobControllerPersistsStableInstalledCommandPath(t *testing.T) {
 		}
 		return binaryPath, nil
 	}
-	probes := 0
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		probes++
-		if probes == 1 {
-			return IPCStatus{}, false, nil
-		}
-		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+		return IPCStatus{}, false, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
 	if err := controller.Ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// An installation target change is intentionally invisible because the
-	// persisted definition keeps the PATH-resolved stable command path.
-	if err := controller.Ensure(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(manager.jobs) != 2 || reloads != 1 {
-		t.Fatalf("LaunchAgent definition checks/reloads = %d/%d, want two idempotent definition checks and one IPC reload", len(manager.jobs), reloads)
+	if len(manager.jobs) != 1 || len(manager.replaced) != 0 || manager.statusCalls != 0 || reloads != 0 {
+		t.Fatalf("absent owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 1/0/0/0", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
 	}
 	for _, job := range manager.jobs {
 		if job.BinaryPath != binaryPath {
@@ -91,6 +91,57 @@ func TestJobControllerPersistsStableInstalledCommandPath(t *testing.T) {
 	}
 }
 
+func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *testing.T) {
+	dir := t.TempDir()
+	manager := &recordingJobManager{}
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", func() (qurl.HubBootstrap, error) {
+		t.Fatal("Hub resolution ran for a compatible live owner")
+		return qurl.HubBootstrap{}, nil
+	})
+	controller.Manager = manager
+	controller.LookPath = func(string) (string, error) {
+		t.Fatal("qurl path lookup ran for a compatible live owner")
+		return "", nil
+	}
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+	}
+	reloads := 0
+	controller.Reload = func(context.Context) (bool, error) {
+		reloads++
+		return true, nil
+	}
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 0 || reloads != 1 {
+		t.Fatalf("compatible owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 0/0/0/1", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
+	}
+}
+
+func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T) {
+	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "bin", "qurl")
+	manager := &recordingJobManager{}
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller.Manager = manager
+	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+	}
+	reloads := 0
+	controller.Reload = func(context.Context) (bool, error) {
+		reloads++
+		return false, nil
+	}
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.jobs) != 1 || len(manager.replaced) != 0 || manager.statusCalls != 0 || reloads != 1 {
+		t.Fatalf("exited owner manager ensure/replace/status/reload = %d/%d/%d/%d, want 1/0/0/1", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
+	}
+}
+
 func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.T) {
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
@@ -109,8 +160,40 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	if len(manager.jobs) != 0 || len(manager.replaced) != 1 || reloads != 0 {
 		t.Fatalf("definition loads/replacements/live reloads = %d/%d/%d, want forced versioned replacement", len(manager.jobs), len(manager.replaced), reloads)
 	}
+	if manager.statusCalls != 1 {
+		t.Fatalf("native ownership status calls = %d, want 1", manager.statusCalls)
+	}
 	if got := manager.replaced[0].Arguments[7]; got != "1/2.5.0" {
 		t.Fatalf("job version argument = %q, want 1/2.5.0", got)
+	}
+}
+
+func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDaemon(t *testing.T) {
+	dir := t.TempDir()
+	foreground := connectorservice.ServiceStatus{Installed: false, Running: false}
+	manager := &recordingJobManager{status: &foreground}
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", func() (qurl.HubBootstrap, error) {
+		t.Fatal("Hub resolution ran for an incompatible foreground owner")
+		return qurl.HubBootstrap{}, nil
+	})
+	controller.Manager = manager
+	controller.LookPath = func(string) (string, error) {
+		t.Fatal("qurl path lookup ran for an incompatible foreground owner")
+		return "", nil
+	}
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+	}
+	controller.Reload = func(context.Context) (bool, error) {
+		t.Fatal("reload ran for an incompatible foreground owner")
+		return false, nil
+	}
+	err := controller.Ensure(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "stop the foreground or externally managed daemon") {
+		t.Fatalf("Ensure error = %v, want safe incompatible foreground-owner guidance", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 1 {
+		t.Fatalf("incompatible foreground manager ensure/replace/status = %d/%d/%d, want 0/0/1", len(manager.jobs), len(manager.replaced), manager.statusCalls)
 	}
 }
 
@@ -160,8 +243,9 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 				t.Fatal("qurl path lookup ran before deployment state validation")
 				return "", nil
 			}
+			probes := 0
 			controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-				t.Fatal("IPC probe ran before deployment state validation")
+				probes++
 				return IPCStatus{}, false, nil
 			}
 			err := controller.Ensure(context.Background())
@@ -170,6 +254,9 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 			}
 			if len(manager.jobs) != 0 || len(manager.replaced) != 0 {
 				t.Fatalf("invalid deployment state installed jobs: ensure=%d replace=%d", len(manager.jobs), len(manager.replaced))
+			}
+			if probes != 1 {
+				t.Fatalf("IPC probes = %d, want 1 before deployment validation", probes)
 			}
 		})
 	}

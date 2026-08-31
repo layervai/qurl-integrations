@@ -85,9 +85,9 @@ keeps the share available and resumes it after login, sleep, wake, or a network
 change. Run `qurl stop <CRID>` to turn it off and `qurl start <CRID>` to turn it
 back on. Publishing the same target later reuses the same CRID.
 
-Background lifecycle management is available on macOS and Windows. On Linux,
-add `--foreground`; the command then owns the share until it exits. qURL v2
-release binaries are available for macOS, Windows, and Linux.
+Background lifecycle management is available on Linux, macOS, and Windows.
+Linux uses the native systemd user manager. Use `--foreground` for CI,
+debugging, or a process that another service manager owns.
 
 ### 4. Open or share it
 
@@ -125,9 +125,9 @@ brew install layervai/tap/qurl
 Homebrew also installs the man pages and the bash/zsh/fish completions
 shipped in the release archive.
 
-The CLI supports remote qURL commands on macOS, Windows, and Linux. Local
-background sharing is available on macOS and Windows. Linux local publish
-requires `--foreground`; `start` and `restart` cannot create a background job.
+The CLI supports remote and local background qURL commands on macOS, Windows,
+and Linux. Linux uses the native systemd user manager and reports a clear error
+when that manager is unavailable.
 
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)

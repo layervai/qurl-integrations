@@ -49,11 +49,42 @@ func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveH
 
 // Ensure reloads a compatible live daemon or installs the current job definition.
 func (c *JobController) Ensure(ctx context.Context) error {
-	hub, expectedJobVersion, err := c.validatedDeployment()
-	if err != nil {
+	if err := c.validateController(); err != nil {
 		return err
 	}
 	status, running, err := c.ProbeStatus(ctx)
+	if err != nil {
+		return err
+	}
+	expectedJobVersion, err := JobVersion(c.BinaryVersion)
+	if err != nil {
+		return err
+	}
+	if running && status.JobVersion == expectedJobVersion {
+		reloaded, err := c.Reload(ctx)
+		if err != nil {
+			return err
+		}
+		if reloaded {
+			return nil
+		}
+		// The compatible owner exited between the status and reload calls.
+		// Continue as an absent owner instead of reporting false convergence.
+		running = false
+	}
+	if running {
+		managed, err := c.Manager.Status(DaemonJobLabel)
+		if err != nil {
+			return fmt.Errorf("inspect native background ownership before replacing incompatible share daemon: %w", err)
+		}
+		if !managed.Installed || !managed.Running {
+			return fmt.Errorf(
+				"share daemon version %q does not match qURL version %q; stop the foreground or externally managed daemon and retry",
+				status.JobVersion, expectedJobVersion,
+			)
+		}
+	}
+	hub, err := c.validatedDeployment()
 	if err != nil {
 		return err
 	}
@@ -61,56 +92,44 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	install := c.Manager.Ensure
-	if running && status.JobVersion != expectedJobVersion {
+	if running {
 		// IPC proved a resident daemon is on an incompatible protocol/binary
-		// version. Force replacement even if a prior interrupted upgrade already
-		// wrote the current plist around that old process.
-		install = c.Manager.Replace
-	}
-	if err := install(job); err != nil {
-		return err
-	}
-	if running && status.JobVersion == expectedJobVersion {
-		// Manager.Ensure first compares the complete non-secret definition, so
-		// an endpoint or Hub change replaces the process instead of reloading an
-		// old deployment. A matching process receives the registry-reconcile
-		// signal; a just-replaced process performs reconciliation on startup.
-		if _, err := c.Reload(ctx); err != nil {
-			return err
-		}
+		// version and the native manager proved that it owns that process. Force
+		// replacement even if an interrupted upgrade already wrote the current
+		// job definition around the old process.
+		return c.Manager.Replace(job)
 	}
 	// A successful native job install transfers ownership to the durable daemon.
 	// Native assignment recovery can legitimately outlive a CLI readiness
 	// deadline, so serving convergence is observed through the control plane.
+	return c.Manager.Ensure(job)
+}
+
+func (c *JobController) validateController() error {
+	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
+		return errors.New("share daemon job controller is incomplete")
+	}
 	return nil
 }
 
-func (c *JobController) validatedDeployment() (qurl.HubBootstrap, string, error) {
-	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
-		return qurl.HubBootstrap{}, "", errors.New("share daemon job controller is incomplete")
-	}
+func (c *JobController) validatedDeployment() (qurl.HubBootstrap, error) {
 	if c.Endpoint == "" || c.Endpoint != strings.TrimSpace(c.Endpoint) {
-		return qurl.HubBootstrap{}, "", errors.New("share daemon API endpoint is empty or non-canonical")
+		return qurl.HubBootstrap{}, errors.New("share daemon API endpoint is empty or non-canonical")
 	}
 	// The endpoint is persisted in an owner-readable plist. Reuse the native
 	// resource origin validator so userinfo, query, and fragment data can never
 	// turn that durable non-secret job definition into a credential store.
 	if _, err := agent.ResourceSDKOrigin(c.Endpoint); err != nil {
-		return qurl.HubBootstrap{}, "", err
-	}
-	expectedJobVersion, err := JobVersion(c.BinaryVersion)
-	if err != nil {
-		return qurl.HubBootstrap{}, "", err
+		return qurl.HubBootstrap{}, err
 	}
 	hub, err := c.ResolveHub()
 	if err != nil {
-		return qurl.HubBootstrap{}, "", err
+		return qurl.HubBootstrap{}, err
 	}
 	if err := connectorhub.ValidateBootstrap(hub); err != nil {
-		return qurl.HubBootstrap{}, "", err
+		return qurl.HubBootstrap{}, err
 	}
-	return hub, expectedJobVersion, nil
+	return hub, nil
 }
 
 func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) (connectorservice.UserJob, error) {

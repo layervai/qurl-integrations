@@ -800,7 +800,7 @@ func TestLifecycleCommandsRejectInternalConnectorID(t *testing.T) {
 	}
 }
 
-func TestStartRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
+func TestLinuxStartRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
 	registry, err := openOwnedTestShareRegistry(stateDir)
@@ -818,7 +818,8 @@ func TestStartRotatesEpochAfterLocalTerminalDisable(t *testing.T) {
 	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"))
 	daemon := &recordingShareDaemon{}
 	res := runCLI(t, &runOpts{
-		args: []string{"--endpoint", srv.URL, "start", srv.Key.CRID},
+		args:         []string{"--endpoint", srv.URL, "start", srv.Key.CRID},
+		platformGOOS: "linux",
 		env: map[string]string{
 			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
 		},

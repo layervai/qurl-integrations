@@ -85,7 +85,7 @@ func TestHelpLeadsWithTheOneCommandLocalJourney(t *testing.T) {
 	if local < 0 || remote < 0 || local >= remote {
 		t.Errorf("publish help must explain the local path first:\n%s", publishHelp)
 	}
-	for _, want := range []string{"On macOS and Windows", "background daemon", "On Linux", "--foreground", "supported on macOS, Windows, and Linux", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
+	for _, want := range []string{"On Linux, macOS, and Windows", "background daemon", "--foreground", "prints the CRID, and exits", "qurl get <CRID>", "identifies the resource but grants no access"} {
 		if !strings.Contains(publishHelp, want) {
 			t.Errorf("publish help missing %q:\n%s", want, publishHelp)
 		}
@@ -259,9 +259,12 @@ func TestBackgroundSharePlatformContract(t *testing.T) {
 	if err := requireBackgroundShareSupport("windows"); err != nil {
 		t.Fatalf("windows background share support: %v", err)
 	}
-	err := requireBackgroundShareSupport("linux")
-	if err == nil || !strings.Contains(err.Error(), "supported only on macOS and Windows") || !strings.Contains(err.Error(), "--foreground") {
-		t.Fatalf("linux background share error = %v", err)
+	if err := requireBackgroundShareSupport("linux"); err != nil {
+		t.Fatalf("linux background share support: %v", err)
+	}
+	err := requireBackgroundShareSupport("plan9")
+	if err == nil || !strings.Contains(err.Error(), "local app sharing is supported on macOS, Linux, and Windows only") {
+		t.Fatalf("unsupported background share error = %v", err)
 	}
 }
 

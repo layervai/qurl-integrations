@@ -39,12 +39,10 @@ For a local app, pass its loopback HTTP address:
 
   qurl publish http://127.0.0.1:3000
 
-On macOS and Windows, qURL starts a per-user background daemon, waits until the
-route is serving, prints the CRID, and exits. The daemon resumes desired-on
-shares after login, sleep, wake, and network changes. On Linux, use
---foreground; background lifecycle management is not yet available. Local app
-sharing is supported on macOS, Windows, and Linux. Running the same command
-later reuses the same resource and CRID.
+On Linux, macOS, and Windows, qURL starts a per-user background daemon, waits
+until the route is serving, prints the CRID, and exits. The daemon resumes
+desired-on shares after login, sleep, wake, and network changes. Running the
+same command later reuses the same resource and CRID.
 Use --id only when you want to choose the Connector ID yourself.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
