@@ -231,6 +231,10 @@ func cliSentinelCode(err error) (int, bool) {
 		// Expiry that survived the one automatic refresh joins the
 		// platform's gone family: the link does not resolve to content now.
 		return NotFound, true
+	case errors.Is(err, consume.ErrLinkUnavailable):
+		// The URL-bearing request or transport cause is intentionally removed,
+		// but this remains a retryable reachability failure.
+		return Unavailable, true
 	case errors.Is(err, consume.ErrLinkFetch):
 		// A freshly minted, verified link that then refuses to serve is the
 		// service answering outside its contract.

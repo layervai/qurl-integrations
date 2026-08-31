@@ -67,6 +67,9 @@ type globalOpts struct {
 	// opener. Tests always inject (the harness refuses by default), so no
 	// test ever sends a real access request.
 	enterPortal func(ctx context.Context, link string) (string, error)
+	// enterPortalGrant retains the acknowledged access lifetime for downloads
+	// that must distinguish propagation from true expiry.
+	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
@@ -263,6 +266,7 @@ func (o *globalOpts) applyDefaults() {
 	if o.enterPortal == nil {
 		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
 		o.enterPortal = opener.Open
+		o.enterPortalGrant = opener.Grant
 	}
 	if o.redirectFRPLogs == nil {
 		o.redirectFRPLogs = func() { redirectFRPLogsToStderr(o) }

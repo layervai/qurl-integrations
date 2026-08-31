@@ -17,6 +17,7 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -85,7 +86,8 @@ type runOpts struct {
 	// refusing fake, so no hermetic test can ever send a real access
 	// request (the clisandbox journey uses the production wiring via
 	// realOpener instead).
-	enterPortal func(ctx context.Context, link string) (string, error)
+	enterPortal      func(ctx context.Context, link string) (string, error)
+	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 	// realOpener keeps the production access opener in place instead of the
 	// refusing fake. Only the clisandbox-tagged live suite sets it.
 	realOpener bool
@@ -211,6 +213,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 				return "", fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
 			}
 		}
+		g.enterPortalGrant = o.enterPortalGrant
 		switch {
 		case o.sleeps != nil:
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }

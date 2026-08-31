@@ -25,6 +25,23 @@ const partSuffix = ".part"
 // cancellation) is the user's abort.
 const responseHeaderTimeout = 30 * time.Second
 
+const (
+	grantPropagationWindow      = 2 * time.Second
+	grantPropagationFirstDelay  = 100 * time.Millisecond
+	grantPropagationMaxDelay    = 500 * time.Millisecond
+	grantPropagationMaxAttempts = 5
+)
+
+var errGrantPropagationPending = errors.New("grant propagation remained pending")
+
+// DownloadTarget is a freshly verified URL and, for an acknowledged qURL
+// access grant, the conservative instant through which that grant remains
+// valid. A zero ValidUntil is a direct URL with no retained grant lifetime.
+type DownloadTarget struct {
+	URL        string
+	ValidUntil time.Time
+}
+
 // NewHTTPClient builds the download client: the default transport with a
 // response-header bound, following redirects (a resolved link may bounce to
 // storage). It carries no credentials — the qURL API key must never reach
@@ -44,12 +61,15 @@ type Downloader struct {
 	// first use and kept on the Downloader so every request of one download
 	// — the expiry retry included — shares one connection pool.
 	Client Doer
-	// Mint resolves a fresh URL whose plain GET serves the content bytes.
-	// The closure the CLI injects re-runs CRID verification on every call —
-	// and, for links that carry their credential in the URL fragment, the
-	// platform access request too — so the retry path is exactly as
-	// fail-closed as the first attempt.
+	// Mint resolves a lifetime-free URL whose plain GET serves the content.
 	Mint func(ctx context.Context) (string, error)
+	// MintTarget is the grant-aware form of Mint. When present it takes
+	// precedence and lets an immediate 410 retry the same acknowledged grant
+	// instead of opening a second NHP session. Mint remains for direct callers
+	// that do not have grant metadata.
+	MintTarget func(ctx context.Context) (DownloadTarget, error)
+	now        func() time.Time
+	wait       func(context.Context, time.Duration) error
 }
 
 // SaveTo downloads to path atomically: bytes land in path+".part", which
@@ -142,29 +162,50 @@ func CheckDestination(path string, force bool) error {
 	}
 }
 
-// fetch mints a fetchable URL and GETs it, retrying exactly once when the
-// host says the link expired: mint a fresh (re-verified, re-granted) URL
-// and start over. Expiry is only trusted before any payload byte, so the
-// retry can never duplicate output.
+// fetch mints a fetchable URL and GETs it. An immediate 410 on a live,
+// acknowledged grant gets a short bounded propagation retry against the same
+// URL. Only a grant that has expired gets one fresh, re-verified grant. Expiry
+// is trusted only before any payload byte, so a retry cannot duplicate output.
 //
 // TODO(upstream-contract): HTTP 410 is the pinned "this access link
 // expired" answer from the link host. If the platform ever adds another
 // expiry spelling, widen linkExpired in lockstep.
 func (d *Downloader) fetch(ctx context.Context) (io.ReadCloser, error) {
-	resp, err := d.get(ctx)
+	target, resp, err := d.getFresh(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if linkExpired(resp) {
 		discard(resp)
-		if resp, err = d.get(ctx); err != nil {
-			return nil, err
+		if d.grantIsLive(target) {
+			resp, err = d.retryLiveGrant(ctx, target)
+			if err != nil && !errors.Is(err, errGrantPropagationPending) {
+				return nil, err
+			}
+			if resp != nil && !linkExpired(resp) {
+				return acceptedBody(resp)
+			}
+			if resp != nil {
+				discard(resp)
+			}
 		}
-		if linkExpired(resp) {
-			discard(resp)
-			return nil, ErrLinkExpired
+		if target.ValidUntil.IsZero() || !d.grantIsLive(target) {
+			_, resp, err = d.getFresh(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if linkExpired(resp) {
+				discard(resp)
+				return nil, ErrLinkExpired
+			}
+			return acceptedBody(resp)
 		}
+		return nil, fmt.Errorf("%w: acknowledged access stayed unavailable", ErrLinkFetch)
 	}
+	return acceptedBody(resp)
+}
+
+func acceptedBody(resp *http.Response) (io.ReadCloser, error) {
 	if resp.StatusCode/100 != 2 {
 		discard(resp)
 		return nil, fmt.Errorf("%w: the link answered HTTP %d", ErrLinkFetch, resp.StatusCode)
@@ -172,17 +213,87 @@ func (d *Downloader) fetch(ctx context.Context) (io.ReadCloser, error) {
 	return resp.Body, nil
 }
 
+func (d *Downloader) retryLiveGrant(ctx context.Context, target DownloadTarget) (*http.Response, error) {
+	deadline := d.currentTime().Add(grantPropagationWindow)
+	if target.ValidUntil.Before(deadline) {
+		deadline = target.ValidUntil
+	}
+	delay := grantPropagationFirstDelay
+	for attempt := 0; attempt < grantPropagationMaxAttempts; attempt++ {
+		remaining := deadline.Sub(d.currentTime())
+		if remaining <= 0 {
+			return nil, errGrantPropagationPending
+		}
+		if err := d.waitFor(ctx, min(delay, remaining)); err != nil {
+			return nil, err
+		}
+		if !d.currentTime().Before(deadline) {
+			return nil, errGrantPropagationPending
+		}
+		resp, err := d.getTarget(ctx, target.URL)
+		if err != nil {
+			return nil, err
+		}
+		if !linkExpired(resp) {
+			return resp, nil
+		}
+		discard(resp)
+		delay = min(delay*2, grantPropagationMaxDelay)
+	}
+	return nil, errGrantPropagationPending
+}
+
+func (d *Downloader) grantIsLive(target DownloadTarget) bool {
+	return !target.ValidUntil.IsZero() && d.currentTime().Before(target.ValidUntil)
+}
+
+func (d *Downloader) currentTime() time.Time {
+	if d.now != nil {
+		return d.now()
+	}
+	return time.Now()
+}
+
+func (d *Downloader) waitFor(ctx context.Context, delay time.Duration) error {
+	if d.wait != nil {
+		return d.wait(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // get performs one mint-then-GET round trip. Mint failures — resolve
 // errors and CRID verification failures alike — propagate unwrapped so
 // they keep their own exit codes.
-func (d *Downloader) get(ctx context.Context) (*http.Response, error) {
-	link, err := d.Mint(ctx)
+func (d *Downloader) getFresh(ctx context.Context) (DownloadTarget, *http.Response, error) {
+	target, err := d.mintTarget(ctx)
 	if err != nil {
-		return nil, err
+		return DownloadTarget{}, nil, err
 	}
+	resp, err := d.getTarget(ctx, target.URL)
+	return target, resp, err
+}
+
+func (d *Downloader) mintTarget(ctx context.Context) (DownloadTarget, error) {
+	if d.MintTarget != nil {
+		return d.MintTarget(ctx)
+	}
+	link, err := d.Mint(ctx)
+	return DownloadTarget{URL: link}, err
+}
+
+func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("build download request: %w", err)
+		// URL parsing errors can echo link. Granted URLs carry short-lived
+		// authority, so keep the same fixed capability boundary as Do below.
+		return nil, fmt.Errorf("%w: invalid download link", ErrLinkFetch)
 	}
 	if d.Client == nil {
 		// Lazy-init once and keep it: the expiry retry must reach the same
@@ -191,7 +302,16 @@ func (d *Downloader) get(ctx context.Context) (*http.Response, error) {
 		// second dial.
 		d.Client = NewHTTPClient()
 	}
-	return d.Client.Do(req)
+	resp, err := d.Client.Do(req)
+	if err == nil {
+		return resp, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("download canceled: %w", ctxErr)
+	}
+	// net/http transport errors normally include req.URL. A granted content
+	// URL is short-lived authority, so never retain that error text or chain.
+	return nil, fmt.Errorf("%w: request failed", ErrLinkUnavailable)
 }
 
 func linkExpired(resp *http.Response) bool {

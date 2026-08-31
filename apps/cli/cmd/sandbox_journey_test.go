@@ -264,6 +264,152 @@ type sandboxInspectionDoc struct {
 	TargetHealth    *string    `json:"local_target_health"`
 }
 
+func sandboxFailureDiagnosticFromInspection(raw []byte) (sandboxFailureDiagnostic, bool) {
+	var document sandboxInspectionDoc
+	if json.Unmarshal(raw, &document) != nil || document.FailureCategory == nil {
+		return sandboxFailureDiagnostic{}, false
+	}
+	diagnostic := sandboxFailureDiagnostic{Category: *document.FailureCategory}
+	if document.FailureCode != nil {
+		diagnostic.Code = *document.FailureCode
+	}
+	if !validSandboxFailureDiagnostic(diagnostic) {
+		return sandboxFailureDiagnostic{}, false
+	}
+	return diagnostic, true
+}
+
+func sandboxFailureASCIIIdentifierByte(character byte) bool {
+	return (character >= '0' && character <= '9') ||
+		(character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z') || character == '_'
+}
+
+func sandboxFailureDiagnosticFromCLIError(stderr string) (sandboxFailureDiagnostic, bool) {
+	const prefix = "error "
+	var code string
+	for offset := 0; offset < len(stderr); {
+		index := strings.Index(stderr[offset:], prefix)
+		if index < 0 {
+			break
+		}
+		prefixStart := offset + index
+		start := prefixStart + len(prefix)
+		end := start
+		for end < len(stderr) && stderr[end] >= '0' && stderr[end] <= '9' {
+			end++
+		}
+		candidate := stderr[start:end]
+		prefixBoundaryOK := prefixStart == 0 || !sandboxFailureASCIIIdentifierByte(stderr[prefixStart-1])
+		codeBoundaryOK := end == len(stderr) || !sandboxFailureASCIIIdentifierByte(stderr[end])
+		if validSandboxFailureCode(candidate) && candidate != "" && prefixBoundaryOK && codeBoundaryOK {
+			if code != "" {
+				return sandboxFailureDiagnostic{}, false
+			}
+			code = candidate
+		}
+		offset = start
+	}
+	if code == "" {
+		return sandboxFailureDiagnostic{}, false
+	}
+	return sandboxFailureDiagnostic{Category: "unknown", Code: code}, true
+}
+
+func markSandboxFailureDiagnosticFromCommand(stdout, stderr string, commandErr error) {
+	if commandErr == nil {
+		if diagnostic, ok := sandboxFailureDiagnosticFromInspection([]byte(stdout)); ok {
+			markSandboxFailureDiagnostic(diagnostic)
+		}
+		return
+	}
+	if diagnostic, ok := sandboxFailureDiagnosticFromCLIError(stderr); ok {
+		markSandboxFailureDiagnostic(diagnostic)
+	}
+}
+
+func markSandboxFailureDiagnosticFromError(err error) {
+	writeSandboxFailureDiagnosticFromError(os.Stdout, err)
+}
+
+func writeSandboxFailureDiagnosticFromError(w io.Writer, err error) {
+	diagnostic := sandboxFailureDiagnostic{Category: "unknown"}
+	if err != nil {
+		if parsed, ok := sandboxFailureDiagnosticFromCLIError(err.Error()); ok {
+			diagnostic.Code = parsed.Code
+		}
+	}
+	writeSandboxFailureDiagnostic(w, diagnostic)
+}
+
+func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
+	t.Run("inspection", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			raw  string
+			want sandboxFailureDiagnostic
+			ok   bool
+		}{
+			{name: "category and code", raw: `{"failure_category":"assignment","failure_code":"52201","target_url":"http://127.0.0.1"}`, want: sandboxFailureDiagnostic{Category: "assignment", Code: "52201"}, ok: true},
+			{name: "category only", raw: `{"failure_category":"network"}`, want: sandboxFailureDiagnostic{Category: "network"}, ok: true},
+			{name: "unknown category", raw: `{"failure_category":"internal_topology","failure_code":"52201"}`},
+			{name: "invalid code", raw: `{"failure_category":"identity","failure_code":"secret"}`},
+			{name: "missing category", raw: `{"failure_code":"52201"}`},
+			{name: "malformed", raw: `{"failure_category":`},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				got, ok := sandboxFailureDiagnosticFromInspection([]byte(test.raw))
+				if ok != test.ok || got != test.want {
+					t.Fatalf("inspection diagnostic = %#v, %t; want %#v, %t", got, ok, test.want, test.ok)
+				}
+			})
+		}
+	})
+	t.Run("CLI error", func(t *testing.T) {
+		for _, test := range []struct {
+			name   string
+			stderr string
+			wantOK bool
+		}{
+			{name: "one canonical code", stderr: "request failed: error 52401", wantOK: true},
+			{name: "absent", stderr: "request failed"},
+			{name: "short", stderr: "error 5240"},
+			{name: "long", stderr: "error 524010"},
+			{name: "embedded", stderr: "error 52401secret"},
+			{name: "embedded prefix", stderr: "terror 52401"},
+			{name: "unicode", stderr: "error ５2401"},
+			{name: "multiple", stderr: "error 52201 then error 52401"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				got, ok := sandboxFailureDiagnosticFromCLIError(test.stderr)
+				if ok != test.wantOK {
+					t.Fatalf("CLI diagnostic = %#v, %t; want ok %t", got, ok, test.wantOK)
+				}
+				if ok && got != (sandboxFailureDiagnostic{Category: "unknown", Code: "52401"}) {
+					t.Fatalf("CLI diagnostic = %#v", got)
+				}
+			})
+		}
+	})
+	t.Run("error marker never relays text", func(t *testing.T) {
+		capture := func(err error) string {
+			t.Helper()
+			var output bytes.Buffer
+			writeSandboxFailureDiagnosticFromError(&output, err)
+			return output.String()
+		}
+		const secret = "lv_test_marker_must_not_relay"
+		withCode := capture(errors.New(secret + ": assignment error 52028 at a private path"))
+		withoutCode := capture(errors.New(secret + ": internal endpoint did not settle"))
+		if withCode != sandboxFailureDiagnosticMarker+" unknown 52028\n" ||
+			withoutCode != sandboxFailureDiagnosticMarker+" unknown none\n" ||
+			strings.Contains(withCode+withoutCode, secret) || strings.Contains(withCode+withoutCode, "private path") ||
+			strings.Contains(withCode+withoutCode, "internal endpoint") {
+			t.Fatalf("redacted error markers = %q and %q", withCode, withoutCode)
+		}
+	})
+}
+
 // assertHealthySandboxInspection proves that inspect is the real redacted
 // diagnostic surface, not an alias for status. The healthy journey requires
 // every always-present diagnostic and requires failure and retry details to be

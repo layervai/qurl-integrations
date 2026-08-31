@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // downloadHost is a scriptable link host: statuses queues per-request
@@ -21,6 +24,14 @@ type downloadHost struct {
 	// onRequest, when set, runs before each response is written.
 	onRequest func(hit int)
 	statuses  []int
+}
+
+type failingDownloadDoer struct {
+	err error
+}
+
+func (d failingDownloadDoer) Do(*http.Request) (*http.Response, error) {
+	return nil, d.err
 }
 
 func newDownloadHost(t *testing.T, payload []byte, statuses ...int) *downloadHost {
@@ -181,6 +192,187 @@ func TestSaveToExpirySurvivingRetryFails(t *testing.T) {
 	}
 	mustNotExist(t, dest)
 	mustNotExist(t, dest+partSuffix)
+}
+
+func TestDownloadLiveGrantRetriesSameURL(t *testing.T) {
+	payload := []byte("grant converged")
+	host := newDownloadHost(t, payload, http.StatusGone, 0)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			return DownloadTarget{URL: host.URL, ValidUntil: now.Add(time.Minute)}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if got := out.String(); got != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+	if mints != 1 || host.hits.Load() != 2 {
+		t.Errorf("mints = %d, GETs = %d; want 1 and 2", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadLiveGrantRetryIsBounded(t *testing.T) {
+	host := newDownloadHost(t, nil,
+		http.StatusGone, http.StatusGone, http.StatusGone,
+		http.StatusGone, http.StatusGone, http.StatusGone)
+	now := time.Unix(1_700_000_000, 0)
+	started := now
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			return DownloadTarget{URL: host.URL, ValidUntil: now.Add(time.Minute)}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) {
+		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	}
+	if mints != 1 || host.hits.Load() != 1+grantPropagationMaxAttempts {
+		t.Errorf("mints = %d, GETs = %d; want 1 and at most %d", mints, host.hits.Load(), 1+grantPropagationMaxAttempts)
+	}
+	if elapsed := now.Sub(started); elapsed > grantPropagationWindow {
+		t.Errorf("retry elapsed = %s, want at most %s", elapsed, grantPropagationWindow)
+	}
+}
+
+func TestDownloadLiveGrantRetryHonorsCancellation(t *testing.T) {
+	host := newDownloadHost(t, nil, http.StatusGone)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			return DownloadTarget{URL: host.URL, ValidUntil: now.Add(time.Minute)}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(ctx context.Context, _ time.Duration) error {
+			cancel()
+			return ctx.Err()
+		},
+	}
+
+	_, err := d.StreamTo(ctx, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if mints != 1 || host.hits.Load() != 1 {
+		t.Errorf("mints = %d, GETs = %d; want 1 and 1", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadExpiredGrantMintsOneFreshTarget(t *testing.T) {
+	payload := []byte("fresh grant")
+	host := newDownloadHost(t, payload, http.StatusGone, 0)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			validUntil := now
+			if mints == 2 {
+				validUntil = now.Add(time.Minute)
+			}
+			return DownloadTarget{URL: host.URL, ValidUntil: validUntil}, nil
+		},
+		now: func() time.Time { return now },
+	}
+
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if got := out.String(); got != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+	if mints != 2 || host.hits.Load() != 2 {
+		t.Errorf("mints = %d, GETs = %d; want 2 and 2", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadGrantExpiryDuringPropagationMintsOneFreshTarget(t *testing.T) {
+	payload := []byte("fresh after retained grant expired")
+	host := newDownloadHost(t, payload, http.StatusGone, http.StatusGone, 0)
+	now := time.Unix(1_700_000_000, 0)
+	mints := 0
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			mints++
+			validUntil := now.Add(time.Minute)
+			if mints == 1 {
+				validUntil = now.Add(150 * time.Millisecond)
+			}
+			return DownloadTarget{URL: host.URL, ValidUntil: validUntil}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if got := out.String(); got != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+	if mints != 2 || host.hits.Load() != 3 {
+		t.Errorf("mints = %d, GETs = %d; want 2 and 3", mints, host.hits.Load())
+	}
+}
+
+func TestDownloadTransportErrorDoesNotExposeGrantedURL(t *testing.T) {
+	const secretURL = "https://download.example/capability-secret"
+	d := &Downloader{
+		Client: failingDownloadDoer{err: errors.New("Get \"" + secretURL + "\": dial failed")},
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			return DownloadTarget{URL: secretURL, ValidUntil: time.Now().Add(time.Minute)}, nil
+		},
+	}
+
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkUnavailable) {
+		t.Fatalf("err = %v, want ErrLinkUnavailable", err)
+	}
+	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "capability-secret") {
+		t.Fatalf("transport error exposed granted authority: %q", err)
+	}
+}
+
+func TestDownloadRequestBuildErrorDoesNotExposeGrantedURL(t *testing.T) {
+	const secretURL = "https://download.example/capability-secret\n"
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: secretURL, ValidUntil: time.Now().Add(time.Minute)}, nil
+	}}
+
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) {
+		t.Fatalf("err = %v, want ErrLinkFetch", err)
+	}
+	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "capability-secret") {
+		t.Fatalf("request-build error exposed granted authority: %q", err)
+	}
 }
 
 func TestSaveToNonExpiryStatusDoesNotRetry(t *testing.T) {

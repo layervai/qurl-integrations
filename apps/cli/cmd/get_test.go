@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // T3/T4 tests for `qurl get`: the real command tree against the mock qURL
@@ -567,10 +569,7 @@ func TestGetDirectLinkDownloadsWithoutAccessRequest(t *testing.T) {
 	}
 }
 
-// TestGetExpiryRetryRepeatsAccessRequest extends the T3 retry contract to
-// the access flow: a 410 on the granted content URL re-resolves, re-runs
-// verification, and asks for access again — never reuses the stale grant.
-func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
+func TestGetLiveGrantRetriesWithoutSecondAccessRequest(t *testing.T) {
 	srv, link := portalServer(t)
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 	dest := filepath.Join(t.TempDir(), "out.bin")
@@ -578,9 +577,36 @@ func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			granted = append(granted, got)
-			return srv.URL + apitest.DownloadPath, nil
+			return consume.AccessGrant{ContentURL: srv.URL + apitest.DownloadPath, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if len(granted) != 1 || granted[0] != link {
+		t.Fatalf("access requests = %q, want the minted link exactly once", granted)
+	}
+	if got := readTestFile(t, dest); string(got) != apitest.DefaultDownloadPayload {
+		t.Errorf("downloaded file = %q, want the granted content payload", got)
+	}
+	mustNeverFetchPortalPage(t, srv)
+}
+
+// A grant with no retained lifetime is expired for retry purposes. A 410 then
+// gets exactly one fresh verified resolve and access request.
+func TestGetExpiredGrantRepeatsAccessRequest(t *testing.T) {
+	srv, link := portalServer(t)
+	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	var granted []string
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
+			granted = append(granted, got)
+			return consume.AccessGrant{ContentURL: srv.URL + apitest.DownloadPath}, nil
 		},
 	})
 	if res.code != 0 {
@@ -593,6 +619,45 @@ func TestGetExpiryRetryRepeatsAccessRequest(t *testing.T) {
 		t.Errorf("downloaded file = %q, want the granted content payload", got)
 	}
 	mustNeverFetchPortalPage(t, srv)
+}
+
+func TestGetDownloadErrorDoesNotExposeGrantedURL(t *testing.T) {
+	srv, _ := portalServer(t)
+	const capability = "capability-secret"
+	secretURL := srv.URL + "/" + capability + "\n"
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "out.bin")},
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != exitcode.ServerError {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.ServerError, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), capability) {
+		t.Fatalf("rendered error exposed granted authority: %q", res.stderr.String())
+	}
+}
+
+func TestGetDownloadTransportErrorIsRedactedAndUnavailable(t *testing.T) {
+	srv, _ := portalServer(t)
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	secretURL := closed.URL + "/capability-secret"
+	closed.Close()
+
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "out.bin")},
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{ContentURL: secretURL, OpenSeconds: 300}, nil
+		},
+	})
+	if res.code != exitcode.Unavailable {
+		t.Fatalf("exit = %d, want %d; stderr: %s", res.code, exitcode.Unavailable, res.stderr.String())
+	}
+	if strings.Contains(res.stderr.String(), secretURL) || strings.Contains(res.stderr.String(), "capability-secret") {
+		t.Fatalf("rendered transport error exposed granted authority: %q", res.stderr.String())
+	}
 }
 
 // TestGetBrowserPathNeverRequestsAccess pins that browser mode carries the

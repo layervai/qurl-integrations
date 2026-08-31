@@ -52,6 +52,7 @@ const (
 	sandboxRouteFencePoll               = 500 * time.Millisecond
 	sandboxRouteFenceSettle             = 2 * time.Second
 	sandboxRouteProbeTimeout            = 15 * time.Second
+	sandboxStoppedRouteRefusalText      = "Error: Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to.\n"
 	// Serving after stop is a security-boundary failure, not eventual
 	// convergence. Five seconds is the intentional initial hard SLO; the
 	// private journey records the real propagation time before release. The
@@ -249,6 +250,18 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 	markSandboxFailurePhase(sandboxFailurePhaseSetup)
 	fixture := startSandboxLocalPublishInState(t, "failure", stateDir)
 	crid = fixture.local.CRID
+	controlledFailureReached := false
+	defer func() {
+		if controlledFailureReached {
+			return
+		}
+		inspection := runSandboxLocalCLI(t, fixture.binary, fixture.env, stateDir, "-o", "json", "inspect", crid)
+		var commandErr error
+		if inspection.code != 0 {
+			commandErr = fmt.Errorf("exit %d", inspection.code)
+		}
+		markSandboxFailureDiagnosticFromCommand(inspection.stdout.String(), inspection.stderr.String(), commandErr)
+	}()
 	t.Cleanup(func() {
 		deleted := runSandboxLocalCLI(t, fixture.binary, fixture.env, stateDir, "delete", crid, "--yes")
 		if deleted.code != 0 {
@@ -286,14 +299,20 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 		t.Fatalf("controlled-failure stop state = %+v: %v", stopped, err)
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseFence)
-	assertSandboxControlledFailureRouteFenced(t, fixture, 30*time.Second)
+	if err := controlledSandboxRouteFenceError(t, fixture.binary, fixture.env, fixture.stateDir,
+		fixture.local.CRID, fixture.marker, &fixture.backendHits, 30*time.Second); err != nil {
+		markSandboxFailureDiagnosticFromError(err)
+		t.Fatal("controlled-failure route fence did not settle")
+	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runSandboxLocalCLI(
 		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", filepath.Join(t.TempDir(), "fenced"),
 	)
 	if err := validateSandboxStoppedRouteRefusal(failedGet, sandboxStoppedRouteRefusal(t)); err != nil {
+		markSandboxFailureDiagnosticFromCommand(failedGet.stdout.String(), failedGet.stderr.String(), errors.New("controlled get failed"))
 		t.Fatalf("controlled customer get did not fail as required: %v", err)
 	}
+	controlledFailureReached = true
 	t.Fatal(sandboxFailureChildSentinel)
 }
 
@@ -581,20 +600,14 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	return fixture
 }
 
-func assertSandboxControlledFailureRouteFenced(t *testing.T, fixture *sandboxLocalFixture, limit time.Duration) {
-	t.Helper()
-	assertSandboxControlledFailureRouteFencedInputs(t, fixture.binary, fixture.env, fixture.stateDir,
-		fixture.local.CRID, fixture.marker, &fixture.backendHits, limit)
-}
-
-func assertSandboxControlledFailureRouteFencedInputs(t *testing.T, binary string, env map[string]string,
+func controlledSandboxRouteFenceError(t *testing.T, binary string, env map[string]string,
 	stateDir, crid, marker string, backendHits *atomic.Uint64, limit time.Duration,
-) {
+) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	destination := filepath.Join(t.TempDir(), "fenced-payload")
-	if err := waitSandboxRouteFence(
+	return waitSandboxRouteFence(
 		ctx,
 		sandboxRouteFencePoll,
 		sandboxRouteFenceSettle,
@@ -607,9 +620,7 @@ func assertSandboxControlledFailureRouteFencedInputs(t *testing.T, binary string
 			)
 		},
 		backendHits.Load,
-	); err != nil {
-		t.Fatal(err)
-	}
+	)
 }
 
 func assertSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, stateDir, crid string) {
@@ -917,20 +928,17 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 	return nil
 }
 
-func sandboxStoppedRouteRefusal(t *testing.T) string {
-	t.Helper()
+func sandboxStoppedRouteRefusal(_ *testing.T) string {
 	// TODO(upstream-contract): qurl-service currently uses this endpoint-dark
 	// response for a stopped resource. Keep the exact CLI and service contracts
 	// in lockstep if the service adds a distinct stopped-resource response.
-	// TestGoldens owns this file; TestSandboxStoppedRouteRefusalMatchesQuietGet
-	// proves the exact quiet get path used below emits the same bytes.
+	// Keep the contract in source because the packaged customer-journey harness
+	// runs without a repository checkout. TestSandboxStoppedRouteRefusalMatchesQuietGet
+	// proves the exact quiet get path used below emits the same bytes, while
+	// TestGoldens independently owns the customer-facing golden file.
 	// The endpoint-scoped text is not sufficient by itself. The live gate also
 	// requires durable off/stopped state and a stable zero-hit backend window.
-	data, err := os.ReadFile(filepath.Join("testdata", "golden", "error_dark503.plain.stderr.golden"))
-	if err != nil {
-		t.Fatalf("read stopped-route refusal golden: %v", err)
-	}
-	return string(data)
+	return sandboxStoppedRouteRefusalText
 }
 
 func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
@@ -939,6 +947,9 @@ func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
 	res := runCLI(t, &runOpts{args: []string{
 		"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "payload"),
 	}})
+	// The packaged harness runs without apps/cli/cmd as its working directory.
+	// Prove this contract has no repository-relative runtime dependency.
+	t.Chdir(t.TempDir())
 	if err := validateSandboxStoppedRouteRefusal(res, sandboxStoppedRouteRefusal(t)); err != nil {
 		t.Fatal(err)
 	}

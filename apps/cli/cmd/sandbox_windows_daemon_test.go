@@ -313,8 +313,17 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		"--id", namespace.ConnectorID)
 	cridValue = strings.TrimSpace(published.stdout)
 	if published.err != nil || cridValue == "" || strings.Contains(cridValue, "\n") {
+		markSandboxFailureDiagnosticFromCommand(published.stdout, published.stderr, published.err)
 		t.Fatalf("controlled-failure Windows publish = stdout %q, stderr %q, error %v", published.stdout, published.stderr, published.err)
 	}
+	controlledFailureReached := false
+	defer func() {
+		if controlledFailureReached {
+			return
+		}
+		inspection := runWindowsSandboxCLI(t, binary, cliEnv, "-o", "json", "inspect", cridValue)
+		markSandboxFailureDiagnosticFromCommand(inspection.stdout, inspection.stderr, inspection.err)
+	}()
 	t.Cleanup(func() {
 		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 		if deleted.err != nil {
@@ -350,16 +359,21 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		t.Fatalf("controlled-failure Windows stop state = %+v: %v", stopped, err)
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseFence)
-	assertWindowsSandboxRouteFenced(t, binary, cliEnv, cridValue, &backendHits)
+	if err := windowsSandboxRouteFenceError(t, binary, cliEnv, cridValue, &backendHits); err != nil {
+		markSandboxFailureDiagnosticFromError(err)
+		t.Fatal("controlled-failure Windows route fence did not settle")
+	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
 	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", filepath.Join(t.TempDir(), "fenced"))
 	if windowsSandboxExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
 		!strings.Contains(strings.ToLower(failedGet.stderr), "aren't available") {
+		markSandboxFailureDiagnosticFromCommand(failedGet.stdout, failedGet.stderr, failedGet.err)
 		t.Fatalf("controlled customer get did not return the fenced-resource failure: error %v, stdout %q, stderr %q", failedGet.err, failedGet.stdout, failedGet.stderr)
 	}
 	if local.CRID != cridValue {
 		t.Fatalf("controlled-failure Windows registry CRID = %q, want %q", local.CRID, cridValue)
 	}
+	controlledFailureReached = true
 	t.Fatal(sandboxFailureChildSentinel)
 }
 
@@ -575,7 +589,7 @@ func assertWindowsSandboxDeleted(
 	}
 }
 
-func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) {
+func windowsSandboxRouteFenceError(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) error {
 	t.Helper()
 	time.Sleep(2 * time.Second)
 	settledHits := backendHits.Load()
@@ -585,12 +599,20 @@ func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string
 		result := runWindowsSandboxCLI(t, binary, env, "get", cridValue, "--file", destination)
 		if result.err == nil {
 			payload, _ := os.ReadFile(destination) //nolint:gosec // Isolated test destination.
-			t.Fatalf("stopped Windows qURL route succeeded with %d bytes", len(payload))
+			return fmt.Errorf("stopped Windows qURL route succeeded with %d bytes", len(payload))
 		}
 		if backendHits.Load() != settledHits {
-			t.Fatal("stopped Windows qURL route reached the local backend")
+			return errors.New("stopped Windows qURL route reached the local backend")
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
+}
+
+func assertWindowsSandboxRouteFenced(t *testing.T, binary string, env map[string]string, cridValue string, backendHits *atomic.Uint64) {
+	t.Helper()
+	if err := windowsSandboxRouteFenceError(t, binary, env, cridValue, backendHits); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,9 +27,15 @@ const (
 	sandboxFailureChildSentinel            = "controlled customer failure reached after route fencing"
 	sandboxFailureCleanupMarker            = "QURL_CONTROLLED_FAILURE_CLEANED"
 	sandboxFailurePhaseMarker              = "QURL_CONTROLLED_FAILURE_PHASE"
+	sandboxFailureDiagnosticMarker         = "QURL_CONTROLLED_FAILURE_DIAGNOSTIC"
 	sandboxFailureChildTimeout             = 3 * time.Minute
 	sandboxFailureDaemonStopTimeout        = 15 * time.Second
 )
+
+type sandboxFailureDiagnostic struct {
+	Category string
+	Code     string
+}
 
 type sandboxFailurePhase string
 
@@ -57,6 +64,19 @@ var sandboxFailurePhases = map[sandboxFailurePhase]struct{}{
 	sandboxFailurePhaseStop:       {},
 	sandboxFailurePhaseFence:      {},
 	sandboxFailurePhaseStoppedGet: {},
+}
+
+var sandboxFailureCategories = map[string]struct{}{
+	"assignment":           {},
+	"enrollment":           {},
+	"identity":             {},
+	"local_daemon":         {},
+	"local_state":          {},
+	"network":              {},
+	"peer_timeout":         {},
+	"platform_denied":      {},
+	"resource_unavailable": {},
+	"unknown":              {},
 }
 
 func runSandboxFailureChild(t *testing.T, childTestName string) string {
@@ -200,6 +220,41 @@ func markSandboxFailurePhase(phase sandboxFailurePhase) {
 	_, _ = fmt.Fprintf(os.Stdout, "%s %s\n", sandboxFailurePhaseMarker, phase)
 }
 
+func validSandboxFailureCode(code string) bool {
+	if code == "" {
+		return true
+	}
+	if len(code) != 5 {
+		return false
+	}
+	for _, character := range code {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) bool {
+	_, categoryOK := sandboxFailureCategories[diagnostic.Category]
+	return categoryOK && validSandboxFailureCode(diagnostic.Code)
+}
+
+func markSandboxFailureDiagnostic(diagnostic sandboxFailureDiagnostic) {
+	writeSandboxFailureDiagnostic(os.Stdout, diagnostic)
+}
+
+func writeSandboxFailureDiagnostic(w io.Writer, diagnostic sandboxFailureDiagnostic) {
+	if !validSandboxFailureDiagnostic(diagnostic) {
+		panic("invalid controlled-failure diagnostic")
+	}
+	code := "none"
+	if diagnostic.Code != "" {
+		code = diagnostic.Code
+	}
+	_, _ = fmt.Fprintf(w, "%s %s %s\n", sandboxFailureDiagnosticMarker, diagnostic.Category, code)
+}
+
 func sandboxFailureLastPhase(output string) sandboxFailurePhase {
 	last := sandboxFailurePhaseUnknown
 	for _, line := range strings.Split(output, "\n") {
@@ -216,8 +271,35 @@ func sandboxFailureLastPhase(output string) sandboxFailurePhase {
 	return last
 }
 
+func sandboxFailureLastDiagnostic(output string) (sandboxFailureDiagnostic, bool) {
+	var last sandboxFailureDiagnostic
+	found := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		fields := strings.Split(line, " ")
+		if len(fields) != 3 || fields[0] != sandboxFailureDiagnosticMarker {
+			continue
+		}
+		diagnostic := sandboxFailureDiagnostic{Category: fields[1], Code: fields[2]}
+		if diagnostic.Code == "none" {
+			diagnostic.Code = ""
+		}
+		if validSandboxFailureDiagnostic(diagnostic) {
+			last, found = diagnostic, true
+		}
+	}
+	return last, found
+}
+
 func sandboxFailureMissingSentinelError(output string) error {
-	return fmt.Errorf("child did not reach the controlled customer failure (last phase: %s)", sandboxFailureLastPhase(output))
+	detail := fmt.Sprintf("last phase: %s", sandboxFailureLastPhase(output))
+	if diagnostic, ok := sandboxFailureLastDiagnostic(output); ok {
+		detail += ", failure category: " + diagnostic.Category
+		if diagnostic.Code != "" {
+			detail += ", failure code: " + diagnostic.Code
+		}
+	}
+	return fmt.Errorf("child did not reach the controlled customer failure (%s)", detail)
 }
 
 func TestSandboxFailureDiagnosticsAreAllowListedAndRedacted(t *testing.T) {
@@ -236,6 +318,33 @@ func TestSandboxFailureDiagnosticsAreAllowListedAndRedacted(t *testing.T) {
 		err := sandboxFailureMissingSentinelError(output)
 		if strings.Contains(err.Error(), secret) || err.Error() != "child did not reach the controlled customer failure (last phase: publish)" {
 			t.Fatalf("redacted controlled-failure diagnostic = %q", err)
+		}
+	})
+	t.Run("closed diagnostic", func(t *testing.T) {
+		output := strings.Join([]string{
+			sandboxFailureDiagnosticMarker + " network none",
+			sandboxFailureDiagnosticMarker + " internal_topology 52401",
+			sandboxFailureDiagnosticMarker + " identity ５2401",
+			sandboxFailureDiagnosticMarker + " identity 524010",
+			" " + sandboxFailureDiagnosticMarker + " identity 52401",
+			sandboxFailureDiagnosticMarker + " identity 52401 extra",
+			sandboxFailureDiagnosticMarker + " identity 52401\r",
+		}, "\n")
+		diagnostic, ok := sandboxFailureLastDiagnostic(output)
+		if !ok || diagnostic != (sandboxFailureDiagnostic{Category: "identity", Code: "52401"}) {
+			t.Fatalf("last controlled-failure diagnostic = %#v, %t", diagnostic, ok)
+		}
+		err := sandboxFailureMissingSentinelError(sandboxFailurePhaseMarker + " publish\n" + output)
+		want := "child did not reach the controlled customer failure (last phase: publish, failure category: identity, failure code: 52401)"
+		if err.Error() != want || strings.Contains(err.Error(), "internal_topology") {
+			t.Fatalf("controlled-failure diagnostic error = %q, want %q", err, want)
+		}
+	})
+	t.Run("diagnostic cannot carry secret", func(t *testing.T) {
+		output := sandboxFailureDiagnosticMarker + " unknown none\narbitrary child detail " + secret
+		err := validateSandboxFailureChildResult(errors.New("not an exit error"), output, "ChildTest", []string{secret})
+		if err == nil || err.Error() != "child exposed a protected credential" || strings.Contains(err.Error(), secret) {
+			t.Fatalf("protected diagnostic validation = %q", err)
 		}
 	})
 	t.Run("secret scan precedes exit validation", func(t *testing.T) {
