@@ -312,7 +312,7 @@ func startSandboxPublishProcess(
 	}
 	//nolint:gosec // The protected test validates the fixed binary path and supplies closed arguments.
 	p.cmd = exec.CommandContext(context.Background(), binary, "--endpoint", baseEnv["QURL_ENDPOINT"], "--quiet", "publish", targetURL,
-		"--id", namespace.ConnectorID, "--description", sandboxJourneyResourceDescription(t, baseEnv), "--foreground")
+		"--id", namespace.ConnectorID, "--foreground")
 	p.cmd.Env = sandboxCommandEnv(env)
 	p.cmd.Stdout = &p.stdout
 	p.cmd.Stderr = &p.stderr

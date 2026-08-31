@@ -71,7 +71,7 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      AUTH_TOKEN_ENDPOINT: ${{ vars.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
       SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
       SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
     steps:
