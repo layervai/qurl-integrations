@@ -693,8 +693,13 @@ func TestSameJourneyTargetURLAcceptsServiceCanonicalForm(t *testing.T) {
 		"different scheme": "http://example.com/?qurl-private-sandbox-device-journey=17881886511",
 		"real path":        "https://example.com/elsewhere?qurl-private-sandbox-device-journey=17881886511",
 		"query dropped":    "https://example.com/",
-		"empty":            "",
-		"not a URL":        "example.com",
+		// The two folds the helper deliberately does NOT perform. When the
+		// service starts canonicalizing either, this fails with an obvious
+		// diff instead of presenting as another red journey.
+		"host case":    "https://EXAMPLE.COM/?qurl-private-sandbox-device-journey=17881886511",
+		"default port": "https://example.com:443/?qurl-private-sandbox-device-journey=17881886511",
+		"empty":        "",
+		"not a URL":    "example.com",
 	}
 	for name, echoed := range different {
 		t.Run(name, func(t *testing.T) {

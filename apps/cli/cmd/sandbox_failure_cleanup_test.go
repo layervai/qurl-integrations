@@ -12,12 +12,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -107,9 +110,11 @@ func requireSandboxFailureCredentials(t *testing.T) (primaryAPIKey, failureAPIKe
 	return primaryAPIKey, failureAPIKey
 }
 
-// sandboxProtectedValueMinBytes is the shortest needle worth scanning for. A
-// one- or two-character value matches ordinary output and would report a leak
-// that never happened, so a degenerate secret is skipped instead.
+// sandboxProtectedValueMinBytes is the shortest *derived* needle worth
+// scanning for. A one- or two-character value matches ordinary output and
+// would report a leak that never happened, so a degenerate derivation is
+// dropped. The three primary credentials are scanned whatever their length —
+// that is the fail-closed direction.
 const sandboxProtectedValueMinBytes = 16
 
 // sandboxProtectedChildValues is every statically known secret the child must
@@ -119,30 +124,37 @@ const sandboxProtectedValueMinBytes = 16
 // and either the whole string or the key half alone can surface on its own.
 func sandboxProtectedChildValues(t *testing.T, primaryAPIKey, failureAPIKey string) []string {
 	t.Helper()
-	values := []string{
-		primaryAPIKey,
-		failureAPIKey,
-		sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"),
+	issuerForms := qv2IssuerKeyForms(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
+	values := make([]string, 0, 3+len(issuerForms))
+	values = append(values, primaryAPIKey, failureAPIKey, sandboxSecret(t, "QURL_CLI_SANDBOX_CLEANUP_JWT"))
+	return append(values, issuerForms...)
+}
+
+// qv2IssuerKeyForms returns every form the qv2 issuer key can surface in: the
+// whole "<kid>=<standard-base64 key>" string, the key half on its own, and the
+// base64url re-encoding journeyDeploymentFile writes into the SDK settings
+// file the child reads. A malformed key yields only the forms that could be
+// derived, never a short needle that would match ordinary output.
+func qv2IssuerKeyForms(issuerKey string) []string {
+	issuerKey = strings.TrimSpace(issuerKey)
+	if len(issuerKey) < sandboxProtectedValueMinBytes {
+		return nil
 	}
-	issuerKey := strings.TrimSpace(os.Getenv("QURL_SANDBOX_QV2_ISSUER_KEY"))
-	if issuerKey == "" {
-		return values
-	}
-	values = append(values, issuerKey)
+	forms := []string{issuerKey}
 	_, keyStd, ok := strings.Cut(issuerKey, "=")
 	keyStd = strings.TrimSpace(keyStd)
 	if !ok || len(keyStd) < sandboxProtectedValueMinBytes {
-		return values
+		return forms
 	}
-	values = append(values, keyStd)
+	forms = append(forms, keyStd)
 	der, err := base64.StdEncoding.DecodeString(keyStd)
 	if err != nil {
-		return values
+		return forms
 	}
-	if keyURL := base64.RawURLEncoding.EncodeToString(der); len(keyURL) >= sandboxProtectedValueMinBytes {
-		values = append(values, keyURL)
+	if keyURL := base64.RawURLEncoding.EncodeToString(der); len(keyURL) >= sandboxProtectedValueMinBytes && keyURL != keyStd {
+		forms = append(forms, keyURL)
 	}
-	return values
+	return forms
 }
 
 func TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey(t *testing.T) {
@@ -191,49 +203,68 @@ func sandboxFailureChildCredentialOverrides(failureAPIKey string) map[string]str
 
 const sandboxFailureChildOutputTailBytes = 8 << 10
 
+// sandboxCredentialFragmentPattern matches the credential a minted qURL link
+// carries after "#". The journey never logs one deliberately, but the child's
+// excerpt is a raw slab of its output rather than a curated message, so the
+// fragment is scrubbed structurally instead of by enumerating values the
+// parent cannot know.
+var sandboxCredentialFragmentPattern = regexp.MustCompile(`#[A-Za-z0-9_\-]{16,}={0,2}`)
+
 // sandboxChildOutputRedactor masks the protected identifiers a failing child
 // routinely embeds in transport errors. The exact-value scan in
 // runSandboxFailureChild can only prove the absence of credentials it knows
-// statically; the sandbox hostname and relay URL are deliberately not public
-// either, and a request URL carries them into the log verbatim. Failing on
-// those would be wrong — they appear in routine output — so they are redacted
-// rather than treated as a leak.
+// statically; the sandbox endpoint, relay URL and Hub coordinates are
+// deliberately not public either, and a request URL carries them into the log
+// verbatim. Failing on those would be wrong — they appear in routine output —
+// so they are redacted rather than treated as a leak.
 func sandboxChildOutputRedactor() *strings.Replacer {
+	// Ordered, not a map: two inputs that share a host would otherwise pick a
+	// placeholder at random between runs.
+	sources := []struct{ placeholder, env string }{
+		{"<sandbox-endpoint>", "QURL_ENDPOINT"},
+		{"<sandbox-relay>", "QURL_SANDBOX_QV2_RELAY_URL"},
+		{"<hub-host>", hub.EnvHost},
+		{"<hub-port>", hub.EnvPort},
+		{"<hub-key>", hub.EnvServerPublicKey},
+	}
 	var pairs []string
-	for placeholder, raw := range map[string]string{
-		"<sandbox-endpoint>": os.Getenv("QURL_ENDPOINT"),
-		"<sandbox-relay>":    os.Getenv("QURL_SANDBOX_QV2_RELAY_URL"),
-	} {
-		value := strings.TrimSpace(raw)
-		if value == "" {
+	for _, source := range sources {
+		value := strings.TrimSpace(os.Getenv(source.env))
+		if len(value) < sandboxRedactedValueMinBytes {
 			continue
 		}
-		pairs = append(pairs, value, placeholder)
-		if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
-			pairs = append(pairs, parsed.Host, placeholder)
-			if hostname := parsed.Hostname(); hostname != "" && hostname != parsed.Host {
-				pairs = append(pairs, hostname, placeholder)
-			}
+		pairs = append(pairs, value, source.placeholder)
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" {
+			continue
 		}
-	}
-	if len(pairs) == 0 {
-		return strings.NewReplacer()
+		pairs = append(pairs, parsed.Host, source.placeholder)
+		if hostname := parsed.Hostname(); hostname != "" && hostname != parsed.Host {
+			pairs = append(pairs, hostname, source.placeholder)
+		}
 	}
 	return strings.NewReplacer(pairs...)
 }
 
+// sandboxRedactedValueMinBytes keeps a short or absent identifier out of the
+// replacer. A one- or two-character needle would rewrite ordinary output into
+// noise; the Hub port is the reason this is a length rule and not just an
+// emptiness check.
+const sandboxRedactedValueMinBytes = 8
+
 // boundedSandboxChildOutput returns the tail of the child's already
-// leak-checked output, with the protected host identifiers redacted. The
-// parent reports it whenever the child stopped before the controlled failure,
-// because the child's own reason is otherwise discarded — which leaves the
-// packaged journey debuggable only by guessing. A truncated tail is cut at a
-// line boundary when the excerpt contains one, and otherwise has any partial
-// leading rune dropped, so the excerpt is always valid UTF-8.
+// leak-checked output, with the protected identifiers redacted and any minted
+// link credential scrubbed. The parent reports it whenever the child stopped
+// before the controlled failure, because the child's own reason is otherwise
+// discarded — which leaves the packaged journey debuggable only by guessing.
+// The result is always valid UTF-8, including when the child itself wrote
+// invalid bytes, because go test -json carries this text.
 func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) string {
 	if redactor != nil {
 		combined = redactor.Replace(combined)
 	}
-	trimmed := strings.TrimRight(combined, "\n")
+	combined = sandboxCredentialFragmentPattern.ReplaceAllString(combined, "#<redacted>")
+	trimmed := strings.ToValidUTF8(strings.TrimRight(combined, "\n"), "")
 	if strings.TrimSpace(trimmed) == "" {
 		return "(the controlled-failure child produced no output)"
 	}
@@ -241,7 +272,10 @@ func boundedSandboxChildOutput(combined string, redactor *strings.Replacer) stri
 		return trimmed
 	}
 	tail := trimmed[len(trimmed)-sandboxFailureChildOutputTailBytes:]
-	if index := strings.IndexByte(tail, '\n'); index >= 0 {
+	// Resume at a line boundary, but not when the first newline sits so late
+	// that the excerpt would be nearly empty — which is exactly the one-huge-
+	// line case where the tail matters most.
+	if index := strings.IndexByte(tail, '\n'); index >= 0 && len(tail)-index > sandboxFailureChildOutputTailBytes/2 {
 		return "(truncated to the last lines)\n" + tail[index+1:]
 	}
 	return "(truncated to the last bytes)\n" + strings.ToValidUTF8(tail, "")
@@ -413,8 +447,8 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 		if !strings.HasPrefix(got, "(truncated to the last lines)\n") {
 			t.Fatalf("truncated excerpt lost its label: %q", got[:min(60, len(got))])
 		}
-		if !strings.HasSuffix(got, "last line") || strings.Contains(got, "\nfiller line\nfiller") == false {
-			t.Fatalf("truncated excerpt did not keep the tail: %q", got[len(got)-40:])
+		if !strings.HasSuffix(got, "last line") {
+			t.Fatalf("truncated excerpt did not keep the tail: %q", got[max(0, len(got)-40):])
 		}
 		if body := strings.TrimPrefix(got, "(truncated to the last lines)\n"); !strings.HasPrefix(body, "filler line") {
 			t.Fatalf("excerpt did not resume at a line boundary: %q", body[:min(40, len(body))])
@@ -460,12 +494,80 @@ func TestBoundedSandboxChildOutputRedactsAndStaysValidUTF8(t *testing.T) {
 			t.Fatalf("redaction destroyed the diagnostic: %q", got)
 		}
 	})
+	t.Run("scrubs minted link credentials", func(t *testing.T) {
+		// A minted link carries a live credential in its fragment. The parent
+		// cannot enumerate one — the child mints it at runtime — so it is
+		// removed structurally rather than by exact-value scan.
+		got := boundedSandboxChildOutput(
+			"resolve failed for https://example.invalid/abc#Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5 after 3 tries", nil)
+		if strings.Contains(got, "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5") {
+			t.Fatalf("excerpt still exposes a minted link credential: %q", got)
+		}
+		if !strings.Contains(got, "#<redacted>") || !strings.Contains(got, "after 3 tries") {
+			t.Fatalf("fragment scrub lost the diagnostic: %q", got)
+		}
+	})
+	t.Run("keeps short fragments that are not credentials", func(t *testing.T) {
+		const line = "see docs#usage for details"
+		if got := boundedSandboxChildOutput(line, nil); got != line {
+			t.Fatalf("boundedSandboxChildOutput = %q, want %q", got, line)
+		}
+	})
 	t.Run("absent identifiers redact nothing", func(t *testing.T) {
 		t.Setenv("QURL_ENDPOINT", "")
 		t.Setenv("QURL_SANDBOX_QV2_RELAY_URL", "")
 		const line = "plain child failure"
 		if got := boundedSandboxChildOutput(line, sandboxChildOutputRedactor()); got != line {
 			t.Fatalf("boundedSandboxChildOutput = %q, want %q", got, line)
+		}
+	})
+}
+
+// TestQV2IssuerKeyFormsCoversEveryEncoding pins the derivation that decides
+// which needles the child's output is scanned for. A silently dropped form is
+// a credential this suite would stop looking for, so the base64 round-trip is
+// the half most worth pinning.
+func TestQV2IssuerKeyFormsCoversEveryEncoding(t *testing.T) {
+	// DER whose standard and URL-safe base64 encodings differ ("+/" vs "-_").
+	der := []byte{0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0}
+	keyStd := base64.StdEncoding.EncodeToString(der)
+	keyURL := base64.RawURLEncoding.EncodeToString(der)
+	if keyStd == keyURL {
+		t.Fatal("fixture encodings coincide; this test would prove nothing")
+	}
+	issuerKey := "sandbox-kid=" + keyStd
+
+	forms := qv2IssuerKeyForms(issuerKey)
+	for _, want := range []string{issuerKey, keyStd, keyURL} {
+		if !slices.Contains(forms, want) {
+			t.Fatalf("qv2IssuerKeyForms(%q) = %q, missing %q", issuerKey, forms, want)
+		}
+	}
+
+	for name, test := range map[string]struct {
+		issuerKey string
+		want      []string
+	}{
+		"absent":            {issuerKey: "", want: nil},
+		"too short to scan": {issuerKey: "kid=aa", want: nil},
+		"no key half":       {issuerKey: "sandbox-kid-with-no-separator", want: []string{"sandbox-kid-with-no-separator"}},
+		"short key half":    {issuerKey: "sandbox-kid-long-enough=aa", want: []string{"sandbox-kid-long-enough=aa"}},
+		"key half is not base64": {
+			issuerKey: "sandbox-kid=not-valid-base64-material!!",
+			want:      []string{"sandbox-kid=not-valid-base64-material!!", "not-valid-base64-material!!"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := qv2IssuerKeyForms(test.issuerKey); !slices.Equal(got, test.want) {
+				t.Fatalf("qv2IssuerKeyForms(%q) = %q, want %q", test.issuerKey, got, test.want)
+			}
+		})
+	}
+	t.Run("no form is short enough to match ordinary output", func(t *testing.T) {
+		for _, form := range qv2IssuerKeyForms(issuerKey) {
+			if len(form) < sandboxProtectedValueMinBytes {
+				t.Fatalf("qv2IssuerKeyForms produced the over-broad needle %q", form)
+			}
 		}
 	})
 }
