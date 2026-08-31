@@ -246,6 +246,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
+		"TestSameJourneyTargetURLAcceptsServiceCanonicalForm",
 		"TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey",
 		"TestSandboxForegroundLifecycleStateContract",
 		"TestSandboxFullCustomerLifecyclePhaseContract",
