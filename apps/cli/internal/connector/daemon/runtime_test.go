@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -535,6 +536,70 @@ func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) 
 	))
 	if category != diagnosticFailureAssignment || code != "" {
 		t.Fatalf("classification=%q/%q, want assignment with no public code", category, code)
+	}
+}
+
+func TestClassifyShareFailureAlwaysProducesIPCCompatibleDiagnostic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{name: "five-digit deny", err: &qurl.ServerDenyError{ErrCode: "52005"}, wantCode: "52005"},
+		{name: "short deny", err: &qurl.ServerDenyError{ErrCode: "7"}},
+		{name: "nondecimal deny", err: &qurl.ServerDenyError{ErrCode: "52x05"}},
+		{
+			name: "invalid recovery code",
+			err: errors.Join(
+				&qurl.CredentialRecoveryError{Code: "52401x", Phase: "hub_issue_recovery"},
+				qurl.ErrRecoveryCredentialRejected,
+			),
+		},
+		{
+			name: "invalid assignment code",
+			err: errors.Join(
+				&qurl.AssignmentError{Code: "522010"},
+				qurl.ErrAssignmentIdentityRejected,
+			),
+		},
+		{
+			name: "invalid completion code",
+			err: errors.Join(
+				&qurl.CompletionError{Code: "5230x"},
+				qurl.ErrCompletionRequestRejected,
+			),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			category, code := classifyShareFailure(test.err)
+			if code != test.wantCode {
+				t.Fatalf("classification code = %q, want %q", code, test.wantCode)
+			}
+			now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+			next := now.Add(time.Second)
+			encoded, err := json.Marshal(IPCStatus{
+				JobVersion: "1/test",
+				Running:    map[string]string{"resource": "crid"},
+				Resources: map[string]ResourceDiagnostic{"resource": {
+					State: diagnosticStateRetrying, LastTransition: now,
+					FailureCategory: category, FailureCode: code,
+					RetryAttempt: 1, NextRetryAt: &next,
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := decodeIPCStatus(bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatalf("classified diagnostic did not survive IPC decode: %v", err)
+			}
+			if got := status.Resources["resource"].FailureCode; got != test.wantCode {
+				t.Fatalf("round-trip code = %q, want %q", got, test.wantCode)
+			}
+		})
 	}
 }
 

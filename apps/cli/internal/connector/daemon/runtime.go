@@ -442,7 +442,7 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 	}
 	var deny *qurl.ServerDenyError
 	if errors.As(err, &deny) {
-		return diagnosticFailurePlatformDenied, deny.ErrCode
+		return diagnosticFailurePlatformDenied, safeDiagnosticCode(deny.ErrCode)
 	}
 	// Credential recovery is an identity-stage operation. Keep its closed,
 	// non-secret code so inspect can distinguish an authenticated recovery
@@ -453,15 +453,15 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 		case errors.Is(err, qurl.ErrRecoveryCredentialRejected),
 			errors.Is(err, qurl.ErrCredentialRecoveryIdentityRejected),
 			errors.Is(err, qurl.ErrCredentialRecoveryRevokeRequired):
-			return diagnosticFailureIdentity, recovery.Code
+			return diagnosticFailureIdentity, safeDiagnosticCode(recovery.Code)
 		case errors.Is(err, qurl.ErrCredentialRecoveryAssignmentRequired):
-			return diagnosticFailureAssignment, recovery.Code
+			return diagnosticFailureAssignment, safeDiagnosticCode(recovery.Code)
 		default:
 			// The remaining closed recovery results are authenticated
 			// platform outcomes: temporary authority failure, rate limiting,
 			// invalid request, rejected grant, or candidate conflict. They are
 			// not proof of a bad device identity or a local network failure.
-			return diagnosticFailurePlatformDenied, recovery.Code
+			return diagnosticFailurePlatformDenied, safeDiagnosticCode(recovery.Code)
 		}
 	}
 	var assignment *qurl.AssignmentError
@@ -472,9 +472,9 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 		if errors.Is(err, qurl.ErrAssignmentIdentityRejected) ||
 			errors.Is(err, qurl.ErrAssignmentKeyRejected) ||
 			errors.Is(err, qurl.ErrAssignmentBootstrapConsumed) {
-			return diagnosticFailureIdentity, assignment.Code
+			return diagnosticFailureIdentity, safeDiagnosticCode(assignment.Code)
 		}
-		return diagnosticFailureAssignment, assignment.Code
+		return diagnosticFailureAssignment, safeDiagnosticCode(assignment.Code)
 	}
 	var completion *qurl.CompletionError
 	if errors.As(err, &completion) {
@@ -486,9 +486,9 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 			errors.Is(err, qurl.ErrCompletionCredentialConflict):
 			category = diagnosticFailurePlatformDenied
 		}
-		code := ""
-		if strings.HasPrefix(completion.Code, "523") && validDiagnosticCode(completion.Code) {
-			code = completion.Code
+		code := safeDiagnosticCode(completion.Code)
+		if !strings.HasPrefix(code, "523") {
+			code = ""
 		}
 		return category, code
 	}
@@ -570,6 +570,16 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 		return diagnosticFailureResourceUnavailable, ""
 	}
 	return diagnosticFailureUnknown, ""
+}
+
+// safeDiagnosticCode keeps the daemon producer inside the exact IPC contract.
+// qurl-go accepts a wider authenticated decimal error grammar for some NHP
+// replies, but inspect exposes only the closed five-digit public taxonomy.
+func safeDiagnosticCode(code string) string {
+	if !validDiagnosticCode(code) {
+		return ""
+	}
+	return code
 }
 
 // Stop cancels and joins the resource runner.
