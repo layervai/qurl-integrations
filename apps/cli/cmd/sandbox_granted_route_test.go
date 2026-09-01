@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ const (
 
 var (
 	errSandboxGrantedRouteUnexpectedSuccess = errors.New("granted route returned an unexpected successful response")
+	errSandboxGrantedRouteAuthorization     = errors.New("granted route authorization failed")
 	errSandboxGrantedRouteTransport         = errors.New("granted route transport failed")
 )
 
@@ -44,6 +47,7 @@ type sandboxGrantedRoute struct {
 	marker      string
 	backendHits func() uint64
 	expiresAt   time.Time
+	authorize   func(*http.Request) error
 }
 
 func prepareSandboxGrantedRoute(
@@ -77,6 +81,7 @@ func prepareSandboxGrantedRoute(
 		marker:      marker,
 		backendHits: backendHits,
 		expiresAt:   grantStartedAt.Add(time.Duration(grant.OpenSeconds) * time.Second),
+		authorize:   grant.AuthorizeContentRequest,
 	}
 	readyCtx, cancelReady := context.WithTimeout(ctx, sandboxGrantedRouteReadyWindow)
 	defer cancelReady()
@@ -159,6 +164,9 @@ func waitSandboxGrantedRouteReady(
 }
 
 func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRouteProbeState, error) {
+	if r == nil || r.authorize == nil {
+		return 0, errSandboxGrantedRouteAuthorization
+	}
 	client := consume.NewHTTPClient()
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		transport.DisableKeepAlives = true
@@ -168,11 +176,29 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 	if err != nil {
 		return 0, errors.New("build granted-route request")
 	}
+	if err := r.authorize(req); err != nil {
+		return 0, errSandboxGrantedRouteAuthorization
+	}
+	priorCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
+		if priorCheckRedirect != nil {
+			if err := priorCheckRedirect(redirectReq, via); err != nil {
+				return err
+			}
+		}
+		if err := r.authorize(redirectReq); err != nil {
+			return errSandboxGrantedRouteAuthorization
+		}
+		return nil
+	}
 	req.Close = true
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr
+		}
+		if errors.Is(err, errSandboxGrantedRouteAuthorization) {
+			return 0, errSandboxGrantedRouteAuthorization
 		}
 		return 0, errSandboxGrantedRouteTransport
 	}
@@ -392,6 +418,73 @@ func TestSandboxGrantedRouteReadiness(t *testing.T) {
 	if err := waitSandboxGrantedRouteReady(context.Background(), 0, time.Second, nil, nil); err == nil {
 		t.Fatal("invalid readiness configuration was accepted")
 	}
+}
+
+func TestSandboxGrantedRouteProbeAuthorizesEverySameOriginRequest(t *testing.T) {
+	var authorizations atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, err := req.Cookie("qurl_vsession"); err != nil {
+			t.Error("granted-route request did not carry its application bearer")
+		}
+		if req.URL.Path == "/" {
+			http.Redirect(w, req, server.URL+"/content", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("marker"))
+	}))
+	t.Cleanup(server.Close)
+
+	route := &sandboxGrantedRoute{
+		url: server.URL, marker: "marker",
+		authorize: func(req *http.Request) error {
+			authorizations.Add(1)
+			addSandboxTestGrantCookie(req)
+			return nil
+		},
+	}
+	state, err := route.probe(t.Context())
+	if err != nil || state != sandboxGrantedRouteServed || authorizations.Load() != 2 {
+		t.Fatalf("same-origin probe = state %d, error %v, authorizations %d", state, err, authorizations.Load())
+	}
+}
+
+func TestSandboxGrantedRouteProbeRefusesCrossOriginWithoutSendingBearer(t *testing.T) {
+	var destinationRequests atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		destinationRequests.Add(1)
+	}))
+	t.Cleanup(destination.Close)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, err := req.Cookie("qurl_vsession"); err != nil {
+			t.Error("origin request did not carry its application bearer")
+		}
+		http.Redirect(w, req, destination.URL, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+	originHost := strings.TrimPrefix(origin.URL, "http://")
+
+	route := &sandboxGrantedRoute{
+		url: origin.URL, marker: "marker",
+		authorize: func(req *http.Request) error {
+			if req.URL.Host != originHost {
+				return errors.New("private cross-origin detail")
+			}
+			addSandboxTestGrantCookie(req)
+			return nil
+		},
+	}
+	state, err := route.probe(t.Context())
+	if state != 0 || !errors.Is(err, errSandboxGrantedRouteAuthorization) || destinationRequests.Load() != 0 {
+		t.Fatalf("cross-origin probe = state %d, error %v, destination requests %d", state, err, destinationRequests.Load())
+	}
+}
+
+func addSandboxTestGrantCookie(req *http.Request) {
+	req.AddCookie(&http.Cookie{
+		Name: "qurl_vsession", Value: "opaque-test-token",
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
 }
 
 func TestSandboxGrantedRouteAccessFailureCategories(t *testing.T) {

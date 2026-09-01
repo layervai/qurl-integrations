@@ -5,10 +5,16 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/layervai/qurl-go/qurl"
+)
+
+const (
+	webSchemeHTTP  = "http"
+	webSchemeHTTPS = "https"
 )
 
 // Direct access for downloads. A resolved qURL credential link carries its
@@ -101,6 +107,9 @@ type AccessOpener struct {
 type AccessGrant struct {
 	ContentURL  string
 	OpenSeconds uint32
+	// AuthorizeContentRequest applies the short-lived application-session
+	// credential to the exact granted HTTPS origin. It never exposes the value.
+	AuthorizeContentRequest func(*http.Request) error
 }
 
 // Open verifies link, asks the platform for access, and returns the granted
@@ -133,7 +142,10 @@ func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
 	if err != nil {
 		return AccessGrant{}, err
 	}
-	return AccessGrant{ContentURL: contentURL, OpenSeconds: handle.OpenSeconds}, nil
+	return AccessGrant{
+		ContentURL: contentURL, OpenSeconds: handle.OpenSeconds,
+		AuthorizeContentRequest: handle.AuthorizeContentRequest,
+	}, nil
 }
 
 // grantedContentURL admits only web URLs as download targets: the granted
@@ -141,7 +153,7 @@ func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
 // outside its contract.
 func grantedContentURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+	if err != nil || (u.Scheme != webSchemeHTTPS && u.Scheme != webSchemeHTTP) {
 		return "", fmt.Errorf("%w — it can't be downloaded", ErrUnopenableLink)
 	}
 	return raw, nil

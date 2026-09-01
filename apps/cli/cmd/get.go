@@ -167,6 +167,7 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		return consume.DownloadTarget{
 			URL:        grant.ContentURL,
 			ValidUntil: started.Add(time.Duration(grant.OpenSeconds) * time.Second),
+			Authorize:  grant.AuthorizeContentRequest,
 		}, nil
 	}
 

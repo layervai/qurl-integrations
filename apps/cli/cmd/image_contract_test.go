@@ -23,6 +23,7 @@ type cliWorkflowJob struct {
 	Env             map[string]any    `yaml:"env"`
 	Outputs         map[string]any    `yaml:"outputs"`
 	Steps           []cliWorkflowStep `yaml:"steps"`
+	TimeoutMinutes  int               `yaml:"timeout-minutes"`
 }
 
 type cliWorkflowStep struct {
@@ -35,7 +36,7 @@ type cliWorkflowStep struct {
 	Run             string         `yaml:"run"`
 }
 
-func validateRequiredCLIWorkflowGate(job cliWorkflowJob, step *cliWorkflowStep, expectedJobIf string) error {
+func validateRequiredCLIWorkflowGate(job *cliWorkflowJob, step *cliWorkflowStep, expectedJobIf string) error {
 	if job.If != expectedJobIf {
 		return fmt.Errorf("job if = %#v, want %q", job.If, expectedJobIf)
 	}
@@ -79,11 +80,36 @@ func TestRequiredCLIWorkflowGateRejectsBypassMutations(t *testing.T) {
 			if len(job.Steps) != 1 {
 				t.Fatalf("workflow mutation has %d steps, want one", len(job.Steps))
 			}
-			err := validateRequiredCLIWorkflowGate(job, &job.Steps[0], expectedJobIf)
+			err := validateRequiredCLIWorkflowGate(&job, &job.Steps[0], expectedJobIf)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("workflow mutation error = %v, want error=%t", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestCLICustomerJourneyTimeoutBudget(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", "cli.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow cliWorkflowContract
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse public CLI workflow: %v", err)
+	}
+	for jobName, want := range map[string]int{
+		"journey":         35,
+		"journey-cleanup": 10,
+	} {
+		job, ok := workflow.Jobs[jobName]
+		if !ok {
+			t.Fatalf("public CLI workflow has no %q job", jobName)
+		}
+		if job.TimeoutMinutes != want {
+			t.Errorf("public CLI workflow %s timeout = %d minutes, want %d", jobName, job.TimeoutMinutes, want)
+		}
 	}
 }
 
@@ -197,7 +223,8 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 	}
 	assertRequiredGate := func(jobName string, step cliWorkflowStep) {
 		t.Helper()
-		if err := validateRequiredCLIWorkflowGate(workflow.Jobs[jobName], &step, expectedCLIJobIf); err != nil {
+		job := workflow.Jobs[jobName]
+		if err := validateRequiredCLIWorkflowGate(&job, &step, expectedCLIJobIf); err != nil {
 			t.Errorf("public CLI workflow %s / %s is bypassable: %v", jobName, step.Name, err)
 		}
 	}

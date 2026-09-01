@@ -259,6 +259,9 @@ func TestAccessGrantRetainsServerLifetime(t *testing.T) {
 	if err != nil || grant.ContentURL != "https://origin.qurl.link/content" || grant.OpenSeconds != 300 {
 		t.Fatalf("access grant = URL %q, lifetime %d, error %v", grant.ContentURL, grant.OpenSeconds, err)
 	}
+	if grant.AuthorizeContentRequest == nil {
+		t.Fatal("access grant dropped the SDK request authorizer")
+	}
 	if _, err := accessGrantFromHandle(nil); !errors.Is(err, ErrUnopenableLink) {
 		t.Fatalf("nil access handle error = %v, want ErrUnopenableLink", err)
 	}

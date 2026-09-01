@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -223,6 +225,171 @@ func TestDownloadLiveGrantRetriesSameURL(t *testing.T) {
 	}
 }
 
+func TestDownloadAppliesGrantAuthorizationToEveryRequest(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit := hits.Add(1)
+		cookie, err := r.Cookie("qurl_vsession")
+		if err != nil || cookie.Value != "opaque-test-token" {
+			t.Errorf("request %d missing the grant cookie", hit)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if hit == 1 {
+			w.WriteHeader(http.StatusGone)
+			return
+		}
+		_, _ = w.Write([]byte("authorized"))
+	}))
+	t.Cleanup(server.Close)
+
+	now := time.Unix(1_700_000_000, 0)
+	var authorizations atomic.Int32
+	d := &Downloader{
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			return DownloadTarget{
+				URL: server.URL, ValidUntil: now.Add(time.Minute),
+				Authorize: func(req *http.Request) error {
+					authorizations.Add(1)
+					addTestGrantCookie(req)
+					return nil
+				},
+			}, nil
+		},
+		now: func() time.Time { return now },
+		wait: func(_ context.Context, delay time.Duration) error {
+			now = now.Add(delay)
+			return nil
+		},
+	}
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if out.String() != "authorized" || hits.Load() != 2 || authorizations.Load() != 2 {
+		t.Fatalf("payload=%q hits=%d authorizations=%d", out.String(), hits.Load(), authorizations.Load())
+	}
+}
+
+func TestDownloadAuthorizationFailureDoesNotExposeTokenOrSendRequest(t *testing.T) {
+	secret := "must-not-appear"
+	host := newDownloadHost(t, []byte("should not be reached"))
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: host.URL, Authorize: func(*http.Request) error {
+			return errors.New(secret)
+		}}, nil
+	}}
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("authorization error = %v", err)
+	}
+	if host.hits.Load() != 0 {
+		t.Fatalf("request was sent after authorization failed")
+	}
+}
+
+func TestDownloadRedirectDoesNotForwardGrantCookie(t *testing.T) {
+	var leaked atomic.Bool
+	var authorizations atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie("qurl_vsession"); err == nil {
+			leaked.Store(true)
+		}
+		_, _ = w.Write([]byte("redirected"))
+	}))
+	t.Cleanup(destination.Close)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie("qurl_vsession"); err != nil {
+			t.Error("origin did not receive the grant cookie")
+		}
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: origin.URL, Authorize: func(req *http.Request) error {
+			authorizations.Add(1)
+			addTestGrantCookie(req)
+			return nil
+		}}, nil
+	}}
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if leaked.Load() || out.String() != "redirected" || authorizations.Load() != 1 {
+		t.Fatalf("redirect leak=%t payload=%q authorizations=%d", leaked.Load(), out.String(), authorizations.Load())
+	}
+}
+
+func TestDownloadSameOriginRedirectReauthorizesGrant(t *testing.T) {
+	var authorizations atomic.Int32
+	var origin *httptest.Server
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := r.Cookie("qurl_vsession"); err != nil {
+			t.Error("same-origin request did not receive the grant cookie")
+		}
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, origin.URL+"/content", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("same-origin"))
+	}))
+	t.Cleanup(origin.Close)
+
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: origin.URL, Authorize: func(req *http.Request) error {
+			authorizations.Add(1)
+			addTestGrantCookie(req)
+			return nil
+		}}, nil
+	}}
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if out.String() != "same-origin" || authorizations.Load() != 2 {
+		t.Fatalf("payload=%q authorizations=%d, want same-origin/2", out.String(), authorizations.Load())
+	}
+}
+
+func TestDownloadRedirectLoopIsBounded(t *testing.T) {
+	var hits atomic.Int32
+	var authorizations atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if _, err := r.Cookie("qurl_vsession"); err != nil {
+			t.Error("redirect-loop request did not carry the grant cookie")
+		}
+		http.Redirect(w, r, server.URL+"/again", http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: server.URL, Authorize: func(req *http.Request) error {
+			authorizations.Add(1)
+			addTestGrantCookie(req)
+			return nil
+		}}, nil
+	}}
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkUnavailable) {
+		t.Fatalf("redirect-loop error = %v, want ErrLinkUnavailable", err)
+	}
+	if hits.Load() != maxDownloadRedirects || authorizations.Load() != maxDownloadRedirects {
+		t.Fatalf("redirect loop hits=%d authorizations=%d, want %d/%d",
+			hits.Load(), authorizations.Load(), maxDownloadRedirects, maxDownloadRedirects)
+	}
+}
+
+func addTestGrantCookie(req *http.Request) {
+	req.AddCookie(&http.Cookie{
+		Name: "qurl_vsession", Value: "opaque-test-token",
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+}
+
 func TestDownloadLiveGrantRetryIsBounded(t *testing.T) {
 	host := newDownloadHost(t, nil,
 		http.StatusGone, http.StatusGone, http.StatusGone,
@@ -311,17 +478,46 @@ func TestDownloadExpiredGrantMintsOneFreshTarget(t *testing.T) {
 
 func TestDownloadGrantExpiryDuringPropagationMintsOneFreshTarget(t *testing.T) {
 	payload := []byte("fresh after retained grant expired")
-	host := newDownloadHost(t, payload, http.StatusGone, http.StatusGone, 0)
+	var tokenMu sync.Mutex
+	var tokens []string
+	var hits atomic.Int32
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		cookie, err := req.Cookie("qurl_vsession")
+		if err != nil {
+			t.Error("grant request did not carry its application bearer")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		tokenMu.Lock()
+		tokens = append(tokens, cookie.Value)
+		tokenMu.Unlock()
+		if hits.Add(1) <= 2 {
+			w.WriteHeader(http.StatusGone)
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(host.Close)
 	now := time.Unix(1_700_000_000, 0)
 	mints := 0
 	d := &Downloader{
 		MintTarget: func(context.Context) (DownloadTarget, error) {
 			mints++
+			token := fmt.Sprintf("grant-%d", mints)
 			validUntil := now.Add(time.Minute)
 			if mints == 1 {
 				validUntil = now.Add(150 * time.Millisecond)
 			}
-			return DownloadTarget{URL: host.URL, ValidUntil: validUntil}, nil
+			return DownloadTarget{
+				URL: host.URL, ValidUntil: validUntil,
+				Authorize: func(req *http.Request) error {
+					req.AddCookie(&http.Cookie{
+						Name: "qurl_vsession", Value: token,
+						Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+					})
+					return nil
+				},
+			}, nil
 		},
 		now: func() time.Time { return now },
 		wait: func(_ context.Context, delay time.Duration) error {
@@ -337,8 +533,20 @@ func TestDownloadGrantExpiryDuringPropagationMintsOneFreshTarget(t *testing.T) {
 	if got := out.String(); got != string(payload) {
 		t.Errorf("payload = %q, want %q", got, payload)
 	}
-	if mints != 2 || host.hits.Load() != 3 {
-		t.Errorf("mints = %d, GETs = %d; want 2 and 3", mints, host.hits.Load())
+	if mints != 2 || hits.Load() != 3 {
+		t.Errorf("mints = %d, GETs = %d; want 2 and 3", mints, hits.Load())
+	}
+	tokenMu.Lock()
+	gotTokens := append([]string(nil), tokens...)
+	tokenMu.Unlock()
+	wantTokens := []string{"grant-1", "grant-1", "grant-2"}
+	if len(gotTokens) != len(wantTokens) {
+		t.Fatalf("grant tokens = %v, want %v", gotTokens, wantTokens)
+	}
+	for i := range wantTokens {
+		if gotTokens[i] != wantTokens[i] {
+			t.Fatalf("grant tokens = %v, want %v", gotTokens, wantTokens)
+		}
 	}
 }
 

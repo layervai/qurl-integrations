@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,6 +28,8 @@ const partSuffix = ".part"
 // cancellation) is the user's abort.
 const responseHeaderTimeout = 30 * time.Second
 
+const maxDownloadRedirects = 10
+
 const (
 	grantPropagationWindow      = 2 * time.Second
 	grantPropagationFirstDelay  = 100 * time.Millisecond
@@ -32,7 +37,10 @@ const (
 	grantPropagationMaxAttempts = 5
 )
 
-var errGrantPropagationPending = errors.New("grant propagation remained pending")
+var (
+	errGrantPropagationPending = errors.New("grant propagation remained pending")
+	errDownloadRedirectLimit   = fmt.Errorf("download stopped after %d redirects", maxDownloadRedirects)
+)
 
 // DownloadTarget is a freshly verified URL and, for an acknowledged qURL
 // access grant, the conservative instant through which that grant remains
@@ -40,16 +48,81 @@ var errGrantPropagationPending = errors.New("grant propagation remained pending"
 type DownloadTarget struct {
 	URL        string
 	ValidUntil time.Time
+	// Authorize applies an opaque per-grant application credential to the exact
+	// request origin. A nil function is a direct URL with no extra authority.
+	Authorize func(*http.Request) error
 }
 
 // NewHTTPClient builds the download client: the default transport with a
-// response-header bound, following redirects (a resolved link may bounce to
-// storage). It carries no credentials — the qURL API key must never reach
-// the link host — and no overall timeout.
+// response-header bound and no overall timeout. It follows redirects, but
+// removes qurl_vsession before each redirect so the host-scoped application
+// bearer can never cross an origin boundary. Downloader re-authorizes a
+// same-origin redirect after this removal. The qURL API key is never added.
 func NewHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	return &http.Client{Transport: transport}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := checkDownloadRedirectLimit(via); err != nil {
+				return err
+			}
+			stripCookie(req, "qurl_vsession")
+			return nil
+		},
+	}
+}
+
+func checkDownloadRedirectLimit(via []*http.Request) error {
+	if len(via) >= maxDownloadRedirects {
+		return errDownloadRedirectLimit
+	}
+	return nil
+}
+
+func stripCookie(req *http.Request, name string) {
+	if req == nil {
+		return
+	}
+	cookies := req.Cookies()
+	req.Header.Del("Cookie")
+	for _, cookie := range cookies {
+		if cookie.Name != name {
+			req.AddCookie(cookie)
+		}
+	}
+}
+
+func sameHTTPOrigin(left, right *url.URL) bool {
+	leftScheme, leftHost, leftPort, leftOK := normalizedHTTPOrigin(left)
+	rightScheme, rightHost, rightPort, rightOK := normalizedHTTPOrigin(right)
+	return leftOK && rightOK && leftScheme == rightScheme && leftHost == rightHost && leftPort == rightPort
+}
+
+func normalizedHTTPOrigin(u *url.URL) (scheme, host, port string, ok bool) {
+	if u == nil || u.User != nil {
+		return "", "", "", false
+	}
+	scheme = strings.ToLower(u.Scheme)
+	host = strings.ToLower(u.Hostname())
+	if host == "" || (scheme != webSchemeHTTP && scheme != webSchemeHTTPS) {
+		return "", "", "", false
+	}
+	port = u.Port()
+	if port == "" {
+		if scheme == webSchemeHTTPS {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	} else {
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return "", "", "", false
+		}
+		port = strconv.FormatUint(portNumber, 10)
+	}
+	return scheme, host, port, true
 }
 
 // Downloader fetches the bytes behind freshly minted, already-verified
@@ -230,7 +303,7 @@ func (d *Downloader) retryLiveGrant(ctx context.Context, target DownloadTarget) 
 		if !d.currentTime().Before(deadline) {
 			return nil, errGrantPropagationPending
 		}
-		resp, err := d.getTarget(ctx, target.URL)
+		resp, err := d.getTarget(ctx, target)
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +349,7 @@ func (d *Downloader) getFresh(ctx context.Context) (DownloadTarget, *http.Respon
 	if err != nil {
 		return DownloadTarget{}, nil, err
 	}
-	resp, err := d.getTarget(ctx, target.URL)
+	resp, err := d.getTarget(ctx, target)
 	return target, resp, err
 }
 
@@ -288,12 +361,19 @@ func (d *Downloader) mintTarget(ctx context.Context) (DownloadTarget, error) {
 	return DownloadTarget{URL: link}, err
 }
 
-func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, http.NoBody)
+func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, http.NoBody)
 	if err != nil {
 		// URL parsing errors can echo link. Granted URLs carry short-lived
 		// authority, so keep the same fixed capability boundary as Do below.
 		return nil, fmt.Errorf("%w: invalid download link", ErrLinkFetch)
+	}
+	if target.Authorize != nil {
+		if err := target.Authorize(req); err != nil {
+			// The authorizer can hold an application bearer. Keep both its value and
+			// its underlying diagnostic out of customer output.
+			return nil, fmt.Errorf("%w: could not authorize the content request", ErrLinkFetch)
+		}
 	}
 	if d.Client == nil {
 		// Lazy-init once and keep it: the expiry retry must reach the same
@@ -302,7 +382,34 @@ func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response
 		// second dial.
 		d.Client = NewHTTPClient()
 	}
-	resp, err := d.Client.Do(req)
+	client := d.Client
+	if httpClient, ok := client.(*http.Client); ok && target.Authorize != nil {
+		// Keep the shared transport and connection pool, but make redirect
+		// authorization specific to this short-lived grant. Strip first, let the
+		// caller's redirect policy run without the bearer, then re-authorize only
+		// the same granted origin. Cross-origin storage redirects still work.
+		requestClient := *httpClient
+		priorCheckRedirect := requestClient.CheckRedirect
+		grantedURL := req.URL
+		requestClient.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
+			if err := checkDownloadRedirectLimit(via); err != nil {
+				return err
+			}
+			stripCookie(redirectReq, "qurl_vsession")
+			if priorCheckRedirect != nil {
+				if err := priorCheckRedirect(redirectReq, via); err != nil {
+					return err
+				}
+			}
+			stripCookie(redirectReq, "qurl_vsession")
+			if sameHTTPOrigin(grantedURL, redirectReq.URL) {
+				return target.Authorize(redirectReq)
+			}
+			return nil
+		}
+		client = &requestClient
+	}
+	resp, err := client.Do(req)
 	if err == nil {
 		return resp, nil
 	}
