@@ -15,37 +15,38 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectorhub "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 )
 
 // DaemonJobLabel is the stable per-user background-job identifier.
 const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
-const daemonJobProtocolVersion = "2"
+
+// daemonJobProtocolVersion identifies the persisted service-manager argument
+// contract. Increment it for each incompatible shape; do not reuse an earlier
+// value even when a later shape resembles it.
+const daemonJobProtocolVersion = "3"
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
-	Manager             connectorservice.UserJobManager
-	IPC                 IPCClient
-	StateDir            string
-	LogDir              string
-	BinaryVersion       string
-	InvocationPath      string
-	Endpoint            string
-	ResolveHub          func() (qurl.HubBootstrap, error)
-	ResolveSessionRelay func() (string, error)
-	LookPath            func(string) (string, error)
-	ProbeStatus         func(context.Context) (IPCStatus, bool, error)
-	Reload              func(context.Context) (bool, error)
+	Manager        connectorservice.UserJobManager
+	IPC            IPCClient
+	StateDir       string
+	LogDir         string
+	BinaryVersion  string
+	InvocationPath string
+	Endpoint       string
+	ResolveHub     func() (qurl.HubBootstrap, error)
+	LookPath       func(string) (string, error)
+	ProbeStatus    func(context.Context) (IPCStatus, bool, error)
+	Reload         func(context.Context) (bool, error)
 }
 
 // NewJobController builds the production native per-user job controller.
-func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveHub func() (qurl.HubBootstrap, error), resolveSessionRelay func() (string, error)) *JobController {
+func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
 	controller := &JobController{
 		Manager:  connectorservice.NewUserJobManager(),
 		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
 		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
-		InvocationPath: os.Args[0], Endpoint: endpoint, ResolveHub: resolveHub,
-		ResolveSessionRelay: resolveSessionRelay, LookPath: exec.LookPath,
+		InvocationPath: os.Args[0], Endpoint: endpoint, ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
@@ -89,11 +90,11 @@ func (c *JobController) Ensure(ctx context.Context) error {
 			)
 		}
 	}
-	hub, sessionRelayURL, err := c.validatedDeployment()
+	hub, err := c.validatedDeployment()
 	if err != nil {
 		return err
 	}
-	job, err := c.jobDefinition(hub, sessionRelayURL, expectedJobVersion)
+	job, err := c.jobDefinition(hub, expectedJobVersion)
 	if err != nil {
 		return err
 	}
@@ -111,43 +112,33 @@ func (c *JobController) Ensure(ctx context.Context) error {
 }
 
 func (c *JobController) validateController() error {
-	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil ||
-		c.ResolveHub == nil || c.ResolveSessionRelay == nil {
+	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
 		return errors.New("share daemon job controller is incomplete")
 	}
 	return nil
 }
 
-func (c *JobController) validatedDeployment() (qurl.HubBootstrap, string, error) {
+func (c *JobController) validatedDeployment() (qurl.HubBootstrap, error) {
 	if c.Endpoint == "" || c.Endpoint != strings.TrimSpace(c.Endpoint) {
-		return qurl.HubBootstrap{}, "", errors.New("share daemon API endpoint is empty or non-canonical")
+		return qurl.HubBootstrap{}, errors.New("share daemon API endpoint is empty or non-canonical")
 	}
 	// The endpoint is persisted in an owner-readable plist. Reuse the native
 	// resource origin validator so userinfo, query, and fragment data can never
 	// turn that durable non-secret job definition into a credential store.
 	if _, err := agent.ResourceSDKOrigin(c.Endpoint); err != nil {
-		return qurl.HubBootstrap{}, "", err
+		return qurl.HubBootstrap{}, err
 	}
 	hub, err := c.ResolveHub()
 	if err != nil {
-		return qurl.HubBootstrap{}, "", err
+		return qurl.HubBootstrap{}, err
 	}
 	if err := connectorhub.ValidateBootstrap(hub); err != nil {
-		return qurl.HubBootstrap{}, "", err
+		return qurl.HubBootstrap{}, err
 	}
-	relayURL, err := c.ResolveSessionRelay()
-	if err != nil {
-		return qurl.HubBootstrap{}, "", err
-	}
-	if relayURL != "" {
-		if err := sessionrelay.Validate(relayURL); err != nil {
-			return qurl.HubBootstrap{}, "", err
-		}
-	}
-	return hub, relayURL, nil
+	return hub, nil
 }
 
-func (c *JobController) jobDefinition(hub qurl.HubBootstrap, sessionRelayURL, jobVersion string) (connectorservice.UserJob, error) {
+func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) (connectorservice.UserJob, error) {
 	binary, err := c.currentExecutablePath()
 	if err != nil {
 		return connectorservice.UserJob{}, err
@@ -157,16 +148,13 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, sessionRelayURL, jo
 	}
 	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
 	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
-	arguments := make([]string, 0, 20)
+	arguments := make([]string, 0, 18)
 	arguments = append(arguments,
 		"--endpoint", c.Endpoint,
 		"daemon", "run", "--state-dir", c.StateDir, "--job-version", jobVersion,
 		"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
 	)
-	if sessionRelayURL != "" {
-		arguments = append(arguments, "--session-relay-url", sessionRelayURL)
-	}
 	arguments = append(arguments, daemonJobLogArguments(stdoutPath, stderrPath)...)
 	return connectorservice.UserJob{
 		Label: DaemonJobLabel, BinaryPath: binary,

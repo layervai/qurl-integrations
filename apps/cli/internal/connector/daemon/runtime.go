@@ -15,7 +15,6 @@ import (
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
-	qurlsessionrelay "github.com/layervai/qurl-go/relayknock/sessionrelay"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -35,9 +34,9 @@ func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCom
 		return nil, fmt.Errorf("complete qURL daemon tunnel configuration: %w", err)
 	}
 	// TODO(upstream-contract): FRP derives ProxyURL from lowercase http_proxy during Complete and repeats
-	// that derivation inside NewService. Native session admission is
-	// source-IP-bound, so reject the unsupported split-egress configuration
-	// before either the HTTPS relay or the tunnel performs network I/O.
+	// that derivation inside NewService. Native UDP session admission is
+	// source-IP-bound, so reject a proxy that would split the tunnel's egress
+	// before the tunnel performs network I/O.
 	if common.Transport.ProxyURL != "" {
 		return nil, fmt.Errorf("%w: lowercase http_proxy is set", ErrDirectEgressRequired)
 	}
@@ -557,19 +556,18 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 		}
 	}
 	for _, sentinel := range []error{
-		nativeudp.ErrResolve, nativeudp.ErrTransport,
-		nativeudp.ErrNoReply, qurlsessionrelay.ErrTransport,
-		context.DeadlineExceeded,
-	} {
-		if errors.Is(err, sentinel) {
-			return diagnosticFailureNetwork, ""
-		}
-	}
-	for _, sentinel := range []error{
-		qurlsessionrelay.ErrServerUnauthenticated, qurl.ErrMalformedReply,
+		nativeudp.ErrServerUnauthenticated, qurl.ErrMalformedReply,
 	} {
 		if errors.Is(err, sentinel) {
 			return diagnosticFailureVerification, ""
+		}
+	}
+	for _, sentinel := range []error{
+		nativeudp.ErrResolve, nativeudp.ErrTransport,
+		nativeudp.ErrNoReply, context.DeadlineExceeded,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureNetwork, ""
 		}
 	}
 	var pathErr *os.PathError

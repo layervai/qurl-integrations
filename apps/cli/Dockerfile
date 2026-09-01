@@ -15,10 +15,9 @@ ARG VERSION=dev
 # This is a public X25519 trust root. It is safe in image history and build
 # provenance; it is stored as a CI secret only to control release readiness.
 ARG HUB_TRUST_ROOT_B64=
-ARG SESSION_RELAY_URL=
 RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -trimpath -mod=readonly \
-    -ldflags="-s -w -X main.version=${VERSION} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${HUB_TRUST_ROOT_B64} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay.defaultURL=${SESSION_RELAY_URL}" \
+    -ldflags="-s -w -X main.version=${VERSION} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${HUB_TRUST_ROOT_B64}" \
     -o /out/qurl ./apps/cli/cmd/
 
 # The customer image has one executable: qurl. The CA bundle is data required

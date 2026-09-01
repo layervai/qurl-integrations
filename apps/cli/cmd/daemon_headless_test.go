@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +23,6 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -160,8 +158,8 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 		if config.SessionOperations.OwnerID != "own_cli_fixture" {
 			t.Fatalf("native session authority = %#v", config.SessionOperations)
 		}
-		if len(config.SessionOptions) != 1 {
-			t.Fatalf("native session options = %d, want one reviewed relay transport", len(config.SessionOptions))
+		if len(config.SessionOptions) != 0 {
+			t.Fatalf("native session options = %d, want native UDP defaults", len(config.SessionOptions))
 		}
 		return nil, errors.Join(errors.New("native bootstrap rejected"), qurl.ErrAssignmentKeyRejected)
 	}
@@ -169,7 +167,6 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionRelay:  func() (string, error) { return "https://relay.example.com", nil },
 		resolveSessionConfig: testNativeSessionConfig,
 	}
 	err := runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, tokenPath)
@@ -187,64 +184,6 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 	ownerID, ownerPresent, ownerErr := registry.OwnerID(context.Background())
 	if listErr != nil || len(shares) != 0 || ownerErr != nil || ownerPresent || ownerID != "" {
 		t.Fatalf("failed bootstrap durable state = shares %+v list %v owner %q/%v/%v", shares, listErr, ownerID, ownerPresent, ownerErr)
-	}
-}
-
-func TestDaemonSessionRelayValidationRedactsResolvedTopology(t *testing.T) {
-	for name, test := range map[string]struct {
-		override string
-		resolve  func() (string, error)
-	}{
-		"supervisor override": {
-			override: "https://user:secret@private-relay.example",
-			resolve: func() (string, error) {
-				t.Fatal("resolver ran when the supervisor supplied an exact override")
-				return "", nil
-			},
-		},
-		"resolved deployment": {
-			resolve: func() (string, error) { return "https://user:secret@private-relay.example", nil },
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := daemonSessionRelayURL(&globalOpts{resolveSessionRelay: test.resolve}, test.override)
-			if err == nil {
-				t.Fatal("invalid session relay was accepted")
-			}
-			for _, forbidden := range []string{"secret", "private-relay.example", "user:"} {
-				if strings.Contains(err.Error(), forbidden) {
-					t.Fatalf("session-relay error exposed %q: %v", forbidden, err)
-				}
-			}
-		})
-	}
-}
-
-func TestDaemonSessionRelayRequiresResolverWithoutSupervisorOverride(t *testing.T) {
-	_, err := daemonSessionRelayURL(&globalOpts{}, "")
-	if !errors.Is(err, sessionrelay.ErrConfig) {
-		t.Fatalf("missing session-relay resolver error = %v, want ErrConfig", err)
-	}
-}
-
-func TestDirectSessionRelayHTTPClientCannotUseEnvironmentProxy(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "https://proxy.example")
-	client := directSessionRelayHTTPClient()
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("session-relay transport = %T, want *http.Transport", client.Transport)
-	}
-	if transport.Proxy != nil {
-		t.Fatal("session-relay transport can split egress through an environment proxy")
-	}
-	if http.DefaultTransport.(*http.Transport).Proxy == nil { //nolint:forcetypeassert // net/http defines this concrete default.
-		t.Fatal("test did not distinguish the direct transport from net/http's proxy-aware default")
-	}
-}
-
-func TestNativeSessionOptionsStayDarkWithoutReviewedRelay(t *testing.T) {
-	if options := nativeSessionOptions(""); len(options) != 0 {
-		t.Fatalf("dark source build session options = %d, want none", len(options))
 	}
 }
 
@@ -268,7 +207,6 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	var firstSessionOption *qurl.AgentRuntimeSessionOption
 	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
 		if !verifyOwner {
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
@@ -280,13 +218,11 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		if cfg.EnrollmentCredential != credential {
 			t.Fatalf("attempt %d enrollment credential = %q", attempts.Load()+1, cfg.EnrollmentCredential)
 		}
-		if len(cfg.SessionOptions) != 1 {
-			t.Fatalf("attempt %d session options = %d, want one", attempts.Load()+1, len(cfg.SessionOptions))
+		if cfg.SessionOperations.OwnerID != "own_cli_fixture" {
+			t.Fatalf("attempt %d native session authority = %#v", attempts.Load()+1, cfg.SessionOperations)
 		}
-		if firstSessionOption == nil {
-			firstSessionOption = &cfg.SessionOptions[0]
-		} else if firstSessionOption != &cfg.SessionOptions[0] {
-			t.Fatal("native bootstrap retry rebuilt the relay option and transport")
+		if len(cfg.SessionOptions) != 0 {
+			t.Fatalf("attempt %d session options = %d, want native UDP defaults", attempts.Load()+1, len(cfg.SessionOptions))
 		}
 		if attempts.Add(1) < 3 {
 			return nil, errors.New("temporary native network failure")
@@ -299,7 +235,6 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionRelay:  func() (string, error) { return "https://relay.example.com", nil },
 		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -413,7 +348,6 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionRelay:  func() (string, error) { return "", nil },
 		resolveSessionConfig: testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -482,7 +416,6 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 				version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
 				resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 				resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-				resolveSessionRelay:  func() (string, error) { return "", nil },
 				resolveSessionConfig: testNativeSessionConfig,
 			}
 			err = runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, "")

@@ -11,6 +11,7 @@
 package ciworkflows
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -96,9 +97,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if ephemeralPin == nil || ephemeralPin.If != "" ||
 		!strings.Contains(ephemeralPin.Run, "openssl genpkey -algorithm X25519") ||
 		!strings.Contains(ephemeralPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256") ||
-		!strings.Contains(ephemeralPin.Run, "QURL_RELEASE_SESSION_RELAY_URL=https://relay.example.invalid") ||
+		strings.Contains(ephemeralPin.Run, "QURL_RELEASE_SESSION_RELAY_URL") ||
 		strings.Contains(fmt.Sprint(ephemeralPin.Env)+ephemeralPin.Run, "secrets.") {
-		t.Errorf("CI artifact native connection settings are not fresh, public, and secret-free: %#v", ephemeralPin)
+		t.Errorf("CI artifact Hub trust root is not fresh, public, and secret-free: %#v", ephemeralPin)
 	}
 	if build == nil || strings.Count(build.Run, "scripts/build-cli-customer-journey-artifacts.sh") != 1 ||
 		strings.Contains(build.Run, "manifest") {
@@ -111,6 +112,19 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	raw := readWorkflowBytes(t, cliWorkflow)
+	for _, forbidden := range []string{
+		"QURL_PROD_NHP_SESSION_RELAY_URL",
+		"QURL_RELEASE_SESSION_RELAY_URL",
+		"QURL_REQUIRE_RELEASE_SESSION_RELAY",
+		"QURL_CONNECTOR_SESSION_RELAY_URL",
+		"TestReleaseSessionRelayEnvironment",
+		"sessionrelay.defaultURL",
+		"SESSION_RELAY_URL",
+	} {
+		if bytes.Contains(raw, []byte(forbidden)) {
+			t.Errorf("%s retains forbidden Connector session-relay contract %q", cliWorkflow, forbidden)
+		}
+	}
 	var contract struct {
 		Jobs map[string]struct {
 			If          string `yaml:"if"`
@@ -346,11 +360,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	builder := readRepoFile(t, "scripts/build-cli-customer-journey-artifacts.sh")
 	for _, requiredText := range []string{
 		"QURL_RELEASE_HUB_PUBLIC_KEY_SHA256",
-		"QURL_RELEASE_SESSION_RELAY_URL",
-		"QURL_REQUIRE_RELEASE_SESSION_RELAY",
-		"TestReleaseSessionRelayEnvironment",
 		"release Hub public key does not match its SHA-256",
-		"does not contain the selected release session relay",
 		`"vcs.modified": "false"`,
 		`version --verify-release-native-trust`,
 	} {
@@ -358,7 +368,15 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			t.Errorf("artifact builder is missing %q", requiredText)
 		}
 	}
-	for _, forbidden := range []string{"manifest.json", "qurl_go_version", "connector_version"} {
+	for _, forbidden := range []string{
+		"manifest.json",
+		"qurl_go_version",
+		"connector_version",
+		"QURL_RELEASE_SESSION_RELAY_URL",
+		"QURL_REQUIRE_RELEASE_SESSION_RELAY",
+		"TestReleaseSessionRelayEnvironment",
+		"sessionrelay.defaultURL",
+	} {
 		if strings.Contains(builder, forbidden) {
 			t.Errorf("artifact builder retains duplicate receipt/version source %q", forbidden)
 		}

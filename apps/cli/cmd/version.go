@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 )
 
 // versionCmd prints the version line. The output shape is a distribution
@@ -24,9 +23,6 @@ func versionCmd(version string) *cobra.Command {
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if verifyReleaseNativeTrust {
-				if _, err := sessionrelay.EmbeddedProductionURL(); err != nil {
-					return err
-				}
 				fingerprint, err := hub.EmbeddedProductionPinFingerprint()
 				if err != nil {
 					return err
@@ -39,7 +35,7 @@ func versionCmd(version string) *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVar(&verifyReleaseNativeTrust, "verify-release-native-trust", false, "verify the embedded native connection settings")
+	cmd.Flags().BoolVar(&verifyReleaseNativeTrust, "verify-release-native-trust", false, "verify the embedded native Hub trust root")
 	if err := cmd.Flags().MarkHidden("verify-release-native-trust"); err != nil {
 		panic(err)
 	}

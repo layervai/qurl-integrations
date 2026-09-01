@@ -123,9 +123,7 @@ func TestCLIImageContract(t *testing.T) {
 	for _, want := range []string{
 		"FROM scratch",
 		"ARG HUB_TRUST_ROOT_B64=",
-		"ARG SESSION_RELAY_URL=",
 		"-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${HUB_TRUST_ROOT_B64}",
-		"-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay.defaultURL=${SESSION_RELAY_URL}",
 		"COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt",
 		"COPY --from=build /out/qurl /usr/local/bin/qurl",
 		"USER 65532:65532",
@@ -135,7 +133,10 @@ func TestCLIImageContract(t *testing.T) {
 			t.Fatalf("CLI Dockerfile missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"qurl-connector", " apk ", " apt-get ", "ENTRYPOINT [\"/bin/", "\nVOLUME ", "\nCMD "} {
+	for _, forbidden := range []string{
+		"qurl-connector", "sessionrelay.defaultURL", "SESSION_RELAY_URL", " apk ", " apt-get ",
+		"ENTRYPOINT [\"/bin/", "\nVOLUME ", "\nCMD ",
+	} {
 		if strings.Contains(dockerfile, forbidden) {
 			t.Fatalf("CLI Dockerfile contains forbidden companion/runtime surface %q", forbidden)
 		}
@@ -275,11 +276,13 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 
 	validatorTests := []string{
 		"TestCanonicalSandboxFailureRootResolvesAlias",
+		"TestCanonicalSandboxQV2RelayHost",
 		"TestReadSandboxSecretFileFailsClosed",
 		"TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding",
 		"TestRunSandboxLocalCLIUsesExactBinaryAndState",
 		"TestSandboxDeletedCommandDiagnosticWithholdsChildOutput",
 		"TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey",
+		"TestSandboxFailureDiagnosticExtractionIsClosed",
 		"TestSandboxFailureDiagnosticsAreAllowListedAndRedacted",
 		"TestSandboxForegroundLifecycleStateContract",
 		"TestSandboxFullCustomerLifecyclePhaseContract",
@@ -389,61 +392,21 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s has no %s job", target.file, target.job)
 		}
-		var relaySteps []cliWorkflowStep
-		relayStepIndex := -1
-		for index, candidate := range job.Steps {
-			if candidate.Name == "Verify the production NHP session relay" {
-				relaySteps = append(relaySteps, candidate)
-				relayStepIndex = index
-			}
-		}
-		if len(relaySteps) != 1 {
-			t.Fatalf("%s has %d production session-relay steps, want one", target.file, len(relaySteps))
-		}
-		relayStep := relaySteps[0]
-		if relayStep.If != nil || relayStep.ContinueOnError != nil || job.ContinueOnError != nil {
-			t.Errorf("%s production session-relay gate is bypassable", target.file)
-		}
-		const relaySource = "${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}"
-		if got := fmt.Sprint(relayStep.Env["QURL_REQUIRE_RELEASE_SESSION_RELAY"]); got != "1" {
-			t.Errorf("%s production session-relay requirement = %q, want 1", target.file, got)
-		}
-		if got := fmt.Sprint(relayStep.Env["QURL_RELEASE_SESSION_RELAY_URL"]); got != relaySource {
-			t.Errorf("%s production session-relay source = %q, want repository variable", target.file, got)
-		}
-		for _, required := range []string{
-			"go test ./apps/cli/internal/connector/sessionrelay -list",
-			"go test ./apps/cli/internal/connector/sessionrelay -run",
-			"-count=1 -json",
-			`select(.Action == "pass" and .Test == $test)`,
-			`select(.Action == "skip" and .Test == $test)`,
-			`if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
-			`if (( test_status != 0 )); then`,
+		jobText := fmt.Sprint(job)
+		workflowText := string(data)
+		for _, forbidden := range []string{
+			"Verify the production NHP session relay",
+			"QURL_PROD_NHP_SESSION_RELAY_URL",
+			"QURL_RELEASE_SESSION_RELAY_URL",
+			"QURL_REQUIRE_RELEASE_SESSION_RELAY",
+			"QURL_CONNECTOR_SESSION_RELAY_URL",
+			"TestReleaseSessionRelayEnvironment",
+			"sessionrelay.defaultURL",
+			"SESSION_RELAY_URL",
 		} {
-			if strings.Count(relayStep.Run, required) != 1 {
-				t.Errorf("%s production session-relay gate does not fail closed with %q", target.file, required)
+			if strings.Contains(workflowText, forbidden) {
+				t.Errorf("%s retains forbidden Connector session-relay contract %q", target.file, forbidden)
 			}
-		}
-		releaseBuilderName := "Build snapshot release"
-		if target.release {
-			releaseBuilderName = "Run GoReleaser"
-		}
-		var releaseBuilders []cliWorkflowStep
-		releaseBuilderIndex := -1
-		for index, candidate := range job.Steps {
-			if candidate.Name == releaseBuilderName {
-				releaseBuilders = append(releaseBuilders, candidate)
-				releaseBuilderIndex = index
-			}
-		}
-		if len(releaseBuilders) != 1 {
-			t.Fatalf("%s has %d %q steps, want one", target.file, len(releaseBuilders), releaseBuilderName)
-		}
-		if got := fmt.Sprint(releaseBuilders[0].Env["QURL_RELEASE_SESSION_RELAY_URL"]); got != relaySource {
-			t.Errorf("%s release builder does not consume the exact verified session-relay source", target.file)
-		}
-		if relayStepIndex >= releaseBuilderIndex {
-			t.Errorf("%s production session-relay gate must run before the release builder (relay=%d builder=%d)", target.file, relayStepIndex, releaseBuilderIndex)
 		}
 		var matches []cliWorkflowStep
 		pinStepIndex := -1
@@ -540,10 +503,6 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 			if !ok || strings.TrimSpace(artifactPinSource) == "" {
 				t.Errorf("%s released CLI Hub-pin verifier has no public-key source", target.file)
 			}
-			artifactRelaySource, ok := releaseVerifier.Env["QURL_RELEASE_SESSION_RELAY_URL"].(string)
-			if !ok || artifactRelaySource != relaySource {
-				t.Errorf("%s released CLI verifier does not consume the exact reviewed session-relay source", target.file)
-			}
 			for _, required := range []string{
 				`case "$QURL_RELEASE_HUB_PIN_MODE" in`,
 				`[[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]`,
@@ -555,7 +514,6 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 				`if (( ${#archives[@]} != ${#expected[@]} ))`,
 				`[[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]`,
 				`! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
-				`! grep -aFq -- "$QURL_RELEASE_SESSION_RELAY_URL" "$binary"`,
 				`version --verify-release-native-trust`,
 				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
 				`if "$native_binary" version --verify-release-native-trust >"$trust_stdout" 2>"$trust_stderr"; then`,
@@ -578,14 +536,10 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 			if fmt.Sprint(imageSmoke.Env["QURL_RELEASE_HUB_PIN_MODE"]) != "${{ steps.release_hub_pin.outputs.mode }}" {
 				t.Errorf("%s image smoke does not consume the validated Hub-pin mode", target.file)
 			}
-			if fmt.Sprint(imageSmoke.Env["QURL_RELEASE_SESSION_RELAY_URL"]) != relaySource {
-				t.Errorf("%s image smoke does not consume the exact reviewed session-relay source", target.file)
-			}
 			for _, required := range []string{
 				`for platform in linux/amd64 linux/arm64; do`,
 				`container_id=$(docker create --platform "$platform" "$platform_candidate")`,
 				`docker cp "$container_id:/usr/local/bin/qurl" "$binary"`,
-				`! grep -aFq -- "$QURL_RELEASE_SESSION_RELAY_URL" "$binary"`,
 				`if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then`,
 				`version --verify-release-native-trust`,
 				`missing required built-in connection settings`,
@@ -597,9 +551,8 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 			if fmt.Sprint(job.Outputs["hub_pin_mode"]) != "${{ steps.release_hub_pin.outputs.mode }}" {
 				t.Errorf("%s does not export the exact validated Hub-pin mode", target.file)
 			}
-			releaseJobText := fmt.Sprint(job)
 			for _, forbidden := range []string{"QURL_SANDBOX", "QURL_CONNECTOR_HUB_", "openssl genpkey -algorithm X25519"} {
-				if strings.Contains(releaseJobText, forbidden) {
+				if strings.Contains(jobText, forbidden) {
 					t.Errorf("%s release job contains forbidden non-production trust input %q", target.file, forbidden)
 				}
 			}
@@ -657,6 +610,28 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 		if hasRequiredMode {
 			t.Errorf("%s dark nightly Hub-pin gate forces release mode", target.file)
 		}
+		pinSource, pinSourcePresent := step.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+		if !pinSourcePresent || strings.TrimSpace(pinSource) == "" {
+			t.Errorf("%s nightly Hub-pin verifier has no key source", target.file)
+		}
+		var snapshotSteps []cliWorkflowStep
+		snapshotStepIndex := -1
+		for index, candidate := range job.Steps {
+			if candidate.Name == "Build snapshot release" {
+				snapshotSteps = append(snapshotSteps, candidate)
+				snapshotStepIndex = index
+			}
+		}
+		if len(snapshotSteps) != 1 {
+			t.Fatalf("%s has %d snapshot release steps, want one", target.file, len(snapshotSteps))
+		}
+		snapshotPin, snapshotPinPresent := snapshotSteps[0].Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
+		if !snapshotPinPresent || snapshotPin != pinSource {
+			t.Errorf("%s snapshot release does not consume the exact verified Hub-pin source", target.file)
+		}
+		if pinStepIndex >= snapshotStepIndex {
+			t.Errorf("%s production Hub-pin gate must run before the snapshot release (pin=%d snapshot=%d)", target.file, pinStepIndex, snapshotStepIndex)
+		}
 		for _, required := range []string{
 			`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
 			`if [[ "$skipped" != "$test_name" || -n "$passed" ]]; then`,
@@ -681,7 +656,6 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		`[ "$GITHUB_REF" = refs/heads/main ]`,
 		"platforms: linux/amd64,linux/arm64",
 		"HUB_TRUST_ROOT_B64=${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}",
-		"SESSION_RELAY_URL=${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}",
 		"provenance: mode=max",
 		"sbom: true",
 		`candidate="${IMAGE_NAME}@${IMAGE_DIGEST}"`,
@@ -728,6 +702,9 @@ func TestReleaseSignsAndVerifiesExactQURLImageDigest(t *testing.T) {
 		"ghcr.io/layervai/qurl-connector",
 		"/usr/local/bin/qurl-connector",
 		"QURL_EXPECTED_VCS_SOURCE=https://github.com/layervai/qurl-integrations.git",
+		"QURL_PROD_NHP_SESSION_RELAY_URL",
+		"QURL_RELEASE_SESSION_RELAY_URL",
+		"SESSION_RELAY_URL",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("release workflow contains retired artifact %q", forbidden)
@@ -779,10 +756,10 @@ func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 		"CLI releases have two reviewed Hub-trust postures",
 		"A production-enabled release must contain the exact production Hub trust root",
 		"A dark release must contain no production Hub trust root",
-		"Every official release must also contain the exact reviewed production HTTPS session-relay origin",
-		"`QURL_PROD_NHP_SESSION_RELAY_URL`",
-		"all six native archives and both immutable OCI platform images",
-		"changed session-relay value therefore requires a new CLI version",
+		"Native local sharing uses the qURL native UDP protocol",
+		"does not embed or require an HTTPS session-relay origin",
+		"required built-in Hub trust root",
+		"both platform binaries to carry the reviewed Hub-trust posture",
 		"fixed, redacted missing-settings error",
 		"release process rejects partial trust data",
 		"must never embed development or test trust data",

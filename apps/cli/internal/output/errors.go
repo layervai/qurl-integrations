@@ -15,7 +15,6 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -87,7 +86,7 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) { 
 	switch {
 	case errors.Is(err, connectordaemon.ErrDirectEgressRequired):
 		headline, hint, includeDetail = msgConnectorDirectEgress, hintConnectorDirectEgress, false
-	case errors.Is(err, hub.ErrConfig), errors.Is(err, sessionrelay.ErrConfig):
+	case errors.Is(err, hub.ErrConfig):
 		headline, hint, includeDetail = msgConnectorConnectionConfig, hintConnectorConnectionConfig, false
 	case errors.Is(err, sessionconfig.ErrConfig):
 		headline, hint = msgConnectorSessionConfig, hintConnectorSessionConfig

@@ -22,7 +22,7 @@ builds:
     # build. `index` deliberately leaves credential-free local snapshots dark;
     # it is not a substitute for the fail-closed release gate.
     ldflags:
-      - -s -w -X main.version={{.Version}} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ index .Env "QURL_RELEASE_HUB_PUBLIC_KEY_B64" }} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay.defaultURL={{ index .Env "QURL_RELEASE_SESSION_RELAY_URL" }}
+      - -s -w -X main.version={{.Version}} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ index .Env "QURL_RELEASE_HUB_PUBLIC_KEY_B64" }}
     goos:
       - linux
       - darwin
