@@ -124,7 +124,8 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	}
 	// Validate the owner-bound session authority before any Connector-resource
 	// mutation. The short-lived discovery runtime below never transfers to
-	// NewNativeAdmitter, so it must not retain that authority or UDP options.
+	// NewNativeAdmitter, so it must not retain that authority or non-default UDP
+	// options.
 	if _, err := opts.resolveSessionConfig(ownerID); err != nil {
 		return err
 	}

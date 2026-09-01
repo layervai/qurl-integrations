@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,18 +39,36 @@ func TestCLIUsesReleasedDirectDependencies(t *testing.T) {
 }
 
 // TestCLIConnectorRuntimeHasNoSessionRelaySurface keeps go.mod authoritative
-// while making the UDP-only control-plane boundary executable. A dependency
-// downgrade that restores the removed compatibility field must fail here even
-// if the CLI does not populate that field.
+// while making the UDP-only control-plane boundary executable. Any exported
+// runtime configuration change must fail here until this seam is reviewed for
+// a renamed or replacement session-relay surface.
 func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
 	t.Parallel()
 
-	runtimeConfig := reflect.TypeOf(connectorshare.NativeRuntimeConfig{})
-	if _, present := runtimeConfig.FieldByName("SessionOptions"); present {
-		t.Fatal("qurl-connector NativeRuntimeConfig restored forbidden SessionOptions compatibility surface")
+	runtimeConfig := reflect.TypeFor[connectorshare.NativeRuntimeConfig]()
+	want := []string{
+		"StateDir",
+		"AgentID",
+		"Hub",
+		"Hostname",
+		"Version",
+		"ClientBaseURL",
+		"EnrollmentCredential",
+		"EnrollmentCredentialProvider",
+		"RecoveryCredentialProvider",
+		"RefreshMode",
+		"UDPOptions",
+		"SessionOperations",
 	}
-	if _, present := runtimeConfig.FieldByName("UDPOptions"); !present {
-		t.Fatal("qurl-connector NativeRuntimeConfig has no native UDP option surface")
+	fields := reflect.VisibleFields(runtimeConfig)
+	got := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field.IsExported() {
+			got = append(got, field.Name)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("qurl-connector NativeRuntimeConfig exported surface = %v, want %v; review any change for a forbidden session-relay path", got, want)
 	}
 }
 
