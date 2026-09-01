@@ -143,15 +143,19 @@ func waitSandboxGrantedRouteReady(
 		if state == sandboxGrantedRouteServed && probeErr == nil && after > before {
 			return nil
 		}
+		// These failures describe local probe construction. Waiting cannot repair
+		// them, so retain the cause and fail before the readiness deadline.
+		switch {
+		case errors.Is(probeErr, errSandboxGrantedRouteMissingAuthorization):
+			return fmt.Errorf("pre-delete granted Connector route is invalid: access grant omitted application authorization: %w", errSandboxGrantedRouteMissingAuthorization)
+		case errors.Is(probeErr, errSandboxGrantedRouteConfiguration):
+			return fmt.Errorf("pre-delete granted Connector route is invalid: probe configuration is invalid: %w", errSandboxGrantedRouteConfiguration)
+		}
 		switch {
 		case errors.Is(probeErr, errSandboxGrantedRouteUnexpectedSuccess):
 			lastCategory = "route returned non-matching successful bytes"
-		case errors.Is(probeErr, errSandboxGrantedRouteMissingAuthorization):
-			lastCategory = "access grant omitted application authorization"
 		case errors.Is(probeErr, errSandboxGrantedRouteAuthorization):
 			lastCategory = "access grant authorization failed"
-		case errors.Is(probeErr, errSandboxGrantedRouteConfiguration):
-			lastCategory = "probe configuration is invalid"
 		case errors.Is(probeErr, context.DeadlineExceeded):
 			lastCategory = "probe timed out"
 		case probeErr != nil:
@@ -455,6 +459,41 @@ func TestSandboxGrantedRouteReadiness(t *testing.T) {
 			t.Fatalf("authorization readiness error = %v", err)
 		}
 	})
+
+	for name, test := range map[string]struct {
+		probeErr error
+		want     error
+		category string
+	}{
+		"fails fast when authorization is missing": {
+			probeErr: fmt.Errorf("%w: qv3.secret", errSandboxGrantedRouteMissingAuthorization),
+			want:     errSandboxGrantedRouteMissingAuthorization,
+			category: "access grant omitted application authorization",
+		},
+		"fails fast on invalid probe configuration": {
+			probeErr: fmt.Errorf("%w: qv3.secret", errSandboxGrantedRouteConfiguration),
+			want:     errSandboxGrantedRouteConfiguration,
+			category: "probe configuration is invalid",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			err := waitSandboxGrantedRouteReady(
+				context.Background(),
+				time.Hour,
+				time.Second,
+				func(context.Context) (sandboxGrantedRouteProbeState, error) {
+					calls++
+					return 0, test.probeErr
+				},
+				func() uint64 { return 0 },
+			)
+			if calls != 1 || !errors.Is(err, test.want) || !strings.Contains(err.Error(), test.category) ||
+				errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "qv3.secret") {
+				t.Fatalf("terminal readiness error = calls %d, error %v", calls, err)
+			}
+		})
+	}
 
 	if err := waitSandboxGrantedRouteReady(context.Background(), 0, time.Second, nil, nil); err == nil {
 		t.Fatal("invalid readiness configuration was accepted")
