@@ -34,8 +34,8 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 		shareRegistry: registry, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
-			if cfg.SessionOperations.OwnerID != "" || len(cfg.SessionOptions) != 0 {
-				t.Fatalf("discovery-only runtime retained session authority: %#v / %d options", cfg.SessionOperations, len(cfg.SessionOptions))
+			if cfg.SessionOperations.OwnerID != "" || len(cfg.UDPOptions) != 0 {
+				t.Fatalf("discovery-only runtime retained session authority: %#v / %d UDP options", cfg.SessionOperations, len(cfg.UDPOptions))
 			}
 			return nil, stop
 		},
@@ -173,8 +173,8 @@ func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
 			gotRefreshMode = cfg.RefreshMode
-			if cfg.SessionOperations.OwnerID != "" || len(cfg.SessionOptions) != 0 {
-				return nil, fmt.Errorf("discovery-only runtime retained session authority: %#v / %d options", cfg.SessionOperations, len(cfg.SessionOptions))
+			if cfg.SessionOperations.OwnerID != "" || len(cfg.UDPOptions) != 0 {
+				return nil, fmt.Errorf("discovery-only runtime retained session authority: %#v / %d UDP options", cfg.SessionOperations, len(cfg.UDPOptions))
 			}
 			if cfg.RecoveryCredentialProvider == nil {
 				return nil, errors.New("missing Connector credential-recovery provider")
