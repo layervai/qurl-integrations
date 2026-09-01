@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/layervai/qurl-integrations/compare/v2.1.0...v2.1.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **cli:** use UDP-only Connector control plane ([#1312](https://github.com/layervai/qurl-integrations/issues/1312)) ([748f80c](https://github.com/layervai/qurl-integrations/commit/748f80c0a3f57298cf2449410a75423a88028a42))
+
 ## [2.1.0](https://github.com/layervai/qurl-integrations/compare/v2.0.3...v2.1.0) (2026-09-01)
 
 
