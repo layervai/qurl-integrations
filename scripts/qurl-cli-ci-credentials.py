@@ -20,6 +20,18 @@ from typing import Any
 
 MAX_RESPONSE = 64 * 1024
 REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
+# TODO(upstream-contract): the CI Auth0 tenant issues one-hour M2M tokens.
+AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
+AUTH0_ISSUANCE_SKEW_SECONDS = 60
+# The journey token must cover its 35-minute lane plus a 10-minute cleanup
+# margin. The fallback job in .github/workflows/qurl-cli-customer-cleanup.yml
+# mints a fresh token; its timeout and the in-workflow cleanup timeout in
+# .github/workflows/cli.yml keep both cleanup paths on one bounded budget.
+JOURNEY_LANE_TIMEOUT_SECONDS = 35 * 60
+JOURNEY_CLEANUP_MARGIN_SECONDS = 10 * 60
+MIN_M2M_TOKEN_REMAINING_SECONDS = (
+    JOURNEY_LANE_TIMEOUT_SECONDS + JOURNEY_CLEANUP_MARGIN_SECONDS
+)
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
@@ -207,10 +219,10 @@ def auth0_token(args: argparse.Namespace) -> tuple[str, str]:
         or isinstance(issued, bool)
         or not isinstance(expires, int)
         or isinstance(expires, bool)
-        or issued > now + 60
-        or now - issued > 60
-        or expires - now < 3600
-        or expires - issued > 7200
+        or issued > now + AUTH0_ISSUANCE_SKEW_SECONDS
+        or now - issued > AUTH0_ISSUANCE_SKEW_SECONDS
+        or expires - now < MIN_M2M_TOKEN_REMAINING_SECONDS
+        or expires - issued > 2 * AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ):
         raise CredentialError("Auth0 token cannot cover the journey and cleanup")
     if effective_scopes(claims) != REQUIRED_M2M_SCOPES:
