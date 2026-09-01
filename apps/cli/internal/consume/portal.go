@@ -249,6 +249,13 @@ func classifyAccessError(err error) error {
 		errors.Is(err, qurl.ErrKeyLength):
 		return ErrLinkVerification
 	case errors.As(err, &deny):
+		// These authenticated server outcomes report temporary platform
+		// readiness, not a bad or expired access grant. Keep the internal code
+		// private while telling the customer that the same fresh link can be
+		// retried.
+		if deny.ErrCode == "52005" || deny.ErrCode == "52028" {
+			return ErrAccessBusy
+		}
 		return ErrAccessDenied
 	case errors.Is(err, qurl.ErrServerOverloaded):
 		return ErrAccessBusy

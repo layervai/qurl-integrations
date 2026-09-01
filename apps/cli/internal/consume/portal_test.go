@@ -273,19 +273,22 @@ func TestClassifyAccessError(t *testing.T) {
 		in   error
 		want error
 	}{
-		"already classified":  {ErrAccessNotConfigured, ErrAccessNotConfigured},
-		"sdk not configured":  {qurl.ErrNotConfigured, ErrAccessNotConfigured},
-		"unknown kid":         {qurl.ErrUnknownKID, ErrAccessSettingsMismatch},
-		"disallowed endpoint": {qurl.ErrRelayURL, ErrAccessSettingsMismatch},
-		"bad signature":       {qurl.ErrSignature, ErrLinkVerification},
-		"strict parse":        {qurl.ErrStrictParse, ErrLinkVerification},
-		"bad shape":           {qurl.ErrFragment, ErrLinkVerification},
-		"bad encoding":        {qurl.ErrEncoding, ErrLinkVerification},
-		"bad key length":      {qurl.ErrKeyLength, ErrLinkVerification},
-		"platform deny":       {&qurl.ServerDenyError{ErrCode: "7"}, ErrAccessDenied},
-		"platform busy":       {qurl.ErrServerOverloaded, ErrAccessBusy},
-		"context canceled":    {context.Canceled, context.Canceled},
-		"other":               {passthrough, passthrough},
+		"already classified":     {ErrAccessNotConfigured, ErrAccessNotConfigured},
+		"sdk not configured":     {qurl.ErrNotConfigured, ErrAccessNotConfigured},
+		"unknown kid":            {qurl.ErrUnknownKID, ErrAccessSettingsMismatch},
+		"disallowed endpoint":    {qurl.ErrRelayURL, ErrAccessSettingsMismatch},
+		"bad signature":          {qurl.ErrSignature, ErrLinkVerification},
+		"strict parse":           {qurl.ErrStrictParse, ErrLinkVerification},
+		"bad shape":              {qurl.ErrFragment, ErrLinkVerification},
+		"bad encoding":           {qurl.ErrEncoding, ErrLinkVerification},
+		"bad key length":         {qurl.ErrKeyLength, ErrLinkVerification},
+		"platform deny":          {&qurl.ServerDenyError{ErrCode: "7"}, ErrAccessDenied},
+		"platform busy":          {qurl.ErrServerOverloaded, ErrAccessBusy},
+		"temporary AC failure":   {&qurl.ServerDenyError{ErrCode: "52005"}, ErrAccessBusy},
+		"AC authority not ready": {&qurl.ServerDenyError{ErrCode: "52028"}, ErrAccessBusy},
+		"expired access session": {&qurl.ServerDenyError{ErrCode: "52024"}, ErrAccessDenied},
+		"context canceled":       {context.Canceled, context.Canceled},
+		"other":                  {passthrough, passthrough},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
