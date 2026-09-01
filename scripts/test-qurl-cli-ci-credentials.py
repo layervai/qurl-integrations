@@ -8,6 +8,7 @@ import base64
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import time
@@ -16,6 +17,10 @@ from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).with_name("qurl-cli-ci-credentials.py")
+CLI_WORKFLOW = SCRIPT.parent.parent / ".github" / "workflows" / "cli.yml"
+CUSTOMER_CLEANUP_WORKFLOW = (
+    SCRIPT.parent.parent / ".github" / "workflows" / "qurl-cli-customer-cleanup.yml"
+)
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("qurl_cli_ci_credentials", SCRIPT)
 assert SPEC and SPEC.loader
@@ -211,6 +216,83 @@ def auth_args(root: pathlib.Path) -> argparse.Namespace:
         qurl_endpoint="https://sandbox.example",
         token_endpoint="https://auth.example/oauth/token",
     )
+
+
+def workflow_timeout_minutes(workflow: pathlib.Path, job_name: str) -> int:
+    """Read one fixed timeout from the standard two-/four-space job shape."""
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    header = f"  {job_name}:"
+    try:
+        start = lines.index(header) + 1
+    except ValueError as exc:
+        raise AssertionError(f"workflow job {job_name!r} is missing") from exc
+    end = next(
+        (
+            index
+            for index in range(start, len(lines))
+            if re.fullmatch(r"  [A-Za-z0-9_-]+:", lines[index])
+        ),
+        len(lines),
+    )
+    values = [
+        int(match.group(1))
+        for line in lines[start:end]
+        if (match := re.fullmatch(r"    timeout-minutes: ([1-9][0-9]*)", line))
+    ]
+    assert len(values) == 1, f"workflow job {job_name!r} must have one fixed timeout"
+    return values[0]
+
+
+def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
+    fixed_now = 2_000_000_000
+    journey_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey")
+    cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
+    assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == cleanup_minutes
+    assert credentials.JOURNEY_LANE_TIMEOUT_SECONDS == journey_minutes * 60
+    assert credentials.JOURNEY_CLEANUP_MARGIN_SECONDS == cleanup_minutes * 60
+    assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 2700, (
+        "journey credential budget changed; confirm the M2M lifetime still covers it"
+    )
+    assert (
+        credentials.MIN_M2M_TOKEN_REMAINING_SECONDS
+        + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
+        <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
+    ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
+
+    def token(remaining_seconds: int, issued_ago: int = 0) -> str:
+        return "header." + encoded(
+            {
+                "aud": "https://sandbox.example",
+                "exp": fixed_now + remaining_seconds,
+                "gty": "client-credentials",
+                "iat": fixed_now - issued_ago,
+                "iss": "https://auth.example/",
+                "scope": "qurl:agent qurl:read qurl:write",
+                "sub": "ci-client@clients",
+            }
+        ) + ".signature"
+
+    def token_response(value: str) -> tuple[int, bytes]:
+        return 200, json.dumps({"access_token": value, "token_type": "Bearer"}).encode()
+
+    with tempfile.TemporaryDirectory() as raw_root:
+        args = auth_args(pathlib.Path(raw_root))
+        for remaining_seconds, issued_ago in ((3599, 1), (2700, 0)):
+            value = token(remaining_seconds, issued_ago)
+            with mock.patch.object(
+                credentials, "request", return_value=token_response(value)
+            ), mock.patch.object(credentials.time, "time", return_value=fixed_now):
+                assert credentials.auth0_token(args) == (value, "ci-client@clients")
+
+        with mock.patch.object(
+            credentials, "request", return_value=token_response(token(2699))
+        ), mock.patch.object(credentials.time, "time", return_value=fixed_now):
+            try:
+                credentials.auth0_token(args)
+            except credentials.CredentialError as exc:
+                assert str(exc) == "Auth0 token cannot cover the journey and cleanup"
+            else:
+                raise AssertionError("2699-second Auth0 token was accepted")
 
 
 def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
@@ -503,6 +585,7 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 
 def main() -> None:
+    test_auth0_token_remaining_lifetime_matches_workflow_budget()
     test_unbounded_valid_pagination()
     test_connector_cleanup_lookup_fails_closed()
     test_resource_failure_still_revokes_every_target_credential()
