@@ -52,7 +52,6 @@ const (
 	sandboxRouteFencePoll               = 500 * time.Millisecond
 	sandboxRouteFenceSettle             = 2 * time.Second
 	sandboxRouteProbeTimeout            = 15 * time.Second
-	sandboxStoppedRouteRefusalText      = "Error: Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to.\n"
 	// Serving after stop is a security-boundary failure, not eventual
 	// convergence. Five seconds is the intentional initial hard SLO; the
 	// private journey records the real propagation time before release. The
@@ -305,10 +304,13 @@ func TestSandboxPOSIXControlledFailureCleanupChild(t *testing.T) {
 		t.Fatal("controlled-failure route fence did not settle")
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
+	destination := filepath.Join(t.TempDir(), "fenced")
 	failedGet := runSandboxLocalCLI(
-		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", filepath.Join(t.TempDir(), "fenced"),
+		t, fixture.binary, fixture.env, stateDir, "--quiet", "get", crid, "--file", destination,
 	)
-	if err := validateSandboxStoppedRouteRefusal(failedGet, sandboxStoppedRouteRefusal(t)); err != nil {
+	if err := validateSandboxStoppedDownloadResult(
+		failedGet.code, failedGet.stdout.String(), failedGet.stderr.String(), destination, sandboxStoppedRouteRefusal(t),
+	); err != nil {
 		markSandboxFailureDiagnosticFromCommand(failedGet.stdout.String(), failedGet.stderr.String(), errors.New("controlled get failed"))
 		t.Fatalf("controlled customer get did not fail as required: %v", err)
 	}
@@ -897,11 +899,10 @@ func probeSandboxLocalRoute(ctx context.Context, t *testing.T, binary string, en
 	}
 	res := runSandboxLocalCLIContext(ctx, t, binary, env, stateDir, "--quiet", "get", crid, "--file", dest)
 	if res.code != 0 {
-		if err := validateSandboxStoppedRouteRefusal(res, stoppedRefusal); err != nil {
+		if err := validateSandboxStoppedDownloadResult(
+			res.code, res.stdout.String(), res.stderr.String(), dest, stoppedRefusal,
+		); err != nil {
 			return 0, err
-		}
-		if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
-			return 0, errors.New("stopped-route refusal left a destination file")
 		}
 		return sandboxRouteRefused, nil
 	}
@@ -919,39 +920,32 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 	if res == nil {
 		return errors.New("stopped-route probe returned no command result")
 	}
-	if stoppedRefusal == "" {
-		return errors.New("stopped-route refusal contract is empty")
-	}
-	if res.code != exitcode.Unavailable || res.stdout.Len() != 0 || res.stderr.String() != stoppedRefusal {
-		return fmt.Errorf("get did not return the exact stopped-resource refusal: exit=%d stdout-bytes=%d stderr=%q", res.code, res.stdout.Len(), res.stderr.String())
-	}
-	return nil
-}
-
-func sandboxStoppedRouteRefusal(_ *testing.T) string {
-	// TODO(upstream-contract): qurl-service currently uses this endpoint-dark
-	// response for a stopped resource. Keep the exact CLI and service contracts
-	// in lockstep if the service adds a distinct stopped-resource response.
-	// Keep the contract in source because the packaged customer-journey harness
-	// runs without a repository checkout. TestSandboxStoppedRouteRefusalMatchesQuietGet
-	// proves the exact quiet get path used below emits the same bytes, while
-	// TestGoldens independently owns the customer-facing golden file.
-	// The endpoint-scoped text is not sufficient by itself. The live gate also
-	// requires durable off/stopped state and a stable zero-hit backend window.
-	return sandboxStoppedRouteRefusalText
+	return validateSandboxStoppedCommandResult(res.code, res.stdout.String(), res.stderr.String(), stoppedRefusal)
 }
 
 func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerDark503(t))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerConnectorStopped503(t))
+	destination := filepath.Join(t.TempDir(), "payload")
 	res := runCLI(t, &runOpts{args: []string{
-		"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", filepath.Join(t.TempDir(), "payload"),
+		"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", destination,
 	}})
 	// The packaged harness runs without apps/cli/cmd as its working directory.
 	// Prove this contract has no repository-relative runtime dependency.
 	t.Chdir(t.TempDir())
-	if err := validateSandboxStoppedRouteRefusal(res, sandboxStoppedRouteRefusal(t)); err != nil {
+	if err := validateSandboxStoppedDownloadResult(
+		res.code, res.stdout.String(), res.stderr.String(), destination, sandboxStoppedRouteRefusal(t),
+	); err != nil {
 		t.Fatal(err)
+	}
+
+	dark := apitest.NewServer(t)
+	dark.Script(http.MethodPost, "/v1/resources/"+dark.Key.CRID+"/resolve", apitest.HandlerDark503(t))
+	darkResult := runCLI(t, &runOpts{args: []string{
+		"--endpoint", dark.URL, "--quiet", "get", dark.Key.CRID, "--file", filepath.Join(t.TempDir(), "payload"),
+	}})
+	if err := validateSandboxStoppedRouteRefusal(darkResult, sandboxStoppedRouteRefusal(t)); err == nil {
+		t.Fatal("generic dark 503 was accepted as the stopped-Connector refusal")
 	}
 }
 
@@ -1516,6 +1510,40 @@ func TestValidateSandboxRouteFence(t *testing.T) {
 		}
 		if err := validateSandboxStoppedRouteRefusal(sandboxRouteResult(exitcode.Unavailable, "", stoppedRefusal), ""); err == nil {
 			t.Fatal("empty stopped-route refusal contract accepted")
+		}
+
+		hostileStderr := "\x1b]8;;https://private.invalid\aendpoint\x1b]8;;\a\n::error::forged workflow command\nlv_live_NEVER_PRINT_THIS\n"
+		hostile := sandboxRouteResult(exitcode.Unavailable, "", hostileStderr)
+		err := validateSandboxStoppedRouteRefusal(hostile, stoppedRefusal)
+		want := fmt.Sprintf(
+			"get did not return the exact stopped-resource refusal: exit=%d stdout-bytes=0 stderr-bytes=%d",
+			exitcode.Unavailable, len(hostileStderr),
+		)
+		if err == nil || err.Error() != want {
+			t.Fatalf("hostile stopped-route diagnostic = %v, want closed metadata %q", err, want)
+		}
+		for _, forbidden := range []string{"private.invalid", "::error::", "lv_live_", "\x1b"} {
+			if strings.Contains(err.Error(), forbidden) {
+				t.Fatalf("hostile stopped-route diagnostic exposed %q", forbidden)
+			}
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		fenceErr := waitSandboxRouteFence(
+			ctx, time.Millisecond, time.Second, time.Second, time.Second,
+			func(context.Context) (sandboxRouteProbeState, error) {
+				cancel()
+				return 0, err
+			},
+			func() uint64 { return 0 },
+		)
+		if fenceErr == nil || !strings.Contains(fenceErr.Error(), want) {
+			t.Fatalf("terminal fence diagnostic = %v, want closed validator metadata", fenceErr)
+		}
+		for _, forbidden := range []string{"private.invalid", "::error::", "lv_live_", "\x1b"} {
+			if strings.Contains(fenceErr.Error(), forbidden) {
+				t.Fatalf("terminal fence diagnostic exposed %q", forbidden)
+			}
 		}
 	})
 

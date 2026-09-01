@@ -135,6 +135,16 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			name: "error_connector_stopped",
+			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerConnectorStopped503(t))
+			},
+			variants:     []string{"plain"},
+			wantCode:     11,
+			stderrGolden: true,
+		},
+		{
 			name: "error_verify_mismatch",
 			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {

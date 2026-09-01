@@ -34,9 +34,42 @@ const (
 	sandboxFailureLoginExitTimeout         = "timeout"
 	sandboxFailureLoginExitUnknown         = "unknown"
 	sandboxLocalStateUnclassified          = "unclassified_local_state"
+	sandboxStoppedRouteRefusalText         = "Error: This qURL Connector is stopped.\n\n  Hint: run `qurl start <CRID>`, then try again.\n"
 	sandboxFailureChildTimeout             = 3 * time.Minute
 	sandboxFailureDaemonStopTimeout        = 15 * time.Second
 )
+
+func sandboxStoppedRouteRefusal(_ *testing.T) string {
+	// Keep this exact fixed-text contract in source because every packaged
+	// customer-journey harness runs without a repository checkout. The command
+	// is already bound to the journey's CRID; the CLI deliberately renders the
+	// documented <CRID> placeholder so the shared error boundary does not echo
+	// any server-controlled value.
+	return sandboxStoppedRouteRefusalText
+}
+
+func validateSandboxStoppedCommandResult(code int, stdout, stderr, stoppedRefusal string) error {
+	if stoppedRefusal == "" {
+		return errors.New("stopped-route refusal contract is empty")
+	}
+	if code != exitcode.Unavailable || stdout != "" || stderr != stoppedRefusal {
+		return fmt.Errorf("get did not return the exact stopped-resource refusal: exit=%d stdout-bytes=%d stderr-bytes=%d", code, len(stdout), len(stderr))
+	}
+	return nil
+}
+
+func validateSandboxStoppedDownloadResult(code int, stdout, stderr, destination, stoppedRefusal string) error {
+	if err := validateSandboxStoppedCommandResult(code, stdout, stderr, stoppedRefusal); err != nil {
+		return err
+	}
+	if destination == "" {
+		return errors.New("stopped-route destination contract is empty")
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("stopped-route refusal left a destination file")
+	}
+	return nil
+}
 
 type sandboxFailureDiagnostic struct {
 	Category string

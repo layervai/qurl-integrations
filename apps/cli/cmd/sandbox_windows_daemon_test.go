@@ -29,7 +29,6 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 const (
@@ -365,11 +364,13 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 		t.Fatal("controlled-failure Windows route fence did not settle")
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
-	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", filepath.Join(t.TempDir(), "fenced"))
-	if windowsSandboxExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
-		!strings.Contains(strings.ToLower(failedGet.stderr), "aren't available") {
+	destination := filepath.Join(t.TempDir(), "fenced")
+	failedGet := runWindowsSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue, "--file", destination)
+	if err := validateSandboxStoppedDownloadResult(
+		windowsSandboxExitCode(failedGet.err), failedGet.stdout, failedGet.stderr, destination, sandboxStoppedRouteRefusal(t),
+	); err != nil {
 		markSandboxFailureDiagnosticFromCommand(failedGet.stdout, failedGet.stderr, failedGet.err)
-		t.Fatalf("controlled customer get did not return the fenced-resource failure: error %v, stdout %q, stderr %q", failedGet.err, failedGet.stdout, failedGet.stderr)
+		t.Fatalf("controlled customer get did not return the exact stopped-Connector failure: %v", err)
 	}
 	if local.CRID != cridValue {
 		t.Fatalf("controlled-failure Windows registry CRID = %q, want %q", local.CRID, cridValue)
