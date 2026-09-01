@@ -108,23 +108,63 @@ tag="v${version}"
 found=''
 missing=''
 lookup_error=''
+metadata_error=''
 attempt=1
 
 while [ "$attempt" -le "$attempts" ]; do
     lookup_status=0
-    lookup_error="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --silent 2>&1)" ||
+    release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+        --json tagName,targetCommitish,isDraft 2>&1)" ||
         lookup_status=$?
 
     if [ "$lookup_status" -eq 0 ]; then
-        found=yes
-        break
+        tag_status=0
+        tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>&1)" ||
+            tag_status=$?
+        if [ "$tag_status" -eq 0 ]; then
+            metadata_status=0
+            metadata_error="$(
+                RELEASE_JSON="$release_json" python3 - "$tag" "$tag_commit" <<'PY'
+import json
+import os
+import re
+import sys
+
+expected_tag, expected_target = sys.argv[1:]
+try:
+    release = json.loads(os.environ["RELEASE_JSON"])
+except (KeyError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"release metadata is not valid JSON: {exc}") from exc
+
+if release.get("tagName") != expected_tag:
+    raise SystemExit("release metadata does not name the exact CLI tag")
+target = release.get("targetCommitish")
+if not isinstance(target, str) or not re.fullmatch(r"[0-9a-f]{40}", target):
+    raise SystemExit("release metadata does not name one exact target commit")
+if target != expected_target:
+    raise SystemExit("release target does not match the CLI tag commit")
+if type(release.get("isDraft")) is not bool:
+    raise SystemExit("release metadata has no exact draft state")
+PY
+            )" 2>&1 || metadata_status=$?
+            if [ "$metadata_status" -eq 0 ]; then
+                found=yes
+                break
+            fi
+            # Exact metadata is a deterministic contract failure. Retrying it
+            # would only delay the fail-closed result.
+            break
+        fi
+        lookup_error="resolving ${tag} to its exact commit failed: ${tag_commit}"
+    else
+        lookup_error="$release_json"
     fi
 
-    # gh renders an HTTP failure as "gh: <message> (HTTP <code>)". A 404 is an
-    # answer rather than an error — the release genuinely is not there, and
-    # retrying cannot change that.
+    # `gh release view` is draft-aware. It reports a missing release as
+    # "release not found"; keep the HTTP form for older gh versions. Either is
+    # an answer rather than a transient lookup error, so do not retry it.
     case "$lookup_error" in
-    *'HTTP 404'*)
+    *'release not found'*|*'HTTP 404'*)
         missing=yes
         break
         ;;
@@ -141,6 +181,12 @@ done
 if [ -n "$found" ]; then
     printf '%s %s exists as %s; nothing was dropped.\n' "$CLI_PACKAGE" "$version" "$tag"
     exit 0
+fi
+
+if [ -n "$metadata_error" ]; then
+    printf '::error::Could not verify the %s release: %s. This is invalid release metadata, not a dropped release.\n' \
+        "$CLI_PACKAGE" "$metadata_error"
+    exit 1
 fi
 
 if [ -z "$missing" ]; then
@@ -165,7 +211,7 @@ recovery() {
     echo "Recovery, in order:"
     echo ""
     echo "1. Create the release at this commit, with notes copied from the \`## [${version}]\` section of \`${CHANGELOG}\`:"
-    echo "   \`gh release create ${tag} --target ${sha} --title ${tag} --notes-file <notes>\`"
+    echo "   \`gh release create ${tag} --target ${sha} --title ${tag} --notes-file <notes> --draft\`"
     echo "2. Attach the GoReleaser assets: run this workflow via workflow_dispatch with \`cli_tag=${tag}\`. Until then \`scripts/install.sh\` 404s on ${tag} and the Homebrew tap is stale."
     echo "3. Relabel the merged release PR \`autorelease: pending\` -> \`autorelease: tagged\`. Until that label moves, every later release-please run aborts with \"There are untagged, merged release PRs outstanding\" and no component can cut a release PR."
     echo ""

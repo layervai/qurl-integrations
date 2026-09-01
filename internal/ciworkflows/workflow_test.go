@@ -1290,10 +1290,16 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	}
 	source := steps["Resolve the exact release source"]
 	for _, required := range []string{"HANDOFF_SOURCE_SHA", `"${CLI_TAG}^{commit}"`,
-		"CLI release tag does not match the handed-off source SHA"} {
+		"CLI release tag does not match the handed-off source SHA",
+		`gh release view "$CLI_TAG"`, "--json tagName,targetCommitish,isDraft",
+		`.isDraft | select(type == "boolean")`,
+		`"$release_tag" == "$CLI_TAG"`, `"$release_target" == "$source_sha"`} {
 		if !strings.Contains(source.Run+fmt.Sprint(source.Env), required) {
 			t.Errorf("exact source resolver is missing %q", required)
 		}
+	}
+	if strings.Contains(source.Run, "/releases/tags/") {
+		t.Error("exact source resolver uses the REST by-tag route, which cannot see a draft release")
 	}
 	if needs := parseWorkflowNeeds(t, "cli-release-gate", gate.Needs); !slices.Equal(needs, []string{releasePleaseJobID, "signal-cli-release"}) {
 		t.Errorf("cli-release-gate needs = %v, want release-please and signal-cli-release", needs)
@@ -1358,7 +1364,14 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 		if current.Name == "Continue an exact draft CLI release" {
 			journeySignal = strings.Contains(current.Run, "gh workflow run release-please.yml") &&
 				strings.Contains(current.Run, "source_sha=$GITHUB_SHA") &&
-				strings.Contains(current.Run, `"${cli_tag}^{commit}"`)
+				strings.Contains(current.Run, `"${cli_tag}^{commit}"`) &&
+				strings.Contains(current.Run, `gh release view "$cli_tag"`) &&
+				strings.Contains(current.Run, "--json tagName,targetCommitish,isDraft") &&
+				strings.Contains(current.Run, `.isDraft | select(type == "boolean")`) &&
+				strings.Contains(current.Run, `"$release_tag" == "$cli_tag"`) &&
+				strings.Contains(current.Run, `"$release_target" == "$GITHUB_SHA"`) &&
+				strings.Contains(current.Run, `"$release_draft" == true`) &&
+				!strings.Contains(current.Run, "/releases/tags/")
 		}
 	}
 	if !journeySignal {

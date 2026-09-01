@@ -1382,8 +1382,19 @@ jobs:
             echo "No exact CLI release belongs to this source SHA."
             exit 0
           fi
-          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$cli_tag")
-          [[ $(jq -er '.draft | select(type == "boolean")' <<<"$release") == true ]] || {
+          # The REST release-by-tag route returns 404 for a draft. `gh release
+          # view` is draft-aware; bind its tag, target, and state before this
+          # exact tested source can dispatch publication.
+          release=$(gh release view "$cli_tag" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft)
+          release_tag=$(jq -er '.tagName | select(type == "string")' <<<"$release")
+          release_target=$(jq -er '.targetCommitish | select(type == "string")' <<<"$release")
+          release_draft=$(jq -er '.isDraft | select(type == "boolean")' <<<"$release")
+          [[ "$release_tag" == "$cli_tag" && "$release_target" == "$GITHUB_SHA" ]] || {
+            echo "::error::CLI release metadata does not match the exact tested tag and source" >&2
+            exit 1
+          }
+          [[ "$release_draft" == true ]] || {
             echo "The exact CLI release is already public."
             exit 0
           }

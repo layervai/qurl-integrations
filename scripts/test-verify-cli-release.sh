@@ -45,17 +45,37 @@ JSON
 }
 
 # The stub records every invocation so the tests can assert both *what* was
-# queried and *how many times* — a 404 must not be retried, a 502 must be.
+# queried and *how many times*. It deliberately rejects the old REST by-tag
+# route: GitHub returns 404 there for a real draft release, which is the
+# production failure this regression test must preserve.
 bindir="$tmp/bin"
 mkdir -p "$bindir"
 cat >"$bindir/gh" <<'STUB_EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$GH_ARGV_OUT"
-if [ "${GH_STUB_STATUS:-0}" != "0" ]; then
-  printf '%s\n' "${GH_STUB_STDERR-}" >&2
-  exit "$GH_STUB_STATUS"
-fi
-exit 0
+case "$*" in
+  api\ repos/layervai/qurl-integrations/releases/tags/*)
+    printf '%s\n' 'gh: Not Found (HTTP 404)' >&2
+    exit 1
+    ;;
+  release\ view\ *)
+    if [ "${GH_STUB_STATUS:-0}" != "0" ]; then
+      printf '%s\n' "${GH_STUB_STDERR-}" >&2
+      exit "$GH_STUB_STATUS"
+    fi
+    tag=${GH_STUB_RELEASE_TAG:-$3}
+    target=${GH_STUB_RELEASE_TARGET:-$GH_STUB_TAG_COMMIT}
+    draft=${GH_STUB_RELEASE_DRAFT:-true}
+    printf '{"tagName":"%s","targetCommitish":"%s","isDraft":%s}\n' "$tag" "$target" "$draft"
+    ;;
+  api\ repos/layervai/qurl-integrations/commits/*)
+    printf '%s\n' "$GH_STUB_TAG_COMMIT"
+    ;;
+  *)
+    printf '%s\n' "unexpected gh invocation: $*" >&2
+    exit 2
+    ;;
+esac
 STUB_EOF
 chmod +x "$bindir/gh"
 
@@ -81,6 +101,7 @@ run_case() {
     GITHUB_REPOSITORY=layervai/qurl-integrations \
     GITHUB_SHA="$head_sha" \
     GITHUB_STEP_SUMMARY="$summary_out" \
+    GH_STUB_TAG_COMMIT="$head_sha" \
     RELEASE_LOOKUP_ATTEMPTS=3 \
     RELEASE_LOOKUP_DELAY=0 \
     "$@" \
@@ -135,12 +156,15 @@ expect_summary() {
   fi
 }
 
-# --- the release exists: the common case, and it must say nothing alarming
+# --- a tagged draft exists: the release-please handoff, and the old REST
+#     by-tag route must never be used because it returns 404 for this release
 
 write_manifest 1.4.0
 run_case released 0 'apps/cli 1.4.0 exists as v1.4.0' '::error::'
-expect_gh_calls released 1
-expect_argv released 'repos/layervai/qurl-integrations/releases/tags/v1.4.0'
+expect_gh_calls released 2
+expect_argv released 'release view v1.4.0 --repo layervai/qurl-integrations --json tagName,targetCommitish,isDraft'
+expect_argv released 'api repos/layervai/qurl-integrations/commits/v1.4.0 --jq .sha'
+refute_argv released 'releases/tags/'
 # The CLI is the one component tagged without a component prefix. A guard that
 # looked up cli-v1.4.0 would report a drop on every successful release.
 refute_argv released 'cli-v1.4.0'
@@ -148,18 +172,38 @@ refute_argv released 'cli-v1.4.0'
 # The tag follows the manifest rather than a hardcoded version.
 write_manifest 2.0.0
 run_case released-other-version 0 'apps/cli 2.0.0 exists as v2.0.0' '::error::'
-expect_argv released-other-version 'releases/tags/v2.0.0'
+expect_argv released-other-version 'release view v2.0.0'
+
+# A public release remains valid on later ordinary main pushes. The verifier
+# confirms the boolean state but does not require a draft after publication.
+run_case released-public 0 'apps/cli 2.0.0 exists as v2.0.0' '::error::' \
+  GH_STUB_RELEASE_DRAFT=false
+
+# Exact tag, target commit, and boolean draft state are all fail-closed. These
+# are malformed releases, not absent releases, so no recovery instructions may
+# claim that release-please dropped them.
+run_case wrong-release-tag 1 'release metadata does not name the exact CLI tag' 'dropped the apps/cli release' \
+  GH_STUB_RELEASE_TAG=v9.9.9
+expect_gh_calls wrong-release-tag 2
+
+run_case wrong-release-target 1 'release target does not match the CLI tag commit' 'dropped the apps/cli release' \
+  GH_STUB_RELEASE_TARGET=0000000000000000000000000000000000000000
+expect_gh_calls wrong-release-target 2
+
+run_case missing-draft-state 1 'release metadata has no exact draft state' 'dropped the apps/cli release' \
+  GH_STUB_RELEASE_DRAFT=null
+expect_gh_calls missing-draft-state 2
 
 # --- the release is absent: the drop, with the whole recovery attached
 
 write_manifest 1.4.0
 run_case dropped 1 '::error::release-please dropped the apps/cli release' 'Could not verify' \
-  GH_STUB_STATUS=1 GH_STUB_STDERR='gh: Not Found (HTTP 404)'
+  GH_STUB_STATUS=1 GH_STUB_STDERR='release not found'
 # A 404 is an answer, not a transient failure: retrying it only delays the
 # report.
 expect_gh_calls dropped 1
 expect_summary dropped 'CLI release v1.4.0 was dropped'
-expect_summary dropped 'gh release create v1.4.0 --target '"$head_sha"
+expect_summary dropped 'gh release create v1.4.0 --target '"$head_sha"' --title v1.4.0 --notes-file <notes> --draft'
 expect_summary dropped 'cli_tag=v1.4.0'
 expect_summary dropped 'autorelease: pending`'
 expect_summary dropped 'untagged, merged release PRs outstanding'

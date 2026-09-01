@@ -209,8 +209,18 @@ jobs:
             echo "::error::CLI release tag is not reachable from current main" >&2
             exit 1
           }
-          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$CLI_TAG")
-          draft=$(jq -er '.draft | select(type == "boolean")' <<<"$release")
+          # The REST release-by-tag route returns 404 for a draft. `gh release
+          # view` is draft-aware, so validate all three bindings before a
+          # recoverable draft can enter the publication pipeline.
+          release=$(gh release view "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft)
+          release_tag=$(jq -er '.tagName | select(type == "string")' <<<"$release")
+          release_target=$(jq -er '.targetCommitish | select(type == "string")' <<<"$release")
+          draft=$(jq -er '.isDraft | select(type == "boolean")' <<<"$release")
+          [[ "$release_tag" == "$CLI_TAG" && "$release_target" == "$source_sha" ]] || {
+            echo "::error::CLI release metadata does not match its exact tag and target commit" >&2
+            exit 1
+          }
           required=true
           if [[ -n "$HANDOFF_SOURCE_SHA" && "$draft" == false ]]; then
             required=false
