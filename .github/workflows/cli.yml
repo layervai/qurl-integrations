@@ -1389,7 +1389,11 @@ jobs:
             --json tagName,targetCommitish,isDraft)
           release_tag=$(jq -er '.tagName | select(type == "string")' <<<"$release")
           release_target=$(jq -er '.targetCommitish | select(type == "string")' <<<"$release")
-          release_draft=$(jq -er '.isDraft | select(type == "boolean")' <<<"$release")
+          jq -e '(.isDraft | type) == "boolean"' <<<"$release" >/dev/null || {
+            echo "::error::CLI release metadata has no exact draft state" >&2
+            exit 1
+          }
+          release_draft=$(jq -r '.isDraft' <<<"$release")
           [[ "$release_tag" == "$cli_tag" && "$release_target" == "$GITHUB_SHA" ]] || {
             echo "::error::CLI release metadata does not match the exact tested tag and source" >&2
             exit 1

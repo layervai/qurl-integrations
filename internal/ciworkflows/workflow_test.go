@@ -1292,7 +1292,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	for _, required := range []string{"HANDOFF_SOURCE_SHA", `"${CLI_TAG}^{commit}"`,
 		"CLI release tag does not match the handed-off source SHA",
 		`gh release view "$CLI_TAG"`, "--json tagName,targetCommitish,isDraft",
-		`.isDraft | select(type == "boolean")`,
+		`(.isDraft | type) == "boolean"`, `draft=$(jq -r '.isDraft'`,
 		`"$release_tag" == "$CLI_TAG"`, `"$release_target" == "$source_sha"`} {
 		if !strings.Contains(source.Run+fmt.Sprint(source.Env), required) {
 			t.Errorf("exact source resolver is missing %q", required)
@@ -1367,7 +1367,8 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 				strings.Contains(current.Run, `"${cli_tag}^{commit}"`) &&
 				strings.Contains(current.Run, `gh release view "$cli_tag"`) &&
 				strings.Contains(current.Run, "--json tagName,targetCommitish,isDraft") &&
-				strings.Contains(current.Run, `.isDraft | select(type == "boolean")`) &&
+				strings.Contains(current.Run, `(.isDraft | type) == "boolean"`) &&
+				strings.Contains(current.Run, `release_draft=$(jq -r '.isDraft'`) &&
 				strings.Contains(current.Run, `"$release_tag" == "$cli_tag"`) &&
 				strings.Contains(current.Run, `"$release_target" == "$GITHUB_SHA"`) &&
 				strings.Contains(current.Run, `"$release_draft" == true`) &&
@@ -1379,6 +1380,158 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	}
 
 	assertExecutableRepoScript(t, "scripts/check-exact-cli-release-gate.sh")
+}
+
+// TestCLIReleaseDraftAwareStepsExecuteBothStates runs the checked-in shell,
+// not a duplicate implementation. A valid JSON false must remain a successful
+// lookup so an already-public release can take its intended no-op path.
+func TestCLIReleaseDraftAwareStepsExecuteBothStates(t *testing.T) {
+	const sourceSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var manifest map[string]string
+	manifestBytes, err := os.ReadFile(filepath.Join("..", "..", ".release-please-manifest.json"))
+	if err != nil {
+		t.Fatalf("read release manifest: %v", err)
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode release manifest: %v", err)
+	}
+	cliVersion := manifest["apps/cli"]
+	if cliVersion == "" {
+		t.Fatal("release manifest has no CLI version")
+	}
+	cliTag := "v" + cliVersion
+
+	stepRun := func(t *testing.T, workflowName, jobID, stepName string) string {
+		t.Helper()
+		workflow := readWorkflow(t, workflowName)
+		job := workflow.Jobs[jobID]
+		if job == nil {
+			t.Fatalf("%s is missing job %q", workflowName, jobID)
+		}
+		for _, candidate := range job.Steps {
+			if candidate.Name == stepName {
+				return candidate.Run
+			}
+		}
+		t.Fatalf("%s job %q is missing step %q", workflowName, jobID, stepName)
+		return ""
+	}
+
+	type result struct {
+		output       string
+		githubOutput string
+		ghCalls      string
+	}
+	runStep := func(t *testing.T, script string, draft bool) result {
+		t.Helper()
+
+		tempDir := t.TempDir()
+		binDir := filepath.Join(tempDir, "bin")
+		if err := os.Mkdir(binDir, 0o700); err != nil {
+			t.Fatalf("create stub bin: %v", err)
+		}
+		gitStub := `#!/bin/sh
+set -eu
+if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ]; then
+  printf '%s\n' "$STUB_SHA"
+  exit 0
+fi
+if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then
+  exit 0
+fi
+exit 2
+`
+		ghStub := `#!/bin/sh
+set -eu
+if [ "$1" = "release" ] && [ "$2" = "view" ]; then
+  printf '{"tagName":"%s","targetCommitish":"%s","isDraft":%s}\n' \
+    "$STUB_TAG" "$STUB_SHA" "$STUB_DRAFT"
+  exit 0
+fi
+if [ "$1" = "workflow" ] && [ "$2" = "run" ]; then
+  printf '%s\n' "$*" >>"$STUB_GH_LOG"
+  exit 0
+fi
+exit 2
+`
+		for name, contents := range map[string]string{"git": gitStub, "gh": ghStub} {
+			if err := os.WriteFile(filepath.Join(binDir, name), []byte(contents), 0o700); err != nil {
+				t.Fatalf("write %s stub: %v", name, err)
+			}
+		}
+
+		githubOutput := filepath.Join(tempDir, "github-output")
+		ghCalls := filepath.Join(tempDir, "gh-calls")
+		for _, path := range []string{githubOutput, ghCalls} {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("create %s: %v", filepath.Base(path), err)
+			}
+		}
+
+		draftValue := "false"
+		if draft {
+			draftValue = "true"
+		}
+		overrides := map[string]string{
+			"CLI_TAG":            cliTag,
+			"GITHUB_OUTPUT":      githubOutput,
+			"GITHUB_REPOSITORY":  "layervai/qurl-integrations",
+			"GITHUB_SHA":         sourceSHA,
+			"HANDOFF_SOURCE_SHA": sourceSHA,
+			"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"STUB_DRAFT":         draftValue,
+			"STUB_GH_LOG":        ghCalls,
+			"STUB_SHA":           sourceSHA,
+			"STUB_TAG":           cliTag,
+		}
+		command := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", script) //nolint:gosec // Executes checked-in workflow shell with fixed test inputs.
+		command.Dir = filepath.Join("..", "..")
+		command.Env = environmentWithOverrides(os.Environ(), overrides)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("execute workflow step with draft=%t: %v\n%s", draft, err, output)
+		}
+		read := func(path string) string {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", filepath.Base(path), err)
+			}
+			return string(contents)
+		}
+		return result{output: string(output), githubOutput: read(githubOutput), ghCalls: read(ghCalls)}
+	}
+
+	releaseGateRun := stepRun(t, releasePleaseWorkflow, "cli-release-gate", "Resolve the exact release source")
+	for _, draft := range []bool{true, false} {
+		t.Run(fmt.Sprintf("release_gate_draft_%t", draft), func(t *testing.T) {
+			got := runStep(t, releaseGateRun, draft)
+			wantRequired := fmt.Sprintf("required=%t\n", draft)
+			if !strings.Contains(got.githubOutput, wantRequired) {
+				t.Errorf("gate output = %q, want %q", got.githubOutput, wantRequired)
+			}
+		})
+	}
+
+	cliSignalRun := stepRun(t, cliWorkflow, "signal-cli-release", "Continue an exact draft CLI release")
+	for _, draft := range []bool{true, false} {
+		t.Run(fmt.Sprintf("cli_signal_draft_%t", draft), func(t *testing.T) {
+			got := runStep(t, cliSignalRun, draft)
+			if draft {
+				for _, required := range []string{"workflow run release-please.yml", "cli_tag=" + cliTag, "source_sha=" + sourceSHA} {
+					if !strings.Contains(got.ghCalls, required) {
+						t.Errorf("draft dispatch = %q, want %q", got.ghCalls, required)
+					}
+				}
+				return
+			}
+			if got.ghCalls != "" {
+				t.Errorf("public release dispatched a workflow: %q", got.ghCalls)
+			}
+			if !strings.Contains(got.output, "The exact CLI release is already public.") {
+				t.Errorf("public release output = %q", got.output)
+			}
+		})
+	}
 }
 
 // TestCLIReleaseValidatesPackagesBeforePublication keeps each exact native
