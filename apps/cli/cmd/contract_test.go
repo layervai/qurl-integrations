@@ -854,10 +854,19 @@ func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.
 	}
 	for _, hidden := range []string{
 		"--job-version", "--job-stdout-log", "--job-stderr-log",
-		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--session-relay-url",
+		"--hub-host", "--hub-port", "--hub-server-public-key-b64",
 	} {
 		if strings.Contains(res.stdout.String(), hidden) {
 			t.Errorf("daemon run help exposes internal supervision flag %q", hidden)
 		}
+	}
+}
+
+func TestDaemonRunRejectsRemovedSessionRelayFlag(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{
+		"daemon", "run", "--session-relay-url", "https://relay.example.com",
+	}})
+	if res.code != 2 || !strings.Contains(res.stderr.String(), "unknown flag") {
+		t.Fatalf("removed session-relay flag = exit %d stderr %q", res.code, res.stderr.String())
 	}
 }

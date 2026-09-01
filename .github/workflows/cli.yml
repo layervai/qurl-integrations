@@ -248,14 +248,16 @@ jobs:
       - name: Run credential-free journey validator tests
         shell: bash
         env:
-          VALIDATOR_TEST_REGEX: '^(TestCanonicalSandboxFailureRootResolvesAlias|TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxDeletedCommandDiagnosticWithholdsChildOutput|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxFailureDiagnosticsAreAllowListedAndRedacted|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxGrantedRouteAccessFailureCategories|TestSandboxGrantedRouteFenceValidator|TestSandboxGrantedRouteLifetime|TestSandboxGrantedRouteProbeAllowsCrossOriginWithoutSendingBearer|TestSandboxGrantedRouteProbeAuthorizesEverySameOriginRequest|TestSandboxGrantedRouteProbeRejectsMissingAuthorization|TestSandboxGrantedRouteReadiness|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxLocalStateReasonDoesNotForwardHostileLogText|TestSandboxLocalStateReasonIsClosedAndUsesLatestCause|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResolveCommandDiagnosticWithholdsChildOutput|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
+          VALIDATOR_TEST_REGEX: '^(TestCanonicalSandboxFailureRootResolvesAlias|TestCanonicalSandboxQV2RelayHost|TestReadSandboxSecretFileFailsClosed|TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding|TestRunSandboxLocalCLIUsesExactBinaryAndState|TestSandboxDeletedCommandDiagnosticWithholdsChildOutput|TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey|TestSandboxFailureDiagnosticExtractionIsClosed|TestSandboxFailureDiagnosticsAreAllowListedAndRedacted|TestSandboxForegroundLifecycleStateContract|TestSandboxFullCustomerLifecyclePhaseContract|TestSandboxGrantedRouteAccessFailureCategories|TestSandboxGrantedRouteFenceValidator|TestSandboxGrantedRouteLifetime|TestSandboxGrantedRouteProbeAllowsCrossOriginWithoutSendingBearer|TestSandboxGrantedRouteProbeAuthorizesEverySameOriginRequest|TestSandboxGrantedRouteProbeRejectsMissingAuthorization|TestSandboxGrantedRouteReadiness|TestSandboxHarnessPassesInlineAPIKeyToExactBinary|TestSandboxLocalStateReasonDoesNotForwardHostileLogText|TestSandboxLocalStateReasonIsClosedAndUsesLatestCause|TestSandboxNamespaceIsCanonicalAndSeparated|TestSandboxProcessRecoveryCleanupAfterPreReadyFailure|TestSandboxPublishProcessReportsEarlyExit|TestSandboxPublishReadinessWaitsForCompleteCRIDLine|TestSandboxResolveCommandDiagnosticWithholdsChildOutput|TestSandboxResourceCleanupIsSafeBeforePublish|TestSandboxRunIdentityBindsOnlyImmutableHardenedImage|TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure|TestSandboxStoppedRouteRefusalMatchesQuietGet|TestValidateSandboxCLIBinary|TestValidateSandboxDeviceIdentity|TestValidateSandboxRouteFence|TestValidateSandboxSharingTransitionRequiresAdvancedEpoch)$'
           VALIDATOR_TEST_NAMES: |-
             TestCanonicalSandboxFailureRootResolvesAlias
+            TestCanonicalSandboxQV2RelayHost
             TestReadSandboxSecretFileFailsClosed
             TestRunSandboxLocalCLIForwardsOnlyHardenedImageBinding
             TestRunSandboxLocalCLIUsesExactBinaryAndState
             TestSandboxDeletedCommandDiagnosticWithholdsChildOutput
             TestSandboxFailureChildEnvironmentUsesItsOwnOneTimeKey
+            TestSandboxFailureDiagnosticExtractionIsClosed
             TestSandboxFailureDiagnosticsAreAllowListedAndRedacted
             TestSandboxForegroundLifecycleStateContract
             TestSandboxFullCustomerLifecyclePhaseContract
@@ -606,7 +608,6 @@ jobs:
           {
             echo "QURL_RELEASE_HUB_PUBLIC_KEY_B64=$(openssl base64 -A -in "$key_file")"
             echo "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256=$(sha256sum "$key_file" | awk '{print $1}')"
-            echo "QURL_RELEASE_SESSION_RELAY_URL=https://relay.example.invalid"
           } >>"$GITHUB_ENV"
 
       - name: Build exact packaged customer artifacts once

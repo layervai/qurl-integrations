@@ -21,7 +21,6 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -721,10 +720,6 @@ func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {
 			"%w: private-cell.example:443 Hub server public key via QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT",
 			hub.ErrConfig,
 		),
-		"session relay": fmt.Errorf(
-			"%w: https://private-relay.example/secret via QURL_CONNECTOR_SESSION_RELAY_URL",
-			sessionrelay.ErrConfig,
-		),
 	} {
 		t.Run(name, func(t *testing.T) {
 			var buf bytes.Buffer
@@ -736,8 +731,8 @@ func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {
 				}
 			}
 			for _, forbidden := range []string{
-				"private-cell.example", "private-relay.example", "secret", "Hub", "server public key",
-				"QURL_CONNECTOR_HUB_", "QURL_CONNECTOR_SESSION_RELAY_URL", ":443",
+				"private-cell.example", "secret", "Hub", "server public key",
+				"QURL_CONNECTOR_HUB_", ":443",
 			} {
 				if strings.Contains(got, forbidden) {
 					t.Fatalf("connection configuration rendering exposed %q:\n%s", forbidden, got)

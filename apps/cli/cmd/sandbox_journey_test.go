@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,7 +23,6 @@ import (
 	"github.com/layervai/qurl-go/crid"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -43,17 +43,15 @@ import (
 //	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
 //	    "<kid>=<standard-base64 P-256 SPKI DER>" (a protected environment
 //	    secret).
-//	QURL_SANDBOX_QV2_RELAY_URL — the sandbox NHP HTTPS relay origin used by
-//	    both qv2 platform access and registered Connector session operations
-//	    (a protected environment secret).
+//	QURL_SANDBOX_QV2_RELAY_URL — the sandbox's platform access URL (a
+//	    protected environment secret).
 //	QURL_CLI_SANDBOX_FAILURE_API_KEY — a second one-time account key used
 //	    only by the controlled-failure child in the full lifecycle.
 //
 // The issuer and relay values become a QURL_DEPLOYMENT settings file for the
 // download step: `get --file` opens fragment-credential links through the
-// platform access flow, which needs the deployment's trust settings. The same
-// relay origin is passed to the Connector session path. Their values — like
-// every minted link — never reach the log.
+// platform access flow, which needs the deployment's trust settings. Their
+// values — like every minted link — never reach the log.
 //
 // Quota safety: each run publishes exactly ONE throwaway resource and always
 // reclaims it. The happy path ends in delete + idempotent re-delete, and a
@@ -125,14 +123,10 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"QURL_SANDBOX_QV2_RELAY_URL inputs the download step's deployment "+
 			"settings are built from.", missing)
 	}
-	if err := sessionrelay.Validate(relayURL); err != nil {
-		t.Fatalf("QURL_SANDBOX_QV2_RELAY_URL is invalid; refusing to print the value because CI logs are public: %v", err)
-	}
 	return map[string]string{
-		"QURL_API_KEY":                     key,
-		"QURL_ENDPOINT":                    endpoint,
-		"QURL_DEPLOYMENT":                  journeyDeploymentFile(t, issuerKey, relayURL),
-		"QURL_CONNECTOR_SESSION_RELAY_URL": relayURL,
+		"QURL_API_KEY":    key,
+		"QURL_ENDPOINT":   endpoint,
+		"QURL_DEPLOYMENT": journeyDeploymentFile(t, issuerKey, relayURL),
 	}
 }
 
@@ -205,9 +199,9 @@ func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
 	if err != nil {
 		t.Fatal("QURL_SANDBOX_QV2_ISSUER_KEY's key part is not valid standard base64; refusing to print the malformed value (CI logs are public)")
 	}
-	relay, err := url.Parse(relayURL)
-	if err != nil || relay.Scheme != "https" || relay.Host == "" {
-		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be an https URL; refusing to print the malformed value (CI logs are public)")
+	relayHost, ok := canonicalSandboxQV2RelayHost(relayURL)
+	if !ok {
+		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be one canonical https origin; refusing to print the malformed value (CI logs are public)")
 	}
 	doc := map[string]any{
 		"issuers": []map[string]string{{
@@ -216,7 +210,7 @@ func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
 			"spki_der_b64": base64.RawURLEncoding.EncodeToString(der),
 		}},
 		"cells":           []any{},
-		"relay_allowlist": []string{relay.Host},
+		"relay_allowlist": []string{relayHost},
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
@@ -227,6 +221,86 @@ func journeyDeploymentFile(t *testing.T, issuerKey, relayURL string) string {
 		t.Fatalf("write deployment settings: %v", err)
 	}
 	return path
+}
+
+func canonicalSandboxQV2RelayHost(raw string) (string, bool) {
+	if raw == "" || raw != strings.TrimSpace(raw) || strings.Contains(raw, "#") {
+		return "", false
+	}
+	relay, err := url.Parse(raw)
+	if err != nil || relay.Scheme != "https" || relay.Host == "" || relay.User != nil ||
+		relay.RawQuery != "" || relay.Fragment != "" || relay.Path != "" || relay.RawPath != "" ||
+		relay.ForceQuery || relay.Opaque != "" {
+		return "", false
+	}
+	host := relay.Hostname()
+	// relayHost becomes an exact SDK allowlist entry. Keep one lowercase DNS
+	// spelling, reject IP literals, and omit the default port so link matching
+	// cannot depend on two spellings of the same endpoint.
+	if relay.Host != strings.ToLower(relay.Host) || strings.HasSuffix(relay.Host, ":") ||
+		!validSandboxDNSHost(host) {
+		return "", false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return "", false
+	}
+	if port := relay.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || n == 443 {
+			return "", false
+		}
+	}
+	return relay.Host, true
+}
+
+func validSandboxDNSHost(host string) bool {
+	if host == "" || len(host) > 253 || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := range len(label) {
+			character := label[i]
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func TestCanonicalSandboxQV2RelayHost(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "canonical", raw: "https://relay.example.com", want: "relay.example.com"},
+		{name: "non-default port", raw: "https://relay.example.com:8443", want: "relay.example.com:8443"},
+		{name: "userinfo", raw: "https://user:secret@relay.example.com"},
+		{name: "path", raw: "https://relay.example.com/path"},
+		{name: "query", raw: "https://relay.example.com?secret=value"},
+		{name: "fragment", raw: "https://relay.example.com#fragment"},
+		{name: "uppercase", raw: "https://Relay.example.com"},
+		{name: "empty label", raw: "https://relay..example.com"},
+		{name: "underscore", raw: "https://relay_.example.com"},
+		{name: "leading hyphen", raw: "https://-relay.example.com"},
+		{name: "trailing hyphen", raw: "https://relay-.example.com"},
+		{name: "IP literal", raw: "https://192.0.2.1"},
+		{name: "IPv6 literal", raw: "https://[2001:db8::1]"},
+		{name: "IPv6 zone", raw: "https://[fe80::1%25eth0]"},
+		{name: "default port", raw: "https://relay.example.com:443"},
+		{name: "whitespace", raw: " https://relay.example.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := canonicalSandboxQV2RelayHost(test.raw)
+			if ok != (test.want != "") || got != test.want {
+				t.Fatalf("canonical relay host = %q, %t; want %q", got, ok, test.want)
+			}
+		})
+	}
 }
 
 // runSandboxCLI invokes the real command tree against the live sandbox:
@@ -389,6 +463,7 @@ func TestSandboxFailureDiagnosticExtractionIsClosed(t *testing.T) {
 		}{
 			{name: "category and code", raw: `{"failure_category":"assignment","failure_code":"52201","target_url":"http://127.0.0.1"}`, want: sandboxFailureDiagnostic{Category: "assignment", Code: "52201"}, ok: true},
 			{name: "category only", raw: `{"failure_category":"network"}`, want: sandboxFailureDiagnostic{Category: "network"}, ok: true},
+			{name: "native UDP verification", raw: `{"failure_category":"verification"}`, want: sandboxFailureDiagnostic{Category: "verification"}, ok: true},
 			{name: "unknown category", raw: `{"failure_category":"internal_topology","failure_code":"52201"}`},
 			{name: "invalid code", raw: `{"failure_category":"identity","failure_code":"secret"}`},
 			{name: "missing category", raw: `{"failure_code":"52201"}`},

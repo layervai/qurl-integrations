@@ -18,7 +18,7 @@ import (
 	"github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
-	qurlsessionrelay "github.com/layervai/qurl-go/relayknock/sessionrelay"
+	"github.com/layervai/qurl-go/relayknock/nativeudp"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -562,13 +562,14 @@ func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) 
 	}
 }
 
-func TestClassifyShareFailureDistinguishesSessionRelayTransportFromVerification(t *testing.T) {
+func TestClassifyShareFailurePreservesNativeUDPVerification(t *testing.T) {
 	tests := []struct {
 		err      error
 		category string
 	}{
-		{err: qurlsessionrelay.ErrTransport, category: diagnosticFailureNetwork},
-		{err: qurlsessionrelay.ErrServerUnauthenticated, category: diagnosticFailureVerification},
+		{err: nativeudp.ErrTransport, category: diagnosticFailureNetwork},
+		{err: nativeudp.ErrServerUnauthenticated, category: diagnosticFailureVerification},
+		{err: errors.Join(nativeudp.ErrTransport, nativeudp.ErrServerUnauthenticated), category: diagnosticFailureVerification},
 		{err: qurl.ErrMalformedReply, category: diagnosticFailureVerification},
 	}
 	for _, test := range tests {

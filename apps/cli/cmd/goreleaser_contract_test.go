@@ -122,19 +122,21 @@ func TestCaskMetadataAndPostflightAreHomebrewStyleSafe(t *testing.T) {
 	}
 }
 
-func TestReleaseBuildEmbedsProductionNativeConnectionSettings(t *testing.T) {
+func TestReleaseBuildEmbedsOnlyProductionHubTrust(t *testing.T) {
 	cfg := loadGoreleaserConfig(t)
+	ldflags := strings.Join(cfg.Builds[0].LDFlags, "\n")
 	const pinAssignment = `-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64={{ index .Env "QURL_RELEASE_HUB_PUBLIC_KEY_B64" }}`
-	if count := strings.Count(strings.Join(cfg.Builds[0].LDFlags, "\n"), pinAssignment); count != 1 {
+	if count := strings.Count(ldflags, pinAssignment); count != 1 {
 		t.Fatalf("release ldflags contain production Hub-pin assignment %d time(s), want one", count)
 	}
-	const relayAssignment = `-X github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay.defaultURL={{ index .Env "QURL_RELEASE_SESSION_RELAY_URL" }}`
-	if count := strings.Count(strings.Join(cfg.Builds[0].LDFlags, "\n"), relayAssignment); count != 1 {
-		t.Fatalf("release ldflags contain production session-relay assignment %d time(s), want one", count)
+	for _, forbidden := range []string{"sessionrelay.defaultURL", "QURL_RELEASE_SESSION_RELAY_URL"} {
+		if strings.Contains(ldflags, forbidden) {
+			t.Errorf("release ldflags retain forbidden session-relay setting %q", forbidden)
+		}
 	}
 }
 
-func TestReleaseLinkerTargetsProduceRunnableNativeConnectionSettings(t *testing.T) {
+func TestReleaseLinkerTargetProducesRunnableNativeTrustPin(t *testing.T) {
 	scalar := bytes.Repeat([]byte{0x42}, curve25519.ScalarSize)
 	public, err := curve25519.X25519(scalar, curve25519.Basepoint)
 	if err != nil {
@@ -152,13 +154,11 @@ func TestReleaseLinkerTargetsProduceRunnableNativeConnectionSettings(t *testing.
 		t.Fatal(err)
 	}
 	const linkerTarget = "github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64"
-	const relayLinkerTarget = "github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay.defaultURL"
-	const relayURL = "https://relay.example.com"
 	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelBuild()
 	// #nosec G204 -- every argument is a test-owned constant or a value generated above in this process.
 	build := exec.CommandContext(buildCtx, "go", "build", "-trimpath", "-mod=readonly", "-ldflags",
-		"-X "+linkerTarget+"="+keyB64+" -X "+relayLinkerTarget+"="+relayURL, "-o", binary, "./apps/cli/cmd/")
+		"-X "+linkerTarget+"="+keyB64, "-o", binary, "./apps/cli/cmd/")
 	build.Dir = root
 	build.Env = append(os.Environ(), "GOWORK=off")
 	if output, err := build.CombinedOutput(); err != nil {

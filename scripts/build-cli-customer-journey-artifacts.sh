@@ -10,7 +10,6 @@ fi
 output_dir=$1
 hub_public_key_b64=${QURL_RELEASE_HUB_PUBLIC_KEY_B64:-}
 hub_public_key_sha256=${QURL_RELEASE_HUB_PUBLIC_KEY_SHA256:-}
-session_relay_url=${QURL_RELEASE_SESSION_RELAY_URL:-}
 
 [[ "$output_dir" == /* && "$output_dir" != / ]] || {
   echo "output directory must be an absolute non-root path" >&2
@@ -42,19 +41,6 @@ if hashlib.sha256(key).hexdigest() != sys.argv[2]:
     raise SystemExit("release Hub public key does not match its SHA-256")
 PY
 
-relay_test=TestReleaseSessionRelayEnvironment
-relay_pattern="^${relay_test}$"
-actual_relay_test=$(GOWORK=off GOFLAGS=-mod=readonly \
-  go test ./apps/cli/internal/connector/sessionrelay -list "$relay_pattern" | sed -n '/^Test/p')
-[[ "$actual_relay_test" == "$relay_test" ]] || {
-  echo "exact release session-relay validation test is missing or ambiguous" >&2
-  exit 65
-}
-QURL_REQUIRE_RELEASE_SESSION_RELAY=1 \
-  QURL_RELEASE_SESSION_RELAY_URL="$session_relay_url" \
-  GOWORK=off GOFLAGS=-mod=readonly \
-  go test ./apps/cli/internal/connector/sessionrelay -run "$relay_pattern" -count=1
-
 mkdir -m 700 "$output_dir"
 version="v0.0.0-ci.${head_sha:0:12}"
 
@@ -67,7 +53,7 @@ build_target() {
 
   CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" GOWORK=off GOFLAGS=-mod=readonly \
     go build -trimpath -buildvcs=true \
-      -ldflags="-buildid= -s -w -X main.version=${version} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${hub_public_key_b64} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay.defaultURL=${session_relay_url}" \
+      -ldflags="-buildid= -s -w -X main.version=${version} -X github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub.defaultServerPublicKeyB64=${hub_public_key_b64}" \
       -o "$qurl_path" ./apps/cli/cmd
   chmod 0500 "$qurl_path"
 }
@@ -77,7 +63,7 @@ build_target darwin amd64 darwin-amd64 ""
 build_target darwin arm64 darwin-arm64 ""
 build_target windows amd64 windows-amd64 .exe
 
-python3 - "$output_dir" "$head_sha" "$hub_public_key_b64" "$session_relay_url" <<'PY'
+python3 - "$output_dir" "$head_sha" "$hub_public_key_b64" <<'PY'
 import json
 import pathlib
 import subprocess
@@ -86,9 +72,6 @@ import sys
 root = pathlib.Path(sys.argv[1])
 head_sha = sys.argv[2]
 hub_key = sys.argv[3].encode("ascii")
-session_relay = sys.argv[4].encode("ascii")
-if not session_relay:
-    raise SystemExit("release session relay must not be empty")
 expected = {
     "qurl-linux-amd64": ("linux", "amd64"),
     "qurl-darwin-amd64": ("darwin", "amd64"),
@@ -104,8 +87,6 @@ for name, (target_os, target_arch) in expected.items():
     data = path.read_bytes()
     if hub_key not in data:
         raise SystemExit(f"{name} does not contain the selected release trust root")
-    if session_relay not in data:
-        raise SystemExit(f"{name} does not contain the selected release session relay")
     result = subprocess.run(
         ["go", "version", "-m", "-json", str(path)],
         check=True,

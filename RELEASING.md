@@ -37,17 +37,14 @@ cancellation.
 CLI releases have two reviewed Hub-trust postures. A production-enabled
 release must contain the exact production Hub trust root, and every packaged
 artifact must verify it. A dark release must contain no production Hub trust
-root. Every official release must also contain the exact reviewed production
-HTTPS session-relay origin from the repository variable
-`QURL_PROD_NHP_SESSION_RELAY_URL`. The release checks that exact value without
-printing it in all six native archives and both immutable OCI platform images.
-Native local sharing stops with the fixed, redacted missing-settings error if
-either required built-in connection setting is absent or invalid, unless a
-qURL administrator supplies a complete custom deployment configuration. The
-release process rejects partial trust data and must never embed development or
-test trust data. The GitHub Release stays draft and the Homebrew tap stays on
-its prior version until all customer-journey, artifact, image, trust-posture,
-and signature checks pass.
+root. Native local sharing uses the qURL native UDP protocol and does not embed
+or require an HTTPS session-relay origin. It stops with the fixed, redacted
+missing-settings error if the required built-in Hub trust root is absent or
+invalid, unless a qURL administrator supplies a complete custom deployment
+configuration. The release process rejects partial trust data and must never
+embed development or test trust data. The GitHub Release stays draft and the
+Homebrew tap stays on its prior version until all customer-journey, artifact,
+image, trust-posture, and signature checks pass.
 
 ## What a CLI release ships
 
@@ -163,12 +160,11 @@ the mutable release tag.
 
 Recovery reruns never rebuild over an existing `vX.Y.Z` image tag. They resolve
 the already-published digest, re-run both platform smokes, require both
-platform binaries to contain the exact current reviewed production session
-relay, require its BuildKit provenance to name the checked-out release commit
-and canonical repository, and finish signing/uploading that same digest. A
-changed session-relay value therefore requires a new CLI version; recovery
-cannot overwrite an existing versioned image. An ambiguous registry lookup
-fails closed instead of treating the tag as absent.
+platform binaries to carry the reviewed Hub-trust posture, require its BuildKit
+provenance to name the checked-out release commit and canonical repository, and
+finish signing/uploading that same digest. Recovery cannot overwrite an
+existing versioned image. An ambiguous registry lookup fails closed instead of
+treating the tag as absent.
 
 ## SBOMs
 

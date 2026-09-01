@@ -27,7 +27,6 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
@@ -81,7 +80,6 @@ type globalOpts struct {
 	resolveShareStateDir func(string) (string, error)
 	resolveLocalResource localResourceResolver
 	resolveHubBootstrap  func() (qurl.HubBootstrap, error)
-	resolveSessionRelay  func() (string, error)
 	resolveSessionConfig func(string) (connectorshare.NativeSessionOperationAuthority, error)
 	runForegroundDaemon  func(context.Context, *globalOpts, string, string) error
 	sharingWaitLimit     time.Duration
@@ -295,7 +293,7 @@ func (o *globalOpts) applyDefaults() {
 	if o.newShareDaemon == nil {
 		o.newShareDaemon = func(stateDir, logDir string) shareDaemonController {
 			return connectordaemon.NewJobController(
-				stateDir, logDir, o.version, o.resolvedEndpoint, o.resolveHubBootstrap, o.resolveSessionRelay,
+				stateDir, logDir, o.version, o.resolvedEndpoint, o.resolveHubBootstrap,
 			)
 		}
 	}
@@ -307,11 +305,6 @@ func (o *globalOpts) applyDefaults() {
 	}
 	if o.resolveHubBootstrap == nil {
 		o.resolveHubBootstrap = hub.Bootstrap
-	}
-	if o.resolveSessionRelay == nil {
-		o.resolveSessionRelay = func() (string, error) {
-			return sessionrelay.ResolveWithLookup(o.lookupEnv)
-		}
 	}
 	if o.resolveSessionConfig == nil {
 		o.resolveSessionConfig = sessionconfig.Resolve
