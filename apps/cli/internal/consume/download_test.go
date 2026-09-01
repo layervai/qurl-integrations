@@ -385,10 +385,14 @@ func TestDownloadRedirectDoesNotForwardGrantCredentials(t *testing.T) {
 
 func TestNewHTTPClientStripsKnownGrantCredentialsOnRedirect(t *testing.T) {
 	var leaked atomic.Bool
+	var benignCookieSeen atomic.Bool
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if _, err := req.Cookie(grantSessionCookie); err == nil ||
 			req.Header.Get("Authorization") != "" || req.Header.Get("Proxy-Authorization") != "" {
 			leaked.Store(true)
+		}
+		if cookie, err := req.Cookie("customer_preference"); err == nil && cookie.Value == "compact" {
+			benignCookieSeen.Store(true)
 		}
 		_, _ = w.Write([]byte("redirected"))
 	}))
@@ -402,6 +406,13 @@ func TestNewHTTPClientStripsKnownGrantCredentialsOnRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
+	req.AddCookie(&http.Cookie{
+		Name:     "customer_preference",
+		Value:    "compact",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 	addTestGrantCookie(req)
 	req.Header.Set("Authorization", "Bearer opaque-test-token")
 	req.Header.Set("Proxy-Authorization", "Bearer opaque-test-token")
@@ -414,6 +425,9 @@ func TestNewHTTPClientStripsKnownGrantCredentialsOnRedirect(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if leaked.Load() {
 		t.Fatal("NewHTTPClient forwarded a known grant credential across origins")
+	}
+	if !benignCookieSeen.Load() {
+		t.Fatal("NewHTTPClient removed an unrelated cookie while stripping the grant credential")
 	}
 }
 
