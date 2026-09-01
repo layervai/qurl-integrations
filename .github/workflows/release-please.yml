@@ -164,7 +164,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: read
-      contents: read
+      # GitHub only returns draft releases to identities with push access.
+      # This job does not write content, but contents:write gives its scoped
+      # GITHUB_TOKEN the access level required to verify the draft binding.
+      contents: write
     outputs:
       required: ${{ steps.decision.outputs.required }}
       source_sha: ${{ steps.source.outputs.sha }}
