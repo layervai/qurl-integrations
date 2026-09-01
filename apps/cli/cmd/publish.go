@@ -122,8 +122,10 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	if err != nil {
 		return err
 	}
-	sessionOperations, err := opts.resolveSessionConfig(ownerID)
-	if err != nil {
+	// Validate the owner-bound session authority before any Connector-resource
+	// mutation. The short-lived discovery runtime below never transfers to
+	// NewNativeAdmitter, so it must not retain that authority or session options.
+	if _, err := opts.resolveSessionConfig(ownerID); err != nil {
 		return err
 	}
 	enrollment := &localEnrollment{opts: opts, target: target, requestedID: requestedID}
@@ -135,7 +137,7 @@ func runLocalPublish(ctx context.Context, opts *globalOpts, target *publishTarge
 	// its session-operation journals across processes.
 	// TODO(upstream-contract): Keep the completed-state fast path and journal
 	// serialization assumption in lockstep with qurl-connector.
-	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir, sessionOperations)
+	resolved, knockResourceID, err := prepareLocalPublishResource(ctx, opts, enrollment, stateDir)
 	if err != nil {
 		return err
 	}
@@ -333,7 +335,6 @@ func prepareLocalPublishResource(
 	opts *globalOpts,
 	enrollment *localEnrollment,
 	stateDir string,
-	sessionOperations connectorshare.NativeSessionOperationAuthority,
 ) (resolved *agent.ResolvedResource, knockResourceID string, err error) {
 	hubBootstrap, err := opts.resolveHubBootstrap()
 	if err != nil {
@@ -353,7 +354,6 @@ func prepareLocalPublishResource(
 		EnrollmentCredentialProvider: enrollment.credential,
 		RecoveryCredentialProvider:   enrollment.recoveryCredential,
 		RefreshMode:                  connectorRefreshModeAuto,
-		SessionOperations:            sessionOperations,
 	}
 	resolved, err = opts.resolveLocalResource(ctx, cfg, func(agentID string) (string, error) {
 		return enrollment.resolveID(ctx, stateDir, agentID)

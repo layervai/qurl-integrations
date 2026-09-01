@@ -162,6 +162,7 @@ var sandboxFailureCategories = map[string]struct{}{
 	"network":              {},
 	"peer_timeout":         {},
 	"platform_denied":      {},
+	"verification":         {},
 	"resource_unavailable": {},
 	"unknown":              {},
 }

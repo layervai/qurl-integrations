@@ -15,10 +15,15 @@ import (
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
+	qurlsessionrelay "github.com/layervai/qurl-go/relayknock/sessionrelay"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
+
+// ErrDirectEgressRequired reports an environment proxy configuration that
+// would split the source address used for admission from the Connector route.
+var ErrDirectEgressRequired = errors.New("qURL local sharing requires direct egress")
 
 // DefaultFRPCommon builds the daemon's shared immutable FRP client defaults.
 func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCommonConfig, error) {
@@ -28,6 +33,13 @@ func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCom
 	common.Transport.DialServerKeepAlive = keepaliveSeconds
 	if err := common.Complete(); err != nil {
 		return nil, fmt.Errorf("complete qURL daemon tunnel configuration: %w", err)
+	}
+	// TODO(upstream-contract): FRP derives ProxyURL from lowercase http_proxy during Complete and repeats
+	// that derivation inside NewService. Native session admission is
+	// source-IP-bound, so reject the unsupported split-egress configuration
+	// before either the HTTPS relay or the tunnel performs network I/O.
+	if common.Transport.ProxyURL != "" {
+		return nil, fmt.Errorf("%w: lowercase http_proxy is set", ErrDirectEgressRequired)
 	}
 	return common, nil
 }
@@ -527,7 +539,7 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 		}
 	}
 	for _, sentinel := range []error{
-		qurl.ErrInvalidRegisterConfig, qurl.ErrAgentBindingPersistence,
+		qurl.ErrInvalidRegisterConfig, qurl.ErrInvalidNativeKnockInput, qurl.ErrAgentBindingPersistence,
 		qurl.ErrAgentCompletionCandidatePersistence, qurl.ErrAgentSetupLock,
 		qurl.ErrInvalidNativeSessionOperation, agentstate.ErrSessionOperationConflict,
 		agentstate.ErrSessionOperationJournalCorrupt,
@@ -546,10 +558,18 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 	}
 	for _, sentinel := range []error{
 		nativeudp.ErrResolve, nativeudp.ErrTransport,
-		nativeudp.ErrNoReply, context.DeadlineExceeded,
+		nativeudp.ErrNoReply, qurlsessionrelay.ErrTransport,
+		context.DeadlineExceeded,
 	} {
 		if errors.Is(err, sentinel) {
 			return diagnosticFailureNetwork, ""
+		}
+	}
+	for _, sentinel := range []error{
+		qurlsessionrelay.ErrServerUnauthenticated, qurl.ErrMalformedReply,
+	} {
+		if errors.Is(err, sentinel) {
+			return diagnosticFailureVerification, ""
 		}
 	}
 	var pathErr *os.PathError

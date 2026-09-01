@@ -19,7 +19,9 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -713,24 +715,51 @@ func TestConnectorResourceRenderings(t *testing.T) {
 	})
 }
 
-func TestConnectorHubConfigRenderingHidesTopology(t *testing.T) {
-	err := fmt.Errorf(
-		"%w: private-cell.example:443 Hub server public key via QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT",
-		hub.ErrConfig,
-	)
+func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {
+	for name, err := range map[string]error{
+		"Hub": fmt.Errorf(
+			"%w: private-cell.example:443 Hub server public key via QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT",
+			hub.ErrConfig,
+		),
+		"session relay": fmt.Errorf(
+			"%w: https://private-relay.example/secret via QURL_CONNECTOR_SESSION_RELAY_URL",
+			sessionrelay.ErrConfig,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			RenderError(&buf, err, false)
+			got := buf.String()
+			for _, want := range []string{msgConnectorConnectionConfig, hintConnectorConnectionConfig} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("connection configuration rendering missing %q:\n%s", want, got)
+				}
+			}
+			for _, forbidden := range []string{
+				"private-cell.example", "private-relay.example", "secret", "Hub", "server public key",
+				"QURL_CONNECTOR_HUB_", "QURL_CONNECTOR_SESSION_RELAY_URL", ":443",
+			} {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("connection configuration rendering exposed %q:\n%s", forbidden, got)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorDirectEgressRenderingIsActionableAndRedacted(t *testing.T) {
+	err := fmt.Errorf("%w: http://user:secret@private-proxy.example:8080", connectordaemon.ErrDirectEgressRequired)
 	var buf bytes.Buffer
 	RenderError(&buf, err, false)
 	got := buf.String()
-	for _, want := range []string{msgConnectorHubConfig, hintConnectorHubConfig} {
+	for _, want := range []string{msgConnectorDirectEgress, hintConnectorDirectEgress} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("Hub configuration rendering missing %q:\n%s", want, got)
+			t.Fatalf("direct-egress rendering missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{
-		"private-cell.example", "Hub", "server public key", "QURL_CONNECTOR_HUB_", ":443",
-	} {
+	for _, forbidden := range []string{"secret", "private-proxy.example", "user:", ":8080"} {
 		if strings.Contains(got, forbidden) {
-			t.Fatalf("Hub configuration rendering exposed %q:\n%s", forbidden, got)
+			t.Fatalf("direct-egress rendering exposed %q:\n%s", forbidden, got)
 		}
 	}
 }

@@ -23,6 +23,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -62,6 +63,7 @@ var cliSentinels = map[string]struct {
 	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},
 	"consume.ErrAccessBusy":                 {consume.ErrAccessBusy, Unavailable},
 	"daemon.ErrAlreadyRunning":              {connectordaemon.ErrAlreadyRunning, Conflict},
+	"daemon.ErrDirectEgressRequired":        {connectordaemon.ErrDirectEgressRequired, Config},
 	"daemon.ErrResourceGone":                {connectordaemon.ErrResourceGone, NotFound},
 	"state.ErrNoDefaultStateDir":            {state.ErrNoDefaultStateDir, Config},
 	"state.ErrLocalShareOwnerConflict":      {state.ErrLocalShareOwnerConflict, Conflict},
@@ -76,6 +78,7 @@ var cliSentinels = map[string]struct {
 	// even though it lives in the environment.
 	"hub.ErrConfig":           {hub.ErrConfig, Config},
 	"sessionconfig.ErrConfig": {sessionconfig.ErrConfig, Config},
+	"sessionrelay.ErrConfig":  {sessionrelay.ErrConfig, Config},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can

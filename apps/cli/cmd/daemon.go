@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -118,7 +120,7 @@ another service manager owns the process.`,
 		Args: noArgs,
 	}
 	var stateDir, jobVersion, headlessConfig, enrollmentTokenFile string
-	var hubHost, hubServerPublicKeyB64 string
+	var hubHost, hubServerPublicKeyB64, sessionRelayURL string
 	var hubPort int
 	run := &cobra.Command{
 		Use:   "run",
@@ -146,7 +148,9 @@ another service manager owns the process.`,
 			if hasHubOverride {
 				hubOverride = &hubBootstrap
 			}
-			return runShareDaemonWithDeployment(cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride)
+			return runShareDaemonWithDeployment(
+				cmd.Context(), opts, stateDir, jobVersion, headlessConfig, enrollmentTokenFile, hubOverride, sessionRelayURL,
+			)
 		},
 	}
 	run.Flags().StringVar(&stateDir, "state-dir", "", "qURL share daemon state directory")
@@ -160,7 +164,8 @@ another service manager owns the process.`,
 	run.Flags().StringVar(&hubHost, "hub-host", "", "pinned share-daemon Hub host")
 	run.Flags().IntVar(&hubPort, "hub-port", 0, "pinned share-daemon Hub port")
 	run.Flags().StringVar(&hubServerPublicKeyB64, "hub-server-public-key-b64", "", "pinned share-daemon Hub server public key")
-	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "job-version", "job-stdout-log", "job-stderr-log"} {
+	run.Flags().StringVar(&sessionRelayURL, "session-relay-url", "", "trusted share-daemon session relay origin")
+	for _, name := range []string{"hub-host", "hub-port", "hub-server-public-key-b64", "session-relay-url", "job-version", "job-stdout-log", "job-stderr-log"} {
 		_ = run.Flags().MarkHidden(name)
 	}
 	validateTestCRID := &cobra.Command{
@@ -209,10 +214,10 @@ func runShareDaemon(ctx context.Context, opts *globalOpts, stateDirOverride, job
 }
 
 func runShareDaemonWithBootstrap(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string) (retErr error) {
-	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath, nil)
+	return runShareDaemonWithDeployment(ctx, opts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath, nil, "")
 }
 
-func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap) (retErr error) {
+func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDirOverride, jobVersion, headlessConfigPath, enrollmentTokenPath string, hubOverride *qurl.HubBootstrap, sessionRelayOverride string) (retErr error) {
 	stateDir, err := opts.resolveShareStateDir(stateDirOverride)
 	if err != nil {
 		return err
@@ -239,7 +244,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	hubBootstrap, err := daemonHubBootstrap(opts, hubOverride)
+	hubBootstrap, sessionRelayURL, err := daemonNativeDeployment(opts, hubOverride, sessionRelayOverride)
 	if err != nil {
 		return err
 	}
@@ -255,6 +260,10 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
+	// Build one immutable relay option and transport for the daemon lifetime.
+	// Native bootstrap can retry for a long time; rebuilding the option inside
+	// openFactory would leave each failed attempt's idle transport behind.
+	sessionOptions := nativeSessionOptions(sessionRelayURL)
 	openFactory := func(initCtx context.Context) (connectordaemon.SessionFactory, error) {
 		apiConfig := &qurlapi.Config{
 			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
@@ -264,6 +273,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
+			SessionOptions:    sessionOptions,
 			SessionOperations: sessionOperations,
 		}, common, apiConfig, verifyOwner)
 	}
@@ -342,6 +352,58 @@ func daemonHubBootstrap(opts *globalOpts, override *qurl.HubBootstrap) (qurl.Hub
 		return *override, nil
 	}
 	return opts.resolveHubBootstrap()
+}
+
+func daemonNativeDeployment(opts *globalOpts, hubOverride *qurl.HubBootstrap, sessionRelayOverride string) (qurl.HubBootstrap, string, error) {
+	hubBootstrap, err := daemonHubBootstrap(opts, hubOverride)
+	if err != nil {
+		return qurl.HubBootstrap{}, "", err
+	}
+	sessionRelayURL, err := daemonSessionRelayURL(opts, sessionRelayOverride)
+	if err != nil {
+		return qurl.HubBootstrap{}, "", err
+	}
+	return hubBootstrap, sessionRelayURL, nil
+}
+
+func daemonSessionRelayURL(opts *globalOpts, override string) (string, error) {
+	if override != "" {
+		if err := sessionrelay.Validate(override); err != nil {
+			return "", err
+		}
+		return override, nil
+	}
+	if opts == nil || opts.resolveSessionRelay == nil {
+		return "", fmt.Errorf("%w: session relay resolver is unavailable", sessionrelay.ErrConfig)
+	}
+	relayURL, err := opts.resolveSessionRelay()
+	if err != nil {
+		return "", err
+	}
+	if relayURL == "" {
+		return "", nil
+	}
+	if err := sessionrelay.Validate(relayURL); err != nil {
+		return "", err
+	}
+	return relayURL, nil
+}
+
+func nativeSessionOptions(relayURL string) []qurl.AgentRuntimeSessionOption {
+	if relayURL == "" {
+		return nil
+	}
+	return []qurl.AgentRuntimeSessionOption{qurl.WithAgentRuntimeSessionRelay(relayURL, directSessionRelayHTTPClient())}
+}
+
+// directSessionRelayHTTPClient keeps HTTPS admission on the same direct public
+// egress as the later Connector data-plane TCP connection. The standard Go
+// transport honors HTTPS_PROXY, which would split those source addresses and
+// make a valid admission unusable.
+func directSessionRelayHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // net/http defines this concrete default.
+	transport.Proxy = nil
+	return &http.Client{Transport: transport}
 }
 
 func exactDaemonHubOverride(host string, port int, serverPublicKeyB64 string) (qurl.HubBootstrap, bool, error) {

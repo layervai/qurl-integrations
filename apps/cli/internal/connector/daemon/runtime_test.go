@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/layervai/qurl-connector/pkg/agentstate"
 	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	qurl "github.com/layervai/qurl-go/qurl"
+	qurlsessionrelay "github.com/layervai/qurl-go/relayknock/sessionrelay"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -47,6 +49,27 @@ func (a *failingResourceAdmitter) Admit(context.Context, string, string) (connec
 func (*failingResourceAdmitter) Retire(context.Context, connectorshare.Admission) error { return nil }
 func (*failingResourceAdmitter) MarkServingHealthy() error                              { return nil }
 func (*failingResourceAdmitter) Close() error                                           { return nil }
+
+func TestDefaultFRPCommonCannotUseEnvironmentProxy(t *testing.T) {
+	const proxy = "http://user:secret@private-proxy.example:8080"
+	t.Setenv("http_proxy", proxy)
+	inherited := &v1.ClientCommonConfig{}
+	if err := inherited.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if inherited.Transport.ProxyURL == "" {
+		t.Fatal("test no longer exercises FRP's environment-proxy default")
+	}
+	common, err := DefaultFRPCommon(1, 1)
+	if common != nil || !errors.Is(err, ErrDirectEgressRequired) {
+		t.Fatalf("proxy configuration = %#v, %v; want actionable rejection", common, err)
+	}
+	for _, forbidden := range []string{proxy, "secret", "private-proxy.example", "user:"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("proxy rejection exposed %q: %v", forbidden, err)
+		}
+	}
+}
 
 func TestNativeSessionFactoryLogsClassifiedRetryWithoutStoppingSession(t *testing.T) {
 	const secret = "lv_live_SUPERSECRETVALUE0000001"
@@ -536,6 +559,23 @@ func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) 
 	))
 	if category != diagnosticFailureAssignment || code != "" {
 		t.Fatalf("classification=%q/%q, want assignment with no public code", category, code)
+	}
+}
+
+func TestClassifyShareFailureDistinguishesSessionRelayTransportFromVerification(t *testing.T) {
+	tests := []struct {
+		err      error
+		category string
+	}{
+		{err: qurlsessionrelay.ErrTransport, category: diagnosticFailureNetwork},
+		{err: qurlsessionrelay.ErrServerUnauthenticated, category: diagnosticFailureVerification},
+		{err: qurl.ErrMalformedReply, category: diagnosticFailureVerification},
+	}
+	for _, test := range tests {
+		category, code := classifyShareFailure(fmt.Errorf("admit registered session: %w", test.err))
+		if category != test.category || code != "" {
+			t.Fatalf("classification=%q/%q, want %s with no public code", category, code, test.category)
+		}
 	}
 }
 

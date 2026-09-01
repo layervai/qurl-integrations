@@ -606,6 +606,7 @@ jobs:
           {
             echo "QURL_RELEASE_HUB_PUBLIC_KEY_B64=$(openssl base64 -A -in "$key_file")"
             echo "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256=$(sha256sum "$key_file" | awk '{print $1}')"
+            echo "QURL_RELEASE_SESSION_RELAY_URL=https://relay.example.invalid"
           } >>"$GITHUB_ENV"
 
       - name: Build exact packaged customer artifacts once

@@ -96,8 +96,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if ephemeralPin == nil || ephemeralPin.If != "" ||
 		!strings.Contains(ephemeralPin.Run, "openssl genpkey -algorithm X25519") ||
 		!strings.Contains(ephemeralPin.Run, "QURL_RELEASE_HUB_PUBLIC_KEY_SHA256") ||
+		!strings.Contains(ephemeralPin.Run, "QURL_RELEASE_SESSION_RELAY_URL=https://relay.example.invalid") ||
 		strings.Contains(fmt.Sprint(ephemeralPin.Env)+ephemeralPin.Run, "secrets.") {
-		t.Errorf("CI artifact trust root is not fresh, independently fingerprinted, and secret-free: %#v", ephemeralPin)
+		t.Errorf("CI artifact native connection settings are not fresh, public, and secret-free: %#v", ephemeralPin)
 	}
 	if build == nil || strings.Count(build.Run, "scripts/build-cli-customer-journey-artifacts.sh") != 1 ||
 		strings.Contains(build.Run, "manifest") {
@@ -345,7 +346,11 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	builder := readRepoFile(t, "scripts/build-cli-customer-journey-artifacts.sh")
 	for _, requiredText := range []string{
 		"QURL_RELEASE_HUB_PUBLIC_KEY_SHA256",
+		"QURL_RELEASE_SESSION_RELAY_URL",
+		"QURL_REQUIRE_RELEASE_SESSION_RELAY",
+		"TestReleaseSessionRelayEnvironment",
 		"release Hub public key does not match its SHA-256",
+		"does not contain the selected release session relay",
 		`"vcs.modified": "false"`,
 		`version --verify-release-native-trust`,
 	} {

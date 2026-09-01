@@ -28,14 +28,15 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 	stateDir := connectorStateTestDir(t)
 	registry := &ownerOnlyTestShareRegistry{}
 	stop := errors.New("stop after owner binding")
-	var authority connectorshare.NativeSessionOperationAuthority
 	res := runCLI(t, &runOpts{
 		args:          []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"},
 		env:           map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry: registry, shareStateDir: stateDir,
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
-			authority = cfg.SessionOperations
+			if cfg.SessionOperations.OwnerID != "" || len(cfg.SessionOptions) != 0 {
+				t.Fatalf("discovery-only runtime retained session authority: %#v / %d options", cfg.SessionOperations, len(cfg.SessionOptions))
+			}
 			return nil, stop
 		},
 	})
@@ -43,8 +44,8 @@ func TestLocalPublishBindsAuthenticatedOwnerBeforeNativeOpen(t *testing.T) {
 		t.Fatalf("result = exit %d stderr %q", res.code, res.stderr.String())
 	}
 	ownerID, present, err := registry.OwnerID(context.Background())
-	if err != nil || !present || ownerID != apitest.MeOwnerID || authority.OwnerID != apitest.MeOwnerID {
-		t.Fatalf("owner binding = durable %q/%v/%v authority %#v", ownerID, present, err, authority)
+	if err != nil || !present || ownerID != apitest.MeOwnerID {
+		t.Fatalf("owner binding = durable %q/%v/%v", ownerID, present, err)
 	}
 	requests := srv.Requests()
 	if len(requests) != 1 || requests[0].Method != http.MethodGet || requests[0].Path != "/v1/me" {
@@ -164,7 +165,6 @@ func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	registry := &ownerOnlyTestShareRegistry{ownerID: "own_cli_fixture"}
 	var gotRefreshMode string
 	var recoveryCredential string
-	var sessionOperations connectorshare.NativeSessionOperationAuthority
 	res := runCLI(t, &runOpts{
 		args:            []string{"publish", "http://127.0.0.1:3000"},
 		env:             map[string]string{"QURL_API_KEY": testAPIKey},
@@ -173,7 +173,9 @@ func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 		preflightTarget: func(context.Context, string, int) error { return nil },
 		localResource: func(_ context.Context, cfg *connectorshare.NativeRuntimeConfig, _ func(string) (string, error)) (*agent.ResolvedResource, error) {
 			gotRefreshMode = cfg.RefreshMode
-			sessionOperations = cfg.SessionOperations
+			if cfg.SessionOperations.OwnerID != "" || len(cfg.SessionOptions) != 0 {
+				return nil, fmt.Errorf("discovery-only runtime retained session authority: %#v / %d options", cfg.SessionOperations, len(cfg.SessionOptions))
+			}
 			if cfg.RecoveryCredentialProvider == nil {
 				return nil, errors.New("missing Connector credential-recovery provider")
 			}
@@ -193,9 +195,6 @@ func TestLocalPublishAlwaysUsesAutomaticAssignmentRecovery(t *testing.T) {
 	}
 	if recoveryCredential != testAPIKey {
 		t.Fatalf("Connector recovery credential did not resolve the exact signed-in account authority")
-	}
-	if sessionOperations.OwnerID != "own_cli_fixture" {
-		t.Fatalf("Connector session operation authority = %#v", sessionOperations)
 	}
 	mustEmptyStdout(t, res)
 }
