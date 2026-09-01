@@ -26,7 +26,6 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
-	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 const (
@@ -377,13 +376,14 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 		t.Fatal("controlled-failure route fence did not settle")
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseStoppedGet)
+	destination := filepath.Join(t.TempDir(), "fenced")
 	failedGet := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "get", cridValue,
-		"--file", filepath.Join(t.TempDir(), "fenced"))
-	if sandboxExternalExitCode(failedGet.err) != exitcode.Unavailable || failedGet.stdout != "" ||
-		!strings.Contains(strings.ToLower(failedGet.stderr), "aren't available") {
+		"--file", destination)
+	if err := validateSandboxStoppedDownloadResult(
+		sandboxExternalExitCode(failedGet.err), failedGet.stdout, failedGet.stderr, destination, sandboxStoppedRouteRefusal(t),
+	); err != nil {
 		markSandboxFailureDiagnosticFromCommand(failedGet.stdout, failedGet.stderr, failedGet.err)
-		t.Fatalf("controlled customer get did not return the fenced-resource failure: error %v, stdout %q, stderr %q",
-			failedGet.err, failedGet.stdout, failedGet.stderr)
+		t.Fatalf("controlled customer get did not return the exact stopped-Connector failure: %v", err)
 	}
 	controlledFailureReached = true
 	t.Fatal(sandboxFailureChildSentinel)
