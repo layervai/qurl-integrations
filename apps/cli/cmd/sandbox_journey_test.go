@@ -126,7 +126,7 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"settings are built from.", missing)
 	}
 	if err := sessionrelay.Validate(relayURL); err != nil {
-		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be one canonical lowercase HTTPS DNS origin with no credentials, path, query, fragment, or default port; refusing to print the malformed value (CI logs are public)")
+		t.Fatalf("QURL_SANDBOX_QV2_RELAY_URL is invalid; refusing to print the value because CI logs are public: %v", err)
 	}
 	return map[string]string{
 		"QURL_API_KEY":                     key,

@@ -122,6 +122,8 @@ jobs:
           fi
 
       - name: Verify the production NHP session relay
+        # Official artifacts have no dark relay posture. A missing reviewed
+        # origin must fail this nightly gate before a release is attempted.
         env:
           QURL_REQUIRE_RELEASE_SESSION_RELAY: '1'
           QURL_RELEASE_SESSION_RELAY_URL: ${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}
