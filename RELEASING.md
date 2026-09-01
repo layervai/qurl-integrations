@@ -34,10 +34,15 @@ cleanup and an independent `always()` cleanup job must delete every created
 resource and revoke every disposable credential on success, failure, or
 cancellation.
 
-CLI releases have two reviewed trust postures. A production-enabled release
-must contain the exact production trust root, and every packaged artifact must
-verify it. A dark release must contain no production trust root. Native local
-sharing then stops with the fixed, redacted missing-settings error unless a
+CLI releases have two reviewed Hub-trust postures. A production-enabled
+release must contain the exact production Hub trust root, and every packaged
+artifact must verify it. A dark release must contain no production Hub trust
+root. Every official release must also contain the exact reviewed production
+HTTPS session-relay origin from the repository variable
+`QURL_PROD_NHP_SESSION_RELAY_URL`. The release checks that exact value without
+printing it in all six native archives and both immutable OCI platform images.
+Native local sharing stops with the fixed, redacted missing-settings error if
+either required built-in connection setting is absent or invalid, unless a
 qURL administrator supplies a complete custom deployment configuration. The
 release process rejects partial trust data and must never embed development or
 test trust data. The GitHub Release stays draft and the Homebrew tap stays on
@@ -157,9 +162,12 @@ for that signed binding. Do not replace the digest from `qurl-image.txt` with
 the mutable release tag.
 
 Recovery reruns never rebuild over an existing `vX.Y.Z` image tag. They resolve
-the already-published digest, re-run both platform smokes, require its BuildKit
-provenance to name the checked-out release commit and canonical repository,
-and finish signing/uploading that same digest. An ambiguous registry lookup
+the already-published digest, re-run both platform smokes, require both
+platform binaries to contain the exact current reviewed production session
+relay, require its BuildKit provenance to name the checked-out release commit
+and canonical repository, and finish signing/uploading that same digest. A
+changed session-relay value therefore requires a new CLI version; recovery
+cannot overwrite an existing versioned image. An ambiguous registry lookup
 fails closed instead of treating the tag as absent.
 
 ## SBOMs

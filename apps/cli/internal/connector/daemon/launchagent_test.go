@@ -20,6 +20,8 @@ func testHubResolver() (qurl.HubBootstrap, error) {
 	return qurl.HubBootstrap{Host: "hub.sandbox.layerv.xyz", Port: 443, ServerPublicKeyB64: testHubKey}, nil
 }
 
+func testSessionRelayResolver() (string, error) { return "", nil }
+
 type recordingJobManager struct {
 	jobs        []connectorservice.UserJob
 	replaced    []connectorservice.UserJob
@@ -52,7 +54,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(name string) (string, error) {
@@ -79,7 +81,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 		wantArguments := make([]string, 0, 18)
 		wantArguments = append(wantArguments,
 			"--endpoint", "https://api.sandbox.layerv.xyz", "daemon", "run", "--state-dir", filepath.Join(dir, "state"),
-			"--job-version", "1/2.4.0", "--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
+			"--job-version", "2/2.4.0", "--hub-host", "hub.sandbox.layerv.xyz", "--hub-port", "443",
 			"--hub-server-public-key-b64", testHubKey,
 		)
 		wantArguments = append(wantArguments, daemonJobLogArguments(
@@ -90,6 +92,55 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 		if job.Umask != 0o077 {
 			t.Fatalf("launchd Umask = %#o, want 0077", job.Umask)
 		}
+	}
+}
+
+func TestJobControllerPersistsReviewedSessionRelayInOwnerOnlyArguments(t *testing.T) {
+	dir := t.TempDir()
+	manager := &recordingJobManager{}
+	controller := NewJobController(
+		filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0",
+		"https://api.sandbox.layerv.xyz", testHubResolver,
+		func() (string, error) { return "https://relay.example.com", nil },
+	)
+	controller.Manager = manager
+	controller.InvocationPath = filepath.Join(dir, "qurl")
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
+	controller.Reload = func(context.Context) (bool, error) { return false, nil }
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.jobs) != 1 {
+		t.Fatalf("installed jobs = %d, want 1", len(manager.jobs))
+	}
+	arguments := manager.jobs[0].Arguments
+	index := slices.Index(arguments, "--session-relay-url")
+	if index < 0 || index+1 >= len(arguments) || arguments[index+1] != "https://relay.example.com" {
+		t.Fatalf("session relay arguments = %#v", arguments)
+	}
+	if strings.Contains(strings.Join(arguments, " "), "QURL_API_KEY") {
+		t.Fatal("background job arguments contain a credential name")
+	}
+}
+
+func TestJobControllerRejectsSessionRelayBeforeInstallingJob(t *testing.T) {
+	dir := t.TempDir()
+	manager := &recordingJobManager{}
+	controller := NewJobController(
+		filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0",
+		"https://api.sandbox.layerv.xyz", testHubResolver,
+		func() (string, error) { return "https://user:secret@relay.example.com", nil },
+	)
+	controller.Manager = manager
+	controller.InvocationPath = filepath.Join(dir, "qurl")
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
+	controller.Reload = func(context.Context) (bool, error) { return false, nil }
+	err := controller.Ensure(context.Background())
+	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "relay.example.com") {
+		t.Fatalf("session relay validation error = %v", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 {
+		t.Fatal("invalid session relay installed a background job")
 	}
 }
 
@@ -114,7 +165,7 @@ func TestJobControllerPersistsCurrentArtifactInsteadOfOldQURLOnPath(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			manager := &recordingJobManager{}
 			controller := NewJobController(filepath.Join(dir, "state", test.name), filepath.Join(dir, "logs", test.name),
-				"2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+				"2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 			controller.Manager = manager
 			controller.InvocationPath = test.invocation
 			controller.LookPath = func(name string) (string, error) {
@@ -149,7 +200,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 	dir := t.TempDir()
 	currentBinary := filepath.Join(dir, "candidate", "qurl-candidate")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl-candidate"
 	controller.LookPath = func(name string) (string, error) {
@@ -172,7 +223,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 	controller.Manager = manager
 	controller.InvocationPath = " qurl"
 	controller.LookPath = func(string) (string, error) {
@@ -197,6 +248,9 @@ func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *te
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for a compatible live owner")
 		return qurl.HubBootstrap{}, nil
+	}, func() (string, error) {
+		t.Fatal("session-relay resolution ran for a compatible live owner")
+		return "", nil
 	})
 	controller.Manager = manager
 	controller.LookPath = func(string) (string, error) {
@@ -204,7 +258,7 @@ func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *te
 		return "", nil
 	}
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "2/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) {
@@ -223,12 +277,12 @@ func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T)
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "2/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) {
@@ -247,12 +301,12 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "2/2.4.0"}, true, nil
 	}
 	reloads := 0
 	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
@@ -265,8 +319,8 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	if manager.statusCalls != 1 {
 		t.Fatalf("native ownership status calls = %d, want 1", manager.statusCalls)
 	}
-	if got := manager.replaced[0].Arguments[7]; got != "1/2.5.0" {
-		t.Fatalf("job version argument = %q, want 1/2.5.0", got)
+	if got := manager.replaced[0].Arguments[7]; got != "2/2.5.0" {
+		t.Fatalf("job version argument = %q, want 2/2.5.0", got)
 	}
 }
 
@@ -277,6 +331,9 @@ func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDae
 	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for an incompatible foreground owner")
 		return qurl.HubBootstrap{}, nil
+	}, func() (string, error) {
+		t.Fatal("session-relay resolution ran for an incompatible foreground owner")
+		return "", nil
 	})
 	controller.Manager = manager
 	controller.LookPath = func(string) (string, error) {
@@ -284,7 +341,7 @@ func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDae
 		return "", nil
 	}
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
-		return IPCStatus{JobVersion: "1/2.4.0"}, true, nil
+		return IPCStatus{JobVersion: "2/2.4.0"}, true, nil
 	}
 	controller.Reload = func(context.Context) (bool, error) {
 		t.Fatal("reload ran for an incompatible foreground owner")
@@ -303,7 +360,7 @@ func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testi
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", testHubResolver, testSessionRelayResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -340,7 +397,7 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
 			manager := &recordingJobManager{}
-			controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", test.endpoint, test.resolve)
+			controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", test.endpoint, test.resolve, testSessionRelayResolver)
 			controller.Manager = manager
 			controller.LookPath = func(string) (string, error) {
 				t.Fatal("qurl path lookup ran before deployment state validation")

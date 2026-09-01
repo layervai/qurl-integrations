@@ -852,7 +852,10 @@ func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.
 			t.Errorf("daemon run help lost supported public input %q", public)
 		}
 	}
-	for _, hidden := range []string{"--job-version", "--job-stdout-log", "--job-stderr-log"} {
+	for _, hidden := range []string{
+		"--job-version", "--job-stdout-log", "--job-stderr-log",
+		"--hub-host", "--hub-port", "--hub-server-public-key-b64", "--session-relay-url",
+	} {
 		if strings.Contains(res.stdout.String(), hidden) {
 			t.Errorf("daemon run help exposes internal supervision flag %q", hidden)
 		}

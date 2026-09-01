@@ -393,6 +393,34 @@ jobs:
           fi
           printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"
 
+      - name: Verify the production NHP session relay
+        env:
+          QURL_REQUIRE_RELEASE_SESSION_RELAY: '1'
+          QURL_RELEASE_SESSION_RELAY_URL: ${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}
+        run: |
+          set -euo pipefail
+          test_name=TestReleaseSessionRelayEnvironment
+          test_pattern='^TestReleaseSessionRelayEnvironment$'
+          actual_test="$(go test ./apps/cli/internal/connector/sessionrelay -list "$test_pattern" | sed -n '/^Test/p')"
+          if [[ "$actual_test" != "$test_name" ]]; then
+            echo "::error::exact production session-relay test declaration is missing or ambiguous"
+            exit 1
+          fi
+          events=$(mktemp)
+          trap 'rm -f "$events"' EXIT
+          test_status=0
+          go test ./apps/cli/internal/connector/sessionrelay -run "$test_pattern" -count=1 -json >"$events" || test_status=$?
+          jq -j 'select(.Output != null) | .Output' "$events"
+          passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
+          skipped="$(jq -r --arg test "$test_name" 'select(.Action == "skip" and .Test == $test) | .Test' "$events")"
+          if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
+            echo "::error::production session-relay test must report one PASS and no SKIP" >&2
+            exit 1
+          fi
+          if (( test_status != 0 )); then
+            exit "$test_status"
+          fi
+
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
       # keeps its notes.
@@ -404,6 +432,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+          QURL_RELEASE_SESSION_RELAY_URL: ${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}
           # Pin which tag is being released. A combined release PR can tag
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.
@@ -415,8 +444,13 @@ jobs:
           QURL_RELEASE_HUB_PIN_MODE: ${{ steps.release_hub_pin.outputs.mode }}
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+          QURL_RELEASE_SESSION_RELAY_URL: ${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}
         run: |
           set -euo pipefail
+          [[ -n "$QURL_RELEASE_SESSION_RELAY_URL" ]] || {
+            echo "::error::release is missing the reviewed production session relay" >&2
+            exit 1
+          }
           case "$QURL_RELEASE_HUB_PIN_MODE" in
             dark)
               [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
@@ -480,6 +514,10 @@ jobs:
               ! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"; then
                 echo "::error::$(basename "$archive") does not carry the exact verified production Hub trust root" >&2
                 exit 1
+            fi
+            if ! grep -aFq -- "$QURL_RELEASE_SESSION_RELAY_URL" "$binary"; then
+              echo "::error::$(basename "$archive") does not carry the exact reviewed production session relay" >&2
+              exit 1
             fi
             if [[ "$archive" == *_linux_amd64.tar.gz ]]; then
               native_binary=$binary
@@ -565,6 +603,7 @@ jobs:
           build-args: |
             VERSION=${{ env.CLI_TAG }}
             HUB_TRUST_ROOT_B64=${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
+            SESSION_RELAY_URL=${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}
           provenance: mode=max
           sbom: true
           outputs: type=image,name=ghcr.io/layervai/qurl,push-by-digest=true,name-canonical=true,push=true
@@ -574,10 +613,24 @@ jobs:
           QURL_IMAGE: ghcr.io/layervai/qurl@${{ steps.qurl_existing.outputs.digest || steps.qurl_image.outputs.digest }}
           QURL_RELEASE_HUB_PIN_MODE: ${{ steps.release_hub_pin.outputs.mode }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
+          QURL_RELEASE_SESSION_RELAY_URL: ${{ vars.QURL_PROD_NHP_SESSION_RELAY_URL }}
         run: |
           set -euo pipefail
+          [[ -n "$QURL_RELEASE_SESSION_RELAY_URL" ]] || {
+            echo "::error::qurl image smoke is missing the reviewed production session relay" >&2
+            exit 1
+          }
           image_name="${QURL_IMAGE%@*}"
           index_json="$(docker buildx imagetools inspect "$QURL_IMAGE" --raw)"
+          image_work=$(mktemp -d)
+          container_id=
+          cleanup_image_smoke() {
+            if [[ -n "$container_id" ]]; then
+              docker rm -f "$container_id" >/dev/null 2>&1 || true
+            fi
+            rm -rf "$image_work"
+          }
+          trap cleanup_image_smoke EXIT
           for platform in linux/amd64 linux/arm64; do
             os="${platform%/*}"
             architecture="${platform#*/}"
@@ -592,6 +645,15 @@ jobs:
                 end
               ' <<<"$index_json")"
             platform_candidate="${image_name}@${platform_digest}"
+            binary="$image_work/qurl-${os}-${architecture}"
+            container_id=$(docker create --platform "$platform" "$platform_candidate")
+            docker cp "$container_id:/usr/local/bin/qurl" "$binary"
+            docker rm "$container_id" >/dev/null
+            container_id=
+            if ! grep -aFq -- "$QURL_RELEASE_SESSION_RELAY_URL" "$binary"; then
+              echo "::error::qurl ${platform} image does not carry the exact reviewed production session relay" >&2
+              exit 1
+            fi
             got="$(docker run --rm --platform "$platform" "$platform_candidate" version | awk '{print $3}')"
             [ "$got" = "$CLI_TAG" ] || {
               echo "::error::${platform} image reports ${got}, want ${CLI_TAG}" >&2

@@ -123,9 +123,10 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"settings are built from.", missing)
 	}
 	return map[string]string{
-		"QURL_API_KEY":    key,
-		"QURL_ENDPOINT":   endpoint,
-		"QURL_DEPLOYMENT": journeyDeploymentFile(t, issuerKey, relayURL),
+		"QURL_API_KEY":                     key,
+		"QURL_ENDPOINT":                    endpoint,
+		"QURL_DEPLOYMENT":                  journeyDeploymentFile(t, issuerKey, relayURL),
+		"QURL_CONNECTOR_SESSION_RELAY_URL": relayURL,
 	}
 }
 

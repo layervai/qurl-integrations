@@ -27,6 +27,7 @@ import (
 	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
@@ -292,7 +293,7 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 		return Config, true
 	case errors.Is(err, state.ErrNoDefaultStateDir):
 		return Config, true
-	case errors.Is(err, hub.ErrConfig):
+	case errors.Is(err, hub.ErrConfig), errors.Is(err, sessionrelay.ErrConfig):
 		// The QURL_CONNECTOR_HUB_* trust triple (or a dark build missing its
 		// production pin) is configuration in the §16.5 sense even though it
 		// lives in the environment: the config files row is the closest

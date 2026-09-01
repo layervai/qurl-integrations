@@ -72,11 +72,11 @@ const (
 	// what happened, then the one next step.
 	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
 
-	// msgConnectorHubConfig renders hub.ErrConfig without exposing deployment
-	// topology or the hidden inputs used by custom builds.
-	msgConnectorHubConfig = "This qURL CLI is missing required built-in connection settings, so local sharing can't start."
+	// msgConnectorConnectionConfig renders native connection configuration
+	// errors without exposing deployment topology or custom-build inputs.
+	msgConnectorConnectionConfig = "This qURL CLI is missing required built-in connection settings, so local sharing can't start."
 
-	hintConnectorHubConfig = "Hint: install or reinstall an official qURL release. For a custom deployment, use the release supplied by your qURL administrator."
+	hintConnectorConnectionConfig = "Hint: install or reinstall an official qURL release. For a custom deployment, use the release supplied by your qURL administrator."
 
 	labelConnectorErrorCode = "Error code:"
 
@@ -270,8 +270,8 @@ func CustomerMessages() []string {
 		msgSavedTo,
 		msgAlreadyPublished,
 		msgPublishFoundExisting,
-		msgConnectorHubConfig,
-		hintConnectorHubConfig,
+		msgConnectorConnectionConfig,
+		hintConnectorConnectionConfig,
 		labelConnectorErrorCode,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,

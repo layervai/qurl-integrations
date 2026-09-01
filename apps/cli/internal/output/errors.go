@@ -14,6 +14,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionconfig"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
@@ -83,8 +84,8 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) { 
 		return renderConnectorResourcePosture(p, head, err, resourceHeadline, resourceHint), true
 	}
 	switch {
-	case errors.Is(err, hub.ErrConfig):
-		headline, hint, includeDetail = msgConnectorHubConfig, hintConnectorHubConfig, false
+	case errors.Is(err, hub.ErrConfig), errors.Is(err, sessionrelay.ErrConfig):
+		headline, hint, includeDetail = msgConnectorConnectionConfig, hintConnectorConnectionConfig, false
 	case errors.Is(err, sessionconfig.ErrConfig):
 		headline, hint = msgConnectorSessionConfig, hintConnectorSessionConfig
 	case errors.Is(err, qurl.ErrDeviceCredentialMissing),
