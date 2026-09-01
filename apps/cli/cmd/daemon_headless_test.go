@@ -158,8 +158,8 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 		if config.SessionOperations.OwnerID != "own_cli_fixture" {
 			t.Fatalf("native session authority = %#v", config.SessionOperations)
 		}
-		if len(config.SessionOptions) != 0 {
-			t.Fatalf("native session options = %d, want native UDP defaults", len(config.SessionOptions))
+		if len(config.UDPOptions) != 0 {
+			t.Fatalf("native UDP options = %d, want native UDP defaults", len(config.UDPOptions))
 		}
 		return nil, errors.Join(errors.New("native bootstrap rejected"), qurl.ErrAssignmentKeyRejected)
 	}
@@ -221,8 +221,8 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 		if cfg.SessionOperations.OwnerID != "own_cli_fixture" {
 			t.Fatalf("attempt %d native session authority = %#v", attempts.Load()+1, cfg.SessionOperations)
 		}
-		if len(cfg.SessionOptions) != 0 {
-			t.Fatalf("attempt %d session options = %d, want native UDP defaults", attempts.Load()+1, len(cfg.SessionOptions))
+		if len(cfg.UDPOptions) != 0 {
+			t.Fatalf("attempt %d native UDP options = %d, want native UDP defaults", attempts.Load()+1, len(cfg.UDPOptions))
 		}
 		if attempts.Add(1) < 3 {
 			return nil, errors.New("temporary native network failure")

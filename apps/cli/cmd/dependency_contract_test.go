@@ -3,9 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
@@ -32,6 +35,42 @@ func TestCLIUsesReleasedDirectDependencies(t *testing.T) {
 		if err := checkReleasedDirectRequirement(goModPath, raw, modulePath); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestCLIConnectorRuntimeHasNoSessionRelaySurface keeps go.mod authoritative
+// while making the UDP-only control-plane boundary executable. Any change to
+// the visible exported field names or their order must fail until this seam is
+// reviewed for a renamed or replacement session-relay surface.
+// TODO(upstream-contract): want mirrors qurl-connector NativeRuntimeConfig's
+// visible exported field names and order; update it only after that review.
+func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
+	t.Parallel()
+
+	runtimeConfig := reflect.TypeFor[connectorshare.NativeRuntimeConfig]()
+	want := []string{
+		"StateDir",
+		"AgentID",
+		"Hub",
+		"Hostname",
+		"Version",
+		"ClientBaseURL",
+		"EnrollmentCredential",
+		"EnrollmentCredentialProvider",
+		"RecoveryCredentialProvider",
+		"RefreshMode",
+		"UDPOptions",
+		"SessionOperations",
+	}
+	fields := reflect.VisibleFields(runtimeConfig)
+	got := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field.IsExported() {
+			got = append(got, field.Name)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("qurl-connector NativeRuntimeConfig exported surface = %v, want %v; review any change for a forbidden session-relay path", got, want)
 	}
 }
 
