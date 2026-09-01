@@ -24,9 +24,9 @@ REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
 AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
 AUTH0_ISSUANCE_SKEW_SECONDS = 60
 # The journey token must cover its 35-minute lane plus a 10-minute cleanup
-# margin. The fallback job in .github/workflows/qurl-cli-customer-cleanup.yml
-# mints a fresh token; its timeout and the in-workflow cleanup timeout in
-# .github/workflows/cli.yml keep both cleanup paths on one bounded budget.
+# margin. Each fallback reconcile invocation mints a fresh token; the fallback
+# job timeout must fit inside this minimum remaining lifetime but need not equal
+# the in-workflow cleanup timeout.
 JOURNEY_LANE_TIMEOUT_SECONDS = 35 * 60
 JOURNEY_CLEANUP_MARGIN_SECONDS = 10 * 60
 MIN_M2M_TOKEN_REMAINING_SECONDS = (
@@ -305,6 +305,8 @@ def retry_assignment_retire(endpoint: str, jwt: str, agent_id: str) -> None:
         else:
             if status == 204:
                 return
+            # qurl-service reserves 500 for a durable invariant failure and
+            # 503 for a retryable store failure. Do not retry durable faults.
             if status not in {429, 502, 503, 504}:
                 raise CredentialError("qURL Connector assignment retirement was rejected")
             last_error = CredentialError(

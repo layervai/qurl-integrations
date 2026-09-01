@@ -370,12 +370,29 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 	t.Parallel()
 
 	workflows := []struct {
-		name     string
-		jobID    string
-		stepName string
+		name            string
+		jobID           string
+		stepName        string
+		sourceRuns      string
+		wantLanes       string
+		wantInvocations string
 	}{
-		{name: cliWorkflow, jobID: "journey-cleanup", stepName: "Revoke run resources and credentials"},
-		{name: "qurl-cli-customer-cleanup.yml", jobID: "cleanup", stepName: "Revoke exact-run resources and credentials"},
+		{
+			name:            cliWorkflow,
+			jobID:           "journey-cleanup",
+			stepName:        "Revoke run resources and credentials",
+			sourceRuns:      "700:2",
+			wantLanes:       "linux\nmacos\nwindows\n",
+			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n",
+		},
+		{
+			name:            "qurl-cli-customer-cleanup.yml",
+			jobID:           "cleanup",
+			stepName:        "Revoke exact-run resources and credentials",
+			sourceRuns:      "700:2,701:3",
+			wantLanes:       "linux\nmacos\nwindows\nlinux\nmacos\nwindows\n",
+			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n7011:3:linux\n7012:3:macos\n7013:3:windows\n",
+		},
 	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -384,15 +401,19 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 	const fakePython = `#!/usr/bin/env bash
 set -euo pipefail
 lane=
+run_id=
+run_attempt=
 while (( $# > 0 )); do
-  if [[ "$1" == --lane && $# -ge 2 ]]; then
-    lane=$2
-    break
-  fi
-  shift
+  case "$1" in
+    --lane) lane=$2; shift 2 ;;
+    --run-id) run_id=$2; shift 2 ;;
+    --run-attempt) run_attempt=$2; shift 2 ;;
+    *) shift ;;
+  esac
 done
-[[ -n "$lane" ]]
+[[ -n "$lane" && -n "$run_id" && -n "$run_attempt" ]]
 printf '%s\n' "$lane" >>"$LANE_CAPTURE"
+printf '%s:%s:%s\n' "$run_id" "$run_attempt" "$lane" >>"$INVOCATION_CAPTURE"
 if [[ -n "${FAIL_LANE:-}" && "$lane" == "$FAIL_LANE" ]]; then
   exit 17
 fi
@@ -435,12 +456,14 @@ fi
 					}
 					runnerTemp := t.TempDir()
 					capture := filepath.Join(runnerTemp, "lanes")
+					invocationCapture := filepath.Join(runnerTemp, "invocations")
 					command := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", cleanup.Run) //nolint:gosec // Executes the checked-in workflow step with a test-owned python3.
 					command.Dir = repoRoot
 					command.Env = []string{
 						"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
 						"RUNNER_TEMP=" + runnerTemp,
 						"LANE_CAPTURE=" + capture,
+						"INVOCATION_CAPTURE=" + invocationCapture,
 						"FAIL_LANE=" + test.failLane,
 						"AUTH_CLIENT_ID=test-client",
 						"AUTH_CLIENT_SECRET=secret-value-must-not-print",
@@ -450,7 +473,7 @@ fi
 						"GITHUB_RUN_ATTEMPT=2",
 						"SOURCE_RUN_ID=700",
 						"SOURCE_RUN_ATTEMPT=2",
-						"SOURCE_RUNS=700:2",
+						"SOURCE_RUNS=" + subject.sourceRuns,
 					}
 					output, err := command.CombinedOutput()
 					if gotFail := err != nil; gotFail != test.wantFail {
@@ -460,8 +483,15 @@ fi
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if got, want := string(lanes), "linux\nmacos\nwindows\n"; got != want {
+					if got, want := string(lanes), subject.wantLanes; got != want {
 						t.Errorf("attempted lanes = %q, want %q", got, want)
+					}
+					invocations, readErr := os.ReadFile(invocationCapture) //nolint:gosec // Test-owned path under t.TempDir.
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if got, want := string(invocations), subject.wantInvocations; got != want {
+						t.Errorf("cleanup invocations = %q, want %q", got, want)
 					}
 					text := string(output)
 					if strings.Contains(text, "secret-value-must-not-print") {
@@ -560,16 +590,21 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 set -euo pipefail
 printf '%s\n' "$*" >>"$GH_CAPTURE"
 if [[ "$*" == *"/attempts/$EXPECTED_ATTEMPT/jobs?per_page=100" ]]; then
-  jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
-    '{total_count:1,jobs:[{name:$name,conclusion:$conclusion}]}'
+  if [[ "$MOCK_JOB_CONCLUSION" == __NULL__ ]]; then
+    jq -n --arg name "$MOCK_JOB_NAME" '{total_count:1,jobs:[{name:$name,conclusion:null}]}'
+  else
+    jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
+      '{total_count:1,jobs:[{name:$name,conclusion:$conclusion}]}'
+  fi
 else
   jq -n \
+    --arg status "$MOCK_RUN_STATUS" \
     --arg event "$MOCK_RUN_EVENT" \
     --arg branch "$MOCK_RUN_BRANCH" \
     --arg repository "$MOCK_RUN_REPOSITORY" \
     --arg name "$MOCK_RUN_NAME" \
     --arg path "$MOCK_RUN_PATH" \
-    '{event:$event,head_branch:$branch,head_repository:{full_name:$repository},name:$name,path:$path}'
+    '{status:$status,event:$event,head_branch:$branch,head_repository:{full_name:$repository},name:$name,path:$path}'
 fi
 `
 	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(mockGH), 0o700); err != nil { //nolint:gosec // Test-owned executable in t.TempDir.
@@ -600,6 +635,7 @@ fi
 			"WORKFLOW_REPOSITORY":   "layervai/qurl-integrations",
 			"MOCK_JOB_NAME":         "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle)",
 			"MOCK_JOB_CONCLUSION":   "success",
+			"MOCK_RUN_STATUS":       "completed",
 			"MOCK_RUN_EVENT":        "push",
 			"MOCK_RUN_BRANCH":       "main",
 			"MOCK_RUN_REPOSITORY":   "layervai/qurl-integrations",
@@ -638,6 +674,10 @@ fi
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "skipped"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
 		t.Fatalf("automatic skipped journey did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "__NULL__"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+		t.Fatalf("automatic unsettled journey did not bias toward cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	_, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "0"})
 	if err == nil || !strings.Contains(output, "source run attempt is not a positive integer") {
@@ -704,6 +744,11 @@ fi
 			wantMessage: "source runs are malformed",
 		},
 		{
+			name:        "run id leaves no lane suffix room",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "12345678901234567890:1"},
+			wantMessage: "source runs are malformed",
+		},
+		{
 			name:        "duplicate input",
 			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "700:2,700:2"},
 			wantMessage: "contain a duplicate",
@@ -721,6 +766,11 @@ fi
 		{
 			name:        "wrong run event",
 			overrides:   map[string]string{"MOCK_RUN_EVENT": "workflow_dispatch"},
+			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "unfinished run",
+			overrides:   map[string]string{"MOCK_RUN_STATUS": "in_progress"},
 			wantMessage: "exact same-repository main CLI workflow",
 		},
 		{

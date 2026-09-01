@@ -60,7 +60,7 @@ jobs:
                 echo "::error::cleanup accepts only the exact same-repository main CLI workflow" >&2
                 exit 1
               }
-              [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
+              [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || {
                 echo "::error::cleanup source run id is not a positive integer" >&2
                 exit 1
               }
@@ -79,7 +79,7 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$source_runs" =~ ^[1-9][0-9]{0,19}:[1-9][0-9]{0,9}(,[1-9][0-9]{0,19}:[1-9][0-9]{0,9}){0,2}$ ]] || {
+          [[ "$source_runs" =~ ^[1-9][0-9]{0,18}:[1-9][0-9]{0,9}(,[1-9][0-9]{0,18}:[1-9][0-9]{0,9}){0,2}$ ]] || {
             echo "::error::cleanup source runs are malformed or exceed the 3-run limit" >&2
             exit 1
           }
@@ -95,7 +95,7 @@ jobs:
             if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
               jq -e --arg repository "$GITHUB_REPOSITORY" '
-                .event == "push" and .head_branch == "main" and
+                .status == "completed" and .event == "push" and .head_branch == "main" and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml"
@@ -105,10 +105,12 @@ jobs:
               }
             fi
             jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")
+            # A completed workflow event can briefly precede its final job
+            # conclusion. Only explicit skipped suppresses idempotent cleanup.
             required=$(jq -r '
               if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
                 (.jobs | type) != "array" or (.jobs | length) != .total_count or
-                any(.jobs[]; (.name | type) != "string" or (.conclusion | type) != "string")
+                any(.jobs[]; (.name | type) != "string")
               then error("source jobs are malformed or truncated")
               else any(.jobs[];
                 (.name == "cli / customer journey" or
@@ -145,6 +147,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Manual recovery runs trusted current-main code. The deterministic
+          # run, agent, and resource ID formulas are therefore a recovery
+          # contract for prior journeys and need a migration if they change.
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
