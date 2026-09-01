@@ -1382,10 +1382,29 @@ jobs:
             echo "No exact CLI release belongs to this source SHA."
             exit 0
           fi
-          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$cli_tag")
-          [[ $(jq -er '.draft | select(type == "boolean")' <<<"$release") == true ]] || {
+          # The REST release-by-tag route returns 404 for a draft. `gh release
+          # view` is draft-aware; bind its tag, target, and state before this
+          # exact tested source can dispatch publication.
+          release=$(gh release view "$cli_tag" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft)
+          release_tag=$(jq -er '.tagName | select(type == "string")' <<<"$release")
+          release_target=$(jq -er '.targetCommitish | select(type == "string")' <<<"$release")
+          jq -e '(.isDraft | type) == "boolean"' <<<"$release" >/dev/null || {
+            echo "::error::CLI release metadata has no exact draft state" >&2
+            exit 1
+          }
+          release_draft=$(jq -r '.isDraft' <<<"$release")
+          [[ "$release_tag" == "$cli_tag" ]] || {
+            printf '::error::CLI release tag mismatch: observed %q; expected %q\n' "$release_tag" "$cli_tag" >&2
+            exit 1
+          }
+          [[ "$release_draft" == true ]] || {
             echo "The exact CLI release is already public."
             exit 0
+          }
+          [[ "$release_target" == "$GITHUB_SHA" ]] || {
+            printf '::error::Draft CLI release target mismatch: observed %q; expected exact tested tag commit %q\n' "$release_target" "$GITHUB_SHA" >&2
+            exit 1
           }
           gh workflow run release-please.yml --repo "$GITHUB_REPOSITORY" --ref main \
             --field "cli_tag=$cli_tag" --field "source_sha=$GITHUB_SHA"

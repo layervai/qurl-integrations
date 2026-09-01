@@ -107,67 +107,227 @@ tag="v${version}"
 
 found=''
 missing=''
-lookup_error=''
+release_found=''
+release_lookup_error=''
+tag_verified=''
+tag_lookup_error=''
+metadata_valid=''
+metadata_error=''
 attempt=1
+lookup_tmp="$(mktemp -d)"
+trap 'rm -rf "$lookup_tmp"' EXIT
+release_stderr="$lookup_tmp/release.stderr"
+tag_stderr="$lookup_tmp/tag.stderr"
+metadata_stderr="$lookup_tmp/metadata.stderr"
 
 while [ "$attempt" -le "$attempts" ]; do
-    lookup_status=0
-    lookup_error="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --silent 2>&1)" ||
-        lookup_status=$?
-
-    if [ "$lookup_status" -eq 0 ]; then
-        found=yes
+    : >"$release_stderr"
+    if release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+        --json tagName,targetCommitish,isDraft 2>"$release_stderr")"; then
+        release_found=yes
         break
     fi
+    release_lookup_error="$(cat "$release_stderr")"
 
-    # gh renders an HTTP failure as "gh: <message> (HTTP <code>)". A 404 is an
-    # answer rather than an error — the release genuinely is not there, and
-    # retrying cannot change that.
-    case "$lookup_error" in
-    *'HTTP 404'*)
+    # `gh release view` is draft-aware. It reports a missing release as
+    # "release not found"; keep the HTTP form for older gh versions. Only
+    # this lookup may classify a release as dropped. A later failure to
+    # resolve the tag must report that the release exists but is unverifiable.
+    case "$release_lookup_error" in
+    *'release not found'*|*'HTTP 404'*)
         missing=yes
         break
         ;;
     esac
 
     printf 'Release lookup for %s failed (attempt %s of %s): %s\n' \
-        "$tag" "$attempt" "$attempts" "$lookup_error" >&2
+        "$tag" "$attempt" "$attempts" "$release_lookup_error" >&2
     if [ "$attempt" -lt "$attempts" ]; then
         sleep "$delay"
     fi
     attempt=$((attempt + 1))
 done
 
+if [ -n "$release_found" ]; then
+    attempt=1
+    while [ "$attempt" -le "$attempts" ]; do
+        : >"$tag_stderr"
+        if tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" \
+            --jq .sha 2>"$tag_stderr")"; then
+            case "$tag_commit" in
+            ''|*[!0-9a-f]*)
+                tag_lookup_error="tag lookup returned invalid commit ${tag_commit}; expected one 40-character lowercase hexadecimal commit"
+                break
+                ;;
+            esac
+            if [ "${#tag_commit}" -ne 40 ]; then
+                tag_lookup_error="tag lookup returned invalid commit ${tag_commit}; expected one 40-character lowercase hexadecimal commit"
+                break
+            fi
+            tag_verified=yes
+            break
+        fi
+        tag_lookup_error="$(cat "$tag_stderr")"
+        case "$tag_lookup_error" in
+        *'HTTP 404'*)
+            break
+            ;;
+        esac
+        printf 'Tag-commit lookup for %s failed (attempt %s of %s): %s\n' \
+            "$tag" "$attempt" "$attempts" "$tag_lookup_error" >&2
+        if [ "$attempt" -lt "$attempts" ]; then
+            sleep "$delay"
+        fi
+        attempt=$((attempt + 1))
+    done
+fi
+
+if [ -n "$tag_verified" ]; then
+    : >"$metadata_stderr"
+    if RELEASE_JSON="$release_json" python3 - "$tag" "$tag_commit" 2>"$metadata_stderr" <<'PY'
+import json
+import os
+import re
+import sys
+
+expected_tag, expected_target = sys.argv[1:]
+try:
+    release = json.loads(os.environ["RELEASE_JSON"])
+except (KeyError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"release metadata is not valid JSON: {exc}") from exc
+
+observed_tag = release.get("tagName")
+if observed_tag != expected_tag:
+    raise SystemExit(
+        f"release tag mismatch: observed {observed_tag!r}; expected {expected_tag!r}"
+    )
+is_draft = release.get("isDraft")
+if type(is_draft) is not bool:
+    raise SystemExit(
+        f"release draft state has type {type(is_draft).__name__}; expected boolean true or false"
+    )
+if is_draft:
+    target = release.get("targetCommitish")
+    if not isinstance(target, str) or not re.fullmatch(r"[0-9a-f]{40}", target):
+        raise SystemExit(
+            f"draft release target mismatch: observed {target!r}; "
+            f"expected exact tag commit {expected_target!r}"
+        )
+    if target != expected_target:
+        raise SystemExit(
+            f"draft release target mismatch: observed {target!r}; "
+            f"expected tag commit {expected_target!r}"
+        )
+PY
+    then
+        metadata_valid=yes
+    else
+        metadata_error="$(cat "$metadata_stderr")"
+        if [ -z "$metadata_error" ]; then
+            metadata_error='release metadata validation failed without a diagnostic'
+        fi
+    fi
+fi
+
+if [ -n "$metadata_valid" ]; then
+    found=yes
+fi
+
 if [ -n "$found" ]; then
     printf '%s %s exists as %s; nothing was dropped.\n' "$CLI_PACKAGE" "$version" "$tag"
     exit 0
 fi
 
-if [ -z "$missing" ]; then
-    printf '::error::Could not verify the %s release: looking up %s failed %s time(s), most recently with "%s". This is a lookup failure, not a dropped release — re-run this job to find out which.\n' \
-        "$CLI_PACKAGE" "$tag" "$attempts" "$lookup_error"
+if [ -n "$metadata_error" ]; then
+    printf '::error::Could not verify the %s release: %s. This is invalid release metadata, not a dropped release.\n' \
+        "$CLI_PACKAGE" "$metadata_error"
     exit 1
 fi
 
-sha="${GITHUB_SHA:-HEAD}"
+if [ -n "$release_found" ] && [ -z "$tag_verified" ]; then
+    printf '::error::Could not verify the %s release: GitHub Release %s exists, but tag %s cannot be verified: "%s". This is a tag verification failure, not a dropped release.\n' \
+        "$CLI_PACKAGE" "$tag" "$tag" "$tag_lookup_error"
+    exit 1
+fi
+
+if [ -z "$missing" ]; then
+    printf '::error::Could not verify the %s release: looking up %s failed %s time(s), most recently with "%s". This is a lookup failure, not a dropped release — re-run this job to find out which.\n' \
+        "$CLI_PACKAGE" "$tag" "$attempts" "$release_lookup_error"
+    exit 1
+fi
+
+source_sha="${CLI_RELEASE_SOURCE_SHA:-}"
+source_error=''
+
+# A later push still observes the missing release, but its GITHUB_SHA is not
+# the commit the missing tag belongs to. Never turn that moving value into a
+# recovery command. Recovery requires the original source commit as explicit
+# operator input, then verifies that exact commit against the checked-out
+# repository and current main before printing any command that creates a tag.
+if [ -z "$source_sha" ]; then
+    source_error='CLI_RELEASE_SOURCE_SHA is unset; set it to the original 40-character source commit and rerun this verifier'
+else
+    case "$source_sha" in
+    *[!0-9a-f]*)
+        source_error="CLI_RELEASE_SOURCE_SHA must be one 40-character lowercase hexadecimal commit, got ${source_sha}"
+        ;;
+    esac
+    if [ -z "$source_error" ] && [ "${#source_sha}" -ne 40 ]; then
+        source_error="CLI_RELEASE_SOURCE_SHA must be one 40-character lowercase hexadecimal commit, got ${source_sha}"
+    fi
+fi
+
+if [ -z "$source_error" ]; then
+    resolved_source="$(git rev-parse --verify "${source_sha}^{commit}" 2>/dev/null || true)"
+    if [ "$resolved_source" != "$source_sha" ]; then
+        source_error="CLI_RELEASE_SOURCE_SHA ${source_sha} does not resolve to that exact commit in this checkout"
+    elif ! git rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1; then
+        source_error='origin/main does not resolve to a commit; fetch current main before generating recovery commands'
+    elif ! git merge-base --is-ancestor "$source_sha" origin/main; then
+        source_error="CLI_RELEASE_SOURCE_SHA ${source_sha} is not an ancestor of origin/main"
+    fi
+fi
+
+if [ -n "$source_error" ]; then
+    printf '::error::release-please dropped the %s release: %s names %s but GitHub Release %s does not exist, and the run still reported success. No recovery command was generated: %s.\n' \
+        "$CLI_PACKAGE" "$MANIFEST" "$version" "$tag" "$source_error"
+
+    recovery_source_required() {
+        echo "## CLI release ${tag} was dropped"
+        echo ""
+        echo "\`${MANIFEST}\` names \`${CLI_PACKAGE}\` ${version}, but no GitHub Release \`${tag}\` exists. release-please skipped the release and the run still reported success."
+        echo ""
+        echo "No recovery command was generated because the original release source was not verified: ${source_error}."
+        echo ""
+        echo "Set \`CLI_RELEASE_SOURCE_SHA\` to the original 40-character source commit, fetch current \`origin/main\`, and rerun \`${0}\`. The verifier will require that exact commit to exist and be an ancestor of \`origin/main\` before it prints tag or release commands."
+    }
+
+    recovery_source_required
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        recovery_source_required >>"$GITHUB_STEP_SUMMARY"
+    fi
+    exit 1
+fi
 
 # One line, because a workflow command cannot span lines. The readable version
 # follows, in the log and in the job summary.
-printf '::error::release-please dropped the %s release: %s names %s at %s but GitHub Release %s does not exist, and the run still reported success. Recover by (1) creating release %s at %s with notes from the "## [%s]" section of %s, (2) re-running this workflow via workflow_dispatch with cli_tag=%s to attach the GoReleaser assets, and (3) relabelling the merged release PR "autorelease: pending" -> "autorelease: tagged" — until that label moves, every later release-please run aborts with "There are untagged, merged release PRs outstanding" and no component can cut a release.\n' \
-    "$CLI_PACKAGE" "$MANIFEST" "$version" "$sha" "$tag" \
-    "$tag" "$sha" "$version" "$CHANGELOG" "$tag"
+printf '::error::release-please dropped the %s release: %s names %s at %s but GitHub Release %s does not exist, and the run still reported success. Recover by (1) creating exact tag %s at expected commit %s, (2) pushing refs/tags/%s, (3) creating draft release %s with --verify-tag, --target %s, and notes from the "## [%s]" section of %s, (4) re-running this workflow via workflow_dispatch with cli_tag=%s to attach the GoReleaser assets, and (5) relabelling the merged release PR "autorelease: pending" -> "autorelease: tagged" — until that label moves, every later release-please run aborts with "There are untagged, merged release PRs outstanding" and no component can cut a release.\n' \
+    "$CLI_PACKAGE" "$MANIFEST" "$version" "$source_sha" "$tag" \
+    "$tag" "$source_sha" "$tag" "$tag" "$source_sha" "$version" "$CHANGELOG" "$tag"
 
 recovery() {
     echo "## CLI release ${tag} was dropped"
     echo ""
-    echo "\`${MANIFEST}\` names \`${CLI_PACKAGE}\` ${version} at \`${sha}\` and \`${CHANGELOG}\` carries its entry, but no GitHub Release \`${tag}\` exists. release-please skipped the release and the run still reported success."
+    echo "\`${MANIFEST}\` names \`${CLI_PACKAGE}\` ${version} at the verified source \`${source_sha}\` and \`${CHANGELOG}\` carries its entry, but no GitHub Release \`${tag}\` exists. release-please skipped the release and the run still reported success."
     echo ""
     echo "Recovery, in order:"
     echo ""
-    echo "1. Create the release at this commit, with notes copied from the \`## [${version}]\` section of \`${CHANGELOG}\`:"
-    echo "   \`gh release create ${tag} --target ${sha} --title ${tag} --notes-file <notes>\`"
-    echo "2. Attach the GoReleaser assets: run this workflow via workflow_dispatch with \`cli_tag=${tag}\`. Until then \`scripts/install.sh\` 404s on ${tag} and the Homebrew tap is stale."
-    echo "3. Relabel the merged release PR \`autorelease: pending\` -> \`autorelease: tagged\`. Until that label moves, every later release-please run aborts with \"There are untagged, merged release PRs outstanding\" and no component can cut a release PR."
+    echo "1. Create the exact tag at the verified source commit: \`git tag ${tag} ${source_sha}\`"
+    echo "2. Push the exact tag: \`git push origin refs/tags/${tag}\`"
+    echo "3. Create the draft release from that verified tag, with notes copied from the \`## [${version}]\` section of \`${CHANGELOG}\`:"
+    echo "   \`gh release create ${tag} --verify-tag --target ${source_sha} --title ${tag} --notes-file <notes> --draft\`"
+    echo "4. Attach the GoReleaser assets: run this workflow via workflow_dispatch with \`cli_tag=${tag}\`. Until then \`scripts/install.sh\` 404s on ${tag} and the Homebrew tap is stale."
+    echo "5. Relabel the merged release PR \`autorelease: pending\` -> \`autorelease: tagged\`. Until that label moves, every later release-please run aborts with \"There are untagged, merged release PRs outstanding\" and no component can cut a release PR."
     echo ""
     echo "Cause: a \`component\` declared for \`${CLI_PACKAGE}\` in release-please-config.json makes release-please refuse to build its release whenever the CLI is alone in the manifest release PR. \`scripts/check-release-please-sync.sh\` pins that it declares none."
 }
