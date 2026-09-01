@@ -28,9 +28,10 @@ const (
 )
 
 var (
-	errSandboxGrantedRouteUnexpectedSuccess = errors.New("granted route returned an unexpected successful response")
-	errSandboxGrantedRouteAuthorization     = errors.New("granted route authorization failed")
-	errSandboxGrantedRouteTransport         = errors.New("granted route transport failed")
+	errSandboxGrantedRouteUnexpectedSuccess    = errors.New("granted route returned an unexpected successful response")
+	errSandboxGrantedRouteMissingAuthorization = errors.New("granted route omitted application authorization")
+	errSandboxGrantedRouteAuthorization        = errors.New("granted route authorization failed")
+	errSandboxGrantedRouteTransport            = errors.New("granted route transport failed")
 )
 
 type sandboxGrantedRouteProbeState uint8
@@ -144,6 +145,8 @@ func waitSandboxGrantedRouteReady(
 		switch {
 		case errors.Is(probeErr, errSandboxGrantedRouteUnexpectedSuccess):
 			lastCategory = "route returned non-matching successful bytes"
+		case errors.Is(probeErr, errSandboxGrantedRouteMissingAuthorization):
+			lastCategory = "access grant omitted application authorization"
 		case errors.Is(probeErr, context.DeadlineExceeded):
 			lastCategory = "probe timed out"
 		case probeErr != nil:
@@ -164,8 +167,13 @@ func waitSandboxGrantedRouteReady(
 }
 
 func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRouteProbeState, error) {
-	if r == nil || r.authorize == nil {
+	if r == nil {
 		return 0, errSandboxGrantedRouteAuthorization
+	}
+	// This probe validates a qv2 Connector grant, not Downloader's direct-URL
+	// mode. A missing authorizer means the protected route was not granted.
+	if r.authorize == nil {
+		return 0, errSandboxGrantedRouteMissingAuthorization
 	}
 	client := consume.NewHTTPClient()
 	if transport, ok := client.Transport.(*http.Transport); ok {
@@ -179,12 +187,16 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 	if err := r.authorize(req); err != nil {
 		return 0, errSandboxGrantedRouteAuthorization
 	}
+	grantedURL := req.URL
 	priorCheckRedirect := client.CheckRedirect
 	client.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
 		if priorCheckRedirect != nil {
 			if err := priorCheckRedirect(redirectReq, via); err != nil {
 				return err
 			}
+		}
+		if !consume.SameHTTPOrigin(grantedURL, redirectReq.URL) {
+			return nil
 		}
 		if err := r.authorize(redirectReq); err != nil {
 			return errSandboxGrantedRouteAuthorization
@@ -449,10 +461,15 @@ func TestSandboxGrantedRouteProbeAuthorizesEverySameOriginRequest(t *testing.T) 
 	}
 }
 
-func TestSandboxGrantedRouteProbeRefusesCrossOriginWithoutSendingBearer(t *testing.T) {
+func TestSandboxGrantedRouteProbeAllowsCrossOriginWithoutSendingBearer(t *testing.T) {
 	var destinationRequests atomic.Int32
-	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	var leaked atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		destinationRequests.Add(1)
+		if _, err := req.Cookie("qurl_vsession"); err == nil {
+			leaked.Store(true)
+		}
+		_, _ = w.Write([]byte("marker"))
 	}))
 	t.Cleanup(destination.Close)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -462,21 +479,28 @@ func TestSandboxGrantedRouteProbeRefusesCrossOriginWithoutSendingBearer(t *testi
 		http.Redirect(w, req, destination.URL, http.StatusFound)
 	}))
 	t.Cleanup(origin.Close)
-	originHost := strings.TrimPrefix(origin.URL, "http://")
-
+	var authorizations atomic.Int32
 	route := &sandboxGrantedRoute{
 		url: origin.URL, marker: "marker",
 		authorize: func(req *http.Request) error {
-			if req.URL.Host != originHost {
-				return errors.New("private cross-origin detail")
-			}
+			authorizations.Add(1)
 			addSandboxTestGrantCookie(req)
 			return nil
 		},
 	}
 	state, err := route.probe(t.Context())
-	if state != 0 || !errors.Is(err, errSandboxGrantedRouteAuthorization) || destinationRequests.Load() != 0 {
-		t.Fatalf("cross-origin probe = state %d, error %v, destination requests %d", state, err, destinationRequests.Load())
+	if state != sandboxGrantedRouteServed || err != nil || destinationRequests.Load() != 1 ||
+		authorizations.Load() != 1 || leaked.Load() {
+		t.Fatalf("cross-origin probe = state %d, error %v, destination requests %d, authorizations %d, leaked %t",
+			state, err, destinationRequests.Load(), authorizations.Load(), leaked.Load())
+	}
+}
+
+func TestSandboxGrantedRouteProbeRejectsMissingAuthorization(t *testing.T) {
+	route := &sandboxGrantedRoute{url: "https://download.example", marker: "marker"}
+	state, err := route.probe(t.Context())
+	if state != 0 || !errors.Is(err, errSandboxGrantedRouteMissingAuthorization) {
+		t.Fatalf("missing-authorization probe = state %d, error %v", state, err)
 	}
 }
 

@@ -36,6 +36,15 @@ func (d failingDownloadDoer) Do(*http.Request) (*http.Response, error) {
 	return nil, d.err
 }
 
+type recordingDownloadDoer struct {
+	called atomic.Bool
+}
+
+func (d *recordingDownloadDoer) Do(*http.Request) (*http.Response, error) {
+	d.called.Store(true)
+	return nil, errors.New("unexpected request")
+}
+
 func newDownloadHost(t *testing.T, payload []byte, statuses ...int) *downloadHost {
 	t.Helper()
 	h := &downloadHost{payload: payload, statuses: statuses}
@@ -288,11 +297,32 @@ func TestDownloadAuthorizationFailureDoesNotExposeTokenOrSendRequest(t *testing.
 	}
 }
 
-func TestDownloadRedirectDoesNotForwardGrantCookie(t *testing.T) {
+func TestDownloadGrantFailsClosedForCustomDoerWithoutRedirectPolicy(t *testing.T) {
+	client := &recordingDownloadDoer{}
+	d := &Downloader{
+		Client: client,
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			return DownloadTarget{URL: "https://download.example", Authorize: func(req *http.Request) error {
+				addTestGrantCookie(req)
+				return nil
+			}}, nil
+		},
+	}
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) || !strings.Contains(err.Error(), "cannot enforce grant redirect policy") {
+		t.Fatalf("custom-doer grant error = %v", err)
+	}
+	if client.called.Load() {
+		t.Fatal("custom Doer received a grant-bearing request without redirect containment")
+	}
+}
+
+func TestDownloadRedirectDoesNotForwardGrantCredentials(t *testing.T) {
 	var leaked atomic.Bool
 	var authorizations atomic.Int32
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := r.Cookie("qurl_vsession"); err == nil {
+		if _, err := r.Cookie(grantSessionCookie); err == nil ||
+			r.Header.Get("Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" {
 			leaked.Store(true)
 		}
 		_, _ = w.Write([]byte("redirected"))
@@ -310,6 +340,8 @@ func TestDownloadRedirectDoesNotForwardGrantCookie(t *testing.T) {
 		return DownloadTarget{URL: origin.URL, Authorize: func(req *http.Request) error {
 			authorizations.Add(1)
 			addTestGrantCookie(req)
+			req.Header.Set("Authorization", "Bearer opaque-test-token")
+			req.Header.Set("Proxy-Authorization", "Bearer opaque-test-token")
 			return nil
 		}}, nil
 	}}
@@ -377,6 +409,9 @@ func TestDownloadRedirectLoopIsBounded(t *testing.T) {
 	if !errors.Is(err, ErrLinkUnavailable) {
 		t.Fatalf("redirect-loop error = %v, want ErrLinkUnavailable", err)
 	}
+	if !strings.Contains(err.Error(), errDownloadRedirectLimit.Error()) {
+		t.Fatalf("redirect-loop error = %v, want bounded redirect detail", err)
+	}
 	if hits.Load() != maxDownloadRedirects || authorizations.Load() != maxDownloadRedirects {
 		t.Fatalf("redirect loop hits=%d authorizations=%d, want %d/%d",
 			hits.Load(), authorizations.Load(), maxDownloadRedirects, maxDownloadRedirects)
@@ -385,7 +420,7 @@ func TestDownloadRedirectLoopIsBounded(t *testing.T) {
 
 func addTestGrantCookie(req *http.Request) {
 	req.AddCookie(&http.Cookie{
-		Name: "qurl_vsession", Value: "opaque-test-token",
+		Name: grantSessionCookie, Value: "opaque-test-token",
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
 }
