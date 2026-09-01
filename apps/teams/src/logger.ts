@@ -39,24 +39,38 @@ function redactValue(value: unknown, protectedValues: readonly string[], seen: W
   if (typeof value === 'string') {
     return redactText(value, protectedValues);
   }
-  if (value instanceof Error) {
-    return { name: value.name, message: redactText(value.message, protectedValues) };
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactValue(item, protectedValues, seen));
-  }
   if (value !== null && typeof value === 'object') {
     if (seen.has(value)) {
       return '[Circular]';
     }
     seen.add(value);
-    const output: Record<string, unknown> = {};
-    for (const [key, nested] of Object.entries(value)) {
-      output[key] = isSensitiveKey(key)
-        ? REDACTED
-        : redactValue(nested, protectedValues, seen);
+    try {
+      if (value instanceof Error) {
+        return {
+          name: value.name,
+          message: redactText(value.message, protectedValues),
+          // A stack carries frames and paths, not values, and is still passed
+          // through the same redaction as the message. Dropping it leaves the
+          // generic operator-facing failures with nothing to triage from.
+          ...(typeof value.stack === 'string' ? { stack: redactText(value.stack, protectedValues) } : {}),
+          ...(value.cause === undefined ? {} : { cause: redactValue(value.cause, protectedValues, seen) }),
+        };
+      }
+      if (Array.isArray(value)) {
+        return value.map((item) => redactValue(item, protectedValues, seen));
+      }
+      const output: Record<string, unknown> = {};
+      for (const [key, nested] of Object.entries(value)) {
+        output[key] = isSensitiveKey(key)
+          ? REDACTED
+          : redactValue(nested, protectedValues, seen);
+      }
+      return output;
+    } finally {
+      // Track only the active traversal branch. A repeated Error or object is
+      // useful diagnostic context; only a true recursive reference is cyclic.
+      seen.delete(value);
     }
-    return output;
   }
   return value;
 }

@@ -137,6 +137,7 @@ describe('OAuthStateManager', () => {
     const manager = new OAuthStateManager({
       persistence: {
         conditionalCreate: async () => ({ status: 'created' }),
+        read: async () => structuredClone(stored!),
         conditionalConsume: async () => ({ status: 'consumed', state: structuredClone(stored!) }),
       },
       clock: fixedClock(TEST_NOW + OAUTH_STATE_TTL_SECONDS),
@@ -194,5 +195,17 @@ describe('OAuthStateManager', () => {
     await expect(second.mint(mintInput)).rejects.toSatisfy(
       (error: unknown) => expectCode(error, 'STATE_COLLISION'),
     );
+  });
+
+  it('reconstructs provider parameters without consuming the state', async () => {
+    const persistence = new InMemoryStatePersistence();
+    const manager = new OAuthStateManager({ persistence, clock: fixedClock(), randomBytes: deterministicRandom() });
+    const minted = await manager.mint(mintInput);
+
+    await expect(manager.authorizationRequest(minted.handle)).resolves.toMatchObject({
+      nonce: minted.transaction.oidcNonce,
+      loginHint: 'admin@example.com',
+    });
+    await expect(manager.consume(minted.handle)).resolves.toMatchObject({ setupEmail: 'admin@example.com' });
   });
 });

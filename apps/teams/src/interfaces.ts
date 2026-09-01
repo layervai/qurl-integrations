@@ -65,6 +65,8 @@ export type ConditionalConsumeResult =
  */
 export interface OAuthStatePersistence {
   conditionalCreate(state: StoredOAuthState): Promise<ConditionalCreateResult>;
+  /** Returns a state row without consuming it for the authorization redirect. */
+  read(stateKey: string): Promise<StoredOAuthState | undefined>;
   conditionalConsume(
     stateKey: string,
     nowEpochSeconds: number,
@@ -129,7 +131,8 @@ export interface ProviderBindingRequest {
 
 export type ProviderBindingConflictReason =
   | 'tenant_bound_to_another_account'
-  | 'actor_not_authorized';
+  | 'actor_not_authorized'
+  | 'upstream_binding_cleanup_required';
 
 export type ProviderBindingResult =
   | { readonly status: 'bound'; readonly bindingReference?: string }
