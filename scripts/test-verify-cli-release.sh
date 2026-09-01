@@ -193,7 +193,7 @@ expect_summary_order() {
   shift
   local previous=0 needle line
   for needle in "$@"; do
-    line="$(grep -nF -- "$needle" "$summary_out" | head -1 | cut -d: -f1)"
+    line="$(grep -nF -- "$needle" "$summary_out" | head -1 | cut -d: -f1 || true)"
     if [[ -z "$line" || "$line" -le "$previous" ]]; then
       printf '%s: expected summary item %q after line %s, got:\n%s\n' \
         "$name" "$needle" "$previous" "$(cat "$summary_out")" >&2
