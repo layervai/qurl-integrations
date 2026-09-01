@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -317,12 +319,38 @@ func TestDownloadGrantFailsClosedForCustomDoerWithoutRedirectPolicy(t *testing.T
 	}
 }
 
+func TestDownloadGrantFailsClosedForClientCookieJar(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	var authorizations atomic.Int32
+	d := &Downloader{
+		Client: &http.Client{Jar: jar},
+		MintTarget: func(context.Context) (DownloadTarget, error) {
+			return DownloadTarget{URL: "https://download.example", Authorize: func(req *http.Request) error {
+				authorizations.Add(1)
+				addTestGrantCookie(req)
+				return nil
+			}}, nil
+		},
+	}
+	_, err = d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) || !strings.Contains(err.Error(), "cookie jar") {
+		t.Fatalf("cookie-jar grant error = %v", err)
+	}
+	if authorizations.Load() != 0 {
+		t.Fatal("grant authorizer ran before cookie-jar containment failed")
+	}
+}
+
 func TestDownloadRedirectDoesNotForwardGrantCredentials(t *testing.T) {
 	var leaked atomic.Bool
 	var authorizations atomic.Int32
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := r.Cookie(grantSessionCookie); err == nil ||
-			r.Header.Get("Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" {
+			r.Header.Get("Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" ||
+			r.Header.Get("X-QURL-Session") != "" {
 			leaked.Store(true)
 		}
 		_, _ = w.Write([]byte("redirected"))
@@ -342,6 +370,7 @@ func TestDownloadRedirectDoesNotForwardGrantCredentials(t *testing.T) {
 			addTestGrantCookie(req)
 			req.Header.Set("Authorization", "Bearer opaque-test-token")
 			req.Header.Set("Proxy-Authorization", "Bearer opaque-test-token")
+			req.Header.Set("X-QURL-Session", "opaque-test-token")
 			return nil
 		}}, nil
 	}}
@@ -351,6 +380,62 @@ func TestDownloadRedirectDoesNotForwardGrantCredentials(t *testing.T) {
 	}
 	if leaked.Load() || out.String() != "redirected" || authorizations.Load() != 1 {
 		t.Fatalf("redirect leak=%t payload=%q authorizations=%d", leaked.Load(), out.String(), authorizations.Load())
+	}
+}
+
+func TestSameHTTPOriginIsExact(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		left  string
+		right string
+		want  bool
+	}{
+		"same normalized origin": {"https://EXAMPLE.com/content", "https://example.com:443/next", true},
+		"subdomain":              {"https://example.com/content", "https://cdn.example.com/next", false},
+		"different scheme":       {"https://example.com/content", "http://example.com/next", false},
+		"different port":         {"https://example.com/content", "https://example.com:444/next", false},
+		"user info":              {"https://example.com/content", "https://user@example.com/next", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			left, leftErr := url.Parse(tc.left)
+			right, rightErr := url.Parse(tc.right)
+			if leftErr != nil || rightErr != nil {
+				t.Fatalf("parse test origins: left=%v right=%v", leftErr, rightErr)
+			}
+			if got := SameHTTPOrigin(left, right); got != tc.want {
+				t.Fatalf("SameHTTPOrigin(%q, %q) = %t, want %t", tc.left, tc.right, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDownloadSameOriginRedirectAuthorizationFailureIsRedactedAndClassified(t *testing.T) {
+	const secret = "redirect-secret-must-not-appear"
+	var hits atomic.Int32
+	var authorizations atomic.Int32
+	var origin *httptest.Server
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, origin.URL+"/content", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: origin.URL, Authorize: func(req *http.Request) error {
+			if authorizations.Add(1) > 1 {
+				return errors.New(secret)
+			}
+			addTestGrantCookie(req)
+			return nil
+		}}, nil
+	}}
+	_, err := d.StreamTo(context.Background(), io.Discard)
+	if !errors.Is(err, ErrLinkFetch) || errors.Is(err, ErrLinkUnavailable) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("redirect authorization error = %v", err)
+	}
+	if hits.Load() != 1 || authorizations.Load() != 2 {
+		t.Fatalf("hits=%d authorizations=%d, want 1/2", hits.Load(), authorizations.Load())
 	}
 }
 

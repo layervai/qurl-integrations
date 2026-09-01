@@ -227,12 +227,16 @@ func TestGrantedContentURL(t *testing.T) {
 		raw string
 		ok  bool
 	}{
-		"https":        {"https://origin.qurl.link/content", true},
-		"http":         {"http://127.0.0.1:8080/content", true},
-		"file scheme":  {"file:///etc/passwd", false},
-		"no scheme":    {"origin.qurl.link/content", false},
-		"unparseable":  {"\x00https://origin/content", false},
-		"empty string": {"", false},
+		"https":           {"https://origin.qurl.link/content", true},
+		"uppercase https": {"HTTPS://origin.qurl.link/content", true},
+		"http":            {"http://127.0.0.1:8080/content", false},
+		"missing host":    {"https:///content", false},
+		"user info":       {"https://user@origin.qurl.link/content", false},
+		"bad port":        {"https://origin.qurl.link:bad/content", false},
+		"file scheme":     {"file:///etc/passwd", false},
+		"no scheme":       {"origin.qurl.link/content", false},
+		"unparseable":     {"\x00https://origin/content", false},
+		"empty string":    {"", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

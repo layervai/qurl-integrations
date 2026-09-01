@@ -148,12 +148,14 @@ func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
 	}, nil
 }
 
-// grantedContentURL admits only web URLs as download targets: the granted
-// URL is about to be fetched, and anything else is the service answering
-// outside its contract.
+// grantedContentURL admits only HTTPS URLs as download targets: the opaque
+// application credential is about to be attached, and qurl-go binds it to an
+// exact HTTPS origin. Anything else is the service answering outside its
+// contract.
 func grantedContentURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != webSchemeHTTPS && u.Scheme != webSchemeHTTP) {
+	scheme, _, _, validOrigin := normalizedHTTPOrigin(u)
+	if err != nil || !validOrigin || scheme != webSchemeHTTPS {
 		return "", fmt.Errorf("%w — it can't be downloaded", ErrUnopenableLink)
 	}
 	return raw, nil

@@ -43,8 +43,9 @@ const (
 )
 
 var (
-	errGrantPropagationPending = errors.New("grant propagation remained pending")
-	errDownloadRedirectLimit   = fmt.Errorf("download stopped after %d redirects", maxDownloadRedirects)
+	errGrantPropagationPending       = errors.New("grant propagation remained pending")
+	errDownloadRedirectLimit         = fmt.Errorf("download stopped after %d redirects", maxDownloadRedirects)
+	errDownloadRedirectAuthorization = errors.New("download redirect authorization failed")
 )
 
 // DownloadTarget is a freshly verified URL and, for an acknowledged qURL
@@ -387,13 +388,6 @@ func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*htt
 		// authority, so keep the same fixed capability boundary as Do below.
 		return nil, fmt.Errorf("%w: invalid download link", ErrLinkFetch)
 	}
-	if target.Authorize != nil {
-		if err := target.Authorize(req); err != nil {
-			// The authorizer can hold an application bearer. Keep both its value and
-			// its underlying diagnostic out of customer output.
-			return nil, fmt.Errorf("%w: could not authorize the content request", ErrLinkFetch)
-		}
-	}
 	if d.Client == nil {
 		// Lazy-init once and keep it: the expiry retry must reach the same
 		// transport the drained first response's connection was returned to,
@@ -407,10 +401,26 @@ func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*htt
 		if !ok {
 			return nil, fmt.Errorf("%w: download client cannot enforce grant redirect policy", ErrLinkFetch)
 		}
+		// net/http applies a Jar after CheckRedirect. A grant-bearing request
+		// therefore cannot use one: a Jar could restore cookies after this code
+		// removed the SDK credential from a cross-origin redirect.
+		if httpClient.Jar != nil {
+			return nil, fmt.Errorf("%w: download client cannot enforce grant isolation with a cookie jar", ErrLinkFetch)
+		}
+		// Save the request headers before the opaque SDK authorizer runs. Redirects
+		// start from this unprivileged snapshot, so containment does not depend on
+		// the current credential name or header shape.
+		unprivilegedHeaders := req.Header.Clone()
+		if err := target.Authorize(req); err != nil {
+			// The authorizer can hold an application bearer. Keep both its value and
+			// its underlying diagnostic out of customer output.
+			return nil, fmt.Errorf("%w: could not authorize the content request", ErrLinkFetch)
+		}
 		// Keep the shared transport and connection pool, but make redirect
-		// authorization specific to this short-lived grant. Strip first, let the
-		// caller's redirect policy run without the bearer, then re-authorize only
-		// the same granted origin. Cross-origin storage redirects still work.
+		// authorization specific to this short-lived grant. Restore the headers
+		// from before authorization, let the caller's redirect policy run without
+		// that bearer, then re-authorize only the exact granted origin.
+		// Cross-origin storage redirects still work.
 		requestClient := *httpClient
 		priorCheckRedirect := requestClient.CheckRedirect
 		grantedURL := req.URL
@@ -418,15 +428,19 @@ func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*htt
 			if err := checkDownloadRedirectLimit(via); err != nil {
 				return err
 			}
-			stripGrantCredentials(redirectReq)
+			// #nosec G119 -- this is the header snapshot captured before the
+			// grant authorizer added any credential. The cross-origin leak test
+			// covers cookie, standard authorization, and unknown header shapes.
+			redirectReq.Header = unprivilegedHeaders.Clone()
 			if priorCheckRedirect != nil {
 				if err := priorCheckRedirect(redirectReq, via); err != nil {
 					return err
 				}
 			}
-			stripGrantCredentials(redirectReq)
 			if SameHTTPOrigin(grantedURL, redirectReq.URL) {
-				return target.Authorize(redirectReq)
+				if err := target.Authorize(redirectReq); err != nil {
+					return errDownloadRedirectAuthorization
+				}
 			}
 			return nil
 		}
@@ -441,6 +455,9 @@ func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*htt
 	}
 	if errors.Is(err, errDownloadRedirectLimit) {
 		return nil, fmt.Errorf("%w: %w", ErrLinkUnavailable, errDownloadRedirectLimit)
+	}
+	if errors.Is(err, errDownloadRedirectAuthorization) {
+		return nil, fmt.Errorf("%w: could not authorize the content request", ErrLinkFetch)
 	}
 	// net/http transport errors normally include req.URL. A granted content
 	// URL is short-lived authority, so never retain that error text or chain.
