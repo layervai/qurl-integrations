@@ -39,9 +39,11 @@ func TestCLIUsesReleasedDirectDependencies(t *testing.T) {
 }
 
 // TestCLIConnectorRuntimeHasNoSessionRelaySurface keeps go.mod authoritative
-// while making the UDP-only control-plane boundary executable. Any exported
-// runtime configuration change must fail here until this seam is reviewed for
-// a renamed or replacement session-relay surface.
+// while making the UDP-only control-plane boundary executable. Any change to
+// the visible exported field names or their order must fail until this seam is
+// reviewed for a renamed or replacement session-relay surface.
+// TODO(upstream-contract): want mirrors qurl-connector NativeRuntimeConfig's
+// visible exported field names and order; update it only after that review.
 func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
 	t.Parallel()
 
