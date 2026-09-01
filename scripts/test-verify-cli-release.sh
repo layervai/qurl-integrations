@@ -29,11 +29,24 @@ trap 'rm -rf "$tmp"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 
-# A git repo, because the verifier resolves its own root before reading the
-# manifest. Nothing here needs history.
+# A git repo with an original release source and a later main commit. Recovery
+# must use the explicit original source even when the verifier runs later.
 fixture="$tmp/repo"
 mkdir -p "$fixture"
 git -C "$fixture" init -q -b main
+git -C "$fixture" config user.name 'qURL release verifier test'
+git -C "$fixture" config user.email 'qurl-release-verifier@example.invalid'
+printf '%s\n' original >"$fixture/source-marker"
+git -C "$fixture" add source-marker
+git -C "$fixture" commit -qm 'test: original release source'
+source_sha="$(git -C "$fixture" rev-parse HEAD)"
+printf '%s\n' later >>"$fixture/source-marker"
+git -C "$fixture" add source-marker
+git -C "$fixture" commit -qm 'test: later main change'
+head_sha="$(git -C "$fixture" rev-parse HEAD)"
+git -C "$fixture" update-ref refs/remotes/origin/main "$head_sha"
+unrelated_tree="$(git -C "$fixture" mktree </dev/null)"
+unrelated_sha="$(printf '%s\n' 'test: unrelated commit' | git -C "$fixture" commit-tree "$unrelated_tree")"
 
 write_manifest() {
   cat >"$fixture/.release-please-manifest.json" <<JSON
@@ -91,7 +104,6 @@ esac
 STUB_EOF
 chmod +x "$bindir/gh"
 
-head_sha=37bfa43d0000000000000000000000000000beef
 case_no=0
 argv_out=""
 summary_out=""
@@ -164,6 +176,14 @@ expect_summary() {
   local name="$1" needle="$2"
   if [[ "$(cat "$summary_out")" != *"$needle"* ]]; then
     printf '%s: expected the job summary to contain %q, got:\n%s\n' "$name" "$needle" "$(cat "$summary_out")" >&2
+    exit 1
+  fi
+}
+
+refute_summary() {
+  local name="$1" needle="$2"
+  if [[ "$(cat "$summary_out")" == *"$needle"* ]]; then
+    printf '%s: expected the job summary NOT to contain %q, got:\n%s\n' "$name" "$needle" "$(cat "$summary_out")" >&2
     exit 1
   fi
 }
@@ -262,28 +282,59 @@ run_case tag-lookup-failure 1 \
 # One release lookup plus the three bounded tag-commit attempts.
 expect_gh_calls tag-lookup-failure 4
 
-# --- the release is absent: the drop, with the whole recovery attached
+run_case invalid-tag-output 1 \
+  'tag lookup returned invalid commit main; expected one 40-character lowercase hexadecimal commit' \
+  'release-please dropped the apps/cli release' \
+  GH_STUB_TAG_STDOUT=main
+expect_gh_calls invalid-tag-output 2
+
+# --- the release is absent: no tag command without an explicit, verified
+#     original source; a delayed recovery must not use the later current HEAD
 
 write_manifest 1.4.0
-run_case dropped 1 '::error::release-please dropped the apps/cli release' 'Could not verify' \
+run_case dropped-without-source 1 'No recovery command was generated: CLI_RELEASE_SOURCE_SHA is unset' 'git tag v1.4.0' \
   GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='release not found'
 # A 404 is an answer, not a transient failure: retrying it only delays the
 # report.
-expect_gh_calls dropped 1
-expect_summary dropped 'CLI release v1.4.0 was dropped'
-expect_summary dropped 'git tag v1.4.0 '"$head_sha"
-expect_summary dropped 'git push origin refs/tags/v1.4.0'
-expect_summary dropped 'gh release create v1.4.0 --verify-tag --title v1.4.0 --notes-file <notes> --draft'
-expect_summary_order dropped \
+expect_gh_calls dropped-without-source 1
+expect_summary dropped-without-source 'CLI release v1.4.0 was dropped'
+expect_summary dropped-without-source "Set \`CLI_RELEASE_SOURCE_SHA\` to the original 40-character source commit"
+refute_summary dropped-without-source 'git tag v1.4.0'
+
+run_case delayed-recovery 1 '::error::release-please dropped the apps/cli release' "$head_sha" \
+  CLI_RELEASE_SOURCE_SHA="$source_sha" \
+  GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='release not found'
+expect_gh_calls delayed-recovery 1
+expect_summary delayed-recovery 'CLI release v1.4.0 was dropped'
+expect_summary delayed-recovery 'git tag v1.4.0 '"$source_sha"
+refute_summary delayed-recovery 'git tag v1.4.0 '"$head_sha"
+expect_summary delayed-recovery 'git push origin refs/tags/v1.4.0'
+expect_summary delayed-recovery 'gh release create v1.4.0 --verify-tag --target '"$source_sha"' --title v1.4.0 --notes-file <notes> --draft'
+expect_summary_order delayed-recovery \
   '1. Create the exact tag' \
   '2. Push the exact tag' \
   '3. Create the draft release' \
   'gh release create v1.4.0 --verify-tag' \
   '4. Attach the GoReleaser assets' \
   '5. Relabel the merged release PR'
-expect_summary dropped 'cli_tag=v1.4.0'
-expect_summary dropped 'autorelease: pending`'
-expect_summary dropped 'untagged, merged release PRs outstanding'
+expect_summary delayed-recovery 'cli_tag=v1.4.0'
+expect_summary delayed-recovery 'autorelease: pending`'
+expect_summary delayed-recovery 'untagged, merged release PRs outstanding'
+
+run_case malformed-recovery-source 1 'CLI_RELEASE_SOURCE_SHA must be one 40-character lowercase hexadecimal commit' 'git tag v1.4.0' \
+  CLI_RELEASE_SOURCE_SHA=main \
+  GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='release not found'
+refute_summary malformed-recovery-source 'git tag v1.4.0'
+
+run_case missing-recovery-source 1 'does not resolve to that exact commit in this checkout' 'git tag v1.4.0' \
+  CLI_RELEASE_SOURCE_SHA=0000000000000000000000000000000000000000 \
+  GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='release not found'
+refute_summary missing-recovery-source 'git tag v1.4.0'
+
+run_case unrelated-recovery-source 1 'is not an ancestor of origin/main' 'git tag v1.4.0' \
+  CLI_RELEASE_SOURCE_SHA="$unrelated_sha" \
+  GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='release not found'
+refute_summary unrelated-recovery-source 'git tag v1.4.0'
 
 # --- the lookup itself failed: fail loudly, but do NOT call it a drop
 

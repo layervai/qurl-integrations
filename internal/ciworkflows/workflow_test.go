@@ -1207,6 +1207,10 @@ func TestReleasePleaseVerifiesTheCLIReleaseWasCreated(t *testing.T) {
 	if !strings.Contains(verifyStep.Run, cliReleaseVerifierScript) {
 		t.Errorf("%q runs %q, want it to invoke %s", cliReleaseVerifierStepName, strings.TrimSpace(verifyStep.Run), cliReleaseVerifierScript)
 	}
+	if strings.Contains(fmt.Sprint(verifyStep.Env), "CLI_RELEASE_SOURCE_SHA") {
+		t.Errorf("%q infers a dropped release source from workflow state; recovery must require the explicit original source SHA",
+			cliReleaseVerifierStepName)
+	}
 	// A conditional or continue-on-error guard reports green on the very run it
 	// exists to redden, which is the silent pass this whole change removes.
 	if condition := strings.TrimSpace(verifyStep.If); condition != "" {
@@ -1424,7 +1428,7 @@ func TestCLIReleaseDraftAwareStepsExecuteBothStates(t *testing.T) {
 		ghCalls      string
 		err          error
 	}
-	runStep := func(t *testing.T, script string, draft bool, target string) result {
+	runStep := func(t *testing.T, script string, draft bool, target string, metadataOverrides ...map[string]string) result {
 		t.Helper()
 
 		tempDir := t.TempDir()
@@ -1486,6 +1490,14 @@ exit 2
 			"STUB_SHA":           sourceSHA,
 			"STUB_TAG":           cliTag,
 			"STUB_TARGET":        target,
+		}
+		if len(metadataOverrides) > 1 {
+			t.Fatal("runStep accepts at most one metadata override map")
+		}
+		if len(metadataOverrides) == 1 {
+			for key, value := range metadataOverrides[0] {
+				overrides[key] = value
+			}
 		}
 		command := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", script) //nolint:gosec // Executes checked-in workflow shell with fixed test inputs.
 		command.Dir = filepath.Join("..", "..")
@@ -1564,6 +1576,26 @@ exit 2
 				if !strings.Contains(got.output, required) {
 					t.Errorf("draft-target failure = %q, want %q", got.output, required)
 				}
+			}
+		})
+		t.Run(subject.name+"_rejects_wrong_release_tag", func(t *testing.T) {
+			got := runStep(t, subject.script, true, sourceSHA, map[string]string{"STUB_TAG": "v9.9.9"})
+			if got.err == nil {
+				t.Fatal("workflow step accepted release metadata for a different tag")
+			}
+			for _, required := range []string{"::error::CLI release tag mismatch", "v9.9.9", cliTag} {
+				if !strings.Contains(got.output, required) {
+					t.Errorf("release-tag failure = %q, want %q", got.output, required)
+				}
+			}
+		})
+		t.Run(subject.name+"_rejects_nonboolean_draft_state", func(t *testing.T) {
+			got := runStep(t, subject.script, true, sourceSHA, map[string]string{"STUB_DRAFT": "null"})
+			if got.err == nil {
+				t.Fatal("workflow step accepted a nonboolean release draft state")
+			}
+			if !strings.Contains(got.output, "::error::CLI release metadata has no exact draft state") {
+				t.Errorf("release-state failure = %q, want exact draft-state error", got.output)
 			}
 		})
 	}

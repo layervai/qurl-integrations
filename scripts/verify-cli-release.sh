@@ -256,25 +256,76 @@ if [ -z "$missing" ]; then
     exit 1
 fi
 
-sha="${GITHUB_SHA:-HEAD}"
+source_sha="${CLI_RELEASE_SOURCE_SHA:-}"
+source_error=''
+
+# A later push still observes the missing release, but its GITHUB_SHA is not
+# the commit the missing tag belongs to. Never turn that moving value into a
+# recovery command. Recovery requires the original source commit as explicit
+# operator input, then verifies that exact commit against the checked-out
+# repository and current main before printing any command that creates a tag.
+if [ -z "$source_sha" ]; then
+    source_error='CLI_RELEASE_SOURCE_SHA is unset; set it to the original 40-character source commit and rerun this verifier'
+else
+    case "$source_sha" in
+    *[!0-9a-f]*)
+        source_error="CLI_RELEASE_SOURCE_SHA must be one 40-character lowercase hexadecimal commit, got ${source_sha}"
+        ;;
+    esac
+    if [ -z "$source_error" ] && [ "${#source_sha}" -ne 40 ]; then
+        source_error="CLI_RELEASE_SOURCE_SHA must be one 40-character lowercase hexadecimal commit, got ${source_sha}"
+    fi
+fi
+
+if [ -z "$source_error" ]; then
+    resolved_source="$(git rev-parse --verify "${source_sha}^{commit}" 2>/dev/null || true)"
+    if [ "$resolved_source" != "$source_sha" ]; then
+        source_error="CLI_RELEASE_SOURCE_SHA ${source_sha} does not resolve to that exact commit in this checkout"
+    elif ! git rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1; then
+        source_error='origin/main does not resolve to a commit; fetch current main before generating recovery commands'
+    elif ! git merge-base --is-ancestor "$source_sha" origin/main; then
+        source_error="CLI_RELEASE_SOURCE_SHA ${source_sha} is not an ancestor of origin/main"
+    fi
+fi
+
+if [ -n "$source_error" ]; then
+    printf '::error::release-please dropped the %s release: %s names %s but GitHub Release %s does not exist, and the run still reported success. No recovery command was generated: %s.\n' \
+        "$CLI_PACKAGE" "$MANIFEST" "$version" "$tag" "$source_error"
+
+    recovery_source_required() {
+        echo "## CLI release ${tag} was dropped"
+        echo ""
+        echo "\`${MANIFEST}\` names \`${CLI_PACKAGE}\` ${version}, but no GitHub Release \`${tag}\` exists. release-please skipped the release and the run still reported success."
+        echo ""
+        echo "No recovery command was generated because the original release source was not verified: ${source_error}."
+        echo ""
+        echo "Set \`CLI_RELEASE_SOURCE_SHA\` to the original 40-character source commit, fetch current \`origin/main\`, and rerun \`${0}\`. The verifier will require that exact commit to exist and be an ancestor of \`origin/main\` before it prints tag or release commands."
+    }
+
+    recovery_source_required
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        recovery_source_required >>"$GITHUB_STEP_SUMMARY"
+    fi
+    exit 1
+fi
 
 # One line, because a workflow command cannot span lines. The readable version
 # follows, in the log and in the job summary.
-printf '::error::release-please dropped the %s release: %s names %s at %s but GitHub Release %s does not exist, and the run still reported success. Recover by (1) creating exact tag %s at expected commit %s, (2) pushing refs/tags/%s, (3) creating draft release %s with --verify-tag and notes from the "## [%s]" section of %s, (4) re-running this workflow via workflow_dispatch with cli_tag=%s to attach the GoReleaser assets, and (5) relabelling the merged release PR "autorelease: pending" -> "autorelease: tagged" — until that label moves, every later release-please run aborts with "There are untagged, merged release PRs outstanding" and no component can cut a release.\n' \
-    "$CLI_PACKAGE" "$MANIFEST" "$version" "$sha" "$tag" \
-    "$tag" "$sha" "$tag" "$tag" "$version" "$CHANGELOG" "$tag"
+printf '::error::release-please dropped the %s release: %s names %s at %s but GitHub Release %s does not exist, and the run still reported success. Recover by (1) creating exact tag %s at expected commit %s, (2) pushing refs/tags/%s, (3) creating draft release %s with --verify-tag, --target %s, and notes from the "## [%s]" section of %s, (4) re-running this workflow via workflow_dispatch with cli_tag=%s to attach the GoReleaser assets, and (5) relabelling the merged release PR "autorelease: pending" -> "autorelease: tagged" — until that label moves, every later release-please run aborts with "There are untagged, merged release PRs outstanding" and no component can cut a release.\n' \
+    "$CLI_PACKAGE" "$MANIFEST" "$version" "$source_sha" "$tag" \
+    "$tag" "$source_sha" "$tag" "$tag" "$source_sha" "$version" "$CHANGELOG" "$tag"
 
 recovery() {
     echo "## CLI release ${tag} was dropped"
     echo ""
-    echo "\`${MANIFEST}\` names \`${CLI_PACKAGE}\` ${version} at \`${sha}\` and \`${CHANGELOG}\` carries its entry, but no GitHub Release \`${tag}\` exists. release-please skipped the release and the run still reported success."
+    echo "\`${MANIFEST}\` names \`${CLI_PACKAGE}\` ${version} at the verified source \`${source_sha}\` and \`${CHANGELOG}\` carries its entry, but no GitHub Release \`${tag}\` exists. release-please skipped the release and the run still reported success."
     echo ""
     echo "Recovery, in order:"
     echo ""
-    echo "1. Create the exact tag at the expected commit: \`git tag ${tag} ${sha}\`"
+    echo "1. Create the exact tag at the verified source commit: \`git tag ${tag} ${source_sha}\`"
     echo "2. Push the exact tag: \`git push origin refs/tags/${tag}\`"
     echo "3. Create the draft release from that verified tag, with notes copied from the \`## [${version}]\` section of \`${CHANGELOG}\`:"
-    echo "   \`gh release create ${tag} --verify-tag --title ${tag} --notes-file <notes> --draft\`"
+    echo "   \`gh release create ${tag} --verify-tag --target ${source_sha} --title ${tag} --notes-file <notes> --draft\`"
     echo "4. Attach the GoReleaser assets: run this workflow via workflow_dispatch with \`cli_tag=${tag}\`. Until then \`scripts/install.sh\` 404s on ${tag} and the Homebrew tap is stale."
     echo "5. Relabel the merged release PR \`autorelease: pending\` -> \`autorelease: tagged\`. Until that label moves, every later release-please run aborts with \"There are untagged, merged release PRs outstanding\" and no component can cut a release PR."
     echo ""
