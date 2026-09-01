@@ -13,6 +13,7 @@ import (
 )
 
 type cliWorkflowContract struct {
+	Env  map[string]any            `yaml:"env"`
 	Jobs map[string]cliWorkflowJob `yaml:"jobs"`
 }
 
@@ -20,6 +21,7 @@ type cliWorkflowJob struct {
 	If              any               `yaml:"if"`
 	ContinueOnError any               `yaml:"continue-on-error"`
 	Env             map[string]any    `yaml:"env"`
+	Outputs         map[string]any    `yaml:"outputs"`
 	Steps           []cliWorkflowStep `yaml:"steps"`
 }
 
@@ -388,11 +390,22 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			if releaseGate != expectedReleaseGate {
 				t.Errorf("%s release-cli gate = %q, want %q", target.file, releaseGate, expectedReleaseGate)
 			}
-			if !hasRequiredMode || requiredMode != "1" {
-				t.Errorf("%s release Hub-pin gate is not required", target.file)
+			if hasRequiredMode {
+				t.Errorf("%s release Hub-pin step shadows the committed workflow mode with %v", target.file, requiredMode)
 			}
-			if strings.Count(step.Run, `if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`) != 1 {
-				t.Errorf("%s release Hub-pin gate does not reject SKIP", target.file)
+			if mode := fmt.Sprint(workflow.Env["QURL_REQUIRE_RELEASE_HUB_PIN"]); mode != "0" {
+				t.Errorf("%s release Hub-pin source mode = %q, want reviewed dark mode 0", target.file, mode)
+			}
+			for _, required := range []string{
+				`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+				`if [[ "$QURL_REQUIRE_RELEASE_HUB_PIN" != 0 || "$skipped" != "$test_name" || -n "$passed" ]]; then`,
+				`elif [[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+				`if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then`,
+				`printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"`,
+			} {
+				if strings.Count(step.Run, required) != 1 {
+					t.Errorf("%s release Hub-pin gate does not pin dark/configured behavior with %q", target.file, required)
+				}
 			}
 			pinSource, pinSourcePresent := step.Env["QURL_RELEASE_HUB_PUBLIC_KEY_B64"].(string)
 			if !pinSourcePresent || strings.TrimSpace(pinSource) == "" {
@@ -419,7 +432,7 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 			var releaseVerifierSteps []cliWorkflowStep
 			releaseVerifierStepIndex := -1
 			for index, candidate := range job.Steps {
-				if candidate.Name == "Verify the draft CLI carries the exact production Hub trust pin" {
+				if candidate.Name == "Verify the draft CLI trust posture" {
 					releaseVerifierSteps = append(releaseVerifierSteps, candidate)
 					releaseVerifierStepIndex = index
 				}
@@ -440,19 +453,55 @@ func TestReleaseHubPinWorkflowsRequireExactTestResult(t *testing.T) {
 				t.Errorf("%s released CLI Hub-pin verifier has no public-key source", target.file)
 			}
 			for _, required := range []string{
-				`if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" || -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then`,
+				`case "$QURL_RELEASE_HUB_PIN_MODE" in`,
+				`[[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]`,
+				`[[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]`,
 				`gh release download "$CLI_TAG"`,
 				`--pattern 'qurl_*_darwin_*.tar.gz'`,
 				`--pattern 'qurl_*_linux_*.tar.gz'`,
 				`--pattern 'qurl_*_windows_*.zip'`,
 				`if (( ${#archives[@]} != ${#expected[@]} ))`,
-				`grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
-				`Byte presence covers every release archive`,
+				`[[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]`,
+				`! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"`,
 				`version --verify-release-native-trust`,
 				`"$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256"`,
+				`if "$native_binary" version --verify-release-native-trust >"$trust_stdout" 2>"$trust_stderr"; then`,
+				`missing required built-in connection settings`,
 			} {
-				if strings.Count(releaseVerifier.Run, required) != 1 {
+				if !strings.Contains(releaseVerifier.Run, required) {
 					t.Errorf("%s draft CLI Hub-pin verifier does not bind exact artifact behavior %q", target.file, required)
+				}
+			}
+			var imageSmokeSteps []cliWorkflowStep
+			for _, candidate := range job.Steps {
+				if candidate.Name == "Smoke both qurl image platforms" {
+					imageSmokeSteps = append(imageSmokeSteps, candidate)
+				}
+			}
+			if len(imageSmokeSteps) != 1 {
+				t.Fatalf("%s has %d qurl image trust verifiers, want one", target.file, len(imageSmokeSteps))
+			}
+			imageSmoke := imageSmokeSteps[0]
+			if fmt.Sprint(imageSmoke.Env["QURL_RELEASE_HUB_PIN_MODE"]) != "${{ steps.release_hub_pin.outputs.mode }}" {
+				t.Errorf("%s image smoke does not consume the validated Hub-pin mode", target.file)
+			}
+			for _, required := range []string{
+				`for platform in linux/amd64 linux/arm64; do`,
+				`if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then`,
+				`version --verify-release-native-trust`,
+				`missing required built-in connection settings`,
+			} {
+				if !strings.Contains(imageSmoke.Run, required) {
+					t.Errorf("%s image smoke does not pin both trust postures with %q", target.file, required)
+				}
+			}
+			if fmt.Sprint(job.Outputs["hub_pin_mode"]) != "${{ steps.release_hub_pin.outputs.mode }}" {
+				t.Errorf("%s does not export the exact validated Hub-pin mode", target.file)
+			}
+			releaseJobText := fmt.Sprint(job)
+			for _, forbidden := range []string{"QURL_SANDBOX", "QURL_CONNECTOR_HUB_", "openssl genpkey -algorithm X25519"} {
+				if strings.Contains(releaseJobText, forbidden) {
+					t.Errorf("%s release job contains forbidden non-production trust input %q", target.file, forbidden)
 				}
 			}
 			signatureIndex, imageIndex, caskValidationIndex, caskStageIndex := -1, -1, -1, -1
@@ -627,8 +676,12 @@ func TestReleaseDocsDescribeIndependentImageTrust(t *testing.T) {
 		"`qurl-image.txt` is intentionally not in that manifest",
 		"https://layerv.ai/attestations/qurl-image-buildkit-manifest/v1",
 		"Do not replace the digest from",
-		"release publication also fails closed",
-		"independently verified in the packaged artifacts",
+		"CLI releases have two reviewed trust postures",
+		"A production-enabled release must contain the exact production trust root",
+		"A dark release must contain no production trust root",
+		"fixed, redacted missing-settings error",
+		"release process rejects partial trust data",
+		"must never embed development or test trust data",
 		"GitHub Release stays draft and the Homebrew tap stays on its prior version",
 	} {
 		if !strings.Contains(text, want) {

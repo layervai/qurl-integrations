@@ -34,12 +34,15 @@ cleanup and an independent `always()` cleanup job must delete every created
 resource and revoke every disposable credential on success, failure, or
 cancellation.
 
-CLI release publication also fails closed until the exact production
-connection settings are embedded and independently verified in the packaged
-artifacts. The GitHub Release stays draft and the Homebrew tap stays on its
-prior version until all customer-journey, artifact, image, and signature checks
-pass. Do not bypass this gate or publish a build without its required
-connection settings.
+CLI releases have two reviewed trust postures. A production-enabled release
+must contain the exact production trust root, and every packaged artifact must
+verify it. A dark release must contain no production trust root. Native local
+sharing then stops with the fixed, redacted missing-settings error unless a
+qURL administrator supplies a complete custom deployment configuration. The
+release process rejects partial trust data and must never embed development or
+test trust data. The GitHub Release stays draft and the Homebrew tap stays on
+its prior version until all customer-journey, artifact, image, trust-posture,
+and signature checks pass.
 
 ## What a CLI release ships
 

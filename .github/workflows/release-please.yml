@@ -84,6 +84,10 @@ permissions: {}
 
 env:
   QURL_RELEASE_LIFECYCLE_COMMANDS: start stop restart status inspect daemon
+  # Production native sharing remains dark until its reviewed Hub trust root
+  # exists. Flip this committed gate to 1 when production is ready; never use a
+  # mutable repository variable or a non-production key here.
+  QURL_REQUIRE_RELEASE_HUB_PIN: '0'
 
 jobs:
   release-please:
@@ -260,6 +264,7 @@ jobs:
     outputs:
       qurl_image_digest: ${{ steps.qurl_candidate.outputs.digest }}
       qurl_image_already_tagged: ${{ steps.qurl_candidate.outputs.already_tagged }}
+      hub_pin_mode: ${{ steps.release_hub_pin.outputs.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -342,8 +347,8 @@ jobs:
           syft-version: 'v1.42.3'
 
       - name: Verify the production NHP Hub trust pin
+        id: release_hub_pin
         env:
-          QURL_REQUIRE_RELEASE_HUB_PIN: '1'
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
@@ -362,13 +367,31 @@ jobs:
           jq -j 'select(.Output != null) | .Output' "$events"
           passed="$(jq -r --arg test "$test_name" 'select(.Action == "pass" and .Test == $test) | .Test' "$events")"
           skipped="$(jq -r --arg test "$test_name" 'select(.Action == "skip" and .Test == $test) | .Test' "$events")"
-          if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
-            echo "::error::required production Hub-pin test must report one PASS and no SKIP"
+          case "$QURL_REQUIRE_RELEASE_HUB_PIN" in
+            0|1) ;;
+            *) echo "::error::release Hub-pin requirement must be 0 or 1" >&2; exit 1 ;;
+          esac
+          mode=
+          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            if [[ "$QURL_REQUIRE_RELEASE_HUB_PIN" != 0 || "$skipped" != "$test_name" || -n "$passed" ]]; then
+              echo "::error::dark release Hub-pin test must report one SKIP and no PASS" >&2
+              exit 1
+            fi
+            mode=dark
+          elif [[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+            if [[ -n "$skipped" || "$passed" != "$test_name" ]]; then
+              echo "::error::configured release Hub-pin test must report one PASS and no SKIP" >&2
+              exit 1
+            fi
+            mode=pinned
+          else
+            echo "::error::release Hub public key and fingerprint must both be set or both be absent" >&2
             exit 1
           fi
           if (( test_status != 0 )); then
             exit "$test_status"
           fi
+          printf 'mode=%s\n' "$mode" >>"$GITHUB_OUTPUT"
 
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
@@ -386,17 +409,29 @@ jobs:
           # auto-detection would otherwise pick one by version-sort luck.
           GORELEASER_CURRENT_TAG: ${{ env.CLI_TAG }}
 
-      - name: Verify the draft CLI carries the exact production Hub trust pin
+      - name: Verify the draft CLI trust posture
         env:
           GH_TOKEN: ${{ github.token }}
+          QURL_RELEASE_HUB_PIN_MODE: ${{ steps.release_hub_pin.outputs.mode }}
           QURL_RELEASE_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_B64 }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
-          if [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" || -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
-            echo "::error::release Hub trust-pin secrets are empty" >&2
-            exit 1
-          fi
+          case "$QURL_RELEASE_HUB_PIN_MODE" in
+            dark)
+              [[ -z "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -z "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
+                echo "::error::dark release unexpectedly received Hub trust data" >&2
+                exit 1
+              }
+              ;;
+            pinned)
+              [[ -n "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" && -n "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
+                echo "::error::pinned release is missing Hub trust data" >&2
+                exit 1
+              }
+              ;;
+            *) echo "::error::release Hub-pin mode is invalid" >&2; exit 1 ;;
+          esac
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
           gh release download "$CLI_TAG" --repo "$GITHUB_REPOSITORY" \
@@ -434,14 +469,17 @@ jobs:
               *.tar.gz) tar -xzf "$archive" -C "$extracted"; binary="$extracted/qurl" ;;
               *) echo "::error::unexpected qurl archive: $archive" >&2; exit 1 ;;
             esac
-            # Byte presence covers every release archive. This job can execute
-            # only the native linux/amd64 archive, so it verifies that archive's
-            # injected fingerprint below. Cross-platform executable behavior is
-            # tested separately before release; it does not replace this exact
-            # production-pin check on all six archives.
-            if [[ ! -f "$binary" ]] || ! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"; then
-              echo "::error::$(basename "$archive") does not carry the exact verified production Hub trust root" >&2
+            [[ -f "$binary" ]] || {
+              echo "::error::$(basename "$archive") has no qurl binary" >&2
               exit 1
+            }
+            # A configured key must occur in all six archives. Dark mode must
+            # not grep an empty value: the single GoReleaser linker input and
+            # native fail-closed checks below own that posture instead.
+            if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]] &&
+              ! grep -aFq -- "$QURL_RELEASE_HUB_PUBLIC_KEY_B64" "$binary"; then
+                echo "::error::$(basename "$archive") does not carry the exact verified production Hub trust root" >&2
+                exit 1
             fi
             if [[ "$archive" == *_linux_amd64.tar.gz ]]; then
               native_binary=$binary
@@ -451,10 +489,27 @@ jobs:
             echo "::error::released linux/amd64 archive has no executable qurl binary" >&2
             exit 1
           fi
-          fingerprint=$("$native_binary" version --verify-release-native-trust)
-          if [[ "$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
-            echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
-            exit 1
+          if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then
+            fingerprint=$("$native_binary" version --verify-release-native-trust)
+            if [[ "$fingerprint" != "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]]; then
+              echo "::error::draft CLI does not carry the exact verified production Hub trust pin" >&2
+              exit 1
+            fi
+          else
+            trust_stdout="$work/dark-trust.stdout"
+            trust_stderr="$work/dark-trust.stderr"
+            if "$native_binary" version --verify-release-native-trust >"$trust_stdout" 2>"$trust_stderr"; then
+              echo "::error::dark draft CLI unexpectedly accepted native production trust" >&2
+              exit 1
+            fi
+            [[ ! -s "$trust_stdout" ]] || {
+              echo "::error::dark draft CLI wrote unexpected trust output" >&2
+              exit 1
+            }
+            grep -Fq 'missing required built-in connection settings' "$trust_stderr" || {
+              echo "::error::dark draft CLI did not fail with the fixed redacted diagnostic" >&2
+              exit 1
+            }
           fi
           # GoReleaser injects its v-stripped .Version into native archives.
           reported_version=$("$native_binary" version | awk 'NR == 1 { print $3 }')
@@ -517,6 +572,7 @@ jobs:
       - name: Smoke both qurl image platforms
         env:
           QURL_IMAGE: ghcr.io/layervai/qurl@${{ steps.qurl_existing.outputs.digest || steps.qurl_image.outputs.digest }}
+          QURL_RELEASE_HUB_PIN_MODE: ${{ steps.release_hub_pin.outputs.mode }}
           QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
         run: |
           set -euo pipefail
@@ -541,11 +597,24 @@ jobs:
               echo "::error::${platform} image reports ${got}, want ${CLI_TAG}" >&2
               exit 1
             }
-            fingerprint=$(docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust)
-            [ "$fingerprint" = "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ] || {
-              echo "::error::${platform} image does not carry the exact verified production Hub trust pin" >&2
-              exit 1
-            }
+            if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then
+              fingerprint=$(docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust)
+              [ "$fingerprint" = "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ] || {
+                echo "::error::${platform} image does not carry the exact verified production Hub trust pin" >&2
+                exit 1
+              }
+            else
+              trust_error=$(mktemp)
+              if docker run --rm --platform "$platform" "$platform_candidate" version --verify-release-native-trust >/dev/null 2>"$trust_error"; then
+                echo "::error::dark ${platform} image unexpectedly accepted native production trust" >&2
+                exit 1
+              fi
+              grep -Fq 'missing required built-in connection settings' "$trust_error" || {
+                echo "::error::dark ${platform} image did not fail with the fixed redacted diagnostic" >&2
+                exit 1
+              }
+              rm -f "$trust_error"
+            fi
           done
 
       - name: Record the tested qurl image candidate
@@ -647,6 +716,8 @@ jobs:
       contents: read
     env:
       CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      QURL_RELEASE_HUB_PIN_MODE: ${{ needs.release-cli.outputs.hub_pin_mode }}
+      QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
@@ -705,6 +776,27 @@ jobs:
             echo "::error::Homebrew-installed CLI reports ${reported_version}, want ${release_version}" >&2
             exit 1
           }
+          if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then
+            fingerprint=$("$installed" version --verify-release-native-trust)
+            [[ "$fingerprint" == "$QURL_RELEASE_HUB_PUBLIC_KEY_SHA256" ]] || {
+              echo "::error::Homebrew-installed CLI has the wrong production Hub trust pin" >&2
+              exit 1
+            }
+          elif [[ "$QURL_RELEASE_HUB_PIN_MODE" == dark ]]; then
+            trust_error=$(mktemp)
+            if "$installed" version --verify-release-native-trust >/dev/null 2>"$trust_error"; then
+              echo "::error::dark Homebrew-installed CLI unexpectedly accepted native production trust" >&2
+              exit 1
+            fi
+            grep -Fq 'missing required built-in connection settings' "$trust_error" || {
+              echo "::error::dark Homebrew-installed CLI did not fail with the fixed redacted diagnostic" >&2
+              exit 1
+            }
+            rm -f "$trust_error"
+          else
+            echo "::error::Homebrew Hub-pin mode is invalid" >&2
+            exit 1
+          fi
           for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do
             "$installed" "$command" --help >/dev/null
           done
@@ -739,6 +831,8 @@ jobs:
       contents: read
     env:
       CLI_TAG: ${{ needs.cli-release-gate.outputs.cli_tag }}
+      QURL_RELEASE_HUB_PIN_MODE: ${{ needs.release-cli.outputs.hub_pin_mode }}
+      QURL_RELEASE_HUB_PUBLIC_KEY_SHA256: ${{ secrets.QURL_PROD_NHP_HUB_PUBLIC_KEY_SHA256 }}
     steps:
       - name: Download the staged Windows release archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -768,6 +862,22 @@ jobs:
           $versionFields = $versionLine.Trim() -split '\s+'
           if ($versionFields.Count -lt 3 -or $versionFields[2] -cne $releaseVersion) {
             throw "Windows release archive reports $($versionFields[2]), want $releaseVersion"
+          }
+          $trustOutput = @(& $binary version --verify-release-native-trust 2>&1)
+          $trustStatus = $LASTEXITCODE
+          switch ($env:QURL_RELEASE_HUB_PIN_MODE) {
+            'pinned' {
+              if ($trustStatus -ne 0 -or $trustOutput.Count -ne 1 -or $trustOutput[0] -cne $env:QURL_RELEASE_HUB_PUBLIC_KEY_SHA256) {
+                throw 'Windows release archive has the wrong production Hub trust pin'
+              }
+            }
+            'dark' {
+              $trustText = $trustOutput -join "`n"
+              if ($trustStatus -eq 0 -or $trustText -cnotmatch 'missing required built-in connection settings') {
+                throw 'dark Windows release archive did not fail with the fixed redacted diagnostic'
+              }
+            }
+            default { throw 'Windows release archive Hub-pin mode is invalid' }
           }
           foreach ($command in ($env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' ')) {
             & $binary $command --help *> $null

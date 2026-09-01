@@ -1147,6 +1147,9 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	if globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"] != commandRoster {
 		t.Errorf("release lifecycle command roster = %q, want %q", globals.Env["QURL_RELEASE_LIFECYCLE_COMMANDS"], commandRoster)
 	}
+	if globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"] != "0" {
+		t.Errorf("release Hub-pin source mode = %q, want reviewed dark mode 0", globals.Env["QURL_REQUIRE_RELEASE_HUB_PIN"])
+	}
 
 	workflow := readWorkflow(t, releasePleaseWorkflow)
 	release := workflow.Jobs["release-cli"]
@@ -1215,6 +1218,9 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		`[[ "$reported_version" == "$release_version" ]]`,
 		`for command in $QURL_RELEASE_LIFECYCLE_COMMANDS; do`,
 		`"$installed" "$command" --help >/dev/null`,
+		`if [[ "$QURL_RELEASE_HUB_PIN_MODE" == pinned ]]; then`,
+		`elif [[ "$QURL_RELEASE_HUB_PIN_MODE" == dark ]]; then`,
+		`missing required built-in connection settings`,
 	} {
 		if !strings.Contains(audit.Run, fragment) {
 			t.Errorf("Homebrew pre-publication validator does not enforce %q", fragment)
@@ -1227,7 +1233,10 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 	if got := parseWorkflowNeeds(t, "validate-homebrew-cask", validator.Needs); !slices.Contains(got, "release-cli") {
 		t.Errorf("Homebrew validator does not depend on release-cli: %v", got)
 	}
-	draftVerifier := releaseSteps["Verify the draft CLI carries the exact production Hub trust pin"]
+	if validator.Env["QURL_RELEASE_HUB_PIN_MODE"] != "${{ needs.release-cli.outputs.hub_pin_mode }}" {
+		t.Error("Homebrew validator does not consume the exact validated Hub-pin mode")
+	}
+	draftVerifier := releaseSteps["Verify the draft CLI trust posture"]
 	if draftVerifier == nil ||
 		!strings.Contains(draftVerifier.Run, `"qurl_${release_version}_windows_arm64.zip"`) ||
 		!strings.Contains(draftVerifier.Run, `for filename in "${expected[@]}"; do`) ||
@@ -1248,12 +1257,17 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		!strings.Contains(windows.Run, "$versionLine = $versionOutput | Select-Object -First 1") ||
 		strings.Contains(windows.Run, "(& $binary version | Select-Object -First 1)") ||
 		!strings.Contains(windows.Run, "$versionFields[2] -cne $releaseVersion") ||
+		!strings.Contains(windows.Run, "$trustOutput = @(& $binary version --verify-release-native-trust 2>&1)") ||
+		!strings.Contains(windows.Run, "missing required built-in connection settings") ||
 		!strings.Contains(windows.Run, "$env:QURL_RELEASE_LIFECYCLE_COMMANDS -split ' '") ||
 		!strings.Contains(windows.Run, "& $binary $command --help") {
 		t.Error("Windows release archive does not validate the lifecycle command roster")
 	}
 	if got := parseWorkflowNeeds(t, "validate-windows-release-archive", archiveValidator.Needs); !slices.Contains(got, "release-cli") {
 		t.Errorf("release archive validator does not depend on release-cli: %v", got)
+	}
+	if archiveValidator.Env["QURL_RELEASE_HUB_PIN_MODE"] != "${{ needs.release-cli.outputs.hub_pin_mode }}" {
+		t.Error("Windows validator does not consume the exact validated Hub-pin mode")
 	}
 
 	promoteImage := publisherSteps["Sign and promote the tested qurl image"]
@@ -1288,6 +1302,7 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		t.Errorf("CLI release becomes public before its exact image: promote=%d publish=%d", promoteIndex, publishIndex)
 	}
 	if release.Outputs["qurl_image_digest"] != "${{ steps.qurl_candidate.outputs.digest }}" ||
+		release.Outputs["hub_pin_mode"] != "${{ steps.release_hub_pin.outputs.mode }}" ||
 		publisher.Env["QURL_IMAGE_DIGEST"] != "${{ needs.release-cli.outputs.qurl_image_digest }}" {
 		t.Error("post-validation publisher is not bound to the exact image candidate tested by release-cli")
 	}
