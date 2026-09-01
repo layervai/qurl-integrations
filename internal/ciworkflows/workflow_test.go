@@ -370,12 +370,29 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 	t.Parallel()
 
 	workflows := []struct {
-		name     string
-		jobID    string
-		stepName string
+		name            string
+		jobID           string
+		stepName        string
+		sourceRuns      string
+		wantLanes       string
+		wantInvocations string
 	}{
-		{name: cliWorkflow, jobID: "journey-cleanup", stepName: "Revoke run resources and credentials"},
-		{name: "qurl-cli-customer-cleanup.yml", jobID: "cleanup", stepName: "Revoke exact-run resources and credentials"},
+		{
+			name:            cliWorkflow,
+			jobID:           "journey-cleanup",
+			stepName:        "Revoke run resources and credentials",
+			sourceRuns:      "700:2",
+			wantLanes:       "linux\nmacos\nwindows\n",
+			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n",
+		},
+		{
+			name:            "qurl-cli-customer-cleanup.yml",
+			jobID:           "cleanup",
+			stepName:        "Revoke exact-run resources and credentials",
+			sourceRuns:      "700:2,701:3",
+			wantLanes:       "linux\nmacos\nwindows\nlinux\nmacos\nwindows\n",
+			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n7011:3:linux\n7012:3:macos\n7013:3:windows\n",
+		},
 	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -384,15 +401,19 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 	const fakePython = `#!/usr/bin/env bash
 set -euo pipefail
 lane=
+run_id=
+run_attempt=
 while (( $# > 0 )); do
-  if [[ "$1" == --lane && $# -ge 2 ]]; then
-    lane=$2
-    break
-  fi
-  shift
+  case "$1" in
+    --lane) lane=$2; shift 2 ;;
+    --run-id) run_id=$2; shift 2 ;;
+    --run-attempt) run_attempt=$2; shift 2 ;;
+    *) shift ;;
+  esac
 done
-[[ -n "$lane" ]]
+[[ -n "$lane" && -n "$run_id" && -n "$run_attempt" ]]
 printf '%s\n' "$lane" >>"$LANE_CAPTURE"
+printf '%s:%s:%s\n' "$run_id" "$run_attempt" "$lane" >>"$INVOCATION_CAPTURE"
 if [[ -n "${FAIL_LANE:-}" && "$lane" == "$FAIL_LANE" ]]; then
   exit 17
 fi
@@ -435,12 +456,14 @@ fi
 					}
 					runnerTemp := t.TempDir()
 					capture := filepath.Join(runnerTemp, "lanes")
+					invocationCapture := filepath.Join(runnerTemp, "invocations")
 					command := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", cleanup.Run) //nolint:gosec // Executes the checked-in workflow step with a test-owned python3.
 					command.Dir = repoRoot
 					command.Env = []string{
 						"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
 						"RUNNER_TEMP=" + runnerTemp,
 						"LANE_CAPTURE=" + capture,
+						"INVOCATION_CAPTURE=" + invocationCapture,
 						"FAIL_LANE=" + test.failLane,
 						"AUTH_CLIENT_ID=test-client",
 						"AUTH_CLIENT_SECRET=secret-value-must-not-print",
@@ -450,6 +473,7 @@ fi
 						"GITHUB_RUN_ATTEMPT=2",
 						"SOURCE_RUN_ID=700",
 						"SOURCE_RUN_ATTEMPT=2",
+						"SOURCE_RUNS=" + subject.sourceRuns,
 					}
 					output, err := command.CombinedOutput()
 					if gotFail := err != nil; gotFail != test.wantFail {
@@ -459,8 +483,15 @@ fi
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if got, want := string(lanes), "linux\nmacos\nwindows\n"; got != want {
+					if got, want := string(lanes), subject.wantLanes; got != want {
 						t.Errorf("attempted lanes = %q, want %q", got, want)
+					}
+					invocations, readErr := os.ReadFile(invocationCapture) //nolint:gosec // Test-owned path under t.TempDir.
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if got, want := string(invocations), subject.wantInvocations; got != want {
+						t.Errorf("cleanup invocations = %q, want %q", got, want)
 					}
 					text := string(output)
 					if strings.Contains(text, "secret-value-must-not-print") {
@@ -506,7 +537,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	}
 	resolverRun := resolverStep.Run
 	const jqPrefix = "required=$(jq -r '\n"
-	const jqSuffix = "\n' <<<\"$jobs\")"
+	const jqSuffix = "\n  ' <<<\"$jobs\")"
 	start := strings.Index(resolverRun, jqPrefix)
 	if start < 0 {
 		t.Fatal("cleanup resolver does not contain its required-job jq predicate")
@@ -537,7 +568,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 			t.Parallel()
 			fixture, err := json.Marshal(map[string]any{
 				"total_count": 1,
-				"jobs":        []map[string]string{{"name": test.jobName}},
+				"jobs":        []map[string]string{{"name": test.jobName, "conclusion": "success"}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -555,57 +586,227 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	}
 
 	binDir := t.TempDir()
-	capturePath := filepath.Join(binDir, "gh-arguments")
-	outputPath := filepath.Join(binDir, "workflow-output")
 	mockGH := `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >"$GH_CAPTURE"
+printf '%s\n' "$*" >>"$GH_CAPTURE"
 if [[ "$*" == *"/attempts/$EXPECTED_ATTEMPT/jobs?per_page=100" ]]; then
-  jq -n '{total_count:1,jobs:[{name:"cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle)"}]}'
+  if [[ "$MOCK_JOB_CONCLUSION" == __NULL__ ]]; then
+    jq -n --arg name "$MOCK_JOB_NAME" '{total_count:1,jobs:[{name:$name,conclusion:null}]}'
+  else
+    jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
+      '{total_count:1,jobs:[{name:$name,conclusion:$conclusion}]}'
+  fi
 else
-  jq -n '{total_count:0,jobs:[]}'
+  jq -n \
+    --arg status "$MOCK_RUN_STATUS" \
+    --arg event "$MOCK_RUN_EVENT" \
+    --arg branch "$MOCK_RUN_BRANCH" \
+    --arg repository "$MOCK_RUN_REPOSITORY" \
+    --arg name "$MOCK_RUN_NAME" \
+    --arg path "$MOCK_RUN_PATH" \
+    '{status:$status,event:$event,head_branch:$branch,head_repository:{full_name:$repository},name:$name,path:$path}'
 fi
 `
 	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(mockGH), 0o700); err != nil { //nolint:gosec // Test-owned executable in t.TempDir.
 		t.Fatal(err)
 	}
-	resolverCommand := func(attempt string) *exec.Cmd {
+	runResolver := func(overrides map[string]string) (workflowOutput, commandOutput, ghArguments string, runErr error) {
+		t.Helper()
+		runDir := t.TempDir()
+		capturePath := filepath.Join(runDir, "gh-arguments")
+		outputPath := filepath.Join(runDir, "workflow-output")
 		command := exec.CommandContext(t.Context(), "bash", "-c", resolverRun) //nolint:gosec // Executes the repository-owned fixed workflow step.
-		command.Env = append(os.Environ(),
-			"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"GH_CAPTURE="+capturePath,
-			"EXPECTED_ATTEMPT=2",
-			"GITHUB_OUTPUT="+outputPath,
-			"GITHUB_REPOSITORY=layervai/qurl-integrations",
-			"SOURCE_BRANCH=main",
-			"SOURCE_EVENT=push",
-			"SOURCE_REPOSITORY=layervai/qurl-integrations",
-			"SOURCE_RUN_ID=700",
-			"SOURCE_RUN_ATTEMPT="+attempt,
-			"WORKFLOW_REPOSITORY=layervai/qurl-integrations",
-		)
-		return command
+		env := map[string]string{
+			"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"GH_CAPTURE":            capturePath,
+			"EXPECTED_ATTEMPT":      "2",
+			"GITHUB_OUTPUT":         outputPath,
+			"GITHUB_REPOSITORY":     "layervai/qurl-integrations",
+			"GITHUB_EVENT_NAME":     "workflow_run",
+			"GITHUB_REF":            "refs/heads/main",
+			"REQUESTED_SOURCE_RUNS": "",
+			"SOURCE_BRANCH":         "main",
+			"SOURCE_EVENT":          "push",
+			"SOURCE_REPOSITORY":     "layervai/qurl-integrations",
+			"SOURCE_RUN_ID":         "700",
+			"SOURCE_RUN_ATTEMPT":    "2",
+			"SOURCE_WORKFLOW_NAME":  "cli: Build and Test",
+			"SOURCE_WORKFLOW_PATH":  ".github/workflows/cli.yml",
+			"WORKFLOW_REPOSITORY":   "layervai/qurl-integrations",
+			"MOCK_JOB_NAME":         "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle)",
+			"MOCK_JOB_CONCLUSION":   "success",
+			"MOCK_RUN_STATUS":       "completed",
+			"MOCK_RUN_EVENT":        "push",
+			"MOCK_RUN_BRANCH":       "main",
+			"MOCK_RUN_REPOSITORY":   "layervai/qurl-integrations",
+			"MOCK_RUN_NAME":         "cli: Build and Test",
+			"MOCK_RUN_PATH":         ".github/workflows/cli.yml",
+		}
+		for key, value := range overrides {
+			env[key] = value
+		}
+		command.Env = environmentWithOverrides(os.Environ(), env)
+		output, err := command.CombinedOutput()
+		workflowBytes, workflowErr := os.ReadFile(outputPath) //nolint:gosec // Test-owned path under t.TempDir.
+		if workflowErr != nil && !os.IsNotExist(workflowErr) {
+			t.Fatal(workflowErr)
+		}
+		captureBytes, captureErr := os.ReadFile(capturePath) //nolint:gosec // Test-owned path under t.TempDir.
+		if captureErr != nil && !os.IsNotExist(captureErr) {
+			t.Fatal(captureErr)
+		}
+		return string(workflowBytes), string(output), string(captureBytes), err
 	}
-	if output, err := resolverCommand("2").CombinedOutput(); err != nil {
+	workflowOutput, output, ghArguments, err := runResolver(nil)
+	if err != nil {
 		t.Fatalf("execute attempt-bound cleanup resolver: %v: %s", err, output)
 	}
-	workflowOutput, err := os.ReadFile(outputPath) //nolint:gosec // Test-owned path in t.TempDir.
-	if err != nil {
-		t.Fatal(err)
+	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+		t.Fatalf("attempt-bound cleanup result = %q, want required=true and exact source_runs", workflowOutput)
 	}
-	if strings.TrimSpace(string(workflowOutput)) != "required=true" {
-		t.Fatalf("attempt-bound cleanup result = %q, want required=true", workflowOutput)
-	}
-	ghArguments, err := os.ReadFile(capturePath) //nolint:gosec // Test-owned path in t.TempDir.
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(ghArguments), "/actions/runs/700/attempts/2/jobs?per_page=100") {
+	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") {
 		t.Errorf("cleanup queried a different run attempt: %s", ghArguments)
 	}
-	if output, err := resolverCommand("0").CombinedOutput(); err == nil ||
-		!strings.Contains(string(output), "source run attempt is not a positive integer") {
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_NAME": "cli / lint"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
+		t.Fatalf("automatic non-journey source did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "skipped"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
+		t.Fatalf("automatic skipped journey did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "__NULL__"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+		t.Fatalf("automatic unsettled journey did not bias toward cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	_, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "0"})
+	if err == nil || !strings.Contains(output, "source run attempt is not a positive integer") {
 		t.Fatalf("cleanup resolver accepted invalid attempt zero: err=%v output=%s", err, output)
+	}
+
+	for _, test := range []struct {
+		name      string
+		overrides map[string]string
+	}{
+		{name: "wrong automatic branch", overrides: map[string]string{"SOURCE_BRANCH": "feature"}},
+		{name: "wrong automatic event", overrides: map[string]string{"SOURCE_EVENT": "pull_request"}},
+		{name: "wrong automatic source repository", overrides: map[string]string{"SOURCE_REPOSITORY": "other/repo"}},
+		{name: "wrong automatic workflow repository", overrides: map[string]string{"WORKFLOW_REPOSITORY": "other/repo"}},
+		{name: "wrong automatic workflow name", overrides: map[string]string{"SOURCE_WORKFLOW_NAME": "other"}},
+		{name: "wrong automatic workflow path", overrides: map[string]string{"SOURCE_WORKFLOW_PATH": ".github/workflows/other.yml"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, output, _, err := runResolver(test.overrides)
+			if err == nil || !strings.Contains(output, "exact same-repository main CLI workflow") {
+				t.Fatalf("resolver accepted an invalid automatic source: err=%v output=%s", err, output)
+			}
+		})
+	}
+
+	manualSuccess := map[string]string{
+		"GITHUB_EVENT_NAME":     "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS": "700:2",
+	}
+	workflowOutput, output, ghArguments, err = runResolver(manualSuccess)
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+		t.Fatalf("exact manual cleanup source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	for _, want := range []string{
+		"/actions/runs/700\n",
+		"/actions/runs/700/attempts/2/jobs?per_page=100",
+	} {
+		if !strings.Contains(ghArguments, want) {
+			t.Errorf("manual cleanup did not query %q: %s", want, ghArguments)
+		}
+	}
+	exactCap := map[string]string{
+		"GITHUB_EVENT_NAME":     "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS": "700:2,701:2,702:2",
+	}
+	workflowOutput, output, _, err = runResolver(exactCap)
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2,701:2,702:2" {
+		t.Fatalf("three-source manual cleanup was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+
+	for _, test := range []struct {
+		name        string
+		overrides   map[string]string
+		wantMessage string
+	}{
+		{
+			name:        "wrong dispatch ref",
+			overrides:   map[string]string{"GITHUB_REF": "refs/heads/feature"},
+			wantMessage: "manual cleanup must run from main",
+		},
+		{
+			name:        "malformed input",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "700:0"},
+			wantMessage: "source runs are malformed",
+		},
+		{
+			name:        "run id leaves no lane suffix room",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "12345678901234567890:1"},
+			wantMessage: "source runs are malformed",
+		},
+		{
+			name:        "duplicate input",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "700:2,700:2"},
+			wantMessage: "contain a duplicate",
+		},
+		{
+			name:        "more than three inputs",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "1:1,2:1,3:1,4:1"},
+			wantMessage: "exceed the 3-run limit",
+		},
+		{
+			name:        "wrong run repository",
+			overrides:   map[string]string{"MOCK_RUN_REPOSITORY": "other/repo"},
+			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "wrong run event",
+			overrides:   map[string]string{"MOCK_RUN_EVENT": "workflow_dispatch"},
+			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "unfinished run",
+			overrides:   map[string]string{"MOCK_RUN_STATUS": "in_progress"},
+			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "wrong run branch",
+			overrides:   map[string]string{"MOCK_RUN_BRANCH": "feature"},
+			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "unrelated main workflow",
+			overrides:   map[string]string{"MOCK_RUN_PATH": ".github/workflows/other.yml", "MOCK_RUN_NAME": "cli: Build and Test"},
+			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "source without journey",
+			overrides:   map[string]string{"MOCK_JOB_NAME": "cli / lint"},
+			wantMessage: "source did not run the customer journey",
+		},
+		{
+			name:        "skipped journey",
+			overrides:   map[string]string{"MOCK_JOB_CONCLUSION": "skipped"},
+			wantMessage: "source did not run the customer journey",
+		},
+	} {
+		t.Run("manual "+test.name, func(t *testing.T) {
+			overrides := map[string]string{}
+			for key, value := range manualSuccess {
+				overrides[key] = value
+			}
+			for key, value := range test.overrides {
+				overrides[key] = value
+			}
+			_, output, _, err := runResolver(overrides)
+			if err == nil || !strings.Contains(output, test.wantMessage) {
+				t.Fatalf("resolver accepted invalid manual source: err=%v output=%s", err, output)
+			}
+		})
 	}
 
 	var checkout *step
@@ -615,9 +816,23 @@ fi
 			break
 		}
 	}
-	if checkout == nil || checkout.With["ref"] != "${{ github.event.workflow_run.head_sha }}" ||
+	if checkout == nil || checkout.With["ref"] != "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}" ||
 		checkout.With["persist-credentials"] != false {
 		t.Errorf("cancellation cleanup checkout is not exact and credential-free: %#v", checkout)
+	}
+	var cleanupStep *step
+	for index := range cleanup.Steps {
+		if cleanup.Steps[index].Name == "Revoke exact-run resources and credentials" {
+			cleanupStep = &cleanup.Steps[index]
+			break
+		}
+	}
+	if cleanupStep == nil || fmt.Sprint(cleanupStep.Env["SOURCE_RUNS"]) != "${{ needs.resolve.outputs.source_runs }}" ||
+		strings.Contains(cleanupStep.Run, "${{ needs.resolve.outputs.source_runs }}") {
+		t.Errorf("cleanup source runs are not passed through a sanitized step environment value: %#v", cleanupStep)
+	}
+	if timeout, ok := cleanup.TimeoutMinutes.(int); !ok || timeout != 30 {
+		t.Errorf("cancellation cleanup timeout = %#v, want 30 minutes for the bounded 3-run workload", cleanup.TimeoutMinutes)
 	}
 }
 
@@ -2986,6 +3201,21 @@ func runVerifierScriptWithEnv(t *testing.T, script string, env map[string]string
 	}
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+func environmentWithOverrides(base []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if _, replaced := overrides[key]; ok && replaced {
+			continue
+		}
+		result = append(result, entry)
+	}
+	for key, value := range overrides {
+		result = append(result, key+"="+value)
+	}
+	return result
 }
 
 func needsJSON(t *testing.T, results map[string]string) string {

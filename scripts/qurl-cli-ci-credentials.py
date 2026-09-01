@@ -24,9 +24,9 @@ REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
 AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
 AUTH0_ISSUANCE_SKEW_SECONDS = 60
 # The journey token must cover its 35-minute lane plus a 10-minute cleanup
-# margin. The fallback job in .github/workflows/qurl-cli-customer-cleanup.yml
-# mints a fresh token; its timeout and the in-workflow cleanup timeout in
-# .github/workflows/cli.yml keep both cleanup paths on one bounded budget.
+# margin. Each fallback reconcile invocation mints a fresh token; the fallback
+# job timeout must fit inside this minimum remaining lifetime but need not equal
+# the in-workflow cleanup timeout.
 JOURNEY_LANE_TIMEOUT_SECONDS = 35 * 60
 JOURNEY_CLEANUP_MARGIN_SECONDS = 10 * 60
 MIN_M2M_TOKEN_REMAINING_SECONDS = (
@@ -43,6 +43,9 @@ RUN_NAME = re.compile(
 )
 CLEANUP_ID_FILE = re.compile(r"device-key-[0-9a-f]{64}\Z")
 RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
+RUN_AGENT_ID = re.compile(
+    r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sf]\Z"
+)
 MAX_ATTEMPTS = 3
 
 
@@ -283,6 +286,39 @@ def retry_revoke(endpoint: str, jwt: str, key_id: str) -> None:
     raise CredentialError("qURL API-key revoke did not converge after bounded retries") from last_error
 
 
+def retry_assignment_retire(endpoint: str, jwt: str, agent_id: str) -> None:
+    if not RUN_AGENT_ID.fullmatch(agent_id):
+        raise CredentialError("run Connector assignment ID is malformed")
+    last_error: Exception | None = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            status, _ = qurl_json(
+                endpoint,
+                jwt,
+                "DELETE",
+                "/v1/connectors/agents/"
+                + urllib.parse.quote(agent_id, safe="")
+                + "/assignment",
+            )
+        except CredentialError as exc:
+            last_error = exc
+        else:
+            if status == 204:
+                return
+            # qurl-service reserves 500 for a durable invariant failure and
+            # 503 for a retryable store failure. Do not retry durable faults.
+            if status not in {429, 502, 503, 504}:
+                raise CredentialError("qURL Connector assignment retirement was rejected")
+            last_error = CredentialError(
+                "qURL Connector assignment retirement was temporarily rejected"
+            )
+        if attempt + 1 < MAX_ATTEMPTS:
+            time.sleep(attempt + 1)
+    raise CredentialError(
+        "qURL Connector assignment retirement did not converge after bounded retries"
+    ) from last_error
+
+
 def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
     if not resource_id or len(resource_id) > 512 or resource_id != resource_id.strip():
         raise CredentialError("resource cleanup ID is malformed")
@@ -426,17 +462,23 @@ def run_credential_name(run_id: str, run_attempt: str, lane: str, purpose: str) 
     return f"qurl CLI journey v2 {run_id}/{run_attempt}/{lane}/{purpose}"
 
 
-def run_device_key_names(args: argparse.Namespace) -> set[str]:
+def run_agent_ids(args: argparse.Namespace) -> set[str]:
     # TODO(upstream-contract): qurl-service stores each native device key as
     # "agent:" + AgentID, and the tagged harness derives AgentID from this
     # exact run/attempt/runtime plus its smoke or controlled-failure phase.
+    # Assignment retirement returns 204 for both a committed release and a
+    # missing assignment; 404 means the required route is not deployed.
     # Keep both sides in lockstep so a lost runner remains exactly cleanable
     # without moving a bearer credential between jobs.
     runtime_code = {"host": "h", "hardened_container": "c"}[args.runtime]
     return {
-        f"agent:qurl-journey-v2-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
+        f"qurl-journey-v2-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
         for label_code in ("s", "f")
     }
+
+
+def run_device_key_names(args: argparse.Namespace) -> set[str]:
+    return {"agent:" + agent_id for agent_id in run_agent_ids(args)}
 
 
 def run_connector_ids(args: argparse.Namespace) -> set[str]:
@@ -568,6 +610,16 @@ def reconcile_run(args: argparse.Namespace) -> None:
             retry_revoke(endpoint, jwt, key_id)
         except CredentialError:
             record_failure("credential_revoke")
+
+    # Revocation returns the device-key quota. Retirement then removes the
+    # exact owner-scoped assignment and returns its separate assignment slot.
+    # Both identities are deterministic, so cancellation cleanup can finish
+    # even when a runner stopped before it recorded local state.
+    for agent_id in sorted(run_agent_ids(args)):
+        try:
+            retry_assignment_retire(endpoint, jwt, agent_id)
+        except CredentialError:
+            record_failure("assignment_retire")
 
     # Resource cleanup still runs after every credential outcome. Resource
     # inventory intentionally redacts Connector descriptions and tags, so the

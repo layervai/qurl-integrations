@@ -87,12 +87,20 @@ class FakeAPI:
             },
         }
         self.deleted_keys: list[str] = []
+        self.assignments = {
+            "qurl-journey-v2-r1231-a2-hs",
+            "qurl-journey-v2-r1231-a2-hf",
+        }
+        self.retired_assignments: list[str] = []
         self.deleted_resources: list[str] = []
         self.operations: list[str] = []
         self.transient_key_delete = 0
         self.failed_key_deletes: set[str] = set()
+        self.failed_assignment_retires: set[str] = set()
+        self.assignment_retire_statuses: dict[str, int] = {}
         self.failed_resource_deletes: set[str] = set()
         self.key_delete_attempts: list[str] = []
+        self.assignment_retire_attempts: list[str] = []
         self.resource_delete_attempts: list[str] = []
 
     def __call__(
@@ -177,6 +185,27 @@ class FakeAPI:
             self.operations.append("revoke:" + key_id)
             self.keys.pop(key_id, None)
             return 204, b""
+        if (
+            parsed.path.startswith("/v1/connectors/agents/")
+            and parsed.path.endswith("/assignment")
+            and method == "DELETE"
+        ):
+            agent_id = urllib.parse.unquote(
+                parsed.path.removeprefix("/v1/connectors/agents/").removesuffix(
+                    "/assignment"
+                )
+            )
+            assert credentials.RUN_AGENT_ID.fullmatch(agent_id)
+            self.assignment_retire_attempts.append(agent_id)
+            if agent_id in self.assignment_retire_statuses:
+                return self.assignment_retire_statuses[agent_id], b'{}'
+            if agent_id in self.failed_assignment_retires:
+                return 503, b'{}'
+            if agent_id in self.assignments:
+                self.retired_assignments.append(agent_id)
+                self.operations.append("retire:" + agent_id)
+                self.assignments.remove(agent_id)
+            return 204, b""
         if parsed.path == "/v1/resources" and method == "GET":
             query = urllib.parse.parse_qs(parsed.query)
             if "slug" in query:
@@ -247,7 +276,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     fixed_now = 2_000_000_000
     journey_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey")
     cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
-    assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == cleanup_minutes
+    fallback_cleanup_minutes = workflow_timeout_minutes(
+        CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
+    )
     assert credentials.JOURNEY_LANE_TIMEOUT_SECONDS == journey_minutes * 60
     assert credentials.JOURNEY_CLEANUP_MARGIN_SECONDS == cleanup_minutes * 60
     assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 2700, (
@@ -258,6 +289,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
         + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
+    assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
+        "fallback cleanup timeout no longer fits inside each freshly minted token"
+    )
 
     def token(remaining_seconds: int, issued_ago: int = 0) -> str:
         return "header." + encoded(
@@ -483,6 +517,94 @@ def test_credential_failure_still_attempts_every_target_and_resources() -> None:
     assert {"r_connector_failure", "r_customer_ci"}.issubset(fake.deleted_resources)
 
 
+def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
+    fake = FakeAPI()
+    add_run_credentials(fake)
+    failed_agent = "qurl-journey-v2-r1231-a2-hs"
+    other_agent = "qurl-journey-v2-r1231-a2-hf"
+    fake.failed_assignment_retires.add(failed_agent)
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+        args = auth_args(pathlib.Path(raw_root))
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    cleanup_id_dir=None,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == "run cleanup did not converge (assignment_retire=1)"
+        else:
+            raise AssertionError("assignment retirement failure did not fail reconciliation")
+    assert fake.assignment_retire_attempts.count(failed_agent) == credentials.MAX_ATTEMPTS
+    assert other_agent in fake.retired_assignments
+    assert {"r_connector_smoke", "r_connector_failure", "r_customer_ci"}.issubset(
+        fake.deleted_resources
+    )
+
+
+def test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal() -> None:
+    absent_agent = "qurl-journey-v2-r1231-a2-hs"
+    absent = FakeAPI()
+    absent.assignments.clear()
+    with mock.patch.object(credentials, "request", absent):
+        credentials.retry_assignment_retire(
+            "https://sandbox.example", absent.jwt, absent_agent
+        )
+    assert absent.assignment_retire_attempts == [absent_agent]
+    assert absent.retired_assignments == []
+
+    for status in (404, 500):
+        rejected = FakeAPI()
+        rejected.assignment_retire_statuses[absent_agent] = status
+        with mock.patch.object(credentials, "request", rejected):
+            try:
+                credentials.retry_assignment_retire(
+                    "https://sandbox.example", rejected.jwt, absent_agent
+                )
+            except credentials.CredentialError as exc:
+                assert str(exc) == "qURL Connector assignment retirement was rejected"
+            else:
+                raise AssertionError(f"permanent assignment retirement status {status} was accepted")
+        assert rejected.assignment_retire_attempts == [absent_agent]
+
+
+def test_empty_run_reconciliation_is_idempotent() -> None:
+    fake = FakeAPI()
+    fake.assignments.clear()
+    fake.connector_resources.clear()
+    fake.resources = [
+        resource for resource in fake.resources if resource.get("description") == "customer data"
+    ]
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        credentials.reconcile_run(
+            argparse.Namespace(
+                **vars(args),
+                cleanup_id_dir=None,
+                lane="linux",
+                run_attempt="2",
+                run_id="1231",
+                runtime="host",
+            )
+        )
+    assert set(fake.assignment_retire_attempts) == {
+        "qurl-journey-v2-r1231-a2-hs",
+        "qurl-journey-v2-r1231-a2-hf",
+    }
+    assert fake.deleted_keys == []
+    assert fake.retired_assignments == []
+    assert fake.deleted_resources == []
+
+
 def test_unhashable_inventory_fields_remain_bounded() -> None:
     active_fake = FakeAPI()
     run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(active_fake)
@@ -590,6 +712,9 @@ def main() -> None:
     test_connector_cleanup_lookup_fails_closed()
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()
+    test_assignment_failure_still_attempts_every_target_and_resources()
+    test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
+    test_empty_run_reconciliation_is_idempotent()
     test_unhashable_inventory_fields_remain_bounded()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
@@ -597,6 +722,9 @@ def main() -> None:
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="hardened_container")
     ) == {"agent:qurl-journey-v2-r1231-a2-cs", "agent:qurl-journey-v2-r1231-a2-cf"}
+    assert credentials.run_agent_ids(
+        argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
+    ) == {"qurl-journey-v2-r1231-a2-hs", "qurl-journey-v2-r1231-a2-hf"}
     assert credentials.run_connector_ids(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host", lane="linux")
     ) == {
@@ -685,12 +813,36 @@ def main() -> None:
         assert set(fake.deleted_resources) == expected_connector_resource_ids | {"r_customer_ci"}
         assert "r_keep" not in fake.deleted_resources
         assert "r_redacted_tunnel" not in fake.deleted_resources
-        assert {run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
+        assert {
+            run_key_id,
+            failure_key_id,
+            device_key_id,
+            unrecorded_device_key_id,
+        }.issubset(fake.deleted_keys)
+        assert set(fake.retired_assignments) == {
+            "qurl-journey-v2-r1231-a2-hs",
+            "qurl-journey-v2-r1231-a2-hf",
+        }
         assert unrelated_key_id not in fake.deleted_keys
         assert unrelated_device_key_id not in fake.deleted_keys
-        last_revoke = max(index for index, operation in enumerate(fake.operations) if operation.startswith("revoke:"))
+        last_revoke = max(
+            index
+            for index, operation in enumerate(fake.operations)
+            if operation.startswith("revoke:")
+        )
+        first_retire = min(
+            index
+            for index, operation in enumerate(fake.operations)
+            if operation.startswith("retire:")
+        )
+        last_retire = max(
+            index
+            for index, operation in enumerate(fake.operations)
+            if operation.startswith("retire:")
+        )
+        assert last_revoke < first_retire
         assert all(
-            last_revoke < fake.operations.index("delete:" + resource_id)
+            last_retire < fake.operations.index("delete:" + resource_id)
             for resource_id in expected_connector_resource_ids | {"r_customer_ci"}
         )
 
