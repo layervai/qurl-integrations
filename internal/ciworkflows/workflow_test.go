@@ -538,7 +538,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 			t.Parallel()
 			fixture, err := json.Marshal(map[string]any{
 				"total_count": 1,
-				"jobs":        []map[string]string{{"name": test.jobName}},
+				"jobs":        []map[string]string{{"name": test.jobName, "conclusion": "success"}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -560,7 +560,8 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 set -euo pipefail
 printf '%s\n' "$*" >>"$GH_CAPTURE"
 if [[ "$*" == *"/attempts/$EXPECTED_ATTEMPT/jobs?per_page=100" ]]; then
-  jq -n --arg name "$MOCK_JOB_NAME" '{total_count:1,jobs:[{name:$name}]}'
+  jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
+    '{total_count:1,jobs:[{name:$name,conclusion:$conclusion}]}'
 else
   jq -n \
     --arg event "$MOCK_RUN_EVENT" \
@@ -598,6 +599,7 @@ fi
 			"SOURCE_WORKFLOW_PATH":  ".github/workflows/cli.yml",
 			"WORKFLOW_REPOSITORY":   "layervai/qurl-integrations",
 			"MOCK_JOB_NAME":         "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle)",
+			"MOCK_JOB_CONCLUSION":   "success",
 			"MOCK_RUN_EVENT":        "push",
 			"MOCK_RUN_BRANCH":       "main",
 			"MOCK_RUN_REPOSITORY":   "layervai/qurl-integrations",
@@ -628,6 +630,14 @@ fi
 	}
 	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") {
 		t.Errorf("cleanup queried a different run attempt: %s", ghArguments)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_NAME": "cli / lint"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
+		t.Fatalf("automatic non-journey source did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "skipped"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
+		t.Fatalf("automatic skipped journey did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	_, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "0"})
 	if err == nil || !strings.Contains(output, "source run attempt is not a positive integer") {
@@ -669,6 +679,14 @@ fi
 			t.Errorf("manual cleanup did not query %q: %s", want, ghArguments)
 		}
 	}
+	exactCap := map[string]string{
+		"GITHUB_EVENT_NAME":     "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS": "700:2,701:2,702:2",
+	}
+	workflowOutput, output, _, err = runResolver(exactCap)
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2,701:2,702:2" {
+		t.Fatalf("three-source manual cleanup was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
 
 	for _, test := range []struct {
 		name        string
@@ -691,9 +709,9 @@ fi
 			wantMessage: "contain a duplicate",
 		},
 		{
-			name:        "more than eight inputs",
-			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,9:1"},
-			wantMessage: "exceed the 8-run limit",
+			name:        "more than three inputs",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "1:1,2:1,3:1,4:1"},
+			wantMessage: "exceed the 3-run limit",
 		},
 		{
 			name:        "wrong run repository",
@@ -714,6 +732,16 @@ fi
 			name:        "unrelated main workflow",
 			overrides:   map[string]string{"MOCK_RUN_PATH": ".github/workflows/other.yml", "MOCK_RUN_NAME": "cli: Build and Test"},
 			wantMessage: "exact same-repository main CLI workflow",
+		},
+		{
+			name:        "source without journey",
+			overrides:   map[string]string{"MOCK_JOB_NAME": "cli / lint"},
+			wantMessage: "source did not run the customer journey",
+		},
+		{
+			name:        "skipped journey",
+			overrides:   map[string]string{"MOCK_JOB_CONCLUSION": "skipped"},
+			wantMessage: "source did not run the customer journey",
 		},
 	} {
 		t.Run("manual "+test.name, func(t *testing.T) {
@@ -752,6 +780,9 @@ fi
 	if cleanupStep == nil || fmt.Sprint(cleanupStep.Env["SOURCE_RUNS"]) != "${{ needs.resolve.outputs.source_runs }}" ||
 		strings.Contains(cleanupStep.Run, "${{ needs.resolve.outputs.source_runs }}") {
 		t.Errorf("cleanup source runs are not passed through a sanitized step environment value: %#v", cleanupStep)
+	}
+	if timeout, ok := cleanup.TimeoutMinutes.(int); !ok || timeout != 30 {
+		t.Errorf("cancellation cleanup timeout = %#v, want 30 minutes for the bounded 3-run workload", cleanup.TimeoutMinutes)
 	}
 }
 

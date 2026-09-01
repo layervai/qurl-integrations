@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       source_runs:
-        description: "Comma-separated main journey run_id:attempt values to reconcile"
+        description: "Up to 3 comma-separated main journey run_id:attempt values"
         required: true
         type: string
   workflow_run:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: qurl-cli-customer-cleanup-${{ github.event.workflow_run.id || github.run_id }}-${{ github.event.workflow_run.run_attempt || github.run_attempt }}
+  group: ${{ github.event_name == 'workflow_dispatch' && 'qurl-cli-customer-cleanup-manual' || format('qurl-cli-customer-cleanup-{0}-{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) }}
   cancel-in-progress: false
 
 jobs:
@@ -79,8 +79,8 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$source_runs" =~ ^[1-9][0-9]{0,19}:[1-9][0-9]{0,9}(,[1-9][0-9]{0,19}:[1-9][0-9]{0,9}){0,7}$ ]] || {
-            echo "::error::cleanup source runs are malformed or exceed the 8-run limit" >&2
+          [[ "$source_runs" =~ ^[1-9][0-9]{0,19}:[1-9][0-9]{0,9}(,[1-9][0-9]{0,19}:[1-9][0-9]{0,9}){0,2}$ ]] || {
+            echo "::error::cleanup source runs are malformed or exceed the 3-run limit" >&2
             exit 1
           }
           IFS=, read -ra run_specs <<<"$source_runs"
@@ -107,13 +107,20 @@ jobs:
             jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")
             required=$(jq -r '
               if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
-                (.jobs | type) != "array" or (.jobs | length) != .total_count
+                (.jobs | type) != "array" or (.jobs | length) != .total_count or
+                any(.jobs[]; (.name | type) != "string" or (.conclusion | type) != "string")
               then error("source jobs are malformed or truncated")
-              else any(.jobs[]; .name == "cli / customer journey" or
-                (.name | startswith("cli / customer journey (")))
+              else any(.jobs[];
+                (.name == "cli / customer journey" or
+                  (.name | startswith("cli / customer journey ("))) and
+                .conclusion != "skipped")
               end
             ' <<<"$jobs")
             [[ "$required" == true ]] || {
+              if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+                echo "required=false" >>"$GITHUB_OUTPUT"
+                exit 0
+              fi
               echo "::error::cleanup source did not run the customer journey" >&2
               exit 1
             }
@@ -128,7 +135,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.required == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     environment: cli-customer-journey-cleanup
     permissions:
       contents: read

@@ -87,12 +87,17 @@ class FakeAPI:
             },
         }
         self.deleted_keys: list[str] = []
+        self.assignments = {
+            "qurl-journey-v2-r1231-a2-hs",
+            "qurl-journey-v2-r1231-a2-hf",
+        }
         self.retired_assignments: list[str] = []
         self.deleted_resources: list[str] = []
         self.operations: list[str] = []
         self.transient_key_delete = 0
         self.failed_key_deletes: set[str] = set()
         self.failed_assignment_retires: set[str] = set()
+        self.assignment_retire_statuses: dict[str, int] = {}
         self.failed_resource_deletes: set[str] = set()
         self.key_delete_attempts: list[str] = []
         self.assignment_retire_attempts: list[str] = []
@@ -192,10 +197,14 @@ class FakeAPI:
             )
             assert credentials.RUN_AGENT_ID.fullmatch(agent_id)
             self.assignment_retire_attempts.append(agent_id)
+            if agent_id in self.assignment_retire_statuses:
+                return self.assignment_retire_statuses[agent_id], b'{}'
             if agent_id in self.failed_assignment_retires:
                 return 503, b'{}'
-            self.retired_assignments.append(agent_id)
-            self.operations.append("retire:" + agent_id)
+            if agent_id in self.assignments:
+                self.retired_assignments.append(agent_id)
+                self.operations.append("retire:" + agent_id)
+                self.assignments.remove(agent_id)
             return 204, b""
         if parsed.path == "/v1/resources" and method == "GET":
             query = urllib.parse.parse_qs(parsed.query)
@@ -267,7 +276,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     fixed_now = 2_000_000_000
     journey_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey")
     cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
-    assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == cleanup_minutes
+    fallback_cleanup_minutes = workflow_timeout_minutes(
+        CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
+    )
     assert credentials.JOURNEY_LANE_TIMEOUT_SECONDS == journey_minutes * 60
     assert credentials.JOURNEY_CLEANUP_MARGIN_SECONDS == cleanup_minutes * 60
     assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 2700, (
@@ -278,6 +289,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
         + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
+    assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
+        "fallback cleanup timeout no longer fits inside each freshly minted token"
+    )
 
     def token(remaining_seconds: int, issued_ago: int = 0) -> str:
         return "header." + encoded(
@@ -535,6 +549,62 @@ def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
     )
 
 
+def test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal() -> None:
+    absent_agent = "qurl-journey-v2-r1231-a2-hs"
+    absent = FakeAPI()
+    absent.assignments.clear()
+    with mock.patch.object(credentials, "request", absent):
+        credentials.retry_assignment_retire(
+            "https://sandbox.example", absent.jwt, absent_agent
+        )
+    assert absent.assignment_retire_attempts == [absent_agent]
+    assert absent.retired_assignments == []
+
+    for status in (404, 500):
+        rejected = FakeAPI()
+        rejected.assignment_retire_statuses[absent_agent] = status
+        with mock.patch.object(credentials, "request", rejected):
+            try:
+                credentials.retry_assignment_retire(
+                    "https://sandbox.example", rejected.jwt, absent_agent
+                )
+            except credentials.CredentialError as exc:
+                assert str(exc) == "qURL Connector assignment retirement was rejected"
+            else:
+                raise AssertionError(f"permanent assignment retirement status {status} was accepted")
+        assert rejected.assignment_retire_attempts == [absent_agent]
+
+
+def test_empty_run_reconciliation_is_idempotent() -> None:
+    fake = FakeAPI()
+    fake.assignments.clear()
+    fake.connector_resources.clear()
+    fake.resources = [
+        resource for resource in fake.resources if resource.get("description") == "customer data"
+    ]
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        credentials.reconcile_run(
+            argparse.Namespace(
+                **vars(args),
+                cleanup_id_dir=None,
+                lane="linux",
+                run_attempt="2",
+                run_id="1231",
+                runtime="host",
+            )
+        )
+    assert set(fake.assignment_retire_attempts) == {
+        "qurl-journey-v2-r1231-a2-hs",
+        "qurl-journey-v2-r1231-a2-hf",
+    }
+    assert fake.deleted_keys == []
+    assert fake.retired_assignments == []
+    assert fake.deleted_resources == []
+
+
 def test_unhashable_inventory_fields_remain_bounded() -> None:
     active_fake = FakeAPI()
     run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(active_fake)
@@ -643,6 +713,8 @@ def main() -> None:
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()
     test_assignment_failure_still_attempts_every_target_and_resources()
+    test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
+    test_empty_run_reconciliation_is_idempotent()
     test_unhashable_inventory_fields_remain_bounded()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")

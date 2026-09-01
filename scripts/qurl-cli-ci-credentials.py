@@ -300,15 +300,16 @@ def retry_assignment_retire(endpoint: str, jwt: str, agent_id: str) -> None:
                 + urllib.parse.quote(agent_id, safe="")
                 + "/assignment",
             )
+        except CredentialError as exc:
+            last_error = exc
+        else:
             if status == 204:
                 return
-            if status != 429 and status < 500:
+            if status not in {429, 502, 503, 504}:
                 raise CredentialError("qURL Connector assignment retirement was rejected")
             last_error = CredentialError(
                 "qURL Connector assignment retirement was temporarily rejected"
             )
-        except CredentialError as exc:
-            last_error = exc
         if attempt + 1 < MAX_ATTEMPTS:
             time.sleep(attempt + 1)
     raise CredentialError(
@@ -463,6 +464,8 @@ def run_agent_ids(args: argparse.Namespace) -> set[str]:
     # TODO(upstream-contract): qurl-service stores each native device key as
     # "agent:" + AgentID, and the tagged harness derives AgentID from this
     # exact run/attempt/runtime plus its smoke or controlled-failure phase.
+    # Assignment retirement returns 204 for both a committed release and a
+    # missing assignment; 404 means the required route is not deployed.
     # Keep both sides in lockstep so a lost runner remains exactly cleanable
     # without moving a bearer credential between jobs.
     runtime_code = {"host": "h", "hardened_container": "c"}[args.runtime]
