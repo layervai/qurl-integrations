@@ -1293,7 +1293,8 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 		"CLI release tag does not match the handed-off source SHA",
 		`gh release view "$CLI_TAG"`, "--json tagName,targetCommitish,isDraft",
 		`(.isDraft | type) == "boolean"`, `draft=$(jq -r '.isDraft'`,
-		`"$release_tag" == "$CLI_TAG"`, `"$release_target" == "$source_sha"`} {
+		`"$release_tag" == "$CLI_TAG"`, `"$draft" == true && "$release_target" != "$source_sha"`,
+		"Draft CLI release target mismatch"} {
 		if !strings.Contains(source.Run+fmt.Sprint(source.Env), required) {
 			t.Errorf("exact source resolver is missing %q", required)
 		}
@@ -1421,8 +1422,9 @@ func TestCLIReleaseDraftAwareStepsExecuteBothStates(t *testing.T) {
 		output       string
 		githubOutput string
 		ghCalls      string
+		err          error
 	}
-	runStep := func(t *testing.T, script string, draft bool) result {
+	runStep := func(t *testing.T, script string, draft bool, target string) result {
 		t.Helper()
 
 		tempDir := t.TempDir()
@@ -1445,7 +1447,7 @@ exit 2
 set -eu
 if [ "$1" = "release" ] && [ "$2" = "view" ]; then
   printf '{"tagName":"%s","targetCommitish":"%s","isDraft":%s}\n' \
-    "$STUB_TAG" "$STUB_SHA" "$STUB_DRAFT"
+    "$STUB_TAG" "$STUB_TARGET" "$STUB_DRAFT"
   exit 0
 fi
 if [ "$1" = "workflow" ] && [ "$2" = "run" ]; then
@@ -1483,14 +1485,12 @@ exit 2
 			"STUB_GH_LOG":        ghCalls,
 			"STUB_SHA":           sourceSHA,
 			"STUB_TAG":           cliTag,
+			"STUB_TARGET":        target,
 		}
 		command := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", script) //nolint:gosec // Executes checked-in workflow shell with fixed test inputs.
 		command.Dir = filepath.Join("..", "..")
 		command.Env = environmentWithOverrides(os.Environ(), overrides)
 		output, err := command.CombinedOutput()
-		if err != nil {
-			t.Fatalf("execute workflow step with draft=%t: %v\n%s", draft, err, output)
-		}
 		read := func(path string) string {
 			contents, err := os.ReadFile(path) //nolint:gosec // Callers pass only test-owned paths created under t.TempDir above.
 			if err != nil {
@@ -1498,13 +1498,20 @@ exit 2
 			}
 			return string(contents)
 		}
-		return result{output: string(output), githubOutput: read(githubOutput), ghCalls: read(ghCalls)}
+		return result{output: string(output), githubOutput: read(githubOutput), ghCalls: read(ghCalls), err: err}
 	}
 
 	releaseGateRun := stepRun(t, releasePleaseWorkflow, "cli-release-gate", "Resolve the exact release source")
 	for _, draft := range []bool{true, false} {
 		t.Run(fmt.Sprintf("release_gate_draft_%t", draft), func(t *testing.T) {
-			got := runStep(t, releaseGateRun, draft)
+			target := "main"
+			if draft {
+				target = sourceSHA
+			}
+			got := runStep(t, releaseGateRun, draft, target)
+			if got.err != nil {
+				t.Fatalf("execute release gate with draft=%t: %v\n%s", draft, got.err, got.output)
+			}
 			wantRequired := fmt.Sprintf("required=%t\n", draft)
 			if !strings.Contains(got.githubOutput, wantRequired) {
 				t.Errorf("gate output = %q, want %q", got.githubOutput, wantRequired)
@@ -1515,7 +1522,14 @@ exit 2
 	cliSignalRun := stepRun(t, cliWorkflow, "signal-cli-release", "Continue an exact draft CLI release")
 	for _, draft := range []bool{true, false} {
 		t.Run(fmt.Sprintf("cli_signal_draft_%t", draft), func(t *testing.T) {
-			got := runStep(t, cliSignalRun, draft)
+			target := "main"
+			if draft {
+				target = sourceSHA
+			}
+			got := runStep(t, cliSignalRun, draft, target)
+			if got.err != nil {
+				t.Fatalf("execute CLI signal with draft=%t: %v\n%s", draft, got.err, got.output)
+			}
 			if draft {
 				for _, required := range []string{"workflow run release-please.yml", "cli_tag=" + cliTag, "source_sha=" + sourceSHA} {
 					if !strings.Contains(got.ghCalls, required) {
@@ -1529,6 +1543,27 @@ exit 2
 			}
 			if !strings.Contains(got.output, "The exact CLI release is already public.") {
 				t.Errorf("public release output = %q", got.output)
+			}
+		})
+	}
+
+	wrongTarget := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	for _, subject := range []struct {
+		name   string
+		script string
+	}{
+		{name: "release_gate", script: releaseGateRun},
+		{name: "cli_signal", script: cliSignalRun},
+	} {
+		t.Run(subject.name+"_rejects_wrong_draft_target", func(t *testing.T) {
+			got := runStep(t, subject.script, true, wrongTarget)
+			if got.err == nil {
+				t.Fatal("workflow step accepted a draft whose target differs from its exact tag commit")
+			}
+			for _, required := range []string{"::error::Draft CLI release target mismatch", "observed " + wrongTarget, "expected exact", sourceSHA} {
+				if !strings.Contains(got.output, required) {
+					t.Errorf("draft-target failure = %q, want %q", got.output, required)
+				}
 			}
 		})
 	}

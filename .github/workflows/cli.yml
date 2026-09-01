@@ -1394,13 +1394,17 @@ jobs:
             exit 1
           }
           release_draft=$(jq -r '.isDraft' <<<"$release")
-          [[ "$release_tag" == "$cli_tag" && "$release_target" == "$GITHUB_SHA" ]] || {
-            echo "::error::CLI release metadata does not match the exact tested tag and source" >&2
+          [[ "$release_tag" == "$cli_tag" ]] || {
+            printf '::error::CLI release tag mismatch: observed %q; expected %q\n' "$release_tag" "$cli_tag" >&2
             exit 1
           }
           [[ "$release_draft" == true ]] || {
             echo "The exact CLI release is already public."
             exit 0
+          }
+          [[ "$release_target" == "$GITHUB_SHA" ]] || {
+            printf '::error::Draft CLI release target mismatch: observed %q; expected exact tested tag commit %q\n' "$release_target" "$GITHUB_SHA" >&2
+            exit 1
           }
           gh workflow run release-please.yml --repo "$GITHUB_REPOSITORY" --ref main \
             --field "cli_tag=$cli_tag" --field "source_sha=$GITHUB_SHA"

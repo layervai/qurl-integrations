@@ -59,9 +59,15 @@ case "$*" in
     exit 1
     ;;
   release\ view\ *)
-    if [ "${GH_STUB_STATUS:-0}" != "0" ]; then
-      printf '%s\n' "${GH_STUB_STDERR-}" >&2
-      exit "$GH_STUB_STATUS"
+    if [ -n "${GH_STUB_RELEASE_STDERR-}" ]; then
+      printf '%s\n' "$GH_STUB_RELEASE_STDERR" >&2
+    fi
+    if [ "${GH_STUB_RELEASE_STATUS:-0}" != "0" ]; then
+      exit "$GH_STUB_RELEASE_STATUS"
+    fi
+    if [ -n "${GH_STUB_RELEASE_JSON-}" ]; then
+      printf '%s\n' "$GH_STUB_RELEASE_JSON"
+      exit 0
     fi
     tag=${GH_STUB_RELEASE_TAG:-$3}
     target=${GH_STUB_RELEASE_TARGET:-$GH_STUB_TAG_COMMIT}
@@ -69,7 +75,13 @@ case "$*" in
     printf '{"tagName":"%s","targetCommitish":"%s","isDraft":%s}\n' "$tag" "$target" "$draft"
     ;;
   api\ repos/layervai/qurl-integrations/commits/*)
-    printf '%s\n' "$GH_STUB_TAG_COMMIT"
+    if [ -n "${GH_STUB_TAG_STDERR-}" ]; then
+      printf '%s\n' "$GH_STUB_TAG_STDERR" >&2
+    fi
+    if [ "${GH_STUB_TAG_STATUS:-0}" != "0" ]; then
+      exit "$GH_STUB_TAG_STATUS"
+    fi
+    printf '%s\n' "${GH_STUB_TAG_STDOUT:-$GH_STUB_TAG_COMMIT}"
     ;;
   *)
     printf '%s\n' "unexpected gh invocation: $*" >&2
@@ -156,6 +168,21 @@ expect_summary() {
   fi
 }
 
+expect_summary_order() {
+  local name="$1"
+  shift
+  local previous=0 needle line
+  for needle in "$@"; do
+    line="$(grep -nF -- "$needle" "$summary_out" | head -1 | cut -d: -f1)"
+    if [[ -z "$line" || "$line" -le "$previous" ]]; then
+      printf '%s: expected summary item %q after line %s, got:\n%s\n' \
+        "$name" "$needle" "$previous" "$(cat "$summary_out")" >&2
+      exit 1
+    fi
+    previous="$line"
+  done
+}
+
 # --- a tagged draft exists: the release-please handoff, and the old REST
 #     by-tag route must never be used because it returns 404 for this release
 
@@ -174,36 +201,86 @@ write_manifest 2.0.0
 run_case released-other-version 0 'apps/cli 2.0.0 exists as v2.0.0' '::error::'
 expect_argv released-other-version 'release view v2.0.0'
 
-# A public release remains valid on later ordinary main pushes. The verifier
-# confirms the boolean state but does not require a draft after publication.
+# A public release binds through the exact tag commit. targetCommitish is not
+# used after publication and GitHub can return the branch name rather than the
+# SHA that the draft gate required.
+write_manifest 2.0.0
 run_case released-public 0 'apps/cli 2.0.0 exists as v2.0.0' '::error::' \
-  GH_STUB_RELEASE_DRAFT=false
+  GH_STUB_RELEASE_DRAFT=false GH_STUB_RELEASE_TARGET=main
+
+# Successful gh diagnostics stay on their captured stderr streams. They must
+# not corrupt either the release JSON or the tag SHA read from stdout.
+write_manifest 2.0.0
+run_case released-with-warnings 0 'apps/cli 2.0.0 exists as v2.0.0' 'successful-gh-warning' \
+  GH_STUB_RELEASE_STDERR=successful-gh-warning GH_STUB_TAG_STDERR=successful-gh-warning
 
 # Exact tag, target commit, and boolean draft state are all fail-closed. These
 # are malformed releases, not absent releases, so no recovery instructions may
 # claim that release-please dropped them.
-run_case wrong-release-tag 1 'release metadata does not name the exact CLI tag' 'dropped the apps/cli release' \
+run_case wrong-release-tag 1 \
+  "::error::Could not verify the apps/cli release: release tag mismatch: observed 'v9.9.9'; expected 'v2.0.0'. This is invalid release metadata, not a dropped release." \
+  'release-please dropped the apps/cli release' \
   GH_STUB_RELEASE_TAG=v9.9.9
 expect_gh_calls wrong-release-tag 2
 
-run_case wrong-release-target 1 'release target does not match the CLI tag commit' 'dropped the apps/cli release' \
+run_case wrong-release-target 1 \
+  "::error::Could not verify the apps/cli release: draft release target mismatch: observed '0000000000000000000000000000000000000000'; expected tag commit '$head_sha'. This is invalid release metadata, not a dropped release." \
+  'release-please dropped the apps/cli release' \
   GH_STUB_RELEASE_TARGET=0000000000000000000000000000000000000000
 expect_gh_calls wrong-release-target 2
 
-run_case missing-draft-state 1 'release metadata has no exact draft state' 'dropped the apps/cli release' \
+run_case nonexact-draft-target 1 \
+  "::error::Could not verify the apps/cli release: draft release target mismatch: observed 'main'; expected exact tag commit '$head_sha'. This is invalid release metadata, not a dropped release." \
+  'release-please dropped the apps/cli release' \
+  GH_STUB_RELEASE_TARGET=main
+expect_gh_calls nonexact-draft-target 2
+
+run_case missing-draft-state 1 \
+  '::error::Could not verify the apps/cli release: release draft state has type NoneType; expected boolean true or false. This is invalid release metadata, not a dropped release.' \
+  'release-please dropped the apps/cli release' \
   GH_STUB_RELEASE_DRAFT=null
 expect_gh_calls missing-draft-state 2
+
+run_case malformed-release-json 1 \
+  '::error::Could not verify the apps/cli release: release metadata is not valid JSON:' \
+  'release-please dropped the apps/cli release' \
+  GH_STUB_RELEASE_JSON='{not-json'
+expect_gh_calls malformed-release-json 2
+
+# A release that exists without a resolvable tag is not a dropped release. It
+# is a distinct fail-closed integrity failure, even when the tag lookup is 404.
+run_case missing-release-tag 1 \
+  '::error::Could not verify the apps/cli release: GitHub Release v2.0.0 exists, but tag v2.0.0 cannot be verified:' \
+  'release-please dropped the apps/cli release' \
+  GH_STUB_TAG_STATUS=1 GH_STUB_TAG_STDERR='gh: Not Found (HTTP 404)'
+expect_gh_calls missing-release-tag 2
+
+run_case tag-lookup-failure 1 \
+  'This is a tag verification failure, not a dropped release.' \
+  'release-please dropped the apps/cli release' \
+  GH_STUB_TAG_STATUS=1 GH_STUB_TAG_STDERR='gh: Bad gateway (HTTP 502)'
+# One release lookup plus the three bounded tag-commit attempts.
+expect_gh_calls tag-lookup-failure 4
 
 # --- the release is absent: the drop, with the whole recovery attached
 
 write_manifest 1.4.0
 run_case dropped 1 '::error::release-please dropped the apps/cli release' 'Could not verify' \
-  GH_STUB_STATUS=1 GH_STUB_STDERR='release not found'
+  GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='release not found'
 # A 404 is an answer, not a transient failure: retrying it only delays the
 # report.
 expect_gh_calls dropped 1
 expect_summary dropped 'CLI release v1.4.0 was dropped'
-expect_summary dropped 'gh release create v1.4.0 --target '"$head_sha"' --title v1.4.0 --notes-file <notes> --draft'
+expect_summary dropped 'git tag v1.4.0 '"$head_sha"
+expect_summary dropped 'git push origin refs/tags/v1.4.0'
+expect_summary dropped 'gh release create v1.4.0 --verify-tag --title v1.4.0 --notes-file <notes> --draft'
+expect_summary_order dropped \
+  '1. Create the exact tag' \
+  '2. Push the exact tag' \
+  '3. Create the draft release' \
+  'gh release create v1.4.0 --verify-tag' \
+  '4. Attach the GoReleaser assets' \
+  '5. Relabel the merged release PR'
 expect_summary dropped 'cli_tag=v1.4.0'
 expect_summary dropped 'autorelease: pending`'
 expect_summary dropped 'untagged, merged release PRs outstanding'
@@ -211,7 +288,7 @@ expect_summary dropped 'untagged, merged release PRs outstanding'
 # --- the lookup itself failed: fail loudly, but do NOT call it a drop
 
 run_case lookup-failure 1 '::error::Could not verify the apps/cli release' 'dropped the apps/cli release' \
-  GH_STUB_STATUS=1 GH_STUB_STDERR='gh: Bad gateway (HTTP 502)'
+  GH_STUB_RELEASE_STATUS=1 GH_STUB_RELEASE_STDERR='gh: Bad gateway (HTTP 502)'
 expect_gh_calls lookup-failure 3
 
 # --- a broken manifest is not a dropped release either, and must never reach
