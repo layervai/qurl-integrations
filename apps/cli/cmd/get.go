@@ -124,34 +124,11 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		resolved = result
 		return result.QURL, nil
 	}
-	// fetchURL is mint plus the download-only step: a link whose credential
-	// rides in the URL fragment never serves its content to a plain GET
-	// (HTTP clients don't transmit fragments — only the in-browser page
-	// could consume it), so those links go through the platform access flow
-	// and the granted content URL is what gets fetched. The browser action
-	// keeps the full link: the in-browser page is exactly what a browser
-	// needs. The mid-download retry re-runs all of this, fresh access
-	// request included.
-	fetchURL := func(ctx context.Context) (string, error) {
-		link, err := mint(ctx)
-		if err != nil {
-			return "", err
-		}
-		if !consume.NeedsAccessGrant(link) {
-			// No in-link credential: the URL itself serves the bytes.
-			return link, nil
-		}
-		return opts.enterPortal(ctx, link)
-	}
 	// fetchTarget preserves the lifetime of an acknowledged NHP grant. An
 	// immediate 410 can then converge on that same grant without opening a
-	// second session. Lifetime-free direct callers retain the existing
-	// one-fresh-link retry through fetchURL.
+	// second session. It also carries the application authorizer: a protected
+	// target can never degrade to a URL-only download target.
 	fetchTarget := func(ctx context.Context) (consume.DownloadTarget, error) {
-		if opts.enterPortalGrant == nil {
-			url, err := fetchURL(ctx)
-			return consume.DownloadTarget{URL: url}, err
-		}
 		link, err := mint(ctx)
 		if err != nil {
 			return consume.DownloadTarget{}, err
