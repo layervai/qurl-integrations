@@ -1269,7 +1269,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	}
 	assertJobPermissions(t, "cli-release-gate", gate.Permissions, map[string]string{
 		"actions":  "read",
-		"contents": "read",
+		"contents": "write",
 	})
 
 	steps := map[string]*step{}
