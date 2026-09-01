@@ -399,13 +399,13 @@ func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*htt
 	if target.Authorize != nil {
 		httpClient, ok := client.(*http.Client)
 		if !ok {
-			return nil, fmt.Errorf("%w: download client cannot enforce grant redirect policy", ErrLinkFetch)
+			return nil, fmt.Errorf("%w: could not secure the content request", ErrLinkFetch)
 		}
 		// net/http applies a Jar after CheckRedirect. A grant-bearing request
 		// therefore cannot use one: a Jar could restore cookies after this code
 		// removed the SDK credential from a cross-origin redirect.
 		if httpClient.Jar != nil {
-			return nil, fmt.Errorf("%w: download client cannot enforce grant isolation with a cookie jar", ErrLinkFetch)
+			return nil, fmt.Errorf("%w: could not secure the content request", ErrLinkFetch)
 		}
 		// Save the request headers before the opaque SDK authorizer runs. Redirects
 		// start from this unprivileged snapshot, so containment does not depend on
@@ -429,8 +429,9 @@ func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*htt
 				return err
 			}
 			// #nosec G119 -- this is the header snapshot captured before the
-			// grant authorizer added any credential. The cross-origin leak test
-			// covers cookie, standard authorization, and unknown header shapes.
+			// grant authorizer added any credential. This also discards the
+			// automatically generated Referer. The cross-origin leak test covers
+			// cookie, standard authorization, and unknown header shapes.
 			redirectReq.Header = unprivilegedHeaders.Clone()
 			if priorCheckRedirect != nil {
 				if err := priorCheckRedirect(redirectReq, via); err != nil {

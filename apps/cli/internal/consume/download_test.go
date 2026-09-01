@@ -311,7 +311,7 @@ func TestDownloadGrantFailsClosedForCustomDoerWithoutRedirectPolicy(t *testing.T
 		},
 	}
 	_, err := d.StreamTo(context.Background(), io.Discard)
-	if !errors.Is(err, ErrLinkFetch) || !strings.Contains(err.Error(), "cannot enforce grant redirect policy") {
+	if !errors.Is(err, ErrLinkFetch) || !strings.Contains(err.Error(), "could not secure the content request") {
 		t.Fatalf("custom-doer grant error = %v", err)
 	}
 	if client.called.Load() {
@@ -336,7 +336,7 @@ func TestDownloadGrantFailsClosedForClientCookieJar(t *testing.T) {
 		},
 	}
 	_, err = d.StreamTo(context.Background(), io.Discard)
-	if !errors.Is(err, ErrLinkFetch) || !strings.Contains(err.Error(), "cookie jar") {
+	if !errors.Is(err, ErrLinkFetch) || !strings.Contains(err.Error(), "could not secure the content request") {
 		t.Fatalf("cookie-jar grant error = %v", err)
 	}
 	if authorizations.Load() != 0 {
@@ -383,6 +383,40 @@ func TestDownloadRedirectDoesNotForwardGrantCredentials(t *testing.T) {
 	}
 }
 
+func TestNewHTTPClientStripsKnownGrantCredentialsOnRedirect(t *testing.T) {
+	var leaked atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, err := req.Cookie(grantSessionCookie); err == nil ||
+			req.Header.Get("Authorization") != "" || req.Header.Get("Proxy-Authorization") != "" {
+			leaked.Store(true)
+		}
+		_, _ = w.Write([]byte("redirected"))
+	}))
+	t.Cleanup(destination.Close)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, destination.URL, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, origin.URL, http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	addTestGrantCookie(req)
+	req.Header.Set("Authorization", "Bearer opaque-test-token")
+	req.Header.Set("Proxy-Authorization", "Bearer opaque-test-token")
+	client := NewHTTPClient()
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("redirected request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if leaked.Load() {
+		t.Fatal("NewHTTPClient forwarded a known grant credential across origins")
+	}
+}
+
 func TestSameHTTPOriginIsExact(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -395,6 +429,7 @@ func TestSameHTTPOriginIsExact(t *testing.T) {
 		"different scheme":       {"https://example.com/content", "http://example.com/next", false},
 		"different port":         {"https://example.com/content", "https://example.com:444/next", false},
 		"user info":              {"https://example.com/content", "https://user@example.com/next", false},
+		"non-web scheme":         {"https://example.com/content", "file:///tmp/content", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -407,6 +442,50 @@ func TestSameHTTPOriginIsExact(t *testing.T) {
 				t.Fatalf("SameHTTPOrigin(%q, %q) = %t, want %t", tc.left, tc.right, got, tc.want)
 			}
 		})
+	}
+	if SameHTTPOrigin(nil, &url.URL{Scheme: "https", Host: "example.com"}) ||
+		SameHTTPOrigin(&url.URL{Scheme: "https", Host: "example.com"}, nil) {
+		t.Fatal("SameHTTPOrigin accepted a nil URL")
+	}
+}
+
+func TestDownloadRedirectReauthorizesWhenRouteReturnsToGrantedOrigin(t *testing.T) {
+	var authorizations atomic.Int32
+	var leaked atomic.Bool
+	var origin *httptest.Server
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, err := req.Cookie(grantSessionCookie); err == nil || req.Header.Get("X-QURL-Session") != "" {
+			leaked.Store(true)
+		}
+		http.Redirect(w, req, origin.URL+"/final", http.StatusFound)
+	}))
+	t.Cleanup(destination.Close)
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if _, err := req.Cookie(grantSessionCookie); err != nil || req.Header.Get("X-QURL-Session") == "" {
+			t.Error("granted-origin request did not carry the application bearer")
+		}
+		if req.URL.Path == "/start" {
+			http.Redirect(w, req, destination.URL+"/bounce", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("returned"))
+	}))
+	t.Cleanup(origin.Close)
+
+	d := &Downloader{MintTarget: func(context.Context) (DownloadTarget, error) {
+		return DownloadTarget{URL: origin.URL + "/start", Authorize: func(req *http.Request) error {
+			authorizations.Add(1)
+			addTestGrantCookie(req)
+			req.Header.Set("X-QURL-Session", "opaque-test-token")
+			return nil
+		}}, nil
+	}}
+	var out bytes.Buffer
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo: %v", err)
+	}
+	if leaked.Load() || out.String() != "returned" || authorizations.Load() != 2 {
+		t.Fatalf("redirect return leak=%t payload=%q authorizations=%d", leaked.Load(), out.String(), authorizations.Load())
 	}
 }
 
