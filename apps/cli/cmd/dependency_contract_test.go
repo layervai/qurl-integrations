@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
@@ -32,6 +34,22 @@ func TestCLIUsesReleasedDirectDependencies(t *testing.T) {
 		if err := checkReleasedDirectRequirement(goModPath, raw, modulePath); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestCLIConnectorRuntimeHasNoSessionRelaySurface keeps go.mod authoritative
+// while making the UDP-only control-plane boundary executable. A dependency
+// downgrade that restores the removed compatibility field must fail here even
+// if the CLI does not populate that field.
+func TestCLIConnectorRuntimeHasNoSessionRelaySurface(t *testing.T) {
+	t.Parallel()
+
+	runtimeConfig := reflect.TypeOf(connectorshare.NativeRuntimeConfig{})
+	if _, present := runtimeConfig.FieldByName("SessionOptions"); present {
+		t.Fatal("qurl-connector NativeRuntimeConfig restored forbidden SessionOptions compatibility surface")
+	}
+	if _, present := runtimeConfig.FieldByName("UDPOptions"); !present {
+		t.Fatal("qurl-connector NativeRuntimeConfig has no native UDP option surface")
 	}
 }
 
