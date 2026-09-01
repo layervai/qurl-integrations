@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.1.0](https://github.com/layervai/qurl-integrations/compare/v2.0.3...v2.1.0) (2026-09-01)
+
+
+### Features
+
+* **cli:** ship registered CRID lifecycle ([#1279](https://github.com/layervai/qurl-integrations/issues/1279)) ([528695b](https://github.com/layervai/qurl-integrations/commit/528695bb8fe2e8418abb4f3c566719473bda3192))
+
+
+### Bug Fixes
+
+* **cli:** carry qv2 session bearer to content ([#1303](https://github.com/layervai/qurl-integrations/issues/1303)) ([502a0a3](https://github.com/layervai/qurl-integrations/commit/502a0a3cfe5f8cc43aff04924bb1670b54d4cb95))
+* **cli:** classify transient access denials ([#1301](https://github.com/layervai/qurl-integrations/issues/1301)) ([f88c71f](https://github.com/layervai/qurl-integrations/commit/f88c71f1e7874c7300306a4c90c6a9ae3f6fce20))
+* **cli:** complete packaged lifecycle journey ([#1296](https://github.com/layervai/qurl-integrations/issues/1296)) ([265d79b](https://github.com/layervai/qurl-integrations/commit/265d79b9b8fcbfa3b6835271a318936e62796009))
+* **cli:** harden packaged lifecycle journey ([#1294](https://github.com/layervai/qurl-integrations/issues/1294)) ([dba10e9](https://github.com/layervai/qurl-integrations/commit/dba10e947eb3fc8b51ffd9a84f28069da134b796))
+* **cli:** permit fail-closed dark releases ([#1300](https://github.com/layervai/qurl-integrations/issues/1300)) ([2c728e1](https://github.com/layervai/qurl-integrations/commit/2c728e1d7f6cf6f8d147167d97ba907c0e2fecaa))
+* **cli:** preserve actionable lifecycle failures ([#1298](https://github.com/layervai/qurl-integrations/issues/1298)) ([ffd119b](https://github.com/layervai/qurl-integrations/commit/ffd119b018eeaf53cf957afa1e9b6dc7b6aeb59f))
+* **cli:** repair packaged customer journey ([#1293](https://github.com/layervai/qurl-integrations/issues/1293)) ([8787051](https://github.com/layervai/qurl-integrations/commit/8787051bd37bf245e00adba1c149d67674200060))
+* **cli:** use native UDP for Connector sessions ([#1308](https://github.com/layervai/qurl-integrations/issues/1308)) ([bb67fac](https://github.com/layervai/qurl-integrations/commit/bb67fac42dbc66d8780e2de317e9f108b25df601))
+* **cli:** stabilize packaged CRID customer journey ([#1297](https://github.com/layervai/qurl-integrations/issues/1297)) ([db24f49](https://github.com/layervai/qurl-integrations/commit/db24f494a38d6bd4689a5e4dbbfd65f15cb9f66f))
+
 ## [2.0.3](https://github.com/layervai/qurl-integrations/compare/v2.0.2...v2.0.3) (2026-08-26)
 
 
