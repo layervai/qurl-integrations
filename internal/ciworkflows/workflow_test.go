@@ -1455,7 +1455,7 @@ fi
 exit 2
 `
 		for name, contents := range map[string]string{"git": gitStub, "gh": ghStub} {
-			if err := os.WriteFile(filepath.Join(binDir, name), []byte(contents), 0o700); err != nil {
+			if err := os.WriteFile(filepath.Join(binDir, name), []byte(contents), 0o700); err != nil { //nolint:gosec // Test-owned command stubs must be executable and live under t.TempDir.
 				t.Fatalf("write %s stub: %v", name, err)
 			}
 		}
@@ -1492,7 +1492,7 @@ exit 2
 			t.Fatalf("execute workflow step with draft=%t: %v\n%s", draft, err, output)
 		}
 		read := func(path string) string {
-			contents, err := os.ReadFile(path)
+			contents, err := os.ReadFile(path) //nolint:gosec // Callers pass only test-owned paths created under t.TempDir above.
 			if err != nil {
 				t.Fatalf("read %s: %v", filepath.Base(path), err)
 			}
