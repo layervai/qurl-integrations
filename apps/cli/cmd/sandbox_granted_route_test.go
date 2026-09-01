@@ -175,9 +175,9 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 	if r == nil {
 		return 0, errSandboxGrantedRouteConfiguration
 	}
-	// Keep this validator independent from Downloader's grant-scoped client.
-	// Sharing that implementation would let one containment defect make both
-	// the product and this sandbox check agree.
+	// Keep this redirect-policy implementation independent from Downloader's
+	// grant-scoped client. The exact-origin predicate is shared intentionally
+	// and pinned separately by consume's origin table tests.
 	// This probe validates a qv2 Connector grant, not Downloader's direct-URL
 	// mode. A missing authorizer means the protected route was not granted.
 	if r.authorize == nil {

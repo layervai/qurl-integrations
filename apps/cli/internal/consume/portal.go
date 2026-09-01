@@ -91,10 +91,10 @@ var (
 	ErrAccessBusy = errors.New(MsgAccessBusy)
 )
 
-// AccessOpener turns a verified link into the reachable content URL by
-// asking the qURL platform for access. The zero value works; LookupEnv is
-// the CLI's injected environment, so hermetic tests never read the process
-// environment.
+// AccessOpener turns a verified link into a reachable, authorized content
+// grant by asking the qURL platform for access. The zero value works;
+// LookupEnv is the CLI's injected environment, so hermetic tests never read
+// the process environment.
 type AccessOpener struct {
 	// LookupEnv resolves QURL_DEPLOYMENT; nil skips the override and uses
 	// the SDK's shipped deployment resolution.
@@ -112,20 +112,10 @@ type AccessGrant struct {
 	AuthorizeContentRequest func(*http.Request) error
 }
 
-// Open verifies link, asks the platform for access, and returns the granted
-// content URL. Every failure is mapped to a customer-language sentinel; a
-// link the platform cannot serve headlessly fails loudly here and nothing
-// is ever downloaded in its place.
-func (o *AccessOpener) Open(ctx context.Context, link string) (string, error) {
-	grant, err := o.Grant(ctx, link)
-	if err != nil {
-		return "", err
-	}
-	return grant.ContentURL, nil
-}
-
-// Grant is Open with the safe lifetime metadata retained for callers that
-// must prove the access session remains valid across a bounded operation.
+// Grant verifies link, asks the platform for access, and returns the granted
+// URL with its request authorizer and safe lifetime metadata. Every failure
+// is mapped to a customer-language sentinel; a link the platform cannot serve
+// headlessly fails loudly here and nothing is downloaded in its place.
 func (o *AccessOpener) Grant(ctx context.Context, link string) (AccessGrant, error) {
 	handle, err := o.enter(ctx, link)
 	if err != nil {
@@ -142,6 +132,9 @@ func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
 	if err != nil {
 		return AccessGrant{}, err
 	}
+	// This is an SDK method value, not an optional function field. It is
+	// non-nil for this non-nil handle; an empty or invalid handle fails closed
+	// when the method validates the first request.
 	return AccessGrant{
 		ContentURL: contentURL, OpenSeconds: handle.OpenSeconds,
 		AuthorizeContentRequest: handle.AuthorizeContentRequest,

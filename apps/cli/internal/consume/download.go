@@ -31,8 +31,9 @@ const responseHeaderTimeout = 30 * time.Second
 const maxDownloadRedirects = 10
 
 // TODO(upstream-contract): grantSessionCookie mirrors the cookie name set by
-// qurl-go ResourceHandle.AuthorizeContentRequest. If the SDK changes the
-// credential name or shape, update the redirect stripping contract here.
+// qurl-go ResourceHandle.AuthorizeContentRequest. Downloader's header snapshot
+// is the full containment boundary; this name remains only for the independent
+// defense in NewHTTPClient and its focused regression test.
 const grantSessionCookie = "qurl_vsession"
 
 const (
@@ -55,15 +56,17 @@ type DownloadTarget struct {
 	URL        string
 	ValidUntil time.Time
 	// Authorize applies an opaque per-grant application credential to the exact
-	// request origin. A nil function is a direct URL with no extra authority.
+	// HTTPS request origin. A nil function is a direct URL with no extra
+	// authority.
 	Authorize func(*http.Request) error
 }
 
 // NewHTTPClient builds the download client: the default transport with a
 // response-header bound and no overall timeout. It follows redirects, but
-// removes grant credentials before each redirect so the host-scoped application
-// bearer can never cross an origin boundary. Downloader re-authorizes a
-// same-origin redirect after this removal. The qURL API key is never added.
+// removes known grant credentials before each redirect as defense in depth.
+// Downloader provides the full credential-shape-independent boundary: it
+// restores a pre-authorization header snapshot, then re-authorizes only an
+// exact same-origin redirect. The qURL API key is never added.
 func NewHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout

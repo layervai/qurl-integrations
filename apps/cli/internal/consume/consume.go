@@ -16,12 +16,13 @@
 // delivered. The browser path carries the full link, fragment included, because
 // the in-browser page is exactly what a browser needs.
 //
-// Nothing here talks to the qURL API and nothing here carries the API
-// credential: the download client is a plain HTTP client, so the bearer key
-// can never leak to the link host. Every link this package acts on has
-// already passed the CLI's CRID verification (cmd.verifyResolved), and the
-// re-resolve a mid-download retry performs goes through the same verifying
-// closure — the platform access request included.
+// Nothing here carries the qURL API key. An access-granted download does carry
+// one opaque, short-lived application bearer, but the Downloader applies it
+// only to the exact granted HTTPS origin and removes it before any cross-origin
+// redirect. Every link this package acts on has already passed the CLI's CRID
+// verification (cmd.verifyResolved), and the re-resolve a mid-download retry
+// performs goes through the same verifying closure — the platform access
+// request included.
 package consume
 
 import "errors"
