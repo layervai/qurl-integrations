@@ -82,11 +82,9 @@ type runOpts struct {
 	// browser is the injected launcher recorder; nil means a fresh recorder
 	// (pass one to assert on what was — or was not — opened).
 	browser *fakeBrowser
-	// enterPortal is the injected platform access opener; nil means a
-	// refusing fake, so no hermetic test can ever send a real access
-	// request (the clisandbox journey uses the production wiring via
-	// realOpener instead).
-	enterPortal      func(ctx context.Context, link string) (string, error)
+	// enterPortalGrant is the injected platform access opener; nil means a
+	// refusing fake, so no hermetic test can ever send a real access request
+	// (the clisandbox journey uses the production wiring via realOpener).
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 	// realOpener keeps the production access opener in place instead of the
 	// refusing fake. Only the clisandbox-tagged live suite sets it.
@@ -203,17 +201,16 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		}
 		g.openBrowser = browser.open
 		switch {
-		case o.enterPortal != nil:
-			g.enterPortal = o.enterPortal
+		case o.enterPortalGrant != nil:
+			g.enterPortalGrant = o.enterPortalGrant
 		case o.realOpener:
 			// nil is the production default: newRoot wires the real
 			// consume.AccessOpener over this invocation's lookupEnv.
 		default:
-			g.enterPortal = func(_ context.Context, link string) (string, error) {
-				return "", fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
+			g.enterPortalGrant = func(_ context.Context, link string) (consume.AccessGrant, error) {
+				return consume.AccessGrant{}, fmt.Errorf("test invoked the platform access opener without injecting one (link %d bytes)", len(link))
 			}
 		}
-		g.enterPortalGrant = o.enterPortalGrant
 		switch {
 		case o.sleeps != nil:
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }

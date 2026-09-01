@@ -61,14 +61,10 @@ type globalOpts struct {
 	// openBrowser launches the user's browser at an already-verified link;
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
-	// enterPortal asks the qURL platform for direct access to an
-	// already-verified link and returns the granted content URL for
-	// download; production wiring is consume.AccessOpener over the SDK
-	// opener. Tests always inject (the harness refuses by default), so no
-	// test ever sends a real access request.
-	enterPortal func(ctx context.Context, link string) (string, error)
-	// enterPortalGrant retains the acknowledged access lifetime for downloads
-	// that must distinguish propagation from true expiry.
+	// enterPortalGrant asks the qURL platform for direct access to an
+	// already-verified link and retains both its application authorization and
+	// acknowledged lifetime. Tests always inject (the harness refuses by
+	// default), so no hermetic test sends a real access request.
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
 
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
@@ -263,9 +259,8 @@ func (o *globalOpts) applyDefaults() {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
 		o.openBrowser = launcher.Open
 	}
-	if o.enterPortal == nil {
+	if o.enterPortalGrant == nil {
 		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
-		o.enterPortal = opener.Open
 		o.enterPortalGrant = opener.Grant
 	}
 	if o.redirectFRPLogs == nil {

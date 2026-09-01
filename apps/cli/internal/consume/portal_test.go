@@ -104,25 +104,25 @@ func envMap(env map[string]string) func(string) (string, bool) {
 	}
 }
 
-// TestOpenWithoutSettingsRefusesConfigured pins the fail-closed default:
+// TestGrantWithoutSettingsRefusesConfigured pins the fail-closed default:
 // with no QURL_DEPLOYMENT in the injected environment and the SDK's shipped
-// deployment empty, Open refuses with the configuration sentinel before any
+// deployment empty, Grant refuses with the configuration sentinel before any
 // network I/O. The process variable is cleared so a developer's real
 // QURL_DEPLOYMENT can never leak into the hermetic run through the SDK's
 // own fallback.
-func TestOpenWithoutSettingsRefusesConfigured(t *testing.T) {
+func TestGrantWithoutSettingsRefusesConfigured(t *testing.T) {
 	t.Setenv(qurl.EnvDeploymentPath, "")
 	opener := &AccessOpener{LookupEnv: envMap(nil)}
-	_, err := opener.Open(context.Background(), portalLink)
+	_, err := opener.Grant(context.Background(), portalLink)
 	if !errors.Is(err, ErrAccessNotConfigured) {
 		t.Fatalf("err = %v, want ErrAccessNotConfigured", err)
 	}
 }
 
-// TestOpenClassifiesSettingsFaults pins the configuration family: an
+// TestGrantClassifiesSettingsFaults pins the configuration family: an
 // unreadable, malformed, or incomplete settings file refuses with
 // ErrAccessNotConfigured, never a raw SDK error.
-func TestOpenClassifiesSettingsFaults(t *testing.T) {
+func TestGrantClassifiesSettingsFaults(t *testing.T) {
 	t.Parallel()
 	signer, err := qurl.GenerateLocalSigner("kid-settings-faults")
 	if err != nil {
@@ -155,7 +155,7 @@ func TestOpenClassifiesSettingsFaults(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			opener := &AccessOpener{LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: path})}
-			_, err := opener.Open(context.Background(), portalLink)
+			_, err := opener.Grant(context.Background(), portalLink)
 			if !errors.Is(err, ErrAccessNotConfigured) {
 				t.Fatalf("%s: err = %v, want ErrAccessNotConfigured", name, err)
 			}
@@ -163,29 +163,29 @@ func TestOpenClassifiesSettingsFaults(t *testing.T) {
 	}
 }
 
-// TestOpenDiscardsLinkFailingLocalCheck pins the verification family: under
+// TestGrantDiscardsLinkFailingLocalCheck pins the verification family: under
 // valid settings, a link whose credential parts don't decode is discarded
 // with the fail-closed verification sentinel — offline, nothing fetched.
-func TestOpenDiscardsLinkFailingLocalCheck(t *testing.T) {
+func TestGrantDiscardsLinkFailingLocalCheck(t *testing.T) {
 	path := testDeploymentJSON(t, "kid-local-check")
 	opener := &AccessOpener{LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: path})}
 	for name, link := range map[string]string{
 		"undecodable parts": portalLink,
 		"wrong part count":  "https://qurl.link/#qv2t1.1.1.1.onlyone",
 	} {
-		if _, err := opener.Open(context.Background(), link); !errors.Is(err, ErrLinkVerification) {
+		if _, err := opener.Grant(context.Background(), link); !errors.Is(err, ErrLinkVerification) {
 			t.Errorf("%s: err = %v, want ErrLinkVerification", name, err)
 		}
 	}
 }
 
-// TestOpenAcceptsPartialSettingsShapes pins two conversion behaviors that
+// TestGrantAcceptsPartialSettingsShapes pins two conversion behaviors that
 // must NOT refuse: an allowlist mixing blanks with a real host keeps the
 // real host, and a deployment whose only transport is a direct endpoint
 // catalog is a usable configuration. Both fixtures then reach the local
 // link check and are discarded there — proving the settings conversion
 // itself succeeded, still offline.
-func TestOpenAcceptsPartialSettingsShapes(t *testing.T) {
+func TestGrantAcceptsPartialSettingsShapes(t *testing.T) {
 	t.Parallel()
 	signer, err := qurl.GenerateLocalSigner("kid-partial-shapes")
 	if err != nil {
@@ -209,7 +209,7 @@ func TestOpenAcceptsPartialSettingsShapes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			opener := &AccessOpener{LookupEnv: envMap(map[string]string{qurl.EnvDeploymentPath: path})}
-			_, err := opener.Open(context.Background(), portalLink)
+			_, err := opener.Grant(context.Background(), portalLink)
 			if !errors.Is(err, ErrLinkVerification) {
 				t.Fatalf("%s: err = %v, want ErrLinkVerification (settings usable, link discarded locally)", name, err)
 			}
@@ -219,7 +219,7 @@ func TestOpenAcceptsPartialSettingsShapes(t *testing.T) {
 
 // TestGrantedContentURL pins the granted-URL guard: only a web URL is ever
 // handed to the downloader; anything else is the service outside its
-// contract. This is the one Open branch past a successful access grant, so
+// contract. This is the one Grant branch past a successful access grant, so
 // it is tested directly — the grant itself needs a live platform.
 func TestGrantedContentURL(t *testing.T) {
 	t.Parallel()
@@ -227,12 +227,16 @@ func TestGrantedContentURL(t *testing.T) {
 		raw string
 		ok  bool
 	}{
-		"https":        {"https://origin.qurl.link/content", true},
-		"http":         {"http://127.0.0.1:8080/content", true},
-		"file scheme":  {"file:///etc/passwd", false},
-		"no scheme":    {"origin.qurl.link/content", false},
-		"unparseable":  {"\x00https://origin/content", false},
-		"empty string": {"", false},
+		"https":           {"https://origin.qurl.link/content", true},
+		"uppercase https": {"HTTPS://origin.qurl.link/content", true},
+		"http":            {"http://127.0.0.1:8080/content", false},
+		"missing host":    {"https:///content", false},
+		"user info":       {"https://user@origin.qurl.link/content", false},
+		"bad port":        {"https://origin.qurl.link:bad/content", false},
+		"file scheme":     {"file:///etc/passwd", false},
+		"no scheme":       {"origin.qurl.link/content", false},
+		"unparseable":     {"\x00https://origin/content", false},
+		"empty string":    {"", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -258,6 +262,9 @@ func TestAccessGrantRetainsServerLifetime(t *testing.T) {
 	})
 	if err != nil || grant.ContentURL != "https://origin.qurl.link/content" || grant.OpenSeconds != 300 {
 		t.Fatalf("access grant = URL %q, lifetime %d, error %v", grant.ContentURL, grant.OpenSeconds, err)
+	}
+	if grant.AuthorizeContentRequest == nil {
+		t.Fatal("access grant dropped the SDK request authorizer")
 	}
 	if _, err := accessGrantFromHandle(nil); !errors.Is(err, ErrUnopenableLink) {
 		t.Fatalf("nil access handle error = %v, want ErrUnopenableLink", err)

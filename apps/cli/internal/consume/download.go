@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,6 +28,14 @@ const partSuffix = ".part"
 // cancellation) is the user's abort.
 const responseHeaderTimeout = 30 * time.Second
 
+const maxDownloadRedirects = 10
+
+// TODO(upstream-contract): grantSessionCookie mirrors the cookie name set by
+// qurl-go ResourceHandle.AuthorizeContentRequest. Downloader's header snapshot
+// is the full containment boundary; this name remains only for the independent
+// defense in NewHTTPClient and its focused regression test.
+const grantSessionCookie = "qurl_vsession"
+
 const (
 	grantPropagationWindow      = 2 * time.Second
 	grantPropagationFirstDelay  = 100 * time.Millisecond
@@ -32,7 +43,11 @@ const (
 	grantPropagationMaxAttempts = 5
 )
 
-var errGrantPropagationPending = errors.New("grant propagation remained pending")
+var (
+	errGrantPropagationPending       = errors.New("grant propagation remained pending")
+	errDownloadRedirectLimit         = fmt.Errorf("download stopped after %d redirects", maxDownloadRedirects)
+	errDownloadRedirectAuthorization = errors.New("download redirect authorization failed")
+)
 
 // DownloadTarget is a freshly verified URL and, for an acknowledged qURL
 // access grant, the conservative instant through which that grant remains
@@ -40,16 +55,96 @@ var errGrantPropagationPending = errors.New("grant propagation remained pending"
 type DownloadTarget struct {
 	URL        string
 	ValidUntil time.Time
+	// Authorize applies an opaque per-grant application credential to the exact
+	// HTTPS request origin. A nil function is a direct URL with no extra
+	// authority.
+	Authorize func(*http.Request) error
 }
 
 // NewHTTPClient builds the download client: the default transport with a
-// response-header bound, following redirects (a resolved link may bounce to
-// storage). It carries no credentials — the qURL API key must never reach
-// the link host — and no overall timeout.
+// response-header bound and no overall timeout. It follows redirects, but
+// removes known grant credentials before each redirect as defense in depth.
+// Downloader provides the full credential-shape-independent boundary: it
+// restores a pre-authorization header snapshot, then re-authorizes only an
+// exact same-origin redirect. The qURL API key is never added.
 func NewHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
-	return &http.Client{Transport: transport}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := checkDownloadRedirectLimit(via); err != nil {
+				return err
+			}
+			stripGrantCredentials(req)
+			return nil
+		},
+	}
+}
+
+func checkDownloadRedirectLimit(via []*http.Request) error {
+	if len(via) >= maxDownloadRedirects {
+		return errDownloadRedirectLimit
+	}
+	return nil
+}
+
+func stripCookie(req *http.Request, name string) {
+	if req == nil {
+		return
+	}
+	cookies := req.Cookies()
+	req.Header.Del("Cookie")
+	for _, cookie := range cookies {
+		if cookie.Name != name {
+			req.AddCookie(cookie)
+		}
+	}
+}
+
+func stripGrantCredentials(req *http.Request) {
+	if req == nil {
+		return
+	}
+	stripCookie(req, grantSessionCookie)
+	// The current SDK uses only the cookie. Remove standard credential headers
+	// as defense in depth if that upstream contract changes before this mirror.
+	req.Header.Del("Authorization")
+	req.Header.Del("Proxy-Authorization")
+}
+
+// SameHTTPOrigin reports whether two URLs have the same normalized web origin.
+// It fails closed for malformed URLs, user info, and non-HTTP schemes.
+func SameHTTPOrigin(left, right *url.URL) bool {
+	leftScheme, leftHost, leftPort, leftOK := normalizedHTTPOrigin(left)
+	rightScheme, rightHost, rightPort, rightOK := normalizedHTTPOrigin(right)
+	return leftOK && rightOK && leftScheme == rightScheme && leftHost == rightHost && leftPort == rightPort
+}
+
+func normalizedHTTPOrigin(u *url.URL) (scheme, host, port string, ok bool) {
+	if u == nil || u.User != nil {
+		return "", "", "", false
+	}
+	scheme = strings.ToLower(u.Scheme)
+	host = strings.ToLower(u.Hostname())
+	if host == "" || (scheme != webSchemeHTTP && scheme != webSchemeHTTPS) {
+		return "", "", "", false
+	}
+	port = u.Port()
+	if port == "" {
+		if scheme == webSchemeHTTPS {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	} else {
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return "", "", "", false
+		}
+		port = strconv.FormatUint(portNumber, 10)
+	}
+	return scheme, host, port, true
 }
 
 // Downloader fetches the bytes behind freshly minted, already-verified
@@ -59,7 +154,8 @@ func NewHTTPClient() *http.Client {
 type Downloader struct {
 	// Client performs the GETs; nil means NewHTTPClient's default, built on
 	// first use and kept on the Downloader so every request of one download
-	// — the expiry retry included — shares one connection pool.
+	// — the expiry retry included — shares one connection pool. A grant-bearing
+	// target requires *http.Client so Downloader can enforce redirect containment.
 	Client Doer
 	// Mint resolves a lifetime-free URL whose plain GET serves the content.
 	Mint func(ctx context.Context) (string, error)
@@ -230,7 +326,7 @@ func (d *Downloader) retryLiveGrant(ctx context.Context, target DownloadTarget) 
 		if !d.currentTime().Before(deadline) {
 			return nil, errGrantPropagationPending
 		}
-		resp, err := d.getTarget(ctx, target.URL)
+		resp, err := d.getTarget(ctx, target)
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +372,7 @@ func (d *Downloader) getFresh(ctx context.Context) (DownloadTarget, *http.Respon
 	if err != nil {
 		return DownloadTarget{}, nil, err
 	}
-	resp, err := d.getTarget(ctx, target.URL)
+	resp, err := d.getTarget(ctx, target)
 	return target, resp, err
 }
 
@@ -288,8 +384,8 @@ func (d *Downloader) mintTarget(ctx context.Context) (DownloadTarget, error) {
 	return DownloadTarget{URL: link}, err
 }
 
-func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, http.NoBody)
+func (d *Downloader) getTarget(ctx context.Context, target DownloadTarget) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, http.NoBody)
 	if err != nil {
 		// URL parsing errors can echo link. Granted URLs carry short-lived
 		// authority, so keep the same fixed capability boundary as Do below.
@@ -302,12 +398,70 @@ func (d *Downloader) getTarget(ctx context.Context, link string) (*http.Response
 		// second dial.
 		d.Client = NewHTTPClient()
 	}
-	resp, err := d.Client.Do(req)
+	client := d.Client
+	if target.Authorize != nil {
+		httpClient, ok := client.(*http.Client)
+		if !ok {
+			return nil, fmt.Errorf("%w: could not secure the content request", ErrLinkFetch)
+		}
+		// net/http applies a Jar after CheckRedirect. A grant-bearing request
+		// therefore cannot use one: a Jar could restore cookies after this code
+		// removed the SDK credential from a cross-origin redirect.
+		if httpClient.Jar != nil {
+			return nil, fmt.Errorf("%w: could not secure the content request", ErrLinkFetch)
+		}
+		// Save the request headers before the opaque SDK authorizer runs. Redirects
+		// start from this unprivileged snapshot, so containment does not depend on
+		// the current credential name or header shape.
+		unprivilegedHeaders := req.Header.Clone()
+		if err := target.Authorize(req); err != nil {
+			// The authorizer can hold an application bearer. Keep both its value and
+			// its underlying diagnostic out of customer output.
+			return nil, fmt.Errorf("%w: could not authorize the content request", ErrLinkFetch)
+		}
+		// Keep the shared transport and connection pool, but make redirect
+		// authorization specific to this short-lived grant. Restore the headers
+		// from before authorization, let the caller's redirect policy run without
+		// that bearer, then re-authorize only the exact granted origin.
+		// Cross-origin storage redirects still work.
+		requestClient := *httpClient
+		priorCheckRedirect := requestClient.CheckRedirect
+		grantedURL := req.URL
+		requestClient.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
+			if err := checkDownloadRedirectLimit(via); err != nil {
+				return err
+			}
+			// #nosec G119 -- this is the header snapshot captured before the
+			// grant authorizer added any credential. This also discards the
+			// automatically generated Referer. The cross-origin leak test covers
+			// cookie, standard authorization, and unknown header shapes.
+			redirectReq.Header = unprivilegedHeaders.Clone()
+			if priorCheckRedirect != nil {
+				if err := priorCheckRedirect(redirectReq, via); err != nil {
+					return err
+				}
+			}
+			if SameHTTPOrigin(grantedURL, redirectReq.URL) {
+				if err := target.Authorize(redirectReq); err != nil {
+					return errDownloadRedirectAuthorization
+				}
+			}
+			return nil
+		}
+		client = &requestClient
+	}
+	resp, err := client.Do(req)
 	if err == nil {
 		return resp, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, fmt.Errorf("download canceled: %w", ctxErr)
+	}
+	if errors.Is(err, errDownloadRedirectLimit) {
+		return nil, fmt.Errorf("%w: %w", ErrLinkUnavailable, errDownloadRedirectLimit)
+	}
+	if errors.Is(err, errDownloadRedirectAuthorization) {
+		return nil, fmt.Errorf("%w: could not authorize the content request", ErrLinkFetch)
 	}
 	// net/http transport errors normally include req.URL. A granted content
 	// URL is short-lived authority, so never retain that error text or chain.

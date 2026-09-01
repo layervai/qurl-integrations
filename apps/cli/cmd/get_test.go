@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
@@ -465,9 +466,13 @@ func TestGetDownloadFetchesGrantedContentNotPortalPage(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			granted = append(granted, got)
-			return srv.URL + apitest.DownloadPath, nil
+			return consume.AccessGrant{
+				ContentURL:              srv.URL + apitest.DownloadPath,
+				OpenSeconds:             300,
+				AuthorizeContentRequest: func(*http.Request) error { return nil },
+			}, nil
 		},
 	})
 	if res.code != 0 {
@@ -497,8 +502,8 @@ func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(context.Context, string) (string, error) {
-			return "", consume.ErrAccessNotConfigured
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
+			return consume.AccessGrant{}, consume.ErrAccessNotConfigured
 		},
 	})
 	if res.code != 3 {
@@ -526,9 +531,9 @@ func TestGetRetiredQv2LinkFailsThroughAccessFlow(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(_ context.Context, got string) (string, error) {
+		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			opened = append(opened, got)
-			return "", consume.ErrLinkVerification
+			return consume.AccessGrant{}, consume.ErrLinkVerification
 		},
 	})
 	if res.code != 12 {
@@ -553,9 +558,9 @@ func TestGetDirectLinkDownloadsWithoutAccessRequest(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
-		enterPortal: func(context.Context, string) (string, error) {
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
 			calls++
-			return "", errors.New("the direct path must not request access")
+			return consume.AccessGrant{}, errors.New("the direct path must not request access")
 		},
 	})
 	if res.code != 0 {
@@ -574,12 +579,19 @@ func TestGetLiveGrantRetriesWithoutSecondAccessRequest(t *testing.T) {
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 	dest := filepath.Join(t.TempDir(), "out.bin")
 	var granted []string
+	var authorized atomic.Int32
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", srv.URL, "get", srv.Key.CRID, "--file", dest},
 		enterPortalGrant: func(_ context.Context, got string) (consume.AccessGrant, error) {
 			granted = append(granted, got)
-			return consume.AccessGrant{ContentURL: srv.URL + apitest.DownloadPath, OpenSeconds: 300}, nil
+			return consume.AccessGrant{
+				ContentURL: srv.URL + apitest.DownloadPath, OpenSeconds: 300,
+				AuthorizeContentRequest: func(*http.Request) error {
+					authorized.Add(1)
+					return nil
+				},
+			}, nil
 		},
 	})
 	if res.code != 0 {
@@ -587,6 +599,9 @@ func TestGetLiveGrantRetriesWithoutSecondAccessRequest(t *testing.T) {
 	}
 	if len(granted) != 1 || granted[0] != link {
 		t.Fatalf("access requests = %q, want the minted link exactly once", granted)
+	}
+	if authorized.Load() != 2 {
+		t.Fatalf("grant authorizer calls = %d, want 2 (initial request and same-grant retry)", authorized.Load())
 	}
 	if got := readTestFile(t, dest); string(got) != apitest.DefaultDownloadPayload {
 		t.Errorf("downloaded file = %q, want the granted content payload", got)
@@ -673,9 +688,9 @@ func TestGetBrowserPathNeverRequestsAccess(t *testing.T) {
 		args:    []string{"--endpoint", srv.URL, "get", srv.Key.CRID},
 		tty:     true,
 		browser: browser,
-		enterPortal: func(context.Context, string) (string, error) {
+		enterPortalGrant: func(context.Context, string) (consume.AccessGrant, error) {
 			calls++
-			return "", errors.New("browser mode must not request access")
+			return consume.AccessGrant{}, errors.New("browser mode must not request access")
 		},
 	})
 	if res.code != 0 {
