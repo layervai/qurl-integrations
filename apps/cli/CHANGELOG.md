@@ -17,8 +17,7 @@
 * **cli:** permit fail-closed dark releases ([#1300](https://github.com/layervai/qurl-integrations/issues/1300)) ([2c728e1](https://github.com/layervai/qurl-integrations/commit/2c728e1d7f6cf6f8d147167d97ba907c0e2fecaa))
 * **cli:** preserve actionable lifecycle failures ([#1298](https://github.com/layervai/qurl-integrations/issues/1298)) ([ffd119b](https://github.com/layervai/qurl-integrations/commit/ffd119b018eeaf53cf957afa1e9b6dc7b6aeb59f))
 * **cli:** repair packaged customer journey ([#1293](https://github.com/layervai/qurl-integrations/issues/1293)) ([8787051](https://github.com/layervai/qurl-integrations/commit/8787051bd37bf245e00adba1c149d67674200060))
-* **cli:** restore native UDP Connector sessions ([#1308](https://github.com/layervai/qurl-integrations/issues/1308)) ([bb67fac](https://github.com/layervai/qurl-integrations/commit/bb67fac42dbc66d8780e2de317e9f108b25df601))
-* **cli:** route registered sessions through relay ([#1304](https://github.com/layervai/qurl-integrations/issues/1304)) ([56b6fde](https://github.com/layervai/qurl-integrations/commit/56b6fdeb78cbe7a30dc487adc22c5c3be2573a38))
+* **cli:** use native UDP for Connector sessions ([#1308](https://github.com/layervai/qurl-integrations/issues/1308)) ([bb67fac](https://github.com/layervai/qurl-integrations/commit/bb67fac42dbc66d8780e2de317e9f108b25df601))
 * **cli:** stabilize packaged CRID customer journey ([#1297](https://github.com/layervai/qurl-integrations/issues/1297)) ([db24f49](https://github.com/layervai/qurl-integrations/commit/db24f494a38d6bd4689a5e4dbbfd65f15cb9f66f))
 
 ## [2.0.3](https://github.com/layervai/qurl-integrations/compare/v2.0.2...v2.0.3) (2026-08-26)
