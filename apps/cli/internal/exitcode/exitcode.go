@@ -285,6 +285,8 @@ func connectorSentinelCode(err error) (int, bool) { //nolint:gocyclo // Keep the
 	switch {
 	case errors.Is(err, connectordaemon.ErrAlreadyRunning):
 		return Conflict, true
+	case errors.Is(err, connectordaemon.ErrDirectEgressRequired):
+		return Config, true
 	case errors.Is(err, connectordaemon.ErrResourceGone):
 		return NotFound, true
 	case errors.Is(err, state.ErrLocalShareOwnerConflict):

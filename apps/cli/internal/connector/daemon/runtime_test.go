@@ -61,7 +61,7 @@ func TestDefaultFRPCommonCannotUseEnvironmentProxy(t *testing.T) {
 		t.Fatal("test no longer exercises FRP's environment-proxy default")
 	}
 	common, err := DefaultFRPCommon(1, 1)
-	if common != nil || err == nil || !strings.Contains(err.Error(), "unset lowercase http_proxy") {
+	if common != nil || !errors.Is(err, ErrDirectEgressRequired) {
 		t.Fatalf("proxy configuration = %#v, %v; want actionable rejection", common, err)
 	}
 	for _, forbidden := range []string{proxy, "secret", "private-proxy.example", "user:"} {
@@ -562,15 +562,19 @@ func TestClassifyShareFailureTreatsSessionLeaseMarginAsAssignment(t *testing.T) 
 	}
 }
 
-func TestClassifyShareFailureReportsSessionRelayFailuresAsNetwork(t *testing.T) {
-	for _, err := range []error{
-		qurlsessionrelay.ErrTransport,
-		qurlsessionrelay.ErrServerUnauthenticated,
-		qurl.ErrMalformedReply,
-	} {
-		category, code := classifyShareFailure(fmt.Errorf("admit registered session: %w", err))
-		if category != diagnosticFailureNetwork || code != "" {
-			t.Fatalf("classification=%q/%q, want network with no public code", category, code)
+func TestClassifyShareFailureDistinguishesSessionRelayTransportFromVerification(t *testing.T) {
+	tests := []struct {
+		err      error
+		category string
+	}{
+		{err: qurlsessionrelay.ErrTransport, category: diagnosticFailureNetwork},
+		{err: qurlsessionrelay.ErrServerUnauthenticated, category: diagnosticFailureVerification},
+		{err: qurl.ErrMalformedReply, category: diagnosticFailureVerification},
+	}
+	for _, test := range tests {
+		category, code := classifyShareFailure(fmt.Errorf("admit registered session: %w", test.err))
+		if category != test.category || code != "" {
+			t.Fatalf("classification=%q/%q, want %s with no public code", category, code, test.category)
 		}
 	}
 }

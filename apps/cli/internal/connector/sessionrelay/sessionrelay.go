@@ -47,7 +47,7 @@ func Resolve() (string, error) {
 // keeps packaged journey tests hermetic while production passes os.LookupEnv.
 func ResolveWithLookup(lookup func(string) (string, bool)) (string, error) {
 	if lookup == nil {
-		return "", errors.New("qURL Connector session relay environment is unavailable")
+		return "", fmt.Errorf("%w: session relay environment is unavailable", ErrConfig)
 	}
 	raw, set := lookup(EnvURL)
 	if !set {

@@ -22,6 +22,7 @@ import (
 	"github.com/layervai/qurl-go/crid"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
@@ -42,15 +43,17 @@ import (
 //	QURL_SANDBOX_QV2_ISSUER_KEY — the sandbox's link-signing identity as
 //	    "<kid>=<standard-base64 P-256 SPKI DER>" (a protected environment
 //	    secret).
-//	QURL_SANDBOX_QV2_RELAY_URL — the sandbox's platform access URL (a
-//	    protected environment secret).
+//	QURL_SANDBOX_QV2_RELAY_URL — the sandbox NHP HTTPS relay origin used by
+//	    both qv2 platform access and registered Connector session operations
+//	    (a protected environment secret).
 //	QURL_CLI_SANDBOX_FAILURE_API_KEY — a second one-time account key used
 //	    only by the controlled-failure child in the full lifecycle.
 //
-// The last two become a QURL_DEPLOYMENT settings file for the download
-// step: `get --file` opens fragment-credential links through the platform
-// access flow, which needs the deployment's trust settings. Their values —
-// like every minted link — never reach the log.
+// The issuer and relay values become a QURL_DEPLOYMENT settings file for the
+// download step: `get --file` opens fragment-credential links through the
+// platform access flow, which needs the deployment's trust settings. The same
+// relay origin is passed to the Connector session path. Their values — like
+// every minted link — never reach the log.
 //
 // Quota safety: each run publishes exactly ONE throwaway resource and always
 // reclaims it. The happy path ends in delete + idempotent re-delete, and a
@@ -121,6 +124,9 @@ func sandboxJourneyEnv(t *testing.T) map[string]string {
 			"protected input), and the protected QURL_SANDBOX_QV2_ISSUER_KEY / "+
 			"QURL_SANDBOX_QV2_RELAY_URL inputs the download step's deployment "+
 			"settings are built from.", missing)
+	}
+	if err := sessionrelay.Validate(relayURL); err != nil {
+		t.Fatal("QURL_SANDBOX_QV2_RELAY_URL must be one canonical lowercase HTTPS DNS origin with no credentials, path, query, fragment, or default port; refusing to print the malformed value (CI logs are public)")
 	}
 	return map[string]string{
 		"QURL_API_KEY":                     key,

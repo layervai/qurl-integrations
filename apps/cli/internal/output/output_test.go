@@ -19,6 +19,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/sessionrelay"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -743,6 +744,23 @@ func TestConnectorConnectionConfigRenderingHidesTopology(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConnectorDirectEgressRenderingIsActionableAndRedacted(t *testing.T) {
+	err := fmt.Errorf("%w: http://user:secret@private-proxy.example:8080", connectordaemon.ErrDirectEgressRequired)
+	var buf bytes.Buffer
+	RenderError(&buf, err, false)
+	got := buf.String()
+	for _, want := range []string{msgConnectorDirectEgress, hintConnectorDirectEgress} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("direct-egress rendering missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"secret", "private-proxy.example", "user:", ":8080"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("direct-egress rendering exposed %q:\n%s", forbidden, got)
+		}
 	}
 }
 

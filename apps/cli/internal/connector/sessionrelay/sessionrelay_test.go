@@ -74,6 +74,27 @@ func TestResolveWithLookupUsesInjectedEnvironmentOnly(t *testing.T) {
 	}
 }
 
+func TestResolveWithLookupRejectsNilLookupAsConfiguration(t *testing.T) {
+	_, err := ResolveWithLookup(nil)
+	if !errors.Is(err, ErrConfig) {
+		t.Fatalf("ResolveWithLookup(nil) error = %v, want ErrConfig", err)
+	}
+}
+
+func TestValidateAcceptsCanonicalCustomDeploymentOrigins(t *testing.T) {
+	for _, raw := range []string{
+		"https://relay.example.com",
+		"https://relay.example.com:8443",
+		"https://one.two.relay.example.com",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if err := Validate(raw); err != nil {
+				t.Fatalf("Validate(%q) error = %v", raw, err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsNonOriginAndRedactsValue(t *testing.T) {
 	tests := []string{
 		"http://relay.example.com",

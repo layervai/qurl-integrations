@@ -260,6 +260,10 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
+	// Build one immutable relay option and transport for the daemon lifetime.
+	// Native bootstrap can retry for a long time; rebuilding the option inside
+	// openFactory would leave each failed attempt's idle transport behind.
+	sessionOptions := nativeSessionOptions(sessionRelayURL)
 	openFactory := func(initCtx context.Context) (connectordaemon.SessionFactory, error) {
 		apiConfig := &qurlapi.Config{
 			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
@@ -269,7 +273,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			StateDir: stateDir, AgentID: connectorstate.ConfiguredAgentID(), Hub: hubBootstrap,
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
-			SessionOptions:    nativeSessionOptions(sessionRelayURL),
+			SessionOptions:    sessionOptions,
 			SessionOperations: sessionOperations,
 		}, common, apiConfig, verifyOwner)
 	}
@@ -370,11 +374,14 @@ func daemonSessionRelayURL(opts *globalOpts, override string) (string, error) {
 		return override, nil
 	}
 	if opts == nil || opts.resolveSessionRelay == nil {
-		return "", nil
+		return "", fmt.Errorf("%w: session relay resolver is unavailable", sessionrelay.ErrConfig)
 	}
 	relayURL, err := opts.resolveSessionRelay()
-	if err != nil || relayURL == "" {
-		return relayURL, err
+	if err != nil {
+		return "", err
+	}
+	if relayURL == "" {
+		return "", nil
 	}
 	if err := sessionrelay.Validate(relayURL); err != nil {
 		return "", err

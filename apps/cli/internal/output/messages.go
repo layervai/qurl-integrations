@@ -78,6 +78,10 @@ const (
 
 	hintConnectorConnectionConfig = "Hint: install or reinstall an official qURL release. For a custom deployment, use the release supplied by your qURL administrator."
 
+	msgConnectorDirectEgress = "qURL can't start local sharing while this process is configured to use an HTTP proxy."
+
+	hintConnectorDirectEgress = "Hint: unset the lowercase http_proxy environment variable for this command, then retry."
+
 	labelConnectorErrorCode = "Error code:"
 
 	msgConnectorSessionConfig  = "This Connector's saved account binding is missing or invalid, so it can't start."
@@ -272,6 +276,8 @@ func CustomerMessages() []string {
 		msgPublishFoundExisting,
 		msgConnectorConnectionConfig,
 		hintConnectorConnectionConfig,
+		msgConnectorDirectEgress,
+		hintConnectorDirectEgress,
 		labelConnectorErrorCode,
 		msgConnectorSessionConfig,
 		hintConnectorSessionConfig,

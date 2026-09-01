@@ -32,6 +32,7 @@ const (
 	diagnosticFailurePlatformDenied      = "platform_denied"
 	diagnosticFailureResourceUnavailable = "resource_unavailable"
 	diagnosticFailureUnknown             = "unknown"
+	diagnosticFailureVerification        = "verification"
 )
 
 // Registry is the durable desired-state surface consumed by the daemon.

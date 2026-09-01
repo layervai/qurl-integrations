@@ -87,6 +87,8 @@ root = pathlib.Path(sys.argv[1])
 head_sha = sys.argv[2]
 hub_key = sys.argv[3].encode("ascii")
 session_relay = sys.argv[4].encode("ascii")
+if not session_relay:
+    raise SystemExit("release session relay must not be empty")
 expected = {
     "qurl-linux-amd64": ("linux", "amd64"),
     "qurl-darwin-amd64": ("darwin", "amd64"),
@@ -99,9 +101,10 @@ if observed != set(expected):
 
 for name, (target_os, target_arch) in expected.items():
     path = root / name
-    if hub_key not in path.read_bytes():
+    data = path.read_bytes()
+    if hub_key not in data:
         raise SystemExit(f"{name} does not contain the selected release trust root")
-    if session_relay not in path.read_bytes():
+    if session_relay not in data:
         raise SystemExit(f"{name} does not contain the selected release session relay")
     result = subprocess.run(
         ["go", "version", "-m", "-json", str(path)],

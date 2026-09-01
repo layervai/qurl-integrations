@@ -214,7 +214,7 @@ func validDiagnosticCategory(category string) bool {
 	case "", diagnosticFailureAssignment, diagnosticFailureEnrollment, diagnosticFailureIdentity,
 		diagnosticFailureLocalState, diagnosticFailureNetwork, diagnosticFailurePeerTimeout,
 		diagnosticFailurePlatformDenied, diagnosticFailureResourceUnavailable,
-		diagnosticFailureUnknown:
+		diagnosticFailureUnknown, diagnosticFailureVerification:
 		return true
 	default:
 		return false

@@ -63,6 +63,7 @@ var cliSentinels = map[string]struct {
 	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},
 	"consume.ErrAccessBusy":                 {consume.ErrAccessBusy, Unavailable},
 	"daemon.ErrAlreadyRunning":              {connectordaemon.ErrAlreadyRunning, Conflict},
+	"daemon.ErrDirectEgressRequired":        {connectordaemon.ErrDirectEgressRequired, Config},
 	"daemon.ErrResourceGone":                {connectordaemon.ErrResourceGone, NotFound},
 	"state.ErrNoDefaultStateDir":            {state.ErrNoDefaultStateDir, Config},
 	"state.ErrLocalShareOwnerConflict":      {state.ErrLocalShareOwnerConflict, Conflict},
