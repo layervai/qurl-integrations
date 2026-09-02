@@ -6,7 +6,8 @@ set -euo pipefail
 IMG="${QURL_IMAGE:-}"
 REQUIRE_IMAGE="${QURL_RELEASE_IMAGE_REQUIRED:-false}"
 IFS=' ' read -r -a PLATFORMS <<<"${PLATFORM:-linux/amd64 linux/arm64}"
-SHARE_GOLDEN="${SHARE_GOLDEN:-$(dirname "$0")/golden/s3-website-share.yaml}"
+# Absolute: docker -v rejects relative host paths.
+SHARE_GOLDEN="${SHARE_GOLDEN:-$(cd "$(dirname "$0")" && pwd)/golden/s3-website-share.yaml}"
 
 fail() {
   printf 'FAIL qurl S3-origin image contract for %s (%s): %s\n' "${IMG:-unset}" "${platform:-n/a}" "$1" >&2
@@ -49,14 +50,18 @@ for platform in "${PLATFORMS[@]}"; do
     fail 'image failed to report its qurl version'
   fi
   case "$version_output" in
-    'qurl version '*) ;;
+    # Contains-match: a cold runner prefixes the merged output with pull progress.
+    *'qurl version '*) ;;
     *) output="$version_output"; fail 'image did not identify itself as qurl' ;;
   esac
 
   # A valid first-boot config reaches the credential gate without attempting
   # network enrollment. Unknown/old config fields would fail earlier with a
   # decoder error, so this exercises the released image's strict YAML surface.
+  # The image ships no writable /tmp for its non-root user; the rendered
+  # installs mount state, so give the gate a tmpfs for --state-dir.
   if output="$(docker run --rm --platform "$platform" \
+      --tmpfs /tmp:rw,nosuid,nodev \
       -v "$SHARE_GOLDEN:/etc/qurl/share.yaml:ro" \
       "$IMG" daemon run --state-dir /tmp/qurl-state \
       --headless-config /etc/qurl/share.yaml 2>&1)"; then
