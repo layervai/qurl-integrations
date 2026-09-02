@@ -741,6 +741,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			testKeyStatus:    client.StatusActive,
 			"kind":           client.CredentialKindEnrollmentToken,
 			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
@@ -900,6 +901,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 			testKeyStatus:    client.StatusActive,
 			"kind":           client.CredentialKindEnrollmentToken,
 			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
@@ -1590,6 +1592,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			testKeyStatus:    client.StatusActive,
 			"kind":           client.CredentialKindEnrollmentToken,
 			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
@@ -1771,6 +1774,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 					testKeyStatus:    client.StatusActive,
 					"kind":           client.CredentialKindEnrollmentToken,
 					"target":         client.CredentialTargetAgent,
+					"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
@@ -1844,6 +1848,7 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 					testKeyStatus:    client.StatusActive,
 					"kind":           client.CredentialKindEnrollmentToken,
 					"target":         client.CredentialTargetAgent,
+					"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
@@ -2476,6 +2481,7 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 			testKeyStatus:    client.StatusActive,
 			"kind":           client.CredentialKindEnrollmentToken,
 			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
@@ -3225,6 +3231,7 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 			testKeyAPIKey: "",
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3782,6 +3789,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 			testKeyAPIKey: "lv_live_bad'quote",
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3829,6 +3837,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3926,6 +3935,7 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 
@@ -4109,6 +4119,7 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -4177,6 +4188,7 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -4350,6 +4362,7 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	var revokeHits int
@@ -4431,6 +4444,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -4512,6 +4526,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -4587,6 +4602,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 			testKeyAPIKey: fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_retry_1", func(w http.ResponseWriter, _ *http.Request) {
@@ -4679,6 +4695,7 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 			testKeyAPIKey: testTunnelAPIKey,
 			"kind":        client.CredentialKindEnrollmentToken,
 			"target":      client.CredentialTargetAgent,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	var revokeHits int
@@ -4799,6 +4816,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 			testKeyAPIKey:    "lv_live_retry_bootstrap",
 			"kind":           client.CredentialKindEnrollmentToken,
 			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
@@ -4895,6 +4913,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 					testKeyAPIKey:    testTunnelAPIKey,
 					"kind":           client.CredentialKindEnrollmentToken,
 					"target":         client.CredentialTargetAgent,
+					"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
@@ -5274,9 +5293,19 @@ func TestCredentialConfirmsKindFirst(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "kind and target both confirmed",
-			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent},
+			name: "kind, target and bound claim confirmed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent, Claims: []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: testTunnelSlug}}},
 			want: true,
+		},
+		{
+			name: "claim dropped by the producer",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent},
+			want: false,
+		},
+		{
+			name: "claim bound to another connector",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetAgent, Claims: []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: "other"}}},
+			want: false,
 		},
 		{
 			name: "kind confirmed but producer still mints connector-target tokens",
@@ -5313,7 +5342,7 @@ func TestCredentialConfirmsKindFirst(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := credentialConfirmsKindFirst(tc.key); got != tc.want {
+			if got := credentialConfirmsKindFirst(tc.key, testTunnelSlug); got != tc.want {
 				t.Errorf("credentialConfirmsKindFirst(%+v) = %v, want %v", tc.key, got, tc.want)
 			}
 		})
@@ -5441,12 +5470,14 @@ func TestTunnelInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 func TestOwnerLookupFailureMessage(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		err  error
-		want string
+		name          string
+		err           error
+		want          string
+		wantRequestID string
 	}{
-		{name: "404 names the missing route", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "does not serve GET /v1/me yet"},
-		{name: "405 names the missing route", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "does not serve GET /v1/me yet"},
+		{name: "404 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "does not support Connector installs yet", wantRequestID: "req-404"},
+		{name: "405 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "does not support Connector installs yet"},
+		{name: "non API-key principal is permanent", err: fmt.Errorf("resolve account identity: %w", errNonAPIKeyPrincipal), want: "not an account API key"},
 		{name: "other API errors stay generic", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusBadRequest}), want: "Failed to resolve the qURL account owner"},
 		{name: "transport errors stay generic", err: errors.New("dial tcp: refused"), want: "Failed to resolve the qURL account owner."},
 	} {
@@ -5455,8 +5486,8 @@ func TestOwnerLookupFailureMessage(t *testing.T) {
 			if got := ownerLookupFailureMessage(tc.err); !strings.Contains(got, tc.want) {
 				t.Fatalf("message = %q, want containing %q", got, tc.want)
 			}
-			if tc.name == "404 names the missing route" && !strings.Contains(ownerLookupFailureMessage(tc.err), "req-404") {
-				t.Fatalf("404 message lost the request reference: %q", ownerLookupFailureMessage(tc.err))
+			if tc.wantRequestID != "" && !strings.Contains(ownerLookupFailureMessage(tc.err), tc.wantRequestID) {
+				t.Fatalf("message lost the request reference %q: %q", tc.wantRequestID, ownerLookupFailureMessage(tc.err))
 			}
 		})
 	}
@@ -5484,7 +5515,51 @@ func TestTunnelInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Failed to resolve the qURL account owner") || resourceHits != 0 || keyHits != 0 {
-		t.Fatalf("reply = %q, creates = %d, mints = %d; want owner-lookup copy and no mutation", async, resourceHits, keyHits)
+	if !strings.Contains(async, "not an account API key") || resourceHits != 0 || keyHits != 0 {
+		t.Fatalf("reply = %q, creates = %d, mints = %d; want the non-API-key copy and no mutation", async, resourceHits, keyHits)
+	}
+}
+
+// TestTunnelInstallRejectsWhenClaimNotEchoed pins that the kind-first gate
+// also confirms the resource binding: a producer that drops the connector
+// claim mints an unbound owner-scoped token, which is revoked, never DM'd.
+func TestTunnelInstallRejectsWhenClaimNotEchoed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits, meHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		meHits++
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID, "api_key": map[string]any{"key_id": "key_workspace"}})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelModalKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetAgent,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(async, kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("DM posts = %d, revokes = %d, reply = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, async)
+	}
+	if meHits != 1 {
+		t.Fatalf("GET /v1/me hits = %d, want exactly one owner lookup per install", meHits)
 	}
 }

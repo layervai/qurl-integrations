@@ -2491,15 +2491,18 @@ func TestMintBodiesCarryOnlyDeclaredFields(t *testing.T) {
 func TestMe(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		status  int
-		body    string
-		want    string
-		wantErr string
+		name      string
+		status    int
+		body      string
+		want      string
+		wantErr   string
+		wantNoKey bool
 	}{
 		{name: "owner resolved", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
 		{name: "padded owner id trimmed", status: http.StatusOK, body: `{"data":{"owner_id":" email|abc ","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
 		{name: "owner_id missing", status: http.StatusOK, body: `{"data":{"api_key":{"key_id":"key_1"}}}`, wantErr: "missing owner_id"},
+		{name: "empty body", status: http.StatusOK, body: ``, wantErr: ""},
+		{name: "empty api_key object is not a principal", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{}}}`, want: "email|abc", wantNoKey: true},
 		{name: "http error propagates", status: http.StatusInternalServerError, body: `{"error":{"code":"internal","message":"boom"}}`, wantErr: "500"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2514,6 +2517,12 @@ func TestMe(t *testing.T) {
 			}))
 			defer srv.Close()
 			got, err := New(srv.URL, "key").Me(context.Background())
+			if tc.name == "empty body" {
+				if err == nil {
+					t.Fatal("empty 200 body must not yield an identity")
+				}
+				return
+			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("Me error = %v, want containing %q", err, tc.wantErr)
@@ -2522,6 +2531,9 @@ func TestMe(t *testing.T) {
 			}
 			if err != nil || got.OwnerID != tc.want {
 				t.Fatalf("Me = %+v, %v; want owner %q", got, err, tc.want)
+			}
+			if tc.wantNoKey && got.APIKey != nil {
+				t.Fatalf("Me = %+v; an empty api_key object must not count as a principal", got)
 			}
 		})
 	}

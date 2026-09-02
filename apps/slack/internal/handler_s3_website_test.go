@@ -396,6 +396,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			"kind":            client.CredentialKindEnrollmentToken,
 			"target":          client.CredentialTargetAgent,
+			"claims":          []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -512,6 +513,7 @@ func TestS3WebsiteInstallDMFailureMissingScopeIncludesInstallHint(t *testing.T) 
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			"kind":            client.CredentialKindEnrollmentToken,
 			"target":          client.CredentialTargetAgent,
+			"claims":          []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -624,6 +626,7 @@ func TestS3WebsiteInstallInstructionsDeliveryFailureRevokesAndSendsDiscardNotice
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			"kind":            client.CredentialKindEnrollmentToken,
 			"target":          client.CredentialTargetAgent,
+			"claims":          []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -716,6 +719,7 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyPlaintextMissing(t *testing.T) {
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			"kind":            client.CredentialKindEnrollmentToken,
 			"target":          client.CredentialTargetAgent,
+			"claims":          []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -773,6 +777,7 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyFailsShellValidation(t *testing.T) {
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			"kind":            client.CredentialKindEnrollmentToken,
 			"target":          client.CredentialTargetAgent,
+			"claims":          []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -1938,6 +1943,11 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 	now := fixedNow
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var meHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		meHits++
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID, "api_key": map[string]any{"key_id": "key_workspace"}})
+	})
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID:      testTunnelResourceID,
@@ -1954,6 +1964,7 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 			testKeyStatus:    client.StatusActive,
 			"kind":           client.CredentialKindEnrollmentToken,
 			"target":         client.CredentialTargetAgent,
+			"claims":         []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
@@ -1967,6 +1978,9 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 	joined := strings.Join(*responseBodiesPtr, "\n")
 	if !strings.Contains(joined, "owner_id: '"+testOwnerID+"'") || !strings.Contains(joined, "version: 2") {
 		t.Fatalf("rendered install did not carry the identity owner in a v2 config:\n%s", joined)
+	}
+	if meHits != 1 {
+		t.Fatalf("GET /v1/me hits = %d, want exactly one owner lookup per install", meHits)
 	}
 }
 
@@ -2082,7 +2096,7 @@ func TestS3WebsiteInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
-	if resourceHits != 0 || keyHits != 0 || len(*dmPosts) != 0 || !strings.Contains(strings.Join(*bodies, "\n"), "Failed to resolve the qURL account owner") {
-		t.Fatalf("creates = %d, mints = %d, DMs = %d, bodies = %q; want no mutation and the owner-lookup copy", resourceHits, keyHits, len(*dmPosts), *bodies)
+	if resourceHits != 0 || keyHits != 0 || len(*dmPosts) != 0 || !strings.Contains(strings.Join(*bodies, "\n"), "not an account API key") {
+		t.Fatalf("creates = %d, mints = %d, DMs = %d, bodies = %q; want no mutation and the non-API-key copy", resourceHits, keyHits, len(*dmPosts), *bodies)
 	}
 }

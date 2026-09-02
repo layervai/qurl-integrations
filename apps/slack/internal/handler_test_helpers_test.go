@@ -135,8 +135,12 @@ func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) {
 	t.Helper()
 	claims, ok := body["claims"].([]any)
-	if !ok || len(claims) != 1 {
-		t.Errorf("api key claims = %v, want exactly one connector claim; body=%+v", body["claims"], body)
+	if !ok {
+		t.Errorf("api key claims = %v (%T), want a claims array; body=%+v", body["claims"], body["claims"], body)
+		return
+	}
+	if len(claims) != 1 {
+		t.Errorf("api key claims = %d entries, want exactly one connector claim; body=%+v", len(claims), body)
 		return
 	}
 	claim, ok := claims[0].(map[string]any)

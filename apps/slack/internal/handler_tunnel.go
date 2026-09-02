@@ -773,10 +773,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// for the daemon.
 		// The TTL, install-failure revoke and idempotency key below bound the
 		// exposure of the DM'd one-shot token further.
-		Target: client.CredentialTargetAgent,
-		// Bound agent token (qurl-service #1347): the connector claim rides along
-		// so the one-shot credential stays bound to this resource while still
-		// classifying as an owner-scoped session-control enrollment.
+		Target:         client.CredentialTargetAgent,
 		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
@@ -789,7 +786,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
-	if !credentialConfirmsKindFirst(key) {
+	if !credentialConfirmsKindFirst(key, args.Slug) {
 		// Correlate on resource_id/key_id rather than the caller-supplied
 		// slug: both identify the resource and credential just as precisely,
 		// and keeping user-controlled input out of this line avoids a
@@ -1136,16 +1133,16 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 const kindFirstUnconfirmedInstallMessage = "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated."
 
 // credentialConfirmsKindFirst reports whether a minted credential confirms the
-// kind-first contract: kind=enrollment_token AND target=agent, both echoed by
-// the producer. There is no leniency for an omitted target: qurl-service
-// echoes it since #1347 (deployed), and an owner-scoped credential whose
-// scope cannot be confirmed must never be DM'd. A target that is present and
-// disagrees is a real conflict and fails for the same reason.
-func credentialConfirmsKindFirst(key *client.APIKey) bool {
-	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
+// kind-first contract: kind=enrollment_token, target=agent AND exactly one
+// connector claim bound to this install's slug, all echoed by the producer.
+// There is no leniency for an omitted field: qurl-service echoes them since
+// #1347 (deployed), and an owner-scoped credential whose scope or binding
+// cannot be confirmed must never be DM'd.
+func credentialConfirmsKindFirst(key *client.APIKey, slug string) bool {
+	if key == nil || key.Kind != client.CredentialKindEnrollmentToken || key.Target != client.CredentialTargetAgent {
 		return false
 	}
-	return key.Target == client.CredentialTargetAgent
+	return len(key.Claims) == 1 && key.Claims[0].Type == client.CredentialClaimTypeConnector && key.Claims[0].ID == slug
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
@@ -1487,13 +1484,20 @@ func (args *tunnelInstallArgs) pinTunnelResource(resource *client.Resource, apiU
 	return validateTunnelRouteIdentity(args)
 }
 
+// errNonAPIKeyPrincipal marks a workspace credential that is not an account
+// API key: a permanent property of the connection, not an outage.
+var errNonAPIKeyPrincipal = errors.New("credential is not an API-key principal")
+
 // ownerLookupFailureMessage renders the user-facing reply for a failed
 // account owner lookup. A 404/405 means the qURL API predates GET /v1/me,
 // which an operator can act on; anything else is a generic API failure.
 func ownerLookupFailureMessage(err error) string {
+	if errors.Is(err, errNonAPIKeyPrincipal) {
+		return "This workspace's qURL credential is not an account API key, so the Connector install config cannot name the account owner. Reconnect the workspace with an account API key — retrying will not help."
+	}
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
-		return sanitizeAPIError(err, "This qURL API does not serve GET /v1/me yet, which the Connector install config requires. Upgrade qurl-service and retry")
+		return sanitizeAPIError(err, "This workspace's qURL API does not support Connector installs yet. Setup stopped without minting a token. Contact support — retrying will not help until the qURL API is updated")
 	}
 	return sanitizeAPIError(err, "Failed to resolve the qURL account owner")
 }
@@ -1512,7 +1516,7 @@ func resolveInstallOwnerID(ctx context.Context, c *client.Client, log *slog.Logg
 	// principal. A delegated credential would name the calling user.
 	if identity.APIKey == nil {
 		log.Error(flow+": credential is not an API-key principal; refusing to render a share config", "slug", sanitizeLogValue(slug))
-		return "", errors.New("resolve account identity: credential is not an API-key principal")
+		return "", fmt.Errorf("resolve account identity: %w", errNonAPIKeyPrincipal)
 	}
 	return identity.OwnerID, nil
 }
@@ -1532,10 +1536,11 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	if strings.TrimSpace(args.CRID) == "" || args.ServingEpoch == 0 {
 		return "", errors.New("tunnel lifecycle CRID and serving epoch are required")
 	}
-	if strings.TrimSpace(args.OwnerID) == "" {
+	ownerID := strings.TrimSpace(args.OwnerID)
+	if ownerID == "" {
 		return "", errors.New("tunnel headless config requires the account owner id")
 	}
-	values := []string{args.OwnerID, args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
+	values := []string{ownerID, args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
 	quoted := make([]string, len(values))
 	for i, value := range values {
 		var err error

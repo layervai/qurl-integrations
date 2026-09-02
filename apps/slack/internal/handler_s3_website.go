@@ -557,9 +557,8 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Kind: client.CredentialKindEnrollmentToken,
 		// Agent-target (see handler_tunnel.go): owner-scoped device enrollment.
 		Target: client.CredentialTargetAgent,
-		// Bound agent token (qurl-service #1347): the connector claim rides along
-		// so the one-shot credential stays bound to this resource while still
-		// classifying as an owner-scoped session-control enrollment.
+		// Bound agent token (qurl-service #1347): owner-scoped session-control
+		// enrollment that stays bound to this resource.
 		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
@@ -572,7 +571,10 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
-	if !credentialConfirmsKindFirst(key) {
+	// Correlate on resource_id/key_id rather than the caller-supplied
+	// slug; keeping user-controlled input out of this line avoids a
+	// go/log-injection finding.
+	if !credentialConfirmsKindFirst(key, args.Slug) {
 		log.Error("S3 website install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
 			"resource_id", resource.ResourceID, "key_id", key.KeyID,
 			"got_kind", sanitizeLogValue(key.Kind), "want_kind", client.CredentialKindEnrollmentToken,

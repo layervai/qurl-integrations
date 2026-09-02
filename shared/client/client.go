@@ -941,10 +941,14 @@ func (c *Client) Me(ctx context.Context) (*Identity, error) {
 	if _, err := c.do(req, &out, "GET /v1/me"); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(out.OwnerID) == "" {
+	out.OwnerID = strings.TrimSpace(out.OwnerID)
+	if out.OwnerID == "" {
 		return nil, errors.New("identity response missing owner_id")
 	}
-	out.OwnerID = strings.TrimSpace(out.OwnerID)
+	if out.APIKey != nil && strings.TrimSpace(out.APIKey.KeyID) == "" {
+		// An api_key object without key_id is not proof of an API-key principal.
+		out.APIKey = nil
+	}
 	return &out, nil
 }
 
