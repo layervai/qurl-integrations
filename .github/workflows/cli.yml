@@ -275,9 +275,9 @@ jobs:
             TestSandboxProcessRecoveryCleanupAfterPreReadyFailure
             TestSandboxPublishProcessReportsEarlyExit
             TestSandboxPublishReadinessWaitsForCompleteCRIDLine
-            TestSandboxShareCommandDiagnosticWithholdsChildOutput
             TestSandboxResourceCleanupIsSafeBeforePublish
             TestSandboxRunIdentityBindsOnlyImmutableHardenedImage
+            TestSandboxShareCommandDiagnosticWithholdsChildOutput
             TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure
             TestSandboxStoppedRouteRefusalMatchesQuietGet
             TestValidateSandboxCLIBinary
