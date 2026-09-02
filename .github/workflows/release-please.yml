@@ -1023,31 +1023,19 @@ jobs:
           if [ "$IMAGE_ALREADY_TAGGED" != true ]; then
             docker buildx imagetools create --tag "$tagged" "$candidate"
           fi
-          # GHCR can briefly return manifest-unknown immediately after a tag
-          # write. Retry only that failed read. A visible malformed or wrong
-          # digest is deterministic drift and fails on the first observation.
-          inspect_output=
-          promoted_digest=
-          for attempt in 1 2 3 4 5 6; do
-            if inspect_output="$(docker buildx imagetools inspect "$tagged" 2>&1)"; then
-              promoted_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspect_output")"
-              [[ "$promoted_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-                echo "::error::promoted qurl image returned a malformed digest" >&2
-                exit 1
-              }
-              [ "$promoted_digest" = "$IMAGE_DIGEST" ] || {
-                echo "::error::promoted qurl image digest ${promoted_digest} differs from tested ${IMAGE_DIGEST}" >&2
-                exit 1
-              }
-              break
-            fi
-            if [ "$attempt" -eq 6 ]; then
-              printf '%s\n' "$inspect_output" >&2
-              echo "::error::promoted qurl image tag was not readable after bounded GHCR propagation retries" >&2
-              exit 1
-            fi
-            sleep 5
-          done
+          # Read the complete Buildx response before parsing it. Piping Buildx
+          # into an early-exit awk under pipefail can close stdout while Buildx
+          # is still writing the manifest and make Buildx return 255.
+          inspect_output="$(docker buildx imagetools inspect "$tagged")"
+          promoted_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspect_output")"
+          [[ "$promoted_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::promoted qurl image returned a malformed digest" >&2
+            exit 1
+          }
+          [ "$promoted_digest" = "$IMAGE_DIGEST" ] || {
+            echo "::error::promoted qurl image digest ${promoted_digest} differs from tested ${IMAGE_DIGEST}" >&2
+            exit 1
+          }
 
       - name: Publish the verified CLI release
         env:

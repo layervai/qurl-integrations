@@ -1760,12 +1760,11 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		t.Error("versioned GHCR publication is not confined to the post-validation publisher")
 	}
 	if promoteImage == nil ||
-		!strings.Contains(promoteImage.Run, `for attempt in 1 2 3 4 5 6; do`) ||
-		!strings.Contains(promoteImage.Run, `if inspect_output="$(docker buildx imagetools inspect "$tagged" 2>&1)"; then`) ||
+		!strings.Contains(promoteImage.Run, `inspect_output="$(docker buildx imagetools inspect "$tagged")"`) ||
+		!strings.Contains(promoteImage.Run, `promoted_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspect_output")"`) ||
 		!strings.Contains(promoteImage.Run, `[[ "$promoted_digest" =~ ^sha256:[0-9a-f]{64}$ ]]`) ||
-		!strings.Contains(promoteImage.Run, `if [ "$attempt" -eq 6 ]; then`) ||
-		!strings.Contains(promoteImage.Run, `sleep 5`) {
-		t.Error("versioned GHCR promotion does not bound registry propagation while failing visible digest drift immediately")
+		strings.Contains(promoteImage.Run, `imagetools inspect "$tagged" | awk`) {
+		t.Error("versioned GHCR promotion does not consume the complete inspect response before parsing its exact digest")
 	}
 	if promoteImage != nil && strings.Index(promoteImage.Run, `gh release upload "$CLI_TAG"`) >=
 		strings.Index(promoteImage.Run, `docker buildx imagetools create --tag "$tagged" "$candidate"`) {
