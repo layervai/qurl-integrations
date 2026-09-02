@@ -38,13 +38,16 @@ type Client interface {
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
 	// Share mints a short-lived share link for the resource identified by
 	// id (CRID or public-key resource identifier; the service dual-accepts).
+	// Not to be confused with Sharing below, which reads the connector's
+	// local-app sharing state.
 	Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error)
 	// List returns a page of the caller's resources.
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
-	// connection state of one tunnel resource.
+	// connection state of one tunnel resource. It is the connector sharing
+	// state, not the Share operator above.
 	Sharing(ctx context.Context, id string) (*Sharing, error)
 	// SetSharing idempotently changes a tunnel resource's desired state.
 	SetSharing(ctx context.Context, id string, desired DesiredState) (*Sharing, error)

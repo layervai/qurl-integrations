@@ -44,8 +44,7 @@ Using another package format? See [Install](#install).
 
 [Create or copy an API key in the qURL dashboard](https://layerv.ai/qurl/dashboard/keys/).
 Select `qurl:agent` to publish the local app and `qurl:resolve` (the scope
-that allows sharing resources by CRID) to open it in
-step 4. Then run:
+that allows sharing resources by CRID) to open it in step 4. Then run:
 
 ```bash
 qurl login
@@ -454,8 +453,8 @@ the whole listing.
 ### qurl delete
 
 `qurl delete <CRID>` deletes a published resource. Deletion cannot be
-undone: the CRID can no longer be shared, and republishing the same target later
-mints a different CRID.
+undone: the CRID can no longer be shared, and republishing the same target
+later mints a different CRID.
 
 | Flag | Description |
 |------|-------------|

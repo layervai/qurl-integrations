@@ -419,6 +419,9 @@ func TestResolveIsNoLongerACommand(t *testing.T) {
 	if !strings.Contains(res.stderr.String(), `unknown command "resolve"`) {
 		t.Errorf("stderr = %q, want the unknown-command error", res.stderr.String())
 	}
+	if !strings.Contains(res.stderr.String(), "share") {
+		t.Errorf("stderr = %q, want the error to name the share command", res.stderr.String())
+	}
 	if len(srv.Requests()) != 0 {
 		t.Errorf("an unknown command must not reach the service, saw %d request(s)", len(srv.Requests()))
 	}
