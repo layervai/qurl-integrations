@@ -556,7 +556,11 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Name: "Slack qURL Connector enrollment " + args.Slug,
 		Kind: client.CredentialKindEnrollmentToken,
 		// Agent-target (see handler_tunnel.go): owner-scoped device enrollment.
-		Target:         client.CredentialTargetAgent,
+		Target: client.CredentialTargetAgent,
+		// Bound agent token (qurl-service #1347): the connector claim rides along
+		// so the one-shot credential stays bound to this resource while still
+		// classifying as an owner-scoped session-control enrollment.
+		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})

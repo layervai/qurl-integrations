@@ -786,7 +786,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
 		t.Errorf("api key body expires_in = %v, want %q", apiKeyBody[testKeyExpiresIn], tunnelBootstrapTTL)
 	}
-	assertNoConnectorClaims(t, apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if logs.contains(kindFirstRejection) {
 		t.Error("a kind-first mint response must not be rejected")
@@ -1638,7 +1638,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	// the full wire contract here too so a claims/retired-field regression is
 	// caught on either entry point independently.
 	assertAgentEnrollmentKind(t, apiKeyBody)
-	assertNoConnectorClaims(t, apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if logs.contains(kindFirstRejection) {
 		t.Error("a kind-first mint response must not be rejected")

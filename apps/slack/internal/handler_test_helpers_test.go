@@ -121,8 +121,8 @@ func captureDefaultSlog(t *testing.T) *capturedLogs {
 const kindFirstRejection = "tunnel install: minted credential did not confirm the kind-first contract"
 
 // assertAgentEnrollmentKind pins the decoded POST /v1/api-keys body to an
-// owner-scoped, agent-target enrollment token: the daemon enrolls with it and
-// the resource binding lives in share.yaml (no connector claim).
+// agent-target enrollment token (owner-scoped session-control enrollment);
+// assertSingleConnectorClaim pins its resource binding.
 func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 	t.Helper()
 	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetAgent {
@@ -131,15 +131,17 @@ func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 	}
 }
 
-// assertNoConnectorClaims pins that the decoded POST /v1/api-keys body carries
-// no connector claim (absent, null or empty): the resource binding lives in
-// share.yaml. Target/kind are asserted separately by assertAgentEnrollmentKind.
-func assertNoConnectorClaims(t *testing.T, body map[string]any) {
+// assertSingleConnectorClaim pins the decoded POST /v1/api-keys body to a
+// bound agent token: exactly one connector claim naming this install's slug.
+func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) {
 	t.Helper()
-	if raw, ok := body["claims"]; ok && raw != nil {
-		if arr, isArr := raw.([]any); !isArr || len(arr) != 0 {
-			t.Errorf("api key body claims = %v, want none for an agent-target token; body=%+v", raw, body)
-		}
+	claims, ok := body["claims"].([]any)
+	if !ok || len(claims) != 1 {
+		t.Fatalf("api key claims = %v, want exactly one connector claim", body["claims"])
+	}
+	claim, ok := claims[0].(map[string]any)
+	if !ok || claim["type"] != client.CredentialClaimTypeConnector || claim["id"] != slug {
+		t.Fatalf("api key claim = %v, want {type: connector, id: %q}", claims[0], slug)
 	}
 }
 

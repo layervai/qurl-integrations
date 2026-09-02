@@ -445,7 +445,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 		t.Fatalf("api key hits = %d, want 1", apiKeyHits)
 	}
 	assertAgentEnrollmentKind(t, apiKeyBody)
-	assertNoConnectorClaims(t, apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	for _, retired := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
 		if _, ok := apiKeyBody[retired]; ok {
 			t.Errorf("api key body contained retired %s field: %+v", retired, apiKeyBody)

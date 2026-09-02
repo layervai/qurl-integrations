@@ -768,14 +768,16 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// Agent-target: the daemon enrolls its device identity with this token,
 		// and native session control only admits owner-scoped (account/bootstrap)
 		// enrollment. A connector-target token records connector_bootstrap and is
-		// rejected for every session. The resource is bound via share.yaml.
-		// Scope trade-off: this token is owner-scoped (any device of the account),
-		// not bound to one connector claim; the daemon consumes it on its first
-		// enrollment (one-shot), and the TTL, install-failure revoke and
-		// idempotency key below bound the remaining exposure. The resource
-		// binding lives in share.yaml. Re-narrowing (agent-target + connector
-		// claim once the service supports it) is tracked in the internal follow-up (session-control enrollment scope).
-		Target:         client.CredentialTargetAgent,
+		// rejected for every session. The connector claim below keeps the token
+		// bound to this resource (bound agent token), and share.yaml names it
+		// for the daemon.
+		// The TTL, install-failure revoke and idempotency key below bound the
+		// exposure of the DM'd one-shot token further.
+		Target: client.CredentialTargetAgent,
+		// Bound agent token (qurl-service #1347): the connector claim rides along
+		// so the one-shot credential stays bound to this resource while still
+		// classifying as an owner-scoped session-control enrollment.
+		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
