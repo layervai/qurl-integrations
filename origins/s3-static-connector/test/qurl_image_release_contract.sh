@@ -44,7 +44,9 @@ if [ ! -r "$SHARE_GOLDEN" ]; then
 fi
 # The daemon refuses a config writable by group/other; CI checkouts are often
 # group-writable, so mount a private 0444 copy instead of the tracked file.
-GOLDEN_MOUNT="$(mktemp)"
+# Next to the golden (inside the checkout) rather than /tmp: a docker daemon
+# that only shares the workspace would otherwise mount an empty directory.
+GOLDEN_MOUNT="$(mktemp "$(dirname "$SHARE_GOLDEN")/.share-mount-XXXXXX")"
 trap 'rm -f "$GOLDEN_MOUNT"' EXIT
 cp "$SHARE_GOLDEN" "$GOLDEN_MOUNT" && chmod 0444 "$GOLDEN_MOUNT"
 
