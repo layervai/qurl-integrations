@@ -152,11 +152,15 @@ jobs:
     # canceled during cache upload.
     timeout-minutes: 30
     env:
-      # Until the first qurl image release is digest-pinned here, the script
-      # emits a loud warning and the public CLI image smoke plus byte-identical
-      # guided-config fixture remain the active gates. Flip this to true when
-      # QURL_IMAGE is set to the immutable release digest.
-      QURL_RELEASE_IMAGE_REQUIRED: "false"
+      # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
+      # turns private, add docker/login-action and `packages: read` here.
+      # TODO(upstream-contract): mirrors qurl-integrations-infra QURL_IMAGE (keep in lockstep).
+      # Released qurl CLI image (v2.1.1 index digest; derived from
+      # `docker buildx imagetools inspect ghcr.io/layervai/qurl:v2.1.1`) that must strict-decode
+      # the guided v2 headless config and stop at the credential gate. Keep in
+      # lockstep with qurl-integrations-infra's QURL_IMAGE pin.
+      QURL_IMAGE: ghcr.io/layervai/qurl@sha256:5de963d335cca0a6e9a030978d7f3de6587ae1e26f369a38afbf168c04ee220a
+      QURL_RELEASE_IMAGE_REQUIRED: "true"
       # PRs #1158 and #1231 add security assertions the currently pinned
       # immutable origin predates. Waive only that exact digest so the producer
       # fixes can merge and publish; behavior_test.sh rejects a malformed or
