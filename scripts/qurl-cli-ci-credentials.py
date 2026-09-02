@@ -47,10 +47,31 @@ RUN_AGENT_ID = re.compile(
     r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sf]\Z"
 )
 MAX_ATTEMPTS = 3
+# Bound the trusted cleanup inventory independently of per-request timeouts so
+# malformed pagination cannot hold a runner or grow its in-memory result set.
+# TODO(upstream-contract): qurl-service currently honors a 100-row maximum,
+# retains revoked API keys for 30 days, and hard-deletes resources. Recalibrate
+# this dedicated-CI-owner bound if any of those service contracts change.
+INVENTORY_PAGE_SIZE = 100
+INVENTORY_MAX_PAGES = 20
+INVENTORY_MAX_ROWS = INVENTORY_PAGE_SIZE * INVENTORY_MAX_PAGES
+# One absolute deadline covers every inventory scan in one reconciliation. The
+# primary cleanup calls this command three times inside ten minutes; the
+# fallback can call it nine times inside thirty minutes. Two minutes leaves a
+# bounded majority of both job budgets for token minting and cleanup writes.
+RECONCILE_INVENTORY_BUDGET_SECONDS = 2 * 60
+# A slow credential inventory must not consume the whole shared deadline before
+# the final resource inventory can attempt cleanup. This is a reservation inside
+# the two-minute total, not a second independent budget.
+RESOURCE_INVENTORY_RESERVE_SECONDS = 30
 
 
 class CredentialError(RuntimeError):
     """A credential operation failed closed."""
+
+
+class InventoryBoundError(CredentialError):
+    """A trusted cleanup inventory exceeded a runner-safety bound."""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -392,23 +413,35 @@ def paged_rows(
     path: str,
     label: str,
     status_filter: str | None = "active",
+    *,
+    deadline: float,
 ) -> list[dict[str, Any]]:
     cursor = ""
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
+    pages = 0
     while True:
-        query = {"limit": "100"}
+        if pages >= INVENTORY_MAX_PAGES:
+            raise InventoryBoundError(f"{label} inventory exceeded its page limit")
+        if time.monotonic() >= deadline:
+            raise InventoryBoundError(f"{label} inventory exceeded its time limit")
+        query = {"limit": str(INVENTORY_PAGE_SIZE)}
         if status_filter is not None:
             query["status"] = status_filter
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(endpoint, jwt, "GET", path + "?" + urllib.parse.urlencode(query))
+        pages += 1
+        if time.monotonic() >= deadline:
+            raise InventoryBoundError(f"{label} inventory exceeded its time limit")
         rows = response.get("data")
         meta = response.get("meta")
         if status != 200 or not isinstance(rows, list) or not isinstance(meta, dict):
             raise CredentialError(f"{label} inventory was rejected")
         if any(not isinstance(row, dict) for row in rows):
             raise CredentialError(f"{label} inventory contains a malformed row")
+        if len(result) + len(rows) > INVENTORY_MAX_ROWS:
+            raise InventoryBoundError(f"{label} inventory exceeded its row limit")
         result.extend(rows)
         has_more = meta.get("has_more", False)
         next_cursor = meta.get("next_cursor", "")
@@ -528,6 +561,10 @@ def reconcile_run(args: argparse.Namespace) -> None:
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
     endpoint, jwt, _ = authenticated_owner(args)
+    inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
+    credential_inventory_deadline = (
+        inventory_deadline - RESOURCE_INVENTORY_RESERVE_SECONDS
+    )
 
     failures: dict[str, int] = {}
 
@@ -541,7 +578,13 @@ def reconcile_run(args: argparse.Namespace) -> None:
     key_ids: list[str] = []
     try:
         device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
-        credentials = paged_rows(endpoint, jwt, "/v1/api-keys", "qURL credential cleanup")
+        credentials = paged_rows(
+            endpoint,
+            jwt,
+            "/v1/api-keys",
+            "qURL credential cleanup",
+            deadline=credential_inventory_deadline,
+        )
         seen_device_ids: set[str] = set()
         for row in credentials:
             row_name = row.get("name")
@@ -578,7 +621,12 @@ def reconcile_run(args: argparse.Namespace) -> None:
         missing_device_ids = device_key_ids - seen_device_ids
         if missing_device_ids:
             all_credentials = paged_rows(
-                endpoint, jwt, "/v1/api-keys", "qURL revoked credential cleanup", status_filter=None
+                endpoint,
+                jwt,
+                "/v1/api-keys",
+                "qURL revoked credential cleanup",
+                status_filter=None,
+                deadline=credential_inventory_deadline,
             )
             revoked_ids: set[str] = set()
             for row in all_credentials:
@@ -601,6 +649,8 @@ def reconcile_run(args: argparse.Namespace) -> None:
                     revoked_ids.add(key_id)
             if not missing_device_ids.issubset(revoked_ids):
                 record_failure("credential_inventory")
+    except InventoryBoundError:
+        record_failure("credential_inventory_bound")
     except (CredentialError, OSError, UnicodeError):
         record_failure("credential_inventory")
 
@@ -635,7 +685,14 @@ def reconcile_run(args: argparse.Namespace) -> None:
     # Remote-URL resources remain identifiable by the exact run description.
     resource_ids: list[str] = []
     try:
-        resources = paged_rows(endpoint, jwt, "/v1/resources", "qURL resource cleanup", status_filter=None)
+        resources = paged_rows(
+            endpoint,
+            jwt,
+            "/v1/resources",
+            "qURL resource cleanup",
+            status_filter=None,
+            deadline=inventory_deadline,
+        )
         for row in resources:
             if row.get("description") != description:
                 continue
@@ -644,6 +701,8 @@ def reconcile_run(args: argparse.Namespace) -> None:
                 record_failure("resource_shape")
                 continue
             resource_ids.append(resource_id)
+    except InventoryBoundError:
+        record_failure("resource_inventory_bound")
     except CredentialError:
         record_failure("resource_inventory")
     unique_resource_ids = list(dict.fromkeys(resource_ids))

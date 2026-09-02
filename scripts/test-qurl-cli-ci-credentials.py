@@ -213,7 +213,7 @@ class FakeAPI:
                 assert len(query["slug"]) == 1
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
-            assert query == {"limit": ["100"]}
+            assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
             return 200, json.dumps({"data": self.resources, "meta": {"has_more": False}}).encode()
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
             resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
@@ -272,6 +272,20 @@ def workflow_timeout_minutes(workflow: pathlib.Path, job_name: str) -> int:
     return values[0]
 
 
+def sticky_clock(*values: float):
+    """Return each value once, then repeat the final value."""
+    assert values
+    remaining = iter(values)
+    last = values[-1]
+
+    def read() -> float:
+        nonlocal last
+        last = next(remaining, last)
+        return last
+
+    return read
+
+
 def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     fixed_now = 2_000_000_000
     journey_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey")
@@ -291,6 +305,17 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
     assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
         "fallback cleanup timeout no longer fits inside each freshly minted token"
+    )
+    # cli.yml runs three lane reconciliations. The fallback workflow accepts at
+    # most three source runs and runs the same three lanes, for nine total.
+    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 3 < cleanup_minutes * 60, (
+        "primary inventory budgets no longer leave room for cleanup writes"
+    )
+    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 9 < fallback_cleanup_minutes * 60, (
+        "fallback inventory budgets no longer leave room for cleanup writes"
+    )
+    assert 0 < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS < (
+        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS
     )
 
     def token(remaining_seconds: int, issued_ago: int = 0) -> str:
@@ -365,8 +390,8 @@ def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
     return run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id
 
 
-def test_unbounded_valid_pagination() -> None:
-    pages = 5
+def test_bounded_valid_pagination() -> None:
+    pages = credentials.INVENTORY_MAX_PAGES
 
     def fake_request(
         url: str,
@@ -383,7 +408,10 @@ def test_unbounded_valid_pagination() -> None:
         assert "status" not in query
         page = int(query.get("cursor", ["0"])[0])
         response = {
-            "data": [{"resource_id": f"r_{page}"}],
+            "data": [
+                {"resource_id": f"r_{page}_{row}"}
+                for row in range(credentials.INVENTORY_PAGE_SIZE)
+            ],
             "meta": {
                 "has_more": page + 1 < pages,
                 "next_cursor": str(page + 1) if page + 1 < pages else "",
@@ -393,9 +421,185 @@ def test_unbounded_valid_pagination() -> None:
 
     with mock.patch.object(credentials, "request", fake_request):
         rows = credentials.paged_rows(
-            "https://sandbox.example", "jwt", "/v1/resources", "test", status_filter=None
+            "https://sandbox.example",
+            "jwt",
+            "/v1/resources",
+            "test",
+            status_filter=None,
+            deadline=time.monotonic() + 60,
         )
-    assert [row["resource_id"] for row in rows] == [f"r_{page}" for page in range(pages)]
+    assert len(rows) == credentials.INVENTORY_MAX_ROWS
+    assert rows[0]["resource_id"] == "r_0_0"
+    assert rows[-1]["resource_id"] == (
+        f"r_{credentials.INVENTORY_MAX_PAGES - 1}_{credentials.INVENTORY_PAGE_SIZE - 1}"
+    )
+
+
+def test_pagination_safety_limits_fail_closed() -> None:
+    calls = 0
+
+    def endless_request(
+        url: str,
+        method: str,
+        bearer: str | None = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        nonlocal calls
+        del url, bearer, body, content_type, extra_headers
+        assert method == "GET"
+        calls += 1
+        return 200, json.dumps(
+            {
+                "data": [],
+                "meta": {"has_more": True, "next_cursor": f"cursor-{calls}"},
+            }
+        ).encode()
+
+    with mock.patch.object(credentials, "request", endless_request):
+        try:
+            credentials.paged_rows(
+                "https://sandbox.example",
+                "jwt",
+                "/v1/resources",
+                "test",
+                deadline=time.monotonic() + 60,
+            )
+        except credentials.InventoryBoundError as exc:
+            assert str(exc) == "test inventory exceeded its page limit"
+        else:
+            raise AssertionError("inventory page limit was not enforced")
+    assert calls == credentials.INVENTORY_MAX_PAGES
+
+    rows = [
+        {"resource_id": f"r_{index}"}
+        for index in range(credentials.INVENTORY_MAX_ROWS + 1)
+    ]
+
+    def oversized_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
+        return 200, json.dumps({"data": rows, "meta": {"has_more": False}}).encode()
+
+    with mock.patch.object(credentials, "request", oversized_request):
+        try:
+            credentials.paged_rows(
+                "https://sandbox.example",
+                "jwt",
+                "/v1/resources",
+                "test",
+                deadline=time.monotonic() + 60,
+            )
+        except credentials.InventoryBoundError as exc:
+            assert str(exc) == "test inventory exceeded its row limit"
+        else:
+            raise AssertionError("inventory row limit was not enforced")
+
+    def one_page_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
+        return 200, b'{"data":[],"meta":{"has_more":false}}'
+
+    with mock.patch.object(credentials, "request", one_page_request), mock.patch.object(
+        credentials.time,
+        "monotonic",
+        side_effect=sticky_clock(
+            0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+        ),
+    ):
+        try:
+            credentials.paged_rows(
+                "https://sandbox.example",
+                "jwt",
+                "/v1/resources",
+                "test",
+                deadline=float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS),
+            )
+        except credentials.InventoryBoundError as exc:
+            assert str(exc) == "test inventory exceeded its time limit"
+        else:
+            raise AssertionError("inventory time limit was not enforced")
+
+    calls = 0
+
+    def first_page_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
+        nonlocal calls
+        calls += 1
+        return 200, json.dumps(
+            {
+                "data": [{"resource_id": "r_1"}],
+                "meta": {"has_more": True, "next_cursor": "next"},
+            }
+        ).encode()
+
+    with mock.patch.object(credentials, "request", first_page_request), mock.patch.object(
+        credentials.time,
+        "monotonic",
+        side_effect=sticky_clock(
+            0.0, 0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+        ),
+    ):
+        try:
+            credentials.paged_rows(
+                "https://sandbox.example",
+                "jwt",
+                "/v1/resources",
+                "test",
+                deadline=float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS),
+            )
+        except credentials.InventoryBoundError as exc:
+            assert str(exc) == "test inventory exceeded its time limit"
+        else:
+            raise AssertionError("pre-request inventory deadline was not enforced")
+    assert calls == 1
+
+
+def test_reconciliation_reserves_time_for_resource_inventory() -> None:
+    fake = FakeAPI()
+    recorded_key_id = "key_Shared123456"
+    fake.extra_credentials.append(
+        {
+            "key_id": recorded_key_id,
+            "kind": "device",
+            "name": "agent:qurl-journey-v2-r1231-a2-hs",
+            "scopes": credentials.DEVICE_SCOPES,
+            "status": "revoked",
+        }
+    )
+    deadlines: list[tuple[str, float]] = []
+    real_paged_rows = credentials.paged_rows
+
+    def capture_deadline(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        deadline = kwargs.get("deadline")
+        assert isinstance(deadline, float)
+        path = args[2]
+        assert isinstance(path, str)
+        deadlines.append((path, deadline))
+        return real_paged_rows(*args, **kwargs)  # type: ignore[arg-type]
+
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ), mock.patch.object(credentials, "paged_rows", capture_deadline):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        cleanup_ids = root / "cleanup-ids"
+        cleanup_ids.mkdir(mode=0o700)
+        digest = credentials.hashlib.sha256(recorded_key_id.encode("ascii")).hexdigest()
+        private_file(cleanup_ids, "device-key-" + digest, recorded_key_id)
+        credentials.reconcile_run(
+            argparse.Namespace(
+                **vars(args),
+                cleanup_id_dir=cleanup_ids,
+                lane="linux",
+                run_attempt="2",
+                run_id="1231",
+                runtime="host",
+            )
+        )
+    assert len(deadlines) == 3
+    assert deadlines[0][0] == deadlines[1][0] == "/v1/api-keys"
+    assert deadlines[0][1] == deadlines[1][1]
+    assert deadlines[2][0] == "/v1/resources"
+    assert deadlines[2][1] - deadlines[1][1] == (
+        credentials.RESOURCE_INVENTORY_RESERVE_SECONDS
+    )
 
 
 def test_connector_cleanup_lookup_fails_closed() -> None:
@@ -708,7 +912,9 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 def main() -> None:
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
-    test_unbounded_valid_pagination()
+    test_bounded_valid_pagination()
+    test_pagination_safety_limits_fail_closed()
+    test_reconciliation_reserves_time_for_resource_inventory()
     test_connector_cleanup_lookup_fails_closed()
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()
