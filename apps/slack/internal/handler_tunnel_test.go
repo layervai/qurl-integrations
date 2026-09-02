@@ -5476,8 +5476,8 @@ func TestOwnerLookupFailureMessage(t *testing.T) {
 		want          string
 		wantRequestID string
 	}{
-		{name: "404 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "identity lookup (not found)", wantRequestID: "req-404"},
-		{name: "405 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "identity lookup (not found)"},
+		{name: "404 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "identity lookup (endpoint unavailable)", wantRequestID: "req-404"},
+		{name: "405 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "identity lookup (endpoint unavailable)"},
 		{name: "non API-key principal is permanent", err: fmt.Errorf("resolve account identity: %w", errNonAPIKeyPrincipal), want: "not an account API key"},
 		{name: "other API errors stay generic", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusBadRequest}), want: "Failed to resolve the qURL account owner"},
 		{name: "transport errors stay generic", err: errors.New("dial tcp: refused"), want: "Failed to resolve the qURL account owner."},

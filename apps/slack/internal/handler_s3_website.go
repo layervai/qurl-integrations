@@ -574,7 +574,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 	// Correlate on resource_id/key_id rather than the caller-supplied
 	// slug; keeping user-controlled input out of this line avoids a
 	// go/log-injection finding.
-	if err := h.rejectUnconfirmedCredential(log, c, key, resource.ResourceID, args.Slug, "S3 website install", "s3_website_kind_first_unconfirmed"); err != nil {
+	if err := h.rejectUnconfirmedCredential(log, c, key, kindFirstGate{resourceID: resource.ResourceID, slug: args.Slug, flow: "S3 website install", revokeReason: "s3_website_kind_first_unconfirmed"}); err != nil {
 		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), err
 	}
 	if key.APIKey == "" {

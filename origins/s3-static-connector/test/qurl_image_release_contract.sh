@@ -5,6 +5,10 @@ set -euo pipefail
 
 IMG="${QURL_IMAGE:-}"
 TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
+if [ -z "$TIMEOUT_CMD" ]; then
+  if [ -n "${CI:-}" ]; then echo "FAIL: timeout(1) is required on CI to bound the daemon run" >&2; exit 1; fi
+  echo "::warning title=unbounded daemon run::timeout(1)/gtimeout not found; the daemon run is unbounded on this host" >&2
+fi
 REQUIRE_IMAGE="${QURL_RELEASE_IMAGE_REQUIRED:-false}"
 IFS=' ' read -r -a PLATFORMS <<<"${PLATFORM:-linux/amd64 linux/arm64}"
 # Absolute: docker -v rejects relative host paths.

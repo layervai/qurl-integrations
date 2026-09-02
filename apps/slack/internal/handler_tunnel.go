@@ -786,7 +786,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
-	if err := h.rejectUnconfirmedCredential(log, c, key, resource.ResourceID, args.Slug, "tunnel install", "kind_first_unconfirmed"); err != nil {
+	if err := h.rejectUnconfirmedCredential(log, c, key, kindFirstGate{resourceID: resource.ResourceID, slug: args.Slug, flow: "tunnel install", revokeReason: "kind_first_unconfirmed"}); err != nil {
 		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), err
 	}
 	if key.APIKey == "" {
@@ -931,7 +931,7 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	// Every normal return path below must nil panicCleanup after it revokes or
 	// confirms delivery so recovery does not double-handle an already-settled key.
 
-	log.Info("tunnel install succeeded", "slug", sanitizeLogValue(args.Slug), "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
+	log.Info("tunnel install succeeded", "slug", sanitizeLogValue(args.Slug), "shortcut", sanitizeLogValue(args.Alias), "environment", sanitizeLogValue(string(args.Environment)), "resource_id", build.resource.ResourceID)
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
 		log.Error("tunnel install: Slack DM delivery failed after enrollment token mint; revoking token before posting install instructions", "error", err, "slug", sanitizeLogValue(args.Slug), "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
@@ -1116,19 +1116,28 @@ const kindFirstUnconfirmedInstallMessage = "The qURL API did not return a Connec
 // flows: a minted credential that does not confirm kind, target and the bound
 // connector claim is revoked and reported, and errKindFirstUnconfirmed is
 // returned so the caller replies with kindFirstUnconfirmedInstallMessage.
-func (h *Handler) rejectUnconfirmedCredential(log *slog.Logger, c *client.Client, key *client.APIKey, resourceID, slug, flow, revokeReason string) error {
-	if credentialConfirmsKindFirst(key, slug) {
+// kindFirstGate names the per-flow inputs of rejectUnconfirmedCredential so
+// call sites cannot transpose them.
+type kindFirstGate struct {
+	resourceID   string
+	slug         string
+	flow         string
+	revokeReason string
+}
+
+func (h *Handler) rejectUnconfirmedCredential(log *slog.Logger, c *client.Client, key *client.APIKey, gate kindFirstGate) error {
+	if credentialConfirmsKindFirst(key, gate.slug) {
 		return nil
 	}
 	// Correlate on resource_id/key_id rather than the caller-supplied slug:
 	// both identify the resource and credential just as precisely, and keeping
 	// user-controlled input out of this line avoids a go/log-injection finding.
-	log.Error(flow+": minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
-		"resource_id", resourceID, "key_id", key.KeyID,
+	log.Error(gate.flow+": minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
+		"resource_id", gate.resourceID, "key_id", key.KeyID,
 		"got_kind", sanitizeLogValue(key.Kind), "want_kind", client.CredentialKindEnrollmentToken,
 		"got_target", sanitizeLogValue(key.Target), "want_target", client.CredentialTargetAgent,
 		"got_claims", len(key.Claims), "want_claims", 1)
-	revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, revokeReason)
+	revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, gate.revokeReason)
 	return errKindFirstUnconfirmed
 }
 
@@ -1140,7 +1149,9 @@ func (h *Handler) rejectUnconfirmedCredential(log *slog.Logger, c *client.Client
 // connector claim bound to this install's slug, all echoed by the producer.
 // There is no leniency for an omitted field: qurl-service echoes them since
 // #1347 (deployed), and an owner-scoped credential whose scope or binding
-// cannot be confirmed must never be DM'd.
+// cannot be confirmed must never be DM'd. Exactly one claim is deliberate:
+// no other authority may ride along on the DM'd token; an additive claim
+// upstream is a contract change to review here, not to accept silently.
 func credentialConfirmsKindFirst(key *client.APIKey, slug string) bool {
 	if key == nil || key.Kind != client.CredentialKindEnrollmentToken || key.Target != client.CredentialTargetAgent {
 		return false
@@ -1500,7 +1511,7 @@ func ownerLookupFailureMessage(err error) string {
 	}
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
-		return sanitizeAPIError(err, "This workspace's qURL API did not accept the Connector install identity lookup (not found). Setup stopped without minting a token. If this persists, contact support")
+		return sanitizeAPIError(err, "This workspace's qURL API did not accept the Connector install identity lookup (endpoint unavailable). Setup stopped without minting a token. If this persists, contact support")
 	}
 	return sanitizeAPIError(err, "Failed to resolve the qURL account owner")
 }
