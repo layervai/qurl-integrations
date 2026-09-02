@@ -1912,11 +1912,20 @@ func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg str
 	return tunnelInstallInstructionsDeliveryFailed
 }
 
-// sidecarImageLine names the pinned sidecar image and, when the deployment
-// declares it, the human-readable qurl release behind the digest.
-func sidecarImageLine(image, version string) string {
-	if v := strings.TrimSpace(version); v != "" {
-		return fmt.Sprintf("Sidecar image: `%s` (`qurl` %s).", image, v)
+// imageVersionSuffix renders the optional " (`qurl` vX.Y.Z)" label. It is
+// attached only to a digest-pinned image: the label is an operator
+// assertion about the release behind the digest and must never decorate a
+// mutable tag such as the dev/sandbox `:latest` fallback.
+func imageVersionSuffix(image, version string) string {
+	v := strings.TrimSpace(version)
+	if v == "" || !strings.Contains(image, "@sha256:") {
+		return ""
 	}
-	return fmt.Sprintf("Sidecar image: `%s`.", image)
+	return " (`qurl` " + v + ")"
+}
+
+// sidecarImageLine names the pinned sidecar image and, when the deployment
+// declares it, the human-readable `qurl` release behind the digest.
+func sidecarImageLine(image, version string) string {
+	return fmt.Sprintf("Sidecar image: `%s`%s.", image, imageVersionSuffix(image, version))
 }

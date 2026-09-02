@@ -1,8 +1,8 @@
 package internal
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -23,10 +23,6 @@ func mustHubTrust(host, port, key string) ConnectorHubTrust {
 	return h
 }
 
-// partialHubTrust builds an invalid partial triple the constructor would
-// reject, to pin that renderers still refuse it.
-func partialHubTrust(host string) ConnectorHubTrust { return ConnectorHubTrust{host: host} }
-
 var testHub = mustHubTrust("hub.nhp.example", "443", "qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY=")
 
 func assertHubEnv(t *testing.T, name, got string, want bool, lines ...string) {
@@ -41,18 +37,20 @@ func assertHubEnv(t *testing.T, name, got string, want bool, lines ...string) {
 func TestRenderedTunnelInstallsCarryHubTrustEnv(t *testing.T) {
 	t.Parallel()
 	for _, configured := range []bool{true, false} {
-		args := testTunnelInstallArgs()
-		if configured {
-			args.Hub = testHub
-		}
-		docker := mustRenderDockerTunnelInstructions(t, args, testTunnelImageRef)
-		assertHubEnv(t, "docker", docker, configured, "-e QURL_CONNECTOR_HUB_HOST='hub.nhp.example' \\", "-e QURL_CONNECTOR_HUB_PORT='443' \\", "-e QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64='qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY=' \\")
-		compose := mustRenderDockerComposeTunnelInstructions(t, args, testTunnelImageRef)
-		assertHubEnv(t, "compose", compose, configured, "QURL_CONNECTOR_HUB_HOST_YAML="+shellSingleQuote("'hub.nhp.example'"), "QURL_CONNECTOR_HUB_PORT_YAML="+shellSingleQuote("'443'"), "      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}", "      QURL_CONNECTOR_HUB_PORT: ${QURL_CONNECTOR_HUB_PORT_YAML}", "      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}")
-		k8s := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
-		assertHubEnv(t, "kubernetes", k8s, configured, "      - name: QURL_CONNECTOR_HUB_HOST\n        value: 'hub.nhp.example'", "      - name: QURL_CONNECTOR_HUB_PORT\n        value: '443'", "      - name: QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64\n")
-		ecs := mustRenderECSFargateTunnelInstructions(t, args, testTunnelImageRef)
-		assertHubEnv(t, "ecs", ecs, configured, `"name": "QURL_CONNECTOR_HUB_HOST"`, `"value": "hub.nhp.example"`, `"name": "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"`)
+		t.Run(fmt.Sprintf("configured=%v", configured), func(t *testing.T) {
+			args := testTunnelInstallArgs()
+			if configured {
+				args.Hub = testHub
+			}
+			docker := mustRenderDockerTunnelInstructions(t, args, testTunnelImageRef)
+			assertHubEnv(t, "docker", docker, configured, "-e QURL_CONNECTOR_HUB_HOST='hub.nhp.example' \\", "-e QURL_CONNECTOR_HUB_PORT='443' \\", "-e QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64='qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY=' \\")
+			compose := mustRenderDockerComposeTunnelInstructions(t, args, testTunnelImageRef)
+			assertHubEnv(t, "compose", compose, configured, "QURL_CONNECTOR_HUB_HOST_YAML="+shellSingleQuote("'hub.nhp.example'"), "QURL_CONNECTOR_HUB_PORT_YAML="+shellSingleQuote("'443'"), "      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}", "      QURL_CONNECTOR_HUB_PORT: ${QURL_CONNECTOR_HUB_PORT_YAML}", "      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}")
+			k8s := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
+			assertHubEnv(t, "kubernetes", k8s, configured, "      - name: QURL_CONNECTOR_HUB_HOST\n        value: 'hub.nhp.example'", "      - name: QURL_CONNECTOR_HUB_PORT\n        value: '443'", "      - name: QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64\n")
+			ecs := mustRenderECSFargateTunnelInstructions(t, args, testTunnelImageRef)
+			assertHubEnv(t, "ecs", ecs, configured, `"name": "QURL_CONNECTOR_HUB_HOST"`, `"value": "hub.nhp.example"`, `"name": "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"`)
+		})
 	}
 }
 
@@ -95,17 +93,6 @@ func TestHubTrustEnvValueIsSplicedLiterally(t *testing.T) {
 	}
 }
 
-func TestHubTrustPartialTripleNeverRenders(t *testing.T) {
-	t.Parallel()
-	partial := partialHubTrust("hub.nhp.example")
-	if _, err := withHubTrustDockerEnv("  -e QURL_ENDPOINT='x' \\\n", partial); err == nil || !strings.Contains(err.Error(), "partial triple") {
-		t.Fatalf("docker: err = %v, want partial-triple failure", err)
-	}
-	if _, err := hubTrustECSEnv(partial); err == nil || !strings.Contains(err.Error(), "partial triple") {
-		t.Fatalf("ecs: err = %v, want partial-triple failure", err)
-	}
-}
-
 func TestKubernetesDryRunWithConfiguredHub(t *testing.T) {
 	t.Parallel()
 	kubectl, err := exec.LookPath("kubectl")
@@ -123,9 +110,7 @@ func TestKubernetesDryRunWithConfiguredHub(t *testing.T) {
 	cmd := exec.CommandContext(ctx, kubectl, "apply", "--dry-run=client", "--validate=false", "-f", "-") //nolint:gosec // kubectl path comes from exec.LookPath
 	cmd.Stdin = strings.NewReader(pod)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		if bytes.Contains(bytes.ToLower(out), []byte("couldn't get current server api group list")) {
-			t.Skipf("kubectl dry-run needs cluster discovery: %s", out)
-		}
+		skipIfKubectlNeedsClusterDiscovery(t, out)
 		t.Fatalf("kubectl dry-run failed with a configured Hub: %v\n%s\n%s", err, out, pod)
 	}
 }
@@ -144,43 +129,55 @@ func TestPrepareTunnelInstallMessageThreadsImageVersion(t *testing.T) {
 	}
 }
 
-func TestSidecarImageLine(t *testing.T) {
+func TestImageVersionSuffix(t *testing.T) {
 	t.Parallel()
-	if got := sidecarImageLine("ghcr.io/layervai/qurl@sha256:abc", "v2.1.1"); got != "Sidecar image: `ghcr.io/layervai/qurl@sha256:abc` (`qurl` v2.1.1)." {
-		t.Fatalf("with version = %q", got)
+	for _, tc := range []struct{ name, image, version, want string }{
+		{name: "digest pin with version", image: "ghcr.io/layervai/qurl@sha256:abc", version: "v2.1.1", want: " (`qurl` v2.1.1)"},
+		{name: "digest pin without version", image: "ghcr.io/layervai/qurl@sha256:abc", version: "", want: ""},
+		{name: "mutable fallback never labelled", image: "ghcr.io/layervai/qurl:latest", version: "v2.1.1", want: ""},
+		{name: "whitespace version ignored", image: "ghcr.io/layervai/qurl@sha256:abc", version: "  ", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := imageVersionSuffix(tc.image, tc.version); got != tc.want {
+				t.Fatalf("suffix = %q, want %q", got, tc.want)
+			}
+		})
 	}
-	if got := sidecarImageLine("ghcr.io/layervai/qurl@sha256:abc", ""); got != "Sidecar image: `ghcr.io/layervai/qurl@sha256:abc`." {
-		t.Fatalf("without version = %q", got)
+	if got := sidecarImageLine("ghcr.io/layervai/qurl@sha256:abc", "v2.1.1"); got != "Sidecar image: `ghcr.io/layervai/qurl@sha256:abc` (`qurl` v2.1.1)." {
+		t.Fatalf("sidecar line = %q", got)
 	}
 }
 
 func TestRenderedS3WebsiteInstallsCarryHubTrustEnv(t *testing.T) {
 	t.Parallel()
 	for _, configured := range []bool{true, false} {
-		args := testS3WebsiteArgs(tunnelEnvDocker)
-		if configured {
-			args.Hub = testHub
-		}
-		docker, err := renderDockerS3WebsiteInstructions(args, testTunnelImageRef, testS3OriginImageRef)
-		if err != nil {
-			t.Fatalf("docker: %v", err)
-		}
-		assertHubEnv(t, "s3 docker", docker, configured, "-e QURL_CONNECTOR_HUB_HOST='hub.nhp.example' \\", "-e QURL_CONNECTOR_HUB_PORT='443' \\")
-		compose, err := renderDockerComposeS3WebsiteInstructions(args, testTunnelImageRef, testS3OriginImageRef)
-		if err != nil {
-			t.Fatalf("compose: %v", err)
-		}
-		assertHubEnv(t, "s3 compose", compose, configured, "QURL_CONNECTOR_HUB_HOST_YAML="+shellSingleQuote("'hub.nhp.example'"), "      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}", "      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}")
-		k8s, err := renderKubernetesS3WebsiteInstructions(args, testTunnelImageRef, testS3OriginImageRef)
-		if err != nil {
-			t.Fatalf("kubernetes: %v", err)
-		}
-		assertHubEnv(t, "s3 kubernetes", k8s, configured, "      - name: QURL_CONNECTOR_HUB_HOST\n        value: 'hub.nhp.example'", "      - name: QURL_CONNECTOR_HUB_PORT\n        value: '443'")
-		ecs, err := renderS3WebsiteECSContainerJSON(args, testTunnelImageRef, testS3OriginImageRef)
-		if err != nil {
-			t.Fatalf("ecs: %v", err)
-		}
-		assertHubEnv(t, "s3 ecs", ecs, configured, `"name": "QURL_CONNECTOR_HUB_HOST"`, `"value": "hub.nhp.example"`)
+		t.Run(fmt.Sprintf("configured=%v", configured), func(t *testing.T) {
+			args := testS3WebsiteArgs(tunnelEnvDocker)
+			if configured {
+				args.Hub = testHub
+			}
+			docker, err := renderDockerS3WebsiteInstructions(args, testTunnelImageRef, testS3OriginImageRef)
+			if err != nil {
+				t.Fatalf("docker: %v", err)
+			}
+			assertHubEnv(t, "s3 docker", docker, configured, "-e QURL_CONNECTOR_HUB_HOST='hub.nhp.example' \\", "-e QURL_CONNECTOR_HUB_PORT='443' \\")
+			compose, err := renderDockerComposeS3WebsiteInstructions(args, testTunnelImageRef, testS3OriginImageRef)
+			if err != nil {
+				t.Fatalf("compose: %v", err)
+			}
+			assertHubEnv(t, "s3 compose", compose, configured, "QURL_CONNECTOR_HUB_HOST_YAML="+shellSingleQuote("'hub.nhp.example'"), "      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}", "      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}")
+			k8s, err := renderKubernetesS3WebsiteInstructions(args, testTunnelImageRef, testS3OriginImageRef)
+			if err != nil {
+				t.Fatalf("kubernetes: %v", err)
+			}
+			assertHubEnv(t, "s3 kubernetes", k8s, configured, "      - name: QURL_CONNECTOR_HUB_HOST\n        value: 'hub.nhp.example'", "      - name: QURL_CONNECTOR_HUB_PORT\n        value: '443'")
+			ecs, err := renderS3WebsiteECSContainerJSON(args, testTunnelImageRef, testS3OriginImageRef)
+			if err != nil {
+				t.Fatalf("ecs: %v", err)
+			}
+			assertHubEnv(t, "s3 ecs", ecs, configured, `"name": "QURL_CONNECTOR_HUB_HOST"`, `"value": "hub.nhp.example"`)
+		})
 	}
 }
 
@@ -239,7 +236,8 @@ func TestInstallFlowsRenderConfiguredHubTrust(t *testing.T) {
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
-	if joined := strings.Join(responseBodies, "\n"); !strings.Contains(joined, "QURL_CONNECTOR_HUB_HOST='hub.nhp.example'") {
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvKubernetes))
+	if joined := strings.Join(responseBodies, "\n"); !strings.Contains(joined, "QURL_CONNECTOR_HUB_HOST='hub.nhp.example'") || !strings.Contains(joined, "- name: QURL_CONNECTOR_HUB_HOST") {
 		t.Fatalf("S3 website install did not render the configured Hub triple:\n%s", joined)
 	}
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)

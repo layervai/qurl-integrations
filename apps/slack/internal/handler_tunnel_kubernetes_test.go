@@ -197,11 +197,7 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		if ctx.Err() != nil {
 			t.Skipf("kubectl dry-run exceeded %s in this environment", kubectlDryRunTimeout)
 		}
-		// kubectl capitalizes this discovery error differently across versions
-		// (memcache.go:265 vs :381); match case-insensitively on a stable phrase.
-		if bytes.Contains(bytes.ToLower(out), []byte("couldn't get current server api group list")) {
-			t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
-		}
+		skipIfKubectlNeedsClusterDiscovery(t, out)
 		t.Fatalf("kubectl dry-run failed: %v\n%s\n--- pod ---\n%s", err, out, pod)
 	}
 }
@@ -299,5 +295,15 @@ func TestKubernetesNameWithSlugHandlesLongPrefix(t *testing.T) {
 	}
 	if strings.HasSuffix(got, "-") {
 		t.Fatalf("name = %q, must end with hash characters", got)
+	}
+}
+
+// skipIfKubectlNeedsClusterDiscovery skips when kubectl could not reach a
+// cluster for discovery. kubectl capitalizes this error differently across
+// versions (memcache.go:265 vs :381), so the match is case-insensitive.
+func skipIfKubectlNeedsClusterDiscovery(t *testing.T, out []byte) {
+	t.Helper()
+	if bytes.Contains(bytes.ToLower(out), []byte("couldn't get current server api group list")) {
+		t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
 	}
 }

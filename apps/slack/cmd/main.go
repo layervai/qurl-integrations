@@ -1710,7 +1710,7 @@ const (
 
 var connectorImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 
-// readConnectorImageVersionConfig reads the optional human-readable qurl release
+// readConnectorImageVersionConfig reads the optional human-readable `qurl` release
 // shown beside the QURL_IMAGE digest in rendered installs.
 func readConnectorImageVersionConfig() (string, error) {
 	version := strings.TrimSpace(os.Getenv(envQURLImageVersion))

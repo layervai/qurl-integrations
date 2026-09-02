@@ -2,14 +2,13 @@ package internal
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-// ConnectorHubTrust is the NHP Hub trust triple the released qurl CLI needs at
+// ConnectorHubTrust is the NHP Hub trust triple the released `qurl` CLI needs at
 // bootstrap. The CLI ships dark (no baked Hub pin), so a rendered install
 // without it fails closed. All-or-none: cmd/main.go rejects partial triples
 // at startup, so a renderer only ever sees a complete triple or none.
@@ -74,8 +73,9 @@ func NewConnectorHubTrust(host, port, key string) (ConnectorHubTrust, error) {
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
 		return ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a port between 1 and 65535", EnvConnectorHubPort, port)
 	}
-	raw, err := base64.StdEncoding.DecodeString(key)
-	if err != nil || len(raw) != connectorHubServerKeyLen {
+	// Canonical form only (strict decode + round-trip), mirroring the port.
+	raw, err := base64.StdEncoding.Strict().DecodeString(key)
+	if err != nil || len(raw) != connectorHubServerKeyLen || base64.StdEncoding.EncodeToString(raw) != key {
 		return ConnectorHubTrust{}, fmt.Errorf("%s must be the standard base64 encoding of a %d-byte key", EnvConnectorHubServerKey, connectorHubServerKeyLen)
 	}
 	return ConnectorHubTrust{host: host, port: port, serverPublicKeyB64: key}, nil
@@ -85,13 +85,11 @@ func (h ConnectorHubTrust) configured() bool {
 	return h.host != "" && h.port != "" && h.serverPublicKeyB64 != ""
 }
 
-// pairs returns the env entries in a stable order. A partial triple is a
-// programming error upstream of the renderer and is reported, never rendered.
+// pairs returns the env entries in a stable order, or nil when the triple is
+// not configured. Fields are unexported and NewConnectorHubTrust is the only
+// constructor, so a partial triple cannot exist outside this package.
 func (h ConnectorHubTrust) pairs() ([][2]string, error) {
 	if !h.configured() {
-		if h.host != "" || h.port != "" || h.serverPublicKeyB64 != "" {
-			return nil, errors.New("hub trust env: partial triple (host, port and server public key are all required)")
-		}
 		return nil, nil
 	}
 	return [][2]string{{EnvConnectorHubHost, h.host}, {EnvConnectorHubPort, h.port}, {EnvConnectorHubServerKey, h.serverPublicKeyB64}}, nil

@@ -638,7 +638,7 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	imageNote += "S3 origin image is digest-pinned by default; set `QURL_S3_ORIGIN_IMAGE` to a tested digest when rotating it."
 	return preparedS3WebsiteInstallMessage{
 		connectorImage:        connectorImage,
-		connectorImageVersion: strings.TrimSpace(h.cfg.ConnectorImageVersion),
+		connectorImageVersion: h.cfg.ConnectorImageVersion,
 		originImage:           originImage,
 		environmentLabel:      environmentLabel,
 		instructions:          instructions,
@@ -678,9 +678,7 @@ func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key
 	b.WriteString("qURL Connector image: `")
 	b.WriteString(p.connectorImage)
 	b.WriteString("`")
-	if p.connectorImageVersion != "" {
-		b.WriteString(" (`qurl` " + p.connectorImageVersion + ")")
-	}
+	b.WriteString(imageVersionSuffix(p.connectorImage, p.connectorImageVersion))
 	b.WriteString(".\nS3 origin image: `")
 	b.WriteString(p.originImage)
 	b.WriteString("`.\n")
