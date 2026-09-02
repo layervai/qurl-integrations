@@ -25,12 +25,12 @@ func shareCmd(opts *globalOpts) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "share <CRID>",
+		Use: "share <CRID>",
 		// The retired verb is not an alias: cobra still rejects it with exit 2
 		// and no request leaves the process. SuggestFor only makes the error
 		// name the command that replaced it.
 		SuggestFor: []string{"resolve"},
-		Short: "Share a CRID as a short-lived access link",
+		Short:      "Share a CRID as a short-lived access link",
 		Long: `Share a CRID as a temporary access link for the resource it names.
 
 A CRID is safe to paste anywhere — it grants nothing by itself. The share

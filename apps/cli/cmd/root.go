@@ -188,6 +188,11 @@ QURL_API_KEY for the same one-time bootstrap.`,
 			if len(args) == 0 {
 				return cmd.Help()
 			}
+			// A retired verb that a command declares in SuggestFor (or a close
+			// misspelling) names its replacement instead of the generic hint.
+			if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+				return exitcode.UsageError(fmt.Errorf("unknown command %q — did you mean `qurl %s`?", args[0], suggestions[0]))
+			}
 			return exitcode.UsageError(fmt.Errorf("unknown command %q — run `qurl --help` for the command list", args[0]))
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
