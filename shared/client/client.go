@@ -914,12 +914,20 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 
 // Identity is the account identity behind the client credential (GET /v1/me).
 //
-// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`).
+// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`,
+// `api_key` present only for API-key principals).
 type Identity struct {
-	// OwnerID is the account owner behind the credential. The Slack bot only
-	// ever holds account API keys, so this is the account owner (the principal a
-	// headless share config must name), never a delegated calling user.
+	// OwnerID is the account owner behind the credential: the principal a
+	// headless share config must name. Me enforces that the credential is an
+	// account API key (api_key present), so this is never a delegated user.
 	OwnerID string `json:"owner_id"`
+	// APIKey is present only when the request was authenticated by an API key.
+	APIKey *IdentityAPIKey `json:"api_key,omitempty"`
+}
+
+// IdentityAPIKey identifies the API key behind an Identity.
+type IdentityAPIKey struct {
+	KeyID string `json:"key_id,omitempty"`
 }
 
 // Me returns the account identity behind the client credential (GET /v1/me).
@@ -935,6 +943,9 @@ func (c *Client) Me(ctx context.Context) (*Identity, error) {
 	}
 	if strings.TrimSpace(out.OwnerID) == "" {
 		return nil, errors.New("identity response missing owner_id")
+	}
+	if out.APIKey == nil {
+		return nil, errors.New("identity is not an API-key principal; owner_id would name the calling user")
 	}
 	return &out, nil
 }

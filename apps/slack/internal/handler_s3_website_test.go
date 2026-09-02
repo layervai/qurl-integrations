@@ -404,6 +404,8 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 			testKeyAPIKey:     testTunnelModalKey,
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+			"kind":            client.CredentialKindEnrollmentToken,
+			"target":          client.CredentialTargetAgent,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -520,6 +522,8 @@ func TestS3WebsiteInstallDMFailureMissingScopeIncludesInstallHint(t *testing.T) 
 			testKeyAPIKey:     testTunnelModalKey,
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+			"kind":            client.CredentialKindEnrollmentToken,
+			"target":          client.CredentialTargetAgent,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -630,6 +634,8 @@ func TestS3WebsiteInstallInstructionsDeliveryFailureRevokesAndSendsDiscardNotice
 			testKeyAPIKey:     testTunnelModalKey,
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+			"kind":            client.CredentialKindEnrollmentToken,
+			"target":          client.CredentialTargetAgent,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -720,6 +726,8 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyPlaintextMissing(t *testing.T) {
 			testKeyAPIKey:     "",
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+			"kind":            client.CredentialKindEnrollmentToken,
+			"target":          client.CredentialTargetAgent,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -775,6 +783,8 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyFailsShellValidation(t *testing.T) {
 			testKeyAPIKey:     "lv_live_bad$bootstrap",
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+			"kind":            client.CredentialKindEnrollmentToken,
+			"target":          client.CredentialTargetAgent,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -1939,5 +1949,53 @@ func TestS3WebsiteInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	}
 	if joined := strings.Join(responseBodies, "\n"); !strings.Contains(joined, "Failed to resolve the qURL account owner") {
 		t.Fatalf("response_url bodies = %q, want owner-lookup failure copy", responseBodies)
+	}
+}
+
+// TestS3WebsiteInstallRendersOwnerFromIdentity closes the loop the unit
+// render tests cannot: the owner_id the fake GET /v1/me returns is the one in
+// the share config the admin is actually shown.
+func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
+	now := fixedNow
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:      testTunnelResourceID,
+			testKeyKnockResourceID: testS3WebsiteKnockResource,
+			testKeyType:            client.ResourceTypeTunnel,
+			testKeySlug:            testTunnelSlug,
+			testKeyStatus:          client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetAgent,
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
+		})
+	})
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, now, tunnelEnvDocker))
+	joined := strings.Join(responseBodies, "\n")
+	if !strings.Contains(joined, "owner_id: '"+testOwnerID+"'") || !strings.Contains(joined, "version: 2") {
+		t.Fatalf("rendered install did not carry the identity owner in a v2 config:\n%s", joined)
 	}
 }

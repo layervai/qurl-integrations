@@ -54,7 +54,7 @@ func newAdminTestServers(t *testing.T) *adminTestServers {
 	// config (GET /v1/me); serve it by default so tests only override it when
 	// they exercise the failure path.
 	ts.customerRoutes[http.MethodGet+" /v1/me"] = func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID, "auth_type": "api_key"})
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID, "api_key": map[string]any{"key_id": "key_workspace"}})
 	}
 	ts.customerRoutes[http.MethodGet+" "+sharingPath] = func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{

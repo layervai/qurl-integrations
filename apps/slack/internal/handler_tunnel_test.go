@@ -5449,10 +5449,7 @@ func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 // credentialConfirmsKindFirst: a producer that ignores `target` still gets a
 // token DM'd, but the skew is visible in the logs.
 func TestTunnelInstallWarnsWhenTargetNotEchoed(t *testing.T) {
-	var logBuf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logs := captureDefaultSlog(t)
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
@@ -5478,8 +5475,8 @@ func TestTunnelInstallWarnsWhenTargetNotEchoed(t *testing.T) {
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("DM posts = %+v, want the token delivered despite the missing target echo", *dmPosts)
 	}
-	if !strings.Contains(logBuf.String(), "did not echo the enrollment token target") {
-		t.Fatalf("logs = %q, want target-not-echoed warning", logBuf.String())
+	if !logs.contains("did not echo the enrollment token target") {
+		t.Fatalf("logs = %q, want target-not-echoed warning", logs.String())
 	}
 }
 
