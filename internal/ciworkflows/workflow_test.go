@@ -1660,7 +1660,10 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		"GoReleaser did not generate the qurl Homebrew cask",
 		`line == want`,
 		"generated Homebrew cask does not name the exact CLI version",
-		"generated Homebrew cask does not bind all four release archives",
+		`archive_url_prefix='releases/download/v#{version}/qurl_#{version}_'`,
+		`for archive in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do`,
+		"generated Homebrew cask does not bind exactly four release archives",
+		"generated Homebrew cask does not bind the exact ${archive} release archive",
 	} {
 		if !strings.Contains(releaseSteps[validateName].Run, fragment) {
 			t.Errorf("%q does not enforce %q", validateName, fragment)
