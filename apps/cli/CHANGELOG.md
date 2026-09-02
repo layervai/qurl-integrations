@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.2.0](https://github.com/layervai/qurl-integrations/compare/v2.1.1...v2.2.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323))
+
+### Features
+
+* **cli:** rename the resolve command to share (hard cutover) ([#1323](https://github.com/layervai/qurl-integrations/issues/1323)) ([ae6a567](https://github.com/layervai/qurl-integrations/commit/ae6a567a4828da75bf3332fae39d31fb908eaddb))
+
+
+### Bug Fixes
+
+* **ci:** validate generated Homebrew archive templates ([#1317](https://github.com/layervai/qurl-integrations/issues/1317)) ([e60cb25](https://github.com/layervai/qurl-integrations/commit/e60cb25d89bbbf5623bf2ec875b8cc2ac339ae21))
+
 ## [2.1.1](https://github.com/layervai/qurl-integrations/compare/v2.1.0...v2.1.1) (2026-09-01)
 
 
