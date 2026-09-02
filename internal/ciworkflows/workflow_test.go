@@ -1759,6 +1759,19 @@ func TestCLIReleaseValidatesPackagesBeforePublication(t *testing.T) {
 		!strings.Contains(promoteImage.Run, `gh release upload "$CLI_TAG"`) {
 		t.Error("versioned GHCR publication is not confined to the post-validation publisher")
 	}
+	if promoteImage == nil ||
+		!strings.Contains(promoteImage.Run, `promoted_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$tagged")"`) ||
+		!strings.Contains(promoteImage.Run, `[[ "$promoted_digest" =~ ^sha256:[0-9a-f]{64}$ ]]`) ||
+		!strings.Contains(promoteImage.Run, `[ "$promoted_digest" = "$IMAGE_DIGEST" ]`) {
+		t.Error("versioned GHCR promotion does not request and validate the exact machine-readable index digest")
+	}
+	if promoteImage != nil {
+		for _, line := range strings.Split(promoteImage.Run, "\n") {
+			if strings.Contains(line, "imagetools inspect") && strings.Contains(line, "|") {
+				t.Errorf("imagetools inspect is piped into another process: %s", strings.TrimSpace(line))
+			}
+		}
+	}
 	if promoteImage != nil && strings.Index(promoteImage.Run, `gh release upload "$CLI_TAG"`) >=
 		strings.Index(promoteImage.Run, `docker buildx imagetools create --tag "$tagged" "$candidate"`) {
 		t.Error("versioned GHCR tag can be promoted before signed image metadata reaches the draft release")
