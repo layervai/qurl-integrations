@@ -42,6 +42,11 @@ fi
 if [ ! -r "$SHARE_GOLDEN" ]; then
   fail "headless share fixture $SHARE_GOLDEN is missing"
 fi
+# The daemon refuses a config writable by group/other; CI checkouts are often
+# group-writable, so mount a private 0444 copy instead of the tracked file.
+GOLDEN_MOUNT="$(mktemp)"
+trap 'rm -f "$GOLDEN_MOUNT"' EXIT
+cp "$SHARE_GOLDEN" "$GOLDEN_MOUNT" && chmod 0444 "$GOLDEN_MOUNT"
 
 for platform in "${PLATFORMS[@]}"; do
   output=""
@@ -62,7 +67,7 @@ for platform in "${PLATFORMS[@]}"; do
   # installs mount state, so give the gate a tmpfs for --state-dir.
   if output="$(docker run --rm --platform "$platform" \
       --tmpfs /tmp:rw,nosuid,nodev \
-      -v "$SHARE_GOLDEN:/etc/qurl/share.yaml:ro" \
+      -v "$GOLDEN_MOUNT:/etc/qurl/share.yaml:ro" \
       "$IMG" daemon run --state-dir /tmp/qurl-state \
       --headless-config /etc/qurl/share.yaml 2>&1)"; then
     fail 'first bootstrap unexpectedly ran without an enrollment token file'
