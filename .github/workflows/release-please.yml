@@ -1023,17 +1023,15 @@ jobs:
           if [ "$IMAGE_ALREADY_TAGGED" != true ]; then
             docker buildx imagetools create --tag "$tagged" "$candidate"
           fi
-          # Read the complete Buildx response before parsing it. Piping Buildx
-          # into an early-exit awk under pipefail can close stdout while Buildx
-          # is still writing the manifest and make Buildx return 255.
-          inspect_output="$(docker buildx imagetools inspect "$tagged")"
-          promoted_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspect_output")"
+          # Ask Buildx for only the index digest. Piping its full response into
+          # an early-exit reader under pipefail can make Buildx return 255.
+          promoted_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$tagged")"
           [[ "$promoted_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::promoted qurl image returned a malformed digest" >&2
+            echo "::error::promoted qURL image returned a malformed digest: ${promoted_digest:-<empty>}" >&2
             exit 1
           }
           [ "$promoted_digest" = "$IMAGE_DIGEST" ] || {
-            echo "::error::promoted qurl image digest ${promoted_digest} differs from tested ${IMAGE_DIGEST}" >&2
+            echo "::error::promoted qURL image digest ${promoted_digest} differs from tested ${IMAGE_DIGEST}" >&2
             exit 1
           }
 
