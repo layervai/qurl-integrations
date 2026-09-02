@@ -120,11 +120,11 @@ func captureDefaultSlog(t *testing.T) *capturedLogs {
 // it. Shared so the fires/silent assertions cannot drift apart.
 const kindFirstRejection = "tunnel install: minted credential did not confirm the kind-first contract"
 
-// assertConnectorEnrollmentKind pins the kind/target pair that makes the
+// assertAgentEnrollmentKind pins the kind/target pair that makes the
 // minted credential a Connector-bound enrollment token rather than an ordinary
 // key. Callers with extra per-path expectations (an expires_in, say) assert
 // those separately.
-func assertConnectorEnrollmentKind(t *testing.T, body map[string]any) {
+func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 	t.Helper()
 	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetAgent {
 		t.Errorf("api key body = %+v, want kind=%q target=%q",

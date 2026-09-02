@@ -2487,3 +2487,41 @@ func TestMintBodiesCarryOnlyDeclaredFields(t *testing.T) {
 		})
 	}
 }
+
+func TestMe(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		status  int
+		body    string
+		want    string
+		wantErr string
+	}{
+		{name: "owner resolved", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","auth_type":"api_key"}}`, want: "email|abc"},
+		{name: "owner_id missing", status: http.StatusOK, body: `{"data":{"auth_type":"api_key"}}`, wantErr: "missing owner_id"},
+		{name: "http error propagates", status: http.StatusInternalServerError, body: `{"error":{"code":"internal","message":"boom"}}`, wantErr: "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/me" {
+					t.Errorf("request = %s %s, want GET /v1/me", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := New(srv.URL, "key").Me(context.Background())
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Me error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got.OwnerID != tc.want {
+				t.Fatalf("Me = %+v, %v; want owner %q", got, err, tc.want)
+			}
+		})
+	}
+}

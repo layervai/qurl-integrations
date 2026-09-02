@@ -506,6 +506,10 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		return nil, authErrorMessage(err), err
 	}
 
+	ownerID, err := resolveInstallOwnerID(ctx, c, log, "S3 website install", args.Slug)
+	if err != nil {
+		return nil, sanitizeAPIError(err, "Failed to resolve the qURL account owner"), err
+	}
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
@@ -528,12 +532,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		log.Error("S3 website install: qURL API response missing pinned connector identity", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id_present", resourceIDPresent, "connector_routing_id_present", connectorRoutingIDPresent, "knock_resource_id_present", knockResourceIDPresent)
 		return nil, "qURL Connector setup could not receive the complete routing details needed for enrollment. No enrollment token was minted. Please retry after the qURL API returns resource_id, connector_routing_id, and knock_resource_id for Connector resources.", fmt.Errorf("qURL Connector resource identity incomplete: %w", err)
 	}
-	identity, err := c.Me(ctx)
-	if err != nil {
-		log.Error("S3 website install: account identity lookup failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resource.ResourceID))
-		return nil, "", fmt.Errorf("resolve account identity: %w", err)
-	}
-	resolvedArgs.OwnerID = identity.OwnerID
+	resolvedArgs.OwnerID = ownerID
 	resourceID = resource.ResourceID
 
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resolvedArgs.ResourceID)

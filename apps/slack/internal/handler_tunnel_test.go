@@ -374,6 +374,15 @@ func TestRenderedConfigsMatchHeadlessOneShareSchema(t *testing.T) {
 	}
 }
 
+func TestRenderTunnelConfigYAMLRequiresOwnerID(t *testing.T) {
+	t.Parallel()
+	args := testTunnelInstallArgs()
+	args.OwnerID = " "
+	if _, err := renderTunnelConfigYAML(args); err == nil || !strings.Contains(err.Error(), "requires the account owner id") {
+		t.Fatalf("renderTunnelConfigYAML error = %v, want owner id guard", err)
+	}
+}
+
 func TestRenderTunnelConfigYAMLRejectsPartialPinnedIdentity(t *testing.T) {
 	_, err := renderTunnelConfigYAML(&tunnelInstallArgs{Slug: testTunnelSlug, LocalPort: 9090, ResourceID: testTunnelResourceID})
 	if err == nil || !strings.Contains(err.Error(), "connector_routing_id") {
@@ -768,7 +777,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	assertConnectorEnrollmentKind(t, apiKeyBody)
+	assertAgentEnrollmentKind(t, apiKeyBody)
 	if apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
 		t.Errorf("api key body expires_in = %v, want %q", apiKeyBody[testKeyExpiresIn], tunnelBootstrapTTL)
 	}
@@ -1623,7 +1632,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	// The modal path shares buildTunnelInstall with the slash path, but assert
 	// the full wire contract here too so a claims/retired-field regression is
 	// caught on either entry point independently.
-	assertConnectorEnrollmentKind(t, apiKeyBody)
+	assertAgentEnrollmentKind(t, apiKeyBody)
 	assertNoConnectorClaims(t, apiKeyBody)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if logs.contains(kindFirstRejection) {
@@ -5318,6 +5327,8 @@ func TestCredentialConfirmsKindFirst(t *testing.T) {
 			want: false,
 		},
 		{
+			// Leniency is intentional: a pre-cutover producer that ignores
+			// `target` echoes nothing; the caller logs a warning for that skew.
 			name: "kind confirmed, target not echoed",
 			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken},
 			want: true,
@@ -5394,5 +5405,38 @@ func TestValidateConnectorAPIURLLoopbackHostCasing(t *testing.T) {
 				t.Fatalf("ValidateConnectorAPIURL(%q) = %v, want %v", tc.raw, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestTunnelInstallFailsClosedWhenOwnerLookupFails pins the ordering the
+// headless v2 config depends on: the account owner is resolved before any
+// remote mutation, so a GET /v1/me outage mints no token, creates no
+// resource, and surfaces an actionable reply.
+func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, keyHits int
+	// A non-retried status: the client retries 5xx with backoff, which would
+	// outlast the async reply window without changing the fail-closed path.
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "Failed to resolve the qURL account owner") {
+		t.Fatalf("async reply = %q, want owner-lookup failure copy", async)
+	}
+	if resourceHits != 0 || keyHits != 0 {
+		t.Fatalf("resource creates = %d, key mints = %d; want 0 and 0 (owner lookup must precede mutation)", resourceHits, keyHits)
 	}
 }

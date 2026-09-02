@@ -913,9 +913,10 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 }
 
 // Identity is the account identity behind the client credential (GET /v1/me).
+//
+// TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`).
 type Identity struct {
-	OwnerID  string `json:"owner_id"`
-	AuthType string `json:"auth_type,omitempty"`
+	OwnerID string `json:"owner_id"`
 }
 
 // Me returns the account identity behind the client credential (GET /v1/me).

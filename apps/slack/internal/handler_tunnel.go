@@ -704,6 +704,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	// `/qurl-admin unset-display-name`. find_or_create only applies the
 	// description on first create, so re-installing an admin-renamed
 	// tunnel keeps the admin's Display Name.
+	ownerID, err := resolveInstallOwnerID(ctx, c, log, "tunnel install", args.Slug)
+	if err != nil {
+		return nil, sanitizeAPIError(err, "Failed to resolve the qURL account owner"), err
+	}
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
@@ -751,12 +755,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.CRID = restarted.CRID
 	resolvedArgs.ServingEpoch = restarted.ServingEpoch
 
-	identity, err := c.Me(ctx)
-	if err != nil {
-		log.Error("tunnel install: account identity lookup failed", "error", err, "resource_id", resource.ResourceID)
-		return nil, "", fmt.Errorf("resolve account identity: %w", err)
-	}
-	resolvedArgs.OwnerID = identity.OwnerID
+	resolvedArgs.OwnerID = ownerID
 	preparedMessage, err := h.prepareTunnelInstallMessage(&resolvedArgs)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
@@ -770,6 +769,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// and native session control only admits owner-scoped (account/bootstrap)
 		// enrollment. A connector-target token records connector_bootstrap and is
 		// rejected for every session. The resource is bound via share.yaml.
+		// Scope trade-off: this token is owner-scoped (any device of the account),
+		// not bound to one connector claim; the TTL, install-failure revoke and
+		// idempotency key below bound that exposure, and the resource binding
+		// lives in share.yaml.
 		Target:         client.CredentialTargetAgent,
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
@@ -782,6 +785,9 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
+	if key.Target == "" {
+		log.Warn("qURL API did not echo the enrollment token target; assuming agent-target (pre-cutover producer)", "key_id", key.KeyID)
+	}
 	if !credentialConfirmsKindFirst(key) {
 		// Correlate on resource_id/key_id rather than the caller-supplied
 		// slug: both identify the resource and credential just as precisely,
@@ -1485,6 +1491,20 @@ func (args *tunnelInstallArgs) pinTunnelResource(resource *client.Resource, apiU
 	return validateTunnelRouteIdentity(args)
 }
 
+// resolveInstallOwnerID resolves the account owner the headless share config
+// must name (GET /v1/me). Called before any remote mutation so an identity
+// outage aborts the install without leaving sharing state behind.
+func resolveInstallOwnerID(ctx context.Context, c *client.Client, log *slog.Logger, flow, slug string) (string, error) {
+	identity, err := c.Me(ctx)
+	if err != nil {
+		log.Error(flow+": account identity lookup failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(slug))
+		return "", fmt.Errorf("resolve account identity: %w", err)
+	}
+	return identity.OwnerID, nil
+}
+
+// TODO(upstream-contract): mirrors the qurl CLI headless share schema
+// (`version: 2` + top-level `owner_id`, qurl >= v2.1); keep in lockstep.
 func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	if args == nil {
 		return "", errors.New("tunnel install args are missing")
