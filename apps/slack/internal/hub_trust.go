@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// hubTrust is the NHP Hub trust triple the released qurl CLI needs at
+// ConnectorHubTrust is the NHP Hub trust triple the released qurl CLI needs at
 // bootstrap. The CLI ships dark (no baked Hub pin), so a rendered install
 // without it fails closed. All-or-none: cmd/main.go rejects partial triples
 // at startup, so a renderer only ever sees a complete triple or none.
@@ -17,21 +17,23 @@ import (
 // TODO(upstream-contract): mirrors the qurl CLI env contract
 // QURL_CONNECTOR_HUB_HOST / QURL_CONNECTOR_HUB_PORT /
 // QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 (apps/cli/internal/connector/hub).
-type hubTrust struct {
-	Host               string
-	Port               string
-	ServerPublicKeyB64 string
+type ConnectorHubTrust struct {
+	host               string
+	port               string
+	serverPublicKeyB64 string
 }
 
-// ConnectorHubTrust is the exported spelling cmd/main.go builds from env.
-type ConnectorHubTrust = hubTrust
+// Host, Port and ServerPublicKeyB64 expose the validated triple.
+func (h ConnectorHubTrust) Host() string               { return h.host }
+func (h ConnectorHubTrust) Port() string               { return h.port }
+func (h ConnectorHubTrust) ServerPublicKeyB64() string { return h.serverPublicKeyB64 }
 
 // Env var names the bot reads for the triple; the same names are rendered
 // into installs (the CLI reads them), so they are defined exactly once.
 const (
-	EnvConnectorHubHost      = hubEnvHost
-	EnvConnectorHubPort      = hubEnvPort
-	EnvConnectorHubServerKey = hubEnvServerPublicKey
+	EnvConnectorHubHost      = "QURL_CONNECTOR_HUB_HOST"
+	EnvConnectorHubPort      = "QURL_CONNECTOR_HUB_PORT"
+	EnvConnectorHubServerKey = "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"
 
 	connectorHubServerKeyLen  = 32
 	connectorHubHostMaxLength = 253
@@ -45,7 +47,9 @@ var (
 	ipv4LiteralPattern      = regexp.MustCompile(`^\d+(\.\d+){3}$`)
 )
 
-// NewConnectorHubTrust validates the triple next to the renderers it feeds.
+// NewConnectorHubTrust is the only way to build a triple: fields are
+// unexported so callers cannot bypass validation, and renderers re-check
+// completeness. It validates next to the renderers it feeds.
 // All-or-none: all empty means "not configured" (nothing rendered); a partial
 // triple is a deployment mistake and is rejected. A single trailing dot
 // (FQDN spelling) is accepted and stripped.
@@ -70,29 +74,23 @@ func NewConnectorHubTrust(host, port, key string) (ConnectorHubTrust, error) {
 	if err != nil || len(raw) != connectorHubServerKeyLen {
 		return ConnectorHubTrust{}, fmt.Errorf("%s must be the standard base64 encoding of a %d-byte key", EnvConnectorHubServerKey, connectorHubServerKeyLen)
 	}
-	return ConnectorHubTrust{Host: host, Port: port, ServerPublicKeyB64: key}, nil
+	return ConnectorHubTrust{host: host, port: port, serverPublicKeyB64: key}, nil
 }
 
-const (
-	hubEnvHost            = "QURL_CONNECTOR_HUB_HOST"
-	hubEnvPort            = "QURL_CONNECTOR_HUB_PORT"
-	hubEnvServerPublicKey = "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"
-)
-
-func (h hubTrust) configured() bool {
-	return h.Host != "" && h.Port != "" && h.ServerPublicKeyB64 != ""
+func (h ConnectorHubTrust) configured() bool {
+	return h.host != "" && h.port != "" && h.serverPublicKeyB64 != ""
 }
 
 // pairs returns the env entries in a stable order. A partial triple is a
 // programming error upstream of the renderer and is reported, never rendered.
-func (h hubTrust) pairs() ([][2]string, error) {
+func (h ConnectorHubTrust) pairs() ([][2]string, error) {
 	if !h.configured() {
-		if h.Host != "" || h.Port != "" || h.ServerPublicKeyB64 != "" {
+		if h.host != "" || h.port != "" || h.serverPublicKeyB64 != "" {
 			return nil, errors.New("hub trust env: partial triple (host, port and server public key are all required)")
 		}
 		return nil, nil
 	}
-	return [][2]string{{hubEnvHost, h.Host}, {hubEnvPort, h.Port}, {hubEnvServerPublicKey, h.ServerPublicKeyB64}}, nil
+	return [][2]string{{EnvConnectorHubHost, h.host}, {EnvConnectorHubPort, h.port}, {EnvConnectorHubServerKey, h.serverPublicKeyB64}}, nil
 }
 
 var (
@@ -104,7 +102,7 @@ var (
 
 // withHubTrustDockerEnv appends the Hub triple as -e flags right after the
 // QURL_ENDPOINT flag of a rendered docker run block.
-func withHubTrustDockerEnv(rendered string, h hubTrust) (string, error) {
+func withHubTrustDockerEnv(rendered string, h ConnectorHubTrust) (string, error) {
 	return spliceHubEnv(dockerEndpointLine, rendered, h, "docker run block", func(indent string, kv [2]string) (string, error) {
 		return indent + "-e " + kv[0] + "=" + shellSingleQuote(kv[1]) + " \\\n", nil
 	})
@@ -115,7 +113,7 @@ func withHubTrustDockerEnv(rendered string, h hubTrust) (string, error) {
 // KEY_YAML shell variable assigned OUTSIDE the unquoted compose heredoc, and
 // the heredoc only references ${KEY_YAML}. Values therefore never reach the
 // shell parser, regardless of the startup allowlist.
-func withHubTrustComposeEnv(rendered string, h hubTrust) (string, error) {
+func withHubTrustComposeEnv(rendered string, h ConnectorHubTrust) (string, error) {
 	withVars, err := spliceHubEnv(composeEndpointVar, rendered, h, "compose shell variables", func(indent string, kv [2]string) (string, error) {
 		quoted, err := yamlSingleQuoted(kv[1])
 		if err != nil {
@@ -133,7 +131,7 @@ func withHubTrustComposeEnv(rendered string, h hubTrust) (string, error) {
 
 // withHubTrustKubernetesEnv appends the Hub triple as env entries right after
 // the QURL_ENDPOINT entry of a rendered container spec.
-func withHubTrustKubernetesEnv(rendered string, h hubTrust) (string, error) {
+func withHubTrustKubernetesEnv(rendered string, h ConnectorHubTrust) (string, error) {
 	return spliceHubEnv(k8sEndpointEntry, rendered, h, "kubernetes env", func(indent string, kv [2]string) (string, error) {
 		quoted, err := yamlSingleQuoted(kv[1])
 		if err != nil {
@@ -147,7 +145,7 @@ func withHubTrustKubernetesEnv(rendered string, h hubTrust) (string, error) {
 // QURL_ENDPOINT anchor. It splices by index (no regexp replacement templates,
 // so a "$" in a value is never interpreted) and fails closed if the anchor is
 // missing or ambiguous, so a template edit cannot silently drop the triple.
-func spliceHubEnv(re *regexp.Regexp, rendered string, h hubTrust, what string, line func(indent string, kv [2]string) (string, error)) (string, error) {
+func spliceHubEnv(re *regexp.Regexp, rendered string, h ConnectorHubTrust, what string, line func(indent string, kv [2]string) (string, error)) (string, error) {
 	pairs, err := h.pairs()
 	if err != nil {
 		return "", err
@@ -173,7 +171,7 @@ func spliceHubEnv(re *regexp.Regexp, rendered string, h hubTrust, what string, l
 }
 
 // hubTrustECSEnv returns the Hub triple as ECS environment entries.
-func hubTrustECSEnv(h hubTrust) ([]ecsEnvironmentVar, error) {
+func hubTrustECSEnv(h ConnectorHubTrust) ([]ecsEnvironmentVar, error) {
 	pairs, err := h.pairs()
 	if err != nil {
 		return nil, err

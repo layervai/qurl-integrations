@@ -1524,8 +1524,8 @@ func TestReadConnectorHubConfig(t *testing.T) {
 		wantErr         string
 	}{
 		{name: "unset renders nothing"},
-		{name: "complete triple", host: "hub.nhp.example", port: "443", key: goodKey, want: internal.ConnectorHubTrust{Host: "hub.nhp.example", Port: "443", ServerPublicKeyB64: goodKey}},
-		{name: "surrounding whitespace trimmed", host: " hub.nhp.example ", port: " 443 ", key: " " + goodKey + " ", want: internal.ConnectorHubTrust{Host: "hub.nhp.example", Port: "443", ServerPublicKeyB64: goodKey}},
+		{name: "complete triple", host: "hub.nhp.example", port: "443", key: goodKey, want: mustHubTrust("hub.nhp.example", "443", goodKey)},
+		{name: "surrounding whitespace trimmed", host: " hub.nhp.example ", port: " 443 ", key: " " + goodKey + " ", want: mustHubTrust("hub.nhp.example", "443", goodKey)},
 		{name: "partial triple fails closed", host: "hub.nhp.example", wantErr: "must be set together"},
 		{name: "port with sign", host: "hub.nhp.example", port: "+443", key: goodKey, wantErr: "port between 1 and 65535"},
 		{name: "port with leading zero", host: "hub.nhp.example", port: "0443", key: goodKey, wantErr: "port between 1 and 65535"},
@@ -1534,7 +1534,7 @@ func TestReadConnectorHubConfig(t *testing.T) {
 		{name: "host with scheme", host: "https://hub", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 		{name: "host with shell expansion", host: "hub$prod.example", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 		{name: "host with command substitution", host: "hub`id`.example", port: "443", key: goodKey, wantErr: "bare DNS host name"},
-		{name: "fqdn trailing dot stripped", host: "hub.example.", port: "443", key: goodKey, want: internal.ConnectorHubTrust{Host: "hub.example", Port: "443", ServerPublicKeyB64: goodKey}},
+		{name: "fqdn trailing dot stripped", host: "hub.example.", port: "443", key: goodKey, want: mustHubTrust("hub.example", "443", goodKey)},
 		{name: "ipv4 literal rejected", host: "10.0.1.7", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 		{name: "ipv6 literal rejected", host: "::1", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 	} {
@@ -1556,26 +1556,38 @@ func TestReadConnectorHubConfig(t *testing.T) {
 	}
 }
 
-func TestReadTunnelImageVersionConfig(t *testing.T) {
-	for _, tc := range []struct{ in, want, wantErr string }{
-		{in: "", want: ""},
-		{in: "v2.1.1", want: "v2.1.1"},
-		{in: " 2.1.1 ", want: "2.1.1"},
-		{in: "v1.2.3-rc.1", want: "v1.2.3-rc.1"},
-		{in: "v1.2.3+build.5", want: "v1.2.3+build.5"},
-		{in: "v1.2.3-rc.1+build.5", want: "v1.2.3-rc.1+build.5"},
-		{in: "latest", wantErr: "release version"},
+func TestReadConnectorImageVersionConfig(t *testing.T) {
+	for _, tc := range []struct{ name, in, want, wantErr string }{
+		{name: "unset", in: "", want: ""},
+		{name: "release", in: "v2.1.1", want: "v2.1.1"},
+		{name: "trimmed", in: " 2.1.1 ", want: "2.1.1"},
+		{name: "pre-release", in: "v1.2.3-rc.1", want: "v1.2.3-rc.1"},
+		{name: "build metadata", in: "v1.2.3+build.5", want: "v1.2.3+build.5"},
+		{name: "pre-release and build", in: "v1.2.3-rc.1+build.5", want: "v1.2.3-rc.1+build.5"},
+		{name: "tag word", in: "latest", wantErr: "release version"},
+		{name: "two components", in: "v1.2", wantErr: "release version"},
+		{name: "four components", in: "1.2.3.4", wantErr: "release version"},
 	} {
-		t.Setenv(envQURLImageVersion, tc.in)
-		got, err := readTunnelImageVersionConfig()
-		if tc.wantErr != "" {
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("%q: err = %v, want %q", tc.in, err, tc.wantErr)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envQURLImageVersion, tc.in)
+			got, err := readConnectorImageVersionConfig()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
 			}
-			continue
-		}
-		if err != nil || got != tc.want {
-			t.Fatalf("%q: got %q, %v; want %q", tc.in, got, err, tc.want)
-		}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
 	}
+}
+
+func mustHubTrust(host, port, key string) internal.ConnectorHubTrust {
+	h, err := internal.NewConnectorHubTrust(host, port, key)
+	if err != nil {
+		panic(err)
+	}
+	return h
 }

@@ -42,9 +42,12 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	// dockerComposeServicePattern plus the runtime case guard below; the slug
 	// matches tunnelSlugPattern; state/secret dirs derive only from that slug.
 	// Keep dockerComposeServicePattern narrow: it rejects shell metacharacters
-	// such as '$', backticks, quotes, slashes, and whitespace. QURL_API_URL_YAML
+	// such as '$', backticks, quotes, slashes, and whitespace. QURL_ENDPOINT_YAML
 	// is assigned through a shell quote and expanded once, so it does not share
 	// those identifier-only restrictions.
+	// anchor: withHubTrustComposeEnv splices QURL_CONNECTOR_HUB_*_YAML shell
+	// assignments after the QURL_ENDPOINT_YAML= line (outside the heredoc) and
+	// ${..._YAML} references after the QURL_ENDPOINT: line; both must stay unique.
 	compose := fmt.Sprintf(`set -eu
 %s
 

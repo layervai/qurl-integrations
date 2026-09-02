@@ -110,6 +110,8 @@ type kubernetesConnectorPodSpecArgs struct {
 	configMapYAML       string
 }
 
+// anchor: withHubTrustKubernetesEnv splices env entries after the adjacent
+// `- name: QURL_ENDPOINT` / `value:` pair, inheriting its indent.
 func renderKubernetesConnectorPodSpec(args *kubernetesConnectorPodSpecArgs) string {
 	precedingContainers := args.precedingContainers
 	if precedingContainers != "" {

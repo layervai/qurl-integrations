@@ -411,13 +411,13 @@ type Config struct {
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
 
-	// TunnelImageVersion is the human-readable qurl release behind TunnelImage
+	// ConnectorImageVersion is the human-readable qurl release behind TunnelImage
 	// (e.g. v2.1.1), shown beside the digest in rendered installs. Optional.
-	TunnelImageVersion string
+	ConnectorImageVersion string
 
 	// ConnectorHub is the NHP Hub trust triple written into every rendered
 	// Connector install. Empty renders no Hub env (fails closed at the daemon).
-	ConnectorHub hubTrust
+	ConnectorHub ConnectorHubTrust
 
 	// S3OriginImage is the private S3 website origin image shown by the
 	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's

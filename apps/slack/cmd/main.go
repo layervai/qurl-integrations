@@ -189,7 +189,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	tunnelImageVersion, err := readTunnelImageVersionConfig()
+	connectorImageVersion, err := readConnectorImageVersionConfig()
 	if err != nil {
 		return err
 	}
@@ -363,7 +363,7 @@ func run() error {
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
 		S3OriginImage:                  s3OriginImage,
-		TunnelImageVersion:             tunnelImageVersion,
+		ConnectorImageVersion:          connectorImageVersion,
 		ConnectorHub:                   connectorHub,
 		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
@@ -1708,16 +1708,16 @@ const (
 	envQURLImageVersion = "QURL_IMAGE_VERSION"
 )
 
-var tunnelImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+var connectorImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 
-// readTunnelImageVersionConfig reads the optional human-readable qurl release
+// readConnectorImageVersionConfig reads the optional human-readable qurl release
 // shown beside the QURL_IMAGE digest in rendered installs.
-func readTunnelImageVersionConfig() (string, error) {
+func readConnectorImageVersionConfig() (string, error) {
 	version := strings.TrimSpace(os.Getenv(envQURLImageVersion))
 	if version == "" {
 		return "", nil
 	}
-	if !tunnelImageVersionPattern.MatchString(version) {
+	if !connectorImageVersionPattern.MatchString(version) {
 		return "", fmt.Errorf("%s=%q must be a release version such as v2.1.1", envQURLImageVersion, version)
 	}
 	return version, nil

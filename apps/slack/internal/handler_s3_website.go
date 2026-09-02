@@ -88,7 +88,7 @@ type s3WebsiteInstallArgs struct {
 	KnockResourceID    string
 	ServingEpoch       uint64
 	APIURL             string
-	Hub                hubTrust
+	Hub                ConnectorHubTrust
 }
 
 type s3WebsiteInstallRequest struct {
@@ -102,11 +102,12 @@ type s3WebsiteInstallRequest struct {
 }
 
 type preparedS3WebsiteInstallMessage struct {
-	connectorImage   string
-	originImage      string
-	environmentLabel string
-	instructions     string
-	imageNote        string
+	connectorImage        string
+	connectorImageVersion string
+	originImage           string
+	environmentLabel      string
+	instructions          string
+	imageNote             string
 }
 
 func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload *ViewSubmission) {
@@ -636,11 +637,12 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	}
 	imageNote += "S3 origin image is digest-pinned by default; set `QURL_S3_ORIGIN_IMAGE` to a tested digest when rotating it."
 	return preparedS3WebsiteInstallMessage{
-		connectorImage:   connectorImage,
-		originImage:      originImage,
-		environmentLabel: environmentLabel,
-		instructions:     instructions,
-		imageNote:        imageNote,
+		connectorImage:        connectorImage,
+		connectorImageVersion: strings.TrimSpace(h.cfg.ConnectorImageVersion),
+		originImage:           originImage,
+		environmentLabel:      environmentLabel,
+		instructions:          instructions,
+		imageNote:             imageNote,
 	}, nil
 }
 
@@ -675,7 +677,11 @@ func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key
 	b.WriteString("\n\n")
 	b.WriteString("qURL Connector image: `")
 	b.WriteString(p.connectorImage)
-	b.WriteString("`.\nS3 origin image: `")
+	b.WriteString("`")
+	if p.connectorImageVersion != "" {
+		b.WriteString(" (`qurl` " + p.connectorImageVersion + ")")
+	}
+	b.WriteString(".\nS3 origin image: `")
 	b.WriteString(p.originImage)
 	b.WriteString("`.\n")
 	b.WriteString(p.imageNote)
@@ -783,6 +789,7 @@ func renderDockerS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImag
 	if err != nil {
 		return "", err
 	}
+	// anchor: withHubTrustDockerEnv splices after the unique -e QURL_ENDPOINT= line.
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -892,6 +899,7 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 	// backslashes, and whitespace. The API URL and raw origin service name are
 	// assigned through shell-quoted variables first so
 	// heredoc expansion is not recursive.
+	// anchor: withHubTrustComposeEnv splices after QURL_ENDPOINT_YAML= and QURL_ENDPOINT:.
 	compose := fmt.Sprintf(`set -eu
 %s
 

@@ -1,11 +1,13 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,19 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-var testHub = hubTrust{Host: "hub.nhp.example", Port: "443", ServerPublicKeyB64: "qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY="}
+func mustHubTrust(host, port, key string) ConnectorHubTrust {
+	h, err := NewConnectorHubTrust(host, port, key)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
+
+// partialHubTrust builds an invalid partial triple the constructor would
+// reject, to pin that renderers still refuse it.
+func partialHubTrust(host string) ConnectorHubTrust { return ConnectorHubTrust{host: host} }
+
+var testHub = mustHubTrust("hub.nhp.example", "443", "qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY=")
 
 func assertHubEnv(t *testing.T, name, got string, want bool, lines ...string) {
 	t.Helper()
@@ -49,7 +63,7 @@ func TestHubTrustEnvFailsClosedOnMissingOrAmbiguousAnchor(t *testing.T) {
 	k8sAnchor := "      - name: QURL_ENDPOINT\n        value: 'https://api.example'\n"
 	for _, tc := range []struct {
 		name     string
-		render   func(string, hubTrust) (string, error)
+		render   func(string, ConnectorHubTrust) (string, error)
 		rendered string
 		want     string
 	}{
@@ -74,7 +88,7 @@ func TestHubTrustEnvValueIsSplicedLiterally(t *testing.T) {
 	// "$1" must survive: the splice must not run through a regexp
 	// replacement template. (The startup validator rejects such hosts; this
 	// pins the renderer independently.)
-	h := hubTrust{Host: "hub$1.example", Port: "443", ServerPublicKeyB64: testHub.ServerPublicKeyB64}
+	h := ConnectorHubTrust{host: "hub$1.example", port: "443", serverPublicKeyB64: testHub.ServerPublicKeyB64()}
 	got, err := withHubTrustDockerEnv("  -e QURL_ENDPOINT='https://api.example' \\\n  img", h)
 	if err != nil || !strings.Contains(got, "-e QURL_CONNECTOR_HUB_HOST='hub$1.example' \\") {
 		t.Fatalf("got %q, %v; want literal host", got, err)
@@ -83,7 +97,7 @@ func TestHubTrustEnvValueIsSplicedLiterally(t *testing.T) {
 
 func TestHubTrustPartialTripleNeverRenders(t *testing.T) {
 	t.Parallel()
-	partial := hubTrust{Host: "hub.nhp.example"}
+	partial := partialHubTrust("hub.nhp.example")
 	if _, err := withHubTrustDockerEnv("  -e QURL_ENDPOINT='x' \\\n", partial); err == nil || !strings.Contains(err.Error(), "partial triple") {
 		t.Fatalf("docker: err = %v, want partial-triple failure", err)
 	}
@@ -92,23 +106,47 @@ func TestHubTrustPartialTripleNeverRenders(t *testing.T) {
 	}
 }
 
+func TestKubernetesDryRunWithConfiguredHub(t *testing.T) {
+	t.Parallel()
+	kubectl, err := exec.LookPath("kubectl")
+	if err != nil {
+		t.Skip("kubectl not on PATH")
+	}
+	args := testTunnelInstallArgs()
+	args.Environment = tunnelEnvKubernetes
+	args.Hub = testHub
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
+	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
+	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-hub-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, kubectl, "apply", "--dry-run=client", "--validate=false", "-f", "-") //nolint:gosec // kubectl path comes from exec.LookPath
+	cmd.Stdin = strings.NewReader(pod)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if bytes.Contains(bytes.ToLower(out), []byte("couldn't get current server api group list")) {
+			t.Skipf("kubectl dry-run needs cluster discovery: %s", out)
+		}
+		t.Fatalf("kubectl dry-run failed with a configured Hub: %v\n%s\n%s", err, out, pod)
+	}
+}
+
 func TestPrepareTunnelInstallMessageThreadsImageVersion(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
-	h.cfg.TunnelImageVersion = "v2.1.1"
+	h.cfg.ConnectorImageVersion = "v2.1.1"
 	prepared, err := h.prepareTunnelInstallMessage(testTunnelInstallArgs())
 	if err != nil {
 		t.Fatalf("prepareTunnelInstallMessage: %v", err)
 	}
-	if want := "Sidecar image: `" + testTunnelImageRef + "` (qurl v2.1.1)."; prepared.imageLine != want {
+	if want := "Sidecar image: `" + testTunnelImageRef + "` (`qurl` v2.1.1)."; prepared.imageLine != want {
 		t.Fatalf("imageLine = %q, want %q", prepared.imageLine, want)
 	}
 }
 
 func TestSidecarImageLine(t *testing.T) {
 	t.Parallel()
-	if got := sidecarImageLine("ghcr.io/layervai/qurl@sha256:abc", "v2.1.1"); got != "Sidecar image: `ghcr.io/layervai/qurl@sha256:abc` (qurl v2.1.1)." {
+	if got := sidecarImageLine("ghcr.io/layervai/qurl@sha256:abc", "v2.1.1"); got != "Sidecar image: `ghcr.io/layervai/qurl@sha256:abc` (`qurl` v2.1.1)." {
 		t.Fatalf("with version = %q", got)
 	}
 	if got := sidecarImageLine("ghcr.io/layervai/qurl@sha256:abc", ""); got != "Sidecar image: `ghcr.io/layervai/qurl@sha256:abc`." {
@@ -151,7 +189,7 @@ func TestRenderedS3WebsiteInstallsCarryHubTrustEnv(t *testing.T) {
 // "$" in a value is preserved literally rather than expanded on paste.
 func TestComposeHubValuesNeverReachTheShell(t *testing.T) {
 	t.Parallel()
-	h := hubTrust{Host: "hub$1.example", Port: "443", ServerPublicKeyB64: testHub.ServerPublicKeyB64}
+	h := ConnectorHubTrust{host: "hub$1.example", port: "443", serverPublicKeyB64: testHub.ServerPublicKeyB64()}
 	got, err := withHubTrustComposeEnv("QURL_ENDPOINT_YAML='x'\ncat <<EOF\n      QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}\nEOF\n", h)
 	if err != nil {
 		t.Fatal(err)

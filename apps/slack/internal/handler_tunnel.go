@@ -169,7 +169,7 @@ type tunnelInstallArgs struct {
 	// a public HTTP registration or bootstrap endpoint.
 	APIURL string
 	// Hub is the NHP Hub trust triple rendered into the install; empty = none.
-	Hub hubTrust
+	Hub ConnectorHubTrust
 }
 
 type tunnelInstallRequest struct {
@@ -1289,7 +1289,7 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	}
 	return preparedTunnelInstallMessage{
 		imageNote:        imageNote,
-		imageLine:        sidecarImageLine(image, h.cfg.TunnelImageVersion),
+		imageLine:        sidecarImageLine(image, h.cfg.ConnectorImageVersion),
 		environmentLabel: environmentLabel,
 		instructions:     instructions,
 	}, nil
@@ -1916,7 +1916,7 @@ func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg str
 // declares it, the human-readable qurl release behind the digest.
 func sidecarImageLine(image, version string) string {
 	if v := strings.TrimSpace(version); v != "" {
-		return fmt.Sprintf("Sidecar image: `%s` (qurl %s).", image, v)
+		return fmt.Sprintf("Sidecar image: `%s` (`qurl` %s).", image, v)
 	}
 	return fmt.Sprintf("Sidecar image: `%s`.", image)
 }

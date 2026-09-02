@@ -17,6 +17,8 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 	if err != nil {
 		return "", err
 	}
+	// anchor: withHubTrustDockerEnv splices -e QURL_CONNECTOR_HUB_* flags after
+	// the -e QURL_ENDPOINT= line, which must stay unique and end with a continuation.
 	docker := fmt.Sprintf(`set -eu
 %s
 
