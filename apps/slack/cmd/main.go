@@ -1714,6 +1714,8 @@ const (
 	connectorHubHostMaxLength = 253
 )
 
+var connectorHubHostPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+
 var tunnelImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$`)
 
 // readTunnelImageVersionConfig reads the optional human-readable qurl release
@@ -1742,10 +1744,15 @@ func readConnectorHubConfig() (internal.ConnectorHubTrust, error) {
 	if host == "" || port == "" || key == "" {
 		return internal.ConnectorHubTrust{}, fmt.Errorf("%s, %s and %s must be set together", envConnectorHubHost, envConnectorHubPort, envConnectorHubServerKey)
 	}
-	if len(host) > connectorHubHostMaxLength || strings.ContainsAny(host, " \t\r\n/:'\"") {
-		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a bare host name", envConnectorHubHost, host)
+	// Allowlist (RFC 1123 labels): the value is rendered into shell and YAML
+	// install blocks, so anything outside a DNS name is rejected here. IPv6
+	// literals are deliberately not accepted; the Hub is addressed by name.
+	if len(host) > connectorHubHostMaxLength || !connectorHubHostPattern.MatchString(host) {
+		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a bare DNS host name", envConnectorHubHost, host)
 	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+	// Canonical decimal only: Atoi would accept "+443" / "0443", which the
+	// CLI then rejects at bootstrap.
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
 		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a port between 1 and 65535", envConnectorHubPort, port)
 	}
 	raw, err := base64.StdEncoding.DecodeString(key)

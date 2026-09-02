@@ -117,6 +117,10 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 	if err != nil {
 		return "", err
 	}
+	hubEnv, err := hubTrustECSEnv(args.Hub)
+	if err != nil {
+		return "", err
+	}
 	container := ecsContainerDefinition{
 		Name:                   connectorContainerName,
 		Image:                  image,
@@ -127,7 +131,7 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		ReadonlyRootFilesystem: true,
 		Environment: append([]ecsEnvironmentVar{
 			{Name: "QURL_ENDPOINT", Value: endpoint},
-		}, hubTrustECSEnv(args.Hub)...),
+		}, hubEnv...),
 		MountPoints: []ecsMountPoint{
 			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
 			{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},

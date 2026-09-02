@@ -111,6 +111,10 @@ QURL_COMPOSE_YAML_EOF
 
 docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedEndpointShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedTunnelServiceName, quotedImage)
 
+	compose, err = withHubTrustComposeEnv(compose, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	block, err := slackCodeBlock(compose)
 	if err != nil {
 		return "", err
@@ -128,9 +132,5 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_
 		"If Compose recreates the web service container, bring the qurl service up again too.",
 	)
 	intro := strings.Join(introParts, " ")
-	block, err = withHubTrustComposeEnv(block, args.Hub)
-	if err != nil {
-		return "", err
-	}
 	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After qURL connects, delete the enrollment-token file.", nil
 }

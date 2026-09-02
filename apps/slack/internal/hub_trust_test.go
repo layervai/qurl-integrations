@@ -34,10 +34,66 @@ func TestRenderedTunnelInstallsCarryHubTrustEnv(t *testing.T) {
 	}
 }
 
-func TestHubTrustEnvFailsClosedWithoutEndpointAnchor(t *testing.T) {
+func TestHubTrustEnvFailsClosedOnMissingOrAmbiguousAnchor(t *testing.T) {
 	t.Parallel()
-	if _, err := withHubTrustDockerEnv("docker run img", testHub); err == nil || !strings.Contains(err.Error(), "found 0") {
-		t.Fatalf("err = %v, want missing-anchor failure", err)
+	dockerAnchor := "  -e QURL_ENDPOINT='https://api.example' \\\n"
+	composeAnchor := "      QURL_ENDPOINT: ${QURL_ENDPOINT_YAML}\n"
+	k8sAnchor := "      - name: QURL_ENDPOINT\n        value: 'https://api.example'\n"
+	for _, tc := range []struct {
+		name     string
+		render   func(string, hubTrust) (string, error)
+		rendered string
+		want     string
+	}{
+		{name: "docker missing", render: withHubTrustDockerEnv, rendered: "docker run img", want: "found 0"},
+		{name: "docker ambiguous", render: withHubTrustDockerEnv, rendered: dockerAnchor + dockerAnchor, want: "found 2"},
+		{name: "compose ambiguous", render: withHubTrustComposeEnv, rendered: composeAnchor + "x:\n" + composeAnchor, want: "found 2"},
+		{name: "kubernetes missing", render: withHubTrustKubernetesEnv, rendered: "env: []", want: "found 0"},
+		{name: "kubernetes ambiguous", render: withHubTrustKubernetesEnv, rendered: k8sAnchor + k8sAnchor, want: "found 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := tc.render(tc.rendered, testHub); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestHubTrustEnvValueIsSplicedLiterally(t *testing.T) {
+	t.Parallel()
+	// "$1" must survive: the splice must not run through a regexp
+	// replacement template. (The startup validator rejects such hosts; this
+	// pins the renderer independently.)
+	h := hubTrust{Host: "hub$1.example", Port: "443", ServerPublicKeyB64: testHub.ServerPublicKeyB64}
+	got, err := withHubTrustDockerEnv("  -e QURL_ENDPOINT='https://api.example' \\\n  img", h)
+	if err != nil || !strings.Contains(got, "-e QURL_CONNECTOR_HUB_HOST='hub$1.example' \\") {
+		t.Fatalf("got %q, %v; want literal host", got, err)
+	}
+}
+
+func TestHubTrustPartialTripleNeverRenders(t *testing.T) {
+	t.Parallel()
+	partial := hubTrust{Host: "hub.nhp.example"}
+	if _, err := withHubTrustDockerEnv("  -e QURL_ENDPOINT='x' \\\n", partial); err == nil || !strings.Contains(err.Error(), "partial triple") {
+		t.Fatalf("docker: err = %v, want partial-triple failure", err)
+	}
+	if _, err := hubTrustECSEnv(partial); err == nil || !strings.Contains(err.Error(), "partial triple") {
+		t.Fatalf("ecs: err = %v, want partial-triple failure", err)
+	}
+}
+
+func TestPrepareTunnelInstallMessageThreadsImageVersion(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.TunnelImageVersion = "v2.1.1"
+	prepared, err := h.prepareTunnelInstallMessage(testTunnelInstallArgs())
+	if err != nil {
+		t.Fatalf("prepareTunnelInstallMessage: %v", err)
+	}
+	if want := "Sidecar image: `" + testTunnelImageRef + "` (qurl v2.1.1)."; prepared.imageLine != want {
+		t.Fatalf("imageLine = %q, want %q", prepared.imageLine, want)
 	}
 }
 
@@ -72,7 +128,7 @@ func TestRenderedS3WebsiteInstallsCarryHubTrustEnv(t *testing.T) {
 		if err != nil {
 			t.Fatalf("kubernetes: %v", err)
 		}
-		assertHubEnv(t, "s3 kubernetes", k8s, configured, "- name: QURL_CONNECTOR_HUB_HOST\n", "- name: QURL_CONNECTOR_HUB_PORT\n")
+		assertHubEnv(t, "s3 kubernetes", k8s, configured, "      - name: QURL_CONNECTOR_HUB_HOST\n        value: 'hub.nhp.example'", "      - name: QURL_CONNECTOR_HUB_PORT\n        value: '443'")
 		ecs, err := renderS3WebsiteECSContainerJSON(args, testTunnelImageRef, testS3OriginImageRef)
 		if err != nil {
 			t.Fatalf("ecs: %v", err)

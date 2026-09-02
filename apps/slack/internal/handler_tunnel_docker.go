@@ -69,6 +69,10 @@ docker run -d \
     --headless-config /etc/qurl/share.yaml \
     --enrollment-token-file /run/secrets/qurl/enrollment-token`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(endpoint), shellSingleQuote(image))
 
+	docker, err = withHubTrustDockerEnv(docker, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	block, err := slackCodeBlock(docker)
 	if err != nil {
 		return "", err
@@ -78,9 +82,5 @@ docker run -d \
 		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
 	intro += " It writes or overwrites the qURL share config in the current directory. Re-running this install briefly restarts the qurl container if it already exists. Because qurl shares the web container's network namespace, restart qurl after replacing or recreating the web container."
-	block, err = withHubTrustDockerEnv(block, args.Hub)
-	if err != nil {
-		return "", err
-	}
 	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. Warm restarts use the persisted state volume and do not need it.", nil
 }

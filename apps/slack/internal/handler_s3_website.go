@@ -849,15 +849,15 @@ docker run -d \
     --headless-config /etc/qurl/share.yaml \
     --enrollment-token-file /run/secrets/qurl/enrollment-token`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), shellSingleQuote(originImage), shellSingleQuote(endpoint), shellSingleQuote(connectorImage))
 
+	docker, err = withHubTrustDockerEnv(docker, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	block, err := slackCodeBlock(docker)
 	if err != nil {
 		return "", err
 	}
 	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the enrollment token so the secret does not land in shell history."
-	block, err = withHubTrustDockerEnv(block, args.Hub)
-	if err != nil {
-		return "", err
-	}
 	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart qURL too because it shares the origin container's network namespace.", nil
 }
 
@@ -959,15 +959,15 @@ QURL_COMPOSE_YAML_EOF
 
 docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/enrollment-token"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService)
 
+	compose, err = withHubTrustComposeEnv(compose, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	block, err := slackCodeBlock(compose)
 	if err != nil {
 		return "", err
 	}
 	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history."
-	block, err = withHubTrustComposeEnv(block, args.Hub)
-	if err != nil {
-		return "", err
-	}
 	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; after qURL connects, delete the enrollment-token file. If the S3 origin service is recreated, restart qURL too because it shares the origin network namespace.", nil
 }
 
@@ -1013,6 +1013,10 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 	if err != nil {
 		return "", err
 	}
+	hubEnv, err := hubTrustECSEnv(args.Hub)
+	if err != nil {
+		return "", err
+	}
 	// The S3 origin is the protected workload, so both containers are essential:
 	// losing either one should fail/restart the ECS task.
 	containers := []ecsContainerDefinition{
@@ -1041,7 +1045,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 			ReadonlyRootFilesystem: true,
 			Environment: append([]ecsEnvironmentVar{
 				{Name: "QURL_ENDPOINT", Value: endpoint},
-			}, hubTrustECSEnv(args.Hub)...),
+			}, hubEnv...),
 			MountPoints: []ecsMountPoint{
 				{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
 				{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},
@@ -1142,6 +1146,10 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 	if err != nil {
 		return "", err
 	}
+	patch, err = withHubTrustKubernetesEnv(patch, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	patchBlock, err := slackCodeBlock(patch)
 	if err != nil {
 		return "", err
@@ -1153,6 +1161,5 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 		"The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.",
 		"After the pod connects, roll out a warm-start revision without `--enrollment-token-file` or its Secret mount. Verify reconnect, then delete the enrollment-token Secret.",
 	}, "\n")
-	rendered := intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nMerge the generated pod securityContext, add both runtime containers under `containers:`, and append the volumes. Do not duplicate existing YAML keys.\n\n" + patchBlock
-	return withHubTrustKubernetesEnv(rendered, args.Hub)
+	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nMerge the generated pod securityContext, add both runtime containers under `containers:`, and append the volumes. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }

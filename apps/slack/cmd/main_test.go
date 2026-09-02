@@ -1516,19 +1516,26 @@ func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 }
 
 func TestReadConnectorHubConfig(t *testing.T) {
-	const goodKey = "qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY="
+	const goodKey = "UhVQcrKoJ2LhQlRtuIItBjxXR2wA/VvZvTmqnzT+GS8="
 	for _, tc := range []struct {
 		name            string
 		host, port, key string
-		wantSet         bool
+		want            internal.ConnectorHubTrust
 		wantErr         string
 	}{
 		{name: "unset renders nothing"},
-		{name: "complete triple", host: "hub.nhp.example", port: "443", key: goodKey, wantSet: true},
+		{name: "complete triple", host: "hub.nhp.example", port: "443", key: goodKey, want: internal.ConnectorHubTrust{Host: "hub.nhp.example", Port: "443", ServerPublicKeyB64: goodKey}},
+		{name: "surrounding whitespace trimmed", host: " hub.nhp.example ", port: " 443 ", key: " " + goodKey + " ", want: internal.ConnectorHubTrust{Host: "hub.nhp.example", Port: "443", ServerPublicKeyB64: goodKey}},
 		{name: "partial triple fails closed", host: "hub.nhp.example", wantErr: "must be set together"},
-		{name: "bad port", host: "hub.nhp.example", port: "http", key: goodKey, wantErr: "port between 1 and 65535"},
+		{name: "port with sign", host: "hub.nhp.example", port: "+443", key: goodKey, wantErr: "port between 1 and 65535"},
+		{name: "port with leading zero", host: "hub.nhp.example", port: "0443", key: goodKey, wantErr: "port between 1 and 65535"},
+		{name: "port out of range", host: "hub.nhp.example", port: "70000", key: goodKey, wantErr: "port between 1 and 65535"},
 		{name: "bad key", host: "hub.nhp.example", port: "443", key: "not-base64", wantErr: "32-byte key"},
-		{name: "host with scheme", host: "https://hub", port: "443", key: goodKey, wantErr: "bare host name"},
+		{name: "host with scheme", host: "https://hub", port: "443", key: goodKey, wantErr: "bare DNS host name"},
+		{name: "host with shell expansion", host: "hub$prod.example", port: "443", key: goodKey, wantErr: "bare DNS host name"},
+		{name: "host with command substitution", host: "hub`id`.example", port: "443", key: goodKey, wantErr: "bare DNS host name"},
+		{name: "host with trailing dot", host: "hub.example.", port: "443", key: goodKey, wantErr: "bare DNS host name"},
+		{name: "ipv6 literal rejected", host: "::1", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(envConnectorHubHost, tc.host)
@@ -1541,8 +1548,8 @@ func TestReadConnectorHubConfig(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || (got.Host != "") != tc.wantSet {
-				t.Fatalf("got %+v, %v; want set=%v", got, err, tc.wantSet)
+			if err != nil || got != tc.want {
+				t.Fatalf("got %+v, %v; want %+v", got, err, tc.want)
 			}
 		})
 	}
@@ -1553,6 +1560,8 @@ func TestReadTunnelImageVersionConfig(t *testing.T) {
 		{in: "", want: ""},
 		{in: "v2.1.1", want: "v2.1.1"},
 		{in: " 2.1.1 ", want: "2.1.1"},
+		{in: "v1.2.3-rc.1", want: "v1.2.3-rc.1"},
+		{in: "v1.2.3+build.5", want: "v1.2.3+build.5"},
 		{in: "latest", wantErr: "release version"},
 	} {
 		t.Setenv(envQURLImageVersion, tc.in)

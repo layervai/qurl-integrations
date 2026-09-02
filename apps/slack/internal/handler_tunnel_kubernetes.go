@@ -82,6 +82,10 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 	if err != nil {
 		return "", err
 	}
+	patch, err = withHubTrustKubernetesEnv(patch, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	patchBlock, err := slackCodeBlock(patch)
 	if err != nil {
 		return "", err
@@ -93,8 +97,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 		"- The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session. The apply pipeline briefly carries a generated Secret manifest between `kubectl` processes.",
 		"- After the pod connects, create and roll out a warm-start workload revision that removes `--enrollment-token-file`, its Secret volume and mount. Verify the replacement pod connects from persisted state, then delete the enrollment-token Secret.",
 	}, "\n")
-	rendered := intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nMerge the generated pod `securityContext`, append the `qurl` container under `containers:`, and append the volumes under `volumes:`. Do not duplicate existing YAML keys.\n\n" + patchBlock
-	return withHubTrustKubernetesEnv(rendered, args.Hub)
+	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nMerge the generated pod `securityContext`, append the `qurl` container under `containers:`, and append the volumes under `volumes:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }
 
 type kubernetesConnectorPodSpecArgs struct {
