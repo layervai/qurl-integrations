@@ -188,6 +188,11 @@ const (
 	// CredentialTargetConnector constrains an enrollment token to Connector
 	// enrollment.
 	CredentialTargetConnector = "connector"
+	// CredentialTargetAgent constrains an enrollment token to registered-device
+	// (agent) enrollment: the owner-scoped credential a headless Connector
+	// daemon needs for native session control. Connector-target tokens are
+	// connector-scoped and cannot open native sessions.
+	CredentialTargetAgent = "agent"
 	// CredentialClaimTypeConnector binds an enrollment token to one Connector
 	// resource identifier. Sharing the literal "connector" with
 	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
@@ -903,6 +908,29 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	}
 	if out.ResourceID != resourceID {
 		return nil, errors.New("get resource response identity does not match request")
+	}
+	return &out, nil
+}
+
+// Identity is the account identity behind the client credential (GET /v1/me).
+type Identity struct {
+	OwnerID  string `json:"owner_id"`
+	AuthType string `json:"auth_type,omitempty"`
+}
+
+// Me returns the account identity behind the client credential (GET /v1/me).
+// OwnerID is the durable account owner the headless share config must name.
+func (c *Client) Me(ctx context.Context) (*Identity, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/me", http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	var out Identity
+	if _, err := c.do(req, &out, "GET /v1/me"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out.OwnerID) == "" {
+		return nil, errors.New("identity response missing owner_id")
 	}
 	return &out, nil
 }

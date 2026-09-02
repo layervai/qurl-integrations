@@ -126,34 +126,22 @@ const kindFirstRejection = "tunnel install: minted credential did not confirm th
 // those separately.
 func assertConnectorEnrollmentKind(t *testing.T, body map[string]any) {
 	t.Helper()
-	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetConnector {
+	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetAgent {
 		t.Errorf("api key body = %+v, want kind=%q target=%q",
-			body, client.CredentialKindEnrollmentToken, client.CredentialTargetConnector)
+			body, client.CredentialKindEnrollmentToken, client.CredentialTargetAgent)
 	}
 }
 
-// assertSingleConnectorClaim pins the decoded `POST /v1/api-keys` body to
-// exactly one Connector claim bound to slug. Every step is type-checked so a
-// wrong-shaped body reports a readable failure instead of panicking the test
-// binary on a bad assertion.
-func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) {
+// assertNoConnectorClaims pins the decoded `POST /v1/api-keys` body to an
+// agent-target enrollment token: the daemon enrolls its device identity with
+// it, so it must not carry a connector claim (the resource is bound through
+// the rendered share.yaml, not the credential).
+func assertNoConnectorClaims(t *testing.T, body map[string]any) {
 	t.Helper()
-	raw, ok := body["claims"].([]any)
-	if !ok {
-		t.Errorf("api key body claims = %v, want a JSON array; body=%+v", body["claims"], body)
-		return
-	}
-	if len(raw) != 1 {
-		t.Errorf("api key body has %d claims, want exactly 1; body=%+v", len(raw), body)
-		return
-	}
-	claim, ok := raw[0].(map[string]any)
-	if !ok {
-		t.Errorf("api key body claims[0] = %v, want a JSON object; body=%+v", raw[0], body)
-		return
-	}
-	if claim[testKeyType] != client.CredentialClaimTypeConnector || claim["id"] != slug {
-		t.Errorf("api key body claim = %+v, want {type:%q, id:%q}", claim, client.CredentialClaimTypeConnector, slug)
+	if raw, ok := body["claims"]; ok && raw != nil {
+		if arr, isArr := raw.([]any); !isArr || len(arr) != 0 {
+			t.Errorf("api key body claims = %v, want none for an agent-target token; body=%+v", raw, body)
+		}
 	}
 }
 

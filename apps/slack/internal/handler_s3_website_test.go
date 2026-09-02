@@ -452,13 +452,10 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 	if apiKeyHits != 1 {
 		t.Fatalf("api key hits = %d, want 1", apiKeyHits)
 	}
-	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector {
-		t.Errorf("api key body = %+v, want Connector enrollment token", apiKeyBody)
+	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetAgent {
+		t.Errorf("api key body = %+v, want agent-target enrollment token", apiKeyBody)
 	}
-	claims, ok := apiKeyBody["claims"].([]any)
-	if !ok || len(claims) != 1 || claims[0].(map[string]any)["type"] != client.CredentialClaimTypeConnector || claims[0].(map[string]any)["id"] != testTunnelSlug {
-		t.Errorf("api key body = %+v, want one connector claim", apiKeyBody)
-	}
+	assertNoConnectorClaims(t, apiKeyBody)
 	for _, retired := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
 		if _, ok := apiKeyBody[retired]; ok {
 			t.Errorf("api key body contained retired %s field: %+v", retired, apiKeyBody)
@@ -1294,7 +1291,8 @@ func TestRenderS3WebsiteConnectorConfigYAMLPinsResourceIdentity(t *testing.T) {
 		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
 	}
 	for _, want := range []string{
-		"version: 1",
+		"version: 2",
+		"owner_id: '" + testOwnerID + "'",
 		"shares:",
 		"crid: '" + testTunnelCRID + "'",
 		"connector_id: '" + testTunnelSlug + "'",
@@ -1809,6 +1807,7 @@ func testS3WebsiteArgs(env tunnelInstallEnvironment) *s3WebsiteInstallArgs {
 		ConnectorRoutingID: testTunnelRoutingID,
 		KnockResourceID:    testS3WebsiteKnockResource,
 		ServingEpoch:       1,
+		OwnerID:            testOwnerID,
 		APIURL:             testTunnelAPIURL,
 	}
 }

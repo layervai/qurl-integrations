@@ -164,6 +164,7 @@ type tunnelInstallArgs struct {
 	ConnectorRoutingID string
 	KnockResourceID    string
 	ServingEpoch       uint64
+	OwnerID            string
 	// APIURL is the canonical /v1 base used for qURL resource CRUD. Native NHP
 	// enrollment and knocks use qurl-go's assigned-cell UDP lifecycle instead of
 	// a public HTTP registration or bootstrap endpoint.
@@ -750,6 +751,12 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.CRID = restarted.CRID
 	resolvedArgs.ServingEpoch = restarted.ServingEpoch
 
+	identity, err := c.Me(ctx)
+	if err != nil {
+		log.Error("tunnel install: account identity lookup failed", "error", err, "resource_id", resource.ResourceID)
+		return nil, "", fmt.Errorf("resolve account identity: %w", err)
+	}
+	resolvedArgs.OwnerID = identity.OwnerID
 	preparedMessage, err := h.prepareTunnelInstallMessage(&resolvedArgs)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
@@ -757,10 +764,13 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
-		Name:           "Slack qURL Connector enrollment " + args.Slug,
-		Kind:           client.CredentialKindEnrollmentToken,
-		Target:         client.CredentialTargetConnector,
-		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
+		Name: "Slack qURL Connector enrollment " + args.Slug,
+		Kind: client.CredentialKindEnrollmentToken,
+		// Agent-target: the daemon enrolls its device identity with this token,
+		// and native session control only admits owner-scoped (account/bootstrap)
+		// enrollment. A connector-target token records connector_bootstrap and is
+		// rejected for every session. The resource is bound via share.yaml.
+		Target:         client.CredentialTargetAgent,
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
@@ -780,7 +790,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
 			"resource_id", resource.ResourceID, "key_id", key.KeyID,
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
-			"got_target", key.Target, "want_target", client.CredentialTargetConnector)
+			"got_target", key.Target, "want_target", client.CredentialTargetAgent)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "kind_first_unconfirmed")
 		// No "please retry" here: the dominant cause is a qURL API that
 		// predates this credential contract, and retrying against it will
@@ -1133,7 +1143,7 @@ func credentialConfirmsKindFirst(key *client.APIKey) bool {
 	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
 		return false
 	}
-	return key.Target == "" || key.Target == client.CredentialTargetConnector
+	return key.Target == "" || key.Target == client.CredentialTargetAgent
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
@@ -1485,7 +1495,10 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	if strings.TrimSpace(args.CRID) == "" || args.ServingEpoch == 0 {
 		return "", errors.New("tunnel lifecycle CRID and serving epoch are required")
 	}
-	values := []string{args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
+	if strings.TrimSpace(args.OwnerID) == "" {
+		return "", errors.New("tunnel headless config requires the account owner id")
+	}
+	values := []string{args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort), args.OwnerID}
 	quoted := make([]string, len(values))
 	for i, value := range values {
 		var err error
@@ -1494,7 +1507,8 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 			return "", err
 		}
 	}
-	return fmt.Sprintf(`version: 1
+	return fmt.Sprintf(`version: 2
+owner_id: %s
 shares:
   - crid: %s
     resource_id: %s
@@ -1505,7 +1519,7 @@ shares:
     local_ip: 127.0.0.1
     local_port: %d
     desired_state: on
-    serving_epoch: %d`, quoted[0], quoted[1], quoted[2], quoted[3], quoted[4], quoted[5], args.LocalPort, args.ServingEpoch), nil
+    serving_epoch: %d`, quoted[6], quoted[0], quoted[1], quoted[2], quoted[3], quoted[4], quoted[5], args.LocalPort, args.ServingEpoch), nil
 }
 
 func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
