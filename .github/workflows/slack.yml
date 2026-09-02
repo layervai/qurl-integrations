@@ -152,6 +152,7 @@ jobs:
     # canceled during cache upload.
     timeout-minutes: 30
     env:
+      # TODO(upstream-contract): mirrors qurl-integrations-infra QURL_IMAGE (keep in lockstep).
       # Released qurl CLI image (v2.1.1 index digest; derived from
       # `docker buildx imagetools inspect ghcr.io/layervai/qurl:v2.1.1`) that must strict-decode
       # the guided v2 headless config and stop at the credential gate. Keep in

@@ -3390,55 +3390,6 @@ func TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails(t *testing.T) 
 	}
 }
 
-// TestTunnelInstallAcceptsCredentialWithoutEchoedTarget pins the acceptance
-// side of the gate: `target` is corroborating, not required. Now that an
-// unconfirmed credential fails the install outright, tightening the predicate
-// to demand `target` would break enrollment against every producer that
-// echoes `kind` but omits it — a regression that no rejection test would
-// catch, since all of those assert the opposite direction. This is the test
-// that fails if someone "hardens" the gate past its documented contract.
-func TestTunnelInstallAcceptsCredentialWithoutEchoedTarget(t *testing.T) {
-	logs := captureDefaultSlog(t)
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
-		})
-	})
-	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
-		// Honors kind, omits target entirely.
-		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:  testTunnelAPIKeyID,
-			testKeyAPIKey: testTunnelAPIKey,
-			testKeyStatus: client.StatusActive,
-			"kind":        client.CredentialKindEnrollmentToken,
-		})
-	})
-	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
-		t.Error("a credential that confirms kind must not be revoked")
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	h := newAdminTestHandler(t, ts)
-	dmPosts := captureTunnelPostDMSuccess(h)
-	h.SetAliasStore(h.cfg.AdminStore)
-	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
-
-	if logs.contains(kindFirstRejection) {
-		t.Error("a response that echoes kind without target must not be rejected")
-	}
-	if !strings.Contains(async, "is ready to install") {
-		t.Fatalf("async reply = %q, want the successful install copy", async)
-	}
-	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
-		t.Fatalf("enrollment token DM = %+v, want one containing the token", *dmPosts)
-	}
-}
-
 func TestTunnelInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -5332,11 +5283,11 @@ func TestCredentialConfirmsKindFirst(t *testing.T) {
 			want: false,
 		},
 		{
-			// Leniency is intentional: a pre-cutover producer that ignores
-			// `target` echoes nothing; the caller logs a warning for that skew.
+			// No leniency: qurl-service echoes target since #1347 (deployed), and
+			// an unconfirmable owner-scoped credential must never be DM'd.
 			name: "kind confirmed, target not echoed",
 			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken},
-			want: true,
+			want: false,
 		},
 		{
 			name: "kind confirmed but target disagrees",
@@ -5450,13 +5401,13 @@ func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	}
 }
 
-// TestTunnelInstallWarnsWhenTargetNotEchoed pins the deliberate leniency in
-// credentialConfirmsKindFirst: a producer that ignores `target` still gets a
-// token DM'd, but the skew is visible in the logs.
-func TestTunnelInstallWarnsWhenTargetNotEchoed(t *testing.T) {
-	logs := captureDefaultSlog(t)
+// TestTunnelInstallRejectsWhenTargetNotEchoed pins the strict gate: a
+// producer that does not echo `target` cannot confirm the owner-scoped
+// credential, so it is revoked and never DM'd.
+func TestTunnelInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
+	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID:   testTunnelResourceID,
@@ -5473,15 +5424,16 @@ func TestTunnelInstallWarnsWhenTargetNotEchoed(t *testing.T) {
 			"kind":        client.CredentialKindEnrollmentToken,
 		})
 	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
 	h := newAdminTestHandler(t, ts)
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
-	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
-		t.Fatalf("DM posts = %+v, want the token delivered despite the missing target echo", *dmPosts)
-	}
-	if !logs.contains("did not echo the enrollment token target") {
-		t.Fatalf("logs = %q, want target-not-echoed warning", logs.String())
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(async, kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("DM posts = %d, revokes = %d, reply = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, async)
 	}
 }
 
@@ -5506,5 +5458,32 @@ func TestOwnerLookupFailureMessage(t *testing.T) {
 				t.Fatalf("404 message lost the request reference: %q", ownerLookupFailureMessage(tc.err))
 			}
 		})
+	}
+}
+
+// TestTunnelInstallFailsClosedForNonAPIKeyPrincipal pins the install policy
+// guard: /v1/me without api_key means owner_id would name a delegated user,
+// so nothing is created or minted and the admin sees the generic copy.
+func TestTunnelInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, keyHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "Failed to resolve the qURL account owner") || resourceHits != 0 || keyHits != 0 {
+		t.Fatalf("reply = %q, creates = %d, mints = %d; want owner-lookup copy and no mutation", async, resourceHits, keyHits)
 	}
 }

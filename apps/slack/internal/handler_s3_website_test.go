@@ -1916,16 +1916,7 @@ func TestS3WebsiteInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 		sharingHits++
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	var responseBodies []string
-	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read response_url body: %v", err)
-		}
-		responseBodies = append(responseBodies, string(body))
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(responseURL.Close)
+	responseURL, responseBodiesPtr := s3WebsiteInstallResponseCapture(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.cfg.S3OriginImage = testS3OriginImageRef
@@ -1935,8 +1926,8 @@ func TestS3WebsiteInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	if resourceHits != 0 || keyHits != 0 || sharingHits != 0 || len(*dmPosts) != 0 {
 		t.Fatalf("resource creates = %d, key mints = %d, sharing writes = %d, DMs = %d; want all 0", resourceHits, keyHits, sharingHits, len(*dmPosts))
 	}
-	if joined := strings.Join(responseBodies, "\n"); !strings.Contains(joined, "Failed to resolve the qURL account owner") {
-		t.Fatalf("response_url bodies = %q, want owner-lookup failure copy", responseBodies)
+	if joined := strings.Join(*responseBodiesPtr, "\n"); !strings.Contains(joined, "Failed to resolve the qURL account owner") {
+		t.Fatalf("response_url bodies = %q, want owner-lookup failure copy", *responseBodiesPtr)
 	}
 }
 
@@ -1966,23 +1957,14 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
-	var responseBodies []string
-	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read response_url body: %v", err)
-		}
-		responseBodies = append(responseBodies, string(body))
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(responseURL.Close)
+	responseURL, responseBodiesPtr := s3WebsiteInstallResponseCapture(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, now, tunnelEnvDocker))
-	joined := strings.Join(responseBodies, "\n")
+	joined := strings.Join(*responseBodiesPtr, "\n")
 	if !strings.Contains(joined, "owner_id: '"+testOwnerID+"'") || !strings.Contains(joined, "version: 2") {
 		t.Fatalf("rendered install did not carry the identity owner in a v2 config:\n%s", joined)
 	}
@@ -2033,27 +2015,23 @@ func s3WebsiteInstallFakes(t *testing.T, ts *adminTestServers, keyFields map[str
 	})
 }
 
-// TestS3WebsiteInstallWarnsWhenTargetNotEchoed mirrors the tunnel test: a
-// producer that ignores `target` still gets the token delivered, with the
-// skew visible in the logs.
-func TestS3WebsiteInstallWarnsWhenTargetNotEchoed(t *testing.T) {
-	logs := captureDefaultSlog(t)
+// TestS3WebsiteInstallRejectsWhenTargetNotEchoed mirrors the tunnel gate: a
+// producer that does not echo `target` cannot confirm the owner-scoped
+// credential, so it is revoked and never DM'd.
+func TestS3WebsiteInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	var revokeHits int
 	s3WebsiteInstallFakes(t, ts, map[string]any{}, &revokeHits)
-	responseURL, _ := s3WebsiteInstallResponseCapture(t)
+	responseURL, bodies := s3WebsiteInstallResponseCapture(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
-	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) || revokeHits != 0 {
-		t.Fatalf("DM posts = %+v, revokes = %d; want the token delivered without a revoke", *dmPosts, revokeHits)
-	}
-	if !logs.contains("did not echo the enrollment token target") {
-		t.Fatalf("logs = %q, want target-not-echoed warning", logs.String())
+	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(strings.Join(*bodies, "\n"), kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("DM posts = %d, revokes = %d, bodies = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, *bodies)
 	}
 }
 

@@ -572,21 +572,18 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
+	if !credentialConfirmsKindFirst(key) {
+		log.Error("S3 website install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
+			"resource_id", resource.ResourceID, "key_id", key.KeyID,
+			"got_kind", sanitizeLogValue(key.Kind), "want_kind", client.CredentialKindEnrollmentToken,
+			"got_target", sanitizeLogValue(key.Target), "want_target", client.CredentialTargetAgent)
+		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_kind_first_unconfirmed")
+		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), errKindFirstUnconfirmed
+	}
 	if key.APIKey == "" {
 		log.Error("S3 website install: create api key response missing plaintext", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_missing_plaintext")
 		return nil, sharingInstallFailureMessage("The qURL API did not return an enrollment token. Please retry or contact support.", previousSharing), errMissingBootstrapPlaintext
-	}
-	if key.Target == "" {
-		log.Warn("qURL API did not echo the enrollment token target; assuming agent-target (pre-cutover producer)", "key_id", key.KeyID)
-	}
-	if !credentialConfirmsKindFirst(key) {
-		log.Error("S3 website install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
-			"resource_id", resource.ResourceID, "key_id", key.KeyID,
-			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
-			"got_target", key.Target, "want_target", client.CredentialTargetAgent)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_kind_first_unconfirmed")
-		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), errKindFirstUnconfirmed
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("S3 website install: create api key response was not shell-renderable", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))

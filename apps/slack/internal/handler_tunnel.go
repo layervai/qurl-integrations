@@ -789,9 +789,6 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sharingInstallFailureMessage(sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), previousSharing), err
 	}
 	mintedKey = key
-	if key.Target == "" {
-		log.Warn("qURL API did not echo the enrollment token target; assuming agent-target (pre-cutover producer)", "key_id", key.KeyID)
-	}
 	if !credentialConfirmsKindFirst(key) {
 		// Correlate on resource_id/key_id rather than the caller-supplied
 		// slug: both identify the resource and credential just as precisely,
@@ -799,8 +796,8 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// go/log-injection finding on a log statement added here.
 		log.Error("tunnel install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
 			"resource_id", resource.ResourceID, "key_id", key.KeyID,
-			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
-			"got_target", key.Target, "want_target", client.CredentialTargetAgent)
+			"got_kind", sanitizeLogValue(key.Kind), "want_kind", client.CredentialKindEnrollmentToken,
+			"got_target", sanitizeLogValue(key.Target), "want_target", client.CredentialTargetAgent)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "kind_first_unconfirmed")
 		// No "please retry" here: the dominant cause is a qURL API that
 		// predates this credential contract, and retrying against it will
@@ -1133,6 +1130,11 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 	return h.cfg.PostDM(ctx, teamID, enterpriseID, userID, msg)
 }
 
+// kindFirstUnconfirmedInstallMessage is the shared fail-closed copy for a
+// minted credential that does not confirm the kind-first contract; both
+// install flows use it so the two cannot drift.
+const kindFirstUnconfirmedInstallMessage = "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated."
+
 // credentialConfirmsKindFirst reports whether a mint response echoes back the
 // kind-first contract the request asked for. The response is the only in-band
 // signal that the producer honored the request: a pre-cutover producer that
@@ -1149,16 +1151,11 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 // that this fails closed: a producer that honors `kind` but does not echo
 // `target` must not break every enrollment. A `target` that is present and
 // disagrees is a real conflict and does fail.
-// kindFirstUnconfirmedInstallMessage is the shared fail-closed copy for a
-// minted credential that does not confirm the kind-first contract; both
-// install flows use it so the two cannot drift.
-const kindFirstUnconfirmedInstallMessage = "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated."
-
 func credentialConfirmsKindFirst(key *client.APIKey) bool {
 	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
 		return false
 	}
-	return key.Target == "" || key.Target == client.CredentialTargetAgent
+	return key.Target == client.CredentialTargetAgent
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
@@ -1530,6 +1527,9 @@ func resolveInstallOwnerID(ctx context.Context, c *client.Client, log *slog.Logg
 	return identity.OwnerID, nil
 }
 
+// renderTunnelConfigYAML renders the one-share headless config the daemon
+// reads (--headless-config).
+//
 // TODO(upstream-contract): mirrors the qurl CLI headless share schema
 // (`version: 2` + top-level `owner_id`, qurl >= v2.1); keep in lockstep.
 func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {

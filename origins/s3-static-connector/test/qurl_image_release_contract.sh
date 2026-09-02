@@ -35,7 +35,7 @@ fi
 resolves=false
 for attempt in 1 2 3; do
   if docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then resolves=true; break; fi
-  sleep $((attempt * 5))
+  [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
 done
 if [ "$resolves" != true ]; then
   if [ "$REQUIRE_IMAGE" = "true" ]; then
@@ -67,14 +67,20 @@ for platform in "${PLATFORMS[@]}"; do
   docker image rm -f "$IMG" >/dev/null 2>&1 || true
   pulled=false
   for attempt in 1 2 3; do
-    if docker pull --quiet --platform "$platform" "$IMG" >/dev/null 2>&1; then pulled=true; break; fi
-    sleep $((attempt * 5))
+    if pull_output="$(docker pull --quiet --platform "$platform" "$IMG" 2>&1)"; then pulled=true; break; fi
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
   done
   if [ "$pulled" != true ]; then
-    output="$(docker pull --platform "$platform" "$IMG" 2>&1 | tail -5)"
+    output="$(printf '%s\n' "$pull_output" | tail -5)"
     fail "could not pull the image for $platform"
   fi
-  if ! version_output="$(docker run --rm --platform "$platform" "$IMG" version 2>&1)"; then
+  # The emulated run is the flakiest step; retry it like the pull.
+  ran=false
+  for attempt in 1 2 3; do
+    if version_output="$(docker run --rm --platform "$platform" "$IMG" version 2>&1)"; then ran=true; break; fi
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
+  done
+  if [ "$ran" != true ]; then
     output="$version_output
 binfmt: $(ls /proc/sys/fs/binfmt_misc 2>/dev/null | tr '\n' ' ')
 docker: $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null)"
