@@ -179,7 +179,7 @@ func retrySafeRequest(req *http.Request, basePath string) bool {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
 	case http.MethodPost:
-		// Resolve mints a short-lived link but does not change the resource.
+		// Share mints a short-lived link but does not change the resource.
 		// qurl-go owns this request and cannot carry our private context marker,
 		// so keep the one reviewed SDK write-like route explicit here. A 503
 		// still requires an Idempotency-Key in retryableResponse.
@@ -187,7 +187,7 @@ func retrySafeRequest(req *http.Request, basePath string) bool {
 		if !ok {
 			return false
 		}
-		resource, ok = strings.CutSuffix(resource, "/resolve")
+		resource, ok = strings.CutSuffix(resource, "/share")
 		return ok && resource != "" && !strings.Contains(resource, "/")
 	default:
 		return false

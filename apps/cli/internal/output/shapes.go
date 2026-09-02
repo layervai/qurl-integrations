@@ -26,7 +26,7 @@ type publishJSON struct {
 	FoundExisting *bool `json:"found_existing,omitempty"`
 }
 
-type resolveJSON struct {
+type shareLinkJSON struct {
 	QURL             string     `json:"qurl"`
 	CRID             string     `json:"crid,omitempty"`
 	Type             string     `json:"type,omitempty"`
@@ -319,52 +319,52 @@ func foundExisting(res *qurlapi.Published) bool {
 	return res.FoundExisting != nil && *res.FoundExisting
 }
 
-// Resolve renders a minted temporary access link. Piped stdout gets the bare
-// link and nothing else, so `link="$(qurl resolve <CRID>)"` captures it
-// cleanly (the link opens in a browser — fetching it with curl yields the
-// page that opens the link, which is why `qurl get --file` exists); a TTY
-// gets the link plus its expiry on stderr-free stdout decoration.
-func (p *Printer) Resolve(res *qurlapi.Resolved) error {
+// ShareLink renders a minted share link. Piped stdout gets the bare link
+// and nothing else, so `link="$(qurl share <CRID>)"` captures it cleanly
+// (the link opens in a browser — fetching it with curl yields the page that
+// opens the link, which is why `qurl get --file` exists); a TTY gets the
+// link plus its expiry on stderr-free stdout decoration.
+func (p *Printer) ShareLink(link *qurlapi.ShareLink) error {
 	if p.format == FormatJSON {
-		out := resolveJSON{
-			QURL:             res.QURL,
-			CRID:             res.CRID,
-			Type:             res.Type,
-			ExpiresInSeconds: res.ExpiresInSeconds,
-			SingleUse:        res.SingleUse,
+		out := shareLinkJSON{
+			QURL:             link.QURL,
+			CRID:             link.CRID,
+			Type:             link.Type,
+			ExpiresInSeconds: link.ExpiresInSeconds,
+			SingleUse:        link.SingleUse,
 		}
-		if !res.ExpiresAt.IsZero() {
-			t := res.ExpiresAt
+		if !link.ExpiresAt.IsZero() {
+			t := link.ExpiresAt
 			out.ExpiresAt = &t
 		}
 		return p.writeJSON(out)
 	}
 	if p.quiet || !p.outTTY {
-		_, err := fmt.Fprintln(p.out, res.QURL)
+		_, err := fmt.Fprintln(p.out, link.QURL)
 		return err
 	}
 	ew := &errWriter{w: p.out}
-	ew.printf("%s\n", res.QURL)
-	if line := p.resolveDetail(res); line != "" {
+	ew.printf("%s\n", link.QURL)
+	if line := p.shareLinkDetail(link); line != "" {
 		ew.printf("\n%s\n", p.dim("  "+line))
 	}
 	return ew.flush(nil)
 }
 
-func (p *Printer) resolveDetail(res *qurlapi.Resolved) string {
+func (p *Printer) shareLinkDetail(link *qurlapi.ShareLink) string {
 	var expiry string
 	switch {
-	case res.ExpiresInSeconds > 0:
-		expiry = "Expires in " + formatDuration(time.Duration(res.ExpiresInSeconds)*time.Second)
-	case !res.ExpiresAt.IsZero():
-		expiry = "Expires " + p.formatExpiry(res.ExpiresAt)
+	case link.ExpiresInSeconds > 0:
+		expiry = "Expires in " + formatDuration(time.Duration(link.ExpiresInSeconds)*time.Second)
+	case !link.ExpiresAt.IsZero():
+		expiry = "Expires " + p.formatExpiry(link.ExpiresAt)
 	}
 	switch {
-	case expiry != "" && res.SingleUse:
+	case expiry != "" && link.SingleUse:
 		return expiry + " (single use)"
 	case expiry != "":
 		return expiry
-	case res.SingleUse:
+	case link.SingleUse:
 		return "Single use"
 	default:
 		return ""

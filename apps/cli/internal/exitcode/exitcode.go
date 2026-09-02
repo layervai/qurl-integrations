@@ -229,7 +229,7 @@ func cliSentinelCode(err error) (int, bool) {
 		return Conflict, true
 	case errors.Is(err, consume.ErrLinkExpired):
 		// Expiry that survived the one automatic refresh joins the
-		// platform's gone family: the link does not resolve to content now.
+		// platform's gone family: the link no longer leads to content.
 		return NotFound, true
 	case errors.Is(err, consume.ErrLinkUnavailable):
 		// The URL-bearing request or transport cause is intentionally removed,
@@ -447,7 +447,7 @@ func connectorResourceSentinelCode(err error) (int, bool) {
 // apiErrorCode maps a typed qURL API error by status class, with the pinned
 // code-level exceptions: the platform's "gone" family — 404 (both code
 // spellings), 400 `revoked`, and 410 `resource_tombstoned` — all mean the
-// resource does not resolve and share the not-found exit code; only the
+// resource can no longer be shared and all map to the not-found exit code; only the
 // stderr message distinguishes them.
 func apiErrorCode(err error) (int, bool) {
 	var apiErr *qurlapi.Error

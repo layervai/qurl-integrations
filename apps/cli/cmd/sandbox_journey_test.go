@@ -624,9 +624,9 @@ type journeyListDoc struct {
 }
 
 // TestSandboxCRIDJourney walks the whole customer journey against the real
-// sandbox: publish → status/inspect → list (paginated) → resolve (verified,
+// sandbox: publish → status/inspect → list (paginated) → share (verified,
 // piped bare-URL) → get --file (real bytes through the minted link) → delete --yes →
-// idempotent re-delete → resolve-after-delete (owner-truthful revoked exit).
+// idempotent re-delete → share-after-delete (owner-truthful revoked exit).
 func TestSandboxCRIDJourney(t *testing.T) {
 	cliEnv := sandboxJourneyEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), journeyTimeout)
@@ -661,7 +661,7 @@ func TestSandboxCRIDJourney(t *testing.T) {
 
 	// The minted identifier is a full-form test-environment CRID: 60
 	// characters, and the leading 'q' that marks the test version bytes —
-	// the premise of the environment-guard assertion at the resolve step.
+	// the premise of the environment-guard assertion at the share step.
 	if len(pub.CRID) != 60 || !strings.HasPrefix(pub.CRID, "q") {
 		t.Fatalf("CRID = %q (len %d), want the 60-character 'q'-prefixed test-environment form", pub.CRID, len(pub.CRID))
 	}
@@ -675,10 +675,10 @@ func TestSandboxCRIDJourney(t *testing.T) {
 
 	assertRemoteStatusAndInspect(ctx, t, cliEnv, pub)
 	assertListFindsCRID(ctx, t, cliEnv, pub.CRID, description)
-	link := assertResolveJourney(ctx, t, cliEnv, pub.CRID)
+	link := assertShareJourney(ctx, t, cliEnv, pub.CRID)
 	// The link value never reaches the log: CI logs are public, and a
 	// minted link carries the sandbox hostname and a live qURL credential.
-	t.Logf("resolved %s -> a verified %d-byte https link", pub.CRID, len(link))
+	t.Logf("shared %s -> a verified %d-byte https link", pub.CRID, len(link))
 	assertGetDownloadsBytes(ctx, t, cliEnv, pub.CRID)
 	assertDeleteJourney(ctx, t, cliEnv, pub.CRID)
 }
@@ -789,7 +789,7 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 	if seen != 1 {
 		t.Fatalf("published CRID appeared %d times across %d newest-first list pages, want exactly once", seen, pages)
 	}
-	// Not a Fatal: the row was found, so the rest of the journey (resolve,
+	// Not a Fatal: the row was found, so the rest of the journey (share,
 	// download, delete) is still worth running and still reclaims the row.
 	if label != expectedDescription {
 		t.Errorf("listed row description = %q, want %q; nothing built on `qurl list` can identify this fixture",
@@ -797,19 +797,19 @@ func assertListFindsCRID(ctx context.Context, t *testing.T, cliEnv map[string]st
 	}
 }
 
-// assertResolveJourney resolves the CRID and holds the piped contract: with
+// assertShareJourney shares the CRID and holds the piped contract: with
 // stdout not a terminal the command emits the bare link and nothing else, so
-// `link="$(qurl resolve <CRID>)"` captures it cleanly (the link opens in a
+// `link="$(qurl share <CRID>)"` captures it cleanly (the link opens in a
 // browser — downloading is get's job). Exit 0 here IS the verification
 // evidence — the CLI discards any answer that fails CRID verification before
 // printing (exit 12), so a printed link is a verified link. It also holds
 // the environment-guard case: the sandbox is the test environment, so its
 // 'q'-prefixed CRID at this non-production endpoint must produce no warning
 // at all.
-func assertResolveJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
+func assertShareJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) string {
 	t.Helper()
-	res := runSandboxCLI(ctx, t, cliEnv, "resolve", id)
-	link, err := validateSandboxResolveCommandResult("resolve", res.code, res.stdout.String(), res.stderr.String())
+	res := runSandboxCLI(ctx, t, cliEnv, "share", id)
+	link, err := validateSandboxShareCommandResult("share", res.code, res.stdout.String(), res.stderr.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -868,7 +868,7 @@ func assertGetDownloadsBytes(ctx context.Context, t *testing.T, cliEnv map[strin
 
 // assertDeleteJourney deletes the resource, proves the re-delete is the
 // idempotent success the platform promises, and then holds the
-// owner-truthful revoked path: resolving a deleted resource with the
+// owner-truthful revoked path: sharing a deleted resource with the
 // owner's own key exits with the not-found code and an honest "deleted"
 // story on stderr — never a link, never a silent success.
 func assertDeleteJourney(ctx context.Context, t *testing.T, cliEnv map[string]string, id string) {
@@ -897,9 +897,9 @@ func assertDeleteJourney(ctx context.Context, t *testing.T, cliEnv map[string]st
 		t.Errorf("re-delete stderr = %q, want the already-gone note or the repeated deletion confirmation", stderrText)
 	}
 
-	res = runSandboxCLI(ctx, t, cliEnv, "resolve", id)
+	res = runSandboxCLI(ctx, t, cliEnv, "share", id)
 	if err := validateSandboxDeletedCommandResult(
-		"resolve",
+		"share",
 		res.code,
 		res.stdout.String(),
 		res.stderr.String(),

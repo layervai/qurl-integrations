@@ -1,4 +1,4 @@
-// Package consume turns a verified resolve answer into the thing the user
+// Package consume turns a verified share answer into the thing the user
 // asked for: the resource open in their browser, or its bytes on disk.
 //
 // The action decision (Decide) is local and runs before any network traffic:
@@ -20,8 +20,8 @@
 // one opaque, short-lived application bearer, but the Downloader applies it
 // only to the exact granted HTTPS origin and removes it before any cross-origin
 // redirect. Every link this package acts on has already passed the CLI's CRID
-// verification (cmd.verifyResolved), and the re-resolve a mid-download retry
-// performs goes through the same verifying closure — the platform access
+// verification (cmd.verifyShareLink), and the fresh share link a mid-download
+// retry mints goes through the same verifying closure — the platform access
 // request included.
 package consume
 
@@ -48,7 +48,7 @@ const (
 // same values; the CLI-wide jargon gate asserts over CustomerMessages.
 const (
 	// MsgPipedNeedsFile is the §16.2 refusal: no browser without a terminal.
-	MsgPipedNeedsFile = "this output is piped, and a browser is only opened on a terminal. Add --file <path> to download the file (--file - streams the raw bytes), or use `qurl resolve` to print an access link"
+	MsgPipedNeedsFile = "this output is piped, and a browser is only opened on a terminal. Add --file <path> to download the file (--file - streams the raw bytes), or use `qurl share` to print an access link"
 
 	// MsgFileExists is the overwrite refusal; wraps add the path and remedy.
 	MsgFileExists = "the destination already exists"
@@ -65,7 +65,7 @@ const (
 	// retaining the granted URL carried by the underlying error.
 	MsgLinkUnavailable = "the download host could not be reached"
 
-	// MsgUnopenableLink frames a resolved link the browser must not open.
+	// MsgUnopenableLink frames a share link the browser must not open.
 	MsgUnopenableLink = "the service answered with a link this command won't open"
 
 	// The fixed fragments wraps append to MsgFileExists.
@@ -91,7 +91,7 @@ var (
 	// ErrLinkUnavailable reports a URL-free request or transport failure
 	// (temporarily unavailable).
 	ErrLinkUnavailable = errors.New(MsgLinkUnavailable)
-	// ErrUnopenableLink reports a verified resolve answer whose link is not
+	// ErrUnopenableLink reports a verified share answer whose link is not
 	// a web URL — outside the service's contract (server error).
 	ErrUnopenableLink = errors.New(MsgUnopenableLink)
 )

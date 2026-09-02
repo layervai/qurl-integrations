@@ -7,7 +7,7 @@ const (
 	errorPrefix = "Error:"
 
 	// msgLinksUnavailable renders the typed "temporary access links are not
-	// being served here" condition (HTTP 503 on resolve) as a service
+	// being served here" condition (HTTP 503 on share) as a service
 	// posture, not a user mistake.
 	msgLinksUnavailable = "Temporary access links aren't available from this qURL endpoint right now. The resource may exist, but this environment isn't serving links for it yet. Try again later, or check that you're using the endpoint this CRID was published to."
 
@@ -26,13 +26,14 @@ const (
 	// hintRevoked is owner-truthful: the platform tells a resource's owner
 	// that their own resource was deleted rather than hiding it behind the
 	// ambiguous not-found. Everyone else gets the ambiguous 404.
-	hintRevoked = "Hint: this resource was deleted. Deleted resources stop resolving; publish the target again to get a new CRID."
+	hintRevoked = "Hint: this resource was deleted. Deleted resources can no longer be shared; publish the target again to get a new CRID."
 
 	// hintRetired covers the permanently-closed lifecycle state.
-	hintRetired = "Hint: this resource was permanently retired and will never resolve again. Publish the target again to get a new CRID."
+	hintRetired = "Hint: this resource was permanently retired and can never be shared again. Publish the target again to get a new CRID."
 
-	// hintScope covers a key that authenticates but cannot resolve.
-	hintScope                    = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with resolve access."
+	// hintScope covers a key that authenticates but cannot share. The scope
+	// string stays qurl:resolve: it is baked into existing keys.
+	hintScope                    = "Hint: your API key isn't allowed to request access links. Ask your qURL administrator for a key with the qurl:resolve scope (it allows sharing resources by CRID)."
 	hintEnrollmentScope          = "Hint: log in with an API key that includes qurl:agent. The CLI uses it only to mint a one-time device enrollment credential."
 	hintConnectorEnrollmentScope = "Hint: this registered device is not allowed to publish local apps. Contact your qURL administrator."
 

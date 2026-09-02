@@ -7,7 +7,7 @@
 // honors Retry-After, redaction of credentials from every diagnostic line,
 // and the mapping of wire failures onto typed errors.
 //
-// Resolve delegates to qurl-go's ResolveResource (whose VerifyCRID carries
+// Share delegates to qurl-go's ShareResource (whose VerifyCRID carries
 // the client half of the CRID trust story). Publish, list, and delete are
 // direct calls against the /v1/resources REST surface through the same
 // transport and error mapping: v0.5.3's ProtectURL does not send the
@@ -36,15 +36,18 @@ type Client interface {
 	// Publish registers targetURL as a protected resource and returns its
 	// identity, CRID included when the service mints one.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
-	// Resolve mints a temporary access link for the resource identified by
+	// Share mints a short-lived share link for the resource identified by
 	// id (CRID or public-key resource identifier; the service dual-accepts).
-	Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error)
+	// Not to be confused with Sharing below, which reads the connector's
+	// local-app sharing state.
+	Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error)
 	// List returns a page of the caller's resources.
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
 	Resource(ctx context.Context, id string) (*ResourceSummary, error)
 	// Sharing returns the durable desired state and current platform-observed
-	// connection state of one tunnel resource.
+	// connection state of one tunnel resource. It is the connector sharing
+	// state, not the Share operator above.
 	Sharing(ctx context.Context, id string) (*Sharing, error)
 	// SetSharing idempotently changes a tunnel resource's desired state.
 	SetSharing(ctx context.Context, id string, desired DesiredState) (*Sharing, error)
@@ -75,8 +78,8 @@ type PublishOptions struct {
 	Alias       string
 }
 
-// ResolveOptions carries the optional resolve parameters.
-type ResolveOptions struct {
+// ShareOptions carries the optional share parameters.
+type ShareOptions struct {
 	// TTLSeconds asks for the minted link's lifetime; 0 leaves the server
 	// default in effect. The server may clamp the value it grants.
 	TTLSeconds int
@@ -112,8 +115,9 @@ type DeleteResult struct {
 	AlreadyGone bool
 }
 
-// Resolved is the repo-owned result of Resolve.
-type Resolved struct {
+// ShareLink is the repo-owned result of Share: a short-lived access link
+// for the resource a CRID names.
+type ShareLink struct {
 	QURL             string
 	CRID             string
 	Type             string
@@ -130,7 +134,7 @@ type Resolved struct {
 // SDK's qurl.ErrNoCRID when the response carried no CRID, qurl.ErrCRIDMismatch
 // when the key does not derive it, or the crid package sentinels when the
 // held value fails the local gate.
-func (r *Resolved) VerifyKey(derSPKI []byte) error {
+func (r *ShareLink) VerifyKey(derSPKI []byte) error {
 	if r.verifyKey == nil {
 		return fmt.Errorf("%w: response cannot be verified", qurl.ErrNoCRID)
 	}
@@ -301,18 +305,18 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	return &registeredClient{Client: core}, nil
 }
 
-// Resolve delegates to the SDK's ResolveResource and carries its VerifyCRID
+// Share delegates to the SDK's ShareResource and carries its VerifyCRID
 // forward as the result's VerifyKey.
-func (c *client) Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error) {
-	var sdkOpts *qurl.ResolveResourceOptions
+func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error) {
+	var sdkOpts *qurl.ShareResourceOptions
 	if opts.TTLSeconds > 0 {
-		sdkOpts = &qurl.ResolveResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
+		sdkOpts = &qurl.ShareResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
 	}
-	access, err := c.sdk.ResolveResource(ctx, id, sdkOpts)
+	access, err := c.sdk.ShareResource(ctx, id, sdkOpts)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	return &Resolved{
+	return &ShareLink{
 		QURL:             access.Link,
 		CRID:             access.CRID,
 		Type:             access.Type,

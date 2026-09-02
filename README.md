@@ -16,7 +16,7 @@ apps/                Per-integration apps (released apps get independent release
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   edge-extension/    Edge extension — Gmail file uploads as expiring qURL links (MV3)
-  cli/               CLI — publish, resolve, and manage qURL resources by CRID (Go)
+  cli/               CLI — publish, share, and manage qURL resources by CRID (Go)
   teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources

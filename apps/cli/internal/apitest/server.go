@@ -26,21 +26,21 @@ type Server struct {
 	t *testing.T
 
 	// Key backs the default happy-path responses; DER, resource id, and
-	// CRID are mutually consistent, so default resolves verify cleanly.
+	// CRID are mutually consistent, so default share answers verify cleanly.
 	Key *ResourceKey
 
 	mu                   sync.Mutex
 	requests             []RecordedRequest
 	scripts              map[string][]http.HandlerFunc
-	resolveCRID          string
-	resolveQURL          string
+	shareCRID            string
+	shareQURL            string
 	downloadPayload      []byte
 	publishFoundExisting *bool
 	publishOmitCRID      bool
 }
 
-// DownloadPath is the mock's link-host route: SetResolveQURL(srv.URL +
-// DownloadPath) makes resolve answers point at the mock itself, so download
+// DownloadPath is the mock's link-host route: SetShareQURL(srv.URL +
+// DownloadPath) makes share answers point at the mock itself, so download
 // tests never leave the process.
 const DownloadPath = "/file"
 
@@ -48,7 +48,7 @@ const DownloadPath = "/file"
 // SetDownloadPayload overrides it. Fixed so goldens can pin byte counts.
 const DefaultDownloadPayload = "qURL mock file payload\n"
 
-// PortalPath is the mock's in-browser page route. A resolve answer of the
+// PortalPath is the mock's in-browser page route. A share answer of the
 // form srv.URL + PortalPath + "#qv2t1.…" mimics a real fragment-credential
 // link: the fragment stays client-side, so any plain HTTP GET of the link
 // lands here and receives the page — never the content bytes. Tests use it
@@ -71,9 +71,9 @@ const (
 	// int echo of the HTTP status) and deliberately does not share this one.
 	fieldStatus = "status"
 	fieldCRID   = "crid"
-	// fieldType is the `type` key of the resource and resolve payloads. The
+	// fieldType is the `type` key of the resource and share payloads. The
 	// two objects give the key different value spaces (url|tunnel for a
-	// resource, the link type for a resolve), but it is one wire field name
+	// resource, the link type for a share), but it is one wire field name
 	// and must not drift between them. builders.go's RFC7807 problem
 	// document has its own "type" (a URI derived from code) and deliberately
 	// does not share this one, same as "status" above.
@@ -88,7 +88,7 @@ const (
 )
 
 // NewServer starts a mock with consistent happy-path handlers for publish,
-// resolve, list, and delete. Close it via t.Cleanup automatically.
+// share, list, and delete. Close it via t.Cleanup automatically.
 func NewServer(t *testing.T) *Server {
 	t.Helper()
 	return NewServerWithKey(t, GenerateResourceKey(t))
@@ -127,12 +127,12 @@ func (s *Server) ScriptRepeat(method, path string, n int, handler http.HandlerFu
 	}
 }
 
-// SetResolveCRID overrides the crid field of resolve responses — the
+// SetShareCRID overrides the crid field of share responses — the
 // wrong-key mode used to exercise fail-closed verification.
-func (s *Server) SetResolveCRID(value string) {
+func (s *Server) SetShareCRID(value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resolveCRID = value
+	s.shareCRID = value
 }
 
 // SetPublishFoundExisting makes publish responses report the
@@ -159,12 +159,12 @@ func (s *Server) SetPublishOmitCRID(v bool) {
 	s.publishOmitCRID = v
 }
 
-// SetResolveQURL overrides the qurl field of resolve responses; download
+// SetShareQURL overrides the qurl field of share responses; download
 // tests point it at the mock's own DownloadPath.
-func (s *Server) SetResolveQURL(u string) {
+func (s *Server) SetShareQURL(u string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resolveQURL = u
+	s.shareQURL = u
 }
 
 // SetDownloadPayload overrides the bytes the DownloadPath route serves —
@@ -215,8 +215,8 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
 		s.handleMe(w, r)
 
-	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resolve"):
-		s.handleResolve(w, r)
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/share"):
+		s.handleShare(w, r)
 
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
 		// A fully populated list row: the publish-time metadata (type,
@@ -325,19 +325,20 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}, nil)
 }
 
-// handleResolve enforces the pinned resolve bind rule — the body must be
-// JSON (`{}` at minimum); a literal empty body is a 400 — then answers a
-// consistent minted link.
-func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+// handleShare serves the CRID share operator (POST /v1/resources/{id}/share).
+// It enforces the pinned bind rule — the body must be JSON (`{}` at
+// minimum); a literal empty body is a 400 — then answers a consistent
+// minted share link.
+func (s *Server) handleShare(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil || len(raw) == 0 || !json.Valid(raw) {
 		WriteProblem(s.t, w, http.StatusBadRequest, "invalid_request", "Bad Request",
 			"request body must be a JSON object")
 		return
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/resolve")
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/share")
 	s.mu.Lock()
-	qurlLink := s.resolveQURL
+	qurlLink := s.shareQURL
 	s.mu.Unlock()
 	if qurlLink == "" {
 		qurlLink = "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ"
@@ -379,13 +380,13 @@ func (s *Server) handlePortalPage(w http.ResponseWriter) {
 	}
 }
 
-// cridFor answers the crid field for a resolve: the override when scripted,
-// the requested CRID echoed back when the caller resolved by CRID, or the
-// CRID derived from the requested key when the caller resolved by resource
+// cridFor answers the crid field for a share: the override when scripted,
+// the requested CRID echoed back when the caller shared by CRID, or the
+// CRID derived from the requested key when the caller shared by resource
 // id — i.e. a consistent server by default.
 func (s *Server) cridFor(requestedID string) string {
 	s.mu.Lock()
-	override := s.resolveCRID
+	override := s.shareCRID
 	s.mu.Unlock()
 	if override != "" {
 		return override

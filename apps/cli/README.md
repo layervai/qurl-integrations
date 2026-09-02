@@ -43,8 +43,8 @@ Using another package format? See [Install](#install).
 ### 2. Sign in
 
 [Create or copy an API key in the qURL dashboard](https://layerv.ai/qurl/dashboard/keys/).
-Select `qurl:agent` to publish the local app and `qurl:resolve` to open it in
-step 4. Then run:
+Select `qurl:agent` to publish the local app and `qurl:resolve` (the scope
+that allows sharing resources by CRID) to open it in step 4. Then run:
 
 ```bash
 qurl login
@@ -238,7 +238,7 @@ would travel unencrypted; loopback endpoints are exempt.
 | Command | Description |
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a remote URL or serve a loopback HTTP app, and get its CRID |
-| `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
+| `qurl share <CRID>` | Share a CRID as a short-lived access link |
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl start <CRID>` | Turn on a previously published local share |
@@ -341,12 +341,14 @@ JSON reports a known outcome as `found_existing: true` or `false`; if recovery
 cannot prove which happened, it omits the field rather than guessing. Delete
 the resource first if you intentionally want a new CRID.
 
-### qurl resolve
+### qurl share
 
-`qurl resolve <CRID>` mints a temporary access link for the resource the
-CRID names. The link expires on its own; resolve again whenever you need
-a fresh one. When stdout is not a terminal the command prints the bare
-link and nothing else, ready to share or open.
+`qurl share <CRID>` mints a short-lived share link for the resource the
+CRID names. A CRID is safe to paste anywhere — it grants nothing by
+itself; the share link is what turns it into access, so treat the link as
+a secret. The link expires on its own; share again whenever you need a
+fresh one. When stdout is not a terminal the command prints the bare link
+and nothing else, ready to hand out or open.
 
 The link opens in a browser. Passing it to a tool like curl fetches the
 page that opens the link, not the content itself — to download content
@@ -363,8 +365,8 @@ exits with code 12 without printing a link.
 
 ### qurl get
 
-`qurl get <CRID>` resolves and verifies exactly like `qurl resolve`, then
-acts on the verified link — nothing is ever acted on unverified:
+`qurl get <CRID>` mints a share link exactly like `qurl share`, verifies
+it, then opens or downloads — nothing is ever acted on unverified:
 
 - **On a terminal**, get prints the link, then opens it in your browser
   (set `QURL_BROWSER` or `BROWSER` to choose which one).
@@ -387,7 +389,7 @@ acts on the verified link — nothing is ever acted on unverified:
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
 When stdout is not a terminal, get never opens a browser: pass `--file`,
-or use `qurl resolve` if you only need the link. With `-o json`, get is a
+or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
@@ -451,8 +453,8 @@ the whole listing.
 ### qurl delete
 
 `qurl delete <CRID>` deletes a published resource. Deletion cannot be
-undone: the CRID stops resolving, and republishing the same target later
-mints a different CRID.
+undone: the CRID can no longer be shared, and republishing the same target
+later mints a different CRID.
 
 | Flag | Description |
 |------|-------------|
@@ -556,14 +558,14 @@ in every archive.
 
 ## Scripting contract
 
-- **stdout carries data, stderr carries everything else.** `qurl resolve`
+- **stdout carries data, stderr carries everything else.** `qurl share`
   piped into another command prints the bare link and nothing more;
   notes, warnings, and confirmation prompts go to stderr.
 - **`--quiet` prints only the primary value**, one per line: the CRID for
-  `publish`, the link for `resolve`, full CRIDs for `list`, the
+  `publish`, the link for `share`, full CRIDs for `list`, the
   destination path for a `get --file` download, the owner id for
   `whoami` and `login`.
-- **Verification is built in:** before printing anything, `qurl resolve`
+- **Verification is built in:** before printing anything, `qurl share`
   and `qurl get` check the service's answer against the CRID you asked
   for and discard mismatches (exit 12).
 

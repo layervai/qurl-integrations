@@ -197,11 +197,11 @@ func TestQuietProjections(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := p.Resolve(&qurlapi.Resolved{QURL: "https://qurl.link/#x"}); err != nil {
+	if err := p.ShareLink(&qurlapi.ShareLink{QURL: "https://qurl.link/#x"}); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "https://qurl.link/#x\n" {
-		t.Errorf("quiet resolve = %q", out.String())
+		t.Errorf("quiet share link = %q", out.String())
 	}
 }
 
@@ -856,7 +856,7 @@ func TestJSONProjectionIsRepoOwned(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	p := newTestPrinter(&out, &errBuf, FormatJSON, false, false, false)
 	expires := time.Date(2026, 3, 1, 0, 5, 0, 0, time.UTC)
-	if err := p.Resolve(&qurlapi.Resolved{
+	if err := p.ShareLink(&qurlapi.ShareLink{
 		QURL:             "https://qurl.link/#x",
 		CRID:             "acrid",
 		Type:             "qv2",
@@ -869,7 +869,7 @@ func TestJSONProjectionIsRepoOwned(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{`"qurl"`, `"crid"`, `"type"`, `"expires_at"`, `"expires_in_seconds"`, `"single_use"`} {
 		if !strings.Contains(got, want) {
-			t.Errorf("resolve JSON missing key %s:\n%s", want, got)
+			t.Errorf("share link JSON missing key %s:\n%s", want, got)
 		}
 	}
 }

@@ -14,7 +14,7 @@ func whoamiCmd(opts *globalOpts) *cobra.Command {
 		Short: "Show which qURL account this device belongs to",
 		Long: `Show the qURL account and registered device identity used by this machine.
 
-The command opens the same durable device identity as publish, list, resolve,
+The command opens the same durable device identity as publish, list, share,
 and lifecycle commands, then checks it against the qURL service. It does not
 read an account API key on a warm start. If this machine is not enrolled, run
 "qurl login" or set QURL_API_KEY for one-time bootstrap.
