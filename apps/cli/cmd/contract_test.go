@@ -120,7 +120,7 @@ func TestShareByResourceKeyVerifies(t *testing.T) {
 func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
 	srv := apitest.NewServer(t)
 	other := apitest.GenerateResourceKey(t)
-	srv.SetResolveCRID(other.CRID)
+	srv.SetShareCRID(other.CRID)
 
 	// By CRID: the echo check fails.
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
@@ -142,8 +142,7 @@ func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
 
 func TestShareResponseWithoutCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
-	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (every /resolve route in this file).
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", func(w http.ResponseWriter, _ *http.Request) {
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 			"qurl": "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ",
 			"type": "qv2",
@@ -158,7 +157,7 @@ func TestShareResponseWithoutCRIDFailsClosed(t *testing.T) {
 
 func TestShare429RetryAfterHonored(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.Handler429(t, 3))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.Handler429(t, 3))
 
 	var sleeps []time.Duration
 	res := runCLI(t, &runOpts{
@@ -195,7 +194,7 @@ func TestRateLimitExhaustionSurfaces429(t *testing.T) {
 
 func TestShareDark503TypedUX(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerDark503(t))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerDark503(t))
 
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 11 {
@@ -263,7 +262,7 @@ func TestDeleteTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 // the owner-truthful message rather than the ambiguous 404 anatomy.
 func TestShareAfterDeleteIsOwnerTruthful(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerRevoked400(t))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerRevoked400(t))
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 5 {
 		t.Fatalf("exit = %d, want 5; stderr: %s", res.code, res.stderr.String())
@@ -294,7 +293,7 @@ func TestGetAndStatusAfterDeleteAreOwnerTruthful(t *testing.T) {
 
 	t.Run("get", func(t *testing.T) {
 		srv := apitest.NewServer(t)
-		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerRevoked400(t))
+		srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerRevoked400(t))
 		downloadDir := t.TempDir()
 		res := runCLI(t, &runOpts{args: []string{
 			"--endpoint", srv.URL,
@@ -319,7 +318,7 @@ func TestGetAndStatusAfterDeleteAreOwnerTruthful(t *testing.T) {
 // TestShareInsufficientScope pins the dedicated-scope failure UX.
 func TestShareInsufficientScope(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerInsufficientScope403(t))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerInsufficientScope403(t))
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 6 {
 		t.Fatalf("exit = %d, want 6; stderr: %s", res.code, res.stderr.String())

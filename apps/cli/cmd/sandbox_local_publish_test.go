@@ -925,8 +925,7 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 
 func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
 	srv := apitest.NewServer(t)
-	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (both /resolve routes in this test).
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerConnectorStopped503(t))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerConnectorStopped503(t))
 	destination := filepath.Join(t.TempDir(), "payload")
 	res := runCLI(t, &runOpts{args: []string{
 		"--endpoint", srv.URL, "--quiet", "get", srv.Key.CRID, "--file", destination,
@@ -941,7 +940,7 @@ func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
 	}
 
 	dark := apitest.NewServer(t)
-	dark.Script(http.MethodPost, "/v1/resources/"+dark.Key.CRID+"/resolve", apitest.HandlerDark503(t))
+	dark.Script(http.MethodPost, "/v1/resources/"+dark.Key.CRID+"/share", apitest.HandlerDark503(t))
 	darkResult := runCLI(t, &runOpts{args: []string{
 		"--endpoint", dark.URL, "--quiet", "get", dark.Key.CRID, "--file", filepath.Join(t.TempDir(), "payload"),
 	}})

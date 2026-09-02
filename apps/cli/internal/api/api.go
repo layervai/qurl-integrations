@@ -7,7 +7,7 @@
 // honors Retry-After, redaction of credentials from every diagnostic line,
 // and the mapping of wire failures onto typed errors.
 //
-// Share delegates to qurl-go's ResolveResource (whose VerifyCRID carries
+// Share delegates to qurl-go's ShareResource (whose VerifyCRID carries
 // the client half of the CRID trust story). Publish, list, and delete are
 // direct calls against the /v1/resources REST surface through the same
 // transport and error mapping: v0.5.3's ProtectURL does not send the
@@ -302,17 +302,14 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	return &registeredClient{Client: core}, nil
 }
 
-// Share delegates to the SDK's ResolveResource and carries its VerifyCRID
+// Share delegates to the SDK's ShareResource and carries its VerifyCRID
 // forward as the result's VerifyKey.
-//
-// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0:
-// switch to sdk.ShareResource / qurl.ShareResourceOptions once go.mod pins it.
 func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error) {
-	var sdkOpts *qurl.ResolveResourceOptions
+	var sdkOpts *qurl.ShareResourceOptions
 	if opts.TTLSeconds > 0 {
-		sdkOpts = &qurl.ResolveResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
+		sdkOpts = &qurl.ShareResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
 	}
-	access, err := c.sdk.ResolveResource(ctx, id, sdkOpts)
+	access, err := c.sdk.ShareResource(ctx, id, sdkOpts)
 	if err != nil {
 		return nil, mapError(err)
 	}

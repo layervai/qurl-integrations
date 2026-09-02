@@ -203,9 +203,8 @@ func TestTransportDoesNotMutateCallerRequestAcrossRetry(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	transport := newTransport(&Config{BaseURL: srv.URL, HTTPClient: srv.Client(), Version: "test", Sleep: func(time.Duration) {}})
-	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0.
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		srv.URL+"/v1/resources/qexample/resolve", bytes.NewBufferString("payload"))
+		srv.URL+"/v1/resources/qexample/share", bytes.NewBufferString("payload"))
 	if err != nil {
 		t.Fatal(err)
 	}

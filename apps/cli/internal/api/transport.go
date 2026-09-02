@@ -187,8 +187,7 @@ func retrySafeRequest(req *http.Request, basePath string) bool {
 		if !ok {
 			return false
 		}
-		// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0.
-		resource, ok = strings.CutSuffix(resource, "/resolve")
+		resource, ok = strings.CutSuffix(resource, "/share")
 		return ok && resource != "" && !strings.Contains(resource, "/")
 	default:
 		return false

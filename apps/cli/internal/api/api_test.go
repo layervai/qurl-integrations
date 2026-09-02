@@ -584,8 +584,7 @@ func TestShareVerifyKeyPassesAndFailsClosed(t *testing.T) {
 
 func TestShareDark503PreservesSentinel(t *testing.T) {
 	srv := apitest.NewServer(t)
-	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (every /resolve route in this file).
-	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerDark503(t))
+	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", apitest.HandlerDark503(t))
 	client := newTestClient(t, srv, nil)
 
 	_, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
@@ -600,7 +599,7 @@ func TestShareDark503PreservesSentinel(t *testing.T) {
 
 func TestShareStoppedConnectorPreservesProblemCodeAndDoesNotRetry(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", 2, apitest.HandlerConnectorStopped503(t))
+	srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", 2, apitest.HandlerConnectorStopped503(t))
 
 	var sleeps []time.Duration
 	client := newTestClient(t, srv, &sleeps)
@@ -711,7 +710,7 @@ func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 	}
 }
 
-func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
+func TestRetrySafeRequestAllowsOnlyExactShareRoute(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name     string
@@ -719,14 +718,14 @@ func TestRetrySafeRequestAllowsOnlyExactResolveRoute(t *testing.T) {
 		basePath string
 		want     bool
 	}{
-		{name: "exact", path: "/v1/resources/qexample/resolve", want: true},
-		{name: "exact with base path", path: "/proxy/v1/resources/qexample/resolve", basePath: "/proxy", want: true},
-		{name: "wrong base path", path: "/other/v1/resources/qexample/resolve", basePath: "/proxy"},
-		{name: "empty resource", path: "/v1/resources//resolve"},
-		{name: "nested resource", path: "/v1/resources/qexample/sessions/resolve"},
-		{name: "different version", path: "/v2/resources/qexample/resolve"},
-		{name: "unrelated suffix", path: "/v1/admin/resolve"},
-		{name: "trailing slash", path: "/v1/resources/qexample/resolve/"},
+		{name: "exact", path: "/v1/resources/qexample/share", want: true},
+		{name: "exact with base path", path: "/proxy/v1/resources/qexample/share", basePath: "/proxy", want: true},
+		{name: "wrong base path", path: "/other/v1/resources/qexample/share", basePath: "/proxy"},
+		{name: "empty resource", path: "/v1/resources//share"},
+		{name: "nested resource", path: "/v1/resources/qexample/sessions/share"},
+		{name: "different version", path: "/v2/resources/qexample/share"},
+		{name: "unrelated suffix", path: "/v1/admin/share"},
+		{name: "trailing slash", path: "/v1/resources/qexample/share/"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -783,7 +782,7 @@ func TestDeleteIsIdempotent(t *testing.T) {
 // transport must surface it on the first answer.
 func TestDark503IsNeverAutoRetried(t *testing.T) {
 	srv := apitest.NewServer(t)
-	srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", 2, apitest.HandlerDark503(t))
+	srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/share", 2, apitest.HandlerDark503(t))
 
 	var sleeps []time.Duration
 	client := newTestClient(t, srv, &sleeps)

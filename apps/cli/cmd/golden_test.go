@@ -97,8 +97,7 @@ func TestGoldens(t *testing.T) {
 			name: "error_notfound",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
-				// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (every /resolve route in this file).
-				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve",
+				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share",
 					apitest.HandlerNotFound404(t, "resource_not_found"))
 			},
 			variants:     []string{"tty", "plain"},
@@ -109,7 +108,7 @@ func TestGoldens(t *testing.T) {
 			name: "error_revoked",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
-				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerRevoked400(t))
+				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share", apitest.HandlerRevoked400(t))
 			},
 			variants:     []string{"plain"},
 			wantCode:     5,
@@ -119,7 +118,7 @@ func TestGoldens(t *testing.T) {
 			name: "error_retired",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
-				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerTombstoned410(t))
+				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share", apitest.HandlerTombstoned410(t))
 			},
 			variants:     []string{"plain"},
 			wantCode:     5,
@@ -129,7 +128,7 @@ func TestGoldens(t *testing.T) {
 			name: "error_dark503",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
-				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerDark503(t))
+				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share", apitest.HandlerDark503(t))
 			},
 			variants:     []string{"plain"},
 			wantCode:     11,
@@ -139,7 +138,7 @@ func TestGoldens(t *testing.T) {
 			name: "error_connector_stopped",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
-				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerConnectorStopped503(t))
+				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/share", apitest.HandlerConnectorStopped503(t))
 			},
 			variants:     []string{"plain"},
 			wantCode:     11,
@@ -149,7 +148,7 @@ func TestGoldens(t *testing.T) {
 			name: "error_verify_mismatch",
 			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
-				srv.SetResolveCRID(otherCRID)
+				srv.SetShareCRID(otherCRID)
 			},
 			variants:     []string{"plain"},
 			wantCode:     12,
@@ -260,7 +259,7 @@ func TestGoldens(t *testing.T) {
 				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
 			},
 			prepare: func(srv *apitest.Server) {
-				srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+				srv.SetShareQURL(srv.URL + apitest.DownloadPath)
 			},
 			chdirTemp:    true,
 			variants:     []string{"tty", "plain"},
@@ -272,7 +271,7 @@ func TestGoldens(t *testing.T) {
 				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
 			},
 			prepare: func(srv *apitest.Server) {
-				srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+				srv.SetShareQURL(srv.URL + apitest.DownloadPath)
 			},
 			chdirTemp:    true,
 			variants:     []string{"json"},
@@ -311,7 +310,7 @@ func TestGoldens(t *testing.T) {
 				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
 			},
 			prepare: func(srv *apitest.Server) {
-				srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+				srv.SetShareQURL(srv.URL + apitest.DownloadPath)
 				srv.ScriptRepeat(http.MethodGet, apitest.DownloadPath, 2,
 					func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusGone) })
 			},

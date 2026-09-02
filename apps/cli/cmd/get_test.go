@@ -21,11 +21,9 @@ import (
 // API and its link-host route, plus the harness contracts (no hangs, no
 // browser off a terminal, binary-clean stdout).
 
-// resolveRoute is the mock's share path for the fixture CRID, spelled the
-// way the phase-1 wire spells it.
-// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0.
-func resolveRoute(srv *apitest.Server) string {
-	return "/v1/resources/" + srv.Key.CRID + "/resolve"
+// shareRoute is the mock's share path for the fixture CRID.
+func shareRoute(srv *apitest.Server) string {
+	return "/v1/resources/" + srv.Key.CRID + "/share"
 }
 
 // downloadServer returns a mock whose share answers point at its own
@@ -33,7 +31,7 @@ func resolveRoute(srv *apitest.Server) string {
 func downloadServer(t *testing.T) *apitest.Server {
 	t.Helper()
 	srv := apitest.NewServer(t)
-	srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+	srv.SetShareQURL(srv.URL + apitest.DownloadPath)
 	return srv
 }
 
@@ -67,7 +65,7 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("requests = %d, want share then download", len(requests))
 	}
-	if requests[0].Method != http.MethodPost || requests[0].Path != resolveRoute(srv) {
+	if requests[0].Method != http.MethodPost || requests[0].Path != shareRoute(srv) {
 		t.Errorf("first request = %s %s, want the share", requests[0].Method, requests[0].Path)
 	}
 	if requests[1].Method != http.MethodGet || requests[1].Path != apitest.DownloadPath {
@@ -108,9 +106,9 @@ func TestGetExpiryRetrySequence(t *testing.T) {
 		sequence = append(sequence, req.Method+" "+req.Path)
 	}
 	want := []string{
-		http.MethodPost + " " + resolveRoute(srv),
+		http.MethodPost + " " + shareRoute(srv),
 		http.MethodGet + " " + apitest.DownloadPath,
-		http.MethodPost + " " + resolveRoute(srv),
+		http.MethodPost + " " + shareRoute(srv),
 		http.MethodGet + " " + apitest.DownloadPath,
 	}
 	if strings.Join(sequence, "\n") != strings.Join(want, "\n") {
@@ -139,7 +137,7 @@ func TestGetRetryReverifiesFreshAnswer(t *testing.T) {
 			}, nil)
 		}
 	}
-	srv.Script(http.MethodPost, resolveRoute(srv), mintAnswer(srv.Key.CRID), mintAnswer(otherCRID))
+	srv.Script(http.MethodPost, shareRoute(srv), mintAnswer(srv.Key.CRID), mintAnswer(otherCRID))
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
 	dest := filepath.Join(t.TempDir(), "out.bin")
 
@@ -212,7 +210,7 @@ func TestGetBrowserFailureStillLeavesTheLink(t *testing.T) {
 func TestGetVerifyMismatchNeverActs(t *testing.T) {
 	srv := apitest.NewServer(t)
 	other := apitest.GenerateResourceKey(t)
-	srv.SetResolveCRID(other.CRID)
+	srv.SetShareCRID(other.CRID)
 	browser := &fakeBrowser{}
 
 	res := runCLI(t, &runOpts{
@@ -440,7 +438,7 @@ func portalServer(t *testing.T) (srv *apitest.Server, link string) {
 	t.Helper()
 	srv = apitest.NewServer(t)
 	link = srv.URL + apitest.PortalPath + "#qv2t1.1.1.1.claims.secret.sig"
-	srv.SetResolveQURL(link)
+	srv.SetShareQURL(link)
 	return srv, link
 }
 
@@ -527,7 +525,7 @@ func TestGetPortalLinkNotConfiguredFailsLoudly(t *testing.T) {
 func TestGetRetiredQv2LinkFailsThroughAccessFlow(t *testing.T) {
 	srv := apitest.NewServer(t)
 	link := srv.URL + apitest.PortalPath + "#qv2.claims.secret.sig"
-	srv.SetResolveQURL(link)
+	srv.SetShareQURL(link)
 	dest := filepath.Join(t.TempDir(), "out.bin")
 	var opened []string
 
