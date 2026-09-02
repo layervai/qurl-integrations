@@ -696,6 +696,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No enrollment token was minted. Contact the operator.", err
 	}
 
+	ownerID, err := resolveInstallOwnerID(ctx, c, log, "tunnel install", args.Slug)
+	if err != nil {
+		return nil, ownerLookupFailureMessage(err), err
+	}
 	// The description doubles as the tunnel's user-facing Display Name
 	// (see handleSetDisplayName — there's no separate field). Install
 	// seeds it with a sensible default so every qURL Connector has a Display Name
@@ -704,10 +708,6 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	// `/qurl-admin unset-display-name`. find_or_create only applies the
 	// description on first create, so re-installing an admin-renamed
 	// tunnel keeps the admin's Display Name.
-	ownerID, err := resolveInstallOwnerID(ctx, c, log, "tunnel install", args.Slug)
-	if err != nil {
-		return nil, sanitizeAPIError(err, "Failed to resolve the qURL account owner"), err
-	}
 	resource, err := c.CreateResource(ctx, &client.CreateResourceInput{
 		Type:         client.ResourceTypeTunnel,
 		Slug:         args.Slug,
@@ -1491,13 +1491,24 @@ func (args *tunnelInstallArgs) pinTunnelResource(resource *client.Resource, apiU
 	return validateTunnelRouteIdentity(args)
 }
 
+// ownerLookupFailureMessage renders the user-facing reply for a failed
+// account owner lookup. A 404/405 means the qURL API predates GET /v1/me,
+// which an operator can act on; anything else is a generic API failure.
+func ownerLookupFailureMessage(err error) string {
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) {
+		return sanitizeAPIError(err, "This qURL API does not serve GET /v1/me yet, which the Connector install config requires. Upgrade qurl-service and retry")
+	}
+	return sanitizeAPIError(err, "Failed to resolve the qURL account owner")
+}
+
 // resolveInstallOwnerID resolves the account owner the headless share config
 // must name (GET /v1/me). Called before any remote mutation so an identity
 // outage aborts the install without leaving sharing state behind.
 func resolveInstallOwnerID(ctx context.Context, c *client.Client, log *slog.Logger, flow, slug string) (string, error) {
 	identity, err := c.Me(ctx)
 	if err != nil {
-		log.Error(flow+": account identity lookup failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(slug))
+		log.Error(flow+": account identity lookup failed", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(slug))
 		return "", fmt.Errorf("resolve account identity: %w", err)
 	}
 	return identity.OwnerID, nil
@@ -1518,7 +1529,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	if strings.TrimSpace(args.OwnerID) == "" {
 		return "", errors.New("tunnel headless config requires the account owner id")
 	}
-	values := []string{args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort), args.OwnerID}
+	values := []string{args.OwnerID, args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
 	quoted := make([]string, len(values))
 	for i, value := range values {
 		var err error
@@ -1539,7 +1550,7 @@ shares:
     local_ip: 127.0.0.1
     local_port: %d
     desired_state: on
-    serving_epoch: %d`, quoted[6], quoted[0], quoted[1], quoted[2], quoted[3], quoted[4], quoted[5], args.LocalPort, args.ServingEpoch), nil
+    serving_epoch: %d`, quoted[0], quoted[1], quoted[2], quoted[3], quoted[4], quoted[5], quoted[6], args.LocalPort, args.ServingEpoch), nil
 }
 
 func validateTunnelConnectorContract(args *tunnelInstallArgs) error {

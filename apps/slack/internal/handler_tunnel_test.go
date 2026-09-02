@@ -5415,7 +5415,11 @@ func TestValidateConnectorAPIURLLoopbackHostCasing(t *testing.T) {
 func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
-	var resourceHits, keyHits int
+	var resourceHits, keyHits, sharingHits int
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		sharingHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
 	// A non-retried status: the client retries 5xx with backoff, which would
 	// outlast the async reply window without changing the fail-closed path.
 	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
@@ -5436,7 +5440,45 @@ func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	if !strings.Contains(async, "Failed to resolve the qURL account owner") {
 		t.Fatalf("async reply = %q, want owner-lookup failure copy", async)
 	}
-	if resourceHits != 0 || keyHits != 0 {
-		t.Fatalf("resource creates = %d, key mints = %d; want 0 and 0 (owner lookup must precede mutation)", resourceHits, keyHits)
+	if resourceHits != 0 || keyHits != 0 || sharingHits != 0 {
+		t.Fatalf("resource creates = %d, key mints = %d, sharing writes = %d; want all 0 (owner lookup must precede mutation)", resourceHits, keyHits, sharingHits)
+	}
+}
+
+// TestTunnelInstallWarnsWhenTargetNotEchoed pins the deliberate leniency in
+// credentialConfirmsKindFirst: a producer that ignores `target` still gets a
+// token DM'd, but the skew is visible in the logs.
+func TestTunnelInstallWarnsWhenTargetNotEchoed(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelModalKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+		})
+	})
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
+		t.Fatalf("DM posts = %+v, want the token delivered despite the missing target echo", *dmPosts)
+	}
+	if !strings.Contains(logBuf.String(), "did not echo the enrollment token target") {
+		t.Fatalf("logs = %q, want target-not-echoed warning", logBuf.String())
 	}
 }

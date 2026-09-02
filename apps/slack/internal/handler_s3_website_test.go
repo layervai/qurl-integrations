@@ -103,12 +103,12 @@ func TestValidS3WebsiteBucketName(t *testing.T) {
 }
 
 func TestSanitizeS3WebsiteLogValueEscapesLineBreaks(t *testing.T) {
-	got := sanitizeS3WebsiteLogValue("team\r\nforged\nentry\rtail")
+	got := sanitizeLogValue("team\r\nforged\nentry\rtail")
 	if want := `team\r\nforged\nentry\rtail`; got != want {
-		t.Fatalf("sanitizeS3WebsiteLogValue() = %q, want %q", got, want)
+		t.Fatalf("sanitizeLogValue() = %q, want %q", got, want)
 	}
 	if strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("sanitizeS3WebsiteLogValue() retained a line break: %q", got)
+		t.Fatalf("sanitizeLogValue() retained a line break: %q", got)
 	}
 }
 
@@ -1892,5 +1892,52 @@ func TestS3WebsiteHeadlessConfigMatchesReleaseFixture(t *testing.T) {
 	}
 	if string(golden) != want {
 		t.Fatalf("release contract golden is stale.\n golden:\n%s\n rendered:\n%s\nRerun with UPDATE_GOLDEN=1 if the change is intended, and keep %s consuming this file.", golden, want, "origins/s3-static-connector/test/qurl_image_release_contract.sh")
+	}
+}
+
+// TestS3WebsiteInstallFailsClosedWhenOwnerLookupFails mirrors the tunnel
+// ordering test: the account owner is resolved before any remote mutation,
+// so a GET /v1/me failure creates no resource, mints no token, writes no
+// sharing state, and the reply says why.
+func TestS3WebsiteInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, keyHits, sharingHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest) // non-retried status, see the tunnel test
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPut, "/v1/resources/"+testTunnelResourceID+"/sharing", func(w http.ResponseWriter, _ *http.Request) {
+		sharingHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	if resourceHits != 0 || keyHits != 0 || sharingHits != 0 || len(*dmPosts) != 0 {
+		t.Fatalf("resource creates = %d, key mints = %d, sharing writes = %d, DMs = %d; want all 0", resourceHits, keyHits, sharingHits, len(*dmPosts))
+	}
+	if joined := strings.Join(responseBodies, "\n"); !strings.Contains(joined, "Failed to resolve the qURL account owner") {
+		t.Fatalf("response_url bodies = %q, want owner-lookup failure copy", responseBodies)
 	}
 }

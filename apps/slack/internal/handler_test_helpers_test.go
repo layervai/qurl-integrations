@@ -132,10 +132,9 @@ func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 	}
 }
 
-// assertNoConnectorClaims pins the decoded `POST /v1/api-keys` body to an
-// agent-target enrollment token: the daemon enrolls its device identity with
-// it, so it must not carry a connector claim (the resource is bound through
-// the rendered share.yaml, not the credential).
+// assertNoConnectorClaims pins that the decoded POST /v1/api-keys body carries
+// no connector claim (absent, null or empty): the resource binding lives in
+// share.yaml. Target/kind are asserted separately by assertAgentEnrollmentKind.
 func assertNoConnectorClaims(t *testing.T, body map[string]any) {
 	t.Helper()
 	if raw, ok := body["claims"]; ok && raw != nil {

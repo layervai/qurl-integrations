@@ -916,6 +916,9 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 //
 // TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`).
 type Identity struct {
+	// OwnerID is the account owner behind the credential. The Slack bot only
+	// ever holds account API keys, so this is the account owner (the principal a
+	// headless share config must name), never a delegated calling user.
 	OwnerID string `json:"owner_id"`
 }
 
