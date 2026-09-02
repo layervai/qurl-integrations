@@ -41,8 +41,8 @@ const (
 // install blocks, so anything outside a DNS name is rejected. IP literals
 // (v4 or v6) are deliberately not accepted; the Hub is addressed by name.
 var (
-	connectorHubHostPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
-	ipv4LiteralPattern      = regexp.MustCompile(`^[0-9]+(\.[0-9]+){3}$`)
+	connectorHubHostPattern = regexp.MustCompile(`^[A-Za-z\d]([A-Za-z\d-]{0,61}[A-Za-z\d])?(\.[A-Za-z\d]([A-Za-z\d-]{0,61}[A-Za-z\d])?)*$`)
+	ipv4LiteralPattern      = regexp.MustCompile(`^\d+(\.\d+){3}$`)
 )
 
 // NewConnectorHubTrust validates the triple next to the renderers it feeds.
