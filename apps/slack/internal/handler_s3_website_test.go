@@ -1988,19 +1988,19 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 	}
 }
 
-func s3WebsiteInstallResponseCapture(t *testing.T) (*httptest.Server, *[]string) {
+func s3WebsiteInstallResponseCapture(t *testing.T) (srv *httptest.Server, bodies *[]string) {
 	t.Helper()
-	var bodies []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var captured []string
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read response_url body: %v", err)
 		}
-		bodies = append(bodies, string(body))
+		captured = append(captured, string(body))
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &bodies
+	return srv, &captured
 }
 
 func s3WebsiteInstallFakes(t *testing.T, ts *adminTestServers, keyFields map[string]any, revokeHits *int) {
