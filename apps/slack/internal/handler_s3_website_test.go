@@ -2036,7 +2036,7 @@ func TestS3WebsiteInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	var revokeHits int
-	s3WebsiteInstallFakes(t, ts, map[string]any{}, &revokeHits)
+	s3WebsiteInstallFakes(t, ts, map[string]any{"claims": []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}}}, &revokeHits)
 	responseURL, bodies := s3WebsiteInstallResponseCapture(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
@@ -2056,7 +2056,7 @@ func TestS3WebsiteInstallRejectsConnectorTargetCredential(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	var revokeHits int
-	s3WebsiteInstallFakes(t, ts, map[string]any{"target": client.CredentialTargetConnector}, &revokeHits)
+	s3WebsiteInstallFakes(t, ts, map[string]any{"target": client.CredentialTargetConnector, "claims": []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}}}, &revokeHits)
 	responseURL, bodies := s3WebsiteInstallResponseCapture(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
@@ -2098,5 +2098,24 @@ func TestS3WebsiteInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
 	if resourceHits != 0 || keyHits != 0 || len(*dmPosts) != 0 || !strings.Contains(strings.Join(*bodies, "\n"), "not an account API key") {
 		t.Fatalf("creates = %d, mints = %d, DMs = %d, bodies = %q; want no mutation and the non-API-key copy", resourceHits, keyHits, len(*dmPosts), *bodies)
+	}
+}
+
+// TestS3WebsiteInstallRejectsWhenClaimNotEchoed isolates the claim clause on
+// the S3 flow: kind and target=agent are echoed, the connector claim is not.
+func TestS3WebsiteInstallRejectsWhenClaimNotEchoed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	s3WebsiteInstallFakes(t, ts, map[string]any{"target": client.CredentialTargetAgent}, &revokeHits)
+	responseURL, bodies := s3WebsiteInstallResponseCapture(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	if len(*dmPosts) != 0 || revokeHits != 1 || !strings.Contains(strings.Join(*bodies, "\n"), kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("DM posts = %d, revokes = %d, bodies = %q; want no DM, one revoke, shared copy", len(*dmPosts), revokeHits, *bodies)
 	}
 }

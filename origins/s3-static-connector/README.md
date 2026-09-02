@@ -23,7 +23,7 @@ once the published image has soaked in the target environment.
 The origin's Connector-facing contract is intentionally small: plain HTTP on
 `127.0.0.1:8080`, with both containers running as UID/GID `65532`. Connector
 enrollment is independent of the origin and uses the current native UDP
-lifecycle: a one-shot, owner-scoped, resource-bound (agent-target with a connector claim; `share.yaml` names the same resource for the daemon) enrollment token is consumed on the
+lifecycle: a one-shot, owner-scoped, resource-bound enrollment token is consumed on the
 first start, and the Connector persists the resulting device credential.
 
 Slack validates the complete server-issued `resource_id`,

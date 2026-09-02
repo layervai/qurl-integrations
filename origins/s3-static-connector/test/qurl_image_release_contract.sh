@@ -4,6 +4,7 @@
 set -euo pipefail
 
 IMG="${QURL_IMAGE:-}"
+TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
 REQUIRE_IMAGE="${QURL_RELEASE_IMAGE_REQUIRED:-false}"
 IFS=' ' read -r -a PLATFORMS <<<"${PLATFORM:-linux/amd64 linux/arm64}"
 # Absolute: docker -v rejects relative host paths.
@@ -54,8 +55,8 @@ fi
 GOLDEN_MOUNT_DIR="$(mktemp -d "$(cd "$(dirname "$0")" && pwd)/.share-mount-XXXXXX")"
 trap 'rm -rf "$GOLDEN_MOUNT_DIR"' EXIT
 GOLDEN_MOUNT="$GOLDEN_MOUNT_DIR/share.yaml"
-# Private 0755 dir + 0444 file: the daemon rejects a config (or its directory)
-# writable by group/other, and CI checkouts default to group-writable.
+# A fresh dir + 0444 file, neither group/other-writable: the daemon rejects a
+# config writable by group/other, and CI checkouts default to group-writable.
 chmod 0755 "$GOLDEN_MOUNT_DIR" && cp "$SHARE_GOLDEN" "$GOLDEN_MOUNT" && chmod 0444 "$GOLDEN_MOUNT"
 
 for platform in "${PLATFORMS[@]}"; do
@@ -98,7 +99,9 @@ docker: $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.
   # installs mount state, so give the gate a tmpfs for --state-dir.
   # Run as the invoking uid: the daemon rejects a config owned by another
   # non-root user, and a Linux bind mount keeps the host owner.
-  if output="$(docker run --rm --platform "$platform" \
+  # Bounded: a future image that blocks (e.g. on a network dial) instead of
+  # stopping at the credential gate must fail the contract, not hang CI.
+  if output="$(${TIMEOUT_CMD:+$TIMEOUT_CMD 120} docker run --rm --platform "$platform" \
       --user "$(id -u):$(id -g)" \
       --tmpfs /tmp:rw,nosuid,nodev \
       -v "$GOLDEN_MOUNT:/etc/qurl/share.yaml:ro" \

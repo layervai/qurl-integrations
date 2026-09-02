@@ -574,13 +574,8 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 	// Correlate on resource_id/key_id rather than the caller-supplied
 	// slug; keeping user-controlled input out of this line avoids a
 	// go/log-injection finding.
-	if !credentialConfirmsKindFirst(key, args.Slug) {
-		log.Error("S3 website install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
-			"resource_id", resource.ResourceID, "key_id", key.KeyID,
-			"got_kind", sanitizeLogValue(key.Kind), "want_kind", client.CredentialKindEnrollmentToken,
-			"got_target", sanitizeLogValue(key.Target), "want_target", client.CredentialTargetAgent)
-		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_kind_first_unconfirmed")
-		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), errKindFirstUnconfirmed
+	if err := h.rejectUnconfirmedCredential(log, c, key, resource.ResourceID, args.Slug, "S3 website install", "s3_website_kind_first_unconfirmed"); err != nil {
+		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), err
 	}
 	if key.APIKey == "" {
 		log.Error("S3 website install: create api key response missing plaintext", "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))

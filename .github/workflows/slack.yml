@@ -152,6 +152,8 @@ jobs:
     # canceled during cache upload.
     timeout-minutes: 30
     env:
+      # Pulled anonymously: the ghcr.io/layervai/qurl package is public. If it ever
+      # turns private, add docker/login-action and `packages: read` here.
       # TODO(upstream-contract): mirrors qurl-integrations-infra QURL_IMAGE (keep in lockstep).
       # Released qurl CLI image (v2.1.1 index digest; derived from
       # `docker buildx imagetools inspect ghcr.io/layervai/qurl:v2.1.1`) that must strict-decode

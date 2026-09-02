@@ -5431,9 +5431,9 @@ func TestTunnelInstallFailsClosedWhenOwnerLookupFails(t *testing.T) {
 	}
 }
 
-// TestTunnelInstallRejectsWhenTargetNotEchoed pins the strict gate: a
-// producer that does not echo `target` cannot confirm the owner-scoped
-// credential, so it is revoked and never DM'd.
+// TestTunnelInstallRejectsWhenTargetNotEchoed isolates the target clause: kind
+// and the bound claim are echoed, target is not, so the owner-scoped
+// credential cannot be confirmed and is revoked, never DM'd.
 func TestTunnelInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -5452,6 +5452,7 @@ func TestTunnelInstallRejectsWhenTargetNotEchoed(t *testing.T) {
 			testKeyKeyID:  testTunnelAPIKeyID,
 			testKeyAPIKey: testTunnelModalKey,
 			"kind":        client.CredentialKindEnrollmentToken,
+			"claims":      []map[string]any{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -5475,8 +5476,8 @@ func TestOwnerLookupFailureMessage(t *testing.T) {
 		want          string
 		wantRequestID string
 	}{
-		{name: "404 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "does not support Connector installs yet", wantRequestID: "req-404"},
-		{name: "405 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "does not support Connector installs yet"},
+		{name: "404 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "identity lookup (not found)", wantRequestID: "req-404"},
+		{name: "405 names the missing capability", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "identity lookup (not found)"},
 		{name: "non API-key principal is permanent", err: fmt.Errorf("resolve account identity: %w", errNonAPIKeyPrincipal), want: "not an account API key"},
 		{name: "other API errors stay generic", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusBadRequest}), want: "Failed to resolve the qURL account owner"},
 		{name: "transport errors stay generic", err: errors.New("dial tcp: refused"), want: "Failed to resolve the qURL account owner."},
@@ -5561,5 +5562,14 @@ func TestTunnelInstallRejectsWhenClaimNotEchoed(t *testing.T) {
 	}
 	if meHits != 1 {
 		t.Fatalf("GET /v1/me hits = %d, want exactly one owner lookup per install", meHits)
+	}
+}
+
+func TestRenderS3WebsiteConnectorConfigYAMLRequiresOwnerID(t *testing.T) {
+	t.Parallel()
+	args := testS3WebsiteArgs(tunnelEnvDocker)
+	args.OwnerID = ""
+	if _, err := renderS3WebsiteConnectorConfigYAML(args); err == nil || !strings.Contains(err.Error(), "requires the account owner id") {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML error = %v, want owner id guard", err)
 	}
 }
