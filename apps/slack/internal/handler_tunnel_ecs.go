@@ -125,9 +125,9 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		User:                   ecsConnectorUser,
 		Essential:              false,
 		ReadonlyRootFilesystem: true,
-		Environment: []ecsEnvironmentVar{
+		Environment: append([]ecsEnvironmentVar{
 			{Name: "QURL_ENDPOINT", Value: endpoint},
-		},
+		}, hubTrustECSEnv(args.Hub)...),
 		MountPoints: []ecsMountPoint{
 			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/qurl-volume"},
 			{SourceVolume: "qurl-config", ContainerPath: "/etc/qurl", ReadOnly: true},

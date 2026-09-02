@@ -168,6 +168,8 @@ type tunnelInstallArgs struct {
 	// enrollment and knocks use qurl-go's assigned-cell UDP lifecycle instead of
 	// a public HTTP registration or bootstrap endpoint.
 	APIURL string
+	// Hub is the NHP Hub trust triple rendered into the install; empty = none.
+	Hub hubTrust
 }
 
 type tunnelInstallRequest struct {
@@ -714,6 +716,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
 	resolvedArgs := *args
+	resolvedArgs.Hub = h.cfg.ConnectorHub
 	if err := resolvedArgs.pinTunnelResource(resource, connectorAPIURL); err != nil {
 		log.Error("tunnel install: resource response missing connector contract", "error", err)
 		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No enrollment token was minted. Please retry or contact support.", err
@@ -1286,7 +1289,7 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	}
 	return preparedTunnelInstallMessage{
 		imageNote:        imageNote,
-		imageLine:        fmt.Sprintf("Sidecar image: `%s`.", image),
+		imageLine:        sidecarImageLine(image, h.cfg.TunnelImageVersion),
 		environmentLabel: environmentLabel,
 		instructions:     instructions,
 	}, nil
@@ -1907,4 +1910,13 @@ func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg str
 		return tunnelInstallInstructionsDeliverySucceeded
 	}
 	return tunnelInstallInstructionsDeliveryFailed
+}
+
+// sidecarImageLine names the pinned sidecar image and, when the deployment
+// declares it, the human-readable qurl release behind the digest.
+func sidecarImageLine(image, version string) string {
+	if v := strings.TrimSpace(version); v != "" {
+		return fmt.Sprintf("Sidecar image: `%s` (qurl %s).", image, v)
+	}
+	return fmt.Sprintf("Sidecar image: `%s`.", image)
 }

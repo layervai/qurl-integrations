@@ -1514,3 +1514,57 @@ func TestSlackInstallConfigRejectsBadBaseURL(t *testing.T) {
 		t.Fatalf("err=%v, want https error", err)
 	}
 }
+
+func TestReadConnectorHubConfig(t *testing.T) {
+	const goodKey = "qmvYisCByN6gTC89Pp6hzBEoYajNDnHj2HgdWf4LOkY="
+	for _, tc := range []struct {
+		name            string
+		host, port, key string
+		wantSet         bool
+		wantErr         string
+	}{
+		{name: "unset renders nothing"},
+		{name: "complete triple", host: "hub.nhp.example", port: "443", key: goodKey, wantSet: true},
+		{name: "partial triple fails closed", host: "hub.nhp.example", wantErr: "must be set together"},
+		{name: "bad port", host: "hub.nhp.example", port: "http", key: goodKey, wantErr: "port between 1 and 65535"},
+		{name: "bad key", host: "hub.nhp.example", port: "443", key: "not-base64", wantErr: "32-byte key"},
+		{name: "host with scheme", host: "https://hub", port: "443", key: goodKey, wantErr: "bare host name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envConnectorHubHost, tc.host)
+			t.Setenv(envConnectorHubPort, tc.port)
+			t.Setenv(envConnectorHubServerKey, tc.key)
+			got, err := readConnectorHubConfig()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || (got.Host != "") != tc.wantSet {
+				t.Fatalf("got %+v, %v; want set=%v", got, err, tc.wantSet)
+			}
+		})
+	}
+}
+
+func TestReadTunnelImageVersionConfig(t *testing.T) {
+	for _, tc := range []struct{ in, want, wantErr string }{
+		{in: "", want: ""},
+		{in: "v2.1.1", want: "v2.1.1"},
+		{in: " 2.1.1 ", want: "2.1.1"},
+		{in: "latest", wantErr: "release version"},
+	} {
+		t.Setenv(envQURLImageVersion, tc.in)
+		got, err := readTunnelImageVersionConfig()
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%q: err = %v, want %q", tc.in, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Fatalf("%q: got %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+}

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,6 +190,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	tunnelImageVersion, err := readTunnelImageVersionConfig()
+	if err != nil {
+		return err
+	}
+	connectorHub, err := readConnectorHubConfig()
+	if err != nil {
+		return err
+	}
 
 	// DDBProvider reads the workspace_state table populated by
 	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails
@@ -354,6 +364,8 @@ func run() error {
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
 		S3OriginImage:                  s3OriginImage,
+		TunnelImageVersion:             tunnelImageVersion,
+		ConnectorHub:                   connectorHub,
 		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
@@ -1691,4 +1703,54 @@ func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
 		slog.Info("feedback delivery wired via Slack incoming webhook")
 		return newFeedbackWebhookPoster(feedbackWebhookURL, userAgent, nil)
 	}
+}
+
+const (
+	envQURLImageVersion       = "QURL_IMAGE_VERSION"
+	envConnectorHubHost       = "QURL_CONNECTOR_HUB_HOST"
+	envConnectorHubPort       = "QURL_CONNECTOR_HUB_PORT"
+	envConnectorHubServerKey  = "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"
+	connectorHubServerKeyLen  = 32
+	connectorHubHostMaxLength = 253
+)
+
+var tunnelImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$`)
+
+// readTunnelImageVersionConfig reads the optional human-readable qurl release
+// shown beside the QURL_IMAGE digest in rendered installs.
+func readTunnelImageVersionConfig() (string, error) {
+	version := strings.TrimSpace(os.Getenv(envQURLImageVersion))
+	if version == "" {
+		return "", nil
+	}
+	if !tunnelImageVersionPattern.MatchString(version) {
+		return "", fmt.Errorf("%s=%q must be a release version such as v2.1.1", envQURLImageVersion, version)
+	}
+	return version, nil
+}
+
+// readConnectorHubConfig reads the NHP Hub trust triple rendered into every
+// Connector install. All-or-none: a partial triple is a deployment mistake
+// that would render installs the daemon rejects, so it fails startup.
+func readConnectorHubConfig() (internal.ConnectorHubTrust, error) {
+	host := strings.TrimSpace(os.Getenv(envConnectorHubHost))
+	port := strings.TrimSpace(os.Getenv(envConnectorHubPort))
+	key := strings.TrimSpace(os.Getenv(envConnectorHubServerKey))
+	if host == "" && port == "" && key == "" {
+		return internal.ConnectorHubTrust{}, nil
+	}
+	if host == "" || port == "" || key == "" {
+		return internal.ConnectorHubTrust{}, fmt.Errorf("%s, %s and %s must be set together", envConnectorHubHost, envConnectorHubPort, envConnectorHubServerKey)
+	}
+	if len(host) > connectorHubHostMaxLength || strings.ContainsAny(host, " \t\r\n/:'\"") {
+		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a bare host name", envConnectorHubHost, host)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a port between 1 and 65535", envConnectorHubPort, port)
+	}
+	raw, err := base64.StdEncoding.DecodeString(key)
+	if err != nil || len(raw) != connectorHubServerKeyLen {
+		return internal.ConnectorHubTrust{}, fmt.Errorf("%s must be the standard base64 encoding of a %d-byte key", envConnectorHubServerKey, connectorHubServerKeyLen)
+	}
+	return internal.ConnectorHubTrust{Host: host, Port: port, ServerPublicKeyB64: key}, nil
 }

@@ -128,5 +128,9 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_
 		"If Compose recreates the web service container, bring the qurl service up again too.",
 	)
 	intro := strings.Join(introParts, " ")
+	block, err = withHubTrustComposeEnv(block, args.Hub)
+	if err != nil {
+		return "", err
+	}
 	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-" + args.Slug + ".compose.yaml logs -f qurl-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After qURL connects, delete the enrollment-token file.", nil
 }
