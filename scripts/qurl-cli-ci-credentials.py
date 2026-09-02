@@ -47,6 +47,11 @@ RUN_AGENT_ID = re.compile(
     r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sf]\Z"
 )
 MAX_ATTEMPTS = 3
+# Bound the trusted cleanup inventory independently of per-request timeouts so
+# malformed pagination cannot hold a runner or grow its in-memory result set.
+INVENTORY_MAX_PAGES = 20
+INVENTORY_MAX_ROWS = 250
+INVENTORY_MAX_SECONDS = 5 * 60
 
 
 class CredentialError(RuntimeError):
@@ -396,19 +401,30 @@ def paged_rows(
     cursor = ""
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
+    pages = 0
+    started = time.monotonic()
     while True:
+        if pages >= INVENTORY_MAX_PAGES:
+            raise CredentialError(f"{label} inventory exceeded its page limit")
+        if time.monotonic() - started > INVENTORY_MAX_SECONDS:
+            raise CredentialError(f"{label} inventory exceeded its time limit")
         query = {"limit": "100"}
         if status_filter is not None:
             query["status"] = status_filter
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(endpoint, jwt, "GET", path + "?" + urllib.parse.urlencode(query))
+        pages += 1
+        if time.monotonic() - started > INVENTORY_MAX_SECONDS:
+            raise CredentialError(f"{label} inventory exceeded its time limit")
         rows = response.get("data")
         meta = response.get("meta")
         if status != 200 or not isinstance(rows, list) or not isinstance(meta, dict):
             raise CredentialError(f"{label} inventory was rejected")
         if any(not isinstance(row, dict) for row in rows):
             raise CredentialError(f"{label} inventory contains a malformed row")
+        if len(result) + len(rows) > INVENTORY_MAX_ROWS:
+            raise CredentialError(f"{label} inventory exceeded its row limit")
         result.extend(rows)
         has_more = meta.get("has_more", False)
         next_cursor = meta.get("next_cursor", "")

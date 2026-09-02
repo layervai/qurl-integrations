@@ -365,7 +365,7 @@ def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
     return run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id
 
 
-def test_unbounded_valid_pagination() -> None:
+def test_bounded_valid_pagination() -> None:
     pages = 5
 
     def fake_request(
@@ -396,6 +396,66 @@ def test_unbounded_valid_pagination() -> None:
             "https://sandbox.example", "jwt", "/v1/resources", "test", status_filter=None
         )
     assert [row["resource_id"] for row in rows] == [f"r_{page}" for page in range(pages)]
+
+
+def test_pagination_safety_limits_fail_closed() -> None:
+    calls = 0
+
+    def endless_request(
+        url: str,
+        method: str,
+        bearer: str | None = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        nonlocal calls
+        del url, bearer, body, content_type, extra_headers
+        assert method == "GET"
+        calls += 1
+        return 200, json.dumps(
+            {
+                "data": [],
+                "meta": {"has_more": True, "next_cursor": f"cursor-{calls}"},
+            }
+        ).encode()
+
+    with mock.patch.object(credentials, "request", endless_request):
+        try:
+            credentials.paged_rows("https://sandbox.example", "jwt", "/v1/resources", "test")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "test inventory exceeded its page limit"
+        else:
+            raise AssertionError("inventory page limit was not enforced")
+    assert calls == credentials.INVENTORY_MAX_PAGES
+
+    rows = [{"resource_id": f"r_{index}"} for index in range(credentials.INVENTORY_MAX_ROWS + 1)]
+
+    def oversized_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
+        return 200, json.dumps({"data": rows, "meta": {"has_more": False}}).encode()
+
+    with mock.patch.object(credentials, "request", oversized_request):
+        try:
+            credentials.paged_rows("https://sandbox.example", "jwt", "/v1/resources", "test")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "test inventory exceeded its row limit"
+        else:
+            raise AssertionError("inventory row limit was not enforced")
+
+    def one_page_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
+        return 200, b'{"data":[],"meta":{"has_more":false}}'
+
+    with mock.patch.object(credentials, "request", one_page_request), mock.patch.object(
+        credentials.time,
+        "monotonic",
+        side_effect=[0.0, 0.0, float(credentials.INVENTORY_MAX_SECONDS + 1)],
+    ):
+        try:
+            credentials.paged_rows("https://sandbox.example", "jwt", "/v1/resources", "test")
+        except credentials.CredentialError as exc:
+            assert str(exc) == "test inventory exceeded its time limit"
+        else:
+            raise AssertionError("inventory time limit was not enforced")
 
 
 def test_connector_cleanup_lookup_fails_closed() -> None:
@@ -708,7 +768,8 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 def main() -> None:
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
-    test_unbounded_valid_pagination()
+    test_bounded_valid_pagination()
+    test_pagination_safety_limits_fail_closed()
     test_connector_cleanup_lookup_fails_closed()
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()
