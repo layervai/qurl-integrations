@@ -23,9 +23,13 @@ type ConnectorHubTrust struct {
 	serverPublicKeyB64 string
 }
 
-// Host, Port and ServerPublicKeyB64 expose the validated triple.
-func (h ConnectorHubTrust) Host() string               { return h.host }
-func (h ConnectorHubTrust) Port() string               { return h.port }
+// Host returns the validated Hub host name.
+func (h ConnectorHubTrust) Host() string { return h.host }
+
+// Port returns the validated Hub port.
+func (h ConnectorHubTrust) Port() string { return h.port }
+
+// ServerPublicKeyB64 returns the validated base64 Hub server public key.
 func (h ConnectorHubTrust) ServerPublicKeyB64() string { return h.serverPublicKeyB64 }
 
 // Env var names the bot reads for the triple; the same names are rendered
