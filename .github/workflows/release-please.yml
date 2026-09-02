@@ -707,10 +707,17 @@ jobs:
             echo "::error::generated Homebrew cask does not name the exact CLI version" >&2
             exit 1
           }
-          [ "$(grep -Fc "releases/download/${CLI_TAG}/" "$generated")" = 4 ] || {
-            echo "::error::generated Homebrew cask does not bind all four release archives" >&2
+          archive_url_prefix='releases/download/v#{version}/qurl_#{version}_'
+          [ "$(grep -Fc "$archive_url_prefix" "$generated")" = 4 ] || {
+            echo "::error::generated Homebrew cask does not bind exactly four release archives" >&2
             exit 1
           }
+          for archive in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
+            [ "$(grep -Fc "${archive_url_prefix}${archive}.tar.gz" "$generated")" = 1 ] || {
+              echo "::error::generated Homebrew cask does not bind the exact ${archive} release archive" >&2
+              exit 1
+            }
+          done
 
       # Linux is validated above on this native runner. Stage the Darwin and
       # Windows outputs so their native runners test the same GoReleaser bytes.

@@ -565,7 +565,13 @@ func TestReleaseNativeConnectionWorkflowsRequireExactTestResult(t *testing.T) {
 					imageIndex = index
 				case "Validate generated Homebrew cask":
 					caskValidationIndex = index
-					for _, required := range []string{"dist/homebrew/Casks/qurl.rb", `releases/download/${CLI_TAG}/`, "generated Homebrew cask does not bind all four release archives"} {
+					for _, required := range []string{
+						"dist/homebrew/Casks/qurl.rb",
+						`archive_url_prefix='releases/download/v#{version}/qurl_#{version}_'`,
+						`for archive in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do`,
+						"generated Homebrew cask does not bind exactly four release archives",
+						"generated Homebrew cask does not bind the exact ${archive} release archive",
+					} {
 						if strings.Count(candidate.Run, required) != 1 {
 							t.Errorf("%s Homebrew pre-publication gate does not bind %q", target.file, required)
 						}
