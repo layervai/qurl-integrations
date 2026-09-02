@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -1706,17 +1705,10 @@ func buildPostFeedback(userAgent string) internal.PostFeedbackFunc {
 }
 
 const (
-	envQURLImageVersion       = "QURL_IMAGE_VERSION"
-	envConnectorHubHost       = "QURL_CONNECTOR_HUB_HOST"
-	envConnectorHubPort       = "QURL_CONNECTOR_HUB_PORT"
-	envConnectorHubServerKey  = "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"
-	connectorHubServerKeyLen  = 32
-	connectorHubHostMaxLength = 253
+	envQURLImageVersion = "QURL_IMAGE_VERSION"
 )
 
-var connectorHubHostPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
-
-var tunnelImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$`)
+var tunnelImageVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 
 // readTunnelImageVersionConfig reads the optional human-readable qurl release
 // shown beside the QURL_IMAGE digest in rendered installs.
@@ -1732,32 +1724,8 @@ func readTunnelImageVersionConfig() (string, error) {
 }
 
 // readConnectorHubConfig reads the NHP Hub trust triple rendered into every
-// Connector install. All-or-none: a partial triple is a deployment mistake
-// that would render installs the daemon rejects, so it fails startup.
+// Connector install; validation lives in internal.NewConnectorHubTrust next
+// to the renderers it protects.
 func readConnectorHubConfig() (internal.ConnectorHubTrust, error) {
-	host := strings.TrimSpace(os.Getenv(envConnectorHubHost))
-	port := strings.TrimSpace(os.Getenv(envConnectorHubPort))
-	key := strings.TrimSpace(os.Getenv(envConnectorHubServerKey))
-	if host == "" && port == "" && key == "" {
-		return internal.ConnectorHubTrust{}, nil
-	}
-	if host == "" || port == "" || key == "" {
-		return internal.ConnectorHubTrust{}, fmt.Errorf("%s, %s and %s must be set together", envConnectorHubHost, envConnectorHubPort, envConnectorHubServerKey)
-	}
-	// Allowlist (RFC 1123 labels): the value is rendered into shell and YAML
-	// install blocks, so anything outside a DNS name is rejected here. IPv6
-	// literals are deliberately not accepted; the Hub is addressed by name.
-	if len(host) > connectorHubHostMaxLength || !connectorHubHostPattern.MatchString(host) {
-		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a bare DNS host name", envConnectorHubHost, host)
-	}
-	// Canonical decimal only: Atoi would accept "+443" / "0443", which the
-	// CLI then rejects at bootstrap.
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
-		return internal.ConnectorHubTrust{}, fmt.Errorf("%s=%q must be a port between 1 and 65535", envConnectorHubPort, port)
-	}
-	raw, err := base64.StdEncoding.DecodeString(key)
-	if err != nil || len(raw) != connectorHubServerKeyLen {
-		return internal.ConnectorHubTrust{}, fmt.Errorf("%s must be the standard base64 encoding of a %d-byte key", envConnectorHubServerKey, connectorHubServerKeyLen)
-	}
-	return internal.ConnectorHubTrust{Host: host, Port: port, ServerPublicKeyB64: key}, nil
+	return internal.NewConnectorHubTrust(os.Getenv(internal.EnvConnectorHubHost), os.Getenv(internal.EnvConnectorHubPort), os.Getenv(internal.EnvConnectorHubServerKey))
 }

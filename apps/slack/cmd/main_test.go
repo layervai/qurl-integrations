@@ -1534,13 +1534,14 @@ func TestReadConnectorHubConfig(t *testing.T) {
 		{name: "host with scheme", host: "https://hub", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 		{name: "host with shell expansion", host: "hub$prod.example", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 		{name: "host with command substitution", host: "hub`id`.example", port: "443", key: goodKey, wantErr: "bare DNS host name"},
-		{name: "host with trailing dot", host: "hub.example.", port: "443", key: goodKey, wantErr: "bare DNS host name"},
+		{name: "fqdn trailing dot stripped", host: "hub.example.", port: "443", key: goodKey, want: internal.ConnectorHubTrust{Host: "hub.example", Port: "443", ServerPublicKeyB64: goodKey}},
+		{name: "ipv4 literal rejected", host: "10.0.1.7", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 		{name: "ipv6 literal rejected", host: "::1", port: "443", key: goodKey, wantErr: "bare DNS host name"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envConnectorHubHost, tc.host)
-			t.Setenv(envConnectorHubPort, tc.port)
-			t.Setenv(envConnectorHubServerKey, tc.key)
+			t.Setenv(internal.EnvConnectorHubHost, tc.host)
+			t.Setenv(internal.EnvConnectorHubPort, tc.port)
+			t.Setenv(internal.EnvConnectorHubServerKey, tc.key)
 			got, err := readConnectorHubConfig()
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -1562,6 +1563,7 @@ func TestReadTunnelImageVersionConfig(t *testing.T) {
 		{in: " 2.1.1 ", want: "2.1.1"},
 		{in: "v1.2.3-rc.1", want: "v1.2.3-rc.1"},
 		{in: "v1.2.3+build.5", want: "v1.2.3+build.5"},
+		{in: "v1.2.3-rc.1+build.5", want: "v1.2.3-rc.1+build.5"},
 		{in: "latest", wantErr: "release version"},
 	} {
 		t.Setenv(envQURLImageVersion, tc.in)
