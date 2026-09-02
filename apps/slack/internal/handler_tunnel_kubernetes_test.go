@@ -197,7 +197,13 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		if ctx.Err() != nil {
 			t.Skipf("kubectl dry-run exceeded %s in this environment", kubectlDryRunTimeout)
 		}
-		if bytes.Contains(out, []byte("couldn't get current server API group list")) {
+		// Newer kubectl emits the discovery failure through klog with a capital
+		// "Couldn't" and then "unable to recognize"; older builds print it in
+		// lowercase. Either shape means the runner has no cluster to discover
+		// against, which is an environment limit rather than a rendering bug.
+		lowered := bytes.ToLower(out)
+		if bytes.Contains(lowered, []byte("couldn't get current server api group list")) ||
+			bytes.Contains(lowered, []byte("unable to recognize")) {
 			t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
 		}
 		t.Fatalf("kubectl dry-run failed: %v\n%s\n--- pod ---\n%s", err, out, pod)
