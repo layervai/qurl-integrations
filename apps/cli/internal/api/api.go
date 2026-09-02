@@ -7,7 +7,7 @@
 // honors Retry-After, redaction of credentials from every diagnostic line,
 // and the mapping of wire failures onto typed errors.
 //
-// Resolve delegates to qurl-go's ResolveResource (whose VerifyCRID carries
+// Share delegates to qurl-go's ResolveResource (whose VerifyCRID carries
 // the client half of the CRID trust story). Publish, list, and delete are
 // direct calls against the /v1/resources REST surface through the same
 // transport and error mapping: v0.5.3's ProtectURL does not send the
@@ -36,9 +36,9 @@ type Client interface {
 	// Publish registers targetURL as a protected resource and returns its
 	// identity, CRID included when the service mints one.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
-	// Resolve mints a temporary access link for the resource identified by
+	// Share mints a short-lived share link for the resource identified by
 	// id (CRID or public-key resource identifier; the service dual-accepts).
-	Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error)
+	Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error)
 	// List returns a page of the caller's resources.
 	List(ctx context.Context, opts ListOptions) (*ResourcePage, error)
 	// Resource returns one owner-visible resource by CRID or public resource ID.
@@ -75,8 +75,8 @@ type PublishOptions struct {
 	Alias       string
 }
 
-// ResolveOptions carries the optional resolve parameters.
-type ResolveOptions struct {
+// ShareOptions carries the optional share parameters.
+type ShareOptions struct {
 	// TTLSeconds asks for the minted link's lifetime; 0 leaves the server
 	// default in effect. The server may clamp the value it grants.
 	TTLSeconds int
@@ -112,8 +112,9 @@ type DeleteResult struct {
 	AlreadyGone bool
 }
 
-// Resolved is the repo-owned result of Resolve.
-type Resolved struct {
+// ShareLink is the repo-owned result of Share: a short-lived access link
+// for the resource a CRID names.
+type ShareLink struct {
 	QURL             string
 	CRID             string
 	Type             string
@@ -130,7 +131,7 @@ type Resolved struct {
 // SDK's qurl.ErrNoCRID when the response carried no CRID, qurl.ErrCRIDMismatch
 // when the key does not derive it, or the crid package sentinels when the
 // held value fails the local gate.
-func (r *Resolved) VerifyKey(derSPKI []byte) error {
+func (r *ShareLink) VerifyKey(derSPKI []byte) error {
 	if r.verifyKey == nil {
 		return fmt.Errorf("%w: response cannot be verified", qurl.ErrNoCRID)
 	}
@@ -301,9 +302,12 @@ func NewRegistered(ctx context.Context, cfg *Config, store qurl.AgentStateStore)
 	return &registeredClient{Client: core}, nil
 }
 
-// Resolve delegates to the SDK's ResolveResource and carries its VerifyCRID
+// Share delegates to the SDK's ResolveResource and carries its VerifyCRID
 // forward as the result's VerifyKey.
-func (c *client) Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error) {
+//
+// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0:
+// switch to sdk.ShareResource / qurl.ShareResourceOptions once go.mod pins it.
+func (c *client) Share(ctx context.Context, id string, opts ShareOptions) (*ShareLink, error) {
 	var sdkOpts *qurl.ResolveResourceOptions
 	if opts.TTLSeconds > 0 {
 		sdkOpts = &qurl.ResolveResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
@@ -312,7 +316,7 @@ func (c *client) Resolve(ctx context.Context, id string, opts ResolveOptions) (*
 	if err != nil {
 		return nil, mapError(err)
 	}
-	return &Resolved{
+	return &ShareLink{
 		QURL:             access.Link,
 		CRID:             access.CRID,
 		Type:             access.Type,

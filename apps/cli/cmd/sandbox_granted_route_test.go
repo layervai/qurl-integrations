@@ -55,12 +55,12 @@ type sandboxGrantedRoute struct {
 func prepareSandboxGrantedRoute(
 	t *testing.T,
 	env map[string]string,
-	resolvedLink string,
+	shareLink string,
 	marker string,
 	backendHits func() uint64,
 ) *sandboxGrantedRoute {
 	t.Helper()
-	link := strings.TrimSpace(resolvedLink)
+	link := strings.TrimSpace(shareLink)
 	if link == "" || strings.ContainsAny(link, " \t\r\n") || backendHits == nil {
 		t.Fatal("pre-delete Connector access input is incomplete")
 	}

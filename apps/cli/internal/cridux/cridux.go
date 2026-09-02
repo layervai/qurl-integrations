@@ -47,7 +47,7 @@ const (
 	// alphabet characters). It is warned about and still forwarded.
 	KindCRIDTypo
 	// KindResourceKey is a public-key resource identifier; KeyDER holds the
-	// decoded key so the resolve response can be verified against it.
+	// decoded key so the share response can be verified against it.
 	KindResourceKey
 )
 

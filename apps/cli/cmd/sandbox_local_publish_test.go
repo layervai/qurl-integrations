@@ -409,12 +409,12 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 		t.Fatalf("device-authenticated remote CRID appeared %d times in the newest active list window, want once", seen)
 	}
 
-	resolved := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "resolve", pub.CRID)
-	if _, err := validateSandboxResolveCommandResult(
-		"device-authenticated remote resolve",
-		resolved.code,
-		resolved.stdout.String(),
-		resolved.stderr.String(),
+	shared := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "share", pub.CRID)
+	if _, err := validateSandboxShareCommandResult(
+		"device-authenticated remote share",
+		shared.code,
+		shared.stdout.String(),
+		shared.stderr.String(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -447,9 +447,9 @@ func assertSandboxRemoteURLDeviceJourney(t *testing.T, binary string, cliEnv map
 	if redeleted.code != 0 {
 		t.Fatalf("device-authenticated remote re-delete exit = %d: %s", redeleted.code, redeleted.stderr.String())
 	}
-	revoked := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "resolve", pub.CRID)
+	revoked := runSandboxLocalCLI(t, binary, cliEnv, stateDir, "share", pub.CRID)
 	if err := validateSandboxDeletedCommandResult(
-		"device-authenticated resolve",
+		"device-authenticated share",
 		revoked.code,
 		revoked.stdout.String(),
 		revoked.stderr.String(),
@@ -627,9 +627,9 @@ func controlledSandboxRouteFenceError(t *testing.T, binary string, env map[strin
 
 func assertSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, stateDir, crid string) {
 	t.Helper()
-	result := runSandboxLocalCLI(t, binary, env, stateDir, "resolve", crid)
+	result := runSandboxLocalCLI(t, binary, env, stateDir, "share", crid)
 	if err := validateSandboxDeletedCommandResult(
-		"controlled-failure resolve",
+		"controlled-failure share",
 		result.code,
 		result.stdout.String(),
 		result.stderr.String(),
@@ -925,6 +925,7 @@ func validateSandboxStoppedRouteRefusal(res *runResult, stoppedRefusal string) e
 
 func TestSandboxStoppedRouteRefusalMatchesQuietGet(t *testing.T) {
 	srv := apitest.NewServer(t)
+	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (both /resolve routes in this test).
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerConnectorStopped503(t))
 	destination := filepath.Join(t.TempDir(), "payload")
 	res := runCLI(t, &runOpts{args: []string{

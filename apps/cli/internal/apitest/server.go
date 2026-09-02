@@ -215,6 +215,7 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
 		s.handleMe(w, r)
 
+	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0.
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resolve"):
 		s.handleResolve(w, r)
 
@@ -325,9 +326,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}, nil)
 }
 
-// handleResolve enforces the pinned resolve bind rule — the body must be
-// JSON (`{}` at minimum); a literal empty body is a 400 — then answers a
-// consistent minted link.
+// handleResolve serves the CRID share operator on its phase-1 wire route
+// (POST /v1/resources/{id}/resolve; the mock keeps the wire's spelling). It
+// enforces the pinned bind rule — the body must be JSON (`{}` at minimum);
+// a literal empty body is a 400 — then answers a consistent minted link.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil || len(raw) == 0 || !json.Valid(raw) {
@@ -335,6 +337,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			"request body must be a JSON object")
 		return
 	}
+	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0.
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/resolve")
 	s.mu.Lock()
 	qurlLink := s.resolveQURL

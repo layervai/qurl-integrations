@@ -89,8 +89,8 @@ func TestNewRegistered_UsesDeviceCredentialAcrossCustomerResourceSurface(t *test
 	if _, err := client.List(context.Background(), ListOptions{Limit: 20}); err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if _, err := client.Resolve(context.Background(), srv.Key.CRID, ResolveOptions{}); err != nil {
-		t.Fatalf("Resolve: %v", err)
+	if _, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{}); err != nil {
+		t.Fatalf("Share: %v", err)
 	}
 	if _, err := client.Sharing(context.Background(), srv.Key.CRID); err != nil {
 		t.Fatalf("Sharing: %v", err)

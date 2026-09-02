@@ -166,13 +166,13 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 
 	cmd := &cobra.Command{
 		Use:   "qurl",
-		Short: "Publish, resolve, and manage qURL resources by CRID",
+		Short: "Publish, share, and manage qURL resources by CRID",
 		Long: `Publish a local app or remote URL as a protected qURL resource, then use
 its CRID to open it when access is authorized.
 
 A CRID is a permanent, shareable resource ID — it contains no secret and grants
 no access by itself. Authorized users turn it into a short-lived access link
-with "qurl get" or "qurl resolve".
+with "qurl get" or "qurl share".
 
 Authentication: use ` + "`qurl login`" + ` to enroll this machine. The account API key is
 used only for enrollment and is not stored by qurl. Scripts and CI can set
@@ -231,7 +231,7 @@ QURL_API_KEY for the same one-time bootstrap.`,
 
 	cmd.AddCommand(
 		publishCmd(opts),
-		resolveCmd(opts),
+		shareCmd(opts),
 		getCmd(opts),
 		listCmd(opts),
 		shareStartCmd(opts),

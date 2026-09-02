@@ -95,20 +95,20 @@ func TestListQuietPrintsFullCRIDs(t *testing.T) {
 	}
 }
 
-func TestResolveByCRIDEchoVerifies(t *testing.T) {
+func TestShareByCRIDEchoVerifies(t *testing.T) {
 	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
 	if got := res.stdout.String(); got != "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ\n" {
-		t.Errorf("piped resolve stdout = %q, want the bare link", got)
+		t.Errorf("piped share stdout = %q, want the bare link", got)
 	}
 }
 
-func TestResolveByResourceKeyVerifies(t *testing.T) {
+func TestShareByResourceKeyVerifies(t *testing.T) {
 	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.ResourceID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.ResourceID}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -117,13 +117,13 @@ func TestResolveByResourceKeyVerifies(t *testing.T) {
 	}
 }
 
-func TestResolveWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
+func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
 	srv := apitest.NewServer(t)
 	other := apitest.GenerateResourceKey(t)
 	srv.SetResolveCRID(other.CRID)
 
 	// By CRID: the echo check fails.
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 12 {
 		t.Fatalf("exit = %d, want 12; stderr: %s", res.code, res.stderr.String())
 	}
@@ -133,35 +133,36 @@ func TestResolveWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
 	}
 
 	// By resource key: VerifyKey fails against the delivered CRID.
-	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.ResourceID}})
+	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.ResourceID}})
 	if res.code != 12 {
 		t.Fatalf("key-form exit = %d, want 12; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
 }
 
-func TestResolveResponseWithoutCRIDFailsClosed(t *testing.T) {
+func TestShareResponseWithoutCRIDFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
+	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (every /resolve route in this file).
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", func(w http.ResponseWriter, _ *http.Request) {
 		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
 			"qurl": "https://qurl.link/#qv2t1.1.1.1.AQ.AQ.AQ",
 			"type": "qv2",
 		}, nil)
 	})
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 12 {
 		t.Fatalf("exit = %d, want 12; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
 }
 
-func TestResolve429RetryAfterHonored(t *testing.T) {
+func TestShare429RetryAfterHonored(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.Handler429(t, 3))
 
 	var sleeps []time.Duration
 	res := runCLI(t, &runOpts{
-		args:   []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID},
+		args:   []string{"--endpoint", srv.URL, "share", srv.Key.CRID},
 		sleeps: &sleeps,
 	})
 	if res.code != 0 {
@@ -192,11 +193,11 @@ func TestRateLimitExhaustionSurfaces429(t *testing.T) {
 	}
 }
 
-func TestResolveDark503TypedUX(t *testing.T) {
+func TestShareDark503TypedUX(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerDark503(t))
 
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 11 {
 		t.Fatalf("exit = %d, want 11; stderr: %s", res.code, res.stderr.String())
 	}
@@ -240,7 +241,7 @@ func TestDeleteIsIdempotentAtCLILevel(t *testing.T) {
 }
 
 // TestDeleteTestCRIDOnProductionRefusedWithoutYes pins the same environment
-// guard on the destructive command that resolve carries: a test CRID aimed
+// guard on the destructive command that share carries: a test CRID aimed
 // at the production endpoint is refused before any request without --yes.
 func TestDeleteTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 	srv := apitest.NewServer(t) // never contacted
@@ -257,13 +258,13 @@ func TestDeleteTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 	}
 }
 
-// TestResolveAfterDeleteIsOwnerTruthful pins the revoked path: resolving a
+// TestShareAfterDeleteIsOwnerTruthful pins the revoked path: sharing a
 // deleted resource answers 400 `revoked`, which the CLI maps to exit 5 with
 // the owner-truthful message rather than the ambiguous 404 anatomy.
-func TestResolveAfterDeleteIsOwnerTruthful(t *testing.T) {
+func TestShareAfterDeleteIsOwnerTruthful(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerRevoked400(t))
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 5 {
 		t.Fatalf("exit = %d, want 5; stderr: %s", res.code, res.stderr.String())
 	}
@@ -315,16 +316,16 @@ func TestGetAndStatusAfterDeleteAreOwnerTruthful(t *testing.T) {
 	})
 }
 
-// TestResolveInsufficientScope pins the dedicated-scope failure UX.
-func TestResolveInsufficientScope(t *testing.T) {
+// TestShareInsufficientScope pins the dedicated-scope failure UX.
+func TestShareInsufficientScope(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerInsufficientScope403(t))
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID}})
 	if res.code != 6 {
 		t.Fatalf("exit = %d, want 6; stderr: %s", res.code, res.stderr.String())
 	}
 	if !strings.Contains(res.stderr.String(), "isn't allowed to request access links") {
-		t.Errorf("expected the resolve-access hint, got %q", res.stderr.String())
+		t.Errorf("expected the share-scope hint, got %q", res.stderr.String())
 	}
 }
 
@@ -670,7 +671,7 @@ func TestDeleteInteractiveReadErrorIsSurfaced(t *testing.T) {
 
 func TestTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 	srv := apitest.NewServer(t) // never contacted
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", "https://api.layerv.ai", "resolve", srv.Key.CRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", "https://api.layerv.ai", "share", srv.Key.CRID}})
 	if res.code != 2 {
 		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
 	}
@@ -686,7 +687,7 @@ func TestTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 func TestProductionCRIDOnLocalEndpointWarnsAndProceeds(t *testing.T) {
 	srv := apitest.NewServer(t)
 	prodCRID := apitest.DeriveCRID(t, srv.Key.DER, apitest.VersionProduction)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", prodCRID}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", prodCRID}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -703,7 +704,7 @@ func TestCRIDTypoWarnsAndForwards(t *testing.T) {
 	// Corrupt the final character to break the CRID's internal check while
 	// keeping the alphabet and length valid.
 	typo := srv.Key.CRID[:59] + flipCRIDChar(srv.Key.CRID[59])
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", typo}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", typo}})
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
@@ -748,12 +749,12 @@ func TestDocsRejectsUnknownMode(t *testing.T) {
 	}
 }
 
-// TestResolveSubSecondTTLRefused pins clamp-and-report: a requested lifetime
+// TestShareSubSecondTTLRefused pins clamp-and-report: a requested lifetime
 // is never silently dropped, and a sub-second --ttl would truncate to zero
 // on the whole-second wire.
-func TestResolveSubSecondTTLRefused(t *testing.T) {
+func TestShareSubSecondTTLRefused(t *testing.T) {
 	srv := apitest.NewServer(t) // never contacted
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID, "--ttl", "500ms"}})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.CRID, "--ttl", "500ms"}})
 	if res.code != 2 {
 		t.Errorf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
 	}

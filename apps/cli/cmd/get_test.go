@@ -21,12 +21,14 @@ import (
 // API and its link-host route, plus the harness contracts (no hangs, no
 // browser off a terminal, binary-clean stdout).
 
-// resolveRoute is the mock's resolve path for the fixture CRID.
+// resolveRoute is the mock's share path for the fixture CRID, spelled the
+// way the phase-1 wire spells it.
+// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0.
 func resolveRoute(srv *apitest.Server) string {
 	return "/v1/resources/" + srv.Key.CRID + "/resolve"
 }
 
-// downloadServer returns a mock whose resolve answers point at its own
+// downloadServer returns a mock whose share answers point at its own
 // link-host route, so downloads stay in-process.
 func downloadServer(t *testing.T) *apitest.Server {
 	t.Helper()
@@ -63,18 +65,18 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 
 	requests := srv.Requests()
 	if len(requests) != 2 {
-		t.Fatalf("requests = %d, want resolve then download", len(requests))
+		t.Fatalf("requests = %d, want share then download", len(requests))
 	}
 	if requests[0].Method != http.MethodPost || requests[0].Path != resolveRoute(srv) {
-		t.Errorf("first request = %s %s, want the resolve", requests[0].Method, requests[0].Path)
+		t.Errorf("first request = %s %s, want the share", requests[0].Method, requests[0].Path)
 	}
 	if requests[1].Method != http.MethodGet || requests[1].Path != apitest.DownloadPath {
 		t.Errorf("second request = %s %s, want the download GET", requests[1].Method, requests[1].Path)
 	}
-	// The API credential authenticates the resolve and must never follow
+	// The API credential authenticates the share and must never follow
 	// the minted link to the download host.
 	if auth := requests[0].Header.Get("Authorization"); auth == "" {
-		t.Error("resolve request lost its Authorization header")
+		t.Error("share request lost its Authorization header")
 	}
 	if auth := requests[1].Header.Get("Authorization"); auth != "" {
 		t.Errorf("download request carried Authorization (%d bytes); the key must never reach the link host", len(auth))
@@ -82,7 +84,7 @@ func TestGetDownloadEndToEnd(t *testing.T) {
 }
 
 // TestGetExpiryRetrySequence pins the T3 retry contract end to end: first
-// GET 410 → re-resolve → second GET succeeds.
+// GET 410 → fresh share → second GET succeeds.
 func TestGetExpiryRetrySequence(t *testing.T) {
 	srv := downloadServer(t)
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)
@@ -119,7 +121,7 @@ func TestGetExpiryRetrySequence(t *testing.T) {
 	}
 }
 
-// TestGetRetryReverifiesFreshAnswer pins that the mid-download re-resolve
+// TestGetRetryReverifiesFreshAnswer pins that the mid-download fresh share
 // goes through the same fail-closed verification: a substituted answer on
 // the retry aborts with exit 12 and no file.
 func TestGetRetryReverifiesFreshAnswer(t *testing.T) {
@@ -206,7 +208,7 @@ func TestGetBrowserFailureStillLeavesTheLink(t *testing.T) {
 }
 
 // TestGetVerifyMismatchNeverActs pins fail-closed ordering: a mismatched
-// resolve answer means no browser, no bytes, exit 12.
+// share answer means no browser, no bytes, exit 12.
 func TestGetVerifyMismatchNeverActs(t *testing.T) {
 	srv := apitest.NewServer(t)
 	other := apitest.GenerateResourceKey(t)
@@ -241,7 +243,7 @@ func TestGetPipedWithoutFileRefusedBeforeNetwork(t *testing.T) {
 		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
-	for _, remedy := range []string{"--file", "qurl resolve"} {
+	for _, remedy := range []string{"--file", "qurl share"} {
 		if !strings.Contains(res.stderr.String(), remedy) {
 			t.Errorf("refusal must point at %s, got %q", remedy, res.stderr.String())
 		}
@@ -336,7 +338,7 @@ func TestGetUsageRefusals(t *testing.T) {
 }
 
 // TestGetTestCRIDOnProductionRefusedWithoutYes pins the same environment
-// guard resolve and delete carry, on the same exit code, before any
+// guard share and delete carry, on the same exit code, before any
 // request — and that no browser starts either.
 func TestGetTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
 	srv := apitest.NewServer(t) // never contacted
@@ -429,7 +431,7 @@ func mustNotExistCmd(t *testing.T, path string) {
 	}
 }
 
-// portalServer returns a mock whose resolve answers mint a
+// portalServer returns a mock whose share answers mint a
 // fragment-credential link at the mock's own in-browser page route, plus
 // that link. A plain GET of it can only ever fetch the page (the fragment
 // never leaves the client), which is exactly what the tests below must
@@ -610,7 +612,7 @@ func TestGetLiveGrantRetriesWithoutSecondAccessRequest(t *testing.T) {
 }
 
 // A grant with no retained lifetime is expired for retry purposes. A 410 then
-// gets exactly one fresh verified resolve and access request.
+// gets exactly one fresh verified share and access request.
 func TestGetExpiredGrantRepeatsAccessRequest(t *testing.T) {
 	srv, link := portalServer(t)
 	srv.Script(http.MethodGet, apitest.DownloadPath, handlerGone)

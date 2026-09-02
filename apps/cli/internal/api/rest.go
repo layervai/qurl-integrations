@@ -477,7 +477,7 @@ func validateSharingRow(row sharingRow) error {
 //
 // TODO(upstream-contract): 204-or-404 is the verified platform contract for
 // re-delete — DELETE on an already-revoked resource answers 204 (the soft
-// revoke is idempotent), so the resolve-side gone family (400 `revoked`,
+// revoke is idempotent), so the share-side gone family (400 `revoked`,
 // 410 `resource_tombstoned`) is not expected here and deliberately not
 // treated as success. If the platform ever starts answering 410 for a
 // delete on a tombstoned row, widen this switch in lockstep.

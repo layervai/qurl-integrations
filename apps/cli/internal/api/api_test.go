@@ -559,11 +559,11 @@ func TestPublishValidatesTargetLocally(t *testing.T) {
 	}
 }
 
-func TestResolveVerifyKeyPassesAndFailsClosed(t *testing.T) {
+func TestShareVerifyKeyPassesAndFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
 
-	res, err := client.Resolve(context.Background(), srv.Key.ResourceID, ResolveOptions{})
+	res, err := client.Share(context.Background(), srv.Key.ResourceID, ShareOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,19 +575,20 @@ func TestResolveVerifyKeyPassesAndFailsClosed(t *testing.T) {
 		t.Errorf("wrong key: err = %v, want ErrCRIDMismatch", err)
 	}
 
-	// A Resolved constructed without the SDK wiring fails closed, never open.
-	bare := &Resolved{QURL: "https://qurl.link/#x"}
+	// A ShareLink constructed without the SDK wiring fails closed, never open.
+	bare := &ShareLink{QURL: "https://qurl.link/#x"}
 	if err := bare.VerifyKey(srv.Key.DER); !errors.Is(err, qurl.ErrNoCRID) {
 		t.Errorf("unwired VerifyKey = %v, want ErrNoCRID", err)
 	}
 }
 
-func TestResolveDark503PreservesSentinel(t *testing.T) {
+func TestShareDark503PreservesSentinel(t *testing.T) {
 	srv := apitest.NewServer(t)
+	// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (every /resolve route in this file).
 	srv.Script(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", apitest.HandlerDark503(t))
 	client := newTestClient(t, srv, nil)
 
-	_, err := client.Resolve(context.Background(), srv.Key.CRID, ResolveOptions{})
+	_, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
 	if !errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		t.Fatalf("err = %v, want the dark-surface sentinel preserved through mapping", err)
 	}
@@ -597,13 +598,13 @@ func TestResolveDark503PreservesSentinel(t *testing.T) {
 	}
 }
 
-func TestResolveStoppedConnectorPreservesProblemCodeAndDoesNotRetry(t *testing.T) {
+func TestShareStoppedConnectorPreservesProblemCodeAndDoesNotRetry(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.ScriptRepeat(http.MethodPost, "/v1/resources/"+srv.Key.CRID+"/resolve", 2, apitest.HandlerConnectorStopped503(t))
 
 	var sleeps []time.Duration
 	client := newTestClient(t, srv, &sleeps)
-	_, err := client.Resolve(context.Background(), srv.Key.CRID, ResolveOptions{})
+	_, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
 	if !errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		t.Fatalf("err = %v, want the 503 sentinel preserved", err)
 	}
@@ -786,7 +787,7 @@ func TestDark503IsNeverAutoRetried(t *testing.T) {
 
 	var sleeps []time.Duration
 	client := newTestClient(t, srv, &sleeps)
-	_, err := client.Resolve(context.Background(), srv.Key.CRID, ResolveOptions{})
+	_, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
 	if !errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled) {
 		t.Fatalf("err = %v", err)
 	}

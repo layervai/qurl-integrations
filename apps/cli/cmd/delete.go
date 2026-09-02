@@ -25,7 +25,7 @@ func deleteCmd(opts *globalOpts) *cobra.Command {
 		Short: "Delete a published resource",
 		Long: `Delete a published resource by its CRID.
 
-Deletion cannot be undone: the CRID stops resolving, and republishing the
+Deletion cannot be undone: the CRID can no longer be shared, and republishing the
 same target later mints a different CRID. Interactive runs confirm first;
 scripts and pipelines must pass --yes.`,
 		Example: "  qurl delete " + exampleCRID + "\n" +

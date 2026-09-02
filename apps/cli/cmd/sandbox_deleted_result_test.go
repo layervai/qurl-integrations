@@ -12,7 +12,7 @@ import (
 )
 
 // validateSandboxDeletedCommandResult deliberately reports only lengths and
-// fixed booleans. Resolve stdout can contain live access authority when the
+// fixed booleans. Share stdout can contain live access authority when the
 // deletion fence regresses, so no child output may enter the diagnostic.
 func validateSandboxDeletedCommandResult(name string, gotCode int, stdout, stderr string) error {
 	hasDeletedDiagnostic := strings.Contains(strings.ToLower(stderr), "deleted")
@@ -29,7 +29,7 @@ func validateSandboxDeletedCommandResult(name string, gotCode int, stdout, stder
 	)
 }
 
-func validateSandboxResolveCommandResult(name string, gotCode int, stdout, stderr string) (string, error) {
+func validateSandboxShareCommandResult(name string, gotCode int, stdout, stderr string) (string, error) {
 	if gotCode != 0 {
 		return "", fmt.Errorf("%s = exit code %d, stdout %d bytes, stderr %d bytes; private details withheld", name, gotCode, len(stdout), len(stderr))
 	}
@@ -49,16 +49,16 @@ func validateSandboxResolveCommandResult(name string, gotCode int, stdout, stder
 
 func TestSandboxDeletedCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 	t.Parallel()
-	if err := validateSandboxDeletedCommandResult("resolve", exitcode.NotFound, "", "resource was deleted"); err != nil {
+	if err := validateSandboxDeletedCommandResult("share", exitcode.NotFound, "", "resource was deleted"); err != nil {
 		t.Fatalf("valid deleted result = %v", err)
 	}
 	const (
 		stdoutAuthority = "https://access.invalid/#qv3.stdout-secret"
 		stderrAuthority = "stderr-secret"
 	)
-	err := validateSandboxDeletedCommandResult("resolve", 0, stdoutAuthority, stderrAuthority)
+	err := validateSandboxDeletedCommandResult("share", 0, stdoutAuthority, stderrAuthority)
 	if err == nil {
-		t.Fatal("unexpected successful resolve result was accepted")
+		t.Fatal("unexpected successful share result was accepted")
 	}
 	for _, secret := range []string{stdoutAuthority, stderrAuthority} {
 		if strings.Contains(err.Error(), secret) {
@@ -67,11 +67,11 @@ func TestSandboxDeletedCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 	}
 }
 
-func TestSandboxResolveCommandDiagnosticWithholdsChildOutput(t *testing.T) {
+func TestSandboxShareCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 	const validLink = "https://access.invalid/open#qv3.valid-secret"
-	link, err := validateSandboxResolveCommandResult("resolve", 0, validLink+"\n", "")
+	link, err := validateSandboxShareCommandResult("share", 0, validLink+"\n", "")
 	if err != nil || link != validLink {
-		t.Fatalf("valid resolve = link length %d, error %v", len(link), err)
+		t.Fatalf("valid share = link length %d, error %v", len(link), err)
 	}
 	for name, test := range map[string]struct {
 		code   int
@@ -87,13 +87,13 @@ func TestSandboxResolveCommandDiagnosticWithholdsChildOutput(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := validateSandboxResolveCommandResult("resolve", test.code, test.stdout, test.stderr)
+			_, err := validateSandboxShareCommandResult("share", test.code, test.stdout, test.stderr)
 			if err == nil {
-				t.Fatal("invalid resolve result was accepted")
+				t.Fatal("invalid share result was accepted")
 			}
 			for _, secret := range []string{test.stdout, test.stderr} {
 				if secret != "" && strings.Contains(err.Error(), secret) {
-					t.Fatal("resolve diagnostic exposed child output")
+					t.Fatal("share diagnostic exposed child output")
 				}
 			}
 		})

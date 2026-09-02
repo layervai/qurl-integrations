@@ -300,7 +300,7 @@ func TestCLIRequiredPRTestGatesAreExactAndFailClosed(t *testing.T) {
 		"TestSandboxProcessRecoveryCleanupAfterPreReadyFailure",
 		"TestSandboxPublishProcessReportsEarlyExit",
 		"TestSandboxPublishReadinessWaitsForCompleteCRIDLine",
-		"TestSandboxResolveCommandDiagnosticWithholdsChildOutput",
+		"TestSandboxShareCommandDiagnosticWithholdsChildOutput",
 		"TestSandboxResourceCleanupIsSafeBeforePublish",
 		"TestSandboxRunIdentityBindsOnlyImmutableHardenedImage",
 		"TestSandboxSiblingCleanupPreservesDeviceAfterResourceFailure",

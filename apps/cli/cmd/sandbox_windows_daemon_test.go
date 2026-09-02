@@ -207,11 +207,11 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		if backendHits.Load() < 3 {
 			t.Fatalf("Windows local backend saw %d route hits, want at least one before and after lifecycle changes", backendHits.Load())
 		}
-		resolvedBeforeDelete := runWindowsSandboxCLI(t, binary, cliEnv, "resolve", cridValue)
-		if resolvedBeforeDelete.err != nil || strings.TrimSpace(resolvedBeforeDelete.stdout) == "" {
-			t.Fatal("Windows resolve before Connector delete failed; private details withheld")
+		sharedBeforeDelete := runWindowsSandboxCLI(t, binary, cliEnv, "share", cridValue)
+		if sharedBeforeDelete.err != nil || strings.TrimSpace(sharedBeforeDelete.stdout) == "" {
+			t.Fatal("Windows share before Connector delete failed; private details withheld")
 		}
-		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, resolvedBeforeDelete.stdout, marker, backendHits.Load)
+		grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
 
 		deleted := runWindowsSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 		if deleted.err != nil {
@@ -427,9 +427,9 @@ func windowsSandboxExitCode(err error) int {
 
 func assertWindowsSandboxFailureRemoteDeleted(t *testing.T, binary string, env map[string]string, cridValue string) {
 	t.Helper()
-	result := runWindowsSandboxCLI(t, binary, env, "resolve", cridValue)
+	result := runWindowsSandboxCLI(t, binary, env, "share", cridValue)
 	if err := validateSandboxDeletedCommandResult(
-		"controlled-failure Windows resolve",
+		"controlled-failure Windows share",
 		windowsSandboxExitCode(result.err),
 		result.stdout,
 		result.stderr,
@@ -603,7 +603,7 @@ func assertWindowsSandboxDeleted(
 		name string
 		args []string
 	}{
-		{name: "resolve", args: []string{"resolve", cridValue}},
+		{name: "share", args: []string{"share", cridValue}},
 		{name: "get", args: []string{"get", cridValue, "--file", destination}},
 		{name: "status", args: []string{"status", cridValue}},
 	} {
@@ -716,12 +716,12 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 		}
 	}
 	assertWindowsSandboxListContains(t, binary, env, resource.CRID)
-	resolved := runWindowsSandboxCLI(t, binary, env, "resolve", resource.CRID)
-	if _, err := validateSandboxResolveCommandResult(
-		"Windows remote resolve",
-		windowsSandboxExitCode(resolved.err),
-		resolved.stdout,
-		resolved.stderr,
+	shared := runWindowsSandboxCLI(t, binary, env, "share", resource.CRID)
+	if _, err := validateSandboxShareCommandResult(
+		"Windows remote share",
+		windowsSandboxExitCode(shared.err),
+		shared.stdout,
+		shared.stderr,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -747,9 +747,9 @@ func runWindowsSandboxRemoteJourney(t *testing.T, binary string, env map[string]
 	if redeleted.err != nil {
 		t.Fatalf("Windows remote idempotent re-delete: %v; stderr %q", redeleted.err, redeleted.stderr)
 	}
-	revoked := runWindowsSandboxCLI(t, binary, env, "resolve", resource.CRID)
+	revoked := runWindowsSandboxCLI(t, binary, env, "share", resource.CRID)
 	if err := validateSandboxDeletedCommandResult(
-		"Windows remote resolve",
+		"Windows remote share",
 		windowsSandboxExitCode(revoked.err),
 		revoked.stdout,
 		revoked.stderr,

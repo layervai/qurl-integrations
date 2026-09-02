@@ -157,7 +157,7 @@ type Downloader struct {
 	// — the expiry retry included — shares one connection pool. A grant-bearing
 	// target requires *http.Client so Downloader can enforce redirect containment.
 	Client Doer
-	// Mint resolves a lifetime-free URL whose plain GET serves the content.
+	// Mint shares a lifetime-free URL whose plain GET serves the content.
 	Mint func(ctx context.Context) (string, error)
 	// MintTarget is the grant-aware form of Mint. When present it takes
 	// precedence and lets an immediate 410 retry the same acknowledged grant
@@ -364,7 +364,7 @@ func (d *Downloader) waitFor(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// get performs one mint-then-GET round trip. Mint failures — resolve
+// get performs one mint-then-GET round trip. Mint failures — share
 // errors and CRID verification failures alike — propagate unwrapped so
 // they keep their own exit codes.
 func (d *Downloader) getFresh(ctx context.Context) (DownloadTarget, *http.Response, error) {

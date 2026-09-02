@@ -17,7 +17,7 @@ const (
 	webSchemeHTTPS = "https"
 )
 
-// Direct access for downloads. A resolved qURL credential link carries its
+// Direct access for downloads. A qURL credential share link carries its
 // credential in the URL fragment, which HTTP clients never transmit — a plain
 // GET of the link can only ever fetch the in-browser page that consumes the
 // fragment, never the content itself. Downloads therefore go through the SDK's
@@ -66,7 +66,7 @@ const (
 	MsgLinkVerification = "the access link failed its safety check, so it was discarded and nothing was downloaded. Try again; if it keeps happening, stop and contact whoever shared the CRID with you"
 
 	// MsgAccessDenied reports an authenticated refusal from the platform.
-	MsgAccessDenied = "the service declined to grant access to this content — resolve the CRID again for a fresh link; if it keeps happening, contact whoever shared the CRID with you"
+	MsgAccessDenied = "the service declined to grant access to this content — share the CRID again for a fresh link; if it keeps happening, contact whoever shared the CRID with you"
 
 	// MsgAccessBusy reports the platform asking the caller to retry later.
 	MsgAccessBusy = "the service is busy right now — try again in a moment"

@@ -373,8 +373,8 @@ func TestDocsGeneratesManPagesAndMarkdown(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("docs markdown exit = %d", res.code)
 	}
-	if _, err := os.Stat(filepath.Join(mdDir, "qurl_resolve.md")); err != nil {
-		t.Errorf("expected qurl_resolve.md: %v", err)
+	if _, err := os.Stat(filepath.Join(mdDir, "qurl_share.md")); err != nil {
+		t.Errorf("expected qurl_share.md: %v", err)
 	}
 }
 
@@ -384,7 +384,7 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		"unknown flag":    {"list", "--no-such-flag"},
 		"bad output":      {"-o", "yaml", "list"},
 		"bad color":       {"--color", "sometimes", "list"},
-		"missing operand": {"resolve"},
+		"missing operand": {"share"},
 		"extra operand":   {"whoami", "extra"},
 	}
 	for name, args := range cases {
@@ -398,11 +398,30 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 }
 
 func TestUnusableOperandExitEight(t *testing.T) {
-	res := runCLI(t, &runOpts{args: []string{"resolve", "not a CRID at all!"}})
+	res := runCLI(t, &runOpts{args: []string{"share", "not a CRID at all!"}})
 	if res.code != 8 {
 		t.Fatalf("exit = %d, want 8; stderr: %s", res.code, res.stderr.String())
 	}
 	mustEmptyStdout(t, res)
+}
+
+// TestResolveIsNoLongerACommand pins the hard cutover from `qurl resolve`
+// to `qurl share`: the old name is not an alias, so it takes cobra's
+// unknown-command path — usage exit, nothing on stdout, and no request
+// ever leaves the process.
+func TestResolveIsNoLongerACommand(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID}})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2 (usage); stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), `unknown command "resolve"`) {
+		t.Errorf("stderr = %q, want the unknown-command error", res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Errorf("an unknown command must not reach the service, saw %d request(s)", len(srv.Requests()))
+	}
 }
 
 // TestEndpointPrecedence pins flag > env > profile for the endpoint setting
@@ -533,7 +552,7 @@ func TestWhoamiListedInHelp(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("help exit = %d", res.code)
 	}
-	for _, name := range []string{"publish", "resolve", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "version", "completion"} {
+	for _, name := range []string{"publish", "share", "get", "list", "start", "stop", "restart", "status", "inspect", "daemon", "delete", "login", "whoami", "version", "completion"} {
 		if !strings.Contains(res.stdout.String(), name) {
 			t.Errorf("help does not list %q", name)
 		}

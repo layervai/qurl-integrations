@@ -29,7 +29,7 @@ loopback target and durable desired state. Observed tunnel state is shown as
 unknown in this paged view; use qurl status <CRID> for an authoritative live
 observation. Pages continue with --cursor when there are more results.`,
 		Example: `  qurl list --status active
-  qurl list --quiet | xargs -n1 qurl resolve --quiet`,
+  qurl list --quiet | xargs -n1 qurl share --quiet`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := opts.newClient(cmd.Context())

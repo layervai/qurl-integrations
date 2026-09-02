@@ -216,11 +216,11 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if backendHits.Load() < 3 {
 		t.Fatalf("local backend saw %d route hits, want at least one before and after lifecycle changes", backendHits.Load())
 	}
-	resolvedBeforeDelete := runExternalSandboxCLI(t, binary, cliEnv, "resolve", cridValue)
-	if resolvedBeforeDelete.err != nil || strings.TrimSpace(resolvedBeforeDelete.stdout) == "" {
-		t.Fatal("resolve before Connector delete failed; private details withheld")
+	sharedBeforeDelete := runExternalSandboxCLI(t, binary, cliEnv, "share", cridValue)
+	if sharedBeforeDelete.err != nil || strings.TrimSpace(sharedBeforeDelete.stdout) == "" {
+		t.Fatal("share before Connector delete failed; private details withheld")
 	}
-	grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, resolvedBeforeDelete.stdout, marker, backendHits.Load)
+	grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
 
 	deleted := runExternalSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 	if deleted.err != nil {
@@ -587,7 +587,7 @@ func assertExternalSandboxDeleted(
 		name string
 		args []string
 	}{
-		{name: "resolve", args: []string{"resolve", cridValue}},
+		{name: "share", args: []string{"share", cridValue}},
 		{name: "get", args: []string{"get", cridValue, "--file", destination}},
 		{name: "status", args: []string{"status", cridValue}},
 	} {

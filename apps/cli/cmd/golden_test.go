@@ -70,8 +70,8 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
-			name:         "resolve",
-			args:         func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			name:         "share",
+			args:         func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			variants:     goldenVariants(),
 			stdoutGolden: true,
 		},
@@ -95,8 +95,9 @@ func TestGoldens(t *testing.T) {
 		},
 		{
 			name: "error_notfound",
-			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
+				// TODO(share-rename phase 2): wire path flips to /share with qurl-go v0.12.0 (every /resolve route in this file).
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve",
 					apitest.HandlerNotFound404(t, "resource_not_found"))
 			},
@@ -106,7 +107,7 @@ func TestGoldens(t *testing.T) {
 		},
 		{
 			name: "error_revoked",
-			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerRevoked400(t))
 			},
@@ -116,7 +117,7 @@ func TestGoldens(t *testing.T) {
 		},
 		{
 			name: "error_retired",
-			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerTombstoned410(t))
 			},
@@ -126,7 +127,7 @@ func TestGoldens(t *testing.T) {
 		},
 		{
 			name: "error_dark503",
-			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerDark503(t))
 			},
@@ -136,7 +137,7 @@ func TestGoldens(t *testing.T) {
 		},
 		{
 			name: "error_connector_stopped",
-			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.Script(http.MethodPost, "/v1/resources/"+key.CRID+"/resolve", apitest.HandlerConnectorStopped503(t))
 			},
@@ -146,7 +147,7 @@ func TestGoldens(t *testing.T) {
 		},
 		{
 			name: "error_verify_mismatch",
-			args: func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
+			args: func(srv *apitest.Server) []string { return []string{"share", srv.Key.CRID} },
 			prepare: func(srv *apitest.Server) {
 				srv.SetResolveCRID(otherCRID)
 			},
@@ -324,7 +325,7 @@ func TestGoldens(t *testing.T) {
 	// Anchor the golden tree before any case changes the working directory.
 	goldenDir, err := filepath.Abs(filepath.Join("testdata", "golden"))
 	if err != nil {
-		t.Fatalf("resolve golden dir: %v", err)
+		t.Fatalf("locate golden dir: %v", err)
 	}
 
 	for _, tc := range cases {

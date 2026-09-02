@@ -9,12 +9,12 @@ const exampleCRID = "aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledf
 // referenced by both the commands and the jargon-gate test, so the strings a
 // customer sees and the strings the gate vets can never drift apart.
 const (
-	// msgVerifyMismatch is printed (stderr only) when a resolve response
+	// msgVerifyMismatch is printed (stderr only) when a share response
 	// fails CRID verification; nothing is emitted on stdout and the exit
 	// code is 12.
 	msgVerifyMismatch = "the service's answer did not match the CRID you asked for, so the link was discarded and nothing was printed. Try again; if it keeps happening, stop and contact whoever shared the CRID with you"
 
-	// msgVerifyMissing covers a resolve response that carried nothing to
+	// msgVerifyMissing covers a share response that carried nothing to
 	// verify against; same fail-closed contract as msgVerifyMismatch.
 	msgVerifyMissing = "the service's answer carried no CRID to verify against, so the link was discarded and nothing was printed. Try again; if it keeps happening, contact qURL support"
 
@@ -55,7 +55,7 @@ const (
 
 	// msgBrowserJSON refuses browser-open under the JSON output mode: a
 	// machine asked for data, and a spawned browser is not data.
-	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl resolve --output json` for the link"
+	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl share --output json` for the link"
 )
 
 // customerMessages returns every fixed customer-facing string the cmd
