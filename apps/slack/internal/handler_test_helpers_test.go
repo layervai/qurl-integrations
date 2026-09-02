@@ -121,8 +121,7 @@ func captureDefaultSlog(t *testing.T) *capturedLogs {
 const kindFirstRejection = "tunnel install: minted credential did not confirm the kind-first contract"
 
 // assertAgentEnrollmentKind pins the decoded POST /v1/api-keys body to an
-// agent-target enrollment token (owner-scoped session-control enrollment);
-// assertSingleConnectorClaim pins its resource binding.
+// agent-target enrollment token (owner-scoped session-control enrollment).
 func assertAgentEnrollmentKind(t *testing.T, body map[string]any) {
 	t.Helper()
 	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetAgent {
@@ -137,11 +136,19 @@ func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) 
 	t.Helper()
 	claims, ok := body["claims"].([]any)
 	if !ok || len(claims) != 1 {
-		t.Fatalf("api key claims = %v, want exactly one connector claim", body["claims"])
+		t.Errorf("api key claims = %v, want exactly one connector claim; body=%+v", body["claims"], body)
+		return
 	}
 	claim, ok := claims[0].(map[string]any)
-	if !ok || claim["type"] != client.CredentialClaimTypeConnector || claim["id"] != slug {
-		t.Fatalf("api key claim = %v, want {type: connector, id: %q}", claims[0], slug)
+	if !ok {
+		t.Errorf("api key claim = %v, want an object; body=%+v", claims[0], body)
+		return
+	}
+	if claim[testKeyType] != client.CredentialClaimTypeConnector {
+		t.Errorf("api key claim type = %v, want %q; body=%+v", claim[testKeyType], client.CredentialClaimTypeConnector, body)
+	}
+	if claim["id"] != slug {
+		t.Errorf("api key claim id = %v, want %q; body=%+v", claim["id"], slug, body)
 	}
 }
 

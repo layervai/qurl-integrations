@@ -1135,22 +1135,12 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 // install flows use it so the two cannot drift.
 const kindFirstUnconfirmedInstallMessage = "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated."
 
-// credentialConfirmsKindFirst reports whether a mint response echoes back the
-// kind-first contract the request asked for. The response is the only in-band
-// signal that the producer honored the request: a pre-cutover producer that
-// ignored `kind` mints an ordinary workspace-scoped key instead of a one-shot
-// enrollment token — same 200, far broader credential.
-//
-// This gates delivery. An unconfirmed credential is revoked and the install
-// fails rather than DMing an admin a key with more authority than the flow
-// promises. The deploy-order gate (qurl-service must ship the kind-first API
-// first) remains the primary control; this is the in-band enforcement of it,
-// and it is what makes that gate more than a convention.
-//
-// Target is corroborating, not required, and that leniency matters more now
-// that this fails closed: a producer that honors `kind` but does not echo
-// `target` must not break every enrollment. A `target` that is present and
-// disagrees is a real conflict and does fail.
+// credentialConfirmsKindFirst reports whether a minted credential confirms the
+// kind-first contract: kind=enrollment_token AND target=agent, both echoed by
+// the producer. There is no leniency for an omitted target: qurl-service
+// echoes it since #1347 (deployed), and an owner-scoped credential whose
+// scope cannot be confirmed must never be DM'd. A target that is present and
+// disagrees is a real conflict and fails for the same reason.
 func credentialConfirmsKindFirst(key *client.APIKey) bool {
 	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
 		return false
@@ -1544,9 +1534,6 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	}
 	if strings.TrimSpace(args.OwnerID) == "" {
 		return "", errors.New("tunnel headless config requires the account owner id")
-	}
-	if strings.Contains(args.OwnerID, "'") {
-		return "", errors.New("tunnel headless config cannot quote an account owner id containing an apostrophe")
 	}
 	values := []string{args.OwnerID, args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
 	quoted := make([]string, len(values))

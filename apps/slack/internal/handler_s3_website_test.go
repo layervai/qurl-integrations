@@ -2057,3 +2057,32 @@ func TestS3WebsiteInstallRejectsConnectorTargetCredential(t *testing.T) {
 		t.Fatalf("response_url bodies = %q, want the shared kind-first copy", *bodies)
 	}
 }
+
+// TestS3WebsiteInstallFailsClosedForNonAPIKeyPrincipal mirrors the tunnel
+// test: /v1/me without api_key must not create, mint or DM anything.
+func TestS3WebsiteInstallFailsClosedForNonAPIKeyPrincipal(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, keyHits int
+	ts.addCustomer(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{"owner_id": testOwnerID})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		keyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	responseURL, bodies := s3WebsiteInstallResponseCapture(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	if resourceHits != 0 || keyHits != 0 || len(*dmPosts) != 0 || !strings.Contains(strings.Join(*bodies, "\n"), "Failed to resolve the qURL account owner") {
+		t.Fatalf("creates = %d, mints = %d, DMs = %d, bodies = %q; want no mutation and the owner-lookup copy", resourceHits, keyHits, len(*dmPosts), *bodies)
+	}
+}

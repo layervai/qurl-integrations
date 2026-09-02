@@ -35,7 +35,7 @@ fi
 resolves=false
 for attempt in 1 2 3; do
   if docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then resolves=true; break; fi
-  [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
+  if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
 done
 if [ "$resolves" != true ]; then
   if [ "$REQUIRE_IMAGE" = "true" ]; then
@@ -68,7 +68,7 @@ for platform in "${PLATFORMS[@]}"; do
   pulled=false
   for attempt in 1 2 3; do
     if pull_output="$(docker pull --quiet --platform "$platform" "$IMG" 2>&1)"; then pulled=true; break; fi
-    [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
+    if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
   done
   if [ "$pulled" != true ]; then
     output="$(printf '%s\n' "$pull_output" | tail -5)"
@@ -78,7 +78,7 @@ for platform in "${PLATFORMS[@]}"; do
   ran=false
   for attempt in 1 2 3; do
     if version_output="$(docker run --rm --platform "$platform" "$IMG" version 2>&1)"; then ran=true; break; fi
-    [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
+    if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
   done
   if [ "$ran" != true ]; then
     output="$version_output
