@@ -811,7 +811,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// ignored the request shape — it may well have minted something
 		// longer-lived. Nor does the copy claim the revoke succeeded; that is
 		// best-effort (tunnel_bootstrap_cleanup_failed).
-		return nil, sharingInstallFailureMessage("The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated.", previousSharing), errKindFirstUnconfirmed
+		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), errKindFirstUnconfirmed
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
@@ -1147,6 +1147,11 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 // that this fails closed: a producer that honors `kind` but does not echo
 // `target` must not break every enrollment. A `target` that is present and
 // disagrees is a real conflict and does fail.
+// kindFirstUnconfirmedInstallMessage is the shared fail-closed copy for a
+// minted credential that does not confirm the kind-first contract; both
+// install flows use it so the two cannot drift.
+const kindFirstUnconfirmedInstallMessage = "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated."
+
 func credentialConfirmsKindFirst(key *client.APIKey) bool {
 	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
 		return false
@@ -1513,6 +1518,13 @@ func resolveInstallOwnerID(ctx context.Context, c *client.Client, log *slog.Logg
 		log.Error(flow+": account identity lookup failed", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(slug))
 		return "", fmt.Errorf("resolve account identity: %w", err)
 	}
+	// Install policy (not a /v1/me property): the share config must name the
+	// account owner, which is only what owner_id means for an API-key
+	// principal. A delegated credential would name the calling user.
+	if identity.APIKey == nil {
+		log.Error(flow+": credential is not an API-key principal; refusing to render a share config", "slug", sanitizeLogValue(slug))
+		return "", errors.New("resolve account identity: credential is not an API-key principal")
+	}
 	return identity.OwnerID, nil
 }
 
@@ -1530,6 +1542,9 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	}
 	if strings.TrimSpace(args.OwnerID) == "" {
 		return "", errors.New("tunnel headless config requires the account owner id")
+	}
+	if strings.Contains(args.OwnerID, "'") {
+		return "", errors.New("tunnel headless config cannot quote an account owner id containing an apostrophe")
 	}
 	values := []string{args.OwnerID, args.CRID, args.ResourceID, args.Slug, args.ConnectorRoutingID, args.KnockResourceID, fmt.Sprintf("http://127.0.0.1:%d", args.LocalPort)}
 	quoted := make([]string, len(values))

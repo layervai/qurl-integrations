@@ -917,9 +917,9 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 // TODO(upstream-contract): mirrors qurl-service `GET /v1/me` (`owner_id`,
 // `api_key` present only for API-key principals).
 type Identity struct {
-	// OwnerID is the account owner behind the credential: the principal a
-	// headless share config must name. Me enforces that the credential is an
-	// account API key (api_key present), so this is never a delegated user.
+	// OwnerID is the principal behind the credential: the account owner for
+	// an API key, the calling user for a delegated credential. Callers that
+	// need the account owner must check APIKey != nil.
 	OwnerID string `json:"owner_id"`
 	// APIKey is present only when the request was authenticated by an API key.
 	APIKey *IdentityAPIKey `json:"api_key,omitempty"`
@@ -944,9 +944,7 @@ func (c *Client) Me(ctx context.Context) (*Identity, error) {
 	if strings.TrimSpace(out.OwnerID) == "" {
 		return nil, errors.New("identity response missing owner_id")
 	}
-	if out.APIKey == nil {
-		return nil, errors.New("identity is not an API-key principal; owner_id would name the calling user")
-	}
+	out.OwnerID = strings.TrimSpace(out.OwnerID)
 	return &out, nil
 }
 

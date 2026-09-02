@@ -376,10 +376,15 @@ func TestRenderedConfigsMatchHeadlessOneShareSchema(t *testing.T) {
 
 func TestRenderTunnelConfigYAMLRequiresOwnerID(t *testing.T) {
 	t.Parallel()
-	args := testTunnelInstallArgs()
-	args.OwnerID = " "
-	if _, err := renderTunnelConfigYAML(args); err == nil || !strings.Contains(err.Error(), "requires the account owner id") {
-		t.Fatalf("renderTunnelConfigYAML error = %v, want owner id guard", err)
+	for _, tc := range []struct{ owner, want string }{
+		{owner: " ", want: "requires the account owner id"},
+		{owner: "email|o'brien", want: "apostrophe"},
+	} {
+		args := testTunnelInstallArgs()
+		args.OwnerID = tc.owner
+		if _, err := renderTunnelConfigYAML(args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("owner %q: renderTunnelConfigYAML error = %v, want %q", tc.owner, err, tc.want)
+		}
 	}
 }
 

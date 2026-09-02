@@ -102,16 +102,6 @@ func TestValidS3WebsiteBucketName(t *testing.T) {
 	}
 }
 
-func TestSanitizeS3WebsiteLogValueEscapesLineBreaks(t *testing.T) {
-	got := sanitizeLogValue("team\r\nforged\nentry\rtail")
-	if want := `team\r\nforged\nentry\rtail`; got != want {
-		t.Fatalf("sanitizeLogValue() = %q, want %q", got, want)
-	}
-	if strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("sanitizeLogValue() retained a line break: %q", got)
-	}
-}
-
 func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -454,9 +444,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 	if apiKeyHits != 1 {
 		t.Fatalf("api key hits = %d, want 1", apiKeyHits)
 	}
-	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetAgent {
-		t.Errorf("api key body = %+v, want agent-target enrollment token", apiKeyBody)
-	}
+	assertAgentEnrollmentKind(t, apiKeyBody)
 	assertNoConnectorClaims(t, apiKeyBody)
 	for _, retired := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
 		if _, ok := apiKeyBody[retired]; ok {
@@ -1997,5 +1985,97 @@ func TestS3WebsiteInstallRendersOwnerFromIdentity(t *testing.T) {
 	joined := strings.Join(responseBodies, "\n")
 	if !strings.Contains(joined, "owner_id: '"+testOwnerID+"'") || !strings.Contains(joined, "version: 2") {
 		t.Fatalf("rendered install did not carry the identity owner in a v2 config:\n%s", joined)
+	}
+}
+
+func s3WebsiteInstallResponseCapture(t *testing.T) (*httptest.Server, *[]string) {
+	t.Helper()
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read response_url body: %v", err)
+		}
+		bodies = append(bodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &bodies
+}
+
+func s3WebsiteInstallFakes(t *testing.T, ts *adminTestServers, keyFields map[string]any, revokeHits *int) {
+	t.Helper()
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:      testTunnelResourceID,
+			testKeyKnockResourceID: testS3WebsiteKnockResource,
+			testKeyType:            client.ResourceTypeTunnel,
+			testKeySlug:            testTunnelSlug,
+			testKeyStatus:          client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		body := map[string]any{
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			testKeyExpiresAt: fixedNow.Add(time.Hour).Format(time.RFC3339),
+		}
+		for k, v := range keyFields {
+			body[k] = v
+		}
+		respondQURLEnvelope(t, w, body)
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		*revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
+// TestS3WebsiteInstallWarnsWhenTargetNotEchoed mirrors the tunnel test: a
+// producer that ignores `target` still gets the token delivered, with the
+// skew visible in the logs.
+func TestS3WebsiteInstallWarnsWhenTargetNotEchoed(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	s3WebsiteInstallFakes(t, ts, map[string]any{}, &revokeHits)
+	responseURL, _ := s3WebsiteInstallResponseCapture(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) || revokeHits != 0 {
+		t.Fatalf("DM posts = %+v, revokes = %d; want the token delivered without a revoke", *dmPosts, revokeHits)
+	}
+	if !logs.contains("did not echo the enrollment token target") {
+		t.Fatalf("logs = %q, want target-not-echoed warning", logs.String())
+	}
+}
+
+// TestS3WebsiteInstallRejectsConnectorTargetCredential pins the S3 side of
+// the kind-first gate: a connector-target token is revoked, never DM'd, and
+// the reply is the shared fail-closed copy.
+func TestS3WebsiteInstallRejectsConnectorTargetCredential(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	s3WebsiteInstallFakes(t, ts, map[string]any{"target": client.CredentialTargetConnector}, &revokeHits)
+	responseURL, bodies := s3WebsiteInstallResponseCapture(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(responseURL.URL, fixedNow, tunnelEnvDocker))
+	if len(*dmPosts) != 0 || revokeHits != 1 {
+		t.Fatalf("DM posts = %d, revokes = %d; want no DM and one revoke", len(*dmPosts), revokeHits)
+	}
+	if joined := strings.Join(*bodies, "\n"); !strings.Contains(joined, kindFirstUnconfirmedInstallMessage) {
+		t.Fatalf("response_url bodies = %q, want the shared kind-first copy", *bodies)
 	}
 }

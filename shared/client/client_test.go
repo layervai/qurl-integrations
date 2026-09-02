@@ -2498,7 +2498,7 @@ func TestMe(t *testing.T) {
 		wantErr string
 	}{
 		{name: "owner resolved", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
-		{name: "non API-key principal rejected", status: http.StatusOK, body: `{"data":{"owner_id":"email|abc"}}`, wantErr: "not an API-key principal"},
+		{name: "padded owner id trimmed", status: http.StatusOK, body: `{"data":{"owner_id":" email|abc ","api_key":{"key_id":"key_1"}}}`, want: "email|abc"},
 		{name: "owner_id missing", status: http.StatusOK, body: `{"data":{"api_key":{"key_id":"key_1"}}}`, wantErr: "missing owner_id"},
 		{name: "http error propagates", status: http.StatusInternalServerError, body: `{"error":{"code":"internal","message":"boom"}}`, wantErr: "500"},
 	} {

@@ -362,11 +362,6 @@ func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {
 	return prefix, ""
 }
 
-// sanitizeLogValue preserves diagnostic context while preventing a
-// Slack- or API-controlled value from forging a second plain-text log entry.
-// Production uses the shared JSON slog handler, which also escapes control
-// bytes; this remains a defense-in-depth boundary if the handler changes.
-
 func respondS3WebsiteInstallModalError(w http.ResponseWriter, message string) {
 	view, err := S3WebsiteInstallErrorModal(message)
 	if err != nil {
@@ -587,7 +582,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
 			"got_target", key.Target, "want_target", client.CredentialTargetAgent)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_kind_first_unconfirmed")
-		return nil, sharingInstallFailureMessage("The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated.", previousSharing), errKindFirstUnconfirmed
+		return nil, sharingInstallFailureMessage(kindFirstUnconfirmedInstallMessage, previousSharing), errKindFirstUnconfirmed
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("S3 website install: create api key response was not shell-renderable", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", sanitizeLogValue(resolvedArgs.ResourceID), "key_id", sanitizeLogValue(key.KeyID))

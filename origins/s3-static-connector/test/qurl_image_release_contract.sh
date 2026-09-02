@@ -62,6 +62,9 @@ for platform in "${PLATFORMS[@]}"; do
   output=""
   # Pull first (retried): a pull hiccup under emulation otherwise surfaces as
   # "failed to report its version" with only progress lines as evidence.
+  # A digest reference can hold only one platform locally; drop the previous
+  # platform's copy or the next pull/run fails with "cannot overwrite digest".
+  docker image rm -f "$IMG" >/dev/null 2>&1 || true
   pulled=false
   for attempt in 1 2 3; do
     if docker pull --quiet --platform "$platform" "$IMG" >/dev/null 2>&1; then pulled=true; break; fi
