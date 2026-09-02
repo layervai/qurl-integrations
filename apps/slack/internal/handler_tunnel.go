@@ -758,7 +758,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.OwnerID = ownerID
 	preparedMessage, err := h.prepareTunnelInstallMessage(&resolvedArgs)
 	if err != nil {
-		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+		log.Error("tunnel install: render preflight failed", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug), "resource_id", resource.ResourceID)
 		return nil, sharingInstallFailureMessage("qURL Connector setup could not render the install instructions. No enrollment token was minted. Please retry or contact support.", previousSharing), err
 	}
 
@@ -770,9 +770,11 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// enrollment. A connector-target token records connector_bootstrap and is
 		// rejected for every session. The resource is bound via share.yaml.
 		// Scope trade-off: this token is owner-scoped (any device of the account),
-		// not bound to one connector claim; the TTL, install-failure revoke and
-		// idempotency key below bound that exposure, and the resource binding
-		// lives in share.yaml.
+		// not bound to one connector claim; the daemon consumes it on its first
+		// enrollment (one-shot), and the TTL, install-failure revoke and
+		// idempotency key below bound the remaining exposure. The resource
+		// binding lives in share.yaml. Re-narrowing (agent-target + connector
+		// claim once the service supports it) is tracked in layervai/nhp#4084.
 		Target:         client.CredentialTargetAgent,
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),

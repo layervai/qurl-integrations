@@ -5482,3 +5482,27 @@ func TestTunnelInstallWarnsWhenTargetNotEchoed(t *testing.T) {
 		t.Fatalf("logs = %q, want target-not-echoed warning", logBuf.String())
 	}
 }
+
+func TestOwnerLookupFailureMessage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "404 names the missing route", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusNotFound, RequestID: "req-404"}), want: "does not serve GET /v1/me yet"},
+		{name: "405 names the missing route", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusMethodNotAllowed}), want: "does not serve GET /v1/me yet"},
+		{name: "other API errors stay generic", err: fmt.Errorf("resolve account identity: %w", &client.APIError{StatusCode: http.StatusBadRequest}), want: "Failed to resolve the qURL account owner"},
+		{name: "transport errors stay generic", err: errors.New("dial tcp: refused"), want: "Failed to resolve the qURL account owner."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ownerLookupFailureMessage(tc.err); !strings.Contains(got, tc.want) {
+				t.Fatalf("message = %q, want containing %q", got, tc.want)
+			}
+			if tc.name == "404 names the missing route" && !strings.Contains(ownerLookupFailureMessage(tc.err), "req-404") {
+				t.Fatalf("404 message lost the request reference: %q", ownerLookupFailureMessage(tc.err))
+			}
+		})
+	}
+}

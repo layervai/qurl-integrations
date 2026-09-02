@@ -366,10 +366,6 @@ func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {
 // Slack- or API-controlled value from forging a second plain-text log entry.
 // Production uses the shared JSON slog handler, which also escapes control
 // bytes; this remains a defense-in-depth boundary if the handler changes.
-func sanitizeLogValue(value string) string {
-	value = strings.ReplaceAll(value, "\r", `\r`)
-	return strings.ReplaceAll(value, "\n", `\n`)
-}
 
 func respondS3WebsiteInstallModalError(w http.ResponseWriter, message string) {
 	view, err := S3WebsiteInstallErrorModal(message)

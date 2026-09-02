@@ -32,7 +32,12 @@ digest="${IMG##*@sha256:}"
 if [ "${#digest}" -ne 64 ] || printf '%s' "$digest" | grep -q '[^0-9a-f]'; then
   fail 'QURL_IMAGE digest must contain exactly 64 lowercase hexadecimal characters'
 fi
-if ! docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
+resolves=false
+for attempt in 1 2 3; do
+  if docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then resolves=true; break; fi
+  sleep $((attempt * 5))
+done
+if [ "$resolves" != true ]; then
   if [ "$REQUIRE_IMAGE" = "true" ]; then
     fail 'immutable qurl image does not resolve'
   fi
@@ -46,7 +51,7 @@ fi
 # group-writable, so mount a private 0444 copy instead of the tracked file.
 # Next to the golden (inside the checkout) rather than /tmp: a docker daemon
 # that only shares the workspace would otherwise mount an empty directory.
-GOLDEN_MOUNT_DIR="$(mktemp -d "$(dirname "$SHARE_GOLDEN")/.share-mount-XXXXXX")"
+GOLDEN_MOUNT_DIR="$(mktemp -d "$(cd "$(dirname "$0")" && pwd)/.share-mount-XXXXXX")"
 trap 'rm -rf "$GOLDEN_MOUNT_DIR"' EXIT
 GOLDEN_MOUNT="$GOLDEN_MOUNT_DIR/share.yaml"
 # Private 0755 dir + 0444 file: the daemon rejects a config (or its directory)
@@ -59,18 +64,20 @@ for platform in "${PLATFORMS[@]}"; do
     output="$version_output"
     fail 'image failed to report its qurl version'
   fi
-  case "$version_output" in
-    # Contains-match: a cold runner prefixes the merged output with pull progress.
-    *'qurl version '*) ;;
-    *) output="$version_output"; fail 'image did not identify itself as qurl' ;;
-  esac
+  # Line-anchored: a cold runner prefixes the merged output with pull progress.
+  if ! printf '%s\n' "$version_output" | grep -q '^qurl version '; then
+    output="$version_output"; fail 'image did not identify itself as qurl'
+  fi
 
   # A valid first-boot config reaches the credential gate without attempting
   # network enrollment. Unknown/old config fields would fail earlier with a
   # decoder error, so this exercises the released image's strict YAML surface.
   # The image ships no writable /tmp for its non-root user; the rendered
   # installs mount state, so give the gate a tmpfs for --state-dir.
+  # Run as the invoking uid: the daemon rejects a config owned by another
+  # non-root user, and a Linux bind mount keeps the host owner.
   if output="$(docker run --rm --platform "$platform" \
+      --user "$(id -u):$(id -g)" \
       --tmpfs /tmp:rw,nosuid,nodev \
       -v "$GOLDEN_MOUNT:/etc/qurl/share.yaml:ro" \
       "$IMG" daemon run --state-dir /tmp/qurl-state \
