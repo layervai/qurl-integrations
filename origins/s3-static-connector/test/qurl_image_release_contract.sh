@@ -46,9 +46,12 @@ fi
 # group-writable, so mount a private 0444 copy instead of the tracked file.
 # Next to the golden (inside the checkout) rather than /tmp: a docker daemon
 # that only shares the workspace would otherwise mount an empty directory.
-GOLDEN_MOUNT="$(mktemp "$(dirname "$SHARE_GOLDEN")/.share-mount-XXXXXX")"
-trap 'rm -f "$GOLDEN_MOUNT"' EXIT
-cp "$SHARE_GOLDEN" "$GOLDEN_MOUNT" && chmod 0444 "$GOLDEN_MOUNT"
+GOLDEN_MOUNT_DIR="$(mktemp -d "$(dirname "$SHARE_GOLDEN")/.share-mount-XXXXXX")"
+trap 'rm -rf "$GOLDEN_MOUNT_DIR"' EXIT
+GOLDEN_MOUNT="$GOLDEN_MOUNT_DIR/share.yaml"
+# Private 0755 dir + 0444 file: the daemon rejects a config (or its directory)
+# writable by group/other, and CI checkouts default to group-writable.
+chmod 0755 "$GOLDEN_MOUNT_DIR" && cp "$SHARE_GOLDEN" "$GOLDEN_MOUNT" && chmod 0444 "$GOLDEN_MOUNT"
 
 for platform in "${PLATFORMS[@]}"; do
   output=""
@@ -76,7 +79,9 @@ for platform in "${PLATFORMS[@]}"; do
   fi
   case "$output" in
     *'--enrollment-token-file is required for first headless bootstrap'*) ;;
-    *) fail 'released qurl rejected the guided headless config before the expected credential gate' ;;
+    *)
+      ls -ln "$GOLDEN_MOUNT_DIR" "$GOLDEN_MOUNT" >&2 || true
+      fail 'released qurl rejected the guided headless config before the expected credential gate' ;;
   esac
 
   printf 'qurl S3-origin headless contract passed for %s (%s)\n' "$IMG" "$platform"
