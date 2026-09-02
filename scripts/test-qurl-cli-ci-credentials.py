@@ -213,7 +213,7 @@ class FakeAPI:
                 assert len(query["slug"]) == 1
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
-            assert query == {"limit": ["100"]}
+            assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
             return 200, json.dumps({"data": self.resources, "meta": {"has_more": False}}).encode()
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
             resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
@@ -272,6 +272,20 @@ def workflow_timeout_minutes(workflow: pathlib.Path, job_name: str) -> int:
     return values[0]
 
 
+def sticky_clock(*values: float):
+    """Return each value once, then repeat the final value."""
+    assert values
+    remaining = iter(values)
+    last = values[-1]
+
+    def read() -> float:
+        nonlocal last
+        last = next(remaining, last)
+        return last
+
+    return read
+
+
 def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     fixed_now = 2_000_000_000
     journey_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey")
@@ -292,11 +306,16 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
         "fallback cleanup timeout no longer fits inside each freshly minted token"
     )
+    # cli.yml runs three lane reconciliations. The fallback workflow accepts at
+    # most three source runs and runs the same three lanes, for nine total.
     assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 3 < cleanup_minutes * 60, (
-        "three primary reconciliations no longer fit inside the cleanup job"
+        "primary inventory budgets no longer leave room for cleanup writes"
     )
     assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 9 < fallback_cleanup_minutes * 60, (
-        "nine fallback reconciliations no longer fit inside the fallback cleanup job"
+        "fallback inventory budgets no longer leave room for cleanup writes"
+    )
+    assert 0 < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS < (
+        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS
     )
 
     def token(remaining_seconds: int, issued_ago: int = 0) -> str:
@@ -478,9 +497,12 @@ def test_pagination_safety_limits_fail_closed() -> None:
     def one_page_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
         return 200, b'{"data":[],"meta":{"has_more":false}}'
 
-    clock = iter((0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)))
     with mock.patch.object(credentials, "request", one_page_request), mock.patch.object(
-        credentials.time, "monotonic", side_effect=lambda: next(clock)
+        credentials.time,
+        "monotonic",
+        side_effect=sticky_clock(
+            0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+        ),
     ):
         try:
             credentials.paged_rows(
@@ -507,11 +529,12 @@ def test_pagination_safety_limits_fail_closed() -> None:
             }
         ).encode()
 
-    before_request_clock = iter(
-        (0.0, 0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS))
-    )
     with mock.patch.object(credentials, "request", first_page_request), mock.patch.object(
-        credentials.time, "monotonic", side_effect=lambda: next(before_request_clock)
+        credentials.time,
+        "monotonic",
+        side_effect=sticky_clock(
+            0.0, 0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+        ),
     ):
         try:
             credentials.paged_rows(
@@ -528,7 +551,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
     assert calls == 1
 
 
-def test_reconciliation_shares_one_inventory_deadline() -> None:
+def test_reconciliation_reserves_time_for_resource_inventory() -> None:
     fake = FakeAPI()
     recorded_key_id = "key_Shared123456"
     fake.extra_credentials.append(
@@ -540,13 +563,15 @@ def test_reconciliation_shares_one_inventory_deadline() -> None:
             "status": "revoked",
         }
     )
-    deadlines: list[float] = []
+    deadlines: list[tuple[str, float]] = []
     real_paged_rows = credentials.paged_rows
 
     def capture_deadline(*args: object, **kwargs: object) -> list[dict[str, object]]:
         deadline = kwargs.get("deadline")
         assert isinstance(deadline, float)
-        deadlines.append(deadline)
+        path = args[2]
+        assert isinstance(path, str)
+        deadlines.append((path, deadline))
         return real_paged_rows(*args, **kwargs)  # type: ignore[arg-type]
 
     with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
@@ -569,7 +594,12 @@ def test_reconciliation_shares_one_inventory_deadline() -> None:
             )
         )
     assert len(deadlines) == 3
-    assert deadlines[0] == deadlines[1] == deadlines[2]
+    assert deadlines[0][0] == deadlines[1][0] == "/v1/api-keys"
+    assert deadlines[0][1] == deadlines[1][1]
+    assert deadlines[2][0] == "/v1/resources"
+    assert deadlines[2][1] - deadlines[1][1] == (
+        credentials.RESOURCE_INVENTORY_RESERVE_SECONDS
+    )
 
 
 def test_connector_cleanup_lookup_fails_closed() -> None:
@@ -884,7 +914,7 @@ def main() -> None:
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()
-    test_reconciliation_shares_one_inventory_deadline()
+    test_reconciliation_reserves_time_for_resource_inventory()
     test_connector_cleanup_lookup_fails_closed()
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()

@@ -49,6 +49,9 @@ RUN_AGENT_ID = re.compile(
 MAX_ATTEMPTS = 3
 # Bound the trusted cleanup inventory independently of per-request timeouts so
 # malformed pagination cannot hold a runner or grow its in-memory result set.
+# TODO(upstream-contract): qurl-service currently honors a 100-row maximum,
+# retains revoked API keys for 30 days, and hard-deletes resources. Recalibrate
+# this dedicated-CI-owner bound if any of those service contracts change.
 INVENTORY_PAGE_SIZE = 100
 INVENTORY_MAX_PAGES = 20
 INVENTORY_MAX_ROWS = INVENTORY_PAGE_SIZE * INVENTORY_MAX_PAGES
@@ -57,6 +60,10 @@ INVENTORY_MAX_ROWS = INVENTORY_PAGE_SIZE * INVENTORY_MAX_PAGES
 # fallback can call it nine times inside thirty minutes. Two minutes leaves a
 # bounded majority of both job budgets for token minting and cleanup writes.
 RECONCILE_INVENTORY_BUDGET_SECONDS = 2 * 60
+# A slow credential inventory must not consume the whole shared deadline before
+# the final resource inventory can attempt cleanup. This is a reservation inside
+# the two-minute total, not a second independent budget.
+RESOURCE_INVENTORY_RESERVE_SECONDS = 30
 
 
 class CredentialError(RuntimeError):
@@ -555,6 +562,9 @@ def reconcile_run(args: argparse.Namespace) -> None:
     connector_ids = run_connector_ids(args)
     endpoint, jwt, _ = authenticated_owner(args)
     inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
+    credential_inventory_deadline = (
+        inventory_deadline - RESOURCE_INVENTORY_RESERVE_SECONDS
+    )
 
     failures: dict[str, int] = {}
 
@@ -573,7 +583,7 @@ def reconcile_run(args: argparse.Namespace) -> None:
             jwt,
             "/v1/api-keys",
             "qURL credential cleanup",
-            deadline=inventory_deadline,
+            deadline=credential_inventory_deadline,
         )
         seen_device_ids: set[str] = set()
         for row in credentials:
@@ -616,7 +626,7 @@ def reconcile_run(args: argparse.Namespace) -> None:
                 "/v1/api-keys",
                 "qURL revoked credential cleanup",
                 status_filter=None,
-                deadline=inventory_deadline,
+                deadline=credential_inventory_deadline,
             )
             revoked_ids: set[str] = set()
             for row in all_credentials:
