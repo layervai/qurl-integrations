@@ -774,7 +774,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// enrollment (one-shot), and the TTL, install-failure revoke and
 		// idempotency key below bound the remaining exposure. The resource
 		// binding lives in share.yaml. Re-narrowing (agent-target + connector
-		// claim once the service supports it) is tracked in layervai/nhp#4084.
+		// claim once the service supports it) is tracked in the internal follow-up (session-control enrollment scope).
 		Target:         client.CredentialTargetAgent,
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
