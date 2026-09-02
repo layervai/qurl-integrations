@@ -197,7 +197,9 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		if ctx.Err() != nil {
 			t.Skipf("kubectl dry-run exceeded %s in this environment", kubectlDryRunTimeout)
 		}
-		if bytes.Contains(out, []byte("couldn't get current server API group list")) {
+		// kubectl capitalizes this discovery error differently across versions
+		// (memcache.go:265 vs :381); match case-insensitively on a stable phrase.
+		if bytes.Contains(bytes.ToLower(out), []byte("server api group list")) {
 			t.Skipf("kubectl dry-run needs cluster discovery in this environment: %s", out)
 		}
 		t.Fatalf("kubectl dry-run failed: %v\n%s\n--- pod ---\n%s", err, out, pod)
