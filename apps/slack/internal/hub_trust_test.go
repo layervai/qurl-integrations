@@ -38,6 +38,7 @@ func TestRenderedTunnelInstallsCarryHubTrustEnv(t *testing.T) {
 	t.Parallel()
 	for _, configured := range []bool{true, false} {
 		t.Run(fmt.Sprintf("configured=%v", configured), func(t *testing.T) {
+			t.Parallel()
 			args := testTunnelInstallArgs()
 			if configured {
 				args.Hub = testHub
@@ -134,7 +135,7 @@ func TestImageVersionSuffix(t *testing.T) {
 	for _, tc := range []struct{ name, image, version, want string }{
 		{name: "digest pin with version", image: "ghcr.io/layervai/qurl@sha256:abc", version: "v2.1.1", want: " (`qurl` v2.1.1)"},
 		{name: "digest pin without version", image: "ghcr.io/layervai/qurl@sha256:abc", version: "", want: ""},
-		{name: "mutable fallback never labelled", image: "ghcr.io/layervai/qurl:latest", version: "v2.1.1", want: ""},
+		{name: "mutable fallback never labeled", image: "ghcr.io/layervai/qurl:latest", version: "v2.1.1", want: ""},
 		{name: "whitespace version ignored", image: "ghcr.io/layervai/qurl@sha256:abc", version: "  ", want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,6 +154,7 @@ func TestRenderedS3WebsiteInstallsCarryHubTrustEnv(t *testing.T) {
 	t.Parallel()
 	for _, configured := range []bool{true, false} {
 		t.Run(fmt.Sprintf("configured=%v", configured), func(t *testing.T) {
+			t.Parallel()
 			args := testS3WebsiteArgs(tunnelEnvDocker)
 			if configured {
 				args.Hub = testHub
