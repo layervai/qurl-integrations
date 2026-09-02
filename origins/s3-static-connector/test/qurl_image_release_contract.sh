@@ -60,8 +60,21 @@ chmod 0755 "$GOLDEN_MOUNT_DIR" && cp "$SHARE_GOLDEN" "$GOLDEN_MOUNT" && chmod 04
 
 for platform in "${PLATFORMS[@]}"; do
   output=""
+  # Pull first (retried): a pull hiccup under emulation otherwise surfaces as
+  # "failed to report its version" with only progress lines as evidence.
+  pulled=false
+  for attempt in 1 2 3; do
+    if docker pull --quiet --platform "$platform" "$IMG" >/dev/null 2>&1; then pulled=true; break; fi
+    sleep $((attempt * 5))
+  done
+  if [ "$pulled" != true ]; then
+    output="$(docker pull --platform "$platform" "$IMG" 2>&1 | tail -5)"
+    fail "could not pull the image for $platform"
+  fi
   if ! version_output="$(docker run --rm --platform "$platform" "$IMG" version 2>&1)"; then
-    output="$version_output"
+    output="$version_output
+binfmt: $(ls /proc/sys/fs/binfmt_misc 2>/dev/null | tr '\n' ' ')
+docker: $(docker version --format '{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null)"
     fail 'image failed to report its qurl version'
   fi
   # Line-anchored: a cold runner prefixes the merged output with pull progress.
