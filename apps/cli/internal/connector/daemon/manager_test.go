@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -91,12 +92,14 @@ type fakeGroupRunner struct {
 	runOnce         sync.Once
 	autoServe       bool
 	runErr          error
+	blockSetRoutes  bool
 }
 
-func newFakeGroupRunner(cfg *GroupConfig, autoServe bool, runErr error, restartFailures int) *fakeGroupRunner {
+func newFakeGroupRunner(cfg *GroupConfig, autoServe bool, runErr error, restartFailures int, blockSetRoutes bool) *fakeGroupRunner {
 	r := &fakeGroupRunner{
 		cfg: *cfg, routes: map[string]connectorshare.RouteState{},
 		runStart: make(chan struct{}), autoServe: autoServe, runErr: runErr, restartFailures: restartFailures,
+		blockSetRoutes: blockSetRoutes,
 	}
 	for _, route := range cfg.Routes {
 		r.routes[route.RouteID] = connectorshare.RouteState{
@@ -143,7 +146,11 @@ func (r *fakeGroupRunner) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (r *fakeGroupRunner) SetRoutes(_ context.Context, routes []connectorshare.LocalHTTPRoute) error {
+func (r *fakeGroupRunner) SetRoutes(ctx context.Context, routes []connectorshare.LocalHTTPRoute) error {
+	if r.blockSetRoutes {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	ids := make([]string, 0, len(routes))
 	next := make(map[string]connectorshare.RouteState, len(routes))
 	r.mu.Lock()
@@ -238,6 +245,24 @@ func (r *fakeGroupRunner) groupRetry(err error, wait time.Duration) {
 	}
 }
 
+// setRouteCalls returns every route set pushed so far, each sorted.
+func (r *fakeGroupRunner) setRouteCalls() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]string, 0, len(r.setCalls))
+	for _, call := range r.setCalls {
+		out = append(out, append([]string(nil), call...))
+	}
+	return out
+}
+
+// dropRoutes models the live session dying: nothing is served any more.
+func (r *fakeGroupRunner) dropRoutes() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.routes = map[string]connectorshare.RouteState{}
+}
+
 func (r *fakeGroupRunner) lastSetRoutes() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -262,6 +287,7 @@ type fakeGroupFactory struct {
 	autoServe       bool
 	runErr          error
 	restartFailures int
+	blockSetRoutes  bool
 }
 
 func newFakeGroupFactory() *fakeGroupFactory { return &fakeGroupFactory{autoServe: true} }
@@ -278,7 +304,7 @@ func (f *fakeGroupFactory) NewGroupRunner(_ context.Context, cfg *GroupConfig) (
 			return nil, err
 		}
 	}
-	runner := newFakeGroupRunner(cfg, f.autoServe, f.runErr, f.restartFailures)
+	runner := newFakeGroupRunner(cfg, f.autoServe, f.runErr, f.restartFailures, f.blockSetRoutes)
 	f.runners = append(f.runners, runner)
 	return runner, nil
 }
@@ -466,46 +492,6 @@ func TestManagerRestartAdvancesOnlyThatRoute(t *testing.T) {
 	}
 }
 
-func TestManagerResourceNotFoundPersistsOneShareOffAndKeepsSiblingsServing(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
-		"a": daemonShare("a", 7, "on"),
-		"b": daemonShare("b", 4, "on"),
-		"c": daemonShare("c", 2, "on"),
-	}}
-	factory := newFakeGroupFactory()
-	manager, _ := newRunningManager(t, registry, factory)
-	for _, id := range []string{"a", "b", "c"} {
-		waitServing(t, manager, id)
-	}
-	runner := factory.runner(1)
-	runner.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
-
-	waitManagerCondition(t, func() bool {
-		return registry.share("b").DesiredState == "off"
-	}, "resource-gone share persisted off")
-	if got := registry.share("b").ServingEpoch; got != 4 {
-		t.Fatalf("persisted epoch = %d, want the same epoch 4", got)
-	}
-	// After persisting off, a reconcile is triggered so the gone share is
-	// dropped from the running set and diagnostics rather than lingering.
-	waitManagerCondition(t, func() bool {
-		_, running := manager.Running()["b"]
-		_, diag := manager.Diagnostics()["b"]
-		return !running && !diag
-	}, "gone share dropped from running and diagnostics")
-	for _, id := range []string{"a", "c"} {
-		if manager.Diagnostics()[id].State != diagnosticStateServing {
-			t.Fatalf("sibling %s state = %q, want serving after a resource-gone sibling", id, manager.Diagnostics()[id].State)
-		}
-		if _, running := manager.Running()[id]; !running {
-			t.Fatalf("sibling %s dropped from running after a resource-gone sibling", id)
-		}
-	}
-	if factory.startCount() != 1 {
-		t.Fatalf("a resource-gone route opened a new admission: starts=%d", factory.startCount())
-	}
-}
-
 func TestManagerConvergesThousandDesiredRowsWithOneAdmission(t *testing.T) {
 	shares := make(map[string]connectorstate.LocalShare, 1000)
 	for i := 0; i < 1000; i++ {
@@ -639,93 +625,6 @@ func TestManagerGroupRetryStallsEveryNonServingRoute(t *testing.T) {
 	}
 	if manager.Diagnostics()["a"].State != diagnosticStateServing {
 		t.Fatalf("serving route a was demoted by a group retry: %q", manager.Diagnostics()["a"].State)
-	}
-}
-
-func TestManagerPersistsTerminalDisableWithRealLocalRegistry(t *testing.T) {
-	dir := shortTempDir(t)
-	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only state directory.
-		t.Fatal(err)
-	}
-	registry, err := connectorstate.OpenLocalShareRegistry(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := registry.BindOwner(context.Background(), "own_daemon_fixture"); err != nil {
-		t.Fatal(err)
-	}
-	key := apitest.FixedResourceKey(t)
-	share := connectorstate.LocalShare{
-		CRID: key.CRID, ResourceID: key.ResourceID, ConnectorID: "terminal-share",
-		ConnectorRoutingID: "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		KnockResourceID:    "qurl-tunnel-server",
-		TargetURL:          "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
-		DesiredState: "on", ServingEpoch: 7,
-	}
-	if err := registry.Put(context.Background(), &share); err != nil {
-		t.Fatal(err)
-	}
-	factory := newFakeGroupFactory()
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- manager.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
-	waitManagerCondition(t, func() bool { return factory.startCount() == 1 }, "group started")
-	factory.runner(1).failRoute("terminal-share", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
-	waitManagerCondition(t, func() bool {
-		got, err := registry.Get(context.Background(), share.ResourceID)
-		return err == nil && got.DesiredState == "off"
-	}, "terminal disable persisted")
-	got, err := registry.Get(context.Background(), share.ResourceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.DesiredState != "off" || got.ServingEpoch != share.ServingEpoch || got.TargetURL != share.TargetURL {
-		t.Fatalf("terminal persistence = %+v, want off at the same epoch with target preserved", got)
-	}
-}
-
-func TestManagerRetriesResourceGonePersistenceWithoutDisruptingSibling(t *testing.T) {
-	registry := &memoryRegistry{
-		shares: map[string]connectorstate.LocalShare{
-			"a": daemonShare("a", 7, "on"),
-			"b": daemonShare("b", 1, "on"),
-		},
-		setFailures: []error{errors.New("temporary disk failure")},
-	}
-	factory := newFakeGroupFactory()
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager.retryDelay = func(int) time.Duration { return 5 * time.Millisecond }
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- manager.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
-	waitServing(t, manager, "a")
-	waitServing(t, manager, "b")
-	factory.runner(1).failRoute("connector-a", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
-
-	waitManagerCondition(t, func() bool {
-		registry.mu.Lock()
-		defer registry.mu.Unlock()
-		return registry.setCalls >= 2
-	}, "resource-gone persistence retried")
-	waitManagerCondition(t, func() bool { return registry.share("a").DesiredState == "off" }, "gone share off after retry")
-	registry.mu.Lock()
-	deadline := registry.setDeadline
-	registry.mu.Unlock()
-	if !deadline {
-		t.Fatal("persistence did not use a bounded deadline")
-	}
-	if manager.Diagnostics()["b"].State != diagnosticStateServing {
-		t.Fatalf("sibling b disrupted by resource-gone persistence: %q", manager.Diagnostics()["b"].State)
 	}
 }
 
@@ -866,5 +765,319 @@ func TestManagerGroupResourceGoneConvergesEveryShareOff(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if got := factory.startCount(); got != 1 {
 		t.Fatalf("group starts = %d, want one; a converged gone group must not re-knock", got)
+	}
+}
+
+func TestManagerRouteRefusedByPlatformStaysOnRetriesAndKeepsSiblingsServing(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 7, "on"),
+		"b": daemonShare("b", 4, "on"),
+		"c": daemonShare("c", 2, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 15 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	for _, id := range []string{"a", "b", "c"} {
+		waitServing(t, manager, id)
+	}
+	runner := factory.runner(1)
+	// The platform refuses b's proxy registration; the group withdraws it and
+	// reports it gone. That is never a reason to turn the share off.
+	runner.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone,
+		errors.New("resource_not_found: resource does not match signed NHP session")))
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["b"].State == diagnosticStateRetrying
+	}, "refused route reported retrying")
+	got := manager.Diagnostics()["b"]
+	if got.FailureCategory != diagnosticFailurePlatformDenied || got.NextRetryAt == nil || got.RetryAttempt != 1 {
+		t.Fatalf("refused route diagnostic = %+v, want retrying/platform_denied with a next retry", got)
+	}
+	if registry.share("b").DesiredState != "on" {
+		t.Fatal("platform refusal of one proxy persisted the share off")
+	}
+	registry.mu.Lock()
+	persisted := registry.setCalls
+	registry.mu.Unlock()
+	if persisted != 0 {
+		t.Fatalf("registry disable calls = %d, want none for a refused proxy", persisted)
+	}
+	// After its backoff the route is re-added to the live group (no knock).
+	waitManagerCondition(t, func() bool {
+		for _, set := range runner.setRouteCalls() {
+			if len(set) == 3 && set[1] == "connector-b" {
+				return true
+			}
+		}
+		return false
+	}, "refused route re-added after backoff")
+	for _, id := range []string{"a", "c"} {
+		if manager.Diagnostics()[id].State != diagnosticStateServing {
+			t.Fatalf("sibling %s state = %q, want serving", id, manager.Diagnostics()[id].State)
+		}
+	}
+	if factory.startCount() != 1 {
+		t.Fatalf("a refused route opened a new admission: starts=%d", factory.startCount())
+	}
+}
+
+func TestManagerGroupResourceGonePersistsOffWithRealLocalRegistry(t *testing.T) {
+	dir := shortTempDir(t)
+	if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- owner-only state directory.
+		t.Fatal(err)
+	}
+	registry, err := connectorstate.OpenLocalShareRegistry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.BindOwner(context.Background(), "own_daemon_fixture"); err != nil {
+		t.Fatal(err)
+	}
+	key := apitest.FixedResourceKey(t)
+	share := connectorstate.LocalShare{
+		CRID: key.CRID, ResourceID: key.ResourceID, ConnectorID: "terminal-share",
+		ConnectorRoutingID: "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		KnockResourceID:    "qurl-tunnel-server",
+		TargetURL:          "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
+		DesiredState: "on", ServingEpoch: 7,
+	}
+	if err := registry.Put(context.Background(), &share); err != nil {
+		t.Fatal(err)
+	}
+	// The knock itself is denied as resource-not-found: the Connector is
+	// unknown to the platform, which is the one permanent case.
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.Join(connectorshare.ErrResourceGone, errors.New("knock resource gone"))}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 5 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitManagerCondition(t, func() bool {
+		got, err := registry.Get(context.Background(), share.ResourceID)
+		return err == nil && got.DesiredState == "off"
+	}, "terminal disable persisted")
+	got, err := registry.Get(context.Background(), share.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DesiredState != "off" || got.ServingEpoch != share.ServingEpoch || got.TargetURL != share.TargetURL {
+		t.Fatalf("terminal persistence = %+v, want off at the same epoch with target preserved", got)
+	}
+}
+
+func TestManagerRetriesGroupResourceGonePersistenceWithBoundedDeadline(t *testing.T) {
+	registry := &memoryRegistry{
+		shares:      map[string]connectorstate.LocalShare{"a": daemonShare("a", 7, "on")},
+		setFailures: []error{errors.New("temporary disk failure")},
+	}
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.Join(connectorshare.ErrResourceGone, errors.New("knock resource gone"))}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 5 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitManagerCondition(t, func() bool {
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
+		return registry.setCalls >= 2
+	}, "resource-gone persistence retried")
+	waitManagerCondition(t, func() bool { return registry.share("a").DesiredState == "off" }, "gone share off after retry")
+	registry.mu.Lock()
+	deadline := registry.setDeadline
+	registry.mu.Unlock()
+	if !deadline {
+		t.Fatal("persistence did not use a bounded deadline")
+	}
+}
+
+func TestManagerBoundedRoutePushCannotStallReconcile(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	factory.blockSetRoutes = true
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.routePushTimeout = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+	// Two shares arrive while every push to the group wedges; reconciliation
+	// must still seed each one's diagnostic and keep turning over.
+	second := daemonShare("b", 1, "on")
+	registry.setShare(&second)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool { _, ok := manager.Diagnostics()["b"]; return ok }, "second share seeded despite a wedged push")
+	third := daemonShare("c", 1, "on")
+	registry.setShare(&third)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool { _, ok := manager.Diagnostics()["c"]; return ok }, "third share seeded despite a wedged push")
+}
+
+func TestManagerGroupRetryDemotesRoutesTheSessionNoLongerServes(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+	runner := factory.runner(1)
+	// The session died: the runner no longer reports the route as serving, so
+	// a group-wide retry must demote it instead of leaving a stale "serving".
+	runner.dropRoutes()
+	runner.groupRetry(errors.New("assigned NHP cell unavailable"), 25*time.Millisecond)
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["a"].State == diagnosticStateRetrying
+	}, "dead session route demoted to retrying")
+}
+
+// newRefusingGroupHarness runs the real SessionGroupRunner through the native
+// group factory against a fake admitter and a fake FRP session group, with the
+// manager and IPC server up, so a test can reproduce the live sequence: one
+// share serving, then a second published into the same group.
+func newRefusingGroupHarness(t *testing.T, refuse func(*connectorshare.GroupRoute) bool) (*Manager, *memoryRegistry, *fakeAdmitter, *fakeSessionGroupFactory, IPCClient) {
+	t.Helper()
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	admitter := &fakeAdmitter{}
+	sessions := &fakeSessionGroupFactory{refuse: refuse}
+	manager, err := NewManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
+	dir := shortTempDir(t)
+	socket := filepath.Join(dir, SocketFile)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (&IPCServer{SocketPath: socket, Manager: manager, JobVersion: "1/test"}).Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+	client := IPCClient{SocketPath: socket}
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readyCancel()
+	if err := client.WaitReady(readyCtx); err != nil {
+		t.Fatal(err)
+	}
+	waitServing(t, manager, "a")
+	return manager, registry, admitter, sessions, client
+}
+
+func ipcStatus(t *testing.T, client IPCClient) IPCStatus {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, running, err := client.Status(ctx)
+	if err != nil || !running {
+		t.Fatalf("status running=%v err=%v", running, err)
+	}
+	return status
+}
+
+// TestManagerHotAddedShareRefusedByPlatformIsVisibleAndRetriedUntilAccepted
+// reproduces the live defect: the tunnel edge answers the second share's
+// NewProxy with resource_not_found because the group's NHP session is signed
+// for the first share's resource. The daemon must hot-add the route with no
+// second knock, report the refusal on /status as retrying/platform_denied
+// while keeping the row desired-on, and re-register it under a fresh proxy
+// name after its backoff; once the platform accepts it, it serves.
+func TestManagerHotAddedShareRefusedByPlatformIsVisibleAndRetriedUntilAccepted(t *testing.T) {
+	// Refuse b's first registration only (generation 0), as a platform whose
+	// authorization catches up would; the retry under generation 1 is accepted.
+	refuse := func(route *connectorshare.GroupRoute) bool {
+		return route.RouteID == "connector-b" && route.Generation == 0
+	}
+	manager, registry, admitter, sessions, client := newRefusingGroupHarness(t, refuse)
+	second := daemonShare("b", 1, "on")
+	registry.setShare(&second)
+	manager.Trigger()
+
+	session := sessions.session(1)
+	// The live session received the hot-add as one Update carrying both routes.
+	waitManagerCondition(t, func() bool {
+		for _, size := range session.updateSizes() {
+			if size == 2 {
+				return true
+			}
+		}
+		return false
+	}, "live session received an Update with two routes")
+	if got := admitter.admissions(); got != 1 {
+		t.Fatalf("admissions = %d, want the hot-add to spend no second knock", got)
+	}
+	// The refusal is visible: the row stays on and /status reports the share
+	// retrying with the platform's answer as its category.
+	waitManagerCondition(t, func() bool {
+		diag := ipcStatus(t, client).Resources["b"]
+		return diag.State == diagnosticStateRetrying && diag.FailureCategory == diagnosticFailurePlatformDenied && diag.NextRetryAt != nil
+	}, "refused hot-add visible on /status as retrying/platform_denied")
+	status := ipcStatus(t, client)
+	if _, running := status.Running["b"]; !running {
+		t.Fatalf("refused share missing from running set: %v", status.Running)
+	}
+	if registry.share("b").DesiredState != "on" {
+		t.Fatal("refused hot-add was persisted off")
+	}
+	if status.Resources["a"].State != diagnosticStateServing {
+		t.Fatalf("serving sibling disturbed by a refused hot-add: %+v", status.Resources["a"])
+	}
+	// The retry re-registers b under a fresh proxy name and, once accepted,
+	// reaches serving — still on the one admission.
+	waitServing(t, manager, "b")
+	if names := session.proxyNames("connector-b"); len(names) != 2 || names[0] == names[1] {
+		t.Fatalf("route b registrations = %v, want a refused name then a fresh one", names)
+	}
+	if got := admitter.admissions(); got != 1 {
+		t.Fatalf("admissions after the retry = %d, want still one", got)
+	}
+	if registry.share("b").DesiredState != "on" {
+		t.Fatal("share was turned off after being accepted")
+	}
+}
+
+func TestManagerShareRefusedByPlatformForeverKeepsRetryingWithoutTurningOff(t *testing.T) {
+	refuse := func(route *connectorshare.GroupRoute) bool { return route.RouteID == "connector-b" }
+	manager, registry, admitter, sessions, client := newRefusingGroupHarness(t, refuse)
+	second := daemonShare("b", 1, "on")
+	registry.setShare(&second)
+	manager.Trigger()
+
+	session := sessions.session(1)
+	waitManagerCondition(t, func() bool { return len(session.proxyNames("connector-b")) >= 3 }, "refused route re-registered with backoff")
+	diag := ipcStatus(t, client).Resources["b"]
+	if diag.State != diagnosticStateRetrying || diag.FailureCategory != diagnosticFailurePlatformDenied || diag.RetryAttempt < 2 {
+		t.Fatalf("persistently refused route diagnostic = %+v, want retrying/platform_denied with a climbing attempt", diag)
+	}
+	if registry.share("b").DesiredState != "on" {
+		t.Fatal("persistently refused share was persisted off")
+	}
+	registry.mu.Lock()
+	persisted := registry.setCalls
+	registry.mu.Unlock()
+	if persisted != 0 {
+		t.Fatalf("registry disable calls = %d, want none while the row is desired-on", persisted)
+	}
+	if manager.Diagnostics()["a"].State != diagnosticStateServing || admitter.admissions() != 1 || sessions.startCount() != 1 {
+		t.Fatalf("refusals disturbed the group: a=%q admissions=%d sessions=%d",
+			manager.Diagnostics()["a"].State, admitter.admissions(), sessions.startCount())
 	}
 }
