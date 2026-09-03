@@ -100,6 +100,9 @@ router.get('/install', rateLimit, (req, res) => {
   const authorizeUrl = new URL('https://discord.com/oauth2/authorize');
   authorizeUrl.searchParams.set('client_id', config.DISCORD_CLIENT_ID);
   authorizeUrl.searchParams.set('permissions', DISCORD_BOT_PERMISSIONS);
+  // Pin the server-install context. Without this, enabling user installs in
+  // Discord later could produce a callback with no authoritative guild.
+  authorizeUrl.searchParams.set('integration_type', '0');
   // `identify` is load-bearing: the callback uses the resulting user token
   // for GET /users/@me so it can bind setup to the installing Discord admin.
   authorizeUrl.searchParams.set('scope', DISCORD_INSTALL_SCOPES);
@@ -116,6 +119,13 @@ router.get('/callback', rateLimit, async (req, res) => {
     // need access to two config flags.
     return renderNotConfigured(res, notConfiguredReason());
   }
+  const installState = singleStringParam(req.query.state);
+  const stateMatches = installStateMatches(req, installState);
+  if (!stateMatches) {
+    logger.warn('Discord install callback rejected invalid session state', { ip: req.ip });
+    return renderError(res, 400, 'Invalid install link', 'Start again from the Add to Discord button on layerv.ai.');
+  }
+
   // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start.
   // Bot is already in the server at this point (Discord install ran
   // before this redirect), so failing here just blocks the chained
@@ -124,23 +134,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // /@me round-trip + an Auth0 round-trip before failing at the qURL
   // callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
-    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
-    // Inline copy: the standard renderError tail ("run /qurl setup
-    // directly") would fail too — same env-var gap. Specific copy
-    // tells the admin to wait for the operator.
-    return res.status(503).send(res.renderPage({
-      title: 'Discord Install Failed',
-      icon: '❌',
-      heading: 'qURL setup not provisioned',
-      message: 'The bot is in your server, but the operator hasn\'t configured encryption-at-rest yet (KEY_ENCRYPTION_KEY). Once that\'s set, run /qurl setup in your server.',
-      type: 'error',
-    }));
-  }
-  const installState = singleStringParam(req.query.state);
-  const stateMatches = installStateMatches(req, installState);
-  if (!stateMatches) {
-    logger.warn('Discord install callback rejected invalid session state', { ip: req.ip });
-    return renderError(res, 400, 'Invalid install link', 'Start again from the Add to Discord button on layerv.ai.');
+    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset');
   }
   clearDiscordInstallSessionCookie(res);
   // Round-9 item #5: funnel through singleStringParam for symmetry.

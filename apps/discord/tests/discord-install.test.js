@@ -100,6 +100,7 @@ describe('Discord install callback', () => {
       expect(loc.pathname).toBe('/oauth2/authorize');
       expect(loc.searchParams.get('client_id')).toBe('234567890123456789');
       expect(loc.searchParams.get('permissions')).toBe('2147503104');
+      expect(loc.searchParams.get('integration_type')).toBe('0');
       expect(loc.searchParams.get('response_type')).toBe('code');
       expect(loc.searchParams.get('redirect_uri')).toBe(
         'http://localhost:3000/oauth/discord/callback',
@@ -136,6 +137,10 @@ describe('Discord install callback', () => {
         expect(res.status).toBe(503);
         expect(res.text).toContain('Nothing was installed');
         expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
+        expect(cookieValue(
+          res.headers['set-cookie'],
+          DISCORD_INSTALL_SESSION_COOKIE,
+        )).toBeNull();
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
       }
@@ -178,7 +183,7 @@ describe('Discord install callback', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
-    it('503s when KEY_ENCRYPTION_KEY is unset (fail-fast before Discord token exchange)', async () => {
+    it('validates state before returning a generic KEY_ENCRYPTION_KEY 503', async () => {
       // Bot is in the server already (Discord install ran), but the
       // chained Auth0 leg can't safely proceed without encryption-at-
       // rest configured. Failing here saves the Discord code from
@@ -186,9 +191,15 @@ describe('Discord install callback', () => {
       const saved = process.env.KEY_ENCRYPTION_KEY;
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
+        const invalid = await request(app)
+          .get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
         const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+
+        expect(invalid.status).toBe(400);
+        expect(invalid.text).toContain('Invalid install link');
         expect(res.status).toBe(503);
-        expect(res.text).toMatch(/encryption-at-rest|KEY_ENCRYPTION_KEY/i);
+        expect(res.text).toMatch(/not configured/i);
+        expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
       }
@@ -628,42 +639,60 @@ describe('discord-install — not configured', () => {
     },
   );
 
-  it('returns 503 while DISCORD_CLIENT_SECRET still has the infrastructure placeholder', async () => {
-    const saved = process.env.DISCORD_CLIENT_SECRET;
-    process.env.DISCORD_CLIENT_SECRET = 'PLACEHOLDER';
+  it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n'])(
+    'returns 503 while DISCORD_CLIENT_SECRET is the infrastructure placeholder (%j)',
+    async (placeholder) => {
+      const saved = process.env.DISCORD_CLIENT_SECRET;
+      process.env.DISCORD_CLIENT_SECRET = placeholder;
+      try {
+        await jest.isolateModulesAsync(async () => {
+          jest.doMock('../src/discord', () => ({
+            sendDM: jest.fn().mockResolvedValue(true),
+            assignContributorRole: jest.fn(),
+            notifyPRMerge: jest.fn(),
+            notifyBadgeEarned: jest.fn(),
+          }));
+          jest.doMock('../src/store', () => ({
+            setGuildApiKey: jest.fn(),
+            getGuildApiKey: jest.fn(),
+            getPendingLink: jest.fn(),
+            consumePendingLink: jest.fn(),
+          }));
+          jest.doMock('../src/commands', () => ({
+            verifyStateBinding: jest.fn().mockReturnValue(true),
+            handleCommand: jest.fn(),
+            commands: [],
+            registerCommands: jest.fn(),
+          }));
+          // eslint-disable-next-line global-require
+          const supertest = require('supertest');
+          // eslint-disable-next-line global-require
+          const { app: freshApp } = require('../src/server');
+
+          const res = await supertest(freshApp).get('/oauth/discord/install');
+
+          expect(res.status).toBe(503);
+          expect(res.text).toMatch(/not configured/i);
+          expect(res.text).not.toContain('PLACEHOLDER');
+        });
+      } finally {
+        process.env.DISCORD_CLIENT_SECRET = saved;
+      }
+    },
+  );
+
+  it('normalizes whitespace around a valid Discord client ID', async () => {
+    const saved = process.env.DISCORD_CLIENT_ID;
+    process.env.DISCORD_CLIENT_ID = ' 234567890123456789\n';
     try {
       await jest.isolateModulesAsync(async () => {
-        jest.doMock('../src/discord', () => ({
-          sendDM: jest.fn().mockResolvedValue(true),
-          assignContributorRole: jest.fn(),
-          notifyPRMerge: jest.fn(),
-          notifyBadgeEarned: jest.fn(),
-        }));
-        jest.doMock('../src/store', () => ({
-          setGuildApiKey: jest.fn(),
-          getGuildApiKey: jest.fn(),
-          getPendingLink: jest.fn(),
-          consumePendingLink: jest.fn(),
-        }));
-        jest.doMock('../src/commands', () => ({
-          verifyStateBinding: jest.fn().mockReturnValue(true),
-          handleCommand: jest.fn(),
-          commands: [],
-          registerCommands: jest.fn(),
-        }));
         // eslint-disable-next-line global-require
-        const supertest = require('supertest');
-        // eslint-disable-next-line global-require
-        const { app: freshApp } = require('../src/server');
-
-        const res = await supertest(freshApp).get('/oauth/discord/install');
-
-        expect(res.status).toBe(503);
-        expect(res.text).toMatch(/not configured/i);
-        expect(res.text).not.toContain('PLACEHOLDER');
+        const freshConfig = require('../src/config');
+        expect(freshConfig.isDiscordInstallConfigured).toBe(true);
+        expect(freshConfig.DISCORD_CLIENT_ID).toBe('234567890123456789');
       });
     } finally {
-      process.env.DISCORD_CLIENT_SECRET = saved;
+      process.env.DISCORD_CLIENT_ID = saved;
     }
   });
 

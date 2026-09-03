@@ -5,6 +5,7 @@
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
 const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
+const { SSM_PLACEHOLDER_SENTINEL } = require('./utils/ssm-placeholder');
 const {
   IPV4_LITERAL_RE,
   parseIPv4Octets,
@@ -558,15 +559,9 @@ function invalidStateSecretValues(cfg) {
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
 //
-// TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also
-// the seed value for `aws_ssm_parameter.bot` in
-// qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
-// (search that repo for `value = "PLACEHOLDER"`). If infra ever
-// renames the sentinel (e.g., "REPLACE_ME"), update here in
-// lockstep — otherwise the boot check silently regresses to
-// "non-empty value passes" and the original incident class
-// returns. `git grep TODO(infra-sentinel-sync)` finds the marker.
-const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
+// Backward-compatible name retained for focused boot-requirement tests; the
+// cross-repo contract now has one application-side source of truth.
+const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = SSM_PLACEHOLDER_SENTINEL;
 function missingMapCommandKeys(cfg) {
   if (!cfg.MAP_COMMAND_ENABLED) return [];
   const key = cfg.GOOGLE_MAPS_API_KEY;

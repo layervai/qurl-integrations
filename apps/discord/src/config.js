@@ -1,4 +1,5 @@
 const os = require('os');
+const { SSM_PLACEHOLDER_SENTINEL } = require('./utils/ssm-placeholder');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
 // NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
@@ -244,16 +245,17 @@ const isQurlOAuthConfigured = Boolean(
 // begin until DISCORD_CLIENT_SECRET is configured.
 const discordClientId = process.env.DISCORD_CLIENT_ID;
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
+const normalizedDiscordClientId = discordClientId?.trim();
 let discordInstallNotConfiguredReason = null;
 if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
-} else if (!discordClientId) {
+} else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
-} else if (!DISCORD_SNOWFLAKE_RE.test(discordClientId)) {
+} else if (!DISCORD_SNOWFLAKE_RE.test(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
 } else if (!discordClientSecret) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
-} else if (discordClientSecret === 'PLACEHOLDER') {
+} else if (discordClientSecret.trim() === SSM_PLACEHOLDER_SENTINEL) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
 }
 const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
@@ -328,7 +330,7 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: discordClientId,
+  DISCORD_CLIENT_ID: normalizedDiscordClientId,
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
