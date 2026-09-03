@@ -15,9 +15,11 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
-// ErrResourceGone marks a permanent resource-local denial. It mirrors
-// connectorshare.ErrResourceGone so a fake group factory in tests can signal a
-// permanently unavailable route without importing the connector sentinel.
+// ErrResourceGone mirrors connectorshare.ErrResourceGone so a fake group
+// factory in tests can signal a resource-not-found answer without importing
+// the connector sentinel. On a single route it is a platform refusal of that
+// proxy registration and is retried (see onRouteFailed); only on the group's
+// knock is it a permanent denial (see finishRunner).
 // TODO(upstream-contract): keep in step with connectorshare.ErrResourceGone.
 var ErrResourceGone = errors.New("local share resource is permanently unavailable")
 
@@ -121,6 +123,7 @@ type Manager struct {
 	routeToRes  map[string]string             // group route ID -> resource ID
 	diagnostics map[string]ResourceDiagnostic // resource ID -> redacted state
 	retry       map[string]int                // resource ID -> transient failure count
+	refusals    map[string]int                // resource ID -> platform refusals of its proxy registration
 	persisting  map[string]struct{}           // resource ID -> resource-gone persistence in flight
 
 	runner        GroupRunner
@@ -142,23 +145,41 @@ type Manager struct {
 
 	resourceGonePersistTimeout time.Duration
 	runnerStopTimeout          time.Duration
-	retryDelay                 func(int) time.Duration
+	// routePushTimeout bounds each SetRoutes/RestartRoute push so a wedged
+	// session push can never stall reconciliation; the runner records the
+	// desired set before pushing and re-applies it itself.
+	routePushTimeout time.Duration
+	retryDelay       func(int) time.Duration
+	// refusalDelay backs off a platform refusal of one route's registration.
+	// It is retried for as long as the row stays desired-on (the daemon cannot
+	// tell a refusal from a deleted resource, and turning the share off was the
+	// silent failure this replaces), so its ceiling is far above retryDelay's
+	// to keep a long-refused route's steady-state cost low.
+	refusalDelay func(int) time.Duration
 }
 
 type trackedShare struct {
 	share connectorstate.LocalShare
 	route connectorshare.LocalHTTPRoute
+	// retryAt gates re-adding a route the platform refused: the route is kept
+	// out of the pushed set until it is due, so the retry honors its backoff
+	// even when unrelated reconciles run in between.
+	retryAt time.Time
 }
 
 // ResourceDiagnostic is the redacted, resource-local daemon state exposed by
 // owner-only IPC. It contains no endpoint, credential, receipt, or topology.
 type ResourceDiagnostic struct {
-	State           string     `json:"state"`
-	LastTransition  time.Time  `json:"last_transition"`
-	FailureCategory string     `json:"failure_category,omitempty"`
-	FailureCode     string     `json:"failure_code,omitempty"`
-	RetryAttempt    int        `json:"retry_attempt"`
-	NextRetryAt     *time.Time `json:"next_retry_at,omitempty"`
+	State           string    `json:"state"`
+	LastTransition  time.Time `json:"last_transition"`
+	FailureCategory string    `json:"failure_category,omitempty"`
+	FailureCode     string    `json:"failure_code,omitempty"`
+	// RetryAttempt counts the attempts of whichever failure the diagnostic
+	// currently reports: transient/group retries and platform refusals of the
+	// route's registration back off on separate counters, so the number can
+	// restart when a resource moves between the two kinds.
+	RetryAttempt int        `json:"retry_attempt"`
+	NextRetryAt  *time.Time `json:"next_retry_at,omitempty"`
 }
 
 // NewManager builds a session-group share reconciler.
@@ -169,11 +190,13 @@ func NewManager(registry Registry, factory GroupFactory) (*Manager, error) {
 	return &Manager{
 		registry: registry, factory: factory,
 		tracked: map[string]trackedShare{}, routeToRes: map[string]string{},
-		diagnostics: map[string]ResourceDiagnostic{}, retry: map[string]int{},
+		diagnostics: map[string]ResourceDiagnostic{}, retry: map[string]int{}, refusals: map[string]int{},
 		persisting:                 map[string]struct{}{},
 		trigger:                    make(chan struct{}, 1),
 		resourceGonePersistTimeout: 5 * time.Second,
 		runnerStopTimeout:          10 * time.Second,
+		routePushTimeout:           10 * time.Second,
+		refusalDelay:               refusalRetryDelay,
 		retryDelay:                 daemonRetryDelay,
 	}, nil
 }
@@ -274,6 +297,7 @@ func (m *Manager) pruneUndesired(desired []connectorstate.LocalShare) {
 		delete(m.tracked, resourceID)
 		delete(m.diagnostics, resourceID)
 		delete(m.retry, resourceID)
+		delete(m.refusals, resourceID)
 	}
 }
 
@@ -289,15 +313,34 @@ type restartEntry struct {
 // applyDesired pushes the desired route set to the live group and restarts any
 // route whose serving epoch advanced without a target change.
 func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.LocalShare) error {
-	routes := make([]connectorshare.LocalHTTPRoute, 0, len(desired))
-	for i := range desired {
-		routes = append(routes, shareRoute(&desired[i]))
-	}
 	restart, runner := m.recordDesired(desired)
 	if runner == nil {
 		return nil
 	}
-	if err := runner.SetRoutes(ctx, routes); err != nil {
+	routes, withheld, nextDue := m.eligibleRoutes(desired)
+	if !nextDue.IsZero() {
+		m.scheduleGroupRetry(ctx, time.Until(nextDue))
+	}
+	if len(routes) == 0 {
+		// Every desired route is waiting out a backoff. A group never carries
+		// an empty set, and SetRoutes is also the only thing that withdraws a
+		// route the user turned off, so stop the group (retiring its admission
+		// and every registration) instead of leaving a stopped share's proxy
+		// live; the retry scheduled above rebuilds it once a route is due. This
+		// path does spend a fresh knock when the group comes back.
+		return m.stopRunnerForEmptyGroup(ctx)
+	}
+	// A restart (epoch bump, same target) of a withheld route has nothing to
+	// restart: the group withdrew that route. Leave its epoch uncommitted so
+	// the restart is re-detected once the route is pushed again.
+	kept := restart[:0]
+	for i := range restart {
+		if _, out := withheld[restart[i].share.ResourceID]; !out {
+			kept = append(kept, restart[i])
+		}
+	}
+	restart = kept
+	if err := m.pushRoutes(ctx, runner, routes); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -314,7 +357,7 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 	restartFailed := false
 	for i := range restart {
 		entry := &restart[i]
-		if err := runner.RestartRoute(ctx, entry.routeID); err != nil {
+		if err := m.restartRoute(ctx, runner, entry.routeID); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -324,6 +367,12 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 			restartFailed = true
 			slog.WarnContext(ctx, "share daemon could not restart a route; will retry",
 				"resource_id", entry.share.ResourceID, "error", redactShareError(err))
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The push is wedged: every remaining restart would burn its own
+				// budget serially. Bail out now; the scheduled reconcile below
+				// re-detects all of them.
+				break
+			}
 			continue
 		}
 		m.commitRestart(&entry.share)
@@ -360,7 +409,13 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			// so a late callback for the old route ID cannot resolve to it.
 			delete(m.routeToRes, previous.route.RouteID)
 		}
-		m.tracked[share.ResourceID] = trackedShare{share: share, route: route}
+		next := trackedShare{share: share, route: route, retryAt: previous.retryAt}
+		if previous.route != route {
+			// A route re-registering under a changed target joins the group
+			// afresh with no pending backoff (a brand-new route carries none).
+			next.retryAt = time.Time{}
+		}
+		m.tracked[share.ResourceID] = next
 		m.routeToRes[route.RouteID] = share.ResourceID
 	}
 	sort.Slice(restart, func(i, j int) bool { return restart[i].routeID < restart[j].routeID })
@@ -372,9 +427,50 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 func (m *Manager) commitRestart(share *connectorstate.LocalShare) {
 	route := shareRoute(share)
 	m.mu.Lock()
-	m.tracked[share.ResourceID] = trackedShare{share: *share, route: route}
+	previous := m.tracked[share.ResourceID]
+	m.tracked[share.ResourceID] = trackedShare{share: *share, route: route, retryAt: previous.retryAt}
 	m.routeToRes[route.RouteID] = share.ResourceID
 	m.mu.Unlock()
+}
+
+// eligibleRoutes returns the desired routes that are not waiting out a
+// per-route backoff, the resource IDs that are (withheld), and the earliest
+// time a withheld route becomes due (zero when none is withheld).
+func (m *Manager) eligibleRoutes(desired []connectorstate.LocalShare) ([]connectorshare.LocalHTTPRoute, map[string]struct{}, time.Time) {
+	now := time.Now()
+	var nextDue time.Time
+	routes := make([]connectorshare.LocalHTTPRoute, 0, len(desired))
+	withheld := make(map[string]struct{})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range desired {
+		tracked := m.tracked[desired[i].ResourceID]
+		if !tracked.retryAt.IsZero() && tracked.retryAt.After(now) {
+			withheld[desired[i].ResourceID] = struct{}{}
+			if nextDue.IsZero() || tracked.retryAt.Before(nextDue) {
+				nextDue = tracked.retryAt
+			}
+			continue
+		}
+		routes = append(routes, shareRoute(&desired[i]))
+	}
+	return routes, withheld, nextDue
+}
+
+// pushRoutes hands the desired set to the live group under a bounded context.
+// SetRoutes records the set before it pushes and the runner re-applies a
+// failed push itself, so a timeout here only stops one wedged push from
+// stalling the reconcile loop.
+func (m *Manager) pushRoutes(ctx context.Context, runner GroupRunner, routes []connectorshare.LocalHTTPRoute) error {
+	pushCtx, cancel := context.WithTimeout(ctx, m.routePushTimeout)
+	defer cancel()
+	return runner.SetRoutes(pushCtx, routes)
+}
+
+func (m *Manager) restartRoute(ctx context.Context, runner GroupRunner, routeID string) error {
+	pushCtx, cancel := context.WithTimeout(ctx, m.routePushTimeout)
+	defer cancel()
+	return runner.RestartRoute(pushCtx, routeID)
 }
 
 func (m *Manager) commitRestarts(restart []restartEntry) {
@@ -399,15 +495,28 @@ func (m *Manager) startGroup(ctx context.Context, desired []connectorstate.Local
 		m.scheduleGroupRetry(ctx, wait)
 		return nil
 	}
-	routes := make([]connectorshare.LocalHTTPRoute, 0, len(desired))
-	for i := range desired {
-		routes = append(routes, shareRoute(&desired[i]))
+	routes, _, nextDue := m.eligibleRoutes(desired)
+	if len(routes) == 0 {
+		// Every desired route is waiting out a backoff; start the group when
+		// the first one is due rather than knocking for an empty set.
+		if !nextDue.IsZero() {
+			m.scheduleGroupRetry(ctx, time.Until(nextDue))
+		}
+		return nil
 	}
 	// A daemon serves exactly one Connector, so every desired share is a proxy
 	// of that Connector and shares its one knock resource. The representative's
-	// public resource identity is the group's protected resource; the server
-	// still authorizes each proxy by its own metadata.
+	// public resource identity is the group's protected resource — the resource
+	// the NHP session is signed for — so it must be a share whose proxy is in
+	// the pushed set, never one sitting out a backoff. The platform still
+	// authorizes each proxy by its own metadata.
 	representative := desired[0]
+	for i := range desired {
+		if desired[i].ResourceID == routes[0].ResourceID {
+			representative = desired[i]
+			break
+		}
+	}
 	warnHeterogeneousKnock(ctx, desired, &representative)
 	runner, err := m.factory.NewGroupRunner(ctx, &GroupConfig{
 		KnockResourceID: representative.KnockResourceID,
@@ -529,7 +638,8 @@ func (m *Manager) finishRunner(parent context.Context, runner GroupRunner, err e
 	m.groupFailures++
 	delay := m.retryDelay(m.groupFailures)
 	m.groupRetryAt = time.Now().Add(delay)
-	m.markTrackedRetryingLocked(err, delay)
+	// The runner has exited, so no route is served by anything.
+	m.markTrackedRetryingLocked(err, delay, nil)
 	m.mu.Unlock()
 	m.scheduleGroupRetry(parent, delay)
 }
@@ -539,7 +649,8 @@ func (m *Manager) recordGroupFailure(ctx context.Context, err error) {
 	m.groupFailures++
 	delay := m.retryDelay(m.groupFailures)
 	m.groupRetryAt = time.Now().Add(delay)
-	m.markTrackedRetryingLocked(err, delay)
+	// No group was built, so no route is served by anything.
+	m.markTrackedRetryingLocked(err, delay, nil)
 	m.mu.Unlock()
 	m.scheduleGroupRetry(ctx, delay)
 }
@@ -584,6 +695,11 @@ func (m *Manager) onRouteServing(routeID string) {
 		return
 	}
 	delete(m.retry, resourceID)
+	delete(m.refusals, resourceID)
+	if tracked, ok := m.tracked[resourceID]; ok {
+		tracked.retryAt = time.Time{}
+		m.tracked[resourceID] = tracked
+	}
 	// A route reaching serving means the group's admission and login succeeded,
 	// so the group is healthy: reset the whole-group start backoff toward its
 	// first step for the next time a rebuild is ever needed.
@@ -606,30 +722,80 @@ func (m *Manager) onRouteFailed(routeID string, cause error) {
 		m.mu.Unlock()
 		return
 	}
-	category, code := classifyShareFailure(cause)
-	m.diagnostics[resourceID] = ResourceDiagnostic{
-		State: diagnosticStateFailed, LastTransition: time.Now().UTC(),
-		FailureCategory: category, FailureCode: code,
+	// The platform refused this route's proxy registration (resource_not_found
+	// on NewProxy). That is a per-proxy authorization answer about the live
+	// session, not proof the resource is gone: the row is still desired-on, so
+	// the share must stay visible as retrying rather than be silently disabled.
+	// The group has already withdrawn the route; keep the row on and re-add it
+	// under a fresh proxy generation once its backoff is due, so /status and
+	// the CLI show what happened. Only the knock-level denial (the Connector's
+	// own resource unknown to the platform) is permanent; see finishRunner.
+	// TODO(upstream-contract): re-adding a withdrawn route yields a fresh proxy
+	// name because qurl-connector bumps GroupRoute.Generation when it withdraws
+	// a gone route (withdrawGone in group.go); the retry depends on that.
+	// Refusals back off on their own counter: group-wide retries must not
+	// inflate a freshly published share's first refusal wait to the ceiling.
+	wait := m.refusalDelay(m.refusals[resourceID] + 1)
+	m.markRouteRefusedLocked(resourceID, cause, wait)
+	m.refusals[resourceID]++
+	if tracked, ok := m.tracked[resourceID]; ok {
+		tracked.retryAt = time.Now().Add(wait)
+		m.tracked[resourceID] = tracked
 	}
-	share := m.tracked[resourceID].share
-	if _, inFlight := m.persisting[resourceID]; inFlight {
-		// A persistence retry loop for this resource is already running; a
-		// re-emitted gone signal must not spawn a second one that races for the
-		// cross-process registry lock and rewrites the whole file again.
-		m.mu.Unlock()
-		return
-	}
-	m.persisting[resourceID] = struct{}{}
 	m.mu.Unlock()
-	go m.persistResourceGone(&share)
+	slog.WarnContext(m.lifetimeContext(), "share daemon route registration was refused by the platform; re-adding after backoff",
+		"resource_id", resourceID, "retry_in", wait, "error", redactShareError(cause))
+	m.scheduleGroupRetry(m.lifetimeContext(), wait)
+}
+
+// markRouteRefusedLocked records a platform refusal of one route's proxy
+// registration as a retrying diagnostic. It keeps every closed code the
+// taxonomy extracts but deliberately overrides classifyShareFailure's reading
+// of ErrResourceGone as resource_unavailable: a NewProxy refusal is the
+// platform declining this proxy, which is what an operator needs to see.
+func (m *Manager) markRouteRefusedLocked(resourceID string, cause error, wait time.Duration) {
+	category, code := classifyShareFailure(cause)
+	if category == diagnosticFailureResourceUnavailable {
+		category = diagnosticFailurePlatformDenied
+	}
+	m.setRetryingLocked(resourceID, category, code, m.refusals[resourceID]+1, wait)
 }
 
 func (m *Manager) onGroupRetry(cause error, wait time.Duration) {
 	slog.WarnContext(m.lifetimeContext(), "share daemon session group attempt failed; retrying",
 		"retry_in", wait, "error", redactShareError(cause))
+	// A group-wide retry means no replacement is up. Routes still running on
+	// the active session (a rotation replacement is what is retrying) keep
+	// serving; everything else — including a route whose session died, which
+	// RouteStates no longer lists — is retrying. RouteStates is queried before
+	// taking the manager lock because the runner holds its own.
+	serving := m.servingRouteIDs()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.markTrackedRetryingLocked(cause, wait)
+	m.markTrackedRetryingLocked(cause, wait, serving)
+}
+
+// servingRouteIDs reports the group route IDs the live session is running, or
+// nil when no session is active.
+// TODO(upstream-contract): this runs inside the runner's OnRetry callback and
+// calls back into RouteStates; qurl-connector emits OnRetry from its run loop
+// with no runner lock held (retryAfter in group.go), which is what keeps this
+// re-entrant call deadlock-free.
+func (m *Manager) servingRouteIDs() map[string]struct{} {
+	m.mu.Lock()
+	runner := m.runner
+	m.mu.Unlock()
+	if runner == nil {
+		return nil
+	}
+	states := runner.RouteStates()
+	serving := make(map[string]struct{}, len(states))
+	for routeID := range states {
+		if states[routeID].Phase == connectorshare.RouteServing {
+			serving[routeID] = struct{}{}
+		}
+	}
+	return serving
 }
 
 func (m *Manager) onRotationLeadCapped(routes int, need, lead time.Duration) {
@@ -637,11 +803,20 @@ func (m *Manager) onRotationLeadCapped(routes int, need, lead time.Duration) {
 		"routes", routes, "needed", need, "lead", lead)
 }
 
-// markTrackedRetryingLocked marks every route that is not currently serving as
-// retrying. A group-wide admission or connection retry stalls the whole set.
-func (m *Manager) markTrackedRetryingLocked(cause error, wait time.Duration) {
+// markTrackedRetryingLocked marks every tracked route as retrying except the
+// ones in serving (group route IDs the live session is actually running). A
+// group-wide admission or connection retry stalls everything else.
+func (m *Manager) markTrackedRetryingLocked(cause error, wait time.Duration, serving map[string]struct{}) {
+	now := time.Now()
 	for resourceID := range m.tracked {
-		if m.diagnostics[resourceID].State == diagnosticStateServing {
+		tracked := m.tracked[resourceID]
+		if _, up := serving[tracked.route.RouteID]; up {
+			continue
+		}
+		if tracked.retryAt.After(now) {
+			// A route sitting out a platform refusal keeps that diagnostic and
+			// its own next-retry time; the group cause would misattribute it
+			// and advertise a retry earlier than the route will re-register.
 			continue
 		}
 		m.markRetryingLocked(resourceID, cause, wait)
@@ -651,9 +826,12 @@ func (m *Manager) markTrackedRetryingLocked(cause error, wait time.Duration) {
 
 func (m *Manager) markRetryingLocked(resourceID string, cause error, wait time.Duration) {
 	category, code := classifyShareFailure(cause)
+	m.setRetryingLocked(resourceID, category, code, m.retry[resourceID]+1, wait)
+}
+
+func (m *Manager) setRetryingLocked(resourceID, category, code string, attempt int, wait time.Duration) {
 	now := time.Now().UTC()
 	next := now.Add(wait)
-	attempt := m.retry[resourceID] + 1
 	m.diagnostics[resourceID] = ResourceDiagnostic{
 		State: diagnosticStateRetrying, LastTransition: now, FailureCategory: category,
 		FailureCode: code, RetryAttempt: attempt, NextRetryAt: &next,
@@ -765,9 +943,11 @@ func (m *Manager) stopRunner(ctx context.Context) error {
 // TODO(upstream-contract): sized from connectorshare.MaxGroupRoutes.
 const maxIPCStatusBytes = (connectorshare.MaxGroupRoutes + 24) * 1024
 
-// Running returns a snapshot of the active public resource IDs and CRIDs. It is
-// empty while no session group is running, so a share never reports as managed
-// before the native runtime has actually taken ownership of it.
+// Running returns a snapshot of the public resource IDs and CRIDs the running
+// session group manages — including a route currently withheld by a refusal
+// backoff, whose diagnostic says so. It is empty while no session group is
+// running, so a share never reports as managed before the native runtime has
+// actually taken ownership of it.
 func (m *Manager) Running() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -790,6 +970,21 @@ func (m *Manager) Diagnostics() map[string]ResourceDiagnostic {
 		result[resourceID] = diagnostic
 	}
 	return result
+}
+
+// refusalRetryDelay doubles from one second to a five-minute ceiling, so a
+// route the platform keeps refusing costs one registration attempt per five
+// minutes at steady state while it stays visible as retrying.
+func refusalRetryDelay(attempt int) time.Duration {
+	const ceiling = 5 * time.Minute
+	delay := time.Second
+	for i := 1; i < attempt && delay < ceiling; i++ {
+		delay *= 2
+	}
+	if delay > ceiling {
+		return ceiling
+	}
+	return delay
 }
 
 func daemonRetryDelay(attempt int) time.Duration {

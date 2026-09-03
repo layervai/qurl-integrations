@@ -54,7 +54,9 @@ type ResourceAdmitter interface {
 // whole route set shares one knock, one login, and one heartbeat stream.
 type NativeGroupFactory struct {
 	admitter ResourceAdmitter
-	sessions *connectorshare.FRPSessionGroupFactory
+	// sessions is the interface so a hermetic test can drive the real
+	// SessionGroupRunner against a fake FRP session group.
+	sessions connectorshare.SessionGroupFactory
 }
 
 // NewNativeGroupFactory adapts qurl-connector's production session-group engine.

@@ -35,11 +35,16 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
   name, so a stale session cannot keep serving it. Its siblings and the shared
   admission are untouched — restarting one share is not a whole-session
   rotation.
-- **Per-share failure isolation.** If the platform reports a route's resource
-  as gone (revoked or deleted), the daemon withdraws just that route and
-  persists that share off; every other route keeps serving. A transient failure
-  to bring a route up leaves it in the group and retrying, again without
-  affecting siblings.
+- **Per-share failure isolation.** If the platform refuses a route's proxy
+  registration (a `resource_not_found` answer to that one proxy), the daemon
+  withdraws just that route, reports it on `/status` as `retrying` with failure
+  category `platform_denied`, and re-adds it under a fresh proxy name with
+  bounded backoff for as long as its row stays desired-on; it never silently
+  turns the share off, so `qurl publish` and `qurl inspect` show what happened.
+  Every other route keeps serving. A transient failure to bring a route up
+  leaves it in the group and retrying, again without affecting siblings. The
+  only permanent case is a denial of the group's single knock (the Connector's
+  own resource unknown to the platform), which persists every share off.
 - **Make-before-break rotation.** The one admission is renewed before it
   expires: a replacement session registers every route the old session was
   serving before the old one is drained. The rotation lead scales with the
