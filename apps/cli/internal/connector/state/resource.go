@@ -290,12 +290,52 @@ func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string
 	return binding, current.Retired[connectorID], found, nil
 }
 
+// ResolveDefaultConnectorID follows retired bindings from root, deriving each
+// successor with ReplacementConnectorID, and returns the first Connector ID
+// that has no binding or a live one, with the number of retired links crossed.
+// It is the one definition of the default-ID walk: the publish command
+// resolves a target's default through it, and eviction protects chains with
+// the same step (see pruneRetired).
+func (s *Store) ResolveDefaultConnectorID(ctx context.Context, root string) (id string, advanced int, retErr error) {
+	if s == nil {
+		return "", 0, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	if err := validateConnectorID(root); err != nil {
+		return "", 0, err
+	}
+	if ctx == nil {
+		return "", 0, errors.New("resolve default Connector ID: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return "", 0, err
+	}
+	unlock, err := acquireConnectorResourcesLock(ctx, s.dir)
+	if err != nil {
+		return "", 0, fmt.Errorf("lock Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	current, err := loadConnectorResources(s.dir)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return "", 0, err
+	}
+	return current.walkReplacements(root)
+}
+
 // RetireConnectorResource records a completed user-authorized deletion by any
 // exact local public identity. The accepted binding remains available only to
 // derive a new default Connector ID; BeginConnectorResource refuses its reuse.
 // The retired memory is bounded: once connectorResourcesMaxRetired deletions
-// are remembered, each new one evicts the oldest-in-file entry together with
-// its binding so deleted shares never crowd out live ones (see pruneRetired).
+// are remembered, each new one forgets another, binding included, so deleted
+// shares never crowd out live ones; leftovers go before the links of chains
+// that still end in a live share (see pruneRetired).
 func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired bool, retErr error) {
 	if s == nil {
 		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
@@ -512,66 +552,119 @@ func ReplacementConnectorID(connectorID, resourceID string) (string, error) {
 // What forgetting costs. A forgotten explicit ID simply stops being refused
 // locally; the next publish of it mints a fresh resource, which is what the
 // service does for any deleted Connector ID. Default IDs chain: the publish
-// command finds a target's current default by walking retired bindings from
-// the origin's root, deriving each successor with ReplacementConnectorID, and
-// stops at the first ID that is absent or live. Forgetting a link of a chain
-// that still ends in a live share would stop that walk early and mint a new
-// resource under the forgotten ID while the live share stayed desired-on,
-// listed only under its own CRID. So links of live-tailed chains are evicted
-// last: first every other retirement in the file's key order (a chain whose
-// tail was itself deleted restarts harmlessly wherever it is cut, and the
-// links beyond the cut become ordinary evictable leftovers), and only when
-// every remembered retirement leads to a live share does eviction cut one.
-// Reaching that takes one default target deleted connectorResourcesMaxRetired
-// times and then republished; the fork it causes is the accepted cost of a
-// bounded memory.
+// command finds a target's current default with ResolveDefaultConnectorID,
+// which walks retired bindings from the origin's root and stops at the first
+// ID that is absent or live. Forgetting a link of a chain that still ends in
+// a live share would stop that walk early and mint a new resource under the
+// forgotten ID while the live share stayed desired-on, listed only under its
+// own CRID. So those links are protected for as long as anything else can be
+// forgotten: leftovers (every retirement whose chain does not end in a live
+// share, including a chain whose tail was itself deleted) go first, in the
+// file's key order. Every delete-then-republish of a target adds one
+// protected link while that target stays live, so the protected set is
+// bounded only by the retired memory itself: once the links of chains that
+// currently end in a live share fill it, the next deletion of anything else
+// is forced to cut one. The cut lands on the link just before a live share,
+// chosen by key order, so the rest of that chain stops being protected and
+// decays as leftovers rather than lingering unreachable. The cut target's
+// next default publish then restarts at the cut link and mints a fresh
+// resource under it while its previous share stays desired-on under its own
+// CRID: the accepted cost of a bounded memory, reached only by a machine
+// whose currently live default targets have been deleted and republished
+// connectorResourcesMaxRetired times between them.
 // TODO(upstream-contract): the explicit-ID fallback assumes the qURL service
 // keeps permitting an ordinarily deleted Connector ID to be published again.
 func (s *connectorResourcesState) pruneRetired(keep string) {
-	excess := len(s.Retired) - connectorResourcesMaxRetired
-	if excess <= 0 {
-		return
-	}
-	liveTailed := s.retiredWithLiveTail()
-	evictable := make(map[string]bool, len(s.Retired))
-	for id := range s.Retired {
-		if !liveTailed[id] {
-			evictable[id] = true
+	for excess := len(s.Retired) - connectorResourcesMaxRetired; excess > 0; excess = len(s.Retired) - connectorResourcesMaxRetired {
+		memo := make(map[string]bool, len(s.Retired))
+		leftovers := make(map[string]bool, len(s.Retired))
+		cuts := make(map[string]bool)
+		for id := range s.Retired {
+			switch {
+			case !s.chainEndsLive(id, memo):
+				leftovers[id] = true
+			case s.successorLive(id):
+				cuts[id] = true
+			}
 		}
-	}
-	for _, id := range evictionOrder(evictable, excess, keep) {
-		s.forgetRetired(id)
-	}
-	if excess = len(s.Retired) - connectorResourcesMaxRetired; excess > 0 {
-		for _, id := range evictionOrder(s.Retired, excess, keep) {
-			s.forgetRetired(id)
+		evicted := s.forgetInOrder(leftovers, excess, keep)
+		if evicted == 0 {
+			evicted = s.forgetInOrder(cuts, excess, keep)
+		}
+		if evicted == 0 {
+			return
 		}
 	}
 }
 
-func (s *connectorResourcesState) forgetRetired(id string) {
-	delete(s.Retired, id)
-	delete(s.Bindings, id)
-}
-
-// retiredWithLiveTail reports every retired Connector whose chain of
-// replacements still ends in a live binding, memoizing each link so the pass
-// stays linear in the size of the retired memory.
-func (s *connectorResourcesState) retiredWithLiveTail() map[string]bool {
-	memo := make(map[string]bool, len(s.Retired))
-	result := make(map[string]bool, len(s.Retired))
-	for id := range s.Retired {
-		if s.chainEndsLive(id, memo) {
-			result[id] = true
-		}
+// forgetInOrder forgets up to excess of the candidates in the file's key
+// order, never keep, and reports how many it forgot.
+func (s *connectorResourcesState) forgetInOrder(candidates map[string]bool, excess int, keep string) int {
+	ids := evictionOrder(candidates, excess, keep)
+	for _, id := range ids {
+		delete(s.Retired, id)
+		delete(s.Bindings, id)
 	}
-	return result
+	return len(ids)
 }
 
-// chainEndsLive follows a retired Connector's replacements until the chain
-// reaches a live binding (true) or leaves the remembered state (false). The
-// path bound guards against a derivation cycle, which cannot occur without a
-// hash collision but must not hang a delete if it ever did.
+// replacementLink classifies one Connector ID on a default-ID chain.
+type replacementLink uint8
+
+const (
+	// replacementAbsent has no binding: the walk stops and the ID is free.
+	replacementAbsent replacementLink = iota
+	// replacementLive has a live binding: the walk stops and reuses it.
+	replacementLive
+	// replacementRetired is a retired link: the walk continues to its successor.
+	replacementRetired
+)
+
+// replacementStep classifies id and, for a retired link, derives its
+// successor. It is the one definition of the walk's step, shared by
+// ResolveDefaultConnectorID and by eviction's chain analysis, so the
+// protection cannot drift from what the publish command does.
+func (s *connectorResourcesState) replacementStep(id string) (next string, kind replacementLink, err error) {
+	binding, bound := s.Bindings[id]
+	switch {
+	case !bound:
+		return "", replacementAbsent, nil
+	case !s.Retired[id]:
+		return "", replacementLive, nil
+	}
+	next, err = ReplacementConnectorID(id, binding.ResourceID)
+	if err != nil {
+		return "", replacementRetired, err
+	}
+	return next, replacementRetired, nil
+}
+
+// walkReplacements follows retired links from root and returns the first ID
+// that is absent or live, with the number of retired links crossed. Every
+// link crossed is a distinct retired Connector unless the derivation cycles,
+// which cannot occur without a hash collision but must never hang a publish.
+func (s *connectorResourcesState) walkReplacements(root string) (id string, advanced int, err error) {
+	id = root
+	for {
+		next, kind, err := s.replacementStep(id)
+		if err != nil {
+			return "", advanced, err
+		}
+		if kind != replacementRetired {
+			return id, advanced, nil
+		}
+		advanced++
+		if advanced > len(s.Retired) {
+			return "", advanced, errors.New("connector replacement chain exceeds the durable retired state")
+		}
+		id = next
+	}
+}
+
+// chainEndsLive reports whether the chain from a retired Connector ends in a
+// live binding, memoizing every link it settles so a pass over the whole
+// retired memory stays linear. The path bound is the same cycle guard as
+// walkReplacements.
 func (s *connectorResourcesState) chainEndsLive(id string, memo map[string]bool) bool {
 	var path []string
 	settle := func(ends bool) bool {
@@ -584,22 +677,29 @@ func (s *connectorResourcesState) chainEndsLive(id string, memo map[string]bool)
 		if ends, seen := memo[current]; seen {
 			return settle(ends)
 		}
-		binding, bound := s.Bindings[current]
-		if !bound {
+		next, kind, err := s.replacementStep(current)
+		switch {
+		case err != nil || kind == replacementAbsent:
 			return settle(false)
-		}
-		if !s.Retired[current] {
+		case kind == replacementLive:
 			return settle(true)
 		}
 		if path = append(path, current); len(path) > len(s.Retired) {
 			return settle(false)
 		}
-		successor, err := ReplacementConnectorID(current, binding.ResourceID)
-		if err != nil {
-			return settle(false)
-		}
-		current = successor
+		current = next
 	}
+}
+
+// successorLive reports whether a retired Connector's replacement is the live
+// share at the end of its chain, which makes it the link a forced cut takes.
+func (s *connectorResourcesState) successorLive(id string) bool {
+	next, kind, err := s.replacementStep(id)
+	if err != nil || kind != replacementRetired {
+		return false
+	}
+	_, kind, err = s.replacementStep(next)
+	return err == nil && kind == replacementLive
 }
 
 // prunePending forgets exact-replay requests beyond

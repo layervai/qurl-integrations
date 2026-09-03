@@ -54,6 +54,13 @@ func TestConnectorResourceCapsFitRegistryAndChurn(t *testing.T) {
 // schema does, and then the cap must be re-measured anyway.
 func TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap(t *testing.T) {
 	t.Parallel()
+	// One set of keypairs serves both shapes; the subtests only read it.
+	bindings := make([]ConnectorResourceBinding, 0, connectorResourcesMaxItems)
+	for i := 0; i < connectorResourcesMaxItems; i++ {
+		binding := testResourceBinding(t, fmt.Sprintf("c%063d", i))
+		binding.KnockResourceID = strings.Repeat("k", 64)
+		bindings = append(bindings, binding)
+	}
 	for _, shape := range []struct {
 		name    string
 		retired bool
@@ -62,9 +69,7 @@ func TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap(t *testing.T) {
 			t.Parallel()
 			dir := secureStateTestDir(t)
 			state := emptyConnectorResourcesState()
-			for i := 0; i < connectorResourcesMaxItems; i++ {
-				binding := testResourceBinding(t, fmt.Sprintf("c%063d", i))
-				binding.KnockResourceID = strings.Repeat("k", 64)
+			for i, binding := range bindings {
 				state.Bindings[binding.ConnectorID] = binding
 				if !shape.retired {
 					state.Pending[binding.ConnectorID] = PendingConnectorResourceRequest{
@@ -445,33 +450,26 @@ func testRetiredChain(t *testing.T, state *connectorResourcesState, root string,
 	return chain, id
 }
 
-// walkDefaultID mirrors the publish command's default-ID resolution: follow
-// retired bindings from root and stop at the first ID that is absent or live.
-func walkDefaultID(t *testing.T, state connectorResourcesState, root string) string {
+// resolveDefault runs the publish command's own default-ID walk.
+func resolveDefault(t *testing.T, store *Store, root string) string {
 	t.Helper()
-	id := root
-	for range state.Retired {
-		binding, bound := state.Bindings[id]
-		if !bound || !state.Retired[id] {
-			return id
-		}
-		next, err := ReplacementConnectorID(id, binding.ResourceID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		id = next
+	id, _, err := store.ResolveDefaultConnectorID(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return id
 }
 
 // TestConnectorResourceRetiredEvictionKeepsLiveTailedChains proves what
-// eviction does to a default-ID chain. Links of a chain that still ends in a
-// live share are never cut while anything else can be forgotten, so the
-// publish command keeps resolving to that live share; a chain whose tail was
-// itself deleted is cut wherever key order says and restarts there, with the
-// links beyond the cut decaying as ordinary leftovers; and when every
-// remembered retirement leads to a live share, the forced cut lands on one
-// link only and the walk restarts at it.
+// eviction does to default-ID chains, asserting through the same walk the
+// publish command uses. Links of a chain that still ends in a live share are
+// never cut while anything else can be forgotten; a chain whose tail was
+// itself deleted is cut wherever key order says, restarts there, and its
+// links beyond the cut decay as ordinary leftovers; and when every remembered
+// retirement leads to a live share (one long chain, or many recycled targets
+// each holding one link), the forced cut lands on the link just before a live
+// share, the walk restarts there, and the rest of that chain is unprotected
+// from then on.
 func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 	t.Parallel()
 	const root = "chain-root"
@@ -500,6 +498,14 @@ func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 		}
 		return loaded
 	}
+	missingLinks := func(loaded connectorResourcesState, chain []string) (missing []string) {
+		for _, link := range chain {
+			if _, bound := loaded.Bindings[link]; !bound {
+				missing = append(missing, link)
+			}
+		}
+		return missing
+	}
 
 	t.Run("live tail is never cut", func(t *testing.T) {
 		t.Parallel()
@@ -513,18 +519,16 @@ func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 			t.Fatal(err)
 		}
 		loaded := retireLive(t, store, "zz-extra")
-		for _, link := range chain {
-			if !loaded.Retired[link] || loaded.Bindings[link] != state.Bindings[link] {
-				t.Fatalf("chain link %s was cut: retired=%t binding=%+v", link, loaded.Retired[link], loaded.Bindings[link])
-			}
+		if missing := missingLinks(loaded, chain); len(missing) != 0 {
+			t.Fatalf("chain links %v were cut", missing)
 		}
 		if loaded.Bindings[tail] != live || loaded.Retired[tail] {
 			t.Fatalf("live tail changed: %+v retired=%t", loaded.Bindings[tail], loaded.Retired[tail])
 		}
 		if _, bound := loaded.Bindings["old-0000"]; bound {
-			t.Fatal("the oldest-in-file unlinked retirement should have been forgotten instead")
+			t.Fatal("the oldest-in-file leftover should have been forgotten instead")
 		}
-		if got := walkDefaultID(t, loaded, root); got != tail {
+		if got := resolveDefault(t, store, root); got != tail {
 			t.Fatalf("default walk resolved %q, want the live tail %q", got, tail)
 		}
 	})
@@ -541,16 +545,11 @@ func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 		// Nothing leads to a live share, so key order decides: the root sorts
 		// before every "local-" link and every "old-" leftover.
 		loaded := retireLive(t, store, "zz-extra")
-		if _, bound := loaded.Bindings[root]; bound || loaded.Retired[root] {
-			t.Fatalf("root should have been cut: bound=%t retired=%t", bound, loaded.Retired[root])
+		if missing := missingLinks(loaded, chain); len(missing) != 1 || missing[0] != root {
+			t.Fatalf("cut links = %v, want just the root", missing)
 		}
-		if got := walkDefaultID(t, loaded, root); got != root {
+		if got := resolveDefault(t, store, root); got != root {
 			t.Fatalf("default walk resolved %q, want a restart at the cut root %q", got, root)
-		}
-		for _, link := range chain[1:] {
-			if !loaded.Retired[link] {
-				t.Fatalf("link %s beyond the cut should still be remembered for now", link)
-			}
 		}
 		if _, bound := loaded.Bindings[tail]; bound {
 			t.Fatalf("deleted tail %s should never have been bound", tail)
@@ -559,21 +558,15 @@ func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 		// eviction takes one of them (every "local-" link sorts ahead of every
 		// "old-" entry; which link is key order among the links themselves).
 		loaded = retireLive(t, store, "zz-extra-2")
-		decayed := 0
-		for _, link := range chain[1:] {
-			if _, bound := loaded.Bindings[link]; !bound && !loaded.Retired[link] {
-				decayed++
-			}
-		}
-		if decayed != 1 {
-			t.Fatalf("%d orphaned links decayed on the next eviction, want exactly one", decayed)
+		if missing := missingLinks(loaded, chain); len(missing) != 2 {
+			t.Fatalf("cut links after the next eviction = %v, want the root plus one orphaned link", missing)
 		}
 		if _, bound := loaded.Bindings["old-0000"]; !bound {
 			t.Fatal("an old leftover was evicted ahead of an orphaned link")
 		}
 	})
 
-	t.Run("forced cut when every retirement leads to a live share", func(t *testing.T) {
+	t.Run("forced cut takes the link before the live share", func(t *testing.T) {
 		t.Parallel()
 		store := openTestStore(t)
 		state := emptyConnectorResourcesState()
@@ -584,21 +577,62 @@ func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 			t.Fatal(err)
 		}
 		loaded := retireLive(t, store, "zz-extra")
-		cut := 0
-		for _, link := range chain {
-			if _, bound := loaded.Bindings[link]; !bound {
-				cut++
-			}
-		}
-		if cut != 1 {
-			t.Fatalf("forced eviction cut %d links, want exactly one", cut)
+		last := chain[len(chain)-1]
+		if missing := missingLinks(loaded, chain); len(missing) != 1 || missing[0] != last {
+			t.Fatalf("forced cut removed %v, want only the link before the live share %q", missing, last)
 		}
 		if loaded.Bindings[tail] != live || loaded.Retired[tail] {
 			t.Fatalf("live tail changed: %+v retired=%t", loaded.Bindings[tail], loaded.Retired[tail])
 		}
-		got := walkDefaultID(t, loaded, root)
-		if _, bound := loaded.Bindings[got]; bound || got == tail {
-			t.Fatalf("default walk resolved %q, want a restart at the cut link", got)
+		if got := resolveDefault(t, store, root); got != last {
+			t.Fatalf("default walk resolved %q, want a restart at the cut link %q", got, last)
+		}
+		// The rest of that chain no longer ends in a live share, so the next
+		// eviction is an ordinary leftover from it, not another forced cut.
+		loaded = retireLive(t, store, "zz-extra-2")
+		if missing := missingLinks(loaded, chain); len(missing) != 2 {
+			t.Fatalf("after the next eviction %d links are gone, want 2", len(missing))
+		}
+		if loaded.Bindings[tail] != live || !loaded.Retired["zz-extra"] {
+			t.Fatal("the next eviction touched the live share or the previous retirement instead of the unprotected chain")
+		}
+	})
+
+	t.Run("saturated by recycled targets cuts exactly one", func(t *testing.T) {
+		t.Parallel()
+		store := openTestStore(t)
+		state := emptyConnectorResourcesState()
+		lives := make(map[string]string, connectorResourcesMaxRetired)
+		for i := 0; i < connectorResourcesMaxRetired; i++ {
+			chain, tail := testRetiredChain(t, &state, fmt.Sprintf("tgt-%04d", i), 1)
+			state.Bindings[tail] = testResourceBinding(t, tail)
+			lives[chain[0]] = tail
+		}
+		if err := writeConnectorResources(store.Dir(), state); err != nil {
+			t.Fatal(err)
+		}
+		loaded := retireLive(t, store, "zz-extra")
+		cut := 0
+		for target, tail := range lives {
+			if _, bound := loaded.Bindings[tail]; !bound || loaded.Retired[tail] {
+				t.Fatalf("live share %s of %s was touched", tail, target)
+			}
+			if _, bound := loaded.Bindings[target]; bound {
+				continue
+			}
+			cut++
+			if target != "tgt-0000" {
+				t.Fatalf("forced cut took %s, want the first in key order", target)
+			}
+			if got := resolveDefault(t, store, target); got != target {
+				t.Fatalf("cut target %s resolves to %q, want a restart at itself", target, got)
+			}
+		}
+		if cut != 1 {
+			t.Fatalf("forced cut removed %d links, want exactly one", cut)
+		}
+		if got := resolveDefault(t, store, "tgt-0001"); got != lives["tgt-0001"] {
+			t.Fatalf("intact target resolves to %q, want its live share %q", got, lives["tgt-0001"])
 		}
 	})
 }

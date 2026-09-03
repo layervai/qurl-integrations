@@ -155,11 +155,24 @@ func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, loc
 		lookupID = local.ResourceID
 	}
 	// RetireConnectorResource reports false for a binding it no longer holds.
-	// With a registry row still present that means an earlier delete retired
-	// the binding, its registry cleanup did not finish, and the bounded retired
-	// memory has since forgotten it: nothing is left to retire, and the row
-	// must still converge because the service deletion is committed.
-	_, retireErr := resourceStore.RetireConnectorResource(ctx, lookupID)
+	// With a registry row still present that is tolerated in exactly one
+	// shape: an earlier delete retired the binding, its registry cleanup did
+	// not finish, and the bounded retired memory has since forgotten the
+	// retirement and binding together. Nothing is left to retire, and the row
+	// must still converge because the service deletion is committed. A binding
+	// that is still held under the row's Connector ID but does not match its
+	// resource identity is a different, inconsistent state: refuse it loudly
+	// rather than leave a live binding that the next publish would fail on.
+	retired, retireErr := resourceStore.RetireConnectorResource(ctx, lookupID)
+	if retireErr == nil && !retired && local != nil {
+		_, _, found, err := resourceStore.ConnectorResourceBinding(ctx, local.ConnectorID)
+		switch {
+		case err != nil:
+			retireErr = err
+		case found:
+			retireErr = errors.New("retire deleted local Connector binding: durable binding does not match the local share identity")
+		}
+	}
 	return errors.Join(retireErr, resourceStore.Close())
 }
 
