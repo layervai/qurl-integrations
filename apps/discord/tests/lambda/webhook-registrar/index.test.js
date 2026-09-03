@@ -243,6 +243,32 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
 });
 
 describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret present)', () => {
+  it('rotates and persists when SSM still holds the terraform seed sentinel', async () => {
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .resolves({ Parameter: { Value: 'PLACEHOLDER' } })
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing',
+        url: BASE_EVENT.bridgeUrl,
+        events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated' } },
+      }),
+    });
+
+    const result = await handler(BASE_EVENT, CONTEXT);
+    expect(result).toEqual({ webhookId: 'wh_existing', action: 'rotated' });
+    const putCalls = ssmMock.commandCalls(PutParameterCommand);
+    expect(putCalls).toHaveLength(1);
+    expect(putCalls[0].args[0].input.Value).toBe('whsec_rotated');
+  });
+
   it('reuses the existing subscription without rotating', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })

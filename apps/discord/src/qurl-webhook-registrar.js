@@ -777,6 +777,17 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
   await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [...TARGET_EVENTS] });
 }
 
+// Prefix qurl-service puts on every webhook secret it issues (create and
+// rotate alike). Used to tell a usable in-memory/SSM secret from a seed
+// sentinel or an empty value.
+const SERVER_SECRET_PREFIX = 'whsec_';
+
+function isServerIssuedSecret(value) {
+  return typeof value === 'string'
+    && value.length > SERVER_SECRET_PREFIX.length
+    && value.startsWith(SERVER_SECRET_PREFIX);
+}
+
 /**
  * Ensure a qurl.accessed subscription exists for the bot's bridge URL.
  * Returns the secret to use for HMAC verification.
@@ -786,7 +797,7 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
  * @param {string} opts.apiKey         - bot's QURL_API_KEY
  * @param {string} opts.bridgeUrl      - bot's own /webhooks/qurl URL
  * @param {string} opts.description    - human-readable; surfaces in qurl-service UI
- * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When set to a non-placeholder value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness.
+ * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When it is a server-issued `whsec_` value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness. Anything else (unset, empty, or the infra-side SSM seed sentinel) takes the bootstrap-rotate path.
  * @param {Function} [opts.persistSecret] - optional async(secret) → void callback for best-effort persistence
  * @param {boolean} [opts.urlMigrationSweepEnabled=true] - hard guard for the cross-host orphan sweep. Default ON for today's single-host deployment. Set to `false` BEFORE any active-active multi-region rollout under a shared `QURL_API_KEY` — see #827. A false value disables both the orphan classification (no near-miss logging, no DELETE attempts) and short-circuits the whole sweep path; matches + dedupe still run normally.
  * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused', ownerId: string}>}
@@ -907,8 +918,14 @@ async function ensureWebhookSubscription(opts) {
   // surviving sub's secret is almost certainly NOT the one in SSM).
   // Force a rotate so SSM gets a known-good value tied to the
   // survivor. One-time cost on dedupe; subsequent restarts reuse.
-  const initialIsRealSecret = typeof initialSecret === 'string'
-    && initialSecret.length > 0;
+  // "Real" means server-issued: qurl-service mints every webhook secret
+  // with a fixed `whsec_` prefix. The SSM parameter the Lambda reads is
+  // seeded by terraform with a sentinel ("PLACEHOLDER") so it exists
+  // before the first registrar run; a non-empty check alone would reuse
+  // that sentinel whenever a subscription already exists for the bridge
+  // URL (a sub that predates the parameter, or an SSM reset), and the
+  // receiver would then 401 every delivery until an operator noticed.
+  const initialIsRealSecret = isServerIssuedSecret(initialSecret);
 
   // Forwarded so per-guild callers can route inbound webhooks
   // without a second GET /v1/webhooks.

@@ -120,6 +120,27 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
     });
   });
 
+  it('also rotates when initialSecret is the infra SSM seed sentinel rather than a server-issued whsec_ value', async () => {
+    // terraform seeds /qurl-bot-discord/QURL_WEBHOOK_SECRET with a sentinel
+    // so the parameter exists before the first registrar run. A sub that
+    // predates the parameter must not be "reused" with that sentinel —
+    // the receiver could never verify a delivery with it.
+    let rotated = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => {
+        rotated = true;
+        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'PLACEHOLDER' });
+    expect(rotated).toBe(true);
+    expect(result.action).toBe('rotated');
+    expect(result.secret).toBe('whsec_post_bootstrap');
+  });
+
   it('also rotates when initialSecret is the empty string (SSM param not yet populated)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
