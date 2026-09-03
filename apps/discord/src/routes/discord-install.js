@@ -93,6 +93,7 @@ router.get('/install', rateLimit, (req, res) => {
   // Refuse before Discord installs the bot: without the encryption key, the
   // chained qURL authorization cannot persist the new guild credential.
   if (!process.env.KEY_ENCRYPTION_KEY) {
+    logger.error('Refusing /oauth/discord/install: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset', true);
   }
 
@@ -127,14 +128,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 400, 'Invalid install link', 'This install session is invalid or expired.');
   }
 
-  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. With
-  // Require OAuth2 Code Grant should be enabled so Discord has not installed
-  // the bot yet, but that Developer Portal setting is external to this service.
-  // Without this,
-  // we'd burn the Discord code on a token exchange + a Users /@me round-trip
-  // + an Auth0 round-trip before failing at the qURL callback's persist-time
-  // guard.
+  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. When
+  // Require OAuth2 Code Grant is enabled, Discord has not installed the bot
+  // yet at this point — but that Developer Portal setting is external to this
+  // service, so we cannot assume it. Without this guard we would burn the
+  // Discord code on a token exchange + a /users/@me round-trip + an Auth0
+  // round-trip before failing at the qURL callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
+    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset');
   }
   clearDiscordInstallSessionCookie(res);

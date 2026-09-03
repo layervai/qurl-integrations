@@ -63,6 +63,7 @@ const {
 } = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
 const { rateLimitStore } = require('../src/utils/oauth-rate-limit');
+const logger = require('../src/logger');
 const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
@@ -136,6 +137,7 @@ describe('Discord install callback', () => {
 
     it('refuses to begin an install when encryption-at-rest is not configured', async () => {
       const saved = process.env.KEY_ENCRYPTION_KEY;
+      const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
         const res = await request(app).get('/oauth/discord/install');
@@ -147,8 +149,12 @@ describe('Discord install callback', () => {
           res.headers['set-cookie'],
           DISCORD_INSTALL_SESSION_COOKIE,
         )).toBeNull();
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Refusing /oauth/discord/install: KEY_ENCRYPTION_KEY is not set',
+        );
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
+        errorSpy.mockRestore();
       }
     });
 
@@ -205,6 +211,7 @@ describe('Discord install callback', () => {
       // observe Discord's external Code Grant setting, so recovery must cover
       // both the installed and not-yet-installed states.
       const saved = process.env.KEY_ENCRYPTION_KEY;
+      const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
         const invalid = await request(app)
@@ -218,8 +225,16 @@ describe('Discord install callback', () => {
         expect(res.text).toContain('may already be in your server');
         expect(res.text).toContain('/qurl setup');
         expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
+        expect(clearedCookieHeader(
+          res.headers['set-cookie'],
+          DISCORD_INSTALL_SESSION_COOKIE,
+        )).toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set',
+        );
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
+        errorSpy.mockRestore();
       }
     });
 
@@ -227,6 +242,10 @@ describe('Discord install callback', () => {
       const res = await discordCallback('/oauth/discord/callback?guild_id=guild-1');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Missing authorization code');
+      expect(clearedCookieHeader(
+        res.headers['set-cookie'],
+        DISCORD_INSTALL_SESSION_COOKIE,
+      )).toBeDefined();
     });
 
     it('uses one CSP nonce in the HTTP header and style tag', async () => {
@@ -253,6 +272,10 @@ describe('Discord install callback', () => {
       const res = await discordCallback('/oauth/discord/callback?code=disc-code');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Bot install incomplete');
+      expect(clearedCookieHeader(
+        res.headers['set-cookie'],
+        DISCORD_INSTALL_SESSION_COOKIE,
+      )).toBeDefined();
     });
 
     it('400s on Discord error param (admin declined consent)', async () => {
@@ -261,6 +284,10 @@ describe('Discord install callback', () => {
       );
       expect(res.status).toBe(400);
       expect(res.text).toContain('Authorization declined');
+      expect(clearedCookieHeader(
+        res.headers['set-cookie'],
+        DISCORD_INSTALL_SESSION_COOKIE,
+      )).toBeDefined();
     });
 
     it('502s when Discord token exchange fails', async () => {
@@ -315,6 +342,10 @@ describe('Discord install callback', () => {
       expect(res.status).toBe(400);
       expect(res.text).toContain('selected server did not match');
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(clearedCookieHeader(
+        res.headers['set-cookie'],
+        DISCORD_INSTALL_SESSION_COOKIE,
+      )).toBeDefined();
     });
 
     it('502s when Discord /users/@me fails after successful token exchange', async () => {

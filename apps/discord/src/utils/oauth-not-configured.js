@@ -1,5 +1,5 @@
-// Shared 503 "qURL setup is not configured" page used by both
-// /oauth/qurl/start (Stage 1) and /oauth/discord/callback (Stage 2).
+// Shared 503 "qURL setup is not configured" page used by /oauth/qurl/start
+// (Stage 1) and the /oauth/discord/install + /callback flow (Stage 2).
 //
 // SECURITY (PR #177 follow-up C.4): the env-var `reason` is logged on
 // the operator side but MUST NOT appear in the rendered HTML —
@@ -12,8 +12,8 @@ const logger = require('../logger');
 /**
  * Render a 503 not-configured page. The `surface` arg picks the
  * remediation copy that fits the entry point — Stage-1 (/qurl setup)
- * and Stage-2 (/oauth/discord/callback) land here for different
- * reasons and the admin's next step differs.
+ * and Stage-2 entry/callback routes land here at different points, so the
+ * admin's safe next step differs.
  *
  * @param {import('express').Response} res
  * @param {'qurl-setup'|'discord-install'|'discord-install-entry'} surface

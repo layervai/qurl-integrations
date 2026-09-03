@@ -335,9 +335,9 @@ module.exports = {
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
-  // installs the bot via the install link. Optional: omit and the
-  // /oauth/discord/callback route will return 503 with a documented
-  // "not configured" page until an operator sets the secret.
+  // installs the bot via the install link. Omit it to disable the customer
+  // install flow: both /oauth/discord/install and its callback return a
+  // documented 503 until an operator sets the secret.
   DISCORD_CLIENT_SECRET: normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
