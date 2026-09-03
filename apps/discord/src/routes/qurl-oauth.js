@@ -13,7 +13,6 @@ const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
-const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
@@ -130,12 +129,6 @@ router.get('/start', rateLimit, async (req, res) => {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
     return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 5 minutes).');
   }
-  // First-install vs re-run gate for prompt=consent (C.8). On re-run,
-  // force prompt=consent so admins can rotate keys; on first install,
-  // skip the redundant screen. Failsafe + bias direction live in
-  // utils/guild-config-state.js (re-run on DDB error — silently
-  // skipping consent on a real re-run would block rotation).
-  const promptConsent = await shouldPromptConsent(verified.payload.guildId, 'qurl-oauth /start');
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
   // Same-browser flows pass; leaked URLs in other browsers fail.
@@ -161,12 +154,26 @@ router.get('/start', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // prompt=consent only on re-run (key-rotation flow) — without it
-  // Auth0 silently re-uses prior consent and re-running /qurl setup
-  // can't actually issue a new key. On first install, omit so the
-  // admin doesn't see a redundant "are you sure?" screen on top of
-  // the standard sign-in. Gate evaluated above. PR #177 follow-up C.8.
-  if (promptConsent) authorizeUrl.searchParams.set('prompt', 'consent');
+  // Force a fresh sign-in AND the consent screen on every setup path.
+  // `login` stops an ambient auth.layerv.ai session (the desktop app, the
+  // dashboard, a colleague's account on a shared browser) from silently
+  // binding this guild — and its billing — to whichever qURL account that
+  // session belongs to: the admin must authenticate as the account that
+  // will own the guild's key. `consent` is what lets a re-run actually
+  // issue a new key (Auth0 otherwise reuses the prior consent). Same
+  // contract as the Slack bot's /qurl setup.
+  authorizeUrl.searchParams.set('prompt', 'login consent');
+  // Optional connection pin (the Slack bot's AUTH0_EMAIL_CONNECTION knob).
+  // When set, Auth0 skips its connection picker and signs the admin in
+  // through that connection — normally `email`, the passwordless
+  // connection qurl-desktop uses, so one human keeps one Auth0 subject
+  // across surfaces. Unset, the tenant's default login page is used.
+  // Pinning a connection the Auth0 application does not have enabled
+  // fails at /authorize ("the connection is not enabled"), so enable it
+  // on the application before setting this.
+  if (config.AUTH0_EMAIL_CONNECTION) {
+    authorizeUrl.searchParams.set('connection', config.AUTH0_EMAIL_CONNECTION);
+  }
   return res.redirect(302, authorizeUrl.toString());
 });
 
