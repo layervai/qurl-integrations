@@ -137,6 +137,62 @@ describe('qURL client — getResourceStatus', () => {
     expect(thrown.message).toMatch(/qURL API GET .*failed \(unexpected_response\)/);
     expect(thrown.message).not.toMatch(/Unexpected 204|No Content/);
   });
+
+  it.each([
+    ['GET status', resourceId => qurl.getResourceStatus(resourceId)],
+    ['DELETE revoke', resourceId => qurl.deleteLink(resourceId)],
+  ])('rejects an access token passed as a resource ID without logging or echoing it (%s)', async (_label, invoke) => {
+    const logger = require('../src/logger');
+    const accessToken = ['at', 'sensitive-access-marker'].join('_');
+    globalThis.fetch = jest.fn();
+
+    const thrown = await invoke(accessToken).then(
+      () => { throw new Error('expected rejection'); },
+      error => error,
+    );
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(thrown.message).toMatch(/Invalid resource ID format/);
+    expect(thrown.message).not.toContain(accessToken);
+    const allLogs = JSON.stringify([
+      logger.debug.mock.calls,
+      logger.info.mock.calls,
+      logger.warn.mock.calls,
+      logger.error.mock.calls,
+      logger.audit.mock.calls,
+    ]);
+    expect(allLogs).not.toContain(accessToken);
+  });
+
+  it('rejects a malformed resource ID with a generic, non-echoing error', async () => {
+    const logger = require('../src/logger');
+    const malformedId = 'bad/id#sensitive-marker';
+    globalThis.fetch = jest.fn();
+
+    const thrown = await qurl.getResourceStatus(malformedId).catch(error => error);
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(thrown.message).toBe('Invalid resource ID format');
+    expect(thrown.message).not.toContain(malformedId);
+    expect(JSON.stringify([
+      logger.debug.mock.calls,
+      logger.info.mock.calls,
+      logger.warn.mock.calls,
+      logger.error.mock.calls,
+      logger.audit.mock.calls,
+    ])).not.toContain(malformedId);
+  });
+
+  it('does not broaden the access-token check to public IDs beginning with "at"', async () => {
+    const publicId = `at${'a'.repeat(105)}`;
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      resource_id: publicId,
+      qurls: [],
+    }));
+
+    await expect(qurl.getResourceStatus(publicId)).resolves.toBeDefined();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('qURL client — retry + audit behavior', () => {
@@ -181,9 +237,10 @@ describe('qURL client — retry + audit behavior', () => {
         dependency: 'qurl_service',
         status: 401,
         method: 'GET',
-        path: '/qurls/res-auth-401',
+        path: '/qurls/:resourceId',
       }),
     );
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain('res-auth-401');
   });
 
   it('emits dependency_auth_failure audit event on 403 (Justin #193 §5)', async () => {
@@ -330,6 +387,25 @@ describe('qURL client — retry + audit behavior', () => {
       .mockResolvedValueOnce(apiOk(204, undefined));
     await qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('redacts the resource ID from DELETE error logs and auth audit metadata', async () => {
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const resourceId = 'r_sensitive_resource_marker';
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
+
+    const thrown = await qurl.deleteLink(resourceId).then(
+      () => { throw new Error('expected rejection'); },
+      error => error,
+    );
+
+    expect(thrown.message).not.toContain(resourceId);
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(resourceId);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+      expect.objectContaining({ method: 'DELETE', path: '/qurls/:resourceId' }),
+    );
   });
 });
 

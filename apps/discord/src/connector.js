@@ -407,6 +407,10 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  */
 async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null, guildId } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  // Same public-resource boundary as status/revoke: mintLinks receives a
+  // connector-returned public ID, never a qURL bearer token. Reuse the shared
+  // generic-error guard so the duplicate validation cannot drift or echo a
+  // cross-wired token into a caller's logs.
   validateResourceId(resourceId);
   // Bound `n` defensively — callers in this codebase already cap at 10
   // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported

@@ -10,6 +10,7 @@ const { AUDIT_EVENTS } = require('./constants');
 const {
   qurlPath,
   resourcePath,
+  validateResourceId,
 } = require('./utils/resource-id');
 const { qurlApiError } = require('./utils/qurl-errors');
 const dns = require('dns').promises;
@@ -41,6 +42,11 @@ const MAX_RETRIES = 2;
 // User-Agent the qURL service sees for the bot's calls. Preserved verbatim
 // across the SDK migration (a literal wire identifier — see CLAUDE.md).
 const USER_AGENT = 'qurl-discord-bot/1.0';
+// Safe labels for status/revoke telemetry. The actual identifier is attacker-
+// influenced; keeping the value out of route labels prevents an accidentally
+// cross-wired credential from reaching logs or audit events.
+const QURL_ID_LOG_PATH = '/qurls/:resourceId';
+const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
 // body) — the only status-0 errors callQurl surfaces verbatim. See its
@@ -73,9 +79,9 @@ function makeClient(apiKey) {
 
 /**
  * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
- * `method`/`path` are labels for the audit/log/error payload (the same
- * dependency/method/path shape the pre-SDK client emitted) — the SDK owns the
- * actual wire path.
+ * `method`/`path` are low-cardinality labels for audit/log/error payloads; the
+ * SDK owns the actual wire path. Identifier-bearing routes use a static path
+ * template so credentials accidentally passed as IDs cannot reach telemetry.
  *
  *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
  *     alarm fires independently of any caller's catch path.
@@ -228,7 +234,7 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 }
 
 async function deleteLink(resourceId, apiKey) {
-  const path = resourcePath(resourceId);
+  resourcePath(resourceId);
   const client = makeClient(apiKey);
   // Revoke at the resource level: every link minted on the resource stops
   // resolving. Repeats against an existing revoked row are idempotent 204;
@@ -237,18 +243,24 @@ async function deleteLink(resourceId, apiKey) {
   // a retired `r_` prefix check before any request is sent.
   // qurl-typescript#244 fixes that older SDK method for other consumers; keep
   // deleteResource() here because it directly names this whole-resource action.
-  await callQurl('DELETE', path, () => client.deleteResource(resourceId));
+  await callQurl('DELETE', RESOURCE_ID_LOG_PATH, () => client.deleteResource(resourceId));
   logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {
-  const path = qurlPath(resourceId);
+  qurlPath(resourceId);
   const client = makeClient(apiKey);
   // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
   // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
-  return callQurl('GET', path, () => client.get(resourceId));
+  return callQurl('GET', QURL_ID_LOG_PATH, () => client.get(resourceId));
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
+module.exports = {
+  createOneTimeLink,
+  deleteLink,
+  getResourceStatus,
+  isPrivateHost,
+  validateResourceId,
+};

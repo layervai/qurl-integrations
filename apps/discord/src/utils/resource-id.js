@@ -11,6 +11,11 @@ const ERROR_PREVIEW_LENGTH = 64;
 const RESOURCE_ID_CHARACTER_CLASS = '[\\w-]';
 const RESOURCE_ID_CHARACTERS = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
 const LEGACY_RESOURCE_ID_PREFIX = 'r_';
+// TODO(upstream-contract): qurl-service owns this lowercase bearer-token
+// prefix. Reject it before building an HTTP path so a cross-wired qURL fragment
+// cannot reach intermediary access logs. Matching is deliberately case-exact:
+// issued access tokens are lowercase and public IDs remain opaque.
+const QURL_ACCESS_TOKEN_PREFIX = 'at_';
 const RESOURCE_PATH_PREFIX = '/resources/';
 const RESOURCE_ID_MASK = '<id>';
 // Shared sticky state is safe while this helper stays synchronous: lastIndex
@@ -40,11 +45,13 @@ function rejectedValuePreview(value) {
 }
 
 function validateResourceId(resourceId) {
-  if (!hasSafeResourceIdShape(resourceId)) {
-    // The stable prefix is the operator-facing contract-change tripwire. Keep
-    // this helper pure: boundary callers already log surfaced failures, while
-    // logging here would duplicate them and attach a rejected value twice.
-    throw new Error(`Invalid resource ID format: ${rejectedValuePreview(resourceId)}`);
+  if (
+    !hasSafeResourceIdShape(resourceId)
+    || resourceId.startsWith(QURL_ACCESS_TOKEN_PREFIX)
+  ) {
+    // Keep this helper pure and the error generic: the rejected value may be a
+    // bearer credential, including under a future namespace unknown here.
+    throw new Error('Invalid resource ID format');
   }
 }
 
