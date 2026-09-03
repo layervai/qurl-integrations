@@ -16,9 +16,11 @@ import (
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
-// ErrResourceGone marks a permanent resource-local denial. It mirrors
-// connectorshare.ErrResourceGone so a fake group factory in tests can signal a
-// permanently unavailable route without importing the connector sentinel.
+// ErrResourceGone mirrors connectorshare.ErrResourceGone so a fake group
+// factory in tests can signal a resource-not-found answer without importing
+// the connector sentinel. On a single route it is a platform refusal of that
+// proxy registration and is retried (see onRouteFailed); only on the group's
+// knock is it a permanent denial (see finishRunner).
 // TODO(upstream-contract): keep in step with connectorshare.ErrResourceGone.
 var ErrResourceGone = errors.New("local share resource is permanently unavailable")
 
@@ -122,6 +124,7 @@ type Manager struct {
 	routeToRes  map[string]string             // group route ID -> resource ID
 	diagnostics map[string]ResourceDiagnostic // resource ID -> redacted state
 	retry       map[string]int                // resource ID -> transient failure count
+	refusals    map[string]int                // resource ID -> platform refusals of its proxy registration
 	persisting  map[string]struct{}           // resource ID -> resource-gone persistence in flight
 
 	runner        GroupRunner
@@ -178,7 +181,7 @@ func NewManager(registry Registry, factory GroupFactory) (*Manager, error) {
 	return &Manager{
 		registry: registry, factory: factory,
 		tracked: map[string]trackedShare{}, routeToRes: map[string]string{},
-		diagnostics: map[string]ResourceDiagnostic{}, retry: map[string]int{},
+		diagnostics: map[string]ResourceDiagnostic{}, retry: map[string]int{}, refusals: map[string]int{},
 		persisting:                 map[string]struct{}{},
 		trigger:                    make(chan struct{}, 1),
 		resourceGonePersistTimeout: 5 * time.Second,
@@ -284,6 +287,7 @@ func (m *Manager) pruneUndesired(desired []connectorstate.LocalShare) {
 		delete(m.tracked, resourceID)
 		delete(m.diagnostics, resourceID)
 		delete(m.retry, resourceID)
+		delete(m.refusals, resourceID)
 	}
 }
 
@@ -308,9 +312,12 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 		m.scheduleGroupRetry(ctx, time.Until(nextDue))
 	}
 	if len(routes) == 0 {
-		// Every desired route is waiting out a backoff; the group already
-		// withdrew them, and a group never carries an empty set.
-		return nil
+		// Every desired route is waiting out a backoff. A group never carries
+		// an empty set, and SetRoutes is also the only thing that withdraws a
+		// route the user turned off, so stop the group (retiring its admission
+		// and every registration) instead of leaving a stopped share's proxy
+		// live; the retry scheduled above rebuilds it once a route is due.
+		return m.stopRunnerForEmptyGroup(ctx)
 	}
 	if err := m.pushRoutes(ctx, runner, routes); err != nil {
 		if ctx.Err() != nil {
@@ -339,6 +346,12 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 			restartFailed = true
 			slog.WarnContext(ctx, "share daemon could not restart a route; will retry",
 				"resource_id", entry.share.ResourceID, "error", redactShareError(err))
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The push is wedged: every remaining restart would burn its own
+				// budget serially. Bail out now; the scheduled reconcile below
+				// re-detects all of them.
+				break
+			}
 			continue
 		}
 		m.commitRestart(&entry.share)
@@ -376,9 +389,9 @@ func (m *Manager) recordDesired(desired []connectorstate.LocalShare) ([]restartE
 			delete(m.routeToRes, previous.route.RouteID)
 		}
 		next := trackedShare{share: share, route: route, retryAt: previous.retryAt}
-		if !existed || previous.route != route {
-			// A new route, or one re-registering under a changed target, joins
-			// the group afresh with no pending backoff.
+		if previous.route != route {
+			// A route re-registering under a changed target joins the group
+			// afresh with no pending backoff (a brand-new route carries none).
 			next.retryAt = time.Time{}
 		}
 		m.tracked[share.ResourceID] = next
@@ -463,14 +476,24 @@ func (m *Manager) startGroup(ctx context.Context, desired []connectorstate.Local
 	if len(routes) == 0 {
 		// Every desired route is waiting out a backoff; start the group when
 		// the first one is due rather than knocking for an empty set.
-		m.scheduleGroupRetry(ctx, time.Until(nextDue))
+		if !nextDue.IsZero() {
+			m.scheduleGroupRetry(ctx, time.Until(nextDue))
+		}
 		return nil
 	}
 	// A daemon serves exactly one Connector, so every desired share is a proxy
 	// of that Connector and shares its one knock resource. The representative's
-	// public resource identity is the group's protected resource; the server
-	// still authorizes each proxy by its own metadata.
+	// public resource identity is the group's protected resource — the resource
+	// the NHP session is signed for — so it must be a share whose proxy is in
+	// the pushed set, never one sitting out a backoff. The platform still
+	// authorizes each proxy by its own metadata.
 	representative := desired[0]
+	for i := range desired {
+		if desired[i].ResourceID == routes[0].ResourceID {
+			representative = desired[i]
+			break
+		}
+	}
 	warnHeterogeneousKnock(ctx, desired, &representative)
 	runner, err := m.factory.NewGroupRunner(ctx, &GroupConfig{
 		KnockResourceID: representative.KnockResourceID,
@@ -649,6 +672,7 @@ func (m *Manager) onRouteServing(routeID string) {
 		return
 	}
 	delete(m.retry, resourceID)
+	delete(m.refusals, resourceID)
 	if tracked, ok := m.tracked[resourceID]; ok {
 		tracked.retryAt = time.Time{}
 		m.tracked[resourceID] = tracked
@@ -683,9 +707,14 @@ func (m *Manager) onRouteFailed(routeID string, cause error) {
 	// under a fresh proxy generation once its backoff is due, so /status and
 	// the CLI show what happened. Only the knock-level denial (the Connector's
 	// own resource unknown to the platform) is permanent; see finishRunner.
-	wait := m.retryDelay(m.retry[resourceID] + 1)
+	// TODO(upstream-contract): re-adding a withdrawn route yields a fresh proxy
+	// name because qurl-connector bumps GroupRoute.Generation when it withdraws
+	// a gone route (withdrawGone in group.go); the retry depends on that.
+	// Refusals back off on their own counter: group-wide retries must not
+	// inflate a freshly published share's first refusal wait to the ceiling.
+	wait := m.retryDelay(m.refusals[resourceID] + 1)
 	m.markRouteRefusedLocked(resourceID, cause, wait)
-	m.retry[resourceID]++
+	m.refusals[resourceID]++
 	if tracked, ok := m.tracked[resourceID]; ok {
 		tracked.retryAt = time.Now().Add(wait)
 		m.tracked[resourceID] = tracked
@@ -698,7 +727,10 @@ func (m *Manager) onRouteFailed(routeID string, cause error) {
 
 // markRouteRefusedLocked records a platform refusal of one route's proxy
 // registration as a retrying diagnostic: category platform_denied, with the
-// platform's closed numeric code preserved when the refusal carries one.
+// platform's closed numeric code preserved when the refusal carries one. This
+// deliberately overrides classifyShareFailure, which reads ErrResourceGone as
+// resource_unavailable: a NewProxy refusal is the platform declining this
+// proxy, which is what an operator needs to see.
 func (m *Manager) markRouteRefusedLocked(resourceID string, cause error, wait time.Duration) {
 	code := ""
 	var deny *qurl.ServerDenyError
@@ -709,7 +741,7 @@ func (m *Manager) markRouteRefusedLocked(resourceID string, cause error, wait ti
 	next := now.Add(wait)
 	m.diagnostics[resourceID] = ResourceDiagnostic{
 		State: diagnosticStateRetrying, LastTransition: now, FailureCategory: diagnosticFailurePlatformDenied,
-		FailureCode: code, RetryAttempt: m.retry[resourceID] + 1, NextRetryAt: &next,
+		FailureCode: code, RetryAttempt: m.refusals[resourceID] + 1, NextRetryAt: &next,
 	}
 }
 
@@ -729,6 +761,10 @@ func (m *Manager) onGroupRetry(cause error, wait time.Duration) {
 
 // servingRouteIDs reports the group route IDs the live session is running, or
 // nil when no session is active.
+// TODO(upstream-contract): this runs inside the runner's OnRetry callback and
+// calls back into RouteStates; qurl-connector emits OnRetry from its run loop
+// with no runner lock held (retryAfter in group.go), which is what keeps this
+// re-entrant call deadlock-free.
 func (m *Manager) servingRouteIDs() map[string]struct{} {
 	m.mu.Lock()
 	runner := m.runner
@@ -755,8 +791,16 @@ func (m *Manager) onRotationLeadCapped(routes int, need, lead time.Duration) {
 // ones in serving (group route IDs the live session is actually running). A
 // group-wide admission or connection retry stalls everything else.
 func (m *Manager) markTrackedRetryingLocked(cause error, wait time.Duration, serving map[string]struct{}) {
+	now := time.Now()
 	for resourceID := range m.tracked {
-		if _, up := serving[m.tracked[resourceID].route.RouteID]; up {
+		tracked := m.tracked[resourceID]
+		if _, up := serving[tracked.route.RouteID]; up {
+			continue
+		}
+		if tracked.retryAt.After(now) {
+			// A route sitting out a platform refusal keeps that diagnostic and
+			// its own next-retry time; the group cause would misattribute it
+			// and advertise a retry earlier than the route will re-register.
 			continue
 		}
 		m.markRetryingLocked(resourceID, cause, wait)

@@ -103,6 +103,8 @@ type fakeGroupSession struct {
 	err           error
 	stopped       bool
 
+	// ready is never closed: the runner drives off Changes/RouteStates, and
+	// make-before-break rotation is out of scope for this fake.
 	ready    chan struct{}
 	done     chan struct{}
 	changes  chan struct{}

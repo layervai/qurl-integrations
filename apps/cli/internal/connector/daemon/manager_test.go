@@ -788,6 +788,7 @@ func TestManagerRouteRefusedByPlatformStaysOnRetriesAndKeepsSiblingsServing(t *t
 		waitServing(t, manager, id)
 	}
 	runner := factory.runner(1)
+	pushesBefore := len(runner.setRouteCalls())
 	// The platform refuses b's proxy registration; the group withdraws it and
 	// reports it gone. That is never a reason to turn the share off.
 	runner.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone,
@@ -810,12 +811,12 @@ func TestManagerRouteRefusedByPlatformStaysOnRetriesAndKeepsSiblingsServing(t *t
 	}
 	// After its backoff the route is re-added to the live group (no knock).
 	waitManagerCondition(t, func() bool {
-		for _, set := range runner.setRouteCalls() {
-			if len(set) == 3 && set[1] == "connector-b" {
-				return true
-			}
+		calls := runner.setRouteCalls()
+		if len(calls) <= pushesBefore {
+			return false
 		}
-		return false
+		last := calls[len(calls)-1]
+		return len(last) == 3 && last[1] == "connector-b"
 	}, "refused route re-added after backoff")
 	for _, id := range []string{"a", "c"} {
 		if manager.Diagnostics()[id].State != diagnosticStateServing {
@@ -1079,5 +1080,86 @@ func TestManagerShareRefusedByPlatformForeverKeepsRetryingWithoutTurningOff(t *t
 	if manager.Diagnostics()["a"].State != diagnosticStateServing || admitter.admissions() != 1 || sessions.startCount() != 1 {
 		t.Fatalf("refusals disturbed the group: a=%q admissions=%d sessions=%d",
 			manager.Diagnostics()["a"].State, admitter.admissions(), sessions.startCount())
+	}
+}
+
+func TestManagerRebuiltGroupSignsForAPushedShareNotOneInBackoff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	// a — the lexicographically first share, the group's current signed
+	// resource — is refused and enters a long backoff.
+	factory.runner(1).failRoute("connector-a", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["a"].State == diagnosticStateRetrying
+	}, "a in refusal backoff")
+	// Force a rebuild while a is withheld: the new group must sign for b, the
+	// share whose proxy is actually pushed, or it could serve nothing.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	if err := manager.stopRunner(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	manager.Trigger()
+	waitManagerCondition(t, func() bool { return factory.startCount() == 2 }, "group rebuilt")
+	cfg := factory.lastConfig()
+	if cfg.ResourceID != "b" || len(cfg.Routes) != 1 || cfg.Routes[0].RouteID != "connector-b" {
+		t.Fatalf("rebuilt group = resource %q routes %v, want signed for b with only b pushed", cfg.ResourceID, cfg.Routes)
+	}
+}
+
+func TestManagerStopConvergesWhileEverySurvivorIsInBackoff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	runner := factory.runner(1)
+	runner.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["b"].State == diagnosticStateRetrying
+	}, "b in refusal backoff")
+	// The user stops a while b (the only survivor) is withheld. Nothing can be
+	// pushed, so the group must be stopped rather than left serving a's proxy.
+	stopA := daemonShare("a", 2, "off")
+	registry.setShare(&stopA)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool {
+		select {
+		case <-runner.runStart:
+		default:
+			return false
+		}
+		return !manager.groupIsRunning()
+	}, "group stopped so the stopped share's proxy is withdrawn")
+	if _, running := manager.Running()["a"]; running {
+		t.Fatalf("stopped share still reported running: %v", manager.Running())
+	}
+	if factory.startCount() != 1 {
+		t.Fatalf("group starts = %d, want no rebuild while every survivor is in backoff", factory.startCount())
 	}
 }
