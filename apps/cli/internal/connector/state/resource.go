@@ -333,9 +333,9 @@ func (s *Store) ResolveDefaultConnectorID(ctx context.Context, root string) (id 
 // exact local public identity. The accepted binding remains available only to
 // derive a new default Connector ID; BeginConnectorResource refuses its reuse.
 // The retired memory is bounded: once connectorResourcesMaxRetired deletions
-// are remembered, each new one forgets another, binding included, so deleted
-// shares never crowd out live ones; leftovers go before the links of chains
-// that still end in a live share (see pruneRetired).
+// are remembered, each new one forgets another whenever one can be, binding
+// included, so deleted shares never crowd out live ones; leftovers go before
+// the links of chains that still end in a live share (see pruneRetired).
 func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired bool, retErr error) {
 	if s == nil {
 		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
