@@ -9012,6 +9012,9 @@ async function registerCommands({ rest, appId, guilds = new Map() }) {
 
   const commandData = commands.map(cmd => {
     const data = cmd.data.toJSON();
+    // Deprecated by Discord in favour of `contexts`; never send both.
+    // Omitting the legacy field also avoids relying on builder defaults.
+    delete data.dm_permission;
     // These fields are global-command-only in Discord's API. Pin them
     // explicitly so Developer Portal defaults cannot expose the server-
     // scoped qURL workflows through user installs or DM contexts.
@@ -9021,7 +9024,6 @@ async function registerCommands({ rest, appId, guilds = new Map() }) {
     } else {
       delete data.integration_types;
       delete data.contexts;
-      delete data.dm_permission;
     }
     return data;
   });

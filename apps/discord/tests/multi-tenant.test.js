@@ -137,6 +137,7 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
       integration_types: [0],
       contexts: [0],
     });
+    expect(opts.body[0]).not.toHaveProperty('dm_permission');
   });
 
   it('single-guild: registers the same command set on the guild endpoint', async () => {

@@ -521,6 +521,15 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it('emits failure_type=unsupported_context when rejecting a DM invocation', async () => {
+    const interaction = makeInteraction({ guildId: null });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: 'unsupported_context' }),
+    );
+  });
+
   it('emits failure_type=reply_failed when stale-registration reply throws non-ack error', async () => {
     // Stale-registration path tries to reply "no longer available" but
     // the reply itself fails for a non-timeout reason (e.g. permission
