@@ -45,3 +45,8 @@ apps/discord/scripts/*
 !apps/discord/scripts/provision-guild-subscriptions.js
 apps/discord/.github/
 apps/discord/railway.json
+
+# proof-1000 harness run directories (apps/cli/scripts/proof-1000)
+proof-1000-runs/
+# binary that `go build ./apps/cli/scripts/...` drops at the repo root
+/proof-1000
