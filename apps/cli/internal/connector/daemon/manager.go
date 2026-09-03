@@ -33,9 +33,18 @@ const (
 	_ = uint(connectorstate.LocalSharesMaxItems - connectorshare.MaxGroupRoutes)
 )
 
-// desiredStateOn is the desired-state value a share carries while it should be
-// served. It mirrors the state package's durable encoding.
-const desiredStateOn = "on"
+// desiredStateOn and desiredStateOff are the desired-state values a share
+// carries while it should and should not be served. They mirror the state
+// package's durable encoding.
+const (
+	desiredStateOn  = "on"
+	desiredStateOff = "off"
+)
+
+// defaultRunnerStopTimeout bounds how long a Manager waits for its session
+// group to retire its admission, both when the group empties and on Run's own
+// shutdown path.
+const defaultRunnerStopTimeout = 10 * time.Second
 
 const (
 	diagnosticStateStarting = "starting"
@@ -194,7 +203,7 @@ func NewManager(registry Registry, factory GroupFactory) (*Manager, error) {
 		persisting:                 map[string]struct{}{},
 		trigger:                    make(chan struct{}, 1),
 		resourceGonePersistTimeout: 5 * time.Second,
-		runnerStopTimeout:          10 * time.Second,
+		runnerStopTimeout:          defaultRunnerStopTimeout,
 		routePushTimeout:           10 * time.Second,
 		refusalDelay:               refusalRetryDelay,
 		retryDelay:                 daemonRetryDelay,

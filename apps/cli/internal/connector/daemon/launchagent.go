@@ -208,7 +208,9 @@ func (c *JobController) currentExecutablePath() (string, error) {
 // version, and the session group mode into the job definition version a
 // resident daemon reports over IPC. The default mode is elided, so a
 // single-mode job version is exactly the pre-mode string; any other mode is a
-// definition change that replaces the resident daemon.
+// definition change that replaces the resident daemon. The zero GroupMode is
+// rejected rather than defaulted, so a construction path that never resolved
+// the mode fails loudly instead of silently installing single.
 func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
 	binaryVersion = strings.TrimSpace(binaryVersion)
 	if binaryVersion == "" {

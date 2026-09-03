@@ -462,7 +462,7 @@ func TestPerShareManagerRefusedShareReKnocksOnlyItsOwnGroup(t *testing.T) {
 // TestPerShareManagerSlowGroupRetirementDoesNotStopTheDaemonOrSiblings pins
 // that a removed group which does not retire its session in time is logged
 // and left to finish, never a reason for the daemon — and every other share —
-// to exit.
+// to exit. Not parallel: it captures the process-global slog default.
 func TestPerShareManagerSlowGroupRetirementDoesNotStopTheDaemonOrSiblings(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
 		"a": perShareRow("a", 1, "on"),
@@ -518,25 +518,166 @@ func TestPerShareManagerSlowGroupRetirementDoesNotStopTheDaemonOrSiblings(t *tes
 	}
 }
 
-func TestPerShareManagerWarnsAboveTheSoftCap(t *testing.T) {
-	shares := make(map[string]connectorstate.LocalShare, PerShareSoftCap+1)
-	for i := 0; i <= PerShareSoftCap; i++ {
-		share := perShareRow(resourceIDf(i), 1, "on")
-		shares[share.ResourceID] = share
+// TestPerShareManagerRePublishWaitsForTheRetiringGroup pins that a resource
+// whose removed group outlived the stop bound is not re-admitted until that
+// group has finished, and that the deferred reconcile re-runs on its own once
+// it has. Not parallel: it captures the process-global slog default.
+func TestPerShareManagerRePublishWaitsForTheRetiringGroup(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	hold := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(hold) }) }
+	factory.holdStopByResource = map[string]chan struct{}{"b": hold}
+	manager, err := NewPerShareManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
 	}
-	registry := &memoryRegistry{shares: shares}
+	manager.groupStopTimeout = 30 * time.Millisecond
+	manager.retiringRecheck = 20 * time.Millisecond
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		release()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("per-share manager did not stop")
+		}
+	})
+	waitPerShareServing(t, manager, "a", "b")
+
+	stopB := perShareRow("b", 2, "off")
+	registry.setShare(&stopB)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool {
+		return strings.Contains(logs.String(), "did not stop within")
+	}, "b's group recorded as retiring")
+	// The user turns b back on while its old group is still retiring: no
+	// second admission may be minted for b.
+	startB := perShareRow("b", 3, "on")
+	registry.setShare(&startB)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool {
+		return strings.Contains(logs.String(), "waiting for a resource's prior share group to retire")
+	}, "re-admission deferred behind the retiring group")
+	time.Sleep(60 * time.Millisecond)
+	if got := len(runnersFor(factory, "b")); got != 1 {
+		t.Fatalf("groups built for b = %d, want no second admission while the first is retiring", got)
+	}
+	if _, running := manager.Running()["b"]; running {
+		t.Fatal("b reported running before its new group was admitted")
+	}
+	// Once the old group finishes, the deferred reconcile re-runs on its own
+	// and b is re-admitted; a was never touched.
+	release()
+	waitManagerCondition(t, func() bool { return len(runnersFor(factory, "b")) == 2 }, "b re-admitted after its prior group retired")
+	waitPerShareServing(t, manager, "b")
+	if got := runnerFor(t, factory, "b").cfg.ResourceID; got != "b" {
+		t.Fatalf("re-admitted group signed for %q, want b", got)
+	}
+	manager.mu.Lock()
+	_, stillRetiring := manager.retiring["b"]
+	manager.mu.Unlock()
+	if stillRetiring {
+		t.Fatal("finished group still tracked as retiring")
+	}
+	a := runnerFor(t, factory, "a")
+	if len(runnersFor(factory, "a")) != 1 || len(a.setRouteCalls()) != 0 || manager.Diagnostics()["a"].State != diagnosticStateServing {
+		t.Fatalf("sibling a disturbed: groups=%d pushes=%v state=%q", len(runnersFor(factory, "a")), a.setRouteCalls(), manager.Diagnostics()["a"].State)
+	}
+}
+
+// TestPerShareManagerWarnsAboveTheSoftCap lowers the cap so three shares
+// exercise the warning; the production value is pinned separately. Not
+// parallel: it captures the process-global slog default.
+func TestPerShareManagerWarnsAboveTheSoftCap(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+		"c": perShareRow("c", 1, "on"),
+	}}
 	factory := newFakeGroupFactory()
 	var logs lockedLogBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
-	manager := newRunningPerShareManager(t, registry, factory)
-	waitManagerCondition(t, func() bool { return len(manager.Running()) == PerShareSoftCap+1 }, "every row converges")
-	if got := factory.startCount(); got != PerShareSoftCap+1 {
+	manager, err := NewPerShareManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.softCap != PerShareSoftCap || PerShareSoftCap != 300 {
+		t.Fatalf("default soft cap = %d (constant %d), want 300", manager.softCap, PerShareSoftCap)
+	}
+	manager.softCap = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("per-share manager did not stop")
+		}
+	})
+	waitPerShareServing(t, manager, "a", "b", "c")
+	if got := factory.startCount(); got != 3 {
 		t.Fatalf("group starts = %d, want one per share even above the soft cap", got)
 	}
-	if out := logs.String(); !strings.Contains(out, "exceeds its soft cap") || !strings.Contains(out, "shares=301") {
-		t.Fatalf("soft cap warning missing from logs: %q", out)
+	if out, want := logs.String(), fmt.Sprintf("shares=%d soft_cap=%d", 3, 2); !strings.Contains(out, "exceeds its soft cap") || !strings.Contains(out, want) {
+		t.Fatalf("soft cap warning missing from logs (want %q): %q", want, out)
+	}
+}
+
+// TestShareViewKeepsTheRowOnWhenTheRegistryWriteFails pins the view's error
+// discipline: a failed durable disable leaves the row on for the group's own
+// retry and never reaches the parent, whose listing would fail the same way.
+func TestShareViewKeepsTheRowOnWhenTheRegistryWriteFails(t *testing.T) {
+	writeErr := errors.New("temporary disk failure")
+	registry := &memoryRegistry{
+		shares:      map[string]connectorstate.LocalShare{"a": perShareRow("a", 4, "on")},
+		setFailures: []error{writeErr},
+	}
+	parent, err := NewPerShareManager(registry, newFakeGroupFactory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := &shareView{parent: parent, share: registry.share("a")}
+	if _, err := view.DisableAtCurrentEpoch(context.Background(), "a", 4); !errors.Is(err, writeErr) {
+		t.Fatalf("failed disable error = %v, want the registry failure", err)
+	}
+	rows, _ := view.List(context.Background())
+	if len(rows) != 1 || rows[0].DesiredState != desiredStateOn {
+		t.Fatalf("view after a failed disable = %+v, want the row still on", rows)
+	}
+	select {
+	case <-parent.trigger:
+		t.Fatal("a failed disable triggered the parent")
+	default:
+	}
+	// The retry lands: the view turns off and the parent is triggered.
+	share, err := view.DisableAtCurrentEpoch(context.Background(), "a", 4)
+	if err != nil || share == nil || share.DesiredState != desiredStateOff {
+		t.Fatalf("retried disable = (%+v, %v), want the row off", share, err)
+	}
+	rows, _ = view.List(context.Background())
+	if rows[0].DesiredState != desiredStateOff {
+		t.Fatalf("view after a successful disable = %+v, want off", rows)
+	}
+	select {
+	case <-parent.trigger:
+	default:
+		t.Fatal("a successful disable did not trigger the parent")
 	}
 }
 

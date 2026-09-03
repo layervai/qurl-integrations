@@ -65,7 +65,7 @@ func TestShareGroupModeRejectsUnknownValuesAtEachSource(t *testing.T) {
 		t.Fatalf("env typo = exit %d stderr %q, want usage error", env.code, env.stderr.String())
 	}
 	configDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("share_group_mode: both\n"), 0o600); err != nil {
+	if err := os.WriteFile(config.Path(configDir), []byte("share_group_mode: both\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	file := runCLI(t, &runOpts{args: []string{"list"}, configDir: configDir})

@@ -45,6 +45,8 @@ func NewShareManager(registry Registry, factory GroupFactory, mode GroupMode) (S
 		if _, err := ParseGroupMode(string(mode)); err != nil {
 			return nil, err
 		}
+		// Unreachable while ParseGroupMode and this switch agree; it is the
+		// guard for a mode added to one but not the other.
 		return nil, fmt.Errorf("share group mode %q has no reconciler", mode)
 	}
 }
@@ -73,8 +75,12 @@ type PerShareManager struct {
 	registry Registry
 	factory  GroupFactory
 
-	mu       sync.Mutex
-	groups   map[string]*shareGroup // resource ID -> its group
+	mu     sync.Mutex
+	groups map[string]*shareGroup // resource ID -> its group
+	// retiring holds removed groups that outlived groupStopTimeout. A resource
+	// whose prior group is still retiring is not re-admitted until that group
+	// has finished, so two live sessions are never signed for one resource.
+	retiring map[string]*shareGroup
 	lifetime context.Context
 
 	trigger chan struct{}
@@ -84,8 +90,16 @@ type PerShareManager struct {
 	failed chan error
 
 	// groupStopTimeout bounds waiting for removed groups to retire their
-	// sessions, on top of each Manager's own bounded stop.
+	// sessions. It is the daemon's exit-latency budget (the per-user job's
+	// ExitTimeout is 15s), not a correctness guarantee: a group that outlives
+	// it is tracked in retiring.
 	groupStopTimeout time.Duration
+	// retiringRecheck is how soon a reconcile that deferred a resource behind
+	// its retiring group is re-run.
+	retiringRecheck time.Duration
+	// softCap is the share count above which Reconcile warns; PerShareSoftCap
+	// in production, lowered by tests.
+	softCap int
 	// configure tunes every group Manager as it is built; tests shorten backoffs.
 	configure func(*Manager)
 }
@@ -107,9 +121,11 @@ func NewPerShareManager(registry Registry, factory GroupFactory) (*PerShareManag
 		return nil, errors.New("share daemon requires a registry and group factory")
 	}
 	return &PerShareManager{
-		registry: registry, factory: factory, groups: map[string]*shareGroup{},
+		registry: registry, factory: factory,
+		groups: map[string]*shareGroup{}, retiring: map[string]*shareGroup{},
 		trigger: make(chan struct{}, 1), failed: make(chan error, 1),
-		groupStopTimeout: 15 * time.Second,
+		groupStopTimeout: defaultRunnerStopTimeout, retiringRecheck: time.Second,
+		softCap: PerShareSoftCap,
 	}, nil
 }
 
@@ -158,7 +174,9 @@ func (m *PerShareManager) Run(ctx context.Context) (retErr error) {
 // Only the registry listing is fatal. A removed group that does not retire in
 // time is logged and left to finish on its own, so one stuck share never takes
 // its serving siblings down — the mirror of single mode tolerating one route's
-// failed push. Groups run under Run's lifetime context, as in
+// failed push; its resource is not re-admitted until it has finished, and a
+// reconcile that had to wait for one is re-run shortly. Groups run under Run's
+// lifetime context, as in
 // Manager.Reconcile; ctx bounds this reconcile only. Production drives
 // Reconcile solely from Run's long-lived context: a group started before Run
 // (tests only) is bound to context.Background and retired only by Run's own
@@ -169,16 +187,18 @@ func (m *PerShareManager) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("list desired local shares: %w", err)
 	}
 	desired := desiredShares(shares)
-	if len(desired) > PerShareSoftCap {
+	if len(desired) > m.softCap {
 		slog.WarnContext(ctx, "share daemon per-share mode exceeds its soft cap; the platform's per-owner session budgets may leave the excess retrying",
-			"shares", len(desired), "soft_cap", PerShareSoftCap)
+			"shares", len(desired), "soft_cap", m.softCap)
 	}
 	keep := make(map[string]struct{}, len(desired))
 	for i := range desired {
 		keep[desired[i].ResourceID] = struct{}{}
 	}
 	var stopped []*shareGroup
+	deferred := 0
 	m.mu.Lock()
+	m.pruneRetiredLocked()
 	for resourceID, group := range m.groups {
 		if _, ok := keep[resourceID]; ok {
 			continue
@@ -194,6 +214,16 @@ func (m *PerShareManager) Reconcile(ctx context.Context) error {
 			}
 			continue
 		}
+		if _, ok := m.retiring[share.ResourceID]; ok {
+			// The prior group for this resource is still retiring its session.
+			// Admitting a second one now would sign two live sessions for one
+			// resource — on the platform this mode exists for, the case most
+			// likely to be refused or to evict the wrong session — so wait.
+			deferred++
+			slog.WarnContext(ctx, "share daemon is waiting for a resource's prior share group to retire before re-admitting it",
+				"resource_id", share.ResourceID)
+			continue
+		}
 		group, err := m.startGroupLocked(share)
 		if err != nil {
 			// Unreachable by construction (the factory is non-nil and the view is
@@ -206,11 +236,49 @@ func (m *PerShareManager) Reconcile(ctx context.Context) error {
 		m.groups[share.ResourceID] = group
 	}
 	m.mu.Unlock()
+	if deferred > 0 {
+		m.scheduleReconcile(m.retiringRecheck)
+	}
 	if err := m.stopGroups(stopped); err != nil {
 		slog.WarnContext(ctx, "share daemon could not cleanly retire a removed share group; its siblings keep serving",
 			"error", redactShareError(err))
 	}
 	return nil
+}
+
+// pruneRetiredLocked forgets retiring groups that have finished.
+func (m *PerShareManager) pruneRetiredLocked() {
+	for resourceID, group := range m.retiring {
+		select {
+		case <-group.done:
+			delete(m.retiring, resourceID)
+		default:
+		}
+	}
+}
+
+// scheduleReconcile triggers a reconciliation after delay, bounded by the
+// daemon lifetime.
+func (m *PerShareManager) scheduleReconcile(delay time.Duration) {
+	ctx := m.lifetimeContext()
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+			m.Trigger()
+		}
+	}()
+}
+
+func (m *PerShareManager) lifetimeContext() context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lifetime == nil {
+		return context.Background()
+	}
+	return m.lifetime
 }
 
 // startGroupLocked builds and launches one share's Manager. The group is
@@ -252,8 +320,12 @@ func (m *PerShareManager) reportGroupFailure(resourceID string, err error) {
 
 // stopGroups cancels every group at once and waits for each to retire its
 // session, bounded by one shared deadline so one wedged shutdown cannot hang
-// the daemon behind the others. A group that does not stop in time is left to
-// finish on its own — its context is already canceled — and reported.
+// the daemon behind the others. The deadline is an exit-latency budget, not a
+// guarantee: a Manager's own stop can take up to two of its bounded waits when
+// it was mid-way through retiring an emptied group. A group that does not stop
+// in time is left to finish on its own — its context is already canceled —
+// recorded as retiring so its resource is not re-admitted meanwhile, and
+// reported.
 func (m *PerShareManager) stopGroups(groups []*shareGroup) error {
 	if len(groups) == 0 {
 		return nil
@@ -269,7 +341,11 @@ func (m *PerShareManager) stopGroups(groups []*shareGroup) error {
 		case <-group.done:
 			errs = errors.Join(errs, groupStopError(group.view.resourceID(), group.exitErr))
 		case <-stopCtx.Done():
-			errs = errors.Join(errs, fmt.Errorf("share group for resource %s did not stop within %s", group.view.resourceID(), m.groupStopTimeout))
+			resourceID := group.view.resourceID()
+			m.mu.Lock()
+			m.retiring[resourceID] = group
+			m.mu.Unlock()
+			errs = errors.Join(errs, fmt.Errorf("share group for resource %s did not stop within %s", resourceID, m.groupStopTimeout))
 		}
 	}
 	return errs
@@ -409,8 +485,13 @@ func (v *shareView) DisableAtCurrentEpoch(ctx context.Context, resourceID string
 	case err == nil && share != nil:
 		v.set(share)
 	case err == nil || errors.Is(err, os.ErrNotExist):
+		// The row is durably off or already deleted: either way it is no longer
+		// desired, so the view turns off and the parent prunes the group. Any
+		// other error leaves the view on (the group keeps retrying the persist
+		// with its own backoff) and must not reach the parent, whose registry
+		// listing would fail the same way and end the daemon.
 		v.mu.Lock()
-		v.share.DesiredState = "off"
+		v.share.DesiredState = desiredStateOff
 		v.mu.Unlock()
 	default:
 		return nil, err

@@ -83,6 +83,11 @@ session:
   operator attribute the retrying excess to the budget rather than to the
   shares.
 
+A removed group that outlives the daemon's stop bound is tracked as
+*retiring*, and its resource is not re-admitted until that group has finished,
+so two live sessions are never signed for one resource; a reconcile that had
+to wait for one is re-run shortly.
+
 Reconcile semantics are identical in both modes: `publish` adds a group,
 `stop` removes exactly that group (retiring its admission), `restart` is a
 `RestartRoute` on that share's own group, a refused route retires and

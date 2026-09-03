@@ -540,7 +540,9 @@ status` / `qurl inspect` output. `per-share` simply pays the per-session cost
 for each share, so the per-owner platform budgets for sessions and heartbeat
 streams cap it well below the [2000-share scale](#scale) of `single`; above
 300 shares the daemon logs a warning so a retrying excess can be attributed
-to that budget.
+to that budget. Start-up in `per-share` mode admits the shares one after
+another on the same shared admission path, so a large fleet takes roughly one
+knock round-trip per share to come fully up.
 
 The mode is part of the daemon's job definition. To switch a machine that is
 already sharing, set the mode durably and run any command that installs the
