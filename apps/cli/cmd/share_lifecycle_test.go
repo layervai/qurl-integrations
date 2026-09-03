@@ -1578,6 +1578,49 @@ func TestDeleteConvergesLocalShareWhoseRetirementWasForgotten(t *testing.T) {
 	}
 }
 
+// TestDeleteRefusesLocalShareWhoseBindingMismatches is the other shape of a
+// registry row with no retirable binding: a binding is still held under the
+// row's Connector ID but for a different resource. That is inconsistent
+// state, not a forgotten retirement, so cleanup must say so and leave the
+// row rather than strand a live binding the next publish would fail on.
+func TestDeleteRefusesLocalShareWhoseBindingMismatches(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	mismatched := localShareFixture(apitest.NewServer(t))
+	mismatched.ConnectorID = local.ConnectorID
+	seedLocalConnectorResourceBinding(t, stateDir, &mismatched)
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{
+		args:               []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+		env:                map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+		shareRegistry:      registry,
+		shareDaemonFactory: func(string, string) shareDaemonController { return &recordingShareDaemon{} },
+		shareStateDir:      stateDir,
+	})
+	if res.code != 0 || !strings.Contains(res.stderr.String(), "did not finish") || !strings.Contains(res.stderr.String(), "does not match the local share identity") {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if _, err := registry.Get(context.Background(), srv.Key.CRID); err != nil {
+		t.Fatalf("mismatched local share was removed: %v", err)
+	}
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), mismatched.ConnectorID)
+	if err != nil || !found || retired {
+		t.Fatalf("mismatched binding found=%t retired=%t err=%v, want it left live", found, retired, err)
+	}
+}
+
 func TestRemoteLifecycleWorksWithoutLocalRegistryRow(t *testing.T) {
 	for _, command := range []string{"stop", "status", "inspect"} {
 		t.Run(command, func(t *testing.T) {

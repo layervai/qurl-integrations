@@ -304,24 +304,12 @@ func (e *localEnrollment) resolveID(ctx context.Context, stateDir, agentID strin
 		return "", err
 	}
 	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
-	for generation := 0; generation <= 1024; generation++ {
-		binding, retired, found, err := resourceStore.ConnectorResourceBinding(ctx, id)
-		if err != nil {
-			return "", err
-		}
-		if !found || !retired {
-			break
-		}
-		if e.requestedID != "" {
-			return "", exitcode.UsageError(fmt.Errorf("connector ID %q was deleted; choose a new value with --id", id))
-		}
-		if generation == 1024 {
-			return "", errors.New("local Connector replacement chain exceeds the durable state limit")
-		}
-		id, err = connectorstate.ReplacementConnectorID(id, binding.ResourceID)
-		if err != nil {
-			return "", err
-		}
+	id, advanced, err := resourceStore.ResolveDefaultConnectorID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if advanced > 0 && e.requestedID != "" {
+		return "", exitcode.UsageError(fmt.Errorf("connector ID %q was deleted; choose a new value with --id", e.requestedID))
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
