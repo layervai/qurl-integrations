@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -100,7 +102,10 @@ func fakeEnvironment(t *testing.T, rules []fakeRule) *environment {
 		t.Fatal(err)
 	}
 	stateDir := filepath.Join(dir, "state")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+	// The CLI's registry reader refuses a state directory that is not
+	// owner-only (0700 on Unix, an inheritance-protected ACL on Windows), so
+	// the fixture directory is created through the CLI's own helper.
+	if err := connectorstate.EnsureDirMode(stateDir); err != nil {
 		t.Fatal(err)
 	}
 	states := filepath.Join(dir, "rule-state")
@@ -144,6 +149,12 @@ func writeRegistry(t *testing.T, stateDir string, rows ...connectorstate.LocalSh
 	}
 	if err := os.WriteFile(filepath.Join(stateDir, connectorstate.LocalSharesFile), raw, 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := readRegistryByConnectorID(context.Background(), stateDir); err != nil {
+		if runtime.GOOS == "windows" && strings.Contains(err.Error(), "ACL") {
+			t.Skipf("registry fixture is not owner-only on this Windows runner: %v", err)
+		}
+		t.Fatalf("registry fixture rejected by the CLI reader: %v", err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 // CLI exit codes this harness reacts to (apps/cli/internal/exitcode).
 const (
 	cliExitOK          = 0
+	cliExitNotFound    = 5
 	cliExitRateLimited = 9
 	cliExitServerError = 10
 	cliExitUnavailable = 11

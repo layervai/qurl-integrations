@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,6 +115,13 @@ func teardownCandidates(ctx context.Context, opts *options, env *environment) (c
 	byID := map[string]shareRecord{}
 	pattern := connectorIDPattern(opts.run)
 	raw, err := os.ReadFile(filepath.Clean(filepath.Join(opts.out, manifestFile)))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, "", fmt.Errorf("read run manifest: %w", err)
+	}
+	if err != nil {
+		// No manifest: the sweep still knows this invocation's origin port.
+		originTarget = "http://127.0.0.1:" + itoa(opts.port)
+	}
 	if err == nil {
 		var m manifest
 		if err := json.Unmarshal(raw, &m); err != nil {
@@ -187,6 +195,12 @@ func deleteOne(ctx context.Context, env *environment, lim *limiter, rec *shareRe
 			return result
 		}
 		result.Error = env.redactor.apply(lastErrorLine(res.Stderr))
+		if res.ExitCode == cliExitNotFound {
+			// The resource is already gone (or retired): the requested outcome,
+			// so a repeated teardown of a clean run stays clean.
+			result.Deleted, result.AlreadyGone = true, true
+			return result
+		}
 		if !throttled && res.ExitCode != cliExitUnavailable && res.ExitCode != cliExitServerError {
 			return result
 		}
@@ -194,7 +208,7 @@ func deleteOne(ctx context.Context, env *environment, lim *limiter, rec *shareRe
 		select {
 		case <-ctx.Done():
 			return result
-		case <-time.After(min(defaultRetryAfter*time.Duration(attempt), maxRetryBackoff)):
+		case <-time.After(min(retryAfterFallback*time.Duration(attempt), maxRetryBackoff)):
 		}
 	}
 	return result

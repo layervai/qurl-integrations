@@ -9,9 +9,12 @@ import (
 	"time"
 )
 
+// retryAfterFallback is the pause used when the CLI reported no Retry-After;
+// a var so tests can shorten it.
+var retryAfterFallback = 15 * time.Second
+
 const (
 	publishTimeout     = 3 * time.Minute
-	defaultRetryAfter  = 15 * time.Second
 	maxRetryBackoff    = 60 * time.Second
 	limiterGrowStreak  = 8
 	limiterPollBackoff = 100 * time.Millisecond
@@ -42,7 +45,7 @@ type publishSummary struct {
 	Started            time.Time      `json:"started"`
 	Finished           time.Time      `json:"finished"`
 	WallSeconds        float64        `json:"wall_s"`
-	Attempted          int            `json:"attempted"`
+	Attempts           int            `json:"attempts"`
 	Published          int            `json:"published"`
 	Existing           int            `json:"found_existing"`
 	Resumed            int            `json:"resumed_from_manifest"`
@@ -107,9 +110,9 @@ func (l *limiter) release(throttled bool, retryAfter time.Duration) {
 		l.streak = 0
 		l.limit = max(1, l.limit/2)
 		if retryAfter <= 0 {
-			retryAfter = defaultRetryAfter
+			retryAfter = retryAfterFallback
 		}
-		l.pauseUntil = time.Now().Add(retryAfter)
+		l.pauseUntil = time.Now().Add(min(retryAfter, maxRetryBackoff))
 	} else {
 		l.streak++
 		if l.streak >= limiterGrowStreak && l.limit < l.maxLimit {
@@ -182,6 +185,7 @@ func (p *publisher) publishOne(ctx context.Context, id string) {
 	}
 	for attempt := 1; attempt <= 1+p.opts.publishRetries; attempt++ {
 		if err := p.lim.acquire(ctx); err != nil {
+			p.recordAbandoned(rec, "publish interrupted: "+err.Error())
 			return
 		}
 		limit := p.lim.current()
@@ -195,30 +199,57 @@ func (p *publisher) publishOne(ctx context.Context, id string) {
 		rec.HTTP429 += res.Calls.TooMany
 		rec.ExitCode = res.ExitCode
 		p.m.mu.Unlock()
-		outcome := p.applyResult(ctx, rec, res)
+		var registered *registryRow
+		if res.ExitCode != cliExitOK {
+			// Read the registry before taking the manifest lock: at N=1000 the
+			// CLI decoder verifies every row's key, which must not stall peers.
+			registered = p.lookupRegistry(ctx, id)
+		}
+		outcome := p.applyResult(rec, res, registered)
+		if outcome == outcomeRetry && attempt == 1+p.opts.publishRetries {
+			// No attempts left: this is the terminal failure, not another retry.
+			p.m.mu.Lock()
+			reason := "publish gave up after " + itoa(attempt) + " attempts: " + rec.Error
+			p.m.mu.Unlock()
+			p.recordAbandoned(rec, reason)
+			return
+		}
 		p.event(id, outcome, res.Wall.Milliseconds(), limit, res.Calls.Total, res.Calls.TooMany, res.ExitCode)
 		_ = p.m.save()
 		if outcome != outcomeRetry {
 			return
 		}
-		backoff := res.Calls.RetryWaitSum
+		backoff := min(res.Calls.RetryWaitSum, maxRetryBackoff)
 		if backoff <= 0 {
-			backoff = min(defaultRetryAfter*time.Duration(attempt), maxRetryBackoff)
+			backoff = min(retryAfterFallback*time.Duration(attempt), maxRetryBackoff)
 		}
 		p.lg.logf("%s: exit %d, retrying in %s (attempt %d/%d)", id, res.ExitCode, backoff, attempt, 1+p.opts.publishRetries)
 		select {
 		case <-ctx.Done():
+			p.recordAbandoned(rec, "publish interrupted before the next attempt")
 			return
 		case <-time.After(backoff):
 		}
 	}
 }
 
+// recordAbandoned closes a share that never reached a decision as a terminal
+// failure, so the verdict can never count it as absent rather than failed.
+func (p *publisher) recordAbandoned(rec *shareRecord, reason string) {
+	p.m.mu.Lock()
+	rec.Error = reason
+	rec.TimedOut = false
+	exit := rec.ExitCode
+	p.m.mu.Unlock()
+	p.event(rec.ID, outcomeFailed, 0, p.lim.current(), 0, 0, exit)
+	_ = p.m.save()
+}
+
 // applyResult records one attempt's outcome. A non-zero exit with the share
 // already in the local registry is "registered, not yet serving": the daemon
 // owns it from here and the serving wait will report on it, so the harness
 // does not spend another publish's worth of API budget to re-ask.
-func (p *publisher) applyResult(ctx context.Context, rec *shareRecord, res *cliResult) string {
+func (p *publisher) applyResult(rec *shareRecord, res *cliResult, registered *registryRow) string {
 	p.m.mu.Lock()
 	defer p.m.mu.Unlock()
 	if res.ExitCode == cliExitOK {
@@ -238,7 +269,7 @@ func (p *publisher) applyResult(ctx context.Context, rec *shareRecord, res *cliR
 	if res.Err != nil && rec.Error == "" {
 		rec.Error = res.Err.Error()
 	}
-	if registered := p.lookupRegistry(ctx, rec.ID); registered != nil {
+	if registered != nil {
 		rec.CRID, rec.ResourceID, rec.RoutingID = registered.CRID, registered.ResourceID, registered.ConnectorRoutingID
 		rec.TimedOut = true
 		return outcomeTimeout
@@ -287,7 +318,7 @@ func (p *publisher) event(id, outcome string, wallMS int64, limit, calls, tooMan
 		p.summary.Retries++
 	}
 	if outcome != outcomeResumed {
-		p.summary.Attempted++
+		p.summary.Attempts++
 		p.summary.APICalls += calls
 		p.summary.HTTP429 += tooMany
 	}

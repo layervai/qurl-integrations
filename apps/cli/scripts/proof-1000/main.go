@@ -55,6 +55,7 @@ type options struct {
 	skipHold         bool
 	rerender         bool
 	probe            string
+	maxProbes        int
 	windows          []knownWindow
 }
 
@@ -111,6 +112,7 @@ func parseOptions(args []string, stderr io.Writer) (*options, error) {
 	fs.BoolVar(&opts.teardown, "teardown", false, "delete every proof-<run>-* share and verify they are gone")
 	fs.BoolVar(&opts.skipVerify, "skip-verify", false, "skip end-to-end fetches")
 	fs.BoolVar(&opts.skipHold, "skip-hold", false, "skip the steady-state hold")
+	fs.IntVar(&opts.maxProbes, "max-probes", 25, "maximum SDK access probes per run (each mints a share link); 0 = unlimited")
 	fs.StringVar(&opts.probe, "probe", "", "probe one CRID's visitor access path through the SDK and print the raw deny code or content HTTP status as JSON")
 	fs.BoolVar(&opts.rerender, "rerender", false, "re-render report.md/report.json for an existing run directory from its report.json (applies --window) without touching the platform")
 	fs.Func("window", "known platform window to attribute failures to, as label=<RFC3339 start>/<RFC3339 end> (repeatable)", func(value string) error {
@@ -127,26 +129,8 @@ func parseOptions(args []string, stderr io.Writer) (*options, error) {
 	if fs.NArg() != 0 {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	if opts.probe != "" && opts.run == "" {
-		opts.run = "probe"
-	}
-	if !runNamePattern.MatchString(opts.run) {
-		return nil, errors.New("--run is required and must match ^[a-z0-9][a-z0-9-]{0,19}$")
-	}
-	if opts.n < 1 || opts.n > 99999 {
-		return nil, errors.New("--n must be between 1 and 99999")
-	}
-	if opts.concurrency < 1 || opts.fetchConcurrency < 1 {
-		return nil, errors.New("--concurrency and --fetch-concurrency must be at least 1")
-	}
-	if opts.port < 1024 || opts.port > 65535 {
-		return nil, errors.New("--port must be between 1024 and 65535")
-	}
-	if opts.consumeBin == "" {
-		opts.consumeBin = opts.qurlBin
-	}
-	if opts.out == "" {
-		opts.out = filepath.Join("proof-1000-runs", opts.run)
+	if err := validateOptions(opts); err != nil {
+		return nil, err
 	}
 	abs, err := filepath.Abs(opts.out)
 	if err != nil {
@@ -154,6 +138,49 @@ func parseOptions(args []string, stderr io.Writer) (*options, error) {
 	}
 	opts.out = abs
 	return opts, nil
+}
+
+// validateOptions rejects every value that would otherwise fail late — a
+// zero ticker interval panics in the hold, a negative retry count publishes
+// nothing — and fills the defaults that depend on other flags.
+func validateOptions(opts *options) error {
+	if opts.probe != "" && opts.run == "" {
+		opts.run = "probe"
+	}
+	if !runNamePattern.MatchString(opts.run) {
+		return errors.New("--run is required and must match ^[a-z0-9][a-z0-9-]{0,19}$")
+	}
+	if opts.n < 1 || opts.n > 99999 {
+		return errors.New("--n must be between 1 and 99999")
+	}
+	if opts.concurrency < 1 || opts.fetchConcurrency < 1 {
+		return errors.New("--concurrency and --fetch-concurrency must be at least 1")
+	}
+	if opts.port < 1024 || opts.port > 65535 {
+		return errors.New("--port must be between 1024 and 65535")
+	}
+	return validateBudgets(opts)
+}
+
+// validateBudgets checks the timing and budget flags and fills the defaults
+// that depend on other flags.
+func validateBudgets(opts *options) error {
+	if opts.fetchInterval <= 0 || opts.servingDeadline <= 0 || opts.hold < 0 {
+		return errors.New("--fetch-interval and --serving-deadline must be positive and --hold must not be negative")
+	}
+	if opts.publishRetries < 0 || opts.sample < 0 || opts.maxProbes < 0 {
+		return errors.New("--publish-retries, --sample, and --max-probes must not be negative")
+	}
+	if opts.probe != "" && (opts.teardown || opts.rerender) {
+		return errors.New("--probe cannot be combined with --teardown or --rerender")
+	}
+	if opts.consumeBin == "" {
+		opts.consumeBin = opts.qurlBin
+	}
+	if opts.out == "" {
+		opts.out = filepath.Join("proof-1000-runs", opts.run)
+	}
+	return nil
 }
 
 // connectorID is the Connector ID for share index i (1-based) of a run.

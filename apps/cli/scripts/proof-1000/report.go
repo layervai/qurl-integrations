@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+const (
+	stagePublish           = "publish"
+	stagePublishNotServing = "publish-not-serving"
+)
+
 type failureDetail struct {
 	At     time.Time `json:"at"`
 	ID     string    `json:"id"`
@@ -108,11 +113,22 @@ type report struct {
 	DaemonLog   []string        `json:"daemon_log"`
 	Estimate    estimate        `json:"estimate"`
 	Shares      []*shareRecord  `json:"shares"`
+	Probes      probeUsage      `json:"probes"`
+}
+
+type probeUsage struct {
+	Max     int   `json:"max"`
+	Used    int64 `json:"used"`
+	Skipped int64 `json:"skipped_over_budget"`
 }
 
 func (r *report) finalize(opts *options, env *environment, m *manifest) {
 	r.GeneratedAt = time.Now()
 	r.Shares = m.ordered()
+	r.Probes = probeUsage{Max: env.maxProbes, Used: min(env.probesUsed.Load(), int64(env.maxProbes)), Skipped: env.probesDenied.Load()}
+	if env.maxProbes == 0 {
+		r.Probes.Used = env.probesUsed.Load()
+	}
 	needles := make([]string, 0, 2*len(r.Shares))
 	for _, rec := range r.Shares {
 		needles = append(needles, rec.CRID, rec.ResourceID)
@@ -180,9 +196,9 @@ func (r *report) collectFailures() {
 		if rec.Error == "" && rec.CRID != "" {
 			continue
 		}
-		stage := "publish"
+		stage := stagePublish
 		if rec.TimedOut {
-			stage = "publish-not-serving"
+			stage = stagePublishNotServing
 		}
 		r.Failures = append(r.Failures, failureDetail{
 			At: r.publishFailureTime(rec), ID: rec.ID, CRID: rec.CRID, Stage: stage, Error: rec.Error,
@@ -253,8 +269,14 @@ func (r *report) judge(verifyExpected, holdExpected bool) {
 	} else if r.Publish.Failed > 0 {
 		fail("%d publishes failed outright", r.Publish.Failed)
 	}
+	if r.ServingWait.Last.Total != r.N {
+		fail("only %d of the %d requested shares were published (the rest never reached the daemon)", r.ServingWait.Last.Total, r.N)
+	}
 	if !r.ServingWait.AllServing {
-		fail("only %d of %d shares serving after %.0fs", r.ServingWait.Last.Serving, r.ServingWait.Last.Total, r.ServingWait.WaitedS)
+		fail("only %d of %d published shares serving after %.0fs", r.ServingWait.Last.Serving, r.ServingWait.Last.Total, r.ServingWait.WaitedS)
+	}
+	if publishFailures := r.countFailures(stagePublish); publishFailures > 0 && (r.Publish == nil || r.Publish.Failed == 0) {
+		fail("%d shares carry a publish failure", publishFailures)
 	}
 	r.judgeVerify(verifyExpected, fail)
 	r.judgeHold(holdExpected, fail)
@@ -266,6 +288,16 @@ func (r *report) judge(verifyExpected, holdExpected bool) {
 		verdict = append(verdict, r.windowVerdict())
 	}
 	r.Verdict = verdict
+}
+
+func (r *report) countFailures(stage string) int {
+	count := 0
+	for i := range r.Failures {
+		if r.Failures[i].Stage == stage {
+			count++
+		}
+	}
+	return count
 }
 
 func (r *report) judgeVerify(expected bool, fail func(string, ...any)) {
@@ -285,8 +317,8 @@ func (r *report) judgeHold(expected bool, fail func(string, ...any)) {
 		fail("hold did not run")
 	default:
 		if r.Hold.DegradedSamples > 0 {
-			fail("%d of %d hold samples saw fewer than %d serving (min %d; %d inside known windows, %d outside)",
-				r.Hold.DegradedSamples, r.Hold.Samples, r.N, r.Hold.MinServing, r.Hold.DegradedInWindow, r.Hold.DegradedOutside)
+			fail("%d of %d hold samples saw fewer than all %d published shares serving (min %d; %d inside known windows, %d outside)",
+				r.Hold.DegradedSamples, r.Hold.Samples, r.ServingWait.Last.Total, r.Hold.MinServing, r.Hold.DegradedInWindow, r.Hold.DegradedOutside)
 		}
 		if r.Hold.FetchFailures > 0 {
 			fail("%d of %d hold fetches failed (%d inside known windows, %d outside)", r.Hold.FetchFailures, r.Hold.Fetches, r.Hold.FetchFailuresInWindow, r.Hold.FetchFailuresOutside)
@@ -594,9 +626,23 @@ func renderEstimate(b *strings.Builder, r *report) {
 }
 
 func renderFailures(b *strings.Builder, r *report) {
-	fmt.Fprintf(b, "\n## Failures (%d)\n\n%s\n", len(r.Failures), classSummary(r.Failures))
+	var failures, notes []failureDetail
 	for i := range r.Failures {
-		f := &r.Failures[i]
+		if r.Failures[i].Stage == stagePublishNotServing {
+			notes = append(notes, r.Failures[i])
+		} else {
+			failures = append(failures, r.Failures[i])
+		}
+	}
+	if len(notes) > 0 {
+		fmt.Fprintf(b, "\n## Notes: registered but not serving at publish exit (%d)\n\nThe daemon owns these from registration on; the serving curve above is their verdict.\n\n", len(notes))
+		for i := range notes {
+			fmt.Fprintf(b, "- **%s** %s: %s\n", notes[i].ID, notes[i].CRID, notes[i].Error)
+		}
+	}
+	fmt.Fprintf(b, "\n## Failures (%d)\n\n%s\n", len(failures), classSummary(failures))
+	for i := range failures {
+		f := &failures[i]
 		window := "outside any declared window"
 		if f.Window != "" {
 			window = "inside window " + f.Window

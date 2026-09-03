@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	qurl "github.com/layervai/qurl-go/qurl"
@@ -48,6 +49,23 @@ type environment struct {
 
 	childEnv []string
 	redactor *redactor
+
+	// maxProbes bounds SDK-level diagnostic probes per run: each one mints a
+	// share link, so a widespread platform flap must not be amplified by the
+	// harness spending more budget on every failure.
+	maxProbes    int
+	probesUsed   atomic.Int64
+	probesDenied atomic.Int64
+}
+
+// probe runs the SDK access probe while the run's probe budget lasts and
+// counts the probes it had to skip.
+func (e *environment) probe(ctx context.Context, crid string) *fetchDiagnosis {
+	if e.maxProbes > 0 && e.probesUsed.Add(1) > int64(e.maxProbes) {
+		e.probesDenied.Add(1)
+		return nil
+	}
+	return probeAccess(ctx, e, crid)
 }
 
 // launchAgent is the subset of the resident daemon's job definition the
@@ -72,7 +90,7 @@ func resolveEnvironment(ctx context.Context, opts *options) (*environment, error
 	}
 	env := &environment{
 		StateDir: stateDir, SocketPath: connectordaemon.StateSocketPath(stateDir), LogDir: logDir,
-		QurlBin: opts.qurlBin, ConsumeBin: opts.consumeBin, GOOS: runtime.GOOS,
+		QurlBin: opts.qurlBin, ConsumeBin: opts.consumeBin, GOOS: runtime.GOOS, maxProbes: opts.maxProbes,
 	}
 	agent, err := readLaunchAgent(ctx)
 	if err != nil {

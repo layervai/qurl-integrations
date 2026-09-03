@@ -110,6 +110,11 @@ func (s *statusSample) count(diag *connectordaemon.ResourceDiagnostic) {
 func waitAllServing(ctx context.Context, resourceIDs []string, socket string, start time.Time,
 	deadline, interval time.Duration, onSample func(statusSample),
 ) (statusSample, bool) {
+	if len(resourceIDs) == 0 {
+		sample := takeStatusSample(ctx, resourceIDs, socket, start)
+		onSample(sample)
+		return sample, false
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	for {

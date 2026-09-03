@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,8 +22,9 @@ var daemonLogFiles = []string{"share-daemon.log", "share-daemon.err.log"}
 // explanation for every non-serving share the report lists.
 func collectDaemonLogs(logDir string, since, until time.Time, needles []string, red *redactor, limit int) []string {
 	var out []string
+	set := newNeedleSet(needles)
 	for _, name := range daemonLogFiles {
-		out = append(out, scanDaemonLog(filepath.Join(logDir, name), since, until, needles, red, limit-len(out))...)
+		out = append(out, scanDaemonLog(filepath.Join(logDir, name), since, until, set, red, limit-len(out))...)
 		if len(out) >= limit {
 			break
 		}
@@ -30,7 +32,7 @@ func collectDaemonLogs(logDir string, since, until time.Time, needles []string, 
 	return out
 }
 
-func scanDaemonLog(path string, since, until time.Time, needles []string, red *redactor, limit int) []string {
+func scanDaemonLog(path string, since, until time.Time, needles *needleSet, red *redactor, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
@@ -51,7 +53,7 @@ func scanDaemonLog(path string, since, until time.Time, needles []string, red *r
 		if err != nil || at.Before(since) || at.After(until) {
 			continue
 		}
-		if !mentionsAny(line, needles) && !mentionsThrottle(line) {
+		if !needles.matches(line) && !mentionsThrottle(line) {
 			continue
 		}
 		out = append(out, red.apply(line))
@@ -60,6 +62,48 @@ func scanDaemonLog(path string, since, until time.Time, needles []string, red *r
 		}
 	}
 	return out
+}
+
+// needleSet indexes identifiers so a daemon log line is matched by looking
+// up its crid=/resource_id= tokens instead of scanning thousands of needles.
+type needleSet struct {
+	ids   map[string]bool
+	plain []string
+}
+
+var logIdentifierToken = regexp.MustCompile(`(?:crid|resource_id)=([A-Za-z0-9_-]+)`)
+
+func newNeedleSet(needles []string) *needleSet {
+	set := &needleSet{ids: make(map[string]bool, len(needles))}
+	for _, needle := range needles {
+		if needle == "" {
+			continue
+		}
+		set.ids[needle] = true
+		if len(set.plain) < smallNeedleScan {
+			set.plain = append(set.plain, needle)
+		}
+	}
+	return set
+}
+
+// smallNeedleScan keeps a plain substring scan for small needle sets, where
+// identifiers may appear without a key= prefix.
+const smallNeedleScan = 64
+
+func (n *needleSet) matches(line string) bool {
+	if n == nil || len(n.ids) == 0 {
+		return false
+	}
+	for _, m := range logIdentifierToken.FindAllStringSubmatch(line, -1) {
+		if n.ids[m[1]] {
+			return true
+		}
+	}
+	if len(n.ids) <= smallNeedleScan {
+		return mentionsAny(line, n.plain)
+	}
+	return false
 }
 
 func mentionsAny(line string, needles []string) bool {

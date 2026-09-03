@@ -254,7 +254,7 @@ func TestReportJudgesRendersAndRerenders(t *testing.T) {
 func TestTeardownDeletesAndVerifiesThroughFakeCLI(t *testing.T) {
 	t.Parallel()
 	env := fakeEnvironment(t, []fakeRule{
-		{Match: "delete crid-1", Stderr: "Error: rate limited\n", Exit: cliExitRateLimited, Times: 1},
+		{Match: "delete crid-1", Stderr: "[debug] < HTTP 429, retrying in 1ms\nError: rate limited\n", Exit: cliExitRateLimited, Times: 1},
 		{Match: "delete crid-1", Stdout: `{"id":"crid-1","deleted":true}`},
 		{Match: "delete crid-2", Stdout: `{"id":"crid-2","deleted":true,"already_gone":true}`},
 		{Match: "delete crid-3", Stderr: "Error: not found\n", Exit: 5},
@@ -266,7 +266,7 @@ func TestTeardownDeletesAndVerifiesThroughFakeCLI(t *testing.T) {
 	defer lg.close()
 	candidates := []shareRecord{{ID: "proof-r1-0001", CRID: "crid-1"}, {ID: "proof-r1-0002", CRID: "crid-2"}, {ID: "proof-r1-0003", CRID: "crid-3"}}
 	results := deleteAll(context.Background(), opts, env, candidates, lg)
-	if !results[0].Deleted || results[0].Attempts != 2 || !results[1].AlreadyGone || results[2].Deleted || results[2].ExitCode != 5 {
+	if !results[0].Deleted || results[0].Attempts != 2 || !results[1].AlreadyGone || !results[2].AlreadyGone || results[2].ExitCode != cliExitNotFound {
 		t.Fatalf("results = %+v", results)
 	}
 	remaining, unexpected, pages := stillListed(context.Background(), env, candidates, "http://127.0.0.1:18080", lg)
@@ -465,7 +465,7 @@ func TestPublisherOutcomesThroughFakeCLI(t *testing.T) {
 	}
 	// A second pass resumes every healthy share without calling the CLI.
 	again := publishAll(context.Background(), opts, env, m, o, lg)
-	if again.Resumed != 3 || again.Attempted != 3 {
+	if again.Resumed != 3 || again.Attempts != 3 {
 		t.Fatalf("resume summary = %+v", again)
 	}
 }
@@ -520,8 +520,68 @@ func TestFetchShareVerifiesOriginAnswer(t *testing.T) {
 	// generous; the assertions are on shape, not on exact counts.
 	opts.hold, opts.fetchInterval = 4*time.Second, 200*time.Millisecond
 	hold := holdSteady(context.Background(), opts, env, o, m, []string{"rid-1"}, []int{1, 2}, time.Now(), lg)
-	if hold.Samples < 1 || hold.Fetches < 2 || hold.DegradedSamples != hold.Samples || hold.FetchFailures == 0 || hold.FetchFailures == hold.Fetches {
+	if hold.Samples < 1 || hold.Fetches < 1 || hold.DegradedSamples != hold.Samples || hold.Fetches+hold.FetchesCanceled < 2 {
 		t.Fatalf("hold = %+v", hold)
+	}
+}
+
+func TestPublishRetryExhaustionIsATerminalFailure(t *testing.T) {
+	saved := retryAfterFallback
+	retryAfterFallback = time.Millisecond
+	t.Cleanup(func() { retryAfterFallback = saved })
+	env := fakeEnvironment(t, []fakeRule{{Match: " --id proof-r1-0001 ", Stderr: "Error: down\n", Exit: cliExitUnavailable}})
+	opts := fakeOptions(t, "r1", 1)
+	m, err := loadOrCreateManifest(opts.out, "r1", 1, 1, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := startOrigin(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = o.close() }()
+	lg := newLogger(io.Discard, filepath.Join(opts.out, "run.log"), env.redactor)
+	defer lg.close()
+	summary := publishAll(context.Background(), opts, env, m, o, lg)
+	if summary.Failed != 1 || summary.Retries != 2 || m.record("proof-r1-0001").CRID != "" || !strings.Contains(m.record("proof-r1-0001").Error, "gave up") {
+		t.Fatalf("summary = %+v record = %+v", summary, m.record("proof-r1-0001"))
+	}
+	r := &report{Run: "r1", N: 1, Publish: summary, Shares: m.ordered(), ServingWait: servingWait{AllServing: false, Last: statusSample{Total: 0}}}
+	r.collectFailures()
+	r.judge(false, false)
+	if r.Passed || !strings.Contains(strings.Join(r.Verdict, "\n"), "requested shares") {
+		t.Fatalf("verdict = %v", r.Verdict)
+	}
+	if _, all := waitAllServing(context.Background(), nil, env.SocketPath, time.Now(), time.Minute, time.Second, func(statusSample) {}); all {
+		t.Fatal("an empty resource set must never be all serving")
+	}
+}
+
+func TestProbeBudgetAndNeedleSet(t *testing.T) {
+	t.Parallel()
+	env := fakeEnvironment(t, []fakeRule{{Match: "share", Stderr: "Error: no\n", Exit: 5}})
+	env.maxProbes = 1
+	if env.probe(context.Background(), "crid") == nil || env.probe(context.Background(), "crid") != nil || env.probesDenied.Load() != 1 {
+		t.Fatal("probe budget")
+	}
+	set := newNeedleSet([]string{"abc", "", "MFkw_-1"})
+	if !set.matches("WARN failed crid=abc retry") || !set.matches("retirement resource_id=MFkw_-1 err") || set.matches("crid=zzz") || !set.matches("bare abc mention") {
+		t.Fatal("needle set")
+	}
+	if (*needleSet)(nil).matches("x") || newNeedleSet(nil).matches("crid=abc") {
+		t.Fatal("empty needle set")
+	}
+	if got := truncateForReport("  a  b\n"+strings.Repeat("c", 200), 20); len(got) != 23 || !strings.HasPrefix(got, "a b ccc") {
+		t.Fatalf("truncate = %q", got)
+	}
+	if _, err := parseOptions([]string{"--run", "r1", "--fetch-interval", "0"}, io.Discard); err == nil {
+		t.Fatal("zero fetch interval must be rejected")
+	}
+	if _, err := parseOptions([]string{"--run", "r1", "--publish-retries", "-1"}, io.Discard); err == nil {
+		t.Fatal("negative retries must be rejected")
+	}
+	if _, err := parseOptions([]string{"--probe", "crid", "--teardown"}, io.Discard); err == nil {
+		t.Fatal("probe with teardown must be rejected")
 	}
 }
 

@@ -20,9 +20,12 @@ type holdSummary struct {
 	FetchFailures   int       `json:"fetch_failures"`
 	// FetchesSkipped counts fetch ticks that found the previous fetch still in
 	// flight: a nonzero value means fetch latency exceeded --fetch-interval.
-	FetchesSkipped int            `json:"fetches_skipped"`
-	Curve          []statusSample `json:"curve"`
-	FetchResults   []fetchResult  `json:"fetch_results"`
+	FetchesSkipped int `json:"fetches_skipped"`
+	// FetchesCanceled counts the fetch still in flight when the hold expired:
+	// its cancellation is the harness's doing, not the platform's.
+	FetchesCanceled int            `json:"fetches_canceled"`
+	Curve           []statusSample `json:"curve"`
+	FetchResults    []fetchResult  `json:"fetch_results"`
 
 	DegradedInWindow      int `json:"degraded_samples_in_known_window"`
 	DegradedOutside       int `json:"degraded_samples_outside_known_window"`
@@ -69,6 +72,10 @@ func holdSteady(ctx context.Context, opts *options, env *environment, o *origin,
 				fetchMu.Lock()
 				defer fetchMu.Unlock()
 				inFlight = false
+				if !result.OK && holdCtx.Err() != nil && result.ExitCode != cliExitOK {
+					summary.FetchesCanceled++
+					return
+				}
 				summary.Fetches++
 				if !result.OK {
 					summary.FetchFailures++

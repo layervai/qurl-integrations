@@ -48,6 +48,9 @@ type verifySummary struct {
 	WallP50 int64         `json:"fetch_ms_p50"`
 	WallP95 int64         `json:"fetch_ms_p95"`
 	Results []fetchResult `json:"results"`
+	// NotAttempted counts sampled shares the run was interrupted before
+	// fetching; they are neither ok nor failed.
+	NotAttempted int `json:"not_attempted"`
 
 	FailedInWindow int `json:"failed_in_known_window"`
 	FailedOutside  int `json:"failed_outside_known_window"`
@@ -102,13 +105,18 @@ func fetchShare(ctx context.Context, env *environment, o *origin, rec *shareReco
 			result.Error = res.Err.Error()
 		}
 		if ctx.Err() == nil {
-			result.Diagnosis = probeAccess(ctx, env, rec.CRID)
+			result.Diagnosis = env.probe(ctx, rec.CRID)
 		}
 		return result
 	}
 	var body originBody
 	if err := json.Unmarshal([]byte(res.Stdout), &body); err != nil {
-		result.Error = "body is not this origin's JSON (" + itoa(len(res.Stdout)) + " bytes)"
+		// Something other than this origin answered: keep a bounded, redacted
+		// prefix of it and probe, since that is the most interesting failure.
+		result.Error = "body is not this origin's JSON (" + itoa(len(res.Stdout)) + " bytes): " + env.redactor.apply(truncateForReport(res.Stdout, 160))
+		if ctx.Err() == nil {
+			result.Diagnosis = env.probe(ctx, rec.CRID)
+		}
 		return result
 	}
 	result.Host = body.Host
@@ -124,10 +132,19 @@ func fetchShare(ctx context.Context, env *environment, o *origin, rec *shareReco
 	if !result.OK {
 		result.Error = "nonce_ok=" + boolStr(result.NonceOK) + " request_seen=" + boolStr(result.RequestSeen) + " host_ok=" + boolStr(result.HostOK)
 		if ctx.Err() == nil {
-			result.Diagnosis = probeAccess(ctx, env, rec.CRID)
+			result.Diagnosis = env.probe(ctx, rec.CRID)
 		}
 	}
 	return result
+}
+
+// truncateForReport bounds a foreign body to one line of evidence.
+func truncateForReport(s string, limit int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > limit {
+		return s[:limit] + "…"
+	}
+	return s
 }
 
 func boolStr(b bool) string {
@@ -141,6 +158,7 @@ func boolStr(b bool) string {
 func verifySample(ctx context.Context, opts *options, env *environment, o *origin, m *manifest, indexes []int, lg *logger) *verifySummary {
 	summary := &verifySummary{Sample: len(indexes)}
 	results := make([]fetchResult, len(indexes))
+	attempted := make([]bool, len(indexes))
 	work := make(chan int, len(indexes))
 	for i := range indexes {
 		work <- i
@@ -157,6 +175,7 @@ func verifySample(ctx context.Context, opts *options, env *environment, o *origi
 				}
 				rec := m.record(connectorID(opts.run, indexes[i]))
 				results[i] = fetchShare(ctx, env, o, rec)
+				attempted[i] = true
 				if !results[i].OK {
 					lg.logf("fetch %s failed: %s", rec.ID, results[i].Error)
 				}
@@ -164,15 +183,20 @@ func verifySample(ctx context.Context, opts *options, env *environment, o *origi
 		}()
 	}
 	wg.Wait()
-	summary.Results = results
+	summary.Results = make([]fetchResult, 0, len(results))
 	var walls []int64
 	for i := range results {
-		if results[i].OK {
+		switch {
+		case !attempted[i]:
+			summary.NotAttempted++
+			continue
+		case results[i].OK:
 			summary.OK++
 			walls = append(walls, results[i].WallMS)
-		} else {
+		default:
 			summary.Failed++
 		}
+		summary.Results = append(summary.Results, results[i])
 	}
 	sort.Slice(walls, func(i, j int) bool { return walls[i] < walls[j] })
 	summary.WallP50, summary.WallP95 = percentile(walls, 0.5), percentile(walls, 0.95)
