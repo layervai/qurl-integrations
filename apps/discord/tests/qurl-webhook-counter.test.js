@@ -110,6 +110,7 @@ process.env.BASE_URL = 'http://localhost:3000';
 const request = require('supertest');
 const { app, stopIntervals } = require('../src/server');
 const logger = require('../src/logger');
+const realDateNow = Date.now.bind(Date);
 
 function signBody(rawJson, secret = 'test-qurl-secret') {
   return crypto.createHmac('sha256', secret).update(rawJson).digest('hex');
@@ -163,14 +164,16 @@ async function waitFor(predicate) {
 }
 
 async function waitForCounterFlush(predicate, timeoutMs = 1000) {
-  const deadline = Date.now() + timeoutMs;
+  // Use the captured real clock so a test that freezes Date.now() for cache
+  // assertions cannot accidentally turn this bounded poll into an infinite one.
+  const deadline = realDateNow() + timeoutMs;
   do {
     // eslint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, 10));
     // eslint-disable-next-line no-await-in-loop
     await flushCounter();
     if (predicate()) return;
-  } while (Date.now() < deadline);
+  } while (realDateNow() < deadline);
   throw new Error('Timed out waiting for counter flush');
 }
 
@@ -198,6 +201,10 @@ function armedState(overrides = {}) {
 }
 
 beforeEach(() => {
+  // The route owns module-level render/debounce caches. Reset them before each
+  // test as well as after it so this case cannot depend on a prior test's send
+  // ID or on how much wall-clock time elapsed between the two cases.
+  stopIntervals();
   [
     mockRecordQurlView,
     mockFindSendsByQurlId,
@@ -261,28 +268,37 @@ describe('sender view-counter fast-path — happy path', () => {
   });
 
   it('caches render state inside a burst and refreshes the cached debounce clock after an edit', async () => {
-    await signedRequest();
-    await flushCounter();
-    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
-    expect(mockGetSendRenderState).toHaveBeenCalledTimes(1);
-    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+    // senderCounterRenderStateCacheTtlMs() deliberately caps the render-state
+    // cache at 50ms. Hold the clock fixed so CI scheduling latency between
+    // these two requests cannot turn this same-burst assertion into a flake.
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await signedRequest();
+      await flushCounter();
+      expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+      expect(mockGetSendRenderState).toHaveBeenCalledTimes(1);
+      expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
 
-    logger.debug.mockClear();
-    await signedRequest({
-      ...VALID_PAYLOAD,
-      id: 'evt-counter-cache-2',
-      data: { ...VALID_PAYLOAD.data, qurl_id: 'q_cache_2' },
-    });
-    await flushCounter();
+      logger.debug.mockClear();
+      await signedRequest({
+        ...VALID_PAYLOAD,
+        id: 'evt-counter-cache-2',
+        data: { ...VALID_PAYLOAD.data, qurl_id: 'q_cache_2' },
+      });
+      await flushCounter();
 
-    expect(mockGetSendRenderState).toHaveBeenCalledTimes(1);
-    expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(2);
-    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
-    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
-    expect(logger.debug).toHaveBeenCalledWith(
-      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
-      expect.objectContaining({ send_id: SEND_ID, qurl_id: 'q_cache_2' }),
-    );
+      expect(mockGetSendRenderState).toHaveBeenCalledTimes(1);
+      expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(2);
+      expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+      expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+      expect(logger.debug).toHaveBeenCalledWith(
+        'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+        expect.objectContaining({ send_id: SEND_ID, qurl_id: 'q_cache_2' }),
+      );
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('coalesces a same-replica first-view while the leading Discord edit is still in flight', async () => {
