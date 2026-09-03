@@ -1578,12 +1578,13 @@ func TestDeleteConvergesLocalShareWhoseRetirementWasForgotten(t *testing.T) {
 	}
 }
 
-// TestDeleteRefusesLocalShareWhoseBindingMismatches is the other shape of a
-// registry row with no retirable binding: a binding is still held under the
-// row's Connector ID but for a different resource. That is inconsistent
-// state, not a forgotten retirement, so cleanup must say so and leave the
-// row rather than strand a live binding the next publish would fail on.
-func TestDeleteRefusesLocalShareWhoseBindingMismatches(t *testing.T) {
+// TestDeleteConvergesLocalShareWhoseConnectorIDWasRebound is the other shape
+// of a registry row with nothing left to retire: the row's Connector ID is
+// bound again, to a different resource, because the row's own retirement was
+// forgotten and the ID republished. The stale row is the only inconsistency
+// and would block every new row under that Connector ID, so cleanup removes
+// it and leaves the other share's binding alone.
+func TestDeleteConvergesLocalShareWhoseConnectorIDWasRebound(t *testing.T) {
 	srv := apitest.NewServer(t)
 	stateDir := connectorStateTestDir(t)
 	registry, err := openOwnedTestShareRegistry(stateDir)
@@ -1591,33 +1592,37 @@ func TestDeleteRefusesLocalShareWhoseBindingMismatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := localShareFixture(srv)
-	mismatched := localShareFixture(apitest.NewServer(t))
-	mismatched.ConnectorID = local.ConnectorID
-	seedLocalConnectorResourceBinding(t, stateDir, &mismatched)
+	rebound := localShareFixture(apitest.NewServer(t))
+	rebound.ConnectorID = local.ConnectorID
+	seedLocalConnectorResourceBinding(t, stateDir, &rebound)
 	if err := registry.Put(context.Background(), &local); err != nil {
 		t.Fatal(err)
 	}
+	daemon := &recordingShareDaemon{}
 	res := runCLI(t, &runOpts{
 		args:               []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
 		env:                map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
 		shareRegistry:      registry,
-		shareDaemonFactory: func(string, string) shareDaemonController { return &recordingShareDaemon{} },
+		shareDaemonFactory: func(string, string) shareDaemonController { return daemon },
 		shareStateDir:      stateDir,
 	})
-	if res.code != 0 || !strings.Contains(res.stderr.String(), "did not finish") || !strings.Contains(res.stderr.String(), "does not match the local share identity") {
+	if res.code != 0 || strings.Contains(res.stderr.String(), "did not finish") {
 		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
 	}
-	if _, err := registry.Get(context.Background(), srv.Key.CRID); err != nil {
-		t.Fatalf("mismatched local share was removed: %v", err)
+	if _, err := registry.Get(context.Background(), srv.Key.CRID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale local share still present: %v", err)
+	}
+	if daemon.reloads != 1 {
+		t.Fatalf("delete daemon reconciliation = %+v, want one reload", daemon)
 	}
 	store, err := connectorstate.Open(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.Close() }()
-	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), mismatched.ConnectorID)
+	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), rebound.ConnectorID)
 	if err != nil || !found || retired {
-		t.Fatalf("mismatched binding found=%t retired=%t err=%v, want it left live", found, retired, err)
+		t.Fatalf("rebound binding found=%t retired=%t err=%v, want it left live", found, retired, err)
 	}
 }
 

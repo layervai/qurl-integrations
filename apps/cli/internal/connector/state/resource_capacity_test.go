@@ -528,8 +528,9 @@ func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
 		if _, bound := loaded.Bindings["old-0000"]; bound {
 			t.Fatal("the oldest-in-file leftover should have been forgotten instead")
 		}
-		if got := resolveDefault(t, store, root); got != tail {
-			t.Fatalf("default walk resolved %q, want the live tail %q", got, tail)
+		got, advanced, err := store.ResolveDefaultConnectorID(context.Background(), root)
+		if err != nil || got != tail || advanced != len(chain) {
+			t.Fatalf("default walk = %q after %d links, %v; want the live tail %q after %d", got, advanced, err, tail, len(chain))
 		}
 	})
 
