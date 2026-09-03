@@ -24,10 +24,14 @@ const (
 	LocalSharesFile = "local_shares.json"
 
 	localSharesVersion = 2
-	// localSharesMaxItems matches the connector session group's MaxGroupRoutes:
+	// LocalSharesMaxItems matches the connector session group's MaxGroupRoutes:
 	// one daemon serves every desired-on share on one Connector session, so the
-	// registry can hold as many rows as one admission carries proxies.
-	localSharesMaxItems = 2000
+	// registry can hold as many rows as one admission carries proxies. It is
+	// exported so the daemon package (which imports both this package and
+	// connectorshare) can pin it to MaxGroupRoutes at compile time.
+	// TODO(upstream-contract): keep LocalSharesMaxItems == connectorshare.MaxGroupRoutes.
+	LocalSharesMaxItems = 2000
+	localSharesMaxItems = LocalSharesMaxItems
 	// localSharesMaxBytes bounds the whole registry file. A full 2000-row
 	// registry of maximal rows (a ~124-char base64url resource identity and
 	// CRID, a 64-char Connector ID, a 54-char routing ID, a 64-char knock

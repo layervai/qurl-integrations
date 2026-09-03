@@ -82,19 +82,21 @@ func (r *memoryRegistry) share(resourceID string) connectorstate.LocalShare {
 type fakeGroupRunner struct {
 	cfg GroupConfig
 
-	mu        sync.Mutex
-	routes    map[string]connectorshare.RouteState
-	setCalls  [][]string
-	restarts  []string
-	runStart  chan struct{}
-	runOnce   sync.Once
-	autoServe bool
+	mu              sync.Mutex
+	routes          map[string]connectorshare.RouteState
+	setCalls        [][]string
+	restarts        []string
+	restartFailures int
+	runStart        chan struct{}
+	runOnce         sync.Once
+	autoServe       bool
+	runErr          error
 }
 
-func newFakeGroupRunner(cfg *GroupConfig, autoServe bool) *fakeGroupRunner {
+func newFakeGroupRunner(cfg *GroupConfig, autoServe bool, runErr error, restartFailures int) *fakeGroupRunner {
 	r := &fakeGroupRunner{
 		cfg: *cfg, routes: map[string]connectorshare.RouteState{},
-		runStart: make(chan struct{}), autoServe: autoServe,
+		runStart: make(chan struct{}), autoServe: autoServe, runErr: runErr, restartFailures: restartFailures,
 	}
 	for _, route := range cfg.Routes {
 		r.routes[route.RouteID] = connectorshare.RouteState{
@@ -129,6 +131,9 @@ func itoa36(v uint64) string {
 
 func (r *fakeGroupRunner) Run(ctx context.Context) error {
 	r.runOnce.Do(func() { close(r.runStart) })
+	if r.runErr != nil {
+		return r.runErr
+	}
 	if r.autoServe {
 		for _, route := range r.cfg.Routes {
 			r.serve(route.RouteID)
@@ -175,6 +180,11 @@ func (r *fakeGroupRunner) SetRoutes(_ context.Context, routes []connectorshare.L
 func (r *fakeGroupRunner) RestartRoute(_ context.Context, routeID string) error {
 	r.mu.Lock()
 	r.restarts = append(r.restarts, routeID)
+	if r.restartFailures > 0 {
+		r.restartFailures--
+		r.mu.Unlock()
+		return errors.New("fake restart failure")
+	}
 	if state, ok := r.routes[routeID]; ok {
 		state.Route.Generation++
 		state.ProxyName = proxyName(routeID, state.Route.Generation)
@@ -244,12 +254,14 @@ func (r *fakeGroupRunner) restartedRoutes() []string {
 }
 
 type fakeGroupFactory struct {
-	mu        sync.Mutex
-	starts    int
-	runners   []*fakeGroupRunner
-	configs   []GroupConfig
-	errs      []error
-	autoServe bool
+	mu              sync.Mutex
+	starts          int
+	runners         []*fakeGroupRunner
+	configs         []GroupConfig
+	errs            []error
+	autoServe       bool
+	runErr          error
+	restartFailures int
 }
 
 func newFakeGroupFactory() *fakeGroupFactory { return &fakeGroupFactory{autoServe: true} }
@@ -266,7 +278,7 @@ func (f *fakeGroupFactory) NewGroupRunner(_ context.Context, cfg *GroupConfig) (
 			return nil, err
 		}
 	}
-	runner := newFakeGroupRunner(cfg, f.autoServe)
+	runner := newFakeGroupRunner(cfg, f.autoServe, f.runErr, f.restartFailures)
 	f.runners = append(f.runners, runner)
 	return runner, nil
 }
@@ -474,15 +486,19 @@ func TestManagerResourceNotFoundPersistsOneShareOffAndKeepsSiblingsServing(t *te
 	if got := registry.share("b").ServingEpoch; got != 4 {
 		t.Fatalf("persisted epoch = %d, want the same epoch 4", got)
 	}
-	if manager.Diagnostics()["b"].State != diagnosticStateFailed {
-		t.Fatalf("gone route b state = %q, want failed", manager.Diagnostics()["b"].State)
-	}
-	if manager.Diagnostics()["b"].FailureCategory != diagnosticFailureResourceUnavailable {
-		t.Fatalf("gone route b category = %q, want resource_unavailable", manager.Diagnostics()["b"].FailureCategory)
-	}
+	// After persisting off, a reconcile is triggered so the gone share is
+	// dropped from the running set and diagnostics rather than lingering.
+	waitManagerCondition(t, func() bool {
+		_, running := manager.Running()["b"]
+		_, diag := manager.Diagnostics()["b"]
+		return !running && !diag
+	}, "gone share dropped from running and diagnostics")
 	for _, id := range []string{"a", "c"} {
 		if manager.Diagnostics()[id].State != diagnosticStateServing {
 			t.Fatalf("sibling %s state = %q, want serving after a resource-gone sibling", id, manager.Diagnostics()[id].State)
+		}
+		if _, running := manager.Running()[id]; !running {
+			t.Fatalf("sibling %s dropped from running after a resource-gone sibling", id)
 		}
 	}
 	if factory.startCount() != 1 {
@@ -710,5 +726,86 @@ func TestManagerRetriesResourceGonePersistenceWithoutDisruptingSibling(t *testin
 	}
 	if manager.Diagnostics()["b"].State != diagnosticStateServing {
 		t.Fatalf("sibling b disrupted by resource-gone persistence: %q", manager.Diagnostics()["b"].State)
+	}
+}
+
+func TestManagerBacksOffAndDoesNotHotLoopWhenGroupRunCrashes(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.New("frp login failed")}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A large backoff means a correctly classified crash must NOT rebuild the
+	// group in the sampling window; the pre-fix "every exit is benign" bug
+	// rebuilt immediately and hot-looped, so startCount would climb fast.
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitManagerCondition(t, func() bool { return factory.startCount() >= 1 }, "group started")
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["a"].State == diagnosticStateRetrying &&
+			manager.Diagnostics()["b"].State == diagnosticStateRetrying
+	}, "crashed group's routes reported retrying")
+	if manager.Diagnostics()["a"].NextRetryAt == nil {
+		t.Fatalf("retrying diagnostic missing next-retry time: %+v", manager.Diagnostics()["a"])
+	}
+	// The group is in backoff; it must not rebuild while the retry window holds.
+	time.Sleep(120 * time.Millisecond)
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d during backoff, want exactly one (a benign-classified crash would hot-loop)", got)
+	}
+	if _, running := manager.Running()["a"]; running {
+		t.Fatalf("crashed group still reports routes running: %v", manager.Running())
+	}
+}
+
+func TestManagerRetriesRestartWhenTheFirstAttemptFails(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := &fakeGroupFactory{autoServe: true, restartFailures: 1}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 10 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+
+	restartA := daemonShare("a", 2, "on")
+	registry.setShare(&restartA)
+	manager.Trigger()
+	// The first RestartRoute fails, so the tracked epoch must not advance and a
+	// later reconcile must re-detect and re-attempt the restart until it lands.
+	waitManagerCondition(t, func() bool {
+		got := 0
+		for _, id := range factory.runner(1).restartedRoutes() {
+			if id == "connector-a" {
+				got++
+			}
+		}
+		return got >= 2
+	}, "restart re-attempted after a transient failure")
+	// Once the restart succeeds, the advanced epoch is committed, so further
+	// reconciles do not keep restarting.
+	manager.Trigger()
+	manager.Trigger()
+	time.Sleep(50 * time.Millisecond)
+	got := 0
+	for _, id := range factory.runner(1).restartedRoutes() {
+		if id == "connector-a" {
+			got++
+		}
+	}
+	if got != 2 {
+		t.Fatalf("restart attempts = %d, want exactly two (one failed, one succeeded, then committed)", got)
 	}
 }
