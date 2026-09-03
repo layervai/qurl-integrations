@@ -76,14 +76,25 @@ session:
   from its own row. The native admitter is still shared (knocks serialize on
   it), but every share spends its own admission, login, and journal, and is
   rotated on its own. This is what such a platform accepts today, and what the
-  daemon did before the single-session model.
+  daemon did before the single-session model. Above `PerShareSoftCap` (300)
+  desired-on shares the daemon logs a warning on every reconcile: the platform
+  is still the authority, but a fleet that size is expected to run into the
+  per-owner session and heartbeat-stream budgets, and the warning lets an
+  operator attribute the retrying excess to the budget rather than to the
+  shares.
 
 Reconcile semantics are identical in both modes: `publish` adds a group,
 `stop` removes exactly that group (retiring its admission), `restart` is a
 `RestartRoute` on that share's own group, a refused route retires and
 re-knocks only its own group after its backoff, and a knock-level denial
 persists only that share off. `/status` reports the union of every group, so
-the IPC contract and `qurl inspect` output are unchanged.
+the IPC contract and `qurl inspect` output are unchanged. One cost follows
+from the group having a single route: a refusal withdraws the group's only
+route, so the session ends and the retry is a fresh knock rather than a
+re-registration on a live session. The refusal backoff carries across that
+rebuild, so a share the platform keeps refusing costs one knock per five
+minutes at steady state — the same cadence as `single` mode's one
+registration attempt, with a knock in front of it.
 
 The mode is folded into the daemon's job version (`3/<version>` for `single`,
 `3/<version>/per-share` otherwise) and written into the per-user job as an
@@ -99,7 +110,8 @@ daemon in the new mode, the same path a binary-version change takes.
   durable registry can hold exactly as many shares as one admission carries
   routes. That figure is for `single` mode; `per-share` pays one session per
   share and is bounded by the per-owner platform session and heartbeat-stream
-  budgets instead (historically ~300 shares).
+  budgets instead (`PerShareSoftCap`, ~300 shares, carries the
+  `TODO(upstream-contract)` marker for that budget).
 - **Registry file cap.** The registry file is bounded at 4 MiB. A full 2000-row
   registry of maximal rows (long base64url resource identities and CRIDs, long
   Connector, routing, and knock identities, and verbose IPv6 loopback targets)

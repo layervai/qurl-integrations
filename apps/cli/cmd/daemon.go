@@ -154,7 +154,9 @@ another service manager owns the process.`,
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
 	// Bound on the shared options so root.go's settings resolution applies the
-	// ordinary flag > env > profile > default precedence to it.
+	// ordinary flag > env > profile > default precedence to it. The cobra default
+	// must stay empty: a non-empty default would count as an explicit flag value
+	// and win over the environment and profile for every daemon run.
 	run.Flags().StringVar(&opts.shareGroupMode, "share-group-mode", "", "session group mode: single (one session for every share) or per-share (default single)")
 	// root.go's persistent pre-run hook reads these before settings resolution,
 	// so a first-start rejection reaches the native supervisor's durable log.

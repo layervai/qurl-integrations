@@ -3,8 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -261,10 +266,8 @@ func TestPerShareManagerPublishAddsAGroupWithoutTouchingSiblings(t *testing.T) {
 	if got := a.restartedRoutes(); len(got) != 0 {
 		t.Fatalf("publishing b restarted a's route: %v", got)
 	}
-	for _, call := range a.setRouteCalls() {
-		if len(call) != 1 || call[0] != "connector-a" {
-			t.Fatalf("a's group was pushed %v, want only its own route", call)
-		}
+	if got := a.setRouteCalls(); len(got) != 0 {
+		t.Fatalf("publishing b pushed a route set to a's unchanged group: %v", got)
 	}
 }
 
@@ -307,10 +310,9 @@ func TestPerShareManagerStopRemovesExactlyOneGroup(t *testing.T) {
 	if got := a.restartedRoutes(); len(got) != 0 {
 		t.Fatalf("stopping b restarted a: %v", got)
 	}
-	for _, call := range a.setRouteCalls() {
-		if len(call) != 1 || call[0] != "connector-a" {
-			t.Fatalf("a's group was pushed %v, want only its own route", call)
-		}
+	// a's row did not change, so its group was not even re-triggered.
+	if got := a.setRouteCalls(); len(got) != 0 {
+		t.Fatalf("stopping b pushed a route set to a's group: %v", got)
 	}
 	if got := b.setRouteCalls(); len(got) != 0 {
 		t.Fatalf("b's retired group was pushed a route set: %v", got)
@@ -352,22 +354,62 @@ func TestPerShareManagerRestartRebuildsOnlyThatShareGroup(t *testing.T) {
 	waitPerShareServing(t, manager, "a", "b")
 }
 
-// TestPerShareManagerRefusedShareRetiresAndRebuildsOnlyItsOwnGroup pins the
-// per-group reading of a platform refusal: the refused share stays desired-on
-// and visible as retrying/platform_denied, its own group (its only route
-// withheld) is retired and re-knocked after the backoff, and the sibling's
-// group is never restarted, re-admitted, or pushed anything but its own route.
-func TestPerShareManagerRefusedShareRetiresAndRebuildsOnlyItsOwnGroup(t *testing.T) {
+// sessionsFor returns every fake session admitted for resourceID's own group,
+// in admission order.
+func sessionsFor(sessions *fakeSessionGroupFactory, resourceID string) []*fakeGroupSession {
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	var matched []*fakeGroupSession
+	for _, session := range sessions.sessions {
+		if session.admission.ResourceID == resourceID {
+			matched = append(matched, session)
+		}
+	}
+	return matched
+}
+
+// TestPerShareManagerRefusedShareReKnocksOnlyItsOwnGroup drives the real
+// SessionGroupRunner and pins the per-group reading of a platform refusal
+// (#1330): the refused share stays desired-on and visible as
+// retrying/platform_denied; because the refused route was its group's only
+// one, that session ends and the share is re-admitted under a fresh proxy name
+// after its backoff — one extra knock for that share alone. The sibling's
+// session, whose row never changed, receives no update at all, even when a
+// lifecycle command reconciles in between.
+func TestPerShareManagerRefusedShareReKnocksOnlyItsOwnGroup(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
 		"a": perShareRow("a", 1, "on"),
 		"b": perShareRow("b", 1, "on"),
 	}}
-	factory := newFakeGroupFactory()
-	manager := newRunningPerShareManager(t, registry, factory)
-	waitPerShareServing(t, manager, "a", "b")
-	first := runnerFor(t, factory, "b")
-	first.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone,
-		errors.New("resource_not_found: resource does not match signed NHP session")))
+	admitter := &fakeAdmitter{}
+	// b's first registration is refused, as a platform whose authorization
+	// catches up would; the re-knocked group's registration is accepted. (A
+	// rebuilt group starts at generation 0 again, so this keys on the attempt,
+	// not the generation.)
+	var registrations atomic.Int32
+	sessions := &fakeSessionGroupFactory{refuse: func(route *connectorshare.GroupRoute) bool {
+		return route.RouteID == "connector-b" && registrations.Add(1) == 1
+	}}
+	manager, err := NewPerShareManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.configure = func(group *Manager) {
+		group.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
+		group.refusalDelay = group.retryDelay
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("per-share manager did not stop")
+		}
+	})
+	waitPerShareServing(t, manager, "a")
 	waitManagerCondition(t, func() bool {
 		return manager.Diagnostics()["b"].State == diagnosticStateRetrying
 	}, "refused share reported retrying")
@@ -377,25 +419,155 @@ func TestPerShareManagerRefusedShareRetiresAndRebuildsOnlyItsOwnGroup(t *testing
 	if registry.share("b").DesiredState != "on" {
 		t.Fatal("a platform refusal persisted the share off")
 	}
-	// A lifecycle command reconciles while b is withheld: b's group has nothing
-	// to push, so it retires its session; a's group is untouched.
+	// A lifecycle command reconciles while b is withheld.
 	manager.Trigger()
-	waitManagerCondition(t, func() bool { return len(runnersFor(factory, "b")) == 2 }, "b's group rebuilt after its backoff")
+	// After its backoff b is re-admitted on a fresh session of its own and
+	// registers under a fresh proxy name; the refused session has ended.
 	waitPerShareServing(t, manager, "b")
-	if got := factory.startCount(); got != 3 {
-		t.Fatalf("group starts = %d, want a's one plus b's original and rebuilt groups", got)
+	bSessions := sessionsFor(sessions, "b")
+	if len(bSessions) != 2 {
+		t.Fatalf("sessions admitted for b = %d, want the refused one and its re-knock", len(bSessions))
 	}
-	if cfg := groupConfigs(factory)[2]; cfg.ResourceID != "b" || len(cfg.Routes) != 1 || cfg.Routes[0].RouteID != "connector-b" {
-		t.Fatalf("rebuilt group = %+v, want signed for b with only b", cfg)
+	select {
+	case <-bSessions[0].Done():
+	default:
+		t.Fatal("the refused session was not ended once its only route was withdrawn")
 	}
-	a := runnerFor(t, factory, "a")
-	if len(runnersFor(factory, "a")) != 1 || len(a.restartedRoutes()) != 0 || manager.Diagnostics()["a"].State != diagnosticStateServing {
-		t.Fatalf("sibling a disturbed: groups=%d restarts=%v state=%q",
-			len(runnersFor(factory, "a")), a.restartedRoutes(), manager.Diagnostics()["a"].State)
+	refused, accepted := bSessions[0].proxyNames("connector-b"), bSessions[1].proxyNames("connector-b")
+	if len(refused) != 1 || len(accepted) != 1 || refused[0] == accepted[0] {
+		t.Fatalf("route b registrations = %v then %v, want a refused name then a fresh one", refused, accepted)
 	}
-	for _, call := range a.setRouteCalls() {
-		if len(call) != 1 || call[0] != "connector-a" {
-			t.Fatalf("a's group was pushed %v, want only its own route", call)
+	if admitter.admissions() != 3 || sessions.startCount() != 3 {
+		t.Fatalf("admissions/sessions = %d/%d, want a's one plus b's refused and re-knocked sessions",
+			admitter.admissions(), sessions.startCount())
+	}
+	aSessions := sessionsFor(sessions, "a")
+	if len(aSessions) != 1 {
+		t.Fatalf("sessions admitted for a = %d, want exactly one", len(aSessions))
+	}
+	// The runner pushes a fresh session its own initial set; nothing else may
+	// ever reach a's session (the fake-factory tests pin that an unchanged row
+	// is not re-triggered at all).
+	for _, size := range aSessions[0].updateSizes() {
+		if size != 1 {
+			t.Fatalf("a's session received an update of %d routes, want only its own", size)
+		}
+	}
+	if states := aSessions[0].RouteStates(); len(states) != 1 || states["connector-a"].Phase != connectorshare.RouteServing ||
+		manager.Diagnostics()["a"].State != diagnosticStateServing {
+		t.Fatalf("sibling a disturbed: routes=%+v state=%q", states, manager.Diagnostics()["a"].State)
+	}
+}
+
+// TestPerShareManagerSlowGroupRetirementDoesNotStopTheDaemonOrSiblings pins
+// that a removed group which does not retire its session in time is logged
+// and left to finish, never a reason for the daemon — and every other share —
+// to exit.
+func TestPerShareManagerSlowGroupRetirementDoesNotStopTheDaemonOrSiblings(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": perShareRow("a", 1, "on"),
+		"b": perShareRow("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	hold := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(hold) }) }
+	factory.holdStopByResource = map[string]chan struct{}{"b": hold}
+	manager, err := NewPerShareManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.groupStopTimeout = 30 * time.Millisecond
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { release(); cancel() })
+	waitPerShareServing(t, manager, "a", "b")
+
+	stopB := perShareRow("b", 2, "off")
+	registry.setShare(&stopB)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool {
+		_, running := manager.Running()["b"]
+		return !running
+	}, "stopped share pruned")
+	waitManagerCondition(t, func() bool {
+		return strings.Contains(logs.String(), "could not cleanly retire a removed share group")
+	}, "slow retirement logged")
+	select {
+	case err := <-done:
+		t.Fatalf("daemon exited on a slow group retirement: %v", err)
+	default:
+	}
+	if manager.Diagnostics()["a"].State != diagnosticStateServing {
+		t.Fatalf("sibling a state = %q, want serving through b's slow retirement", manager.Diagnostics()["a"].State)
+	}
+	release()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want the cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
+func TestPerShareManagerWarnsAboveTheSoftCap(t *testing.T) {
+	shares := make(map[string]connectorstate.LocalShare, PerShareSoftCap+1)
+	for i := 0; i <= PerShareSoftCap; i++ {
+		share := perShareRow(resourceIDf(i), 1, "on")
+		shares[share.ResourceID] = share
+	}
+	registry := &memoryRegistry{shares: shares}
+	factory := newFakeGroupFactory()
+	var logs lockedLogBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	manager := newRunningPerShareManager(t, registry, factory)
+	waitManagerCondition(t, func() bool { return len(manager.Running()) == PerShareSoftCap+1 }, "every row converges")
+	if got := factory.startCount(); got != PerShareSoftCap+1 {
+		t.Fatalf("group starts = %d, want one per share even above the soft cap", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "exceeds its soft cap") || !strings.Contains(out, "shares=301") {
+		t.Fatalf("soft cap warning missing from logs: %q", out)
+	}
+}
+
+func TestGroupStopErrorSurfacesEverythingButAPureCancellation(t *testing.T) {
+	for name, err := range map[string]error{
+		"nil":                  nil,
+		"bare cancellation":    context.Canceled,
+		"joined cancellation":  errors.Join(context.Canceled),
+		"wrapped cancellation": fmt.Errorf("group: %w", context.Canceled),
+	} {
+		if got := groupStopError("r", err); got != nil {
+			t.Errorf("%s: groupStopError = %v, want nil", name, got)
+		}
+	}
+	for name, err := range map[string]error{
+		"stop deadline":                      errors.Join(context.Canceled, context.DeadlineExceeded),
+		"teardown failure beside the cancel": errors.Join(context.Canceled, errors.New("journal write failed")),
+		"deadline alone":                     context.DeadlineExceeded,
+		"unrelated":                          errors.New("frp login failed"),
+		"empty join":                         errors.Join(),
+	} {
+		got := groupStopError("r", err)
+		if err == nil {
+			// errors.Join() with no operands is nil: nothing to surface.
+			if got != nil {
+				t.Errorf("%s: groupStopError = %v, want nil", name, got)
+			}
+			continue
+		}
+		if got == nil || !errors.Is(got, err) || !strings.Contains(got.Error(), "did not stop cleanly") {
+			t.Errorf("%s: groupStopError = %v, want the failure surfaced", name, got)
 		}
 	}
 }

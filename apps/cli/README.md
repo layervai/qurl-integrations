@@ -538,7 +538,9 @@ removes it, `restart` re-registers only that share, and a refused or
 permanently denied share never disturbs its siblings — and the same `qurl
 status` / `qurl inspect` output. `per-share` simply pays the per-session cost
 for each share, so the per-owner platform budgets for sessions and heartbeat
-streams cap it well below the [2000-share scale](#scale) of `single`.
+streams cap it well below the [2000-share scale](#scale) of `single`; above
+300 shares the daemon logs a warning so a retrying excess can be attributed
+to that budget.
 
 The mode is part of the daemon's job definition. To switch a machine that is
 already sharing, set the mode durably and run any command that installs the

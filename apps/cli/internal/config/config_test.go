@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -215,16 +214,10 @@ func TestIsProductionEndpoint(t *testing.T) {
 	}
 }
 
-// TestShareGroupModeVocabularyMatchesDaemonPackage pins config's duplicated
-// share_group_mode literals to the daemon package's authoritative values, the
-// same way the output enums are pinned above.
-func TestShareGroupModeVocabularyMatchesDaemonPackage(t *testing.T) {
-	if want := daemon.GroupModeValues(); !slices.Equal(validShareGroupModes, want) {
-		t.Errorf("validShareGroupModes = %v, want daemon's %v", validShareGroupModes, want)
-	}
-}
-
 func TestShareGroupModeConfigValueIsValidatedAsAFileSetting(t *testing.T) {
+	if got := ShareGroupModes(); !slices.Equal(got, validShareGroupModes) || &got[0] == &validShareGroupModes[0] {
+		t.Fatalf("ShareGroupModes() = %v, want a copy of %v", got, validShareGroupModes)
+	}
 	dir := t.TempDir()
 	for _, mode := range validShareGroupModes {
 		if err := os.WriteFile(Path(dir), []byte("share_group_mode: "+mode+"\n"), 0o600); err != nil {

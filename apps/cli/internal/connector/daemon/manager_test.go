@@ -93,6 +93,9 @@ type fakeGroupRunner struct {
 	autoServe       bool
 	runErr          error
 	blockSetRoutes  bool
+	// holdStop, when non-nil, keeps Run from returning after its context ends
+	// until the channel closes, modeling a session that is slow to retire.
+	holdStop chan struct{}
 }
 
 func newFakeGroupRunner(cfg *GroupConfig, autoServe bool, runErr error, restartFailures int, blockSetRoutes bool) *fakeGroupRunner {
@@ -143,6 +146,9 @@ func (r *fakeGroupRunner) Run(ctx context.Context) error {
 		}
 	}
 	<-ctx.Done()
+	if r.holdStop != nil {
+		<-r.holdStop
+	}
 	return ctx.Err()
 }
 
@@ -288,8 +294,11 @@ type fakeGroupFactory struct {
 	runErr    error
 	// runErrByResource overrides runErr for the group signed for that resource.
 	runErrByResource map[string]error
-	restartFailures  int
-	blockSetRoutes   bool
+	// holdStopByResource keeps that resource's runner from returning after its
+	// context ends until the channel closes.
+	holdStopByResource map[string]chan struct{}
+	restartFailures    int
+	blockSetRoutes     bool
 }
 
 func newFakeGroupFactory() *fakeGroupFactory { return &fakeGroupFactory{autoServe: true} }
@@ -311,6 +320,7 @@ func (f *fakeGroupFactory) NewGroupRunner(_ context.Context, cfg *GroupConfig) (
 		runErr = err
 	}
 	runner := newFakeGroupRunner(cfg, f.autoServe, runErr, f.restartFailures, f.blockSetRoutes)
+	runner.holdStop = f.holdStopByResource[cfg.ResourceID]
 	f.runners = append(f.runners, runner)
 	return runner, nil
 }

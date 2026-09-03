@@ -1,9 +1,21 @@
 package daemon
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 )
+
+// TestGroupModeValuesMatchConfigVocabulary pins the daemon's modes to the
+// share_group_mode vocabulary the config layer validates files against; the
+// daemon imports config for this test, never the reverse.
+func TestGroupModeValuesMatchConfigVocabulary(t *testing.T) {
+	if want := config.ShareGroupModes(); !slices.Equal(GroupModeValues(), want) {
+		t.Errorf("GroupModeValues() = %v, want config's %v", GroupModeValues(), want)
+	}
+}
 
 func TestParseGroupModeAcceptsOnlyCanonicalSpellings(t *testing.T) {
 	for value, want := range map[string]GroupMode{"single": GroupModeSingle, "per-share": GroupModePerShare} {

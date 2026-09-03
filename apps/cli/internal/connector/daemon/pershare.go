@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -47,6 +48,17 @@ func NewShareManager(registry Registry, factory GroupFactory, mode GroupMode) (S
 		return nil, fmt.Errorf("share group mode %q has no reconciler", mode)
 	}
 }
+
+// PerShareSoftCap is the share count above which per-share mode is expected to
+// exhaust the per-owner platform budgets for sessions and heartbeat streams:
+// single mode amortizes one of each across every share, per-share spends one
+// of each per share. The daemon does not refuse rows above it — the platform's
+// answer is authoritative — but warns on every reconcile so an operator can
+// attribute a partially retrying fleet to the budget rather than to the shares.
+// TODO(upstream-contract): mirrors the per-owner Connector session and
+// heartbeat-stream budgets that capped the pre-#1326 one-session-per-share
+// daemon near ~300 shares; move it with those budgets.
+const PerShareSoftCap = 300
 
 // PerShareManager reconciles durable local intent into one session group per
 // desired-on share. Each share gets its own Manager over a one-row view of the
@@ -110,7 +122,8 @@ func (m *PerShareManager) Trigger() {
 }
 
 // Run reconciles until ctx ends. Every exit path stops every group so a
-// registry or reconciliation failure cannot bypass exact admission retirement.
+// registry failure cannot bypass exact admission retirement; a group that
+// fails to retire cleanly on that final path is reported in the result.
 func (m *PerShareManager) Run(ctx context.Context) (retErr error) {
 	m.mu.Lock()
 	m.lifetime = ctx
@@ -136,23 +149,35 @@ func (m *PerShareManager) Run(ctx context.Context) (retErr error) {
 }
 
 // Reconcile applies one desired-state snapshot. It lists the shared registry
-// once, starts a group for every newly desired-on share, refreshes and
-// re-triggers the group of every share still desired-on (so an epoch advance
-// becomes a RestartRoute on that group alone), and stops the group of every
-// share that is no longer desired-on. Groups run under Run's lifetime context,
-// as in Manager.Reconcile; ctx bounds this reconcile only.
+// once, starts a group for every newly desired-on share, refreshes the row of
+// every share still desired-on and re-triggers only the groups whose row
+// actually changed (so an epoch advance becomes a RestartRoute on that group
+// alone, and an unrelated lifecycle command costs no push on the others), and
+// stops the group of every share that is no longer desired-on.
+//
+// Only the registry listing is fatal. A removed group that does not retire in
+// time is logged and left to finish on its own, so one stuck share never takes
+// its serving siblings down — the mirror of single mode tolerating one route's
+// failed push. Groups run under Run's lifetime context, as in
+// Manager.Reconcile; ctx bounds this reconcile only. Production drives
+// Reconcile solely from Run's long-lived context: a group started before Run
+// (tests only) is bound to context.Background and retired only by Run's own
+// shutdown path.
 func (m *PerShareManager) Reconcile(ctx context.Context) error {
 	shares, err := m.registry.List(ctx)
 	if err != nil {
 		return fmt.Errorf("list desired local shares: %w", err)
 	}
 	desired := desiredShares(shares)
+	if len(desired) > PerShareSoftCap {
+		slog.WarnContext(ctx, "share daemon per-share mode exceeds its soft cap; the platform's per-owner session budgets may leave the excess retrying",
+			"shares", len(desired), "soft_cap", PerShareSoftCap)
+	}
 	keep := make(map[string]struct{}, len(desired))
 	for i := range desired {
 		keep[desired[i].ResourceID] = struct{}{}
 	}
 	var stopped []*shareGroup
-	var startErr error
 	m.mu.Lock()
 	for resourceID, group := range m.groups {
 		if _, ok := keep[resourceID]; ok {
@@ -164,19 +189,28 @@ func (m *PerShareManager) Reconcile(ctx context.Context) error {
 	for i := range desired {
 		share := &desired[i]
 		if group, ok := m.groups[share.ResourceID]; ok {
-			group.view.set(share)
-			group.manager.Trigger()
+			if group.view.set(share) {
+				group.manager.Trigger()
+			}
 			continue
 		}
 		group, err := m.startGroupLocked(share)
 		if err != nil {
-			startErr = errors.Join(startErr, err)
+			// Unreachable by construction (the factory is non-nil and the view is
+			// ours); the next reconcile starts the group afresh rather than one
+			// share's failure ending the daemon.
+			slog.ErrorContext(ctx, "share daemon could not start a share group; the next reconcile will retry it",
+				"resource_id", share.ResourceID, "error", redactShareError(err))
 			continue
 		}
 		m.groups[share.ResourceID] = group
 	}
 	m.mu.Unlock()
-	return errors.Join(startErr, m.stopGroups(stopped))
+	if err := m.stopGroups(stopped); err != nil {
+		slog.WarnContext(ctx, "share daemon could not cleanly retire a removed share group; its siblings keep serving",
+			"error", redactShareError(err))
+	}
+	return nil
 }
 
 // startGroupLocked builds and launches one share's Manager. The group is
@@ -218,7 +252,8 @@ func (m *PerShareManager) reportGroupFailure(resourceID string, err error) {
 
 // stopGroups cancels every group at once and waits for each to retire its
 // session, bounded by one shared deadline so one wedged shutdown cannot hang
-// the daemon behind the others.
+// the daemon behind the others. A group that does not stop in time is left to
+// finish on its own — its context is already canceled — and reported.
 func (m *PerShareManager) stopGroups(groups []*shareGroup) error {
 	if len(groups) == 0 {
 		return nil
@@ -241,13 +276,39 @@ func (m *PerShareManager) stopGroups(groups []*shareGroup) error {
 }
 
 // groupStopError classifies a group Manager's Run result after this manager
-// canceled it: the cancellation is the expected exit, but a session that
-// failed to retire within the Manager's own stop bound is not.
+// canceled it. The expected exit is the cancellation and nothing else: any
+// other leaf in the returned error tree — the Manager's bounded stop expiring
+// before the session retired, or a teardown failure joined with the
+// cancellation — is surfaced rather than mistaken for a clean stop.
 func groupStopError(resourceID string, err error) error {
-	if err == nil || (errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+	if err == nil || onlyCancellation(err) {
 		return nil
 	}
 	return fmt.Errorf("share group for resource %s did not stop cleanly: %w", resourceID, err)
+}
+
+// onlyCancellation reports whether every leaf of err's wrap tree is
+// context.Canceled.
+func onlyCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		leaves := joined.Unwrap()
+		if len(leaves) == 0 {
+			return false
+		}
+		for _, leaf := range leaves {
+			if !onlyCancellation(leaf) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyCancellation(wrapped.Unwrap())
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 func (m *PerShareManager) stopAllGroups() error {
@@ -308,10 +369,22 @@ type shareView struct {
 	share connectorstate.LocalShare
 }
 
-func (v *shareView) set(share *connectorstate.LocalShare) {
+// set replaces the row and reports whether it changed in any way the group
+// reconciles on; the registry's own write timestamp is not one.
+func (v *shareView) set(share *connectorstate.LocalShare) bool {
 	v.mu.Lock()
+	defer v.mu.Unlock()
+	if sameShareRow(&v.share, share) {
+		return false
+	}
 	v.share = *share
-	v.mu.Unlock()
+	return true
+}
+
+func sameShareRow(a, b *connectorstate.LocalShare) bool {
+	x, y := *a, *b
+	x.UpdatedAt, y.UpdatedAt = time.Time{}, time.Time{}
+	return x == y
 }
 
 func (v *shareView) resourceID() string {

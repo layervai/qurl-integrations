@@ -76,7 +76,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 		if job.BinaryPath != binaryPath {
 			t.Fatalf("binary path = %q, want stable installed command %q", job.BinaryPath, binaryPath)
 		}
-		wantArguments := make([]string, 0, 18)
+		wantArguments := make([]string, 0, 20)
 		wantArguments = append(wantArguments,
 			"--endpoint", "https://api.sandbox.layerv.xyz", "daemon", "run", "--state-dir", filepath.Join(dir, "state"),
 			"--job-version", "3/2.4.0", "--share-group-mode", "single",
