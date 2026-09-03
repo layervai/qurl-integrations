@@ -704,3 +704,60 @@ func TestClassifyShareFailureRouteNotServingIsResourceUnavailable(t *testing.T) 
 		t.Fatalf("classification=%q/%q, want resource_unavailable with no code", category, code)
 	}
 }
+
+// blockingStartGroupFactory blocks inside NewGroupRunner until released, so a
+// test can hold DeferredGroupFactory's activeStarts across a concurrent Close.
+type blockingStartGroupFactory struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	closes  atomic.Int32
+}
+
+func (f *blockingStartGroupFactory) NewGroupRunner(context.Context, *GroupConfig) (GroupRunner, error) {
+	f.once.Do(func() { close(f.entered) })
+	<-f.release
+	return stubGroupRunner{}, nil
+}
+
+func (f *blockingStartGroupFactory) Close() error {
+	f.closes.Add(1)
+	return nil
+}
+
+func TestDeferredGroupFactoryCloseWaitsForConcurrentNewGroupRunner(t *testing.T) {
+	delegate := &blockingStartGroupFactory{entered: make(chan struct{}), release: make(chan struct{})}
+	factory, err := NewDeferredGroupFactory(func(context.Context) (GroupFactory, error) {
+		return delegate, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := factory.NewGroupRunner(context.Background(), groupConfigFixture())
+		startDone <- err
+	}()
+	<-delegate.entered
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- factory.Close() }()
+	// Close must block while a NewGroupRunner holds activeStarts.
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while a NewGroupRunner was in flight: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(delegate.release)
+	// The in-flight NewGroupRunner observes the closed factory and drops the
+	// runner rather than launching it; Close then completes and reaches the
+	// delegate exactly once.
+	if err := <-startDone; !errors.Is(err, errDeferredFactoryClosed) {
+		t.Fatalf("concurrent NewGroupRunner error = %v, want closed", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	if delegate.closes.Load() != 1 {
+		t.Fatalf("delegate closes = %d, want 1", delegate.closes.Load())
+	}
+}

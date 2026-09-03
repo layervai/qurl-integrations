@@ -809,3 +809,62 @@ func TestManagerRetriesRestartWhenTheFirstAttemptFails(t *testing.T) {
 		t.Fatalf("restart attempts = %d, want exactly two (one failed, one succeeded, then committed)", got)
 	}
 }
+
+func TestManagerJoinedCancellationWithFailureIsNotBenign(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	// A real failure joined with a context cancellation must NOT be classified
+	// benign: the manager never asked to stop, so this is a crash that must
+	// back off, not reset-and-rebuild into a hot loop.
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.Join(context.Canceled, errors.New("frp login failed"))}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["a"].State == diagnosticStateRetrying
+	}, "joined-cancellation crash reported retrying")
+	time.Sleep(120 * time.Millisecond)
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d, want one; a joined context.Canceled must not be read as an intentional stop", got)
+	}
+}
+
+func TestManagerGroupResourceGoneConvergesEveryShareOff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 3, "on"),
+		"b": daemonShare("b", 5, "on"),
+	}}
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.Join(connectorshare.ErrResourceGone, errors.New("knock resource gone"))}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 5 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// A permanent whole-group denial converges every share to a durable off
+	// (each at its own epoch) rather than re-knocking forever.
+	waitManagerCondition(t, func() bool {
+		return registry.share("a").DesiredState == "off" && registry.share("b").DesiredState == "off"
+	}, "every share persisted off on a group-level resource-gone")
+	if got := registry.share("a").ServingEpoch; got != 3 {
+		t.Fatalf("share a persisted epoch = %d, want 3", got)
+	}
+	if got := registry.share("b").ServingEpoch; got != 5 {
+		t.Fatalf("share b persisted epoch = %d, want 5", got)
+	}
+	// Once both are off the desired set is empty, so the group is not rebuilt.
+	time.Sleep(60 * time.Millisecond)
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d, want one; a converged gone group must not re-knock", got)
+	}
+}

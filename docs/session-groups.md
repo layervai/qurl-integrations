@@ -62,7 +62,7 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
 - **Registry file cap.** The registry file is bounded at 4 MiB. A full 2000-row
   registry of maximal rows (long base64url resource identities and CRIDs, long
   Connector, routing, and knock identities, and verbose IPv6 loopback targets)
-  measures ~1.7 MiB, so the cap keeps roughly 2x headroom.
+  measures ~1.66 MiB, so the cap keeps roughly 2.5x headroom.
 - **Bounded status payload.** The owner-only `/status` payload is bounded so a
   full 2000-route fleet stays well within the reader limit: each route appears
   once in the running map and once in the redacted diagnostics map, together

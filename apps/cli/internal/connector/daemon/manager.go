@@ -127,8 +127,12 @@ type Manager struct {
 	runnerCancel  context.CancelFunc
 	runnerDone    chan struct{}
 	runnerRunning bool
-	groupFailures int
-	groupRetryAt  time.Time
+	// runnerStopRequested records that the manager (not a runner failure) asked
+	// the current runner to stop, so finishRunner classifies the exit by intent
+	// rather than by whether the error happens to wrap a context cancellation.
+	runnerStopRequested bool
+	groupFailures       int
+	groupRetryAt        time.Time
 
 	// lifetime bounds background work (resource-gone persistence retries) to
 	// the daemon's Run; it is set when Run starts.
@@ -212,6 +216,12 @@ func (m *Manager) Run(ctx context.Context) (retErr error) {
 // desired route set from every desired-on share, then pushes it to the live
 // session group (adding, removing, and restarting individual routes) or starts
 // a fresh group when none is running.
+//
+// ctx bounds this reconcile only. When Reconcile starts a group it detaches the
+// runner from ctx (see launchRunner), so a caller must not pass a short-lived
+// request context expecting it to scope the session group — Run's context is
+// what owns the group's lifetime. Production drives Reconcile solely from Run's
+// long-lived context; only tests call it directly.
 func (m *Manager) Reconcile(ctx context.Context) error {
 	shares, err := m.registry.List(ctx)
 	if err != nil {
@@ -291,11 +301,15 @@ func (m *Manager) applyDesired(ctx context.Context, desired []connectorstate.Loc
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// SetRoutes records its own divergence and the runner re-applies the
-		// desired set under its own context; a resource-local push failure must
-		// not fail the daemon or disturb serving siblings.
-		slog.WarnContext(ctx, "share daemon could not push the desired route set; the session group will re-apply it",
+		// TODO(upstream-contract): the runner records its own divergence on a
+		// failed SetRoutes and re-applies the desired set under its own context
+		// (qurl-connector pkg/share). We also schedule our own bounded reconcile
+		// so a newly published share still converges even if that self-heal ever
+		// regresses; a resource-local push failure must not fail the daemon or
+		// disturb serving siblings.
+		slog.WarnContext(ctx, "share daemon could not push the desired route set; will re-apply",
 			"routes", len(routes), "error", redactShareError(err))
+		m.scheduleGroupRetry(ctx, m.retryDelay(1))
 	}
 	restartFailed := false
 	for i := range restart {
@@ -363,15 +377,28 @@ func (m *Manager) commitRestart(share *connectorstate.LocalShare) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) commitRestarts(restart []restartEntry) {
+	for i := range restart {
+		m.commitRestart(&restart[i].share)
+	}
+}
+
 // startGroup builds and launches one session group from the desired shares.
 // The group knocks once for the whole set; each route carries its own public
 // resource identity in its FRP proxy metadata.
 func (m *Manager) startGroup(ctx context.Context, desired []connectorstate.LocalShare) error {
+	// Record desired state before the backoff gate so a share published while
+	// the group is backing off still gets a seeded diagnostic (otherwise
+	// waitForSharingWithDiagnostics has no daemon cause to surface). A fresh
+	// group start subsumes any per-route restart accumulated during downtime —
+	// the new admission already retires the stale session — so commit those
+	// epochs now rather than issuing a spurious RestartRoute on a later cycle.
+	restart, _ := m.recordDesired(desired)
+	m.commitRestarts(restart)
 	if wait := m.groupRestartWait(); wait > 0 {
 		m.scheduleGroupRetry(ctx, wait)
 		return nil
 	}
-	m.recordDesired(desired)
 	routes := make([]connectorshare.LocalHTTPRoute, 0, len(desired))
 	for i := range desired {
 		routes = append(routes, shareRoute(&desired[i]))
@@ -423,6 +450,7 @@ func (m *Manager) launchRunner(parent context.Context, runner GroupRunner) {
 	m.runnerCancel = cancel
 	m.runnerDone = done
 	m.runnerRunning = true
+	m.runnerStopRequested = false
 	// The group is launching; a scheduled retry window, if any, is now spent.
 	// groupFailures is deliberately not reset here — it is reset on the first
 	// route serving so a start-then-crash cycle keeps escalating its backoff
@@ -432,21 +460,25 @@ func (m *Manager) launchRunner(parent context.Context, runner GroupRunner) {
 	go func() {
 		err := runner.Run(runCtx)
 		stopOnParent()
+		// Sample the parent before the goroutine's own cancel so a daemon
+		// shutdown is recognized as an intentional stop, not a failure.
+		parentCanceled := parent.Err() != nil
 		cancel()
-		m.finishRunner(parent, runner, err)
+		m.finishRunner(parent, runner, err, parentCanceled)
 		close(done)
 	}()
 }
 
 // finishRunner records a runner exit. parent is the daemon-lifetime context,
-// not the runner's own (already-canceled) run context, so an intentional stop
-// is distinguished by the returned error rather than by a context that is
-// always canceled by this point. A benign exit — an emptied group, or an
-// intentional cancellation (daemon shutdown or a manager-driven stop, both of
-// which make Run return a context.Canceled error) — resets the backoff; any
-// other exit schedules a backed-off reconciliation so a failed group is
-// rebuilt without a hot re-knock loop.
-func (m *Manager) finishRunner(parent context.Context, runner GroupRunner, err error) {
+// not the runner's own (already-canceled) run context. Classification is by
+// intent, not by whether the error wraps a context cancellation: an emptied
+// group, a daemon shutdown (parentCanceled), or a manager-driven stop
+// (runnerStopRequested) is benign and resets the backoff. A whole-group
+// permanent denial (ErrResourceGone from the shared admission) converges every
+// share to off instead of re-knocking forever. Any other exit schedules a
+// backed-off reconciliation so a failed group is rebuilt without a hot
+// re-knock loop.
+func (m *Manager) finishRunner(parent context.Context, runner GroupRunner, err error, parentCanceled bool) {
 	m.mu.Lock()
 	if m.runner != runner {
 		m.mu.Unlock()
@@ -455,13 +487,43 @@ func (m *Manager) finishRunner(parent context.Context, runner GroupRunner, err e
 	m.runner = nil
 	m.runnerCancel = nil
 	m.runnerRunning = false
-	benign := err == nil || errors.Is(err, connectorshare.ErrGroupEmpty) ||
-		errors.Is(err, context.Canceled)
-	if benign {
+	stopRequested := m.runnerStopRequested
+	m.runnerStopRequested = false
+	if err == nil || errors.Is(err, connectorshare.ErrGroupEmpty) || parentCanceled || stopRequested {
 		m.groupFailures = 0
 		m.groupRetryAt = time.Time{}
 		m.mu.Unlock()
 		m.Trigger()
+		return
+	}
+	if errors.Is(err, connectorshare.ErrResourceGone) {
+		// The whole group's Connector knock resource is permanently gone, so
+		// every share is unservable. Converge each to a durable off rather than
+		// leaving an infinite quiet re-knock loop. Gate any rebuild behind a
+		// backoff window so the pending persists land and the desired set
+		// empties instead of the group re-knocking for still-on rows in
+		// between; a persist failure still lets the backed-off retry re-drive it.
+		category, code := classifyShareFailure(err)
+		gone := make([]connectorstate.LocalShare, 0, len(m.tracked))
+		for resourceID := range m.tracked {
+			m.diagnostics[resourceID] = ResourceDiagnostic{
+				State: diagnosticStateFailed, LastTransition: time.Now().UTC(),
+				FailureCategory: category, FailureCode: code,
+			}
+			if _, inFlight := m.persisting[resourceID]; inFlight {
+				continue
+			}
+			m.persisting[resourceID] = struct{}{}
+			gone = append(gone, m.tracked[resourceID].share)
+		}
+		m.groupFailures++
+		delay := m.retryDelay(m.groupFailures)
+		m.groupRetryAt = time.Now().Add(delay)
+		m.mu.Unlock()
+		for i := range gone {
+			go m.persistResourceGone(&gone[i])
+		}
+		m.scheduleGroupRetry(parent, delay)
 		return
 	}
 	m.groupFailures++
@@ -563,7 +625,7 @@ func (m *Manager) onRouteFailed(routeID string, cause error) {
 }
 
 func (m *Manager) onGroupRetry(cause error, wait time.Duration) {
-	slog.Warn("share daemon session group attempt failed; retrying",
+	slog.WarnContext(m.lifetimeContext(), "share daemon session group attempt failed; retrying",
 		"retry_in", wait, "error", redactShareError(cause))
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -571,7 +633,7 @@ func (m *Manager) onGroupRetry(cause error, wait time.Duration) {
 }
 
 func (m *Manager) onRotationLeadCapped(routes int, need, lead time.Duration) {
-	slog.Warn("share daemon session group rotation lead is capped below the route count's need",
+	slog.WarnContext(m.lifetimeContext(), "share daemon session group rotation lead is capped below the route count's need",
 		"routes", routes, "needed", need, "lead", lead)
 }
 
@@ -669,11 +731,16 @@ func (m *Manager) stopRunnerForEmptyGroup(ctx context.Context) error {
 }
 
 // stopRunner cancels the live runner and waits for it to retire its admission,
-// bounded by ctx so one wedged shutdown cannot hang the daemon.
+// bounded by ctx so one wedged shutdown cannot hang the daemon. It marks the
+// stop as manager-requested first so finishRunner classifies the resulting
+// exit as intentional rather than as a failure to back off from.
 func (m *Manager) stopRunner(ctx context.Context) error {
 	m.mu.Lock()
 	cancel := m.runnerCancel
 	done := m.runnerDone
+	if cancel != nil {
+		m.runnerStopRequested = true
+	}
 	m.mu.Unlock()
 	if cancel == nil {
 		return nil

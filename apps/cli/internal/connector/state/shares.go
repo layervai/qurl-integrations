@@ -36,7 +36,8 @@ const (
 	// registry of maximal rows (a ~124-char base64url resource identity and
 	// CRID, a 64-char Connector ID, a 54-char routing ID, a 64-char knock
 	// resource ID, and a verbose IPv6 loopback target per row) marshals to
-	// ~1.7 MiB; the 4 MiB cap keeps ~2x headroom above that measured worst case.
+	// ~1.66 MiB (measured by TestLocalSharesRegistryRoundTripsMaxRowsUnderByteCap);
+	// the 4 MiB cap keeps ~2.5x headroom above that measured worst case.
 	localSharesMaxBytes = 4 << 20
 	desiredStateOn      = "on"
 	desiredStateOff     = "off"
