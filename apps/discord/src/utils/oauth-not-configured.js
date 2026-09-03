@@ -37,9 +37,11 @@ function renderNotConfiguredPage(res, surface, reason) {
   }
 
   return res.status(503).send(res.renderPage({
-    title: 'qURL Setup Not Configured',
+    title: surface.startsWith('discord-install') ? 'Discord Install Not Configured' : 'qURL Setup Not Configured',
     icon: '⚠️',
-    heading: 'qURL setup is not configured yet',
+    heading: surface.startsWith('discord-install')
+      ? 'Discord install is not configured yet'
+      : 'qURL setup is not configured yet',
     message,
     type: 'warning',
   }));

@@ -58,11 +58,13 @@ function setQurlOAuthPkceCookie(res, req, codeVerifier) {
   });
 }
 
-function setDiscordInstallSessionCookie(res, req, state) {
-  setCookie(res, req, DISCORD_INSTALL_SESSION_COOKIE, state, {
-    path: DISCORD_INSTALL_COOKIE_PATH,
-    ttlSeconds: DISCORD_INSTALL_COOKIE_TTL_SECONDS,
+function setDiscordInstallSessionCookie(res, state) {
+  res.cookie(DISCORD_INSTALL_SESSION_COOKIE, state, {
+    httpOnly: true,
     secure: true,
+    sameSite: 'lax',
+    maxAge: DISCORD_INSTALL_COOKIE_TTL_SECONDS * 1000,
+    path: DISCORD_INSTALL_COOKIE_PATH,
   });
 }
 

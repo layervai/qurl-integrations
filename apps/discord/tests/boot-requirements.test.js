@@ -25,11 +25,11 @@ const {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
-  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
 const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
+const { SSM_PLACEHOLDER_SENTINEL } = require('../src/utils/ssm-placeholder');
 
 describe('bootRequired', () => {
   it('demands only DISCORD_TOKEN (GUILD_ID and BASE_URL are enforced upstream)', () => {
@@ -560,7 +560,7 @@ describe('missingMapCommandKeys', () => {
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: false,
-        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+        GOOGLE_MAPS_API_KEY: SSM_PLACEHOLDER_SENTINEL,
       }),
     ).toEqual([]);
   });
@@ -583,7 +583,7 @@ describe('missingMapCommandKeys', () => {
     expect(
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: true,
-        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+        GOOGLE_MAPS_API_KEY: SSM_PLACEHOLDER_SENTINEL,
       }),
     ).toEqual(['GOOGLE_MAPS_API_KEY']);
   });

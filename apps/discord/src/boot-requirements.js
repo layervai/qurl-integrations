@@ -555,17 +555,13 @@ function invalidStateSecretValues(cfg) {
   return problems;
 }
 
-// PLACEHOLDER is treated as missing because the SSM parameter
-// ships with that literal sentinel value; remediation ("seed a
-// real key") is identical to the empty-key case.
-//
-// Backward-compatible name retained for focused boot-requirement tests; the
-// cross-repo contract now has one application-side source of truth.
-const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = SSM_PLACEHOLDER_SENTINEL;
+// PLACEHOLDER is treated as missing because the SSM parameter ships with that
+// literal sentinel value; remediation ("seed a real key") is identical to the
+// empty-key case.
 function missingMapCommandKeys(cfg) {
   if (!cfg.MAP_COMMAND_ENABLED) return [];
   const key = cfg.GOOGLE_MAPS_API_KEY;
-  if (!key || key === GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL) {
+  if (!key || key === SSM_PLACEHOLDER_SENTINEL) {
     return ['GOOGLE_MAPS_API_KEY'];
   }
   return [];
@@ -655,7 +651,6 @@ module.exports = {
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
-  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };

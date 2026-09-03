@@ -99,7 +99,7 @@ describe('utils/oauth-cookies', () => {
     it('uses a ten-minute __Host- session with Secure and Path=/', () => {
       const res = fakeRes();
 
-      setDiscordInstallSessionCookie(res, { protocol: 'https' }, 'install-state');
+      setDiscordInstallSessionCookie(res, 'install-state');
 
       expect(res.cookieCalls).toEqual([{
         name: DISCORD_INSTALL_SESSION_COOKIE,

@@ -2,7 +2,7 @@
 // install callback that chains the Discord OAuth2 install to the qURL
 // Auth0 leg. Covers:
 //   - 503 not-configured response (DISCORD_CLIENT_SECRET or AUTH0_* unset)
-//   - 400 missing code, missing guild_id, declined consent
+//   - 400 missing code, declined consent, mismatched guild hint
 //   - 502 Discord token exchange failure, /users/@me failure
 //   - 302 happy path: redirects to Auth0 with a qURL OAuth state binding
 //     guild_id + discord_user_id
@@ -54,7 +54,7 @@ jest.mock('../src/commands', () => ({
 
 const request = require('supertest');
 const { app } = require('../src/server');
-const db = require('../src/store');
+const config = require('../src/config');
 const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -166,6 +166,20 @@ describe('Discord install callback', () => {
         : res.headers['set-cookie'];
       expect(cookieHeader).toMatch(/Secure/i);
     });
+
+    it('keeps the shared OAuth rate limiter mounted on the public install entrypoint', async () => {
+      for (let i = 0; i < config.RATE_LIMIT_MAX_REQUESTS; i++) {
+        // Sequential requests make the expected bucket consumption explicit.
+        // Each response is a local redirect; no Discord network call occurs.
+        // eslint-disable-next-line no-await-in-loop
+        const res = await request(app).get('/oauth/discord/install');
+        expect(res.status).toBe(302);
+      }
+
+      const throttled = await request(app).get('/oauth/discord/install');
+      expect(throttled.status).toBe(429);
+      expect(throttled.text).toContain('Slow Down');
+    });
   });
 
   describe('GET /oauth/discord/callback', () => {
@@ -268,10 +282,24 @@ describe('Discord install callback', () => {
       expect(extractStyleNonce(first)).not.toBe(extractStyleNonce(second));
     });
 
-    it('400s on missing guild_id (admin abandoned mid-install)', async () => {
+    it('accepts an absent advisory guild_id when the token response identifies the installed guild', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({
+            access_token: 'disc-token', token_type: 'Bearer', guild: { id: 'guild-1' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+
       const res = await discordCallback('/oauth/discord/callback?code=disc-code');
-      expect(res.status).toBe(400);
-      expect(res.text).toContain('Bot install incomplete');
+
+      expect(res.status).toBe(302);
+      expect(verifyQurlOAuthState(new URL(res.headers.location).searchParams.get('state')).payload.guildId)
+        .toBe('guild-1');
       expect(clearedCookieHeader(
         res.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
@@ -305,7 +333,7 @@ describe('Discord install callback', () => {
         json: () => Promise.resolve({ access_token: 'disc-token', token_type: 'Bearer' }),
       });
 
-      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code');
 
       expect(res.status).toBe(502);
       expect(res.text).toContain('Discord returned an unexpected response');
@@ -346,6 +374,35 @@ describe('Discord install callback', () => {
         res.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
       )).toBeDefined();
+    });
+
+    it('warns but continues when Discord reports a different granted permission bitfield', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({
+            access_token: 'disc-token', guild: { id: 'guild-1' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+
+      const res = await discordCallback(
+        '/oauth/discord/callback?code=ok-code&guild_id=guild-1&permissions=1024',
+      );
+
+      expect(res.status).toBe(302);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Discord install callback reported different bot permissions',
+        expect.objectContaining({
+          grantedPermissions: '1024',
+          requestedPermissions: '2147503104',
+        }),
+      );
+      warnSpy.mockRestore();
     });
 
     it('502s when Discord /users/@me fails after successful token exchange', async () => {
@@ -485,12 +542,10 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/Secure/);
     });
 
-    it('still sets prompt=consent on re-install (guild already has a configured_by) — Stage-2 always prompts', async () => {
-      // Round-9 item #1 says always-on for Stage-2; this test pins
-      // the re-install branch produces the same redirect shape as
-      // first-install. Mock returns a prior config row to exercise
-      // the previouslyConfigured=true code path.
-      db.getGuildConfig.mockResolvedValueOnce({ guild_id: 'guild-1', configured_by: '111' });
+    it('still sets prompt=consent when Discord omits the advisory guild hint', async () => {
+      // Re-installs may omit the callback hint. Stage 2 must still use the
+      // authoritative token-response guild and keep the explicit Auth0
+      // consent screen.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -502,7 +557,7 @@ describe('Discord install callback', () => {
           ok: true, status: 200,
           json: () => Promise.resolve({ id: '987654321098765432' }),
         });
-      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code');
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
       expect(loc.searchParams.get('prompt')).toBe('consent');

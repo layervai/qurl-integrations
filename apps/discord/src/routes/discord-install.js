@@ -5,7 +5,8 @@
 //      router's /install endpoint and redirects to Discord.
 //   2. Discord shows the standard "Which server?" picker → admin selects.
 //   3. Discord shows the bot's permission consent → admin clicks Authorize.
-//   4. Discord redirects HERE: /oauth/discord/callback?code=…&guild_id=…&state=…
+//   4. Discord redirects HERE: /oauth/discord/callback?code=…&state=…
+//      (`guild_id` may also be present as an advisory hint).
 //   5. This route exchanges the Discord code for an access_token, calls
 //      /users/@me to get the admin's Discord user ID, then 302-chains to
 //      Auth0 with a qURL OAuth state binding (guildId + discordUserId)
@@ -21,6 +22,8 @@
 //   echoed state and cookie to match before exchanging Discord's code.
 //   A callback URL forwarded from another browser therefore fails closed
 //   before it can bind that browser's qURL account to the attacker's guild.
+//   The cookie is intentionally single-slot: a second /install request in
+//   the same browser invalidates the first tab (last writer wins).
 //   The first-party entrypoint removes the cross-repo signed-state contract
 //   previously proposed in #179; the service that verifies state now mints it.
 
@@ -52,14 +55,6 @@ const DISCORD_INSTALL_SCOPES = 'identify bot applications.commands';
 
 const router = express.Router();
 
-// 503 surface delegates to the shared helper — single source of truth
-// for the wire-vs-log split (C.4 invariant). The `surface` arg picks
-// the discord-install-specific remediation copy.
-function renderNotConfigured(res, reason, beforeInstall = false) {
-  const surface = beforeInstall ? 'discord-install-entry' : 'discord-install';
-  return renderNotConfiguredPage(res, surface, reason);
-}
-
 // `detail` describes the immediate failure; we append a remediation
 // hint that fits any failure during the callback. Discord's external
 // Require OAuth2 Code Grant setting determines whether the bot is already
@@ -76,10 +71,6 @@ function renderError(res, statusCode, headline, detail) {
   }));
 }
 
-function notConfiguredReason() {
-  return config.discordInstallNotConfiguredReason;
-}
-
 function installStateMatches(req, state) {
   const cookieState = readCookie(req, DISCORD_INSTALL_SESSION_COOKIE);
   if (!cookieState || !state) return false;
@@ -88,17 +79,17 @@ function installStateMatches(req, state) {
 
 router.get('/install', rateLimit, (req, res) => {
   if (!config.isDiscordInstallConfigured) {
-    return renderNotConfigured(res, notConfiguredReason(), true);
+    return renderNotConfiguredPage(res, 'discord-install-entry', config.discordInstallNotConfiguredReason);
   }
   // Refuse before Discord installs the bot: without the encryption key, the
   // chained qURL authorization cannot persist the new guild credential.
   if (!process.env.KEY_ENCRYPTION_KEY) {
     logger.error('Refusing /oauth/discord/install: KEY_ENCRYPTION_KEY is not set');
-    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset', true);
+    return renderNotConfiguredPage(res, 'discord-install-entry', 'KEY_ENCRYPTION_KEY unset');
   }
 
   const state = crypto.randomBytes(32).toString('base64url');
-  setDiscordInstallSessionCookie(res, req, state);
+  setDiscordInstallSessionCookie(res, state);
   const authorizeUrl = new URL('https://discord.com/oauth2/authorize');
   authorizeUrl.searchParams.set('client_id', config.DISCORD_CLIENT_ID);
   authorizeUrl.searchParams.set('permissions', DISCORD_BOT_PERMISSIONS);
@@ -119,7 +110,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Single log line lives in renderNotConfiguredPage (round-9 item
     // #7). Reason is computed here because the helper would otherwise
     // need access to two config flags.
-    return renderNotConfigured(res, notConfiguredReason());
+    return renderNotConfiguredPage(res, 'discord-install', config.discordInstallNotConfiguredReason);
   }
   const installState = singleStringParam(req.query.state);
   const stateMatches = installStateMatches(req, installState);
@@ -136,7 +127,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // round-trip before failing at the qURL callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
-    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset');
+    return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
   clearDiscordInstallSessionCookie(res);
   // Round-9 item #5: funnel through singleStringParam for symmetry.
@@ -151,16 +142,19 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
   const code = singleStringParam(req.query.code);
   const guildHint = singleStringParam(req.query.guild_id);
+  const grantedPermissions = singleStringParam(req.query.permissions);
   if (!code) {
     return renderError(res, 400, 'Missing authorization code', 'Discord did not return an authorization code.');
   }
-  if (!guildHint) {
-    // Discord only includes guild_id when the user actually installed the
-    // bot to a server. Missing guild_id means the install was abandoned
-    // mid-flow or the bot's OAuth2 install link was invoked without
-    // scope=bot — flag for triage.
-    logger.warn('Discord install callback missing guild_id', { ip: req.ip });
-    return renderError(res, 400, 'Bot install incomplete', 'Discord did not return the server you selected. Please click "Add to Discord" again.');
+  if (grantedPermissions && grantedPermissions !== DISCORD_BOT_PERMISSIONS) {
+    // Diagnostic only: Discord's installed role/channel overrides remain
+    // authoritative. The command-side permission check gives the admin the
+    // actionable fix if one of these permissions is unavailable.
+    logger.warn('Discord install callback reported different bot permissions', {
+      grantedPermissions,
+      requestedPermissions: DISCORD_BOT_PERMISSIONS,
+      ip: req.ip,
+    });
   }
 
   // Stage-2 ALWAYS sets prompt=consent on the chained Auth0 redirect,
@@ -228,7 +222,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Discord documents callback guild_id as a hint only. Bind qURL setup
     // to the guild returned by the code exchange and reject any tampered hint
     // before calling /users/@me or starting the Auth0 leg.
-    if (guildId !== guildHint) {
+    if (guildHint && guildId !== guildHint) {
       logger.warn('Discord install callback guild hint did not match token response', { ip: req.ip });
       return renderError(res, 400, 'Server mismatch', 'The selected server did not match Discord\'s authorization response.');
     }
