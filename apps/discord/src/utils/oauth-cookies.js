@@ -31,7 +31,7 @@ const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
 // in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
 // — flipping that off would silently downgrade prod cookies. Keeping
 // the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
-function setCookie(res, req, name, value, { path, ttlSeconds, secure = req.protocol === 'https' }) {
+function setCookie(res, req, name, value, { path, ttlSeconds, secure = req?.protocol === 'https' }) {
   res.cookie(name, value, {
     httpOnly: true,
     secure,

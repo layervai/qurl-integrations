@@ -200,14 +200,19 @@ describe('Discord install callback', () => {
       const empty = await request(app)
         .get('/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=')
         .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=`);
+      const duplicateState = await request(app)
+        .get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${DISCORD_INSTALL_STATE}&state=${DISCORD_INSTALL_STATE}`)
+        .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}`);
 
-      for (const res of [missing, mismatch, empty]) {
+      for (const res of [missing, mismatch, empty, duplicateState]) {
         expect(res.status).toBe(400);
         expect(res.text).toContain('Invalid install link');
         expect(clearedCookieHeader(
           res.headers['set-cookie'],
           DISCORD_INSTALL_SESSION_COOKIE,
         )).toBeUndefined();
+        expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_SESSION_COOKIE)).toBeNull();
+        expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE)).toBeNull();
       }
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
@@ -406,6 +411,32 @@ describe('Discord install callback', () => {
           grantedPermissions: '1024',
           requestedPermissions: '2147503104',
         }),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn when Discord reports the exact requested permission bitfield', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({
+            access_token: 'disc-token', guild: { id: 'guild-1' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+
+      const res = await discordCallback(
+        `/oauth/discord/callback?code=ok-code&guild_id=guild-1&permissions=${REQUIRED_DISCORD_PERMISSIONS}`,
+      );
+
+      expect(res.status).toBe(302);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        'Discord install callback reported different bot permissions',
+        expect.anything(),
       );
       warnSpy.mockRestore();
     });
@@ -864,42 +895,49 @@ describe('discord-install — not configured', () => {
     }
   });
 
-  it('returns 503 while DISCORD_CLIENT_ID still has an infrastructure placeholder', async () => {
-    const saved = process.env.DISCORD_CLIENT_ID;
-    process.env.DISCORD_CLIENT_ID = 'PLACEHOLDER';
-    try {
-      await jest.isolateModulesAsync(async () => {
-        jest.doMock('../src/discord', () => ({
-          sendDM: jest.fn().mockResolvedValue(true),
-          assignContributorRole: jest.fn(),
-          notifyPRMerge: jest.fn(),
-          notifyBadgeEarned: jest.fn(),
-        }));
-        jest.doMock('../src/store', () => ({
-          setGuildApiKey: jest.fn(),
-          getGuildApiKey: jest.fn(),
-          getPendingLink: jest.fn(),
-          consumePendingLink: jest.fn(),
-        }));
-        jest.doMock('../src/commands', () => ({
-          verifyStateBinding: jest.fn().mockReturnValue(true),
-          handleCommand: jest.fn(),
-          commands: [],
-          registerCommands: jest.fn(),
-        }));
-        // eslint-disable-next-line global-require
-        const supertest = require('supertest');
-        // eslint-disable-next-line global-require
-        const { app: freshApp } = require('../src/server');
+  it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n'])(
+    'returns 503 while DISCORD_CLIENT_ID still has an infrastructure placeholder (%j)',
+    async (placeholder) => {
+      const saved = process.env.DISCORD_CLIENT_ID;
+      process.env.DISCORD_CLIENT_ID = placeholder;
+      try {
+        await jest.isolateModulesAsync(async () => {
+          jest.doMock('../src/discord', () => ({
+            sendDM: jest.fn().mockResolvedValue(true),
+            assignContributorRole: jest.fn(),
+            notifyPRMerge: jest.fn(),
+            notifyBadgeEarned: jest.fn(),
+          }));
+          jest.doMock('../src/store', () => ({
+            setGuildApiKey: jest.fn(),
+            getGuildApiKey: jest.fn(),
+            getPendingLink: jest.fn(),
+            consumePendingLink: jest.fn(),
+          }));
+          jest.doMock('../src/commands', () => ({
+            verifyStateBinding: jest.fn().mockReturnValue(true),
+            handleCommand: jest.fn(),
+            commands: [],
+            registerCommands: jest.fn(),
+          }));
+          // eslint-disable-next-line global-require
+          const freshConfig = require('../src/config');
+          expect(freshConfig.discordInstallNotConfiguredReason)
+            .toBe('DISCORD_CLIENT_ID is the SSM placeholder');
+          // eslint-disable-next-line global-require
+          const supertest = require('supertest');
+          // eslint-disable-next-line global-require
+          const { app: freshApp } = require('../src/server');
 
-        const res = await supertest(freshApp).get('/oauth/discord/install');
+          const res = await supertest(freshApp).get('/oauth/discord/install');
 
-        expect(res.status).toBe(503);
-        expect(res.text).toMatch(/not configured/i);
-        expect(res.text).not.toContain('PLACEHOLDER');
-      });
-    } finally {
-      process.env.DISCORD_CLIENT_ID = saved;
-    }
-  });
+          expect(res.status).toBe(503);
+          expect(res.text).toMatch(/not configured/i);
+          expect(res.text).not.toContain('PLACEHOLDER');
+        });
+      } finally {
+        process.env.DISCORD_CLIENT_ID = saved;
+      }
+    },
+  );
 });

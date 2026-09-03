@@ -52,7 +52,7 @@ const DISCORD_TIMEOUT_MS = 15000;
 // View Channels + Send Messages + Embed Links + Use Application Commands.
 const DISCORD_BOT_PERMISSION_BITS = [10, 11, 14, 31];
 const DISCORD_BOT_PERMISSIONS = DISCORD_BOT_PERMISSION_BITS
-  .reduce((permissions, bit) => permissions + (2 ** bit), 0)
+  .reduce((permissions, bit) => permissions | (1n << BigInt(bit)), 0n)
   .toString();
 const DISCORD_INSTALL_SCOPES = 'identify bot applications.commands';
 

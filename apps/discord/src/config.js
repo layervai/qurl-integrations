@@ -252,6 +252,8 @@ if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
 } else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
+} else if (normalizedDiscordClientId === SSM_PLACEHOLDER_SENTINEL) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
 } else if (!DISCORD_SNOWFLAKE_RE.test(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
 } else if (!normalizedDiscordClientSecret) {
