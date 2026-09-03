@@ -1529,6 +1529,55 @@ func TestIdempotentDeleteRetiresBindingAfterLocalShareRowWasAlreadyRemoved(t *te
 	assertLocalConnectorResourceRetired(t, stateDir, local.ConnectorID)
 }
 
+// TestDeleteConvergesLocalShareWhoseRetirementWasForgotten covers a delete
+// whose registry cleanup did not finish and whose retired binding the bounded
+// retired memory has since forgotten: the retry finds a registry row with no
+// durable binding for it and must still remove the row, because the service
+// deletion is committed and a stranded desired-on row would keep being served.
+func TestDeleteConvergesLocalShareWhoseRetirementWasForgotten(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another share's binding gives the durable state file a reason to exist
+	// without holding anything for the row being deleted.
+	other := localShareFixture(apitest.NewServer(t))
+	other.ConnectorID = "local-other"
+	seedLocalConnectorResourceBinding(t, stateDir, &other)
+	local := localShareFixture(srv)
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args:               []string{"--endpoint", srv.URL, "delete", srv.Key.CRID, "--yes"},
+		env:                map[string]string{"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir},
+		shareRegistry:      registry,
+		shareDaemonFactory: func(string, string) shareDaemonController { return daemon },
+		shareStateDir:      stateDir,
+	})
+	if res.code != 0 || strings.Contains(res.stderr.String(), "did not finish") {
+		t.Fatalf("exit=%d stderr=%s", res.code, res.stderr.String())
+	}
+	if _, err := registry.Get(context.Background(), srv.Key.CRID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("forgotten-binding local share still present: %v", err)
+	}
+	if daemon.reloads != 1 {
+		t.Fatalf("delete daemon reconciliation = %+v, want one reload", daemon)
+	}
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	_, retired, found, err := store.ConnectorResourceBinding(context.Background(), other.ConnectorID)
+	if err != nil || !found || retired {
+		t.Fatalf("unrelated binding found=%t retired=%t err=%v, want it left live", found, retired, err)
+	}
+}
+
 func TestRemoteLifecycleWorksWithoutLocalRegistryRow(t *testing.T) {
 	for _, command := range []string{"stop", "status", "inspect"} {
 		t.Run(command, func(t *testing.T) {

@@ -68,13 +68,11 @@ const (
 
 // The resource-state map cap must hold a live binding for every registry row
 // (LocalSharesMaxItems) plus the full retired memory, or a bounded retired set
-// could still crowd out a live share. Each expression must be non-negative,
-// which pins connectorResourcesMaxItems >= LocalSharesMaxItems +
-// connectorResourcesMaxRetired at compile time; the pending memory shares the
-// hard cap but never occupies a bindings slot. Mirrors the daemon package's
+// could still crowd out a live share; the pending memory shares the hard cap
+// but never occupies a bindings slot. Each expression must be non-negative,
+// which pins both relations at compile time. Mirrors the daemon package's
 // LocalSharesMaxItems == MaxGroupRoutes pin, one hop further down.
 const (
-	_ = uint(connectorResourcesMaxItems - LocalSharesMaxItems)
 	_ = uint(connectorResourcesMaxItems - LocalSharesMaxItems - connectorResourcesMaxRetired)
 	_ = uint(connectorResourcesMaxItems - connectorResourcesMaxPending)
 )
@@ -94,9 +92,11 @@ var (
 	// ErrConnectorResourceRetired prevents a deliberately deleted Connector ID
 	// from being sent again as an implicit resource-reclamation request. The
 	// refusal is a bounded local memory (connectorResourcesMaxRetired), not a
-	// service-side tombstone: the service permits an ordinarily deleted
-	// Connector ID to be published again, so a forgotten retirement falls back
-	// to that behavior rather than to anything unsafe.
+	// service-side tombstone: a forgotten retirement falls back to the
+	// service's own behavior for a deleted Connector ID, which is to mint a
+	// fresh resource under it. See pruneRetired for what else forgetting costs.
+	// TODO(upstream-contract): that fallback assumes the qURL service keeps
+	// permitting an ordinarily deleted Connector ID to be published again.
 	ErrConnectorResourceRetired = errors.New("connector resource was deliberately retired")
 )
 
@@ -482,23 +482,123 @@ func emptyConnectorResourcesState() connectorResourcesState {
 	}
 }
 
+// LocalPublishIDDomain separates every local Connector ID derivation from any
+// other use of the same inputs. A target's default ID derives from the native
+// agent identity and canonical origin (in the publish command); each
+// replacement derives here, from the retired binding it succeeds.
+const LocalPublishIDDomain = "qurl-cli-local-publish-v1"
+
+// ReplacementConnectorID derives the next stable default Connector ID from a
+// locally accepted binding that an authorized delete retired. It lives beside
+// the retired memory because that memory must recognize the links of a chain
+// the publish command can still walk (see pruneRetired). It does not turn an
+// unexplained authority conflict into replacement permission.
+func ReplacementConnectorID(connectorID, resourceID string) (string, error) {
+	connectorID = strings.TrimSpace(connectorID)
+	resourceID = strings.TrimSpace(resourceID)
+	if connectorID == "" || resourceID == "" {
+		return "", errors.New("cannot derive a replacement Connector ID without the retired Connector and resource identities")
+	}
+	digest := sha256.Sum256([]byte(LocalPublishIDDomain + "\x00replacement\x00" + connectorID + "\x00" + resourceID))
+	suffix := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:10]))
+	return "local-" + suffix, nil
+}
+
 // pruneRetired forgets retired Connectors beyond connectorResourcesMaxRetired,
 // removing each evicted entry from both retired and bindings so the slot it
 // held is free for a live share again. keep is the Connector retired by the
 // current call and is never evicted, so a retirement always sticks.
 //
-// Forgetting a retirement is safe by construction. The service already
-// permits an ordinarily deleted Connector ID to be published again, so a
-// forgotten explicit ID simply stops being refused locally and the next
-// publish of it mints a fresh resource. The default Connector ID chain walks
-// retired bindings and stops at the first ID that has none, so a forgotten
-// link restarts the chain at that ID instead of breaking it. Eviction order
-// is therefore only a choice of which deliberate deletion stops being
-// refused; see evictionOrder for why it is the file's own key order.
+// What forgetting costs. A forgotten explicit ID simply stops being refused
+// locally; the next publish of it mints a fresh resource, which is what the
+// service does for any deleted Connector ID. Default IDs chain: the publish
+// command finds a target's current default by walking retired bindings from
+// the origin's root, deriving each successor with ReplacementConnectorID, and
+// stops at the first ID that is absent or live. Forgetting a link of a chain
+// that still ends in a live share would stop that walk early and mint a new
+// resource under the forgotten ID while the live share stayed desired-on,
+// listed only under its own CRID. So links of live-tailed chains are evicted
+// last: first every other retirement in the file's key order (a chain whose
+// tail was itself deleted restarts harmlessly wherever it is cut, and the
+// links beyond the cut become ordinary evictable leftovers), and only when
+// every remembered retirement leads to a live share does eviction cut one.
+// Reaching that takes one default target deleted connectorResourcesMaxRetired
+// times and then republished; the fork it causes is the accepted cost of a
+// bounded memory.
+// TODO(upstream-contract): the explicit-ID fallback assumes the qURL service
+// keeps permitting an ordinarily deleted Connector ID to be published again.
 func (s *connectorResourcesState) pruneRetired(keep string) {
-	for _, id := range evictionOrder(s.Retired, len(s.Retired)-connectorResourcesMaxRetired, keep) {
-		delete(s.Retired, id)
-		delete(s.Bindings, id)
+	excess := len(s.Retired) - connectorResourcesMaxRetired
+	if excess <= 0 {
+		return
+	}
+	liveTailed := s.retiredWithLiveTail()
+	evictable := make(map[string]bool, len(s.Retired))
+	for id := range s.Retired {
+		if !liveTailed[id] {
+			evictable[id] = true
+		}
+	}
+	for _, id := range evictionOrder(evictable, excess, keep) {
+		s.forgetRetired(id)
+	}
+	if excess = len(s.Retired) - connectorResourcesMaxRetired; excess > 0 {
+		for _, id := range evictionOrder(s.Retired, excess, keep) {
+			s.forgetRetired(id)
+		}
+	}
+}
+
+func (s *connectorResourcesState) forgetRetired(id string) {
+	delete(s.Retired, id)
+	delete(s.Bindings, id)
+}
+
+// retiredWithLiveTail reports every retired Connector whose chain of
+// replacements still ends in a live binding, memoizing each link so the pass
+// stays linear in the size of the retired memory.
+func (s *connectorResourcesState) retiredWithLiveTail() map[string]bool {
+	memo := make(map[string]bool, len(s.Retired))
+	result := make(map[string]bool, len(s.Retired))
+	for id := range s.Retired {
+		if s.chainEndsLive(id, memo) {
+			result[id] = true
+		}
+	}
+	return result
+}
+
+// chainEndsLive follows a retired Connector's replacements until the chain
+// reaches a live binding (true) or leaves the remembered state (false). The
+// path bound guards against a derivation cycle, which cannot occur without a
+// hash collision but must not hang a delete if it ever did.
+func (s *connectorResourcesState) chainEndsLive(id string, memo map[string]bool) bool {
+	var path []string
+	settle := func(ends bool) bool {
+		for _, link := range path {
+			memo[link] = ends
+		}
+		return ends
+	}
+	for current := id; ; {
+		if ends, seen := memo[current]; seen {
+			return settle(ends)
+		}
+		binding, bound := s.Bindings[current]
+		if !bound {
+			return settle(false)
+		}
+		if !s.Retired[current] {
+			return settle(true)
+		}
+		if path = append(path, current); len(path) > len(s.Retired) {
+			return settle(false)
+		}
+		successor, err := ReplacementConnectorID(current, binding.ResourceID)
+		if err != nil {
+			return settle(false)
+		}
+		current = successor
 	}
 }
 
@@ -513,6 +613,9 @@ func (s *connectorResourcesState) pruneRetired(keep string) {
 // whose response was lost converges on the same identity through the fresh
 // request (reported as found-existing). A warm request is regenerated from
 // the durable binding's identity assertion, exactly as it was first built.
+// TODO(upstream-contract): that convergence assumes the qURL service keeps
+// resolving a fresh request for an existing Connector ID to the active
+// resource instead of minting another.
 func (s *connectorResourcesState) prunePending(keep string) {
 	for _, id := range evictionOrder(s.Pending, len(s.Pending)-connectorResourcesMaxPending, keep) {
 		delete(s.Pending, id)

@@ -98,12 +98,8 @@ func cleanupDeletedLocalShare(ctx context.Context, opts *globalOpts, id string) 
 	if err != nil {
 		return err
 	}
-	retired, err := retireDeletedConnectorBinding(ctx, stateDir, id, local)
-	if err != nil {
+	if err := retireDeletedConnectorBinding(ctx, stateDir, id, local); err != nil {
 		return err
-	}
-	if local != nil && !retired {
-		return errors.New("retire deleted local Connector binding: accepted resource identity is absent")
 	}
 	if local == nil {
 		return nil
@@ -139,27 +135,32 @@ func findDeletedLocalShare(ctx context.Context, opts *globalOpts, stateDir, id s
 	return registry, local, err
 }
 
-func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, local *connectorstate.LocalShare) (bool, error) {
+func retireDeletedConnectorBinding(ctx context.Context, stateDir, id string, local *connectorstate.LocalShare) error {
 	_, err := os.Lstat(filepath.Join(stateDir, connectorstate.ConnectorResourcesFile))
 	if errors.Is(err, os.ErrNotExist) {
 		if local == nil {
-			return false, nil
+			return nil
 		}
-		return false, errors.New("retire deleted local Connector binding: durable Connector resource state is missing")
+		return errors.New("retire deleted local Connector binding: durable Connector resource state is missing")
 	}
 	if err != nil {
-		return false, fmt.Errorf("inspect Connector resource state during delete cleanup: %w", err)
+		return fmt.Errorf("inspect Connector resource state during delete cleanup: %w", err)
 	}
 	resourceStore, err := connectorstate.Open(stateDir)
 	if err != nil {
-		return false, err
+		return err
 	}
 	lookupID := id
 	if local != nil {
 		lookupID = local.ResourceID
 	}
-	retired, retireErr := resourceStore.RetireConnectorResource(ctx, lookupID)
-	return retired, errors.Join(retireErr, resourceStore.Close())
+	// RetireConnectorResource reports false for a binding it no longer holds.
+	// With a registry row still present that means an earlier delete retired
+	// the binding, its registry cleanup did not finish, and the bounded retired
+	// memory has since forgotten it: nothing is left to retire, and the row
+	// must still converge because the service deletion is committed.
+	_, retireErr := resourceStore.RetireConnectorResource(ctx, lookupID)
+	return errors.Join(retireErr, resourceStore.Close())
 }
 
 // confirmDelete asks on the terminal. Without a terminal it refuses instead
