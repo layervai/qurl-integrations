@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -32,10 +34,49 @@ const (
 	ConnectorResourcesFile = "connector_resources.json"
 	connectorResourcesLock = ".connector_resources.lock"
 
-	connectorResourcesVersion  = 2
-	connectorResourcesMaxBytes = 1 << 20
-	connectorResourcesMaxItems = 1024
-	connectorResourceFileMode  = 0o600
+	connectorResourcesVersion = 2
+	// connectorResourcesMaxBytes bounds the whole state file. Bindings and
+	// pending both filled to connectorResourcesMaxItems with maximal entries
+	// marshal to ~3.5 MiB (measured by
+	// TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap); the 8 MiB cap
+	// keeps ~2.3x headroom above that worst case.
+	connectorResourcesMaxBytes = 8 << 20
+	// connectorResourcesMaxItems is the hard per-map bound a load or write
+	// refuses. It must never be the cap a publish hits before the local share
+	// registry's LocalSharesMaxItems: every desired share holds one live
+	// binding here, so bindings must fit the whole registry plus the retired
+	// memory below with headroom (pinned at compile time under this block).
+	// 4096 is 2x the registry cap.
+	connectorResourcesMaxItems = 4096
+	// connectorResourcesMaxRetired bounds the retired memory. A retired
+	// Connector keeps its accepted binding (the default Connector ID chain
+	// derives its successor from that identity), so each one occupies a
+	// bindings slot for as long as it is remembered. Without a bound, deleted
+	// shares from earlier runs would eventually crowd out live ones: the cap
+	// was hit at 683 live shares with 340 retired leftovers. Retirement
+	// evicts beyond this bound; see pruneRetired for what forgetting costs.
+	connectorResourcesMaxRetired = 1024
+	// connectorResourcesMaxPending bounds the exact-replay memory. A pending
+	// request outlives a process only while its outcome is uncertain, and a
+	// request whose commit failed locally is replayed by the next publish of
+	// the same Connector ID; a batch that never republishes those IDs leaves
+	// them behind forever. BeginConnectorResource evicts beyond this bound;
+	// see prunePending for what forgetting costs.
+	connectorResourcesMaxPending = 1024
+	connectorResourceFileMode    = 0o600
+)
+
+// The resource-state map cap must hold a live binding for every registry row
+// (LocalSharesMaxItems) plus the full retired memory, or a bounded retired set
+// could still crowd out a live share. Each expression must be non-negative,
+// which pins connectorResourcesMaxItems >= LocalSharesMaxItems +
+// connectorResourcesMaxRetired at compile time; the pending memory shares the
+// hard cap but never occupies a bindings slot. Mirrors the daemon package's
+// LocalSharesMaxItems == MaxGroupRoutes pin, one hop further down.
+const (
+	_ = uint(connectorResourcesMaxItems - LocalSharesMaxItems)
+	_ = uint(connectorResourcesMaxItems - LocalSharesMaxItems - connectorResourcesMaxRetired)
+	_ = uint(connectorResourcesMaxItems - connectorResourcesMaxPending)
 )
 
 var connectorIDPattern = mustCompileConnectorIDPattern()
@@ -51,7 +92,11 @@ var (
 	// authority for the previously accepted identity.
 	ErrConnectorResourceVerification = errors.New("connector resource response failed durable-state verification")
 	// ErrConnectorResourceRetired prevents a deliberately deleted Connector ID
-	// from being sent again as an implicit resource-reclamation request.
+	// from being sent again as an implicit resource-reclamation request. The
+	// refusal is a bounded local memory (connectorResourcesMaxRetired), not a
+	// service-side tombstone: the service permits an ordinarily deleted
+	// Connector ID to be published again, so a forgotten retirement falls back
+	// to that behavior rather than to anything unsafe.
 	ErrConnectorResourceRetired = errors.New("connector resource was deliberately retired")
 )
 
@@ -188,6 +233,7 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 			ExpectedResourceID: expected,
 		}
 		current.Pending[connectorID] = pending
+		current.prunePending(connectorID)
 		if err := writeConnectorResources(s.dir, current); err != nil {
 			return nil, fmt.Errorf("persist native Connector resource request before dispatch: %w", err)
 		}
@@ -247,6 +293,9 @@ func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string
 // RetireConnectorResource records a completed user-authorized deletion by any
 // exact local public identity. The accepted binding remains available only to
 // derive a new default Connector ID; BeginConnectorResource refuses its reuse.
+// The retired memory is bounded: once connectorResourcesMaxRetired deletions
+// are remembered, each new one evicts the oldest-in-file entry together with
+// its binding so deleted shares never crowd out live ones (see pruneRetired).
 func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired bool, retErr error) {
 	if s == nil {
 		return false, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
@@ -295,6 +344,7 @@ func (s *Store) RetireConnectorResource(ctx context.Context, id string) (retired
 	}
 	current.Retired[connectorID] = true
 	delete(current.Pending, connectorID)
+	current.pruneRetired(connectorID)
 	if err := writeConnectorResources(s.dir, current); err != nil {
 		return false, fmt.Errorf("retire Connector resource state: %w", err)
 	}
@@ -430,6 +480,65 @@ func emptyConnectorResourcesState() connectorResourcesState {
 		Pending:  make(map[string]PendingConnectorResourceRequest),
 		Retired:  make(map[string]bool),
 	}
+}
+
+// pruneRetired forgets retired Connectors beyond connectorResourcesMaxRetired,
+// removing each evicted entry from both retired and bindings so the slot it
+// held is free for a live share again. keep is the Connector retired by the
+// current call and is never evicted, so a retirement always sticks.
+//
+// Forgetting a retirement is safe by construction. The service already
+// permits an ordinarily deleted Connector ID to be published again, so a
+// forgotten explicit ID simply stops being refused locally and the next
+// publish of it mints a fresh resource. The default Connector ID chain walks
+// retired bindings and stops at the first ID that has none, so a forgotten
+// link restarts the chain at that ID instead of breaking it. Eviction order
+// is therefore only a choice of which deliberate deletion stops being
+// refused; see evictionOrder for why it is the file's own key order.
+func (s *connectorResourcesState) pruneRetired(keep string) {
+	for _, id := range evictionOrder(s.Retired, len(s.Retired)-connectorResourcesMaxRetired, keep) {
+		delete(s.Retired, id)
+		delete(s.Bindings, id)
+	}
+}
+
+// prunePending forgets exact-replay requests beyond
+// connectorResourcesMaxPending. keep is the request the current transaction
+// is about to dispatch and is never evicted, so a fresh request is always
+// durable before its first packet.
+//
+// A forgotten request costs replay exactness, never correctness: the next
+// publish of that Connector ID persists a fresh nonce before dispatch, and the
+// service resolves a Connector ID to its one active resource, so an exchange
+// whose response was lost converges on the same identity through the fresh
+// request (reported as found-existing). A warm request is regenerated from
+// the durable binding's identity assertion, exactly as it was first built.
+func (s *connectorResourcesState) prunePending(keep string) {
+	for _, id := range evictionOrder(s.Pending, len(s.Pending)-connectorResourcesMaxPending, keep) {
+		delete(s.Pending, id)
+	}
+}
+
+// evictionOrder returns up to excess keys of entries to forget, never keep.
+// v2 state records no timestamps, so the only durable order it carries is the
+// file's own: json.Marshal writes map keys sorted, so the entries that appear
+// first in the file are forgotten first. For sequentially named batches, the
+// kind of workload that fills these memories, that is oldest-first.
+func evictionOrder[V any](entries map[string]V, excess int, keep string) []string {
+	if excess <= 0 {
+		return nil
+	}
+	evicted := make([]string, 0, excess)
+	for _, key := range slices.Sorted(maps.Keys(entries)) {
+		if len(evicted) == excess {
+			break
+		}
+		if key == keep {
+			continue
+		}
+		evicted = append(evicted, key)
+	}
+	return evicted
 }
 
 func loadConnectorResources(dir string) (connectorResourcesState, error) {
