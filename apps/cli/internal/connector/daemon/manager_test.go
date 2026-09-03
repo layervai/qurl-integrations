@@ -279,15 +279,17 @@ func (r *fakeGroupRunner) restartedRoutes() []string {
 }
 
 type fakeGroupFactory struct {
-	mu              sync.Mutex
-	starts          int
-	runners         []*fakeGroupRunner
-	configs         []GroupConfig
-	errs            []error
-	autoServe       bool
-	runErr          error
-	restartFailures int
-	blockSetRoutes  bool
+	mu        sync.Mutex
+	starts    int
+	runners   []*fakeGroupRunner
+	configs   []GroupConfig
+	errs      []error
+	autoServe bool
+	runErr    error
+	// runErrByResource overrides runErr for the group signed for that resource.
+	runErrByResource map[string]error
+	restartFailures  int
+	blockSetRoutes   bool
 }
 
 func newFakeGroupFactory() *fakeGroupFactory { return &fakeGroupFactory{autoServe: true} }
@@ -304,7 +306,11 @@ func (f *fakeGroupFactory) NewGroupRunner(_ context.Context, cfg *GroupConfig) (
 			return nil, err
 		}
 	}
-	runner := newFakeGroupRunner(cfg, f.autoServe, f.runErr, f.restartFailures, f.blockSetRoutes)
+	runErr := f.runErr
+	if err, ok := f.runErrByResource[cfg.ResourceID]; ok {
+		runErr = err
+	}
+	runner := newFakeGroupRunner(cfg, f.autoServe, runErr, f.restartFailures, f.blockSetRoutes)
 	f.runners = append(f.runners, runner)
 	return runner, nil
 }

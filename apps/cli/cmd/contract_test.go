@@ -847,7 +847,7 @@ func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	for _, public := range []string{"--state-dir", "--headless-config", "--enrollment-token-file"} {
+	for _, public := range []string{"--state-dir", "--headless-config", "--enrollment-token-file", "--share-group-mode"} {
 		if !strings.Contains(res.stdout.String(), public) {
 			t.Errorf("daemon run help lost supported public input %q", public)
 		}

@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -210,5 +212,34 @@ func TestIsProductionEndpoint(t *testing.T) {
 		if got := IsProductionEndpoint(endpoint); got != want {
 			t.Errorf("IsProductionEndpoint(%q) = %v, want %v", endpoint, got, want)
 		}
+	}
+}
+
+// TestShareGroupModeVocabularyMatchesDaemonPackage pins config's duplicated
+// share_group_mode literals to the daemon package's authoritative values, the
+// same way the output enums are pinned above.
+func TestShareGroupModeVocabularyMatchesDaemonPackage(t *testing.T) {
+	if want := daemon.GroupModeValues(); !slices.Equal(validShareGroupModes, want) {
+		t.Errorf("validShareGroupModes = %v, want daemon's %v", validShareGroupModes, want)
+	}
+}
+
+func TestShareGroupModeConfigValueIsValidatedAsAFileSetting(t *testing.T) {
+	dir := t.TempDir()
+	for _, mode := range validShareGroupModes {
+		if err := os.WriteFile(Path(dir), []byte("share_group_mode: "+mode+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(dir)
+		if err != nil || cfg.ShareGroupMode != mode {
+			t.Fatalf("share_group_mode %q = (%+v, %v), want it loaded", mode, cfg, err)
+		}
+	}
+	if err := os.WriteFile(Path(dir), []byte("share_group_mode: both\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if !errors.Is(err, ErrConfigFile) || !strings.Contains(err.Error(), "share_group_mode") {
+		t.Fatalf("invalid share_group_mode err = %v, want ErrConfigFile naming the setting", err)
 	}
 }

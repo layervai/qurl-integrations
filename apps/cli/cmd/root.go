@@ -48,6 +48,9 @@ type globalOpts struct {
 	colorMode string
 	verbose   bool
 	profile   string
+	// shareGroupMode is bound by `daemon run --share-group-mode`; every other
+	// command resolves the mode from the environment, profile, or default.
+	shareGroupMode string
 
 	version string
 
@@ -110,6 +113,9 @@ type globalOpts struct {
 	errColorOn         bool
 	ascii              bool
 	profileConnectorID string
+	// resolvedShareGroupMode is the session group mode the daemon runs in and
+	// the per-user job definition carries.
+	resolvedShareGroupMode connectordaemon.GroupMode
 }
 
 // rootOption is a test hook for injecting process context.
@@ -298,7 +304,7 @@ func (o *globalOpts) applyDefaults() {
 	if o.newShareDaemon == nil {
 		o.newShareDaemon = func(stateDir, logDir string) shareDaemonController {
 			return connectordaemon.NewJobController(
-				stateDir, logDir, o.version, o.resolvedEndpoint, o.resolveHubBootstrap,
+				stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolveHubBootstrap,
 			)
 		}
 	}
@@ -357,6 +363,13 @@ func (o *globalOpts) resolveSettings() error {
 	o.errColorOn = output.ResolveColor(colorMode, o.lookupEnv, o.streams.ErrIsTTY)
 	o.ascii = output.ResolveASCII(o.lookupEnv)
 	o.profileConnectorID = cfg.ConnectorID
+
+	shareGroupMode := config.Resolve(o.shareGroupMode, connectordaemon.GroupModeEnv, o.lookupEnv, cfg.ShareGroupMode, string(connectordaemon.DefaultGroupMode))
+	groupMode, err := connectordaemon.ParseGroupMode(shareGroupMode)
+	if err != nil {
+		return exitcode.UsageError(err)
+	}
+	o.resolvedShareGroupMode = groupMode
 	o.resolved = true
 	return nil
 }

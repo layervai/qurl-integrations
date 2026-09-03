@@ -58,12 +58,48 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
   code, or failed — derived from that route's phase on the session. The IPC
   `/status` contract is unchanged.
 
+## Modes
+
+The single-session model above is the target and the default. The daemon also
+carries a compatibility mode, selected by `QURL_SHARE_GROUP_MODE` (config key
+`share_group_mode`, flag `--share-group-mode` on `qurl daemon run`), for a
+platform that has not yet authorized every route of a Connector on one
+session:
+
+- **`single`** — one `SessionGroupRunner` over every desired-on share, as
+  described above. On a platform whose tunnel edge admits a session's proxies
+  only for the one resource the NHP session was signed for, every share beyond
+  the first is refused (`resource_not_found`) and stays visible as
+  `retrying` / `platform_denied` until the platform authorizes it.
+- **`per-share`** — one `SessionGroupRunner` per desired-on share, each with
+  `Routes=[that share]`, `ResourceID` its own resource, and `KnockResourceID`
+  from its own row. The native admitter is still shared (knocks serialize on
+  it), but every share spends its own admission, login, and journal, and is
+  rotated on its own. This is what such a platform accepts today, and what the
+  daemon did before the single-session model.
+
+Reconcile semantics are identical in both modes: `publish` adds a group,
+`stop` removes exactly that group (retiring its admission), `restart` is a
+`RestartRoute` on that share's own group, a refused route retires and
+re-knocks only its own group after its backoff, and a knock-level denial
+persists only that share off. `/status` reports the union of every group, so
+the IPC contract and `qurl inspect` output are unchanged.
+
+The mode is folded into the daemon's job version (`3/<version>` for `single`,
+`3/<version>/per-share` otherwise) and written into the per-user job as an
+explicit `--share-group-mode`, so a resident daemon always runs in the mode
+its job was installed for. Changing the mode is therefore a job-definition
+change: the next `qurl start`, `restart`, or `publish` replaces the resident
+daemon in the new mode, the same path a binary-version change takes.
+
 ## Scale and limits
 
 - **Up to 2000 local shares per machine.** The registry cap
   (`localSharesMaxItems`) matches the session group's `MaxGroupRoutes`, so the
   durable registry can hold exactly as many shares as one admission carries
-  routes.
+  routes. That figure is for `single` mode; `per-share` pays one session per
+  share and is bounded by the per-owner platform session and heartbeat-stream
+  budgets instead (historically ~300 shares).
 - **Registry file cap.** The registry file is bounded at 4 MiB. A full 2000-row
   registry of maximal rows (long base64url resource identities and CRIDs, long
   Connector, routing, and knock identities, and verbose IPv6 loopback targets)

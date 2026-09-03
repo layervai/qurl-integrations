@@ -34,6 +34,10 @@ type JobController struct {
 	BinaryVersion  string
 	InvocationPath string
 	Endpoint       string
+	// ShareGroupMode is part of the job definition: a resident daemon runs in
+	// exactly the mode its job carries, and a changed mode is a definition
+	// change that replaces the daemon just as a binary-version change does.
+	ShareGroupMode GroupMode
 	ResolveHub     func() (qurl.HubBootstrap, error)
 	LookPath       func(string) (string, error)
 	ProbeStatus    func(context.Context) (IPCStatus, bool, error)
@@ -41,12 +45,12 @@ type JobController struct {
 }
 
 // NewJobController builds the production native per-user job controller.
-func NewJobController(stateDir, logDir, binaryVersion, endpoint string, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
+func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
 	controller := &JobController{
 		Manager:  connectorservice.NewUserJobManager(),
 		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
 		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
-		InvocationPath: os.Args[0], Endpoint: endpoint, ResolveHub: resolveHub, LookPath: exec.LookPath,
+		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
@@ -62,7 +66,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	expectedJobVersion, err := JobVersion(c.BinaryVersion)
+	expectedJobVersion, err := JobVersion(c.BinaryVersion, c.ShareGroupMode)
 	if err != nil {
 		return err
 	}
@@ -85,7 +89,7 @@ func (c *JobController) Ensure(ctx context.Context) error {
 		}
 		if !managed.Installed || !managed.Running {
 			return fmt.Errorf(
-				"share daemon version %q does not match qURL version %q; stop the foreground or externally managed daemon and retry",
+				"share daemon job version %q does not match this qURL job version %q; stop the foreground or externally managed daemon and retry",
 				status.JobVersion, expectedJobVersion,
 			)
 		}
@@ -148,10 +152,14 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 	}
 	stdoutPath := filepath.Join(c.LogDir, "share-daemon.log")
 	stderrPath := filepath.Join(c.LogDir, "share-daemon.err.log")
-	arguments := make([]string, 0, 18)
+	arguments := make([]string, 0, 20)
 	arguments = append(arguments,
 		"--endpoint", c.Endpoint,
 		"daemon", "run", "--state-dir", c.StateDir, "--job-version", jobVersion,
+		// The mode is always explicit so the daemon runs in the mode this job
+		// version was computed for, whatever its own environment or config file
+		// would resolve to.
+		"--share-group-mode", string(c.ShareGroupMode),
 		"--hub-host", hub.Host, "--hub-port", strconv.Itoa(hub.Port),
 		"--hub-server-public-key-b64", hub.ServerPublicKeyB64,
 	)
@@ -196,13 +204,24 @@ func (c *JobController) currentExecutablePath() (string, error) {
 	return filepath.Clean(binary), nil
 }
 
-// JobVersion combines the IPC protocol and installed qurl binary versions.
-func JobVersion(binaryVersion string) (string, error) {
+// JobVersion combines the IPC protocol version, the installed qurl binary
+// version, and the session group mode into the job definition version a
+// resident daemon reports over IPC. The default mode is elided, so a
+// single-mode job version is exactly the pre-mode string; any other mode is a
+// definition change that replaces the resident daemon.
+func JobVersion(binaryVersion string, mode GroupMode) (string, error) {
 	binaryVersion = strings.TrimSpace(binaryVersion)
 	if binaryVersion == "" {
 		return "", errors.New("qURL binary version is empty")
 	}
-	return daemonJobProtocolVersion + "/" + binaryVersion, nil
+	if _, err := ParseGroupMode(string(mode)); err != nil {
+		return "", err
+	}
+	version := daemonJobProtocolVersion + "/" + binaryVersion
+	if mode != DefaultGroupMode {
+		version += "/" + string(mode)
+	}
+	return version, nil
 }
 
 // ReloadIfRunning reconciles an existing daemon without starting one.

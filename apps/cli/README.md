@@ -221,6 +221,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
 | Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | Stable opaque ID for local `publish` |
+| Session group mode | `--share-group-mode` (`daemon run`) | `QURL_SHARE_GROUP_MODE` | `share_group_mode` | `single` — see [Session group modes](#session-group-modes) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -520,6 +521,41 @@ does not make one live API request per row, so its observed column is
 `unknown`; use `qurl status <CRID>` for the authoritative `stopped`,
 `connecting`, or `serving` observation. If the owner-only local registry is
 unavailable, list omits local targets and emits one warning.
+
+### Session group modes
+
+The daemon has two ways of mapping local shares onto Connector sessions,
+selected by the `QURL_SHARE_GROUP_MODE` setting (flag `--share-group-mode` on
+`qurl daemon run`, config key `share_group_mode`):
+
+| Mode | What it does | When to use it |
+|------|--------------|----------------|
+| `single` (default) | Every share is one route on **one** session: one knock, one login, one heartbeat stream for the whole machine. | The target model; use it whenever the platform authorizes every route of a Connector on one session. |
+| `per-share` | Every share runs on **its own** session: one knock, one login, and one journal per share, rotated per share. | The compatibility mode for a platform that admits a session's routes only for the one resource that session was signed for. In `single` mode against such a platform, every share beyond the first is refused and shows as `retrying` / `platform_denied` in `qurl inspect`. |
+
+Both modes keep the same lifecycle semantics — `publish` adds a share, `stop`
+removes it, `restart` re-registers only that share, and a refused or
+permanently denied share never disturbs its siblings — and the same `qurl
+status` / `qurl inspect` output. `per-share` simply pays the per-session cost
+for each share, so the per-owner platform budgets for sessions and heartbeat
+streams cap it well below the [2000-share scale](#scale) of `single`.
+
+The mode is part of the daemon's job definition. To switch a machine that is
+already sharing, set the mode durably and run any command that installs the
+job — `qurl start <CRID>`, `qurl restart <CRID>`, or `qurl publish` — which
+replaces the resident daemon in the new mode, exactly as a version upgrade
+would:
+
+```bash
+printf 'share_group_mode: per-share\n' >> ~/.config/qurl/config.yaml
+qurl start <CRID>
+```
+
+Setting only the environment variable works the same way but lasts one
+command: the next lifecycle command run without it resolves `single` again and
+switches the daemon back. Put the setting in the config file for anything
+durable. A headless `qurl daemon run` reads the same setting, or takes
+`--share-group-mode` directly.
 
 ### qurl login / whoami
 

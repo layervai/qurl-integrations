@@ -45,7 +45,7 @@ var errIPCSocketRestrictionPending = errors.New("share daemon socket restriction
 // IPCServer exposes daemon status and reconciliation over an owner-only socket.
 type IPCServer struct {
 	SocketPath string
-	Manager    *Manager
+	Manager    ShareManager
 	JobVersion string
 }
 

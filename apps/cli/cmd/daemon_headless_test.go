@@ -164,9 +164,10 @@ func TestHeadlessNativeOpenFailureDoesNotCommitShareOrExposeCredential(t *testin
 	}
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
-		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
-		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionConfig: testNativeSessionConfig,
+		resolvedShareGroupMode: connectordaemon.GroupModeSingle,
+		resolveShareStateDir:   func(string) (string, error) { return stateDir, nil },
+		resolveHubBootstrap:    func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig:   testNativeSessionConfig,
 	}
 	err := runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, tokenPath)
 	if err == nil || !strings.Contains(err.Error(), "native bootstrap rejected") {
@@ -231,7 +232,8 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	waitHeadlessNativeRetry = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {}, verbose: true,
-		sleep: func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
+		resolvedShareGroupMode: connectordaemon.GroupModeSingle,
+		sleep:                  func(time.Duration) {}, newRequestID: func() string { return "headless-test-request" },
 		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
 		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
 		resolveSessionConfig: testNativeSessionConfig,
@@ -345,9 +347,10 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	}
 	opts := &globalOpts{
 		version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
-		resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
-		resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-		resolveSessionConfig: testNativeSessionConfig,
+		resolvedShareGroupMode: connectordaemon.GroupModeSingle,
+		resolveShareStateDir:   func(string) (string, error) { return stateDir, nil },
+		resolveHubBootstrap:    func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+		resolveSessionConfig:   testNativeSessionConfig,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -413,9 +416,10 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			}
 			opts := &globalOpts{
 				version: "test", resolvedEndpoint: "https://api.example.com", redirectFRPLogs: func() {},
-				resolveShareStateDir: func(string) (string, error) { return stateDir, nil },
-				resolveHubBootstrap:  func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
-				resolveSessionConfig: testNativeSessionConfig,
+				resolvedShareGroupMode: connectordaemon.GroupModeSingle,
+				resolveShareStateDir:   func(string) (string, error) { return stateDir, nil },
+				resolveHubBootstrap:    func() (qurl.HubBootstrap, error) { return qurl.HubBootstrap{}, nil },
+				resolveSessionConfig:   testNativeSessionConfig,
 			}
 			err = runShareDaemonWithBootstrap(context.Background(), opts, stateDir, "test-job", configPath, "")
 			if err == nil || !strings.Contains(err.Error(), "dedicated state volume") {
