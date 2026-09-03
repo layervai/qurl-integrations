@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -48,6 +49,10 @@ type Config struct {
 	// not passed. It is an identity, not a secret; credentials and native state
 	// never live in config files.
 	ConnectorID string `yaml:"connector_id,omitempty"`
+	// ShareGroupMode selects how the local sharing daemon maps its shares onto
+	// Connector session groups: "single" (the default, one session for every
+	// share) or "per-share" (one session per share). Operational, not secret.
+	ShareGroupMode string `yaml:"share_group_mode,omitempty"`
 }
 
 // Enum vocabularies for config-file values. These mirror the output
@@ -57,7 +62,16 @@ type Config struct {
 var (
 	validOutputs = []string{"text", "json"}
 	validColors  = []string{"auto", "always", "never"}
+	// validShareGroupModes mirrors the daemon package's GroupModeValues the
+	// same way (config sits below the daemon too). The daemon package pins its
+	// values against ShareGroupModes, so the dependency arrow only ever points
+	// from daemon to config.
+	validShareGroupModes = []string{"single", "per-share"}
 )
+
+// ShareGroupModes lists the share_group_mode values a config file may carry,
+// default first.
+func ShareGroupModes() []string { return slices.Clone(validShareGroupModes) }
 
 // validate rejects enum-valued settings a config file spelled wrongly. The
 // config layer is the only place that knows the value came from a FILE, so
@@ -68,7 +82,10 @@ func (c *Config) validate(path string) error {
 	if err := validateEnum(path, "output", c.Output, validOutputs); err != nil {
 		return err
 	}
-	return validateEnum(path, "color", c.Color, validColors)
+	if err := validateEnum(path, "color", c.Color, validColors); err != nil {
+		return err
+	}
+	return validateEnum(path, "share_group_mode", c.ShareGroupMode, validShareGroupModes)
 }
 
 func validateEnum(path, setting, value string, valid []string) error {

@@ -128,7 +128,7 @@ another service manager owns the process.`,
 			if err := requireLocalShareSupport(opts.backgroundShareGOOS); err != nil {
 				return err
 			}
-			expected, err := connectordaemon.JobVersion(opts.version)
+			expected, err := connectordaemon.JobVersion(opts.version, opts.resolvedShareGroupMode)
 			if err != nil {
 				return err
 			}
@@ -153,6 +153,11 @@ another service manager owns the process.`,
 	run.Flags().StringVar(&jobVersion, "job-version", "", "qURL share daemon job definition version")
 	run.Flags().StringVar(&headlessConfig, "headless-config", "", "read-only version 2 YAML for one headless share")
 	run.Flags().StringVar(&enrollmentTokenFile, "enrollment-token-file", "", "one-time enrollment credential file for first headless bootstrap")
+	// Bound on the shared options so root.go's settings resolution applies the
+	// ordinary flag > env > profile > default precedence to it. The cobra default
+	// must stay empty: a non-empty default would count as an explicit flag value
+	// and win over the environment and profile for every daemon run.
+	run.Flags().StringVar(&opts.shareGroupMode, "share-group-mode", "", "session group mode: single (one session for every share) or per-share (default single)")
 	// root.go's persistent pre-run hook reads these before settings resolution,
 	// so a first-start rejection reaches the native supervisor's durable log.
 	run.Flags().String("job-stdout-log", "", "native background-job stdout log")
@@ -301,7 +306,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			retErr = errors.Join(retErr, closeFactory())
 		}
 	}()
-	manager, err := connectordaemon.NewManager(registry, factory)
+	manager, err := connectordaemon.NewShareManager(registry, factory, opts.resolvedShareGroupMode)
 	if err != nil {
 		return err
 	}
