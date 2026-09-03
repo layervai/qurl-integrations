@@ -127,10 +127,10 @@ already-deleted share is idempotent.
 ## Classifying a failed fetch
 
 Each failed fetch is classified in the report: `api-rollover` (inside a
-declared window), `nhp-ac-deny:<code>` (an NHP access-control deny on the
-visitor path — `52005` "server ac operation failed", `52028` "boot flush not
-ready", or an overload signal), `content-404` (access was granted but the
-origin answered 404), or `other`. During a run, a failed verify/hold fetch is
+declared window), `nhp-ac-deny:<code>` (a platform access-control deny on
+the visitor path — the readiness codes `52005` or `52028`, or an overload
+signal; the CLI maps exactly these to "the service is busy"), `content-404`
+(access was granted but the origin answered 404), or `other`. During a run, a failed verify/hold fetch is
 followed immediately by an SDK-level probe (`qurl.EnterPortal` on a fresh
 share link) that records the raw deny code the CLI keeps private, so the class
 is grounded in what the platform actually said.
