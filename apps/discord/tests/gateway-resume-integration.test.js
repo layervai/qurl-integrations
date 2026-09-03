@@ -30,6 +30,14 @@ const { WebSocketShardEvents } = require('@discordjs/ws');
 const { createGatewaySessionStore } = require('../src/gateway-session-store');
 const { createGatewayWsShim } = require('../src/gateway-ws-shim');
 
+class ImmediateIdentifyThrottler {
+  constructor(maxConcurrency) {
+    this.maxConcurrency = maxConcurrency;
+  }
+
+  async waitForIdentify() { return undefined; }
+}
+
 // FakeWebSocketManager — replays the shape @discordjs/ws emits when
 // driven by real Discord traffic. Tests construct one via the
 // `WebSocketManagerCtor` injection seam on createGatewayWsShim.
@@ -40,6 +48,9 @@ function makeFakeManagerCtor() {
     inst._constructorArgs = args;
     inst.connect = jest.fn().mockResolvedValue(undefined);
     inst.destroy = jest.fn().mockResolvedValue(undefined);
+    inst.fetchGatewayInformation = jest.fn().mockResolvedValue({
+      session_start_limit: { max_concurrency: 1 },
+    });
     instances.push(inst);
     return inst;
   }
@@ -100,6 +111,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       logger,
       WebSocketManagerCtor: FakeManager,
       RESTCtor: FakeREST,
+      IdentifyThrottlerCtor: ImmediateIdentifyThrottler,
+      onFatal: jest.fn(),
     });
 
     // ── Lifecycle ──
@@ -108,12 +121,7 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     expect(hydrated).toBeNull();
     expect(shim.isReady()).toBe(false);
 
-    // 2. Start — shim wires callbacks into the (fake) manager. With
-    //    mirror still null, retrieveSessionInfo will return null
-    //    once (IDENTIFY budget burns one); after that the throw
-    //    would surface. We don't trigger that path here because
-    //    the cold-start cycle has the library invoke retrieve
-    //    exactly once on the way to IDENTIFY → READY.
+    // 2. Start — shim wires callbacks into the (fake) manager.
     await shim.start();
     expect(instances).toHaveLength(1);
     const mgr = instances[0];
@@ -126,10 +134,16 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     //    sees null, identifies, then on READY calls
     //    updateSessionInfo(shardId, sessionInfo). Simulate by directly
     //    calling the wired callback (the manager's `_constructorArgs`).
-    const { retrieveSessionInfo, updateSessionInfo } = mgr._constructorArgs;
+    const {
+      retrieveSessionInfo, updateSessionInfo, buildIdentifyThrottler,
+    } = mgr._constructorArgs;
 
     expect(retrieveSessionInfo('0:1')).toBeNull();
-    // IDENTIFY pending (budget=1/1 — one IDENTIFY is OK on cold start).
+    // The quota guard advances only at the real IDENTIFY boundary,
+    // not on session reads.
+    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
+    const throttler = await buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
 
     // READY arrives — updateSessionInfo fires with the new session.
@@ -238,6 +252,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       logger,
       WebSocketManagerCtor: FakeManager,
       RESTCtor: makeFakeRESTCtor().FakeREST,
+      IdentifyThrottlerCtor: ImmediateIdentifyThrottler,
+      onFatal: jest.fn(),
     });
 
     const hydrated = await shim.hydrate();
@@ -305,6 +321,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       token: 't', intents: 1, store, logger,
       WebSocketManagerCtor: FakeManager,
       RESTCtor: makeFakeRESTCtor().FakeREST,
+      IdentifyThrottlerCtor: ImmediateIdentifyThrottler,
+      onFatal: jest.fn(),
     });
 
     await shim.hydrate();
@@ -351,6 +369,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       token: 't', intents: 1, store, logger,
       WebSocketManagerCtor: FakeManager,
       RESTCtor: makeFakeRESTCtor().FakeREST,
+      IdentifyThrottlerCtor: ImmediateIdentifyThrottler,
+      onFatal: jest.fn(),
     });
 
     await shim.hydrate();

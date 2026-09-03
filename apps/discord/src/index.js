@@ -454,6 +454,10 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
     intents: GATEWAY_INTENTS_BITFIELD,
     store: sessionStore,
     logger,
+    // gracefulShutdown synchronously flips its re-entry guard and arms the
+    // 10-second force-exit timer before its first await, so this remains
+    // self-terminating even if one cleanup step stalls.
+    onFatal: () => gracefulShutdown(1),
   });
   logger.info('gateway-resume shim constructed', {
     tableName: `${ddbTablePrefix}gateway-session`,
