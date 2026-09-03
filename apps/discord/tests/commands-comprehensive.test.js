@@ -551,6 +551,23 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it.each([
+    ['reply_failed', new Error('Missing Permissions')],
+    ['ack_timeout', Object.assign(new Error('Unknown interaction'), { code: 10062 })],
+  ])('emits failure_type=%s when the unsupported-context reply fails', async (failureType, error) => {
+    const interaction = makeInteraction({
+      guildId: null,
+      reply: jest.fn().mockRejectedValue(error),
+    });
+
+    await handleCommand(interaction);
+
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: failureType }),
+    );
+  });
+
   it('preserves sub-millisecond handler_duration_ms (no BigInt-truncation regression)', async () => {
     // Round-3 fix: Number(ns / 1_000_000n) → Number(ns) / 1_000_000.
     // The bigint-division shape would truncate any sub-ms duration to

@@ -14,7 +14,11 @@ const {
   TextInputStyle,
   AttachmentBuilder,
 } = require('discord.js');
-const { Routes } = require('discord-api-types/v10');
+const {
+  Routes,
+  ApplicationIntegrationType,
+  InteractionContextType,
+} = require('discord-api-types/v10');
 const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
@@ -9006,7 +9010,21 @@ async function purgeStaleGuildCommands({ rest, appId, guilds }) {
 async function registerCommands({ rest, appId, guilds = new Map() }) {
   await purgeStaleGuildCommands({ rest, appId, guilds });
 
-  const commandData = commands.map(cmd => cmd.data.toJSON());
+  const commandData = commands.map(cmd => {
+    const data = cmd.data.toJSON();
+    // These fields are global-command-only in Discord's API. Pin them
+    // explicitly so Developer Portal defaults cannot expose the server-
+    // scoped qURL workflows through user installs or DM contexts.
+    if (!config.GUILD_ID) {
+      data.integration_types = [ApplicationIntegrationType.GuildInstall];
+      data.contexts = [InteractionContextType.Guild];
+    } else {
+      delete data.integration_types;
+      delete data.contexts;
+      delete data.dm_permission;
+    }
+    return data;
+  });
 
   try {
     if (config.GUILD_ID) {
@@ -9068,6 +9086,16 @@ const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
 const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 
+function isUserInstallOnlyInteraction(interaction) {
+  const owners = interaction.authorizingIntegrationOwners;
+  // TODO(upstream-contract): discord.js exposes authorizing owners by the
+  // Discord integration-type enum values (0 = guild, 1 = user).
+  return Boolean(
+    owners?.[ApplicationIntegrationType.UserInstall]
+    && !owners?.[ApplicationIntegrationType.GuildInstall]
+  );
+}
+
 // Per Discord's contract, MUST respond within 3 s. Two-layer error
 // handling: the inner try catches Places I/O failures (ticks the
 // sampled SRE counter; that's its intent — "Places is degraded"); the
@@ -9084,13 +9112,12 @@ async function handleAutocomplete(interaction) {
     if (interaction.commandName !== 'qurl') {
       return await interaction.respond([]);
     }
-    // Reject DM autocomplete — handleQurlMap rejects DMs at submit time
-    // (see commands.js:~3502) but Discord could still deliver an
-    // autocomplete interaction without a guildId. Without this guard a
-    // user who somehow triggered autocomplete in DM would burn the
-    // operator's global GOOGLE_MAPS_API_KEY quota for a send that's
-    // about to be rejected.
-    if (!interaction.guildId) {
+    // Reject DM and user-install-only autocomplete — handleQurlMap
+    // rejects those contexts at submit time, but Discord could still
+    // deliver autocomplete while global registration changes propagate.
+    // Without this guard the invalid interaction would burn the operator's
+    // global GOOGLE_MAPS_API_KEY quota for a send that's about to fail.
+    if (!interaction.guildId || isUserInstallOnlyInteraction(interaction)) {
       return await interaction.respond([]);
     }
     const subcommand = interaction.options.getSubcommand(false);
@@ -9223,6 +9250,27 @@ async function handleCommand(interaction) {
       handler_duration_ms,
     });
   };
+
+  // Global command updates can take up to an hour to propagate. Reject any
+  // stale DM or user-install-only invocation centrally so no subcommand can
+  // bypass the guild-install product boundary during that window. A user-
+  // installed command may still be invoked inside a guild, so guildId alone
+  // is not sufficient; inspect Discord's authorizing-integration mapping too.
+  if (!interaction.guildId || isUserInstallOnlyInteraction(interaction)) {
+    try {
+      await interaction.reply({
+        content: 'This command only works with qURL installed in this server, not from DMs or a user install.',
+        ephemeral: true,
+      });
+      emitInteractionMetric(false, 'unsupported_context');
+    } catch (err) {
+      logger.warn('Failed to reject command outside a guild', {
+        command: interaction.commandName, error: err.message,
+      });
+      emitInteractionMetric(false, isAckTimeoutError(err) ? 'ack_timeout' : 'reply_failed');
+    }
+    return;
+  }
 
   // Defense-in-depth against stale registrations: a guild served by an
   // older deploy may still list commands this build no longer ships

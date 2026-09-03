@@ -284,6 +284,7 @@ describe('handleCommand — double error (reply fail + followUp fail)', () => {
     qurlCommand.execute = jest.fn(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
       commandName: 'qurl',
+      guildId: 'guild-1',
       replied: true,
       followUp: jest.fn().mockRejectedValue(new Error('Cannot send')),
     });
@@ -329,4 +330,3 @@ describe('isGoogleMapsURL — goo.gl edge cases', () => {
     expect(isGoogleMapsURL('https://goo.gl/search/abc')).toBe(false);
   });
 });
-
