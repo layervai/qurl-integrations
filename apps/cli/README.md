@@ -479,23 +479,40 @@ qurl inspect <CRID>
 
 `stop` disables the cloud route first and then tells an already-running local
 daemon to reconcile; it never starts the daemon. `start` is idempotent and
-requires the saved local target to be reachable. `restart` always advances the
-serving epoch so stale sessions cannot keep serving. `status` and
-`inspect` use the same authoritative view. Both work for remote resources and
-include the local target only when this machine owns one.
+requires the saved local target to be reachable. `restart` re-registers just
+that share on the Connector session under a fresh serving epoch, so a stale
+session cannot keep serving it; the other shares are not disturbed. `status`
+and `inspect` use the same authoritative view. Both work for remote resources
+and include the local target only when this machine owns one.
 
 Custom deployments must support the current CLI resource-status API. The CLI
 does not scan the full account inventory when one resource-status request
 fails.
 
-The daemon keeps each share independent. It recovers assignment, sleep/wake,
-and network failures automatically with persisted bounded backoff. Customers
-never need a refresh approval flag. On macOS the first local `publish` or
-`start` installs an owner-only LaunchAgent. On Windows it installs a
-least-privilege per-user Task Scheduler job. The installed `qurl` path survives
-normal upgrades, and a binary-version change reloads the resident daemon
-deliberately. Ordinary lifecycle commands reload desired state over an
+One daemon serves every local share on **one Connector session**: it knocks,
+logs in, and holds one heartbeat stream once for the whole machine, then serves
+each share as its own route on that session. A share can fail, restart, or be
+added or removed on its own without touching the others, and the daemon still
+recovers assignment, sleep/wake, and network failures automatically with
+persisted bounded backoff — customers never need a refresh approval flag. One
+machine serves up to 2000 local shares (see [Scale](#scale)). On macOS the
+first local `publish` or `start` installs an owner-only LaunchAgent. On Windows
+it installs a least-privilege per-user Task Scheduler job. The installed `qurl`
+path survives normal upgrades, and a binary-version change reloads the resident
+daemon deliberately. Ordinary lifecycle commands reload desired state over an
 owner-only local control channel without restarting healthy sibling shares.
+
+### Scale
+
+A single machine can publish up to 2000 local shares under one account. Every
+share is one route on the daemon's single Connector session rather than its own
+session, so the whole set costs one knock, one login, one authorization stream,
+and one heartbeat stream — not one of each per share. Publishing, starting,
+stopping, or restarting a share reconciles the live session in place: a new
+share joins without a second knock, a stopped or deleted share is dropped, and
+a restart re-registers only that share's route. See
+[docs/session-groups.md](../../docs/session-groups.md) for the model and its
+per-share failure isolation.
 
 `qurl list` prints every full CRID. For locally registered tunnel rows it also
 prints the canonical loopback target and durable desired state. The paged list

@@ -138,7 +138,7 @@ func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return IPCStatus{}, true, fmt.Errorf("share daemon status returned HTTP %d", response.StatusCode)
 	}
-	status, err := decodeIPCStatus(io.LimitReader(response.Body, 1<<20))
+	status, err := decodeIPCStatus(io.LimitReader(response.Body, maxIPCStatusBytes))
 	if err != nil {
 		return IPCStatus{}, true, err
 	}

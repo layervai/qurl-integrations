@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
@@ -401,5 +403,53 @@ func TestLocalShareRegistryRefusesSymlink(t *testing.T) {
 	}
 	if _, err := registry.List(context.Background()); err == nil {
 		t.Fatal("symlink registry was accepted")
+	}
+}
+
+// TestLocalSharesRegistryRoundTripsMaxRowsUnderByteCap fills the registry to
+// its item cap with maximal rows (a 64-char Connector ID, a 64-char knock
+// resource, and a verbose full-form IPv6 loopback target alongside the real
+// base64url resource identity and CRID) and proves the whole file round-trips
+// well under the byte cap with room to spare.
+func TestLocalSharesRegistryRoundTripsMaxRowsUnderByteCap(t *testing.T) {
+	dir := secureStateTestDir(t)
+	now := time.Now().UTC()
+	state := localSharesState{
+		Version: localSharesVersion,
+		OwnerID: "own_" + strings.Repeat("x", 40),
+		Shares:  make(map[string]LocalShare, localSharesMaxItems),
+	}
+	const maxTarget = "http://[0000:0000:0000:0000:0000:0000:0000:0001]:65535"
+	for i := 0; i < localSharesMaxItems; i++ {
+		binding := testResourceBinding(t, fmt.Sprintf("c%063d", i))
+		share := LocalShare{
+			CRID: binding.CRID, ResourceID: binding.ResourceID, ConnectorID: binding.ConnectorID,
+			ConnectorRoutingID: binding.ConnectorRoutingID, KnockResourceID: strings.Repeat("k", 64),
+			TargetURL: maxTarget, LocalIP: "0000:0000:0000:0000:0000:0000:0000:0001", LocalPort: 65535,
+			DesiredState: "on", ServingEpoch: ^uint64(0), UpdatedAt: now,
+		}
+		state.Shares[share.ResourceID] = share
+	}
+	if err := writeLocalShares(dir, state); err != nil {
+		t.Fatalf("write %d-row registry: %v", localSharesMaxItems, err)
+	}
+	info, err := os.Stat(filepath.Join(dir, LocalSharesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d-row registry file size: %d bytes (cap %d)", localSharesMaxItems, info.Size(), localSharesMaxBytes)
+	if info.Size() >= localSharesMaxBytes {
+		t.Fatalf("registry file size %d is not under the %d-byte cap", info.Size(), localSharesMaxBytes)
+	}
+	// A generous margin: a full registry must not sit within a hair of the cap.
+	if info.Size() > localSharesMaxBytes/2 {
+		t.Fatalf("registry file size %d leaves less than 2x headroom under the %d-byte cap", info.Size(), localSharesMaxBytes)
+	}
+	loaded, err := loadLocalShares(dir)
+	if err != nil {
+		t.Fatalf("reload %d-row registry: %v", localSharesMaxItems, err)
+	}
+	if len(loaded.Shares) != localSharesMaxItems {
+		t.Fatalf("reloaded %d rows, want %d", len(loaded.Shares), localSharesMaxItems)
 	}
 }

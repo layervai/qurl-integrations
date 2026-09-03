@@ -20,7 +20,7 @@ import (
 
 func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
+	factory := newFakeGroupFactory()
 	manager, _ := NewManager(registry, factory)
 	dir, err := os.MkdirTemp("/tmp", "qurl-daemon-")
 	if err != nil {
@@ -435,7 +435,7 @@ func emptyManager(t *testing.T) *Manager {
 	t.Helper()
 	manager, err := NewManager(
 		&memoryRegistry{shares: map[string]connectorstate.LocalShare{}},
-		&fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}},
+		newFakeGroupFactory(),
 	)
 	if err != nil {
 		t.Fatal(err)

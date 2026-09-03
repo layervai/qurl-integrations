@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/layervai/qurl-connector/pkg/agentstate"
@@ -17,7 +15,6 @@ import (
 	"github.com/layervai/qurl-go/relayknock/nativeudp"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
-	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 // ErrDirectEgressRequired reports an environment proxy configuration that
@@ -43,25 +40,83 @@ func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCom
 	return common, nil
 }
 
-// NativeSessionFactory is the daemon adapter around qurl-connector's single
-// production NHP/FRP lifecycle engine. All resource runners share one
-// serialized native admitter, while each resource keeps its own resource-bound
-// NHP authorization and FRP control session.
-type NativeSessionFactory struct {
-	admitter ResourceAdmitter
-	common   *v1.ClientCommonConfig
-	version  string
+// ResourceAdmitter is the credential-free native session surface consumed by
+// the daemon. qurl-connector's NativeAdmitter is the production implementation.
+type ResourceAdmitter interface {
+	connectorshare.Admitter
+	MarkServingHealthy() error
+	Close() error
 }
 
-// DeferredSessionFactory lets the daemon bind IPC and transfer ownership to
-// launchd before a warm native open or automatic assignment recovery
-// completes. Initialization runs on the manager goroutine only when at least
-// one desired-on share exists; subsequent resource starts share the result.
-type DeferredSessionFactory struct {
-	initialize func(context.Context) (SessionFactory, error)
+// NativeGroupFactory is the daemon adapter around qurl-connector's single
+// production NHP/FRP session-group engine. One native admitter and one FRP
+// session-group factory back every group runner the manager builds, so the
+// whole route set shares one knock, one login, and one heartbeat stream.
+type NativeGroupFactory struct {
+	admitter ResourceAdmitter
+	sessions *connectorshare.FRPSessionGroupFactory
+}
+
+// NewNativeGroupFactory adapts qurl-connector's production session-group engine.
+func NewNativeGroupFactory(admitter ResourceAdmitter, common *v1.ClientCommonConfig, version string) (*NativeGroupFactory, error) {
+	if admitter == nil || common == nil {
+		return nil, errors.New("native group factory requires an admitter and FRP common config")
+	}
+	sessions, err := connectorshare.NewFRPSessionGroupFactory(connectorshare.FRPGroupFactoryConfig{
+		Common: common, ClientVersion: version,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &NativeGroupFactory{admitter: admitter, sessions: sessions}, nil
+}
+
+// NewGroupRunner builds one SessionGroupRunner bound to the shared native
+// admitter. It performs no network I/O before returning; the runner's Run
+// method owns admission and FRP session lifetime.
+func (f *NativeGroupFactory) NewGroupRunner(ctx context.Context, cfg *GroupConfig) (GroupRunner, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return connectorshare.NewSessionGroupRunner(connectorshare.SessionGroupConfig{
+		KnockResourceID: cfg.KnockResourceID,
+		ResourceID:      cfg.ResourceID,
+		Routes:          cfg.Routes,
+		Admitter:        f.admitter,
+		Sessions:        f.sessions,
+		OnServing: func(connectorshare.Admission) {
+			// A failed marker clear is retried on the next serving cycle; it
+			// must never tear down a healthy route or its siblings.
+			_ = f.admitter.MarkServingHealthy()
+		},
+		OnRouteServing: func(routeID string, _ connectorshare.Admission) {
+			if cfg.Events.OnRouteServing != nil {
+				cfg.Events.OnRouteServing(routeID)
+			}
+		},
+		OnRouteFailed:        cfg.Events.OnRouteFailed,
+		OnRetry:              cfg.Events.OnRetry,
+		OnRotationLeadCapped: cfg.Events.OnRotationLeadCapped,
+	})
+}
+
+// Close ends the shared native admitter after every group runner has stopped.
+func (f *NativeGroupFactory) Close() error {
+	if f == nil || f.admitter == nil {
+		return nil
+	}
+	return f.admitter.Close()
+}
+
+// DeferredGroupFactory lets the daemon bind IPC and transfer ownership to
+// launchd before the native runtime opens. Initialization runs on the manager
+// goroutine only when at least one desired-on share exists; every group runner
+// the manager later builds shares the one initialized native delegate.
+type DeferredGroupFactory struct {
+	initialize func(context.Context) (GroupFactory, error)
 
 	mu             sync.Mutex
-	delegate       SessionFactory
+	delegate       GroupFactory
 	delegateCancel context.CancelFunc
 	initializing   bool
 	ready          chan struct{}
@@ -74,22 +129,24 @@ type DeferredSessionFactory struct {
 	cond           *sync.Cond
 }
 
-// NewDeferredSessionFactory delays native runtime initialization until needed.
-func NewDeferredSessionFactory(initialize func(context.Context) (SessionFactory, error)) (*DeferredSessionFactory, error) {
+// NewDeferredGroupFactory delays native runtime initialization until needed.
+func NewDeferredGroupFactory(initialize func(context.Context) (GroupFactory, error)) (*DeferredGroupFactory, error) {
 	if initialize == nil {
-		return nil, errors.New("deferred share session factory requires an initializer")
+		return nil, errors.New("deferred share group factory requires an initializer")
 	}
-	factory := &DeferredSessionFactory{initialize: initialize}
+	factory := &DeferredGroupFactory{initialize: initialize}
 	factory.cond = sync.NewCond(&factory.mu)
 	return factory, nil
 }
 
-var errDeferredFactoryClosed = errors.New("deferred share session factory is closed")
+var errDeferredFactoryClosed = errors.New("deferred share group factory is closed")
 
-// Start serializes native initialization and caches only a successful
+// NewGroupRunner serializes native initialization and caches only a successful
 // delegate. A transient open failure is returned to that reconciliation; the
-// manager's next retry performs a fresh initialization attempt.
-func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstate.LocalShare) (Session, error) {
+// manager's next retry performs a fresh initialization attempt. The check that
+// no initialization is in flight and the flag that starts one are a single
+// critical section, so two concurrent callers never both begin a native open.
+func (f *DeferredGroupFactory) NewGroupRunner(ctx context.Context, cfg *GroupConfig) (GroupRunner, error) {
 	for {
 		f.mu.Lock()
 		if f.closed {
@@ -100,7 +157,7 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 			delegate := f.delegate
 			f.activeStarts++
 			f.mu.Unlock()
-			return f.startDelegate(ctx, delegate, local)
+			return f.newRunnerFromDelegate(ctx, delegate, cfg)
 		}
 		if f.initializing {
 			ready := f.ready
@@ -113,9 +170,9 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 			}
 		}
 		initialize := f.initialize
-		// Initialization follows this Start call until it finishes, but a
-		// successful native runtime must not retain the caller context. Close
-		// owns the independent lifetime cancellation after successful handoff.
+		// Initialization follows this call until it finishes, but a successful
+		// native runtime must not retain the caller context. Close owns the
+		// independent lifetime cancellation after successful handoff.
 		initCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		stopCallerCancel := context.AfterFunc(ctx, cancel)
 		f.initializing = true
@@ -127,7 +184,7 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		delegate, err := initialize(initCtx)
 		settleInitializationCaller(ctx, cancel, stopCallerCancel)
 		if err == nil && delegate == nil {
-			err = errors.New("deferred share session factory initialized without a delegate")
+			err = errors.New("deferred share group factory initialized without a delegate")
 		}
 		if err == nil {
 			err = initCtx.Err()
@@ -138,8 +195,8 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		if err == nil && !closed {
 			f.delegate = delegate
 			// The successful native runtime owns this context for its full
-			// lifetime. Canceling the one-shot initialization context here would
-			// close the admitter before the first resource admission.
+			// lifetime. Canceling the one-shot initialization context here
+			// would close the admitter before the first group admission.
 			f.delegateCancel = cancel
 			f.initialize = nil
 		} else {
@@ -147,10 +204,10 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		}
 		f.initCancel = nil
 		if closed && delegate != nil {
-			// Close the just-created delegate before waking Close or any Start
-			// waiter, so shutdown cannot return while native state is leaked.
+			// Close the just-created delegate before waking Close or any waiter
+			// so shutdown cannot return while native state is leaked.
 			f.mu.Unlock()
-			closeErr := closeSessionFactory(delegate)
+			closeErr := closeGroupFactory(delegate)
 			f.mu.Lock()
 			f.closeErr = errors.Join(f.closeErr, closeErr)
 			err = errors.Join(errDeferredFactoryClosed, err, closeErr)
@@ -161,7 +218,7 @@ func (f *DeferredSessionFactory) Start(ctx context.Context, local *connectorstat
 		f.mu.Unlock()
 		if err != nil {
 			if !closed && delegate != nil {
-				return nil, errors.Join(err, closeSessionFactory(delegate))
+				return nil, errors.Join(err, closeGroupFactory(delegate))
 			}
 			return nil, err
 		}
@@ -178,37 +235,24 @@ func settleInitializationCaller(ctx context.Context, cancel context.CancelFunc, 
 	}
 }
 
-func (f *DeferredSessionFactory) startDelegate(ctx context.Context, delegate SessionFactory, local *connectorstate.LocalShare) (Session, error) {
-	session, startErr := delegate.Start(ctx, local)
+func (f *DeferredGroupFactory) newRunnerFromDelegate(ctx context.Context, delegate GroupFactory, cfg *GroupConfig) (GroupRunner, error) {
+	runner, startErr := delegate.NewGroupRunner(ctx, cfg)
 	f.mu.Lock()
 	closed := f.closed
-	if !closed {
-		// Checking closed and releasing the active call are one handoff. Close
-		// cannot slip between them, close the delegate, and then let Start return
-		// a session from that closed delegate.
-		f.activeStarts--
-		f.cond.Broadcast()
-		f.mu.Unlock()
-		return session, startErr
-	}
-	f.mu.Unlock()
-	var stopErr error
-	if session != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		stopErr = session.Stop(stopCtx)
-		cancel()
-		session = nil
-	}
-	f.mu.Lock()
-	f.closeErr = errors.Join(f.closeErr, stopErr)
 	f.activeStarts--
 	f.cond.Broadcast()
 	f.mu.Unlock()
-	return nil, errors.Join(errDeferredFactoryClosed, startErr, stopErr)
+	if !closed {
+		return runner, startErr
+	}
+	// The factory closed while this runner was being built. The runner has not
+	// been launched, so dropping it is sufficient; the delegate's admitter is
+	// closed by Close.
+	return nil, errors.Join(errDeferredFactoryClosed, startErr)
 }
 
 // Close releases an initialized native delegate.
-func (f *DeferredSessionFactory) Close() error {
+func (f *DeferredGroupFactory) Close() error {
 	if f == nil {
 		return nil
 	}
@@ -240,7 +284,7 @@ func (f *DeferredSessionFactory) Close() error {
 	if delegateCancel != nil {
 		delegateCancel()
 	}
-	closeErr := closeSessionFactory(delegate)
+	closeErr := closeGroupFactory(delegate)
 	f.mu.Lock()
 	f.closeErr = errors.Join(priorErr, closeErr)
 	finalErr := f.closeErr
@@ -249,7 +293,7 @@ func (f *DeferredSessionFactory) Close() error {
 	return finalErr
 }
 
-func closeSessionFactory(factory SessionFactory) error {
+func closeGroupFactory(factory GroupFactory) error {
 	closer, ok := factory.(interface{ Close() error })
 	if !ok || closer == nil {
 		return nil
@@ -257,173 +301,13 @@ func closeSessionFactory(factory SessionFactory) error {
 	return closer.Close()
 }
 
-// ResourceAdmitter is the credential-free native session surface consumed by
-// the daemon. qurl-connector's NativeAdmitter is the production implementation.
-type ResourceAdmitter interface {
-	connectorshare.Admitter
-	MarkServingHealthy() error
-	Close() error
-}
-
-// NewNativeSessionFactory adapts qurl-connector's production lifecycle engine.
-func NewNativeSessionFactory(admitter ResourceAdmitter, common *v1.ClientCommonConfig, version string) (*NativeSessionFactory, error) {
-	if admitter == nil || common == nil {
-		return nil, errors.New("native share session factory requires an admitter and FRP common config")
-	}
-	return &NativeSessionFactory{admitter: admitter, common: common, version: version}, nil
-}
-
-// Start constructs one resource runner and launches its admission loop in the
-// background. It deliberately performs no network I/O before returning, so a
-// broken resource cannot block reconciliation of healthy siblings.
-func (f *NativeSessionFactory) Start(ctx context.Context, local *connectorstate.LocalShare) (Session, error) {
-	if local == nil {
-		return nil, errors.New("native share session requires local state")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	frpFactory, err := connectorshare.NewFRPSessionFactory(connectorshare.FRPFactoryConfig{
-		Common: f.common,
-		Route: connectorshare.LocalHTTPRoute{
-			RouteID: local.ConnectorID, LocalIP: local.LocalIP, LocalPort: local.LocalPort,
-			ResourceID: local.ResourceID, ConnectorRoutingID: local.ConnectorRoutingID,
-		},
-		ClientVersion: f.version,
-	})
-	if err != nil {
-		return nil, err
-	}
-	// The manager owns the returned session and stops it explicitly. Retaining
-	// a one-shot Reconcile context would couple a healthy route to that call.
-	runCtx, cancel := context.WithCancel(context.Background())
-	session := &nativeSession{cancel: cancel, done: make(chan struct{}), diagnostic: ResourceDiagnostic{
-		State: diagnosticStateStarting, LastTransition: time.Now().UTC(),
-	}}
-	runner, err := connectorshare.NewResourceRunner(connectorshare.ResourceConfig{
-		KnockResourceID: local.KnockResourceID,
-		ResourceID:      local.ResourceID,
-		Admitter:        f.admitter,
-		Sessions:        frpFactory,
-		OnServing: func(connectorshare.Admission) {
-			// A failed marker clear is deliberately retried on the next serving
-			// cycle. It must not tear down a healthy route or its siblings.
-			_ = f.admitter.MarkServingHealthy()
-			session.recordServing()
-		},
-		OnRetry: func(err error, wait time.Duration) {
-			session.recordRetry(err, wait)
-			slog.WarnContext(runCtx, "share daemon session attempt failed; retrying",
-				"crid", local.CRID, "retry_in", wait, "error", qurlapi.Redact(err.Error()))
-		},
-	})
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	go session.run(runCtx, runner)
-	return session, nil
-}
-
-// Close ends all native agent sessions after every resource runner stops.
-func (f *NativeSessionFactory) Close() error {
-	if f == nil || f.admitter == nil {
-		return nil
-	}
-	return f.admitter.Close()
-}
-
-type nativeSession struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-
-	mu         sync.Mutex
-	err        error
-	once       sync.Once
-	diagnostic ResourceDiagnostic
-}
-
-func (s *nativeSession) run(ctx context.Context, runner *connectorshare.ResourceRunner) {
-	err := runner.Run(ctx)
-	if errors.Is(err, connectorshare.ErrResourceGone) {
-		err = errors.Join(ErrResourceGone, err)
-	} else if ctx.Err() != nil {
-		err = withoutExpectedNativeSessionCancellation(err)
-	}
-	s.mu.Lock()
-	s.err = err
-	s.diagnostic.State = diagnosticStateStopped
-	if err != nil {
-		s.diagnostic.State = diagnosticStateFailed
-		s.diagnostic.FailureCategory, s.diagnostic.FailureCode = classifyShareFailure(err)
-	}
-	s.diagnostic.LastTransition = time.Now().UTC()
-	s.diagnostic.NextRetryAt = nil
-	s.mu.Unlock()
-	close(s.done)
-}
-
-func withoutExpectedNativeSessionCancellation(err error) error {
+// redactShareError keeps credentials out of daemon logs derived from a native
+// attempt error.
+func redactShareError(err error) string {
 	if err == nil {
-		return nil
+		return ""
 	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		kept := make([]error, 0, len(joined.Unwrap()))
-		for _, cause := range joined.Unwrap() {
-			if cause = withoutExpectedNativeSessionCancellation(cause); cause != nil {
-				kept = append(kept, cause)
-			}
-		}
-		return errors.Join(kept...)
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		cause := wrapped.Unwrap()
-		if !errors.Is(cause, context.Canceled) {
-			return err
-		}
-		return withoutExpectedNativeSessionCancellation(cause)
-	}
-	if errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return err
-}
-
-// Done closes after the resource runner exits.
-func (s *nativeSession) Done() <-chan struct{} { return s.done }
-
-// Err returns the resource runner's terminal result.
-func (s *nativeSession) Err() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.err
-}
-
-// Diagnostic returns the current redacted state for owner-only IPC.
-func (s *nativeSession) Diagnostic() ResourceDiagnostic {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.diagnostic
-}
-
-func (s *nativeSession) recordServing() {
-	s.mu.Lock()
-	s.diagnostic = ResourceDiagnostic{State: diagnosticStateServing, LastTransition: time.Now().UTC()}
-	s.mu.Unlock()
-}
-
-func (s *nativeSession) recordRetry(err error, wait time.Duration) {
-	now := time.Now().UTC()
-	next := now.Add(wait)
-	category, code := classifyShareFailure(err)
-	s.mu.Lock()
-	s.diagnostic.State = diagnosticStateRetrying
-	s.diagnostic.LastTransition = now
-	s.diagnostic.FailureCategory = category
-	s.diagnostic.FailureCode = code
-	s.diagnostic.RetryAttempt++
-	s.diagnostic.NextRetryAt = &next
-	s.mu.Unlock()
+	return qurlapi.Redact(err.Error())
 }
 
 func classifyShareFailure(err error) (category, code string) { //nolint:gocognit,gocyclo // Keep the closed failure taxonomy in one precedence-ordered boundary.
@@ -584,7 +468,8 @@ func classifyShareFailure(err error) (category, code string) { //nolint:gocognit
 			return diagnosticFailurePlatformDenied, ""
 		}
 	}
-	if errors.Is(err, ErrResourceGone) || errors.Is(err, connectorshare.ErrResourceGone) {
+	if errors.Is(err, ErrResourceGone) || errors.Is(err, connectorshare.ErrResourceGone) ||
+		errors.Is(err, connectorshare.ErrRouteNotServing) {
 		return diagnosticFailureResourceUnavailable, ""
 	}
 	return diagnosticFailureUnknown, ""
@@ -600,17 +485,7 @@ func safeDiagnosticCode(code string) string {
 	return code
 }
 
-// Stop cancels and joins the resource runner.
-func (s *nativeSession) Stop(ctx context.Context) error {
-	s.once.Do(s.cancel)
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.done:
-		return s.Err()
-	}
-}
-
-var _ SessionFactory = (*NativeSessionFactory)(nil)
-var _ SessionFactory = (*DeferredSessionFactory)(nil)
-var _ Session = (*nativeSession)(nil)
+var (
+	_ GroupFactory = (*NativeGroupFactory)(nil)
+	_ GroupFactory = (*DeferredGroupFactory)(nil)
+)

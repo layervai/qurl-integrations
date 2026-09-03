@@ -36,9 +36,9 @@ type headlessTestFactory struct {
 	closed  atomic.Int32
 }
 
-func (f *headlessTestFactory) Start(context.Context, *connectorstate.LocalShare) (connectordaemon.Session, error) {
+func (f *headlessTestFactory) NewGroupRunner(context.Context, *connectordaemon.GroupConfig) (connectordaemon.GroupRunner, error) {
 	f.once.Do(func() { close(f.started) })
-	return &headlessTestSession{done: make(chan struct{})}, nil
+	return headlessTestRunner{}, nil
 }
 
 func (f *headlessTestFactory) Close() error {
@@ -46,16 +46,15 @@ func (f *headlessTestFactory) Close() error {
 	return nil
 }
 
-type headlessTestSession struct {
-	done chan struct{}
-	once sync.Once
-}
+type headlessTestRunner struct{}
 
-func (s *headlessTestSession) Done() <-chan struct{} { return s.done }
-func (*headlessTestSession) Err() error              { return nil }
-func (s *headlessTestSession) Stop(context.Context) error {
-	s.once.Do(func() { close(s.done) })
+func (headlessTestRunner) Run(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
+func (headlessTestRunner) SetRoutes(context.Context, []connectorshare.LocalHTTPRoute) error {
 	return nil
+}
+func (headlessTestRunner) RestartRoute(context.Context, string) error { return nil }
+func (headlessTestRunner) RouteStates() map[string]connectorshare.RouteState {
+	return map[string]connectorshare.RouteState{}
 }
 
 func TestHiddenTestCRIDValidatorIsStrictAndCredentialFree(t *testing.T) {
@@ -207,7 +206,7 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 	})
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	var attempts atomic.Int32
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.GroupFactory, error) {
 		if !verifyOwner {
 			t.Fatal("first headless bootstrap did not request authenticated owner verification")
 		}
@@ -292,7 +291,7 @@ func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
 	const secret = "lv_live_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 	factory := &headlessTestFactory{started: make(chan struct{})}
 	attempts := 0
-	got, err := openHeadlessSessionFactory(context.Background(), func(context.Context) (connectordaemon.SessionFactory, error) {
+	got, err := openHeadlessSessionFactory(context.Background(), func(context.Context) (connectordaemon.GroupFactory, error) {
 		attempts++
 		if attempts == 1 {
 			return nil, errors.New("temporary native failure for " + secret)
@@ -335,7 +334,7 @@ func TestHeadlessWarmRestartOwnsExactlyThePersistedShare(t *testing.T) {
 	originalBuilder := buildNativeSessionFactory
 	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 	factory := &headlessTestFactory{started: make(chan struct{})}
-	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+	buildNativeSessionFactory = func(_ context.Context, cfg connectorshare.NativeRuntimeConfig, _ *v1.ClientCommonConfig, _ *qurlapi.Config, verifyOwner bool) (connectordaemon.GroupFactory, error) {
 		if verifyOwner {
 			t.Fatal("warm headless restart repeated authenticated owner verification")
 		}
@@ -408,7 +407,7 @@ func TestHeadlessBootstrapRejectsChangedOrAdditionalPersistedResources(t *testin
 			originalBuilder := buildNativeSessionFactory
 			t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
 			var opens atomic.Int32
-			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool) (connectordaemon.SessionFactory, error) {
+			buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool) (connectordaemon.GroupFactory, error) {
 				opens.Add(1)
 				return &headlessTestFactory{started: make(chan struct{})}, nil
 			}

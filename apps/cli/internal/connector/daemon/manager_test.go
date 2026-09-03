@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sort"
 	"sync"
 	"testing"
 	"time"
+
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
@@ -38,42 +41,6 @@ func (r *memoryRegistry) List(context.Context) ([]connectorstate.LocalShare, err
 	return result, nil
 }
 
-func TestManagerStopsActiveSessionsWhenReconciliationFails(t *testing.T) {
-	reconcileErr := errors.New("registry unavailable")
-	registry := &memoryRegistry{
-		shares:       map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")},
-		listFailures: []error{nil, reconcileErr},
-	}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runDone := make(chan error, 1)
-	go func() { runDone <- manager.Run(context.Background()) }()
-
-	deadline := time.Now().Add(time.Second)
-	for len(manager.Running()) != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(manager.Running()) != 1 {
-		t.Fatalf("initial route did not start: %v", manager.Running())
-	}
-	session := factory.sessions["a"][0]
-	manager.Trigger()
-	select {
-	case err := <-runDone:
-		if !errors.Is(err, reconcileErr) {
-			t.Fatalf("Run error = %v, want registry failure", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Run did not return after registry failure")
-	}
-	if !session.stopped || len(manager.Running()) != 0 {
-		t.Fatalf("failed reconciliation left active route: stopped=%v running=%v", session.stopped, manager.Running())
-	}
-}
-
 func (r *memoryRegistry) DisableAtCurrentEpoch(ctx context.Context, id string, epoch uint64) (*connectorstate.LocalShare, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -96,384 +63,582 @@ func (r *memoryRegistry) DisableAtCurrentEpoch(ctx context.Context, id string, e
 	return &share, nil
 }
 
-type fakeSession struct {
-	done    chan struct{}
-	stopOne sync.Once
-	stopped bool
-	err     error
-	stopErr error
-	block   bool
+func (r *memoryRegistry) setShare(share *connectorstate.LocalShare) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.shares[share.ResourceID] = *share
 }
 
-type fakeDiagnosticSession struct {
-	*fakeSession
-	diagnostic ResourceDiagnostic
+func (r *memoryRegistry) share(resourceID string) connectorstate.LocalShare {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.shares[resourceID]
 }
 
-func (s *fakeDiagnosticSession) Diagnostic() ResourceDiagnostic { return s.diagnostic }
+// fakeGroupRunner models a live session group. On Run it reports every initial
+// route serving and blocks until its context ends. SetRoutes/RestartRoute
+// record their calls and report added or restarted routes serving, so a test
+// can prove exactly which proxies changed.
+type fakeGroupRunner struct {
+	cfg GroupConfig
 
-func newFakeSession() *fakeSession           { return &fakeSession{done: make(chan struct{})} }
-func (s *fakeSession) Done() <-chan struct{} { return s.done }
-func (s *fakeSession) Err() error            { return s.err }
-func (s *fakeSession) Stop(ctx context.Context) error {
-	if s.block {
-		<-ctx.Done()
-		return ctx.Err()
+	mu              sync.Mutex
+	routes          map[string]connectorshare.RouteState
+	setCalls        [][]string
+	restarts        []string
+	restartFailures int
+	runStart        chan struct{}
+	runOnce         sync.Once
+	autoServe       bool
+	runErr          error
+}
+
+func newFakeGroupRunner(cfg *GroupConfig, autoServe bool, runErr error, restartFailures int) *fakeGroupRunner {
+	r := &fakeGroupRunner{
+		cfg: *cfg, routes: map[string]connectorshare.RouteState{},
+		runStart: make(chan struct{}), autoServe: autoServe, runErr: runErr, restartFailures: restartFailures,
 	}
-	if s.stopErr != nil {
-		return s.stopErr
+	for _, route := range cfg.Routes {
+		r.routes[route.RouteID] = connectorshare.RouteState{
+			Route: connectorshare.GroupRoute{LocalHTTPRoute: route}, ProxyName: proxyName(route.RouteID, 0),
+			Phase: connectorshare.RoutePending,
+		}
 	}
-	s.stopOne.Do(func() { s.stopped = true; close(s.done) })
+	return r
+}
+
+func proxyName(routeID string, generation uint64) string {
+	if generation == 0 {
+		return routeID + "-nhp1"
+	}
+	return routeID + "-nhp1-r" + itoa36(generation)
+}
+
+func itoa36(v uint64) string {
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	if v == 0 {
+		return "0"
+	}
+	var buf [16]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = digits[v%36]
+		v /= 36
+	}
+	return string(buf[i:])
+}
+
+func (r *fakeGroupRunner) Run(ctx context.Context) error {
+	r.runOnce.Do(func() { close(r.runStart) })
+	if r.runErr != nil {
+		return r.runErr
+	}
+	if r.autoServe {
+		for _, route := range r.cfg.Routes {
+			r.serve(route.RouteID)
+		}
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r *fakeGroupRunner) SetRoutes(_ context.Context, routes []connectorshare.LocalHTTPRoute) error {
+	ids := make([]string, 0, len(routes))
+	next := make(map[string]connectorshare.RouteState, len(routes))
+	r.mu.Lock()
+	for _, route := range routes {
+		ids = append(ids, route.RouteID)
+		current, existed := r.routes[route.RouteID]
+		if existed && current.Route.LocalHTTPRoute == route {
+			next[route.RouteID] = current
+			continue
+		}
+		next[route.RouteID] = connectorshare.RouteState{
+			Route: connectorshare.GroupRoute{LocalHTTPRoute: route}, ProxyName: proxyName(route.RouteID, 0),
+			Phase: connectorshare.RoutePending,
+		}
+	}
+	sort.Strings(ids)
+	r.setCalls = append(r.setCalls, ids)
+	r.routes = next
+	added := make([]string, 0)
+	for _, route := range routes {
+		if r.routes[route.RouteID].Phase == connectorshare.RoutePending {
+			added = append(added, route.RouteID)
+		}
+	}
+	r.mu.Unlock()
+	if r.autoServe {
+		for _, id := range added {
+			r.serve(id)
+		}
+	}
 	return nil
 }
 
-type fakeFactory struct {
-	mu       sync.Mutex
-	started  []connectorstate.LocalShare
-	sessions map[string][]*fakeSession
-	err      map[string]error
-	attempts map[string]int
+func (r *fakeGroupRunner) RestartRoute(_ context.Context, routeID string) error {
+	r.mu.Lock()
+	r.restarts = append(r.restarts, routeID)
+	if r.restartFailures > 0 {
+		r.restartFailures--
+		r.mu.Unlock()
+		return errors.New("fake restart failure")
+	}
+	if state, ok := r.routes[routeID]; ok {
+		state.Route.Generation++
+		state.ProxyName = proxyName(routeID, state.Route.Generation)
+		state.Phase = connectorshare.RoutePending
+		r.routes[routeID] = state
+	}
+	r.mu.Unlock()
+	if r.autoServe {
+		r.serve(routeID)
+	}
+	return nil
 }
 
-func (f *fakeFactory) Start(_ context.Context, share *connectorstate.LocalShare) (Session, error) {
+func (r *fakeGroupRunner) RouteStates() map[string]connectorshare.RouteState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]connectorshare.RouteState, len(r.routes))
+	for id := range r.routes {
+		out[id] = r.routes[id]
+	}
+	return out
+}
+
+func (r *fakeGroupRunner) serve(routeID string) {
+	r.mu.Lock()
+	if state, ok := r.routes[routeID]; ok {
+		state.Phase = connectorshare.RouteServing
+		r.routes[routeID] = state
+	}
+	r.mu.Unlock()
+	if r.cfg.Events.OnRouteServing != nil {
+		r.cfg.Events.OnRouteServing(routeID)
+	}
+}
+
+func (r *fakeGroupRunner) failRoute(routeID string, err error) {
+	r.mu.Lock()
+	if state, ok := r.routes[routeID]; ok {
+		state.Phase, state.Err = connectorshare.RouteFailed, err
+		r.routes[routeID] = state
+	}
+	r.mu.Unlock()
+	if r.cfg.Events.OnRouteFailed != nil {
+		r.cfg.Events.OnRouteFailed(routeID, err)
+	}
+}
+
+func (r *fakeGroupRunner) groupRetry(err error, wait time.Duration) {
+	if r.cfg.Events.OnRetry != nil {
+		r.cfg.Events.OnRetry(err, wait)
+	}
+}
+
+func (r *fakeGroupRunner) lastSetRoutes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.setCalls) == 0 {
+		return nil
+	}
+	return append([]string(nil), r.setCalls[len(r.setCalls)-1]...)
+}
+
+func (r *fakeGroupRunner) restartedRoutes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.restarts...)
+}
+
+type fakeGroupFactory struct {
+	mu              sync.Mutex
+	starts          int
+	runners         []*fakeGroupRunner
+	configs         []GroupConfig
+	errs            []error
+	autoServe       bool
+	runErr          error
+	restartFailures int
+}
+
+func newFakeGroupFactory() *fakeGroupFactory { return &fakeGroupFactory{autoServe: true} }
+
+func (f *fakeGroupFactory) NewGroupRunner(_ context.Context, cfg *GroupConfig) (GroupRunner, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.attempts == nil {
-		f.attempts = map[string]int{}
+	f.starts++
+	f.configs = append(f.configs, *cfg)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return nil, err
+		}
 	}
-	f.attempts[share.ResourceID]++
-	if err := f.err[share.ResourceID]; err != nil {
-		return nil, err
-	}
-	session := newFakeSession()
-	f.started = append(f.started, *share)
-	f.sessions[share.ResourceID] = append(f.sessions[share.ResourceID], session)
-	return session, nil
+	runner := newFakeGroupRunner(cfg, f.autoServe, f.runErr, f.restartFailures)
+	f.runners = append(f.runners, runner)
+	return runner, nil
 }
 
-func (f *fakeFactory) attemptCount(resourceID string) int {
+func (f *fakeGroupFactory) startCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.attempts[resourceID]
+	return f.starts
 }
 
-func TestManagerUnrelatedReconcileDoesNotBypassResourceBackoff(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
-		"a": daemonShare("a", 1, "on"),
-		"b": daemonShare("b", 1, "on"),
-	}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{
-		"a": errors.New("a unavailable"),
-		"b": errors.New("b unavailable"),
-	}}
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
+func (f *fakeGroupFactory) runner(index int) *fakeGroupRunner {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if index < 1 || index > len(f.runners) {
+		return nil
 	}
-	manager.retryDelay = func(int) time.Duration { return time.Hour }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if factory.attemptCount("a") != 1 || factory.attemptCount("b") != 1 {
-		t.Fatalf("unrelated reconcile bypassed backoff: attempts=%v", factory.attempts)
-	}
-	manager.mu.Lock()
-	retryDefinition := manager.retryDefinitions["a"]
-	retryAttempt := manager.diagnostics["a"].RetryAttempt
-	manager.mu.Unlock()
-	if retryDefinition.ServingEpoch != 1 || retryAttempt != 1 {
-		t.Fatalf("same-definition retry state changed: definition=%+v attempt=%d", retryDefinition, retryAttempt)
-	}
-
-	manager.mu.Lock()
-	delete(manager.retrying, "a")
-	delete(manager.retryGeneration, "a")
-	manager.mu.Unlock()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if factory.attemptCount("a") != 2 || factory.attemptCount("b") != 1 {
-		t.Fatalf("resource-scoped retry disturbed sibling backoff: attempts=%v", factory.attempts)
-	}
+	return f.runners[index-1]
 }
 
-func TestManagerNewDefinitionBypassesFailedStartBackoffImmediately(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{
-		"a": errors.New("old lifecycle unavailable"),
-	}}
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager.retryDelay = func(int) time.Duration { return time.Hour }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	factory.mu.Lock()
-	delete(factory.err, "a")
-	factory.mu.Unlock()
-	registry.mu.Lock()
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	registry.mu.Unlock()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if factory.attemptCount("a") != 2 || len(factory.sessions["a"]) != 1 || factory.started[0].ServingEpoch != 2 {
-		t.Fatalf("new lifecycle did not start immediately: attempts=%d sessions=%d starts=%+v",
-			factory.attemptCount("a"), len(factory.sessions["a"]), factory.started)
-	}
-	manager.mu.Lock()
-	_, retrying := manager.retrying["a"]
-	_, hasRetryDefinition := manager.retryDefinitions["a"]
-	_, hasFailures := manager.failures["a"]
-	diagnostic := manager.diagnostics["a"]
-	manager.mu.Unlock()
-	if retrying || hasRetryDefinition || hasFailures || diagnostic.State != diagnosticStateStarting || diagnostic.RetryAttempt != 0 {
-		t.Fatalf("new lifecycle retained old backoff or diagnostics: retrying=%t definition=%t failures=%t diagnostic=%+v",
-			retrying, hasRetryDefinition, hasFailures, diagnostic)
-	}
-}
-
-func TestManagerNewDefinitionResetsBackoffAndOldTimerCannotDisturbIt(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{
-		"a": errors.New("lifecycle unavailable"),
-	}}
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	delayCalls := 0
-	manager.retryDelay = func(attempt int) time.Duration {
-		if attempt != 1 {
-			t.Fatalf("new lifecycle inherited retry attempt %d", attempt)
-		}
-		delayCalls++
-		if delayCalls == 1 {
-			return 50 * time.Millisecond
-		}
-		return time.Hour
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	manager.mu.Lock()
-	firstGeneration := manager.retryGeneration["a"]
-	manager.mu.Unlock()
-	registry.mu.Lock()
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	registry.mu.Unlock()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	manager.mu.Lock()
-	secondGeneration := manager.retryGeneration["a"]
-	definition := manager.retryDefinitions["a"]
-	diagnostic := manager.diagnostics["a"]
-	manager.mu.Unlock()
-	if secondGeneration == firstGeneration || definition.ServingEpoch != 2 || diagnostic.RetryAttempt != 1 {
-		t.Fatalf("new lifecycle retry was not reset: first=%d second=%d definition=%+v diagnostic=%+v",
-			firstGeneration, secondGeneration, definition, diagnostic)
-	}
-	time.Sleep(100 * time.Millisecond)
-	manager.mu.Lock()
-	stillRetrying := manager.retrying["a"]
-	currentGeneration := manager.retryGeneration["a"]
-	currentDefinition := manager.retryDefinitions["a"]
-	manager.mu.Unlock()
-	if !stillRetrying || currentGeneration != secondGeneration || currentDefinition.ServingEpoch != 2 || len(manager.trigger) != 0 {
-		t.Fatalf("old timer disturbed new lifecycle retry: retrying=%t generation=%d definition=%+v triggers=%d",
-			stillRetrying, currentGeneration, currentDefinition, len(manager.trigger))
-	}
-}
-
-func TestManagerNewDefinitionBypassesWatcherBackoffWithoutLiveSession(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager.retryDelay = func(int) time.Duration { return time.Hour }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	old := factory.sessions["a"][0]
-	old.err = errors.New("old lifecycle ended")
-	close(old.done)
-	waitManagerCondition(t, func() bool {
-		manager.mu.Lock()
-		defer manager.mu.Unlock()
-		return manager.retrying["a"]
-	}, "watcher retry")
-	registry.mu.Lock()
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	registry.mu.Unlock()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if factory.attemptCount("a") != 2 || len(factory.sessions["a"]) != 2 || factory.started[1].ServingEpoch != 2 {
-		t.Fatalf("watcher backoff suppressed new lifecycle: attempts=%d sessions=%d starts=%+v",
-			factory.attemptCount("a"), len(factory.sessions["a"]), factory.started)
-	}
-}
-
-func TestManagerLiveOldSessionKeepsRetryGateAcrossNewDefinition(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
-	manager, err := NewManager(registry, factory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager.retryDelay = func(int) time.Duration { return time.Hour }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	old := factory.sessions["a"][0]
-	old.stopErr = errors.New("old session stop not confirmed")
-	registry.mu.Lock()
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	registry.mu.Unlock()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	manager.mu.Lock()
-	retrying := manager.retrying["a"]
-	retryDefinition := manager.retryDefinitions["a"]
-	retryAttempt := manager.diagnostics["a"].RetryAttempt
-	managed := manager.sessions["a"]
-	manager.mu.Unlock()
-	if !retrying || retryDefinition.ServingEpoch != 1 || retryAttempt != 1 || managed == nil || managed.session != old ||
-		factory.attemptCount("a") != 1 || len(factory.sessions["a"]) != 1 {
-		t.Fatalf("live old session lost its overlap gate: retrying=%t definition=%+v attempt=%d managed=%+v starts=%d sessions=%d",
-			retrying, retryDefinition, retryAttempt, managed, factory.attemptCount("a"), len(factory.sessions["a"]))
-	}
-}
-
-func TestManagerDiagnosticsPreferScheduledRetryOverLiveSession(t *testing.T) {
-	manager, err := NewManager(&memoryRegistry{shares: map[string]connectorstate.LocalShare{}},
-		&fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager.sessions["a"] = &managedSession{share: daemonShare("a", 1, "on"), session: &fakeDiagnosticSession{
-		fakeSession: newFakeSession(), diagnostic: ResourceDiagnostic{State: diagnosticStateServing},
-	}}
-	manager.retrying["a"] = true
-	manager.diagnostics["a"] = ResourceDiagnostic{State: diagnosticStateRetrying, RetryAttempt: 2}
-	got := manager.Diagnostics()["a"]
-	if got.State != diagnosticStateRetrying || got.RetryAttempt != 2 {
-		t.Fatalf("scheduled retry diagnostic was hidden by live session: %+v", got)
-	}
+func (f *fakeGroupFactory) lastConfig() GroupConfig {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.configs[len(f.configs)-1]
 }
 
 func daemonShare(id string, epoch uint64, desired string) connectorstate.LocalShare {
 	return connectorstate.LocalShare{
 		ResourceID: id, CRID: "crid-" + id, ConnectorID: "connector-" + id,
-		ConnectorRoutingID: "routing-" + id, KnockResourceID: "knock-" + id,
+		ConnectorRoutingID: "routing-" + id, KnockResourceID: "q_catalog_key",
 		TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
 		DesiredState: desired, ServingEpoch: epoch,
 	}
 }
 
-func TestManagerKeepsSiblingServingAcrossStopRestartAndRemove(t *testing.T) {
+func newRunningManager(t *testing.T, registry *memoryRegistry, factory *fakeGroupFactory) (*Manager, context.CancelFunc) {
+	t.Helper()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	return manager, cancel
+}
+
+func waitManagerCondition(t *testing.T, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitServing(t *testing.T, manager *Manager, resourceID string) {
+	t.Helper()
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()[resourceID].State == diagnosticStateServing
+	}, "resource "+resourceID+" serving")
+}
+
+func TestManagerServesEveryDesiredShareOnOneGroup(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+		"c": daemonShare("c", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	for _, id := range []string{"a", "b", "c"} {
+		waitServing(t, manager, id)
+	}
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d, want one admission for three shares", got)
+	}
+	if got := len(factory.lastConfig().Routes); got != 3 {
+		t.Fatalf("initial routes = %d, want 3", got)
+	}
+	if got := manager.Running(); len(got) != 3 || got["a"] != "crid-a" {
+		t.Fatalf("running set = %v, want three resources", got)
+	}
+}
+
+func TestManagerAddsFourthShareWithoutASecondAdmission(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+		"c": daemonShare("c", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	for _, id := range []string{"a", "b", "c"} {
+		waitServing(t, manager, id)
+	}
+	fourth := daemonShare("d", 1, "on")
+	registry.setShare(&fourth)
+	manager.Trigger()
+	waitServing(t, manager, "d")
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts after publishing a fourth share = %d, want still one admission", got)
+	}
+	runner := factory.runner(1)
+	if got := runner.lastSetRoutes(); len(got) != 4 {
+		t.Fatalf("SetRoutes route set = %v, want four routes", got)
+	}
+	if got := runner.restartedRoutes(); len(got) != 0 {
+		t.Fatalf("publishing a new share restarted existing routes: %v", got)
+	}
+}
+
+func TestManagerStopOneRouteLeavesSiblingsUntouched(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
 		"a": daemonShare("a", 1, "on"),
 		"b": daemonShare("b", 1, "on"),
 	}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+
+	stopA := daemonShare("a", 2, "off")
+	registry.setShare(&stopA)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool {
+		_, present := manager.Diagnostics()["a"]
+		return !present
+	}, "stopped share pruned")
+	runner := factory.runner(1)
+	if got := runner.lastSetRoutes(); len(got) != 1 || got[0] != "connector-b" {
+		t.Fatalf("SetRoutes after stop = %v, want only connector-b", got)
+	}
+	if manager.Diagnostics()["b"].State != diagnosticStateServing {
+		t.Fatalf("sibling b state = %q, want serving", manager.Diagnostics()["b"].State)
+	}
+	if got := runner.restartedRoutes(); len(got) != 0 {
+		t.Fatalf("stop restarted a route: %v", got)
+	}
+	if factory.startCount() != 1 {
+		t.Fatalf("stop opened a new admission: starts=%d", factory.startCount())
+	}
+}
+
+func TestManagerRestartAdvancesOnlyThatRoute(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+
+	// A restart advances only this share's serving epoch, same target.
+	restartB := daemonShare("b", 2, "on")
+	registry.setShare(&restartB)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool {
+		for _, id := range factory.runner(1).restartedRoutes() {
+			if id == "connector-b" {
+				return true
+			}
+		}
+		return false
+	}, "route b restarted")
+	runner := factory.runner(1)
+	if got := runner.restartedRoutes(); len(got) != 1 || got[0] != "connector-b" {
+		t.Fatalf("restarted routes = %v, want only connector-b", got)
+	}
+	if got := runner.RouteStates()["connector-a"].Route.Generation; got != 0 {
+		t.Fatalf("sibling a generation = %d, want unchanged", got)
+	}
+	if factory.startCount() != 1 {
+		t.Fatalf("restart opened a new admission: starts=%d", factory.startCount())
+	}
+}
+
+func TestManagerResourceNotFoundPersistsOneShareOffAndKeepsSiblingsServing(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 7, "on"),
+		"b": daemonShare("b", 4, "on"),
+		"c": daemonShare("c", 2, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	for _, id := range []string{"a", "b", "c"} {
+		waitServing(t, manager, id)
+	}
+	runner := factory.runner(1)
+	runner.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
+
+	waitManagerCondition(t, func() bool {
+		return registry.share("b").DesiredState == "off"
+	}, "resource-gone share persisted off")
+	if got := registry.share("b").ServingEpoch; got != 4 {
+		t.Fatalf("persisted epoch = %d, want the same epoch 4", got)
+	}
+	// After persisting off, a reconcile is triggered so the gone share is
+	// dropped from the running set and diagnostics rather than lingering.
+	waitManagerCondition(t, func() bool {
+		_, running := manager.Running()["b"]
+		_, diag := manager.Diagnostics()["b"]
+		return !running && !diag
+	}, "gone share dropped from running and diagnostics")
+	for _, id := range []string{"a", "c"} {
+		if manager.Diagnostics()[id].State != diagnosticStateServing {
+			t.Fatalf("sibling %s state = %q, want serving after a resource-gone sibling", id, manager.Diagnostics()[id].State)
+		}
+		if _, running := manager.Running()[id]; !running {
+			t.Fatalf("sibling %s dropped from running after a resource-gone sibling", id)
+		}
+	}
+	if factory.startCount() != 1 {
+		t.Fatalf("a resource-gone route opened a new admission: starts=%d", factory.startCount())
+	}
+}
+
+func TestManagerConvergesThousandDesiredRowsWithOneAdmission(t *testing.T) {
+	shares := make(map[string]connectorstate.LocalShare, 1000)
+	for i := 0; i < 1000; i++ {
+		id := resourceIDf(i)
+		shares[id] = connectorstate.LocalShare{
+			ResourceID: id, CRID: "crid-" + id, ConnectorID: "connector-" + id,
+			ConnectorRoutingID: "routing-" + id, KnockResourceID: "q_catalog_key",
+			TargetURL: "http://127.0.0.1:3000", LocalIP: "127.0.0.1", LocalPort: 3000,
+			DesiredState: "on", ServingEpoch: 1,
+		}
+	}
+	registry := &memoryRegistry{shares: shares}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitManagerCondition(t, func() bool { return len(manager.Running()) == 1000 }, "1000 rows converge")
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts for 1000 rows = %d, want one knock", got)
+	}
+	if got := len(factory.lastConfig().Routes); got != 1000 {
+		t.Fatalf("initial routes = %d, want 1000", got)
+	}
+}
+
+func resourceIDf(i int) string {
+	const digits = "0123456789"
+	b := []byte("r0000")
+	for pos := 4; pos > 0 && i > 0; pos-- {
+		b[pos] = digits[i%10]
+		i /= 10
+	}
+	return string(b)
+}
+
+func TestManagerStopsGroupWhenReconciliationFails(t *testing.T) {
+	reconcileErr := errors.New("registry unavailable")
+	registry := &memoryRegistry{
+		shares:       map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")},
+		listFailures: []error{nil, reconcileErr},
+	}
+	factory := newFakeGroupFactory()
 	manager, err := NewManager(registry, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
+	runDone := make(chan error, 1)
+	go func() { runDone <- manager.Run(context.Background()) }()
+	waitManagerCondition(t, func() bool { return len(manager.Running()) == 1 }, "initial group start")
+	runner := factory.runner(1)
+	manager.Trigger()
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, reconcileErr) {
+			t.Fatalf("Run error = %v, want registry failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after registry failure")
 	}
-	a1 := factory.sessions["a"][0]
-	b1 := factory.sessions["b"][0]
-
-	registry.shares["a"] = daemonShare("a", 1, "off")
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
+	select {
+	case <-runner.runStart:
+	default:
+		t.Fatal("runner never started")
 	}
-	if !a1.stopped || b1.stopped || len(factory.sessions["b"]) != 1 {
-		t.Fatalf("stop one: a stopped=%v b stopped=%v b starts=%d", a1.stopped, b1.stopped, len(factory.sessions["b"]))
-	}
-
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	a2 := factory.sessions["a"][1]
-	registry.shares["a"] = daemonShare("a", 3, "on")
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !a2.stopped || b1.stopped || len(factory.sessions["a"]) != 3 {
-		t.Fatalf("restart one lost isolation: a2 stopped=%v b stopped=%v a starts=%d", a2.stopped, b1.stopped, len(factory.sessions["a"]))
-	}
-
-	delete(registry.shares, "a")
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if b1.stopped || len(manager.Running()) != 1 || manager.Running()["b"] == "" {
-		t.Fatalf("remove one disrupted sibling: running=%v b stopped=%v", manager.Running(), b1.stopped)
+	if factory.startCount() != 1 {
+		t.Fatalf("group starts = %d, want one", factory.startCount())
 	}
 }
 
-func TestManagerPrunesDiagnosticsForSuccessfulRemovedResource(t *testing.T) {
+func TestManagerStopsGroupWhenNoShareIsDesiredOn(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, _ := newRunningManager(t, registry, factory)
+	waitServing(t, manager, "a")
+
+	stopLast := daemonShare("a", 2, "off")
+	registry.setShare(&stopLast)
+	manager.Trigger()
+	waitManagerCondition(t, func() bool { return len(manager.Running()) == 0 }, "group emptied")
+	runner := factory.runner(1)
+	waitManagerCondition(t, func() bool {
+		select {
+		case <-runner.runStart:
+			return true
+		default:
+			return false
+		}
+	}, "runner observed")
+	if factory.startCount() != 1 {
+		t.Fatalf("emptying the group opened a new admission: starts=%d", factory.startCount())
+	}
+}
+
+func TestManagerRebuildsGroupWithBackoffAfterTransientFactoryFailure(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
+	factory := newFakeGroupFactory()
+	factory.errs = []error{errors.New("native transport unavailable")}
 	manager, err := NewManager(registry, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := manager.Diagnostics()["a"]; !ok {
-		t.Fatal("successful session has no diagnostic before removal")
-	}
-
-	delete(registry.shares, "a")
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if diagnostic, ok := manager.Diagnostics()["a"]; ok {
-		t.Fatalf("removed successful session retained diagnostic: %+v", diagnostic)
+	manager.retryDelay = func(int) time.Duration { return 10 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+	if got := factory.startCount(); got != 2 {
+		t.Fatalf("group starts = %d, want a transient failure and one recovery", got)
 	}
 }
 
-func TestManagerStopsRetryingPermanentMissingResource(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 4, "on")}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{"a": ErrResourceGone}}
-	manager, _ := NewManager(registry, factory)
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
+func TestManagerGroupRetryStallsEveryNonServingRoute(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := &fakeGroupFactory{autoServe: false}
+	manager, _ := newRunningManager(t, registry, factory)
+	waitManagerCondition(t, func() bool { return factory.startCount() == 1 }, "group started")
+	runner := factory.runner(1)
+	runner.serve("connector-a")
+	waitServing(t, manager, "a")
+	runner.groupRetry(errors.New("assigned NHP cell unavailable"), 25*time.Millisecond)
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["b"].State == diagnosticStateRetrying
+	}, "non-serving route b retrying")
+	if got := manager.Diagnostics()["b"]; got.NextRetryAt == nil || got.FailureCategory == "" {
+		t.Fatalf("retrying diagnostic incomplete: %+v", got)
 	}
-	if got := registry.shares["a"].DesiredState; got != "off" {
-		t.Fatalf("desired state = %q, want off after permanent resource denial", got)
-	}
-	if len(manager.Running()) != 0 {
-		t.Fatalf("running = %v, want none", manager.Running())
+	if manager.Diagnostics()["a"].State != diagnosticStateServing {
+		t.Fatalf("serving route a was demoted by a group retry: %q", manager.Diagnostics()["a"].State)
 	}
 }
 
@@ -500,167 +665,28 @@ func TestManagerPersistsTerminalDisableWithRealLocalRegistry(t *testing.T) {
 	if err := registry.Put(context.Background(), &share); err != nil {
 		t.Fatal(err)
 	}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{share.ResourceID: ErrResourceGone}}
+	factory := newFakeGroupFactory()
 	manager, err := NewManager(registry, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitManagerCondition(t, func() bool { return factory.startCount() == 1 }, "group started")
+	factory.runner(1).failRoute("terminal-share", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
+	waitManagerCondition(t, func() bool {
+		got, err := registry.Get(context.Background(), share.ResourceID)
+		return err == nil && got.DesiredState == "off"
+	}, "terminal disable persisted")
 	got, err := registry.Get(context.Background(), share.ResourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.DesiredState != "off" || got.ServingEpoch != share.ServingEpoch || got.TargetURL != share.TargetURL {
 		t.Fatalf("terminal persistence = %+v, want off at the same epoch with target preserved", got)
-	}
-}
-
-func TestManagerTransientStartFailureDoesNotStopSibling(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
-		"a": daemonShare("a", 1, "on"),
-		"b": daemonShare("b", 1, "on"),
-	}}
-	factory := &fakeFactory{
-		sessions: map[string][]*fakeSession{},
-		err:      map[string]error{"b": errors.New("network unavailable")},
-	}
-	manager, _ := NewManager(registry, factory)
-	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatalf("resource-local transient escaped Reconcile: %v", err)
-	}
-	a := factory.sessions["a"][0]
-	if a.stopped || manager.Running()["a"] == "" {
-		t.Fatalf("healthy sibling was disrupted: stopped=%v running=%v", a.stopped, manager.Running())
-	}
-	factory.mu.Lock()
-	delete(factory.err, "b")
-	factory.mu.Unlock()
-	waitManagerCondition(t, func() bool {
-		manager.mu.Lock()
-		defer manager.mu.Unlock()
-		return !manager.retrying["b"]
-	}, "resource-local start retry")
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if a.stopped || manager.Running()["b"] == "" {
-		t.Fatalf("recovered resource did not join healthy sibling: a stopped=%v running=%v", a.stopped, manager.Running())
-	}
-}
-
-func TestManagerRemovedResourceDoesNotRetainRetryBackoff(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
-	factory := &fakeFactory{
-		sessions: map[string][]*fakeSession{},
-		err:      map[string]error{"a": errors.New("network unavailable")},
-	}
-	manager, _ := NewManager(registry, factory)
-	firstDelayReady := make(chan struct{})
-	secondDelayReady := make(chan struct{})
-	delayCalls := 0
-	manager.retryDelay = func(int) time.Duration {
-		delayCalls++
-		if delayCalls == 1 {
-			close(firstDelayReady)
-			return 100 * time.Millisecond
-		}
-		close(secondDelayReady)
-		return time.Hour
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	<-firstDelayReady
-	manager.mu.Lock()
-	firstFailures, firstRetrying := manager.failures["a"], manager.retrying["a"]
-	manager.mu.Unlock()
-	if firstFailures != 1 || !firstRetrying {
-		t.Fatalf("first retry state = failures %d retrying %t, want 1/true", firstFailures, firstRetrying)
-	}
-
-	delete(registry.shares, "a")
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	manager.mu.Lock()
-	_, hasFailures := manager.failures["a"]
-	_, hasRetrying := manager.retrying["a"]
-	manager.mu.Unlock()
-	if hasFailures || hasRetrying {
-		t.Fatalf("removed resource retained retry state: failures=%t retrying=%t", hasFailures, hasRetrying)
-	}
-
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	<-secondDelayReady
-	manager.mu.Lock()
-	republishedFailures := manager.failures["a"]
-	manager.mu.Unlock()
-	if republishedFailures != 1 {
-		t.Fatalf("republished resource failure count = %d, want fresh attempt 1", republishedFailures)
-	}
-	time.Sleep(150 * time.Millisecond)
-	manager.mu.Lock()
-	stillRetrying := manager.retrying["a"]
-	_, hasGeneration := manager.retryGeneration["a"]
-	manager.mu.Unlock()
-	if !stillRetrying || !hasGeneration || len(manager.trigger) != 0 {
-		t.Fatalf("stale timer disturbed republished retry: retrying=%t generation=%t triggers=%d", stillRetrying, hasGeneration, len(manager.trigger))
-	}
-}
-
-func TestManagerTransientStopFailureKeepsSiblingsAndPreventsReplacementOverlap(t *testing.T) {
-	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
-		"a": daemonShare("a", 1, "on"),
-		"b": daemonShare("b", 1, "on"),
-	}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
-	manager, _ := NewManager(registry, factory)
-	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	a1 := factory.sessions["a"][0]
-	b1 := factory.sessions["b"][0]
-	a1.stopErr = errors.New("resource-local stop timeout")
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	registry.shares["c"] = daemonShare("c", 1, "on")
-
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatalf("resource-local stop failure escaped Reconcile: %v", err)
-	}
-	if len(factory.sessions["a"]) != 1 {
-		t.Fatalf("replacement overlapped session whose stop was unconfirmed: starts=%d", len(factory.sessions["a"]))
-	}
-	if b1.stopped || manager.Running()["b"] == "" || manager.Running()["c"] == "" {
-		t.Fatalf("stop failure disrupted siblings: b stopped=%v running=%v", b1.stopped, manager.Running())
-	}
-
-	a1.stopErr = nil
-	waitManagerCondition(t, func() bool {
-		manager.mu.Lock()
-		defer manager.mu.Unlock()
-		return !manager.retrying["a"]
-	}, "resource-local stop retry")
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if !a1.stopped || len(factory.sessions["a"]) != 2 {
-		t.Fatalf("resource did not converge after stop recovered: stopped=%v starts=%d", a1.stopped, len(factory.sessions["a"]))
-	}
-	if b1.stopped || manager.Running()["b"] == "" || manager.Running()["c"] == "" {
-		t.Fatalf("recovery disrupted siblings: b stopped=%v running=%v", b1.stopped, manager.Running())
 	}
 }
 
@@ -672,110 +698,173 @@ func TestManagerRetriesResourceGonePersistenceWithoutDisruptingSibling(t *testin
 		},
 		setFailures: []error{errors.New("temporary disk failure")},
 	}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
-	manager, _ := NewManager(registry, factory)
-	manager.retryDelay = func(int) time.Duration { return time.Millisecond }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
 		t.Fatal(err)
 	}
-	a := factory.sessions["a"][0]
-	b := factory.sessions["b"][0]
-	factory.mu.Lock()
-	factory.err["a"] = ErrResourceGone
-	factory.mu.Unlock()
-	a.err = ErrResourceGone
-	close(a.done)
+	manager.retryDelay = func(int) time.Duration { return 5 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	factory.runner(1).failRoute("connector-a", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
 
 	waitManagerCondition(t, func() bool {
 		registry.mu.Lock()
 		defer registry.mu.Unlock()
-		return registry.setCalls == 1
-	}, "first bounded persistence attempt")
+		return registry.setCalls >= 2
+	}, "resource-gone persistence retried")
+	waitManagerCondition(t, func() bool { return registry.share("a").DesiredState == "off" }, "gone share off after retry")
 	registry.mu.Lock()
-	if !registry.setDeadline || registry.shares["a"].DesiredState != "on" {
-		t.Fatalf("failed persistence deadline=%t desired=%q, want bounded/on", registry.setDeadline, registry.shares["a"].DesiredState)
-	}
+	deadline := registry.setDeadline
 	registry.mu.Unlock()
-
-	select {
-	case <-manager.trigger:
-	case <-time.After(time.Second):
-		t.Fatal("resource-local persistence failure did not schedule reconciliation")
+	if !deadline {
+		t.Fatal("persistence did not use a bounded deadline")
 	}
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatalf("resource-local persistence recovery escaped Reconcile: %v", err)
-	}
-	registry.mu.Lock()
-	gotDesired := registry.shares["a"].DesiredState
-	setCalls := registry.setCalls
-	registry.mu.Unlock()
-	if gotDesired != "off" || setCalls != 2 {
-		t.Fatalf("recovery desired=%q persistence calls=%d, want off/2", gotDesired, setCalls)
-	}
-	if b.stopped || manager.Running()["b"] == "" {
-		t.Fatalf("resource-local persistence failure disrupted sibling: stopped=%t running=%v", b.stopped, manager.Running())
+	if manager.Diagnostics()["b"].State != diagnosticStateServing {
+		t.Fatalf("sibling b disrupted by resource-gone persistence: %q", manager.Diagnostics()["b"].State)
 	}
 }
 
-func TestManagerBoundsBlockingResourceStopAndContinuesReconciliation(t *testing.T) {
+func TestManagerBacksOffAndDoesNotHotLoopWhenGroupRunCrashes(t *testing.T) {
 	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
 		"a": daemonShare("a", 1, "on"),
 		"b": daemonShare("b", 1, "on"),
 	}}
-	factory := &fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}}
-	manager, _ := NewManager(registry, factory)
-	manager.resourceStopTimeout = 10 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := manager.Reconcile(ctx); err != nil {
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.New("frp login failed")}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
 		t.Fatal(err)
 	}
-	a := factory.sessions["a"][0]
-	b := factory.sessions["b"][0]
-	a.block = true
-	registry.shares["a"] = daemonShare("a", 2, "on")
-	registry.shares["c"] = daemonShare("c", 1, "on")
+	// A large backoff means a correctly classified crash must NOT rebuild the
+	// group in the sampling window; the pre-fix "every exit is benign" bug
+	// rebuilt immediately and hot-looped, so startCount would climb fast.
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
 
-	started := time.Now()
-	if err := manager.Reconcile(ctx); err != nil {
-		t.Fatalf("bounded resource stop escaped Reconcile: %v", err)
+	waitManagerCondition(t, func() bool { return factory.startCount() >= 1 }, "group started")
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["a"].State == diagnosticStateRetrying &&
+			manager.Diagnostics()["b"].State == diagnosticStateRetrying
+	}, "crashed group's routes reported retrying")
+	if manager.Diagnostics()["a"].NextRetryAt == nil {
+		t.Fatalf("retrying diagnostic missing next-retry time: %+v", manager.Diagnostics()["a"])
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("blocking resource stop stalled reconciliation for %s", elapsed)
+	// The group is in backoff; it must not rebuild while the retry window holds.
+	time.Sleep(120 * time.Millisecond)
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d during backoff, want exactly one (a benign-classified crash would hot-loop)", got)
 	}
-	if b.stopped || manager.Running()["b"] == "" || manager.Running()["c"] == "" {
-		t.Fatalf("blocking resource stop disrupted siblings/new resources: b stopped=%t running=%v", b.stopped, manager.Running())
-	}
-	if len(factory.sessions["a"]) != 1 {
-		t.Fatalf("blocking old session overlapped replacement: starts=%d", len(factory.sessions["a"]))
+	if _, running := manager.Running()["a"]; running {
+		t.Fatalf("crashed group still reports routes running: %v", manager.Running())
 	}
 }
 
-func TestStopSessionsDoesNotLetOneBlockedRouteStarveSiblingRetirement(t *testing.T) {
-	blocked := newFakeSession()
-	blocked.block = true
-	sibling := newFakeSession()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-
-	err := stopSessions(ctx, []Session{blocked, sibling})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("stopSessions error = %v, want deadline from blocked route", err)
+func TestManagerRetriesRestartWhenTheFirstAttemptFails(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	factory := &fakeGroupFactory{autoServe: true, restartFailures: 1}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !sibling.stopped {
-		t.Fatal("blocked route prevented sibling retirement attempt")
-	}
-}
+	manager.retryDelay = func(int) time.Duration { return 10 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
 
-func waitManagerCondition(t *testing.T, condition func() bool, description string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for !condition() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", description)
+	restartA := daemonShare("a", 2, "on")
+	registry.setShare(&restartA)
+	manager.Trigger()
+	// The first RestartRoute fails, so the tracked epoch must not advance and a
+	// later reconcile must re-detect and re-attempt the restart until it lands.
+	waitManagerCondition(t, func() bool {
+		got := 0
+		for _, id := range factory.runner(1).restartedRoutes() {
+			if id == "connector-a" {
+				got++
+			}
 		}
-		time.Sleep(time.Millisecond)
+		return got >= 2
+	}, "restart re-attempted after a transient failure")
+	// Once the restart succeeds, the advanced epoch is committed, so further
+	// reconciles do not keep restarting.
+	manager.Trigger()
+	manager.Trigger()
+	time.Sleep(50 * time.Millisecond)
+	got := 0
+	for _, id := range factory.runner(1).restartedRoutes() {
+		if id == "connector-a" {
+			got++
+		}
+	}
+	if got != 2 {
+		t.Fatalf("restart attempts = %d, want exactly two (one failed, one succeeded, then committed)", got)
+	}
+}
+
+func TestManagerJoinedCancellationWithFailureIsNotBenign(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{"a": daemonShare("a", 1, "on")}}
+	// A real failure joined with a context cancellation must NOT be classified
+	// benign: the manager never asked to stop, so this is a crash that must
+	// back off, not reset-and-rebuild into a hot loop.
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.Join(context.Canceled, errors.New("frp login failed"))}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return time.Hour }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["a"].State == diagnosticStateRetrying
+	}, "joined-cancellation crash reported retrying")
+	time.Sleep(120 * time.Millisecond)
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d, want one; a joined context.Canceled must not be read as an intentional stop", got)
+	}
+}
+
+func TestManagerGroupResourceGoneConvergesEveryShareOff(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 3, "on"),
+		"b": daemonShare("b", 5, "on"),
+	}}
+	factory := &fakeGroupFactory{autoServe: false, runErr: errors.Join(connectorshare.ErrResourceGone, errors.New("knock resource gone"))}
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 5 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	// A permanent whole-group denial converges every share to a durable off
+	// (each at its own epoch) rather than re-knocking forever.
+	waitManagerCondition(t, func() bool {
+		return registry.share("a").DesiredState == "off" && registry.share("b").DesiredState == "off"
+	}, "every share persisted off on a group-level resource-gone")
+	if got := registry.share("a").ServingEpoch; got != 3 {
+		t.Fatalf("share a persisted epoch = %d, want 3", got)
+	}
+	if got := registry.share("b").ServingEpoch; got != 5 {
+		t.Fatalf("share b persisted epoch = %d, want 5", got)
+	}
+	// Once both are off the desired set is empty, so the group is not rebuilt.
+	time.Sleep(60 * time.Millisecond)
+	if got := factory.startCount(); got != 1 {
+		t.Fatalf("group starts = %d, want one; a converged gone group must not re-knock", got)
 	}
 }

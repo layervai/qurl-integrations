@@ -23,9 +23,22 @@ const (
 	// LocalSharesFile is the owner-only durable desired-state registry.
 	LocalSharesFile = "local_shares.json"
 
-	localSharesVersion  = 2
-	localSharesMaxItems = 1024
-	localSharesMaxBytes = 1 << 20
+	localSharesVersion = 2
+	// LocalSharesMaxItems matches the connector session group's MaxGroupRoutes:
+	// one daemon serves every desired-on share on one Connector session, so the
+	// registry can hold as many rows as one admission carries proxies. It is
+	// exported so the daemon package (which imports both this package and
+	// connectorshare) can pin it to MaxGroupRoutes at compile time.
+	// TODO(upstream-contract): keep LocalSharesMaxItems == connectorshare.MaxGroupRoutes.
+	LocalSharesMaxItems = 2000
+	localSharesMaxItems = LocalSharesMaxItems
+	// localSharesMaxBytes bounds the whole registry file. A full 2000-row
+	// registry of maximal rows (a ~124-char base64url resource identity and
+	// CRID, a 64-char Connector ID, a 54-char routing ID, a 64-char knock
+	// resource ID, and a verbose IPv6 loopback target per row) marshals to
+	// ~1.66 MiB (measured by TestLocalSharesRegistryRoundTripsMaxRowsUnderByteCap);
+	// the 4 MiB cap keeps ~2.5x headroom above that measured worst case.
+	localSharesMaxBytes = 4 << 20
 	desiredStateOn      = "on"
 	desiredStateOff     = "off"
 )
