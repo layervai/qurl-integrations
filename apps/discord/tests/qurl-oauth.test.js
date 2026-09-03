@@ -495,8 +495,11 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
+      expect(res.text).toContain('/qurl send is ready');
+      expect(res.text).not.toContain('/qurl map');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
+      expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.not.stringContaining('/qurl map'));
 
       // Guild-key mint must send `kind: api_key` — qurl-service's
       // POST /v1/api-keys requires `kind` and 400s without it. Durable
