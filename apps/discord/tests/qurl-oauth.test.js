@@ -116,10 +116,14 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('scope')).toContain('qurl:read');
       // offline_access dropped per PR #177 review — no refresh-token use.
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
-      // prompt=consent is load-bearing for key rotation — re-running
-      // /qurl setup must actually re-prompt. Pin it here so a future
-      // refactor doesn't silently drop it.
-      expect(loc.searchParams.get('prompt')).toBe('consent');
+      // `login` forces a fresh sign-in so an ambient Auth0 session can't
+      // bind the guild to the wrong account; `consent` is load-bearing
+      // for key rotation — re-running /qurl setup must actually
+      // re-prompt. Pin both so a future refactor can't drop either.
+      expect(loc.searchParams.get('prompt')).toBe('login consent');
+      // No connection pin unless AUTH0_EMAIL_CONNECTION is set (covered
+      // in qurl-oauth-connection-pin.test.js).
+      expect(loc.searchParams.get('connection')).toBeNull();
       expect(loc.searchParams.get('state')).toBe(state);
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
 
@@ -220,32 +224,19 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(400);
     });
 
-    it('omits prompt=consent on first install (no prior guild config)', async () => {
-      // C.8: first-time setup should let Auth0's default flow run —
-      // no redundant consent screen stacked on sign-in. Re-runs (prior
-      // configured_by present) DO get prompt=consent so key rotation
-      // works; that's the default mock and is covered by the happy-path
-      // assertion above.
+    it('forces login + consent on first install too, without reading guild config', async () => {
+      // The prompt no longer depends on whether the guild was configured
+      // before: every setup path re-authenticates (an ambient Auth0
+      // session must not pick the account) and re-consents (so a re-run
+      // can mint a new key). So /start has no reason to touch DDB.
       db.getGuildConfig.mockResolvedValueOnce(undefined);
+      db.getGuildConfig.mockClear();
       const state = signQurlOAuthState('guild-fresh', 'admin-fresh');
       const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
-      expect(loc.searchParams.get('prompt')).toBeNull();
-    });
-
-    it('falls back to prompt=consent when getGuildConfig throws (DDB blip)', async () => {
-      // C.8 failsafe: if the lookup throws, bias toward the safer-for-
-      // rotation default. Re-prompting an already-consenting admin is
-      // mild friction; skipping consent on a real re-run blocks key
-      // rotation. Pin the bias direction here so a future refactor
-      // can't quietly flip it.
-      db.getGuildConfig.mockRejectedValueOnce(new Error('DDB throttled'));
-      const state = signQurlOAuthState('guild-1', 'admin-2');
-      const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
-      expect(res.status).toBe(302);
-      const loc = new URL(res.headers.location);
-      expect(loc.searchParams.get('prompt')).toBe('consent');
+      expect(loc.searchParams.get('prompt')).toBe('login consent');
+      expect(db.getGuildConfig).not.toHaveBeenCalled();
     });
   });
 
