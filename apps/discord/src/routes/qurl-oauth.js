@@ -3,7 +3,6 @@
 // (routes/discord-install.js) also chains into. Step-by-step user
 // experience and CSRF posture live in the PR #177 description; Stage-2
 // confused-deputy mitigation is documented in discord-install.js.
-const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const db = require('../store');
@@ -12,7 +11,7 @@ const { sendDM } = require('../discord');
 const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
-const { readCookie } = require('../utils/cookies');
+const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
 const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
@@ -232,14 +231,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
-  // Both inputs are strings (cookieState early-returned if null;
-  // state came through singleStringParam, which returns '' for any
-  // non-string), so Buffer.from doesn't throw. Length check before
-  // timingSafeEqual handles the only remaining failure mode.
-  const cookieBuf = Buffer.from(cookieState);
-  const stateBuf = Buffer.from(state);
-  const cookieMatches = cookieBuf.length === stateBuf.length
-    && crypto.timingSafeEqual(cookieBuf, stateBuf);
+  const cookieMatches = timingSafeStringEqual(cookieState, state);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
     clearQurlOAuthCookies(res);

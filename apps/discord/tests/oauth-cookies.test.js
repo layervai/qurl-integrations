@@ -11,10 +11,14 @@ const {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
   QURL_OAUTH_COOKIE_PATH,
+  DISCORD_INSTALL_SESSION_COOKIE,
+  DISCORD_INSTALL_COOKIE_PATH,
   setQurlOAuthCookie,
   setQurlOAuthPkceCookie,
+  setDiscordInstallSessionCookie,
   clearQurlOAuthCookie,
   clearQurlOAuthPkceCookie,
+  clearDiscordInstallSessionCookie,
 } = require('../src/utils/oauth-cookies');
 
 function fakeRes() {
@@ -88,6 +92,37 @@ describe('utils/oauth-cookies', () => {
       const call = res.clearCookieCalls[0];
       expect(call.name).toBe(QURL_OAUTH_PKCE_COOKIE);
       expect(call.opts).toEqual({ path: QURL_OAUTH_COOKIE_PATH });
+    });
+  });
+
+  describe('Discord install session cookie', () => {
+    it('uses a ten-minute host-only session scoped to /oauth/discord', () => {
+      const res = fakeRes();
+
+      setDiscordInstallSessionCookie(res, { protocol: 'https' }, 'install-state');
+
+      expect(res.cookieCalls).toEqual([{
+        name: DISCORD_INSTALL_SESSION_COOKIE,
+        value: 'install-state',
+        opts: {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'lax',
+          maxAge: 10 * 60 * 1000,
+          path: DISCORD_INSTALL_COOKIE_PATH,
+        },
+      }]);
+    });
+
+    it('clears with the same /oauth/discord path', () => {
+      const res = fakeRes();
+
+      clearDiscordInstallSessionCookie(res);
+
+      expect(res.clearCookieCalls).toEqual([{
+        name: DISCORD_INSTALL_SESSION_COOKIE,
+        opts: { path: DISCORD_INSTALL_COOKIE_PATH },
+      }]);
     });
   });
 });

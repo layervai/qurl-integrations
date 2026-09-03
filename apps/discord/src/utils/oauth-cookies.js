@@ -1,5 +1,5 @@
-// Shared cookie constants for the qURL OAuth flows. Extracted from
-// routes/qurl-oauth.js so the Stage-2 chain (routes/discord-install.js →
+// Shared cookie constants for the Discord-install and qURL OAuth flows.
+// Extracted from routes/qurl-oauth.js so the Stage-2 chain (routes/discord-install.js →
 // /oauth/qurl/callback) can't drift on the cookie name or path — both
 // MUST match exactly or the qurl-oauth callback's cookie/state CSRF
 // check 400s. PR #177 follow-up C.1.
@@ -16,6 +16,12 @@ const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
 const QURL_OAUTH_PKCE_COOKIE = 'qurl_setup_pkce';
 const QURL_OAUTH_COOKIE_PATH = '/oauth/qurl';
 const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
+const DISCORD_INSTALL_SESSION_COOKIE = 'qurl_discord_install_session';
+const DISCORD_INSTALL_COOKIE_PATH = '/oauth/discord';
+// Discord's authorization-code callback is interactive and can include a
+// server picker, so its browser binding gets ten minutes rather than the
+// five-minute qURL setup window.
+const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
 
 // Single shape for the double-submit CSRF cookie set by both
 // /oauth/qurl/start (Stage 1) and /oauth/discord/callback (Stage 2).
@@ -23,24 +29,37 @@ const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
 // in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
 // — flipping that off would silently downgrade prod cookies. Keeping
 // the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
-function setCookie(res, req, name, value) {
+function setCookie(res, req, name, value, { path, ttlSeconds }) {
   res.cookie(name, value, {
     httpOnly: true,
     secure: req.protocol === 'https',
     sameSite: 'lax',
-    maxAge: QURL_OAUTH_COOKIE_TTL_SECONDS * 1000,
-    path: QURL_OAUTH_COOKIE_PATH,
+    maxAge: ttlSeconds * 1000,
+    path,
   });
 }
 
 function setQurlOAuthCookie(res, req, value) {
-  setCookie(res, req, QURL_OAUTH_SESSION_COOKIE, value);
+  setCookie(res, req, QURL_OAUTH_SESSION_COOKIE, value, {
+    path: QURL_OAUTH_COOKIE_PATH,
+    ttlSeconds: QURL_OAUTH_COOKIE_TTL_SECONDS,
+  });
 }
 
 // PKCE verifier cookie. Kept out of `state`: qURL OAuth state is signed
 // for integrity, not encrypted, and it travels in browser/Auth0 URLs.
 function setQurlOAuthPkceCookie(res, req, codeVerifier) {
-  setCookie(res, req, QURL_OAUTH_PKCE_COOKIE, codeVerifier);
+  setCookie(res, req, QURL_OAUTH_PKCE_COOKIE, codeVerifier, {
+    path: QURL_OAUTH_COOKIE_PATH,
+    ttlSeconds: QURL_OAUTH_COOKIE_TTL_SECONDS,
+  });
+}
+
+function setDiscordInstallSessionCookie(res, req, state) {
+  setCookie(res, req, DISCORD_INSTALL_SESSION_COOKIE, state, {
+    path: DISCORD_INSTALL_COOKIE_PATH,
+    ttlSeconds: DISCORD_INSTALL_COOKIE_TTL_SECONDS,
+  });
 }
 
 // Path MUST match the Set-Cookie path or the browser keeps the cookie
@@ -53,13 +72,22 @@ function clearQurlOAuthPkceCookie(res) {
   res.clearCookie(QURL_OAUTH_PKCE_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
 }
 
+function clearDiscordInstallSessionCookie(res) {
+  res.clearCookie(DISCORD_INSTALL_SESSION_COOKIE, { path: DISCORD_INSTALL_COOKIE_PATH });
+}
+
 module.exports = {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
   QURL_OAUTH_COOKIE_PATH,
   QURL_OAUTH_COOKIE_TTL_SECONDS,
+  DISCORD_INSTALL_SESSION_COOKIE,
+  DISCORD_INSTALL_COOKIE_PATH,
+  DISCORD_INSTALL_COOKIE_TTL_SECONDS,
   setQurlOAuthCookie,
   setQurlOAuthPkceCookie,
+  setDiscordInstallSessionCookie,
   clearQurlOAuthCookie,
   clearQurlOAuthPkceCookie,
+  clearDiscordInstallSessionCookie,
 };

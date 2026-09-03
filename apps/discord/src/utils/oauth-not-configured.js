@@ -16,20 +16,25 @@ const logger = require('../logger');
  * reasons and the admin's next step differs.
  *
  * @param {import('express').Response} res
- * @param {'qurl-setup'|'discord-install'} surface
+ * @param {'qurl-setup'|'discord-install'|'discord-install-entry'} surface
  * @param {string} [reason] - logged-only env-var hint; do NOT render
  */
 function renderNotConfiguredPage(res, surface, reason) {
   // Belt-and-suspenders: pin the log shape so on-call has a uniform
   // grep target across both routers (`/qurl-setup not configured`
   // and `discord-install not configured`).
-  const context = surface === 'discord-install' ? 'discord-install' : 'qurl-setup';
+  const context = surface.startsWith('discord-install') ? 'discord-install' : 'qurl-setup';
   logger.info(`${context} not configured`, { reason });
 
-  const message = surface === 'discord-install'
-    ? 'The bot was added to your server. Setup will be available once your layerv.ai operator finishes provisioning — try /qurl setup in your server later, or contact them out of band.'
-    : 'The Auth0 application for the qURL Discord bot has not been registered yet. '
+  let message;
+  if (surface === 'discord-install-entry') {
+    message = 'Nothing was installed. Try Add to Discord again after your layerv.ai operator finishes provisioning, or contact them out of band.';
+  } else if (surface === 'discord-install') {
+    message = 'The bot was added to your server. Setup will be available once your layerv.ai operator finishes provisioning — try /qurl setup in your server later, or contact them out of band.';
+  } else {
+    message = 'The Auth0 application for the qURL Discord bot has not been registered yet. '
       + 'Run /qurl setup again later, or contact your layerv.ai admin.';
+  }
 
   return res.status(503).send(res.renderPage({
     title: 'qURL Setup Not Configured',

@@ -37,7 +37,7 @@ revocable at any time.
 | `self-destruct` | No | Countdown after the first open (default: no timer) |
 | `personal-message` | No | A note included in each recipient's DM |
 
-`/qurl map` shares a location instead of a file: it takes a required `location`
+When `MAP_COMMAND_ENABLED=true`, `/qurl map` shares a location instead of a file: it takes a required `location`
 (a Google Maps URL, or a place/address to search) in place of `attachment`, the
 same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
 and an optional `location-name` to override the label recipients see.
@@ -46,9 +46,20 @@ and an optional `location-name` to override the label recipients see.
 
 ### 1. Add the bot to your server
 
-Invite the qURL bot using the install link from your qURL operator. The bot
-requests only four permissions: **View Channels**, **Send Messages**,
-**Embed Links**, and **Use Application Commands**.
+Use the **Add to Discord** link on layerv.ai. It opens the bot's
+`/oauth/discord/install` endpoint, where the deployment builds the matching
+Discord authorization URL and chains the install into qURL sign-in. The
+Discord OAuth request includes `identify` because the callback uses
+`/users/@me` to bind setup to the installing admin. The Discord application
+must register the deployment's exact `/oauth/discord/callback` URL and enable
+**Require OAuth2 Code Grant** so the token response identifies the installed
+server authoritatively. Grant only **View Channels**, **Send Messages**,
+**Embed Links**, and **Use Application Commands** (permission bitfield
+`2147503104`).
+
+**Require OAuth2 Code Grant** applies to the entire Discord application. Deploy
+the callback endpoint and register its exact URL before enabling the setting;
+legacy static invite links do not complete installation after it is enabled.
 
 > On the multi-tenant public bot, slash commands can take up to an hour to
 > appear the first time the bot joins a server, while Discord propagates the
@@ -57,10 +68,11 @@ requests only four permissions: **View Channels**, **Send Messages**,
 
 ### 2. Connect qURL (admin)
 
-A server admin runs `/qurl setup` once and follows the prompts to connect this
-server to its own qURL account — by authorizing qURL or entering an API key,
-depending on the deployment. The key is stored **encrypted at rest** and scoped
-to the server. Run `/qurl status` to confirm the connection.
+The Add to Discord flow prompts the installing admin to sign in to qURL and
+connects the server automatically. For a bot that is already installed, a
+server admin can run `/qurl setup` to complete or replace that connection. The
+key is stored **encrypted at rest** and scoped to the server. Run `/qurl status`
+to confirm the connection.
 
 ### 3. Share
 

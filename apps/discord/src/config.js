@@ -164,6 +164,8 @@ function intEnv(key, defaultVal, opts = {}) {
   return v;
 }
 
+const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/;
+
 // Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
 // Any other value — including an unset env, the literal string "PLACEHOLDER"
 // that SSM-seeded params carry, or a whitespace-only value — normalizes to
@@ -174,7 +176,7 @@ const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
   const trimmed = rawGuildId.trim();
-  if (/^\d{17,20}$/.test(trimmed)) {
+  if (DISCORD_SNOWFLAKE_RE.test(trimmed)) {
     normalizedGuildId = trimmed;
   } else {
     // logger isn't loaded this early in config import — use console directly.
@@ -237,13 +239,24 @@ const isQurlOAuthConfigured = Boolean(
 // True when the Stage-2 "Add to Discord, select server" install flow can
 // run end-to-end: needs the bot's Discord OAuth2 client secret (separate
 // from the bot token used for normal operations) on top of qURL OAuth.
-// The /oauth/discord/callback route gates on this; it returns 503 with a
-// "not configured" page when false, so the install link still completes
-// (bot lands in the server) but the chained Auth0 leg won't run until
-// Justin sets DISCORD_CLIENT_SECRET in SSM.
-const isDiscordInstallConfigured = Boolean(
-  isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
-);
+// The /oauth/discord/install and /callback routes gate on this; both return
+// a generic 503 page when false, so the first-party customer flow cannot
+// begin until DISCORD_CLIENT_SECRET is configured.
+const discordClientId = process.env.DISCORD_CLIENT_ID;
+const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
+let discordInstallNotConfiguredReason = null;
+if (!isQurlOAuthConfigured) {
+  discordInstallNotConfiguredReason = 'AUTH0_* unset';
+} else if (!discordClientId) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
+} else if (!DISCORD_SNOWFLAKE_RE.test(discordClientId)) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
+} else if (!discordClientSecret) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
+} else if (discordClientSecret === 'PLACEHOLDER') {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
+}
+const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
 
 // Shard identifier for the shard-aware composite flow_id
 // (`<shard_id>#<guild_id>#<channel_id>#<user_id>`, see src/flow-id.js).
@@ -315,18 +328,19 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_ID: discordClientId,
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
   // installs the bot via the install link. Optional: omit and the
   // /oauth/discord/callback route will return 503 with a documented
-  // "not configured" page until Justin sets the secret.
-  DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
+  // "not configured" page until an operator sets the secret.
+  DISCORD_CLIENT_SECRET: discordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
   isDiscordInstallConfigured,
+  discordInstallNotConfiguredReason,
 
   // Legacy shared HMAC secret for OAuth state tokens. Retained as the
   // fallback below QURL_OAUTH_STATE_SECRET so a deploy that predates
