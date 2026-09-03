@@ -622,19 +622,34 @@ describe('qURL client', () => {
   });
 
   describe('deleteLink', () => {
-    it('sends DELETE request with correct path', async () => {
+    // Shape of a current qurl-service resource ID: an unpadded base64url
+    // P-256 SPKI public key (no `r_` prefix). The SDK's delete() rejects it
+    // client-side, so revoke must go through the resource endpoint.
+    const PUBLIC_KEY_RESOURCE_ID = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEh6JV2atn5OcJec4fe9lgxMNjQyDUEmyeXohUIRsTfjnvKqoe1424TDNd0vvSfA82WLciGOvQ5S43mB3bA15e5Q';
+
+    it('revokes a public-key resource ID through DELETE /v1/resources/{id}', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: true,
         status: 204,
       });
 
-      // delete() requires a qurl-service resource ID (r_ prefix).
-      await qurl.deleteLink('r_resource42abc');
+      await qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe('https://api.test.local/v1/qurls/r_resource42abc');
+      expect(url).toBe(`https://api.test.local/v1/resources/${PUBLIC_KEY_RESOURCE_ID}`);
       expect(opts.method).toBe('DELETE');
+    });
+
+    it('does not route revokes through the SDK delete() prefix check', async () => {
+      // Regression pin: the SDK's delete() throws a client_validation error
+      // for any ID without the retired `r_` prefix before fetching. A revoke
+      // that reaches fetch proves deleteLink no longer depends on it.
+      globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
+
+      await expect(qurl.deleteLink('ahCRID-shaped_identifier')).resolves.toBeUndefined();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(globalThis.fetch.mock.calls[0][0]).toBe('https://api.test.local/v1/resources/ahCRID-shaped_identifier');
     });
 
     it('throws on API error', async () => {

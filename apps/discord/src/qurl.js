@@ -221,8 +221,10 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 
 // Bot-side charset guard on the resource ID, independent of the SDK client (in
 // the same defense-in-depth spirit as the SSRF guards): rejects malformed IDs
-// with a stable bot-side message before any network work. The SDK's delete()
-// adds the semantic `r_` resource-ID check on top.
+// with a stable bot-side message before any network work. qurl-service resource
+// IDs are opaque public identifiers (an unpadded base64url public key, or a
+// CRID) — never derive their shape from the `r_…` routing labels that can still
+// appear in qurl.site hostnames.
 function validateResourceId(resourceId) {
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -232,9 +234,14 @@ function validateResourceId(resourceId) {
 async function deleteLink(resourceId, apiKey) {
   validateResourceId(resourceId);
   const client = makeClient(apiKey);
-  // delete() requires a qurl-service resource ID (r_ prefix); the bot's send
-  // rows store exactly that, so the revoke path satisfies it.
-  await callQurl('DELETE', `/qurls/${resourceId}`, () => client.delete(resourceId));
+  // Revoke at the resource level (DELETE /v1/resources/{id}). It runs the same
+  // revocation as DELETE /v1/qurls/{id} — every link minted on the resource
+  // stops resolving, and a repeat call is an idempotent 204 — but the SDK's
+  // delete() still enforces the retired `r_` resource-ID prefix client-side,
+  // so it rejects every ID qurl-service has issued since resource IDs became
+  // public keys and no DELETE ever reaches the wire. deleteResource() applies
+  // only the non-empty guard and leaves ID grammar to the service.
+  await callQurl('DELETE', `/resources/${resourceId}`, () => client.deleteResource(resourceId));
   logger.info('Revoked qURL', { resource_id: resourceId });
 }
 
