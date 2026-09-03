@@ -233,6 +233,8 @@ func TestRedactingJSONHandlerRedactsSubstringKeys(t *testing.T) {
 		"authorization",
 		"apikey",
 		"api_key",
+		"qurllink",
+		"qurl_link_url",
 	} {
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()
@@ -782,6 +784,30 @@ func TestRedactingJSONHandlerWalksMatchedStringSlicesByInnerNames(t *testing.T) 
 	token := fields["token"].([]interface{})
 	if got := token[0]; got != testRealToken {
 		t.Fatalf("token[0] = %#v, want %q; line=%s", got, testRealToken, line)
+	}
+}
+
+func TestRedactingJSONHandlerRedactsQurlLinkStringSlicesAsAUnit(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"qurlLinks", "qurl_links"} {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+			logger.Info("minted", slog.Any(key, []string{"https://qurl.link/#at_live_bearer"}))
+
+			line := buf.String()
+			if bytes.Contains(buf.Bytes(), []byte("at_live_bearer")) {
+				t.Fatalf("log line leaked qURL access token: %s", line)
+			}
+
+			fields := decodeLogLine(t, line)
+			if got := fields[key]; got != redactedLogValue {
+				t.Fatalf("field %q = %#v, want %q; line=%s", key, got, redactedLogValue, line)
+			}
+		})
 	}
 }
 

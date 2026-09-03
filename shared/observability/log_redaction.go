@@ -29,6 +29,8 @@ var redactSubstrings = [...]string{
 	"authorization",
 	"apikey",
 	"api_key",
+	"qurllink",
+	"qurl_link",
 }
 
 var contentHashLogKeys = [...]string{
@@ -63,9 +65,10 @@ func NewRedactingJSONHandler(w io.Writer, opts *slog.HandlerOptions) slog.Handle
 // NewRedactingHandler wraps next with qURL's shared log redaction policy.
 // For Discord parity, matched keys blank non-empty strings, byte sequences, and
 // JSON-marshaled string scalars. Other scalars, including numbers, are
-// preserved; matched-key containers and collections are walked by inner field
-// names rather than fully suppressed. Map values are walked only when their Go
-// map keys are strings.
+// preserved; most matched-key containers and collections are walked by inner
+// field names rather than fully suppressed. qURL access-link containers are
+// suppressed as a unit because bare string elements have no inner key to
+// match. Map values are walked only when their Go map keys are strings.
 // Struct values passed through slog.Any are only reflected when nested
 // redaction changes them. In that case, rich struct output can differ from
 // encoding/json details like omitempty, string coercion, or embedded-field
@@ -113,7 +116,7 @@ func redactAttrs(attrs []slog.Attr, depth int) []slog.Attr {
 
 func redactAttr(attr slog.Attr, depth int) slog.Attr {
 	if shouldRedactKey(attr.Key) {
-		attr.Value = redactMatchedValue(attr.Value, depth+1)
+		attr.Value = redactMatchedValue(attr.Key, attr.Value, depth+1)
 		return attr
 	}
 
@@ -143,7 +146,7 @@ func redactResolvedValue(value slog.Value, depth int) slog.Value {
 	return value
 }
 
-func redactMatchedValue(value slog.Value, depth int) slog.Value {
+func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 	value = value.Resolve()
 	if value.Kind() == slog.KindString && value.String() != "" {
 		return slog.StringValue(redactedLogValue)
@@ -151,13 +154,24 @@ func redactMatchedValue(value slog.Value, depth int) slog.Value {
 	if value.Kind() == slog.KindAny && matchedScalarNeedsRedaction(value.Any()) {
 		return slog.StringValue(redactedLogValue)
 	}
-	// Match Discord's behavior: only non-empty strings and byte sequences are
-	// blanked. Other scalars, including numbers, pass through; containers are
-	// walked so nested sensitive fields can still be found. A matched object
-	// such as slog.Any("token", SomeStruct{Public: "ok"}) can still emit safe
-	// inner fields; this is a parity backstop, not an unconditional guarantee
-	// for every token-keyed value.
+	if isQurlAccessLinkKey(key) && (value.Kind() == slog.KindAny || value.Kind() == slog.KindGroup) {
+		// A qurlLinks container semantically consists of live bearer links.
+		// Bare string elements have no inner key for the recursive walker to
+		// match, so suppress the whole container instead of leaking them.
+		return slog.StringValue(redactedLogValue)
+	}
+	// Match Discord's behavior: other scalars, including numbers, pass through;
+	// non-qURL containers are walked so nested sensitive fields can still be
+	// found. A matched object such as slog.Any("token",
+	// SomeStruct{Public: "ok"}) can still emit safe inner fields; qURL access-
+	// link containers were suppressed above because their bare elements carry
+	// bearer credentials without inner field names.
 	return redactResolvedValue(value, depth)
+}
+
+func isQurlAccessLinkKey(key string) bool {
+	key = strings.ToLower(key)
+	return strings.Contains(key, "qurllink") || strings.Contains(key, "qurl_link")
 }
 
 func redactAny(value any, depth int) (any, bool) {

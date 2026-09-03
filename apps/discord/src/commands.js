@@ -1794,6 +1794,18 @@ function truncForLog(v) {
   return s;
 }
 
+// Preserve a useful message for local/programming failures without allowing a
+// URL or qURL bearer copied into the message to reach logs. AWS service errors
+// stay on their structured name/fault/status/request-id fields because validation
+// messages can echo request values beyond the access-token contract.
+function scrubQurlCredentialForLog(message) {
+  if (typeof message !== 'string') return undefined;
+  return message
+    .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
+    .replace(/at(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]')
+    .slice(0, 500);
+}
+
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
@@ -2171,11 +2183,26 @@ async function executeSendPipeline(interaction, {
       guildId: interaction.guildId,
     })));
   } catch (err) {
-    // Log the orphaned QURL resources at error level so an operator can
-    // manually revoke them — they exist on the QURL side with no local row.
+    // Log only non-secret identifiers so an operator can manually revoke the
+    // orphaned qURLs. qurlLink carries its live access token in the fragment
+    // and must never reach logs. resourceId drives the same whole-resource
+    // cleanup used by this bot (DELETE /v1/qurls/{resourceId}); qurlId lets an
+    // operator correlate each orphaned token in that resource.
+    // TODO(upstream-contract): qurl-service owns the whole-resource DELETE.
+    // Avoid err.message here too: an upstream validation error may echo an
+    // offending attribute value, including the live qURL access link.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
-      sendId, error: err.message, linkCount: qurlLinks.length,
-      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlLink: l.qurlLink })),
+      sendId,
+      errorName: err?.name,
+      errorCode: err?.code,
+      errorFault: err?.$fault,
+      httpStatusCode: err?.$metadata?.httpStatusCode,
+      requestId: err?.$metadata?.requestId,
+      errorMessage: (err?.$metadata || err?.$fault)
+        ? undefined
+        : scrubQurlCredentialForLog(err?.message),
+      linkCount: qurlLinks.length,
+      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({

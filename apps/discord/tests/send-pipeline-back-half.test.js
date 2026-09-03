@@ -2391,6 +2391,100 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
   });
 });
 
+describe('executeSendPipeline — orphaned qURL log safety', () => {
+  it('logs cleanup identifiers without the live access link when DDB persistence fails', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      {
+        qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+        resource_id: 'resource-public-id',
+        qurl_id: 'q_orphaned_link_one',
+      },
+      {
+        qurl_link: 'https://qurl.site/#at_secret_bearer_two',
+        resource_id: 'resource-public-id',
+        qurl_id: 'q_orphaned_link_two',
+      },
+    ]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(Object.assign(
+      new Error('DDB rejected https://qurl.link/#at_secret_bearer_one'),
+      {
+        name: 'ValidationException',
+        code: 'ValidationException',
+        $fault: 'client',
+        $metadata: { httpStatusCode: 400, requestId: 'ddb-request-123' },
+      },
+    ));
+
+    await executeSendPipeline(interaction, makePipelineParams({
+      recipients: [
+        { id: 'u1', username: 'u1' },
+        { id: 'u2', username: 'u2' },
+      ],
+    }));
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog).toBeDefined();
+    expect(failureLog[1].orphanedResources).toEqual([
+      { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_one' },
+      { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_two' },
+    ]);
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorName: 'ValidationException',
+      errorCode: 'ValidationException',
+      errorFault: 'client',
+      httpStatusCode: 400,
+      requestId: 'ddb-request-123',
+    }));
+    const everythingLogged = JSON.stringify([
+      logger.error.mock.calls,
+      logger.warn.mock.calls,
+      logger.info.mock.calls,
+      logger.debug.mock.calls,
+      logger.audit.mock.calls,
+    ]);
+    expect(everythingLogged).not.toContain('https://qurl.link/#at_secret_bearer_one');
+    expect(everythingLogged).not.toContain('https://qurl.site/#at_secret_bearer_two');
+    expect(everythingLogged).not.toContain('at_secret_bearer_one');
+    expect(everythingLogged).not.toContain('at_secret_bearer_two');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('keeps a scrubbed message for non-AWS persistence failures', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(
+      new TypeError('Persistence callback failed for https://qurl.link/#at_secret_bearer_one at_secret_bearer_two'),
+    );
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorName: 'TypeError',
+      errorMessage: 'Persistence callback failed for [REDACTED_URL] at_[REDACTED]',
+    }));
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');
+  });
+});
+
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
   async function setupRevocableSend() {
     const collectHandlers = {};
