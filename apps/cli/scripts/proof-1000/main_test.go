@@ -228,3 +228,35 @@ func TestKnownWindowParsingAndAnnotation(t *testing.T) {
 		t.Fatalf("verdict should attribute everything to the window: %s", r.windowVerdict())
 	}
 }
+
+func TestClassifyFailureAndContextLines(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		window, err string
+		diag        *fetchDiagnosis
+		want        string
+	}{
+		{"api-rollover", "Error: the service is busy right now", &fetchDiagnosis{DenyCode: "52005"}, classAPIRollover},
+		{"", "Error: the service is busy right now", &fetchDiagnosis{DenyCode: "52028"}, "nhp-ac-deny:52028"},
+		{"", "Error: the service is busy right now", &fetchDiagnosis{Overloaded: true}, "nhp-ac-deny:overloaded"},
+		{"", "Error: the download failed: the link answered HTTP 404", &fetchDiagnosis{Granted: true, ContentStatus: 404}, classContent404},
+		{"", "Error: the service is busy right now", nil, "nhp-ac-deny:unprobed"},
+		{"", "Error: the download failed: the link answered HTTP 404", nil, classContent404},
+		{"", "Error: the download host could not be reached", nil, classOther},
+	}
+	for _, c := range cases {
+		if got := classifyFailure(c.window, c.err, c.diag); got != c.want {
+			t.Errorf("classify(%q, %q) = %q, want %q", c.window, c.err, got, c.want)
+		}
+	}
+	at := time.Date(2026, 9, 2, 19, 50, 0, 0, time.Local)
+	lines := []string{
+		"2026/09/02 19:49:30 WARN share daemon session attempt failed; retrying crid=abc",
+		"2026/09/02 19:52:00 WARN share daemon session attempt failed; retrying crid=abc",
+		"2026/09/02 19:50:10 WARN durable native session retirement failed crid=xyz",
+	}
+	got := contextLines(lines, []string{"abc"}, at, time.Minute, 8)
+	if len(got) != 1 || !strings.Contains(got[0], "19:49:30") {
+		t.Fatalf("contextLines = %v", got)
+	}
+}

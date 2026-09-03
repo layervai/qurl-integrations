@@ -263,7 +263,7 @@ func (e *environment) preflight(ctx context.Context, opts *options) error {
 	if running {
 		e.DaemonJobVersion = status.JobVersion
 	}
-	if !opts.skipVerify && !opts.teardown && !e.DeploymentSet {
+	if (!opts.skipVerify || opts.probe != "") && !opts.teardown && !e.DeploymentSet {
 		return fmt.Errorf("end-to-end fetches need %s (a deployment settings file with the sandbox issuer keys); set it, or pass --skip-verify", qurl.EnvDeploymentPath)
 	}
 	return nil

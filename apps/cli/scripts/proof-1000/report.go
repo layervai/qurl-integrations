@@ -19,7 +19,13 @@ type failureDetail struct {
 	Stage  string    `json:"stage"`
 	Error  string    `json:"error"`
 	Window string    `json:"in_window,omitempty"`
-	Log    []string  `json:"daemon_log,omitempty"`
+	Class  string    `json:"class,omitempty"`
+	// Diagnosis is the SDK-level probe run right after the failed fetch.
+	Diagnosis *fetchDiagnosis `json:"diagnosis,omitempty"`
+	// Log is every collected daemon log line for this share within
+	// failureLogWindow of the failure: whether the connector was itself
+	// retrying, retiring, or rotating its session at that moment.
+	Log []string `json:"daemon_log,omitempty"`
 }
 
 // knownWindow is an operator-declared platform event (a rollover, a deploy)
@@ -126,7 +132,9 @@ func (r *report) annotateWindows() {
 		r.Windows = []knownWindow{}
 	}
 	for i := range r.Failures {
-		r.Failures[i].Window = windowLabel(r.Windows, r.Failures[i].At)
+		f := &r.Failures[i]
+		f.Window = windowLabel(r.Windows, f.At)
+		f.Class = classifyFailure(f.Window, f.Error, f.Diagnosis)
 	}
 	for i := range r.ServingWait.Curve {
 		r.ServingWait.Curve[i].Window = windowLabel(r.Windows, r.ServingWait.Curve[i].At)
@@ -196,7 +204,8 @@ func (r *report) appendFetchFailures(stage string, results []fetchResult) {
 		}
 		r.Failures = append(r.Failures, failureDetail{
 			At: results[i].At, ID: results[i].ID, CRID: results[i].CRID, Stage: stage, Error: results[i].Error,
-			Log: linesMentioning(r.DaemonLog, []string{results[i].CRID}, failureLogLimit),
+			Diagnosis: results[i].Diagnosis,
+			Log:       contextLines(r.DaemonLog, []string{results[i].CRID}, results[i].At, failureLogWindow, failureLogLimit),
 		})
 	}
 }
@@ -555,14 +564,20 @@ func renderEstimate(b *strings.Builder, r *report) {
 }
 
 func renderFailures(b *strings.Builder, r *report) {
-	fmt.Fprintf(b, "\n## Failures (%d)\n\n", len(r.Failures))
+	fmt.Fprintf(b, "\n## Failures (%d)\n\n%s\n", len(r.Failures), classSummary(r.Failures))
 	for i := range r.Failures {
 		f := &r.Failures[i]
 		window := "outside any declared window"
 		if f.Window != "" {
 			window = "inside window " + f.Window
 		}
-		fmt.Fprintf(b, "- **%s** (%s) at %s — %s — %s: %s\n", f.ID, f.Stage, f.At.UTC().Format(time.RFC3339), window, f.CRID, f.Error)
+		fmt.Fprintf(b, "- **%s** (%s) at %s — %s — class `%s` — %s: %s\n", f.ID, f.Stage, f.At.UTC().Format(time.RFC3339), window, f.Class, f.CRID, f.Error)
+		if d := f.Diagnosis; d != nil {
+			fmt.Fprintf(b, "  - probe at %s: deny_code=%q overloaded=%t granted=%t content_http_status=%d %s\n", d.At.UTC().Format(time.RFC3339), d.DenyCode, d.Overloaded, d.Granted, d.ContentStatus, d.Detail)
+		}
+		if len(f.Log) == 0 {
+			fmt.Fprintf(b, "  - no daemon log line for this share within ±%s\n", failureLogWindow)
+		}
 		for _, line := range f.Log {
 			fmt.Fprintf(b, "  - `%s`\n", line)
 		}
@@ -571,6 +586,17 @@ func renderFailures(b *strings.Builder, r *report) {
 	for _, line := range r.DaemonLog {
 		fmt.Fprintf(b, "    %s\n", line)
 	}
+}
+
+func classSummary(failures []failureDetail) string {
+	counts := map[string]int{}
+	for i := range failures {
+		counts[failures[i].Class]++
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+	return "By class: " + failureMap(counts)
 }
 
 func renderShares(b *strings.Builder, r *report) {

@@ -13,6 +13,7 @@ import (
 const (
 	daemonLogLimit    = 400
 	failureLogLimit   = 8
+	failureLogWindow  = 60 * time.Second
 	sampleSeed        = 1000
 	assumedRatePerMin = 100
 	targetN           = 1000

@@ -54,6 +54,7 @@ type options struct {
 	skipVerify       bool
 	skipHold         bool
 	rerender         bool
+	probe            string
 	windows          []knownWindow
 }
 
@@ -83,6 +84,9 @@ func run(args []string, stdout, stderr *os.File) int {
 	if opts.teardown {
 		return runTeardown(ctx, opts, env, stdout, stderr)
 	}
+	if opts.probe != "" {
+		return runProbe(ctx, env, opts.probe, stdout)
+	}
 	return runProof(ctx, opts, env, stdout, stderr)
 }
 
@@ -107,6 +111,7 @@ func parseOptions(args []string, stderr io.Writer) (*options, error) {
 	fs.BoolVar(&opts.teardown, "teardown", false, "delete every proof-<run>-* share and verify they are gone")
 	fs.BoolVar(&opts.skipVerify, "skip-verify", false, "skip end-to-end fetches")
 	fs.BoolVar(&opts.skipHold, "skip-hold", false, "skip the steady-state hold")
+	fs.StringVar(&opts.probe, "probe", "", "probe one CRID's visitor access path through the SDK and print the raw deny code or content HTTP status as JSON")
 	fs.BoolVar(&opts.rerender, "rerender", false, "re-render report.md/report.json for an existing run directory from its report.json (applies --window) without touching the platform")
 	fs.Func("window", "known platform window to attribute failures to, as label=<RFC3339 start>/<RFC3339 end> (repeatable)", func(value string) error {
 		w, err := parseKnownWindow(value)
@@ -121,6 +126,9 @@ func parseOptions(args []string, stderr io.Writer) (*options, error) {
 	}
 	if fs.NArg() != 0 {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if opts.probe != "" && opts.run == "" {
+		opts.run = "probe"
 	}
 	if !runNamePattern.MatchString(opts.run) {
 		return nil, errors.New("--run is required and must match ^[a-z0-9][a-z0-9-]{0,19}$")

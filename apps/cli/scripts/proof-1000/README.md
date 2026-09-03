@@ -124,6 +124,24 @@ It then walks the whole active tunnel listing (following `has_more`) and the
 local registry to prove none remain, writing `teardown.json`. Deleting an
 already-deleted share is idempotent.
 
+## Classifying a failed fetch
+
+Each failed fetch is classified in the report: `api-rollover` (inside a
+declared window), `nhp-ac-deny:<code>` (an NHP access-control deny on the
+visitor path — `52005` "server ac operation failed", `52028` "boot flush not
+ready", or an overload signal), `content-404` (access was granted but the
+origin answered 404), or `other`. During a run, a failed verify/hold fetch is
+followed immediately by an SDK-level probe (`qurl.EnterPortal` on a fresh
+share link) that records the raw deny code the CLI keeps private, so the class
+is grounded in what the platform actually said.
+
+`--probe <CRID>` runs that same SDK probe once and prints the JSON
+(`deny_code`, `granted`, `content_http_status`). **Caveat:** run it *during*
+the run's life, not after — once the run ends its loopback origin is gone, so
+a probe then reports `granted:true` with `content_http_status:404` for every
+share (the tunnel is up but nothing listens locally). After a run, only the
+`deny_code`/`granted` fields are meaningful; the content status is not.
+
 ## Reading the report
 
 - **Publish**: counts, wall time, publishes/min, per-publish p50/p95, API

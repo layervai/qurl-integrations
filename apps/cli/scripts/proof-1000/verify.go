@@ -24,20 +24,21 @@ const (
 // mints a share link for the CRID, the platform grants access, and the bytes
 // that come back must be this origin's answer for this share's routing host.
 type fetchResult struct {
-	At          time.Time `json:"at"`
-	ID          string    `json:"id"`
-	CRID        string    `json:"crid"`
-	OK          bool      `json:"ok"`
-	WallMS      int64     `json:"wall_ms"`
-	ExitCode    int       `json:"exit_code"`
-	APICalls    int       `json:"api_calls"`
-	Host        string    `json:"host,omitempty"`
-	NonceOK     bool      `json:"nonce_ok"`
-	HostChecked bool      `json:"host_checked"`
-	HostOK      bool      `json:"host_ok"`
-	RequestSeen bool      `json:"request_seen_at_origin"`
-	Error       string    `json:"error,omitempty"`
-	Window      string    `json:"in_window,omitempty"`
+	At          time.Time       `json:"at"`
+	ID          string          `json:"id"`
+	CRID        string          `json:"crid"`
+	OK          bool            `json:"ok"`
+	WallMS      int64           `json:"wall_ms"`
+	ExitCode    int             `json:"exit_code"`
+	APICalls    int             `json:"api_calls"`
+	Host        string          `json:"host,omitempty"`
+	NonceOK     bool            `json:"nonce_ok"`
+	HostChecked bool            `json:"host_checked"`
+	HostOK      bool            `json:"host_ok"`
+	RequestSeen bool            `json:"request_seen_at_origin"`
+	Error       string          `json:"error,omitempty"`
+	Window      string          `json:"in_window,omitempty"`
+	Diagnosis   *fetchDiagnosis `json:"diagnosis,omitempty"`
 }
 
 type verifySummary struct {
@@ -99,6 +100,9 @@ func fetchShare(ctx context.Context, env *environment, o *origin, rec *shareReco
 		result.Error = env.redactor.apply(lastErrorLine(res.Stderr))
 		if result.Error == "" && res.Err != nil {
 			result.Error = res.Err.Error()
+		}
+		if ctx.Err() == nil {
+			result.Diagnosis = probeAccess(ctx, env, rec.CRID)
 		}
 		return result
 	}

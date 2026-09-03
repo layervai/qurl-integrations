@@ -83,6 +83,27 @@ func mentionsThrottle(line string) bool {
 	return false
 }
 
+// contextLines filters already-collected log lines to one share within
+// ±window of a moment, so a failure carries the connector's own events
+// (session retries, retirements, rotations) from that moment only.
+func contextLines(lines, needles []string, at time.Time, window time.Duration, limit int) []string {
+	var out []string
+	for _, line := range lines {
+		if !mentionsAny(line, needles) || len(line) < len(daemonLogTimeLayout) {
+			continue
+		}
+		stamp, err := time.ParseInLocation(daemonLogTimeLayout, line[:len(daemonLogTimeLayout)], time.Local)
+		if err != nil || stamp.Before(at.Add(-window)) || stamp.After(at.Add(window)) {
+			continue
+		}
+		out = append(out, line)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 // linesMentioning filters already-collected log lines to one share.
 func linesMentioning(lines, needles []string, limit int) []string {
 	var out []string
