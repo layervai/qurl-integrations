@@ -167,6 +167,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
+  markSendRevoking: jest.fn(),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -783,6 +784,36 @@ describe('/qurl revoke subcommand', () => {
     expect(menuCall[0].content).toMatch(/Select a send to revoke/);
   });
 
+  it('labels an incomplete prior revoke as retryable in the menu', async () => {
+    mockDb.getRecentSends.mockReturnValue([{
+      send_id: 'send-pending',
+      resource_type: 'file',
+      target_type: 'user',
+      recipient_count: 2,
+      delivered_count: 2,
+      expires_in: '24h',
+      created_at: new Date().toISOString(),
+      revocation_pending: true,
+    }]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const menuCall = interaction.editReply.mock.calls.find(
+      c => c[0]?.components?.length > 0,
+    );
+    const option = menuCall[0].components[0].components[0].addOptions.mock.calls[0][0][0];
+    expect(option.description).toMatch(/^Retry needed ·/);
+  });
+
   it('renders the menu when supersedeOrCreate claims the slot from a stale predecessor', async () => {
     // supersedeOrCreate encapsulates the create → load → delete →
     // retry orchestration. From the caller's view, a successful
@@ -1055,7 +1086,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     }
   });
 
-  it('reports a partial revoke (some links already opened)', async () => {
+  it('reports a partial revoke as an unconfirmed failure', async () => {
     mockDb.getSendItems.mockReturnValue([
       { resource_id: 'res-1', recipient_discord_id: 'u-1' },
       { resource_id: 'res-2', recipient_discord_id: 'u-2' },
@@ -1070,6 +1101,33 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     expect(interaction.update).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('1/2') }),
     );
+  });
+
+  it('retries a temporary DELETE failure and finalizes after the next selection', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+    ]);
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('temporary qURL 503'))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    const first = makeSelectInteraction({ values: ['send-retry'] });
+    await handleRevokeSelect(first, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(first.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Could not confirm revocation for 1 user'),
+    }));
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+
+    const second = makeSelectInteraction({ values: ['send-retry'] });
+    await handleRevokeSelect(second, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(second.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 2/2 users.'),
+    }));
+    expect(mockDeleteLink).toHaveBeenCalledTimes(4);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
   });
 });
 

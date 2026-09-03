@@ -127,6 +127,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
+  markSendRevoking: jest.fn(),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -1077,14 +1078,21 @@ describe('revokeAllLinks', () => {
     recipient_discord_id: `user-${i + 1}`,
   }));
 
-  it('calls deleteLink for each resource and markSendRevoked, returns success/total + per-recipient ids', async () => {
+  it('records revocation intent before DELETEs and marks the send revoked only after every DELETE succeeds', async () => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(3));
     mockDeleteLink.mockResolvedValue(undefined);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockDeleteLink).toHaveBeenCalledTimes(3);
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoking.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDb.getSendItems.mock.invocationCallOrder[0]);
+    expect(mockDb.getSendItems.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
+    expect(mockDeleteLink.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(mockDb.markSendRevoked.mock.invocationCallOrder[0]);
     expect(result).toEqual({
       success: 3,
       total: 3,
@@ -1093,11 +1101,15 @@ describe('revokeAllLinks', () => {
     });
   });
 
-  it('counts partial failures as success/total mismatch and logs each failure', async () => {
+  it.each([
+    ['SDK validation', new Error('delete: only public resource IDs are accepted')],
+    ['network', new Error('Network request failed')],
+    ['qURL 5xx', new Error('qURL API DELETE /qurls/id failed (503)')],
+  ])('keeps a partial %s failure fail-closed and available for repair/retry', async (_failureKind, failure) => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('429 rate limited'));
+      .mockRejectedValueOnce(failure);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
@@ -1106,9 +1118,29 @@ describe('revokeAllLinks', () => {
     expect(result.successUserIds).toEqual(['user-1']);
     expect(result.failureUserIds).toEqual(['user-2']);
     expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', expect.any(Object));
-    // markSendRevoked still fires — partial failures don't block the local
-    // record update, since re-picking from /qurl revoke wouldn't help.
-    expect(mockDb.markSendRevoked).toHaveBeenCalled();
+    // The durable revoking_at intent keeps Add disabled, while withholding
+    // revoked_at keeps this send visible in /qurl revoke for retry.
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
+  it('re-drives the full resource set after a partial failure and finalizes on a successful retry', async () => {
+    mockDb.getSendItems.mockResolvedValue(makeItems(2));
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Network request failed'))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    const first = await revokeAllLinks('send-retry', 'sender-1', 'apikey');
+    expect(first).toMatchObject({ success: 1, total: 2 });
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+
+    const second = await revokeAllLinks('send-retry', 'sender-1', 'apikey');
+    expect(second).toMatchObject({ success: 2, total: 2 });
+    expect(mockDeleteLink).toHaveBeenCalledTimes(4);
+    expect(mockDb.markSendRevoking).toHaveBeenCalledTimes(2);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledTimes(1);
   });
 
   it('returns 0/0 when send has no items (already-revoked or unknown sendId)', async () => {
@@ -1118,6 +1150,7 @@ describe('revokeAllLinks', () => {
 
     expect(result).toEqual({ success: 0, total: 0, successUserIds: [], failureUserIds: [] });
     expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoking).toHaveBeenCalled();
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
 
@@ -1132,9 +1165,13 @@ describe('revokeAllLinks', () => {
     });
   });
 
-  it('emits revoke_failed (not revoke_success) when every per-link delete throws', async () => {
+  it.each([
+    ['SDK validation', new Error('delete: only public resource IDs are accepted')],
+    ['network', new Error('Network request failed')],
+    ['qURL 5xx', new Error('qURL API DELETE /qurls/id failed (503)')],
+  ])('keeps a full %s failure fail-closed and emits revoke_failed', async (_failureKind, failure) => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
-    mockDeleteLink.mockRejectedValue(new Error('429 rate limited'));
+    mockDeleteLink.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
 
     await revokeAllLinks('send-43', 'sender-1', 'apikey');
 
@@ -1144,6 +1181,8 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-43', success: 0, total: 2,
     });
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-43', 'sender-1');
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
   it('emits no audit event when there are no resources to revoke (avoids 0/0 noise)', async () => {
@@ -1169,31 +1208,57 @@ describe('revokeAllLinks', () => {
     ).rejects.toThrow('DDB throttled');
 
     expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     const events = logger.audit.mock.calls.map(c => c[0]);
     expect(events).not.toContain('revoke_success');
     expect(events).not.toContain('revoke_failed');
   });
 
   it('does not delete links when recording the revoked state fails', async () => {
-    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
-    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB write failed'));
+    mockDb.markSendRevoking.mockRejectedValueOnce(new Error('DDB write failed'));
     mockDeleteLink.mockResolvedValue(undefined);
 
     await expect(
       revokeAllLinks('send-mark-fail', 'sender-1', 'apikey'),
     ).rejects.toThrow('DDB write failed');
 
+    expect(mockDb.getSendItems).not.toHaveBeenCalled();
     expect(mockDeleteLink).not.toHaveBeenCalled();
     const events = logger.audit.mock.calls.map(c => c[0]);
     expect(events).not.toContain('revoke_success');
     expect(events).not.toContain('revoke_failed');
   });
 
+  it('leaves revocation retryable when the final revoked_at write fails after successful DELETEs', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-1',
+      recipient_discord_id: 'user-1',
+      dm_status: 'sent',
+      dm_channel_id: 'channel-1',
+      dm_message_id: 'message-1',
+    }]);
+    mockDb.markSendRevoking.mockResolvedValueOnce(undefined);
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    await expect(
+      revokeAllLinks('send-finalize-fail', 'sender-1', 'apikey'),
+    ).rejects.toThrow('DDB finalize failed');
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-finalize-fail', success: 1, total: 1,
+    });
+    expect(mockEditDM).toHaveBeenCalledWith(
+      'channel-1', 'message-1', expect.any(Object),
+    );
+  });
+
   // mintLinksInBatches packs up to TOKENS_PER_RESOURCE recipients onto
-  // a single resource_id. Without grouping, the 2nd…Nth DELETE for a
-  // shared resource throws 404 and would mis-classify N-1 recipients
-  // as failures even though all their tokens were invalidated by the
-  // 1st DELETE.
+  // a single resource_id. Grouping avoids redundant DELETEs and keeps the
+  // result user-centric even though one resource invalidates every token.
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
@@ -1767,7 +1832,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
 
 describe('renderRevokeMsg', () => {
   it('lists all names + no expand button when count <= TRUNC_LIMIT', () => {
-    const r = renderRevokeMsg('send-1', ['alice', 'bob'], 2, false);
+    const r = renderRevokeMsg('send-1', ['alice', 'bob'], 2, false, 2);
     expect(r.content).toContain('Revoked 2/2 users');
     expect(r.content).toContain('Revoked for: alice, bob');
     expect(r.needsExpand).toBe(false);
@@ -1776,7 +1841,7 @@ describe('renderRevokeMsg', () => {
 
   it('truncates with "+N more" + adds Show Recipients button when count > TRUNC_LIMIT', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 3 }, (_, i) => `u${i}`);
-    const r = renderRevokeMsg('send-2', names, names.length, false);
+    const r = renderRevokeMsg('send-2', names, names.length, false, names.length);
     expect(r.content).toContain(`+${3} more`);
     expect(r.content).not.toContain(names.at(-1)); // last name truncated off
     expect(r.needsExpand).toBe(true);
@@ -1789,35 +1854,35 @@ describe('renderRevokeMsg', () => {
 
   it('shows full list + Hide Recipients button when showAll=true', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
-    const r = renderRevokeMsg('send-3', names, names.length, true);
+    const r = renderRevokeMsg('send-3', names, names.length, true, names.length);
     expect(r.content).toContain(names.at(-1));
     expect(r.content).not.toMatch(/\+\d+ more/);
     expect(r.needsExpand).toBe(true);
     expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Hide Recipients');
   });
 
-  it('omits the names line when no successful revokes (e.g. all already-opened)', () => {
-    const r = renderRevokeMsg('send-4', [], 5, false);
+  it('omits the names line when no revocation succeeded', () => {
+    const r = renderRevokeMsg('send-4', [], 5, false, 0);
     expect(r.content).toContain('Revoked 0/5 users');
     expect(r.content).not.toContain('Revoked for:');
     expect(r.row).toBeNull();
   });
 
   it('singularizes "user" when total === 1', () => {
-    const r = renderRevokeMsg('send-5', ['alice'], 1, false);
+    const r = renderRevokeMsg('send-5', ['alice'], 1, false, 1);
     expect(r.content).toContain('Revoked 1/1 user.');
     expect(r.content).not.toContain('1/1 users');
   });
 
   it('omits the already-opened note when total === 0 (nothing was attempted)', () => {
-    const r = renderRevokeMsg('send-empty', [], 0, false);
+    const r = renderRevokeMsg('send-empty', [], 0, false, 0);
     expect(r.content).not.toContain('already-opened');
   });
 
   it('emits attachmentText + suppresses Show Recipients when full list would exceed Discord 2000-char cap', () => {
     // 200 long usernames (~30 chars each) → ~6000 chars uncapped.
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
-    const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true);
+    const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true, names.length);
     expect(r.content.length).toBeLessThanOrEqual(2000);
     expect(r.content).toContain('(see attached)');
     expect(r.attachmentText).not.toBeNull();
@@ -1830,7 +1895,7 @@ describe('renderRevokeMsg', () => {
   });
 
   it('does NOT emit attachmentText when full list fits inline', () => {
-    const r = renderRevokeMsg('send-fits', ['alice', 'bob', 'carol'], 3, false);
+    const r = renderRevokeMsg('send-fits', ['alice', 'bob', 'carol'], 3, false, 3);
     expect(r.attachmentText).toBeNull();
   });
 
@@ -1840,13 +1905,13 @@ describe('renderRevokeMsg', () => {
     const names = ['*alice*', 'normal', '[bob](evil)'];
     // Force attachment by repeating to overflow REVOKE_CONTENT_SAFE_MAX.
     const many = Array.from({ length: 200 }, () => '*alice*');
-    const r = renderRevokeMsg('send-md', many, many.length, true);
+    const r = renderRevokeMsg('send-md', many, many.length, true, many.length);
     expect(r.attachmentText).toContain('*alice*');
     expect(r.attachmentText).not.toContain('\\*alice\\*');
     expect(r.content).toContain('\\*alice\\*'); // preview line is escaped
 
     // Inline (small list) path also escapes.
-    const inline = renderRevokeMsg('send-md2', names, names.length, false);
+    const inline = renderRevokeMsg('send-md2', names, names.length, false, names.length);
     expect(inline.content).toContain('\\*alice\\*');
     expect(inline.content).toContain('\\[bob\\]\\(evil\\)');
   });
@@ -1861,6 +1926,11 @@ describe('renderRevokeMsg', () => {
     expect(r.content).toMatch(/^Revoked 5\/5 users\./);
     expect(r.content).toContain('Revoked for: alice, bob, carol, dave');
   });
+
+  it('throws instead of rendering an undefined authoritative success count', () => {
+    expect(() => renderRevokeMsg('send-missing', ['alice'], 1, false))
+      .toThrow(/success and total must be/);
+  });
 });
 
 // Slash-command /qurl revoke uses buildRevokeHeader directly (no
@@ -1873,12 +1943,26 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
     expect(buildRevokeHeader(0, 0)).toBe('Revoked 0/0 users.');
   });
 
-  it('singular: "Revoked 1/1 user." (singular noun + already-opened note)', () => {
-    expect(buildRevokeHeader(1, 1)).toBe('Revoked 1/1 user. Note: already-opened links cannot be revoked.');
+  it('singular: "Revoked 1/1 user." (singular noun + existing-session caveat)', () => {
+    expect(buildRevokeHeader(1, 1)).toBe('Revoked 1/1 user. Revocation blocks new link access; sessions already opened may remain active.');
   });
 
-  it('plural: "Revoked 3/5 users." includes already-opened note when total > 0', () => {
-    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Note: already-opened links cannot be revoked.');
+  it('plural: "Revoked 3/5 users." distinguishes failures from the existing-session caveat', () => {
+    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect. Revocation blocks new link access; sessions already opened may remain active.');
+  });
+
+  it('full failure reports unconfirmed revocation without claiming any existing sessions', () => {
+    expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect.');
+  });
+
+  it.each([
+    [undefined, 1],
+    [1, undefined],
+    [-1, 1],
+    [2, 1],
+    [0.5, 1],
+  ])('rejects invalid success/total pair (%s/%s)', (success, total) => {
+    expect(() => buildRevokeHeader(success, total)).toThrow(/success and total must be/);
   });
 });
 
@@ -1947,12 +2031,15 @@ describe('handleAddRecipients — pre-flight guards', () => {
     expect(result.msg).toMatch(/incomplete/i);
   });
 
-  it('refuses before minting when the send was revoked while Add Recipients was pending', async () => {
+  it.each([
+    ['revoked', { revoked_at: '2026-06-17T20:00:00Z' }, 'Cannot add recipients — this send has already been revoked.'],
+    ['being revoked', { revoking_at: '2026-06-17T20:00:00Z' }, 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.'],
+  ])('refuses before minting when the send was %s while Add Recipients was pending', async (_stateName, revocationState, expectedMessage) => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
-      revoked_at: '2026-06-17T20:00:00Z',
+      ...revocationState,
     });
 
     const result = await handleAddRecipients(
@@ -1960,7 +2047,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
+    expect(result.msg).toBe(expectedMessage);
     expect(mockDownloadAndUpload).not.toHaveBeenCalled();
     expect(mockMintLinks).not.toHaveBeenCalled();
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
@@ -2619,7 +2706,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
 
     expect(addClick.reply).toHaveBeenCalledWith({
-      content: 'Revoke already ran for this send. Add Recipients is disabled.',
+      content: 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.',
       ephemeral: true,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);

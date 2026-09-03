@@ -45,6 +45,7 @@ const STORE_METHODS = Object.freeze([
   'updateSendDMStatus',
   'markSendDMDelivered',
   'getRecentSends',
+  'markSendRevoking',
   'markSendRevoked',
   'isSendRevoked',
   'saveSendConfig',

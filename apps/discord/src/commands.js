@@ -2487,8 +2487,9 @@ async function executeSendPipeline(interaction, {
     // by a stale "Revoked 0/0". These flags are collector-local UX gates;
     // revokingSendLocks handles same-process cross-collector Revoke only
     // while work is active. After the lock releases, and across processes,
-    // revoked_at is the correctness boundary; recordQURLSendBatch enforces
-    // it again in the same transaction as any later Add Recipients rows.
+    // revoking_at/revoked_at are the correctness boundary;
+    // recordQURLSendBatch enforces them again in the same transaction as any
+    // later Add Recipients rows.
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
     // Authoritative DDB strict-success count. Tracked separately from
@@ -2618,8 +2619,8 @@ async function executeSendPipeline(interaction, {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Links still exist after a failed revoke, so Add Recipients can
-          // reopen. Keep only successful revokes sticky.
+          // Release only this collector's retry gate. Durable revoking_at
+          // keeps Add Recipients closed after a partial/external failure.
           revokeInFlight = false;
         } finally {
           revokingSendLocks.delete(sendId);
@@ -2640,8 +2641,8 @@ async function executeSendPipeline(interaction, {
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
         if (revokingSendLocks.has(sendId) || revokeSucceeded) {
-          // Completed revokes set revoked_at before DELETE attempts, even if
-          // individual deletes later fail, so stale Add clicks stay disabled.
+          // Durable revoking_at/revoked_at state keeps stale Add clicks
+          // disabled even after this collector-local lock is released.
           let content = ALREADY_REVOKING_SEND_MSG;
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
@@ -2649,7 +2650,7 @@ async function executeSendPipeline(interaction, {
             } else if (revokeResultTotal === 0) {
               content = 'No live links remain for this send.';
             } else if (revokeResultSuccess < revokeResultTotal) {
-              content = 'Revoke already ran for this send. Add Recipients is disabled.';
+              content = 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.';
             } else {
               content = 'Links for this send have already been revoked.';
             }
@@ -2896,13 +2897,20 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
-  // getSendConfig runs after the user-select await, so revoked_at catches
-  // button, slash-command, and out-of-band revokes that landed while the
-  // Add Recipients picker was open. recordQURLSendBatch repeats this guard
-  // in the recipient-row transaction to close the post-read write window.
+  // getSendConfig runs after the user-select await, so revoking_at/revoked_at
+  // catch button, slash-command, and out-of-band revokes that landed while
+  // the Add Recipients picker was open. recordQURLSendBatch repeats this
+  // guard in the recipient-row transaction to close the post-read write
+  // window.
   if (sendConfig.revoked_at) {
     return {
       msg: 'Cannot add recipients — this send has already been revoked.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (sendConfig.revoking_at) {
+    return {
+      msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
@@ -3411,7 +3419,8 @@ function formatRevokeDescription(s) {
   const when = new Date(s.created_at).toLocaleString();
   const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
   const expiry = `expires ${s.expires_in}`;
-  const base = `${when} · ${delivery} · ${expiry}`;
+  const retry = s.revocation_pending ? 'Retry needed · ' : '';
+  const base = `${retry}${when} · ${delivery} · ${expiry}`;
   // If there's space left, append a truncated message preview so users
   // can disambiguate sends with the same filename but different notes.
   if (s.personal_message) {
@@ -8167,7 +8176,7 @@ function revokeReplyPayload(rendered) {
 // Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
-function renderRevokeMsg(sendId, names, total, showAll, success = names.length) {
+function renderRevokeMsg(sendId, names, total, showAll, success) {
   const data = renderRevokeContent({ names, total, showAll, success });
   const row = data.needsExpand
     ? new ActionRowBuilder().addComponents(
@@ -8237,11 +8246,17 @@ function renderSendConfirm({
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
 // gracefully on the recipient side.
 async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
+  // Establish the durable no-more-recipients barrier before reading the send
+  // rows. getSendItems uses a strongly consistent base-table query, so an Add
+  // transaction that committed before this barrier is included; one racing
+  // after it fails the revoking_at condition check.
+  await db.markSendRevoking(sendId, senderDiscordId);
+
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
   // step skips them.
-  const items = await db.getSendItems(sendId, senderDiscordId);
+  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
   // deleteLink deletes the whole resource; one DELETE per unique
   // resource_id, fan result out to every recipient sharing it.
@@ -8255,15 +8270,6 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   }
   const resourceEntries = [...byResource.entries()];
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
-
-  // Record the user's revocation intent before side-effecting DELETEs.
-  // If this write fails, no qURL resource has been deleted yet, so callers
-  // can safely treat the revoke as failed and leave Add Recipients available.
-  // Do not emit revoke_success/revoke_failed before this point: those audit
-  // events describe qURL DELETE outcomes, and no DELETE has happened yet.
-  // Mark regardless of per-link success: partial failures surface in the
-  // reply ("Revoked X/Y"), and re-picking the same send would not help.
-  await db.markSendRevoked(sendId, senderDiscordId);
 
   const successUserIds = [];
   const failureUserIds = [];
@@ -8427,11 +8433,30 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     }
   }
 
-  // failureUserIds is computed but not yet rendered — the "Note:
-  // already-opened links cannot be revoked" disclaimer covers the
-  // common cause. Returned for callers that want to surface partial-
-  // failure detail (e.g., a future "Failed for: …" line or follow-up
-  // alert when count is large).
+  // Finalize only after every resource DELETE succeeded. Keep this after the
+  // outcome audit and recipient edits: if the DDB write fails, the durable
+  // revoking_at barrier remains and the caller can retry, but the destructive
+  // work that already completed still has an audit record and visible result.
+  //
+  // TODO(upstream-contract): qurl-service's
+  // TestRevokeQurl_Idempotent_SecondRevokeDoesNotRepublish pins repeated
+  // whole-resource DELETE /v1/qurls/{id} as a successful 204 no-op. Retrying
+  // the full set is therefore safe after partial success.
+  //
+  // A permanent-looking failure intentionally does NOT clear the barrier or
+  // finalize the send. qurl-service collapses absent and wrong-owner resources
+  // to the same 404, so treating 404/client-validation as "already revoked"
+  // could hide a still-live link after a key/account mismatch. 401/403 may also
+  // recover after `/qurl setup`. Fail closed, keep the send selectable, and let
+  // the truthful UI direct the operator to retry or reconnect.
+  if (auditSuccess === auditTotal) {
+    await db.markSendRevoked(sendId, senderDiscordId);
+  }
+
+  // failureUserIds is computed but not yet rendered by name. The shared
+  // header reports the exact unconfirmed count and tells the operator to
+  // retry/reconnect; callers can use this list for a future named-failure
+  // detail without inferring that DELETE failure means the link was opened.
   return { success, total, successUserIds, failureUserIds };
 }
 

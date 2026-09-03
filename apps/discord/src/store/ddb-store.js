@@ -371,9 +371,9 @@ async function recordQURLSendBatch(sends, options = {}) {
   }
 
   // Add Recipients uses one TransactWriteItems call so recipient-row Put(s)
-  // are atomically guarded by the send config row's revoked_at state. This
+  // are atomically guarded by the send config row's revoking/revoked state. This
   // keeps the extra transaction cost scoped to the path that has the post-read
-  // revoke race: if a revoke wins and sets revoked_at before this transaction
+  // revoke race: if a revoke wins and sets revoking_at before this transaction
   // commits, none of the newly minted recipient rows land. The Add Recipients
   // UI caps at Discord's 25-select limit today, so this should stay far below
   // the 100-action transaction cap. If a future caller exceeds the cap, fail
@@ -400,10 +400,10 @@ async function recordQURLSendBatch(sends, options = {}) {
       ConditionCheck: {
         TableName: TABLES.qurl_send_configs,
         Key: { send_id: sendId },
-        // Missing config rows, revoked rows, and sender mismatches all
+        // Missing config rows, revoking/revoked rows, and sender mismatches all
         // fail closed here. Add Recipients already read the config row; if
         // it disappears before persistence, do not create recipient rows.
-        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoked_at)',
+        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at)',
         ExpressionAttributeValues: { ':sender': senderMap.get(sendId) },
       },
     })),
@@ -716,10 +716,11 @@ async function clearConsumedDMEdited(sendId, recipientDiscordId) {
 // the door" — re-editing to "Closed N ago" would overwrite that copy
 // with a less-specific message and obscure the revoke signal.
 //
-// Reads qurl_send_configs (the table markSendRevoked writes to);
-// returns true iff revoked_at is set on the row. Falsy / missing row
-// returns false so a config-less legacy send (none exist today, but
-// the row insert in markSendRevoked is lazy) still gets the
+// Reads qurl_send_configs (the table the revoke state machine writes to);
+// Returns true only once revocation finishes. A revoking_at-only row means at
+// least one DELETE may have failed and the recipient link may still be live;
+// expiry/consumed events must therefore keep their normal DM-edit behavior.
+// Falsy / missing rows return false so config-less legacy sends still get the
 // expiry-edit treatment.
 async function isSendRevoked(sendId) {
   if (typeof sendId !== 'string' || sendId.length === 0) return false;
@@ -830,6 +831,11 @@ async function getRecentSends(senderDiscordId, limit = 10) {
     const meta = metaBySendId.get(sendId);
     const recipients = allRecipients[i] || [];
     const cfg = allConfigs[i].Item;
+    // revoking_at intentionally remains selectable: it means at least one
+    // prior DELETE failed and the operator must be able to retry. Only the
+    // fully finalized revoked_at state removes the send from the menu.
+    // TODO(#1376): add an audited operator-dismissed state for permanently
+    // unrecoverable rows so they do not occupy the bounded menu forever.
     if (cfg && cfg.revoked_at) continue;
     const recipientCount = recipients.length;
     const deliveredCount = recipients.filter(r => r.dm_status === 'sent').length;
@@ -845,6 +851,7 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       attachment_name: cfg?.attachment_name,
       location_name: cfg?.location_name,
       personal_message: cfg?.personal_message,
+      revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
   rows.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
@@ -860,7 +867,7 @@ async function flipRevokedAt(sendId, senderDiscordId) {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
-      UpdateExpression: 'SET revoked_at = :t',
+      UpdateExpression: 'SET revoked_at = :t REMOVE revoking_at',
       ExpressionAttributeValues: {
         ':t': nowIso(),
         ':s': senderDiscordId,
@@ -876,6 +883,66 @@ async function flipRevokedAt(sendId, senderDiscordId) {
   }
 }
 
+async function flipRevokingAt(sendId, senderDiscordId) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET revoking_at = if_not_exists(revoking_at, :t)',
+      ExpressionAttributeValues: {
+        ':t': nowIso(),
+        ':s': senderDiscordId,
+      },
+      ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
+    }));
+  } catch (err) {
+    // Already-finalized and wrong-owner rows both fail closed. Repeated
+    // revocation attempts against an existing revoking_at are idempotent.
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+  }
+}
+
+async function markSendRevoking(sendId, senderDiscordId) {
+  const cfgRes = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ConsistentRead: true,
+  }));
+  if (cfgRes.Item) {
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return;
+    if (cfgRes.Item.revoked_at || cfgRes.Item.revoking_at) return;
+    await flipRevokingAt(sendId, senderDiscordId);
+    return;
+  }
+
+  const legacyItems = await queryAll({
+    TableName: TABLES.qurl_sends,
+    ConsistentRead: true,
+    KeyConditionExpression: 'send_id = :sid',
+    FilterExpression: 'sender_discord_id = :s',
+    ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
+  });
+  if (legacyItems.length === 0) return;
+  const legacy = legacyItems[0];
+  try {
+    await ddb.send(new PutCommand({
+      TableName: TABLES.qurl_send_configs,
+      Item: {
+        send_id: sendId,
+        sender_discord_id: senderDiscordId,
+        resource_type: legacy.resource_type,
+        expires_in: legacy.expires_in || '24h',
+        revoking_at: nowIso(),
+        created_at: nowIso(),
+      },
+      ConditionExpression: 'attribute_not_exists(send_id)',
+    }));
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    await flipRevokingAt(sendId, senderDiscordId);
+  }
+}
+
 async function markSendRevoked(sendId, senderDiscordId) {
   // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
@@ -884,6 +951,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
+    ConsistentRead: true,
   }));
   if (cfgRes.Item) {
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
@@ -901,17 +969,17 @@ async function markSendRevoked(sendId, senderDiscordId) {
   // would be safe — but a future migration / manual repair / partial
   // write that violated the invariant would silently miss the
   // matching row and the revoke would no-op. Dropping the Limit makes
-  // the lookup robust regardless of the partition layout: the
-  // partition is bounded by recipient count anyway, and the match-
-  // first-then-stop happens client-side via the .find() below.
-  const legacyRes = await ddb.send(new QueryCommand({
+  // the lookup robust regardless of the partition layout. The partition is
+  // bounded by recipient count, and queryAll follows every filtered page.
+  const legacyItems = await queryAll({
     TableName: TABLES.qurl_sends,
+    ConsistentRead: true,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  }));
-  if (!legacyRes.Items || legacyRes.Items.length === 0) return;
-  const legacy = legacyRes.Items[0];
+  });
+  if (legacyItems.length === 0) return;
+  const legacy = legacyItems[0];
   try {
     await ddb.send(new PutCommand({
       TableName: TABLES.qurl_send_configs,
@@ -1075,7 +1143,7 @@ async function getSendRenderState(sendId) {
     lastRenderedAt: row.last_rendered_at ?? 0,
     baseMsg: row.confirm_base_msg ?? undefined,
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
-    terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
+    terminal: Boolean(row.revoking_at || row.revoked_at) || row.confirm_terminal === true,
   };
 }
 
@@ -1378,9 +1446,15 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipient's DM to "closed the door". Legacy rows predating the
 // ref-capture wire-up have those fields unset — the revoke loop's
 // missing-refs guard skips the edit naturally.
-async function getSendItems(sendId, senderDiscordId) {
+async function getSendItems(sendId, senderDiscordId, { consistentRead = false } = {}) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
+    // Revoke opts into a strongly consistent base-table query after writing
+    // revoking_at: every Add Recipients transaction committed before the
+    // barrier is visible, while later transactions fail the state guard.
+    // Webhook/render fallback callers do not require that ordering and retain
+    // the cheaper eventual-consistency default.
+    ConsistentRead: consistentRead,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
@@ -1735,7 +1809,7 @@ module.exports = {
   getStats,
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
-  getRecentSends, markSendRevoked, isSendRevoked,
+  getRecentSends, markSendRevoking, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   markConsumedDMEdited, clearConsumedDMEdited,
