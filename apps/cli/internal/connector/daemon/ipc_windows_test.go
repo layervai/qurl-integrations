@@ -148,7 +148,7 @@ func windowsEmptyManager(t *testing.T) *Manager {
 	t.Helper()
 	manager, err := NewManager(
 		&memoryRegistry{shares: map[string]connectorstate.LocalShare{}},
-		&fakeFactory{sessions: map[string][]*fakeSession{}, err: map[string]error{}},
+		newFakeGroupFactory(),
 	)
 	if err != nil {
 		t.Fatal(err)

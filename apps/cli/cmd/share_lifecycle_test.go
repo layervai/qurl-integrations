@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,49 +49,48 @@ func (r *diagnosticDaemonRegistry) DisableAtCurrentEpoch(context.Context, string
 	return &r.share, nil
 }
 
-type diagnosticDaemonSession struct {
-	done               chan struct{}
-	stop               sync.Once
-	mu                 sync.Mutex
-	diagnostic         connectordaemon.ResourceDiagnostic
-	diagnosticSequence []connectordaemon.ResourceDiagnostic
-	diagnosticCalls    int
+// scriptedGroupRunner drives the manager's per-route diagnostics from a live
+// session group: onStart fires the group's callbacks (serving, retry,
+// resource-gone) so a test can materialize any diagnostic the IPC surface must
+// report. Run blocks until its context ends, keeping the group running.
+type scriptedGroupRunner struct {
+	cfg     connectordaemon.GroupConfig
+	onStart func(*connectordaemon.GroupConfig)
 }
 
-func (s *diagnosticDaemonSession) Done() <-chan struct{} { return s.done }
-func (*diagnosticDaemonSession) Err() error              { return nil }
-func (s *diagnosticDaemonSession) Stop(context.Context) error {
-	s.stop.Do(func() { close(s.done) })
+func (r *scriptedGroupRunner) Run(ctx context.Context) error {
+	if r.onStart != nil {
+		r.onStart(&r.cfg)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (*scriptedGroupRunner) SetRoutes(context.Context, []connectorshare.LocalHTTPRoute) error {
 	return nil
 }
-func (s *diagnosticDaemonSession) Diagnostic() connectordaemon.ResourceDiagnostic {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.diagnosticSequence) > 0 {
-		index := min(s.diagnosticCalls, len(s.diagnosticSequence)-1)
-		s.diagnosticCalls++
-		return s.diagnosticSequence[index]
+func (*scriptedGroupRunner) RestartRoute(context.Context, string) error { return nil }
+func (*scriptedGroupRunner) RouteStates() map[string]connectorshare.RouteState {
+	return map[string]connectorshare.RouteState{}
+}
+
+type diagnosticDaemonFactory struct {
+	onStart func(*connectordaemon.GroupConfig)
+}
+
+func (f diagnosticDaemonFactory) NewGroupRunner(_ context.Context, cfg *connectordaemon.GroupConfig) (connectordaemon.GroupRunner, error) {
+	return &scriptedGroupRunner{cfg: *cfg, onStart: f.onStart}, nil
+}
+
+// failRouteTimes fires the group's per-route failure callback the given number
+// of times so the manager records a retrying diagnostic at that attempt count.
+func failRouteTimes(cfg *connectordaemon.GroupConfig, cause error, times int) {
+	if cfg.Events.OnRouteFailed == nil || len(cfg.Routes) == 0 {
+		return
 	}
-	return s.diagnostic
-}
-
-func (s *diagnosticDaemonSession) setDiagnosticSequence(sequence ...connectordaemon.ResourceDiagnostic) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.diagnosticSequence = slices.Clone(sequence)
-	s.diagnosticCalls = 0
-}
-
-func (s *diagnosticDaemonSession) diagnosticCallCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.diagnosticCalls
-}
-
-type diagnosticDaemonFactory struct{ session *diagnosticDaemonSession }
-
-func (f diagnosticDaemonFactory) Start(context.Context, *connectorstate.LocalShare) (connectordaemon.Session, error) {
-	return f.session, nil
+	for i := 0; i < times; i++ {
+		cfg.Events.OnRouteFailed(cfg.Routes[0].RouteID, cause)
+	}
 }
 
 func (d *recordingShareDaemon) Ensure(context.Context) error {
@@ -187,7 +185,7 @@ func (d *journeyDaemon) Ensure(ctx context.Context) error {
 			d.mu.Unlock()
 			return err
 		}
-		factory, err := connectordaemon.NewNativeSessionFactory(d.admitter, common, d.version)
+		factory, err := connectordaemon.NewNativeGroupFactory(d.admitter, common, d.version)
 		if err != nil {
 			d.mu.Unlock()
 			return err
@@ -517,16 +515,14 @@ func TestWaitForSharingRetriesBoundedHungPollThenServes(t *testing.T) {
 
 func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	stateDir := connectorStateTestDir(t)
-	now := time.Now().UTC()
-	next := now.Add(time.Second)
 	local := connectorstate.LocalShare{
 		ResourceID: "resource-a", CRID: "crid-a", DesiredState: "on", ServingEpoch: 1,
 	}
-	session := &diagnosticDaemonSession{done: make(chan struct{}), diagnostic: connectordaemon.ResourceDiagnostic{
-		State: "retrying", LastTransition: now, FailureCategory: "platform_denied",
-		FailureCode: "52005", RetryAttempt: 3, NextRetryAt: &next,
-	}}
-	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: local}, diagnosticDaemonFactory{session: session})
+	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: local}, diagnosticDaemonFactory{
+		onStart: func(cfg *connectordaemon.GroupConfig) {
+			failRouteTimes(cfg, &qurl.ServerDenyError{ErrCode: "52005"}, 3)
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,6 +539,9 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyCancel()
+	waitCmdCondition(t, func() bool {
+		return manager.Diagnostics()["resource-a"].RetryAttempt == 3
+	}, "route reaches retry attempt 3")
 	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
 		&local, stateDir, 1, 10*time.Millisecond)
 	for _, want := range []string{"failure category platform_denied", "failure code 52005", "retry attempt 3"} {
@@ -557,17 +556,32 @@ func TestWaitForSharingIncludesRedactedDaemonRootCause(t *testing.T) {
 	}
 }
 
+// waitCmdCondition polls until condition holds or a short deadline passes.
+func waitCmdCondition(t *testing.T, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 	stateDir := connectorStateTestDir(t)
-	now := time.Now().UTC()
-	next := now.Add(time.Second)
 	local := connectorstate.LocalShare{
 		ResourceID: "resource-a", CRID: "crid-a", DesiredState: "on", ServingEpoch: 1,
 	}
-	session := &diagnosticDaemonSession{done: make(chan struct{}), diagnostic: connectordaemon.ResourceDiagnostic{
-		State: "starting", LastTransition: now,
-	}}
-	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: local}, diagnosticDaemonFactory{session: session})
+	// The route holds at the manager's seeded "starting" state, then transitions
+	// to a retrying cause after a short delay, so the CLI's bounded settle poll
+	// observes the handoff instead of a bare "starting" sample.
+	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: local}, diagnosticDaemonFactory{
+		onStart: func(cfg *connectordaemon.GroupConfig) {
+			time.Sleep(30 * time.Millisecond)
+			failRouteTimes(cfg, &qurl.ServerDenyError{ErrCode: "52029"}, 1)
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,23 +598,12 @@ func TestWaitForSharingSettlesStartingDiagnosticIntoRetryCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyCancel()
-	session.setDiagnosticSequence(
-		connectordaemon.ResourceDiagnostic{State: "starting", LastTransition: now},
-		connectordaemon.ResourceDiagnostic{
-			State: "retrying", LastTransition: now.Add(time.Millisecond), FailureCategory: "platform_denied",
-			FailureCode: "52029", RetryAttempt: 1, NextRetryAt: &next,
-		},
-	)
 	_, err = waitForSharingWithDiagnostics(context.Background(), sharingErrorClient{err: errors.New("temporary poll failure")},
 		&local, stateDir, 1, 10*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "failure category platform_denied") ||
 		!strings.Contains(err.Error(), "failure code 52029") || !strings.Contains(err.Error(), "retry attempt 1") {
 		cancel()
 		t.Fatalf("settled diagnostic error = %v, want the retry cause", err)
-	}
-	if calls := session.diagnosticCallCount(); calls < 2 {
-		cancel()
-		t.Fatalf("diagnostic samples = %d, want starting plus one bounded handoff sample", calls)
 	}
 	cancel()
 	if serverErr := <-done; !errors.Is(serverErr, context.Canceled) {
@@ -1249,14 +1252,10 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	})
 	stale := seed
 	stale.DesiredState = string(qurlapi.DesiredStateOn)
-	session := &diagnosticDaemonSession{done: make(chan struct{}), diagnostic: connectordaemon.ResourceDiagnostic{
-		State: "starting", LastTransition: time.Now().UTC(),
-	}}
-	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: stale}, diagnosticDaemonFactory{session: session})
+	// The daemon still holds a live (starting) diagnostic for this share; inspect
+	// must keep the authoritative cloud-off state anyway.
+	manager, err := connectordaemon.NewManager(&diagnosticDaemonRegistry{share: stale}, diagnosticDaemonFactory{})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1289,11 +1288,6 @@ func TestShareInspectKeepsAuthoritativeStoppedStateOverStaleDaemonDiagnostic(t *
 	cancel()
 	if serverErr := <-done; !errors.Is(serverErr, context.Canceled) {
 		t.Fatalf("daemon shutdown = %v", serverErr)
-	}
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
-	defer stopCancel()
-	if err := manager.StopAll(stopCtx); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -2765,8 +2759,8 @@ func TestDaemonServesTwoResourcesAndStopsOneIndependently(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, share := range []connectorstate.LocalShare{
-		{CRID: keyA.CRID, ResourceID: keyA.ResourceID, ConnectorID: "local-a", ConnectorRoutingID: routingA, KnockResourceID: "q_key_a", TargetURL: echoA.URL, LocalIP: "127.0.0.1", LocalPort: portA, DesiredState: "on", ServingEpoch: 1},
-		{CRID: keyB.CRID, ResourceID: keyB.ResourceID, ConnectorID: "local-b", ConnectorRoutingID: routingB, KnockResourceID: "q_key_b", TargetURL: echoB.URL, LocalIP: "127.0.0.1", LocalPort: portB, DesiredState: "on", ServingEpoch: 1},
+		{CRID: keyA.CRID, ResourceID: keyA.ResourceID, ConnectorID: "local-a", ConnectorRoutingID: routingA, KnockResourceID: "q_connector_catalog", TargetURL: echoA.URL, LocalIP: "127.0.0.1", LocalPort: portA, DesiredState: "on", ServingEpoch: 1},
+		{CRID: keyB.CRID, ResourceID: keyB.ResourceID, ConnectorID: "local-b", ConnectorRoutingID: routingB, KnockResourceID: "q_connector_catalog", TargetURL: echoB.URL, LocalIP: "127.0.0.1", LocalPort: portB, DesiredState: "on", ServingEpoch: 1},
 	} {
 		if err := registry.Put(context.Background(), &share); err != nil {
 			t.Fatal(err)
@@ -2781,7 +2775,7 @@ func TestDaemonServesTwoResourcesAndStopsOneIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory, err := connectordaemon.NewNativeSessionFactory(admitter, common, "test")
+	factory, err := connectordaemon.NewNativeGroupFactory(admitter, common, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2818,6 +2812,9 @@ func TestDaemonServesTwoResourcesAndStopsOneIndependently(t *testing.T) {
 	waitRoute(routingB, "resource-b")
 	if len(recorder.snapshot()) < 2 {
 		t.Fatalf("FRPS NewProxy observations = %#v, want two resources", recorder.snapshot())
+	}
+	if got := admitter.admissions(); got != 1 {
+		t.Fatalf("admissions = %d, want one knock for the whole Connector session group", got)
 	}
 	if _, err := registry.SetDesired(context.Background(), keyA.ResourceID, "off", 2); err != nil {
 		t.Fatal(err)
@@ -3033,7 +3030,7 @@ func (emptyForegroundRegistry) DisableAtCurrentEpoch(context.Context, string, ui
 
 type emptyForegroundFactory struct{}
 
-func (emptyForegroundFactory) Start(context.Context, *connectorstate.LocalShare) (connectordaemon.Session, error) {
+func (emptyForegroundFactory) NewGroupRunner(context.Context, *connectordaemon.GroupConfig) (connectordaemon.GroupRunner, error) {
 	return nil, errors.New("empty foreground factory has no resource")
 }
 

@@ -45,7 +45,7 @@ const connectorRefreshModeAuto = "auto"
 
 var errNativeSessionOwnerVerification = errors.New("registered Connector owner verification failed")
 
-var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.SessionFactory, error) {
+var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.GroupFactory, error) {
 	if apiConfig == nil {
 		return nil, errors.New("qURL daemon registered-client configuration is missing")
 	}
@@ -68,7 +68,7 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 	if common == nil {
 		return nil, errors.Join(errors.New("qURL daemon FRP configuration is invalid"), admitter.Close())
 	}
-	return connectordaemon.NewNativeSessionFactory(admitter, common, apiConfig.Version)
+	return connectordaemon.NewNativeGroupFactory(admitter, common, apiConfig.Version)
 }
 
 func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, apiConfig *qurlapi.Config, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
@@ -255,7 +255,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
-	openFactory := func(initCtx context.Context) (connectordaemon.SessionFactory, error) {
+	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
 		apiConfig := &qurlapi.Config{
 			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
 			Sleep: opts.sleep, NewRequestID: opts.newRequestID,
@@ -267,7 +267,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			SessionOperations: sessionOperations,
 		}, common, apiConfig, verifyOwner)
 	}
-	var factory connectordaemon.SessionFactory
+	var factory connectordaemon.GroupFactory
 	var closeFactory func() error
 	if headless != nil {
 		// Native bootstrap succeeds before the share becomes runnable. This avoids
@@ -285,8 +285,8 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			closeFactory = closer.Close
 		}
 	} else {
-		var deferred *connectordaemon.DeferredSessionFactory
-		deferred, err = connectordaemon.NewDeferredSessionFactory(openFactory)
+		var deferred *connectordaemon.DeferredGroupFactory
+		deferred, err = connectordaemon.NewDeferredGroupFactory(openFactory)
 		factory = deferred
 		closeFactory = deferred.Close
 	}
@@ -392,7 +392,7 @@ func validateHeadlessRegistryOwnership(ctx context.Context, registry *connectors
 	return nil
 }
 
-func openHeadlessSessionFactory(ctx context.Context, open func(context.Context) (connectordaemon.SessionFactory, error)) (connectordaemon.SessionFactory, error) {
+func openHeadlessSessionFactory(ctx context.Context, open func(context.Context) (connectordaemon.GroupFactory, error)) (connectordaemon.GroupFactory, error) {
 	if open == nil {
 		return nil, errors.New("headless native session factory opener is nil")
 	}

@@ -38,10 +38,14 @@ jobs:
     uses: layervai/ops-routines-workflows/.github/workflows/age-check-go.yml@d07fa2fe3a103907ff2b1a1a71509a6dcd8e9d32 # v0.13.0
     with:
       min_age_days: 7
-      # qurl-go releases are coordinated in the same organization. The
-      # reusable verifies the exact public proxy origin, GitHub tag and signed
-      # default-branch commit before skipping only this module's age delay.
-      exempt_module_prefixes: github.com/layervai/qurl-go
+      # qurl-go and qurl-connector releases are coordinated in the same
+      # organization. The reusable verifies the exact public proxy origin,
+      # GitHub tag and signed default-branch commit before skipping only these
+      # modules' age delay. qurl-connector is listed twice on purpose: the exact
+      # path exempts the module the CLI pins today (pkg/share ships inside that
+      # one module), and the trailing-slash prefix is the segment-safe form that
+      # covers any future nested submodule without matching a look-alike owner.
+      exempt_module_prefixes: github.com/layervai/qurl-go,github.com/layervai/qurl-connector,github.com/layervai/qurl-connector/
       # Post a sticky PR comment when an age-check fails, listing each
       # pin with its eligible-after date and days remaining. The PR
       # author / reviewer sees the retry-after date inline on the PR
