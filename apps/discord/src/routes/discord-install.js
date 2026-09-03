@@ -50,7 +50,10 @@ const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 // to flip.
 const DISCORD_TIMEOUT_MS = 15000;
 // View Channels + Send Messages + Embed Links + Use Application Commands.
-const DISCORD_BOT_PERMISSIONS = '2147503104';
+const DISCORD_BOT_PERMISSION_BITS = [10, 11, 14, 31];
+const DISCORD_BOT_PERMISSIONS = DISCORD_BOT_PERMISSION_BITS
+  .reduce((permissions, bit) => permissions + (2 ** bit), 0)
+  .toString();
 const DISCORD_INSTALL_SCOPES = 'identify bot applications.commands';
 
 const router = express.Router();
@@ -129,6 +132,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
+  // Consume the install session before any external call. A timeout may leave
+  // the Discord code's redemption state ambiguous, so retries intentionally
+  // restart from the stable /install entrypoint instead of replaying callback.
   clearDiscordInstallSessionCookie(res);
   // Round-9 item #5: funnel through singleStringParam for symmetry.
   const errorParam = singleStringParam(req.query.error);
@@ -151,7 +157,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     // authoritative. The command-side permission check gives the admin the
     // actionable fix if one of these permissions is unavailable.
     logger.warn('Discord install callback reported different bot permissions', {
-      grantedPermissions,
+      grantedPermissions: /^\d{1,20}$/.test(grantedPermissions)
+        ? grantedPermissions
+        : '<malformed>',
       requestedPermissions: DISCORD_BOT_PERMISSIONS,
       ip: req.ip,
     });

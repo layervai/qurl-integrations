@@ -68,6 +68,10 @@ const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
 const DISCORD_INSTALL_STATE = 'a'.repeat(43);
+const REQUIRED_DISCORD_PERMISSION_BITS = [10n, 11n, 14n, 31n];
+const REQUIRED_DISCORD_PERMISSIONS = REQUIRED_DISCORD_PERMISSION_BITS
+  .reduce((permissions, bit) => permissions | (1n << bit), 0n)
+  .toString();
 
 function discordCallback(query, { cookieState = DISCORD_INSTALL_STATE } = {}) {
   const separator = query.includes('?') ? '&' : '?';
@@ -104,7 +108,8 @@ describe('Discord install callback', () => {
       expect(loc.origin).toBe('https://discord.com');
       expect(loc.pathname).toBe('/oauth2/authorize');
       expect(loc.searchParams.get('client_id')).toBe('234567890123456789');
-      expect(loc.searchParams.get('permissions')).toBe('2147503104');
+      expect(REQUIRED_DISCORD_PERMISSIONS).toBe('2147503104');
+      expect(loc.searchParams.get('permissions')).toBe(REQUIRED_DISCORD_PERMISSIONS);
       expect(loc.searchParams.get('integration_type')).toBe('0');
       expect(loc.searchParams.get('response_type')).toBe('code');
       expect(loc.searchParams.get('redirect_uri')).toBe(
@@ -400,6 +405,35 @@ describe('Discord install callback', () => {
         expect.objectContaining({
           grantedPermissions: '1024',
           requestedPermissions: '2147503104',
+        }),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not copy malformed callback permissions into operator logs', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({
+            access_token: 'disc-token', guild: { id: 'guild-1' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+
+      const res = await discordCallback(
+        '/oauth/discord/callback?code=ok-code&guild_id=guild-1&permissions=not-a-bitfield',
+      );
+
+      expect(res.status).toBe(302);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Discord install callback reported different bot permissions',
+        expect.objectContaining({
+          grantedPermissions: '<malformed>',
+          requestedPermissions: REQUIRED_DISCORD_PERMISSIONS,
         }),
       );
       warnSpy.mockRestore();

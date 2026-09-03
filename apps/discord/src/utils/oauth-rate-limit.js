@@ -4,6 +4,8 @@
 // OAuth flow, and the Discord install flow all share the same per-IP
 // budget — otherwise each router carries its own counter and an attacker
 // can amplify by hammering the same IP across multiple routes.
+// The public Discord install entrypoint also spends this callback budget, so a
+// large burst behind one NAT can temporarily throttle an in-flight callback.
 //
 // SCALING: single-instance only. If this bot ever runs horizontally
 // (multiple ECS tasks behind a LB), move this to Redis so limits are

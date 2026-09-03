@@ -26,8 +26,7 @@ const DISCORD_INSTALL_COOKIE_PATH = '/';
 // five-minute qURL setup window.
 const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
 
-// Single shape for the double-submit CSRF cookie set by both
-// /oauth/qurl/start (Stage 1) and /oauth/discord/callback (Stage 2).
+// Single shape for the OAuth double-submit CSRF cookies.
 // `secure: req.protocol === 'https'` requires `trust proxy` to be on
 // in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
 // — flipping that off would silently downgrade prod cookies. Keeping
@@ -59,12 +58,11 @@ function setQurlOAuthPkceCookie(res, req, codeVerifier) {
 }
 
 function setDiscordInstallSessionCookie(res, state) {
-  res.cookie(DISCORD_INSTALL_SESSION_COOKIE, state, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    maxAge: DISCORD_INSTALL_COOKIE_TTL_SECONDS * 1000,
+  setCookie(res, null, DISCORD_INSTALL_SESSION_COOKIE, state, {
     path: DISCORD_INSTALL_COOKIE_PATH,
+    ttlSeconds: DISCORD_INSTALL_COOKIE_TTL_SECONDS,
+    // __Host- cookies require Secure even on localhost.
+    secure: true,
   });
 }
 

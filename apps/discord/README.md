@@ -57,6 +57,10 @@ server authoritatively. Grant only **View Channels**, **Send Messages**,
 **Embed Links**, and **Use Application Commands** (permission bitfield
 `2147503104`).
 
+After seeding or rotating `DISCORD_CLIENT_SECRET`, restart the HTTP service;
+ECS injects the SSM value and the bot derives install readiness only at process
+start.
+
 **Require OAuth2 Code Grant** applies to the entire Discord application. Deploy
 the callback endpoint and register its exact URL before enabling the setting;
 legacy static invite links do not complete installation after it is enabled.
