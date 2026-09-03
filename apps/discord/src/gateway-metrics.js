@@ -7,8 +7,8 @@
  *      `gateway_heartbeat_silence` alarm); unhealthy ticks emit
  *      gateway_heartbeat_unhealthy carrying activity_age_ms for
  *      observability.
- *   2. Active-guild gauge (60 s) — emits active_guild_count carrying
- *      client.guilds.cache.size.
+ *   2. Active-guild gauge (60 s) — emits active_guild_count from either
+ *      discord.js's cache or the gateway shim's exact membership snapshot.
  *
  * Health is gated on heartbeat ACK age only. activity_age_ms is
  * reported as a metric for observability but does NOT gate health.
@@ -44,25 +44,35 @@ function _resetGatewayActivity() {
 }
 
 /**
- * Inspect the discord.js client's WebSocketManager and return a
- * health snapshot. Pure function — callers decide whether to emit.
+ * Inspect a discord.js client or gateway shim and return a health snapshot.
+ * A never-connected standby returns null so callers emit no opinion.
  *
- * @param {import('discord.js').Client} client
+ * @param {import('discord.js').Client|object} client - discord.js client or gateway shim.
  * @param {() => number} now - Injected for testability.
- * @returns {{ healthy: boolean, ping_ms: number, ack_age_ms: number|null, activity_age_ms: number|null, is_ready: boolean }}
+ * @returns {{ healthy: boolean, ping_ms: number, ack_age_ms: number|null, activity_age_ms: number|null, is_ready: boolean }|null}
  */
 function readGatewayHealth(client, now = Date.now) {
   const t = now();
-  const isReady = typeof client.isReady === 'function' ? client.isReady() : false;
-  const ping = client.ws?.ping;
+  const usesShimState = typeof client.getGatewayHeartbeatState === 'function';
+  const shimState = usesShimState
+    ? client.getGatewayHeartbeatState()
+    : null;
+  if (usesShimState && shimState === null) return null;
+  const isReady = shimState
+    ? shimState.isReady === true
+    : (typeof client.isReady === 'function' ? client.isReady() : false);
+  const ping = shimState ? shimState.pingMs : client.ws?.ping;
   const ping_ms = typeof ping === 'number' ? ping : -1;
 
   // discord.js v14 stores the most recent HEARTBEAT_ACK timestamp on
   // each WebSocketShard as `lastPingTimestamp` (-1 pre-first-ack).
   // Iterate so a future sharding flip is automatic; oldest across
   // shards is the worst-case heartbeat age.
-  let oldestAck = null;
-  if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
+  let oldestAck = typeof shimState?.lastHeartbeatAckAt === 'number'
+    && shimState.lastHeartbeatAckAt > 0
+    ? shimState.lastHeartbeatAckAt
+    : null;
+  if (!shimState && client.ws?.shards && typeof client.ws.shards.values === 'function') {
     for (const shard of client.ws.shards.values()) {
       const acked = shard?.lastPingTimestamp;
       // > 0 rejects both the -1 sentinel and any future change to
@@ -83,7 +93,7 @@ function readGatewayHealth(client, now = Date.now) {
 
   const healthy =
     isReady &&
-    ping_ms > 0 &&
+    ping_ms >= 0 &&
     ack_age_ms !== null &&
     ack_age_ms < HEARTBEAT_ACK_AGE_THRESHOLD_MS;
 
@@ -100,7 +110,7 @@ function readGatewayHealth(client, now = Date.now) {
  * Start the heartbeat timer. Returns the timer handle so callers
  * (gracefulShutdown) can clear it.
  *
- * @param {import('discord.js').Client} client
+ * @param {import('discord.js').Client|object} client - discord.js client or gateway shim.
  * @param {{ intervalMs?: number, now?: () => number }} [opts]
  */
 function startGatewayHeartbeat(client, opts = {}) {
@@ -116,6 +126,7 @@ function startGatewayHeartbeat(client, opts = {}) {
   function tick() {
     try {
       const snapshot = readGatewayHealth(client, now);
+      if (snapshot === null) return;
       if (snapshot.healthy) {
         logger.audit(AUDIT_EVENTS.GATEWAY_HEARTBEAT, {
           ping_ms: snapshot.ping_ms,
@@ -167,24 +178,46 @@ function startGatewayHeartbeat(client, opts = {}) {
 /**
  * Start the active-guild-count gauge.
  *
- * @param {import('discord.js').Client} client
+ * @param {import('discord.js').Client|object} client - discord.js client or gateway shim.
  * @param {{ intervalMs?: number }} [opts]
  */
 function startActiveGuildCount(client, opts = {}) {
   const intervalMs = opts.intervalMs ?? ACTIVE_GUILD_INTERVAL_MS;
+  let sampleInFlight = false;
 
-  function tick() {
-    try {
-      const count = client.guilds?.cache?.size;
-      if (typeof count === 'number') {
-        logger.audit(AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count });
-      }
-    } catch (err) {
-      logger.warn('Active-guild-count sampler threw', { error: err?.message });
+  function emitCount(count) {
+    if (typeof count === 'number') {
+      logger.audit(AUDIT_EVENTS.ACTIVE_GUILD_COUNT, { count });
     }
   }
 
-  // Caveat (#196): index.js calls startActiveGuildCount() right after
+  function logSamplerError(err) {
+    logger.warn('Active-guild-count sampler threw', { error: err?.message });
+  }
+
+  function tick() {
+    try {
+      if (typeof client.getActiveGuildCount === 'function') {
+        if (sampleInFlight) return;
+        const result = client.getActiveGuildCount();
+        if (result && typeof result.then === 'function') {
+          sampleInFlight = true;
+          Promise.resolve(result)
+            .then(emitCount)
+            .catch(logSamplerError)
+            .finally(() => { sampleInFlight = false; });
+          return;
+        }
+        emitCount(result);
+      } else {
+        emitCount(client.guilds?.cache?.size);
+      }
+    } catch (err) {
+      logSamplerError(err);
+    }
+  }
+
+  // Legacy-client caveat (#196): index.js calls startActiveGuildCount() right after
   // client.login() resolves, which is BEFORE the gateway READY event
   // populates client.guilds.cache. The first datapoint here can be 0
   // while the bot is actually in N guilds — an artifact of the cache

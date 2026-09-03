@@ -47,6 +47,45 @@ describe('readGatewayHealth', () => {
     expect(snap.is_ready).toBe(true);
   });
 
+  test('reads the @discordjs/ws shim heartbeat snapshot without a discord.js client.ws', () => {
+    const now = 1_700_000_010_000;
+    const shim = {
+      getGatewayHeartbeatState: () => ({
+        isReady: true,
+        pingMs: 37,
+        lastHeartbeatAckAt: now - 5_000,
+      }),
+    };
+
+    const snap = readGatewayHealth(shim, () => now);
+
+    expect(snap).toMatchObject({
+      healthy: true,
+      is_ready: true,
+      ping_ms: 37,
+      ack_age_ms: 5_000,
+    });
+  });
+
+  test('returns no opinion for a hot standby that has never connected', () => {
+    const shim = { getGatewayHeartbeatState: () => null };
+
+    expect(readGatewayHealth(shim)).toBe(null);
+  });
+
+  test('treats a disconnected shim as unhealthy even when its last ACK is recent', () => {
+    const now = 1_700_000_010_000;
+    const shim = {
+      getGatewayHeartbeatState: () => ({
+        isReady: false,
+        pingMs: 37,
+        lastHeartbeatAckAt: now - 1_000,
+      }),
+    };
+
+    expect(readGatewayHealth(shim, () => now).healthy).toBe(false);
+  });
+
   test('unhealthy when not ready', () => {
     const snap = readGatewayHealth(fakeClient({ isReady: false }));
     expect(snap.healthy).toBe(false);
@@ -57,6 +96,11 @@ describe('readGatewayHealth', () => {
     const snap = readGatewayHealth(fakeClient({ ping: -1 }));
     expect(snap.healthy).toBe(false);
     expect(snap.ping_ms).toBe(-1);
+  });
+
+  test('accepts a fresh zero-millisecond heartbeat latency', () => {
+    const snap = readGatewayHealth(fakeClient({ ping: 0, ackedAgo: 5_000 }));
+    expect(snap.healthy).toBe(true);
   });
 
   test('unhealthy when last ack > 60s old (zombie)', () => {
@@ -198,6 +242,14 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
+  test('emits neither heartbeat event from a never-connected hot standby', () => {
+    const shim = { getGatewayHeartbeatState: () => null };
+    startGatewayHeartbeat(shim, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(3_500);
+
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
   test('emits gateway_heartbeat_unhealthy carrying activity_age_ms when unhealthy', () => {
     // Pin the contract that the unhealthy companion event always
     // carries activity_age_ms — terraform's metric filter extracts
@@ -246,6 +298,21 @@ describe('startGatewayHeartbeat', () => {
     expect(timer).toBeDefined();
     expect(typeof timer.unref).toBe('function');
     clearInterval(timer);
+  });
+
+  test('index starts both metric timers on the gateway shim boot path', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
+    const startMarker = 'await gatewayShim.start({ connect: !config.ENABLE_GATEWAY_HOT_STANDBY });';
+    const branchStart = source.indexOf(startMarker);
+    const branchEnd = source.indexOf('} else if (isGateway) {', branchStart);
+    const shimBranch = source.slice(branchStart, branchEnd);
+
+    expect(branchStart).toBeGreaterThanOrEqual(0);
+    expect(branchEnd).toBeGreaterThan(branchStart);
+    expect(shimBranch).toContain('gatewayHeartbeatTimer = startGatewayHeartbeat(gatewayShim);');
+    expect(shimBranch).toContain('activeGuildCountTimer = startActiveGuildCount(gatewayShim);');
   });
 
   test('logs healthy → unhealthy transition exactly once (edge-triggered, not per-tick)', () => {
@@ -364,6 +431,66 @@ describe('startActiveGuildCount', () => {
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
       { count: 5 },
+    );
+  });
+
+  test('emits active_guild_count from an async gateway-shim sampler', async () => {
+    const shim = {
+      getActiveGuildCount: jest.fn().mockResolvedValue(9),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 60_000 });
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 9 },
+    );
+  });
+
+  test('does not overlap async gateway-shim samples when a REST seed is still pending', async () => {
+    let resolveSample;
+    const pendingSample = new Promise((resolve) => { resolveSample = resolve; });
+    const shim = {
+      getActiveGuildCount: jest.fn().mockReturnValue(pendingSample),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 1_000 });
+    await jest.advanceTimersByTimeAsync(3_000);
+
+    expect(shim.getActiveGuildCount).toHaveBeenCalledTimes(1);
+    expect(logger.audit).not.toHaveBeenCalled();
+
+    resolveSample(4);
+    await jest.advanceTimersByTimeAsync(0);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(shim.getActiveGuildCount).toHaveBeenCalledTimes(2);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 4 },
+    );
+  });
+
+  test('swallows async gateway-shim sampler failures and retries on the next tick', async () => {
+    const shim = {
+      getActiveGuildCount: jest.fn()
+        .mockRejectedValueOnce(new Error('Discord unavailable'))
+        .mockResolvedValueOnce(6),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 1_000 });
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Active-guild-count sampler threw',
+      { error: 'Discord unavailable' },
+    );
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 6 },
     );
   });
 
