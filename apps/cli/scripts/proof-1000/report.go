@@ -318,6 +318,17 @@ func (r *report) windowVerdict() string {
 	return fmt.Sprintf("%d failures and %d degraded samples fall OUTSIDE the declared platform window(s) %s — those stand on their own", outside, degradedOutside, strings.Join(labels, "; "))
 }
 
+// rerenderRedactor builds the same identity/home/hostname redaction a live
+// run uses, for re-rendering a report that may predate it.
+func rerenderRedactor() *redactor {
+	home, _ := os.UserHomeDir()
+	red := newRedactor(home)
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		red.literals = append(red.literals, [2]string{host, "<host>"})
+	}
+	return red
+}
+
 // rerenderRun re-renders an existing run directory's report from its
 // report.json, applying the --window annotations. It touches nothing else.
 func rerenderRun(opts *options, stdout, stderr io.Writer) int {
@@ -338,7 +349,9 @@ func rerenderRun(opts *options, stdout, stderr io.Writer) int {
 	r.collectFailures()
 	r.annotateWindows()
 	r.judge(r.Verify != nil, r.Hold != nil)
-	if err := writeReport(opts.out, &r, nil); err != nil {
+	// A report written by an older harness may predate JSON redaction; the
+	// re-render scrubs it with a fresh redactor rather than trusting the file.
+	if err := writeReport(opts.out, &r, rerenderRedactor()); err != nil {
 		_, _ = fmt.Fprintf(stderr, "proof-1000: rerender: %v\n", err)
 		return exitUsage
 	}

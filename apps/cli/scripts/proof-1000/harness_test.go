@@ -538,3 +538,30 @@ func TestSelectSampleWithSmallExplicitSize(t *testing.T) {
 		t.Fatal("nil redactor")
 	}
 }
+
+func TestRerenderScrubsAnUnredactedReport(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == "/" {
+		t.Skip("no home directory to redact")
+	}
+	dir := t.TempDir()
+	r := sampleReport(t)
+	r.Environment.StateDir = filepath.Join(home, ".local", "state", "qurl")
+	r.GeneratedAt = time.Now()
+	if err := writeReport(dir, r, nil); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := rerenderRun(&options{out: dir}, &stdout, &stderr); code != exitProofFailed {
+		t.Fatalf("rerender exit %d: %s", code, stderr.String())
+	}
+	for _, name := range []string{"report.md", "report.json"} {
+		raw, err := os.ReadFile(filepath.Clean(filepath.Join(dir, name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), home) {
+			t.Fatalf("%s still names the home directory after re-render", name)
+		}
+	}
+}
