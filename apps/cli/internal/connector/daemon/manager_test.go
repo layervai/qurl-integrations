@@ -960,6 +960,7 @@ func newRefusingGroupHarness(t *testing.T, refuse func(*connectorshare.GroupRout
 		t.Fatal(err)
 	}
 	manager.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
+	manager.refusalDelay = manager.retryDelay
 	dir := shortTempDir(t)
 	socket := filepath.Join(dir, SocketFile)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -981,6 +982,19 @@ func newRefusingGroupHarness(t *testing.T, refuse func(*connectorshare.GroupRout
 	}
 	waitServing(t, manager, "a")
 	return manager, registry, admitter, sessions, client
+}
+
+// waitIPCCondition polls an IPC-backed condition at a gentler cadence than
+// waitManagerCondition, since each check opens a fresh socket connection.
+func waitIPCCondition(t *testing.T, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func ipcStatus(t *testing.T, client IPCClient) IPCStatus {
@@ -1027,7 +1041,7 @@ func TestManagerHotAddedShareRefusedByPlatformIsVisibleAndRetriedUntilAccepted(t
 	}
 	// The refusal is visible: the row stays on and /status reports the share
 	// retrying with the platform's answer as its category.
-	waitManagerCondition(t, func() bool {
+	waitIPCCondition(t, func() bool {
 		diag := ipcStatus(t, client).Resources["b"]
 		return diag.State == diagnosticStateRetrying && diag.FailureCategory == diagnosticFailurePlatformDenied && diag.NextRetryAt != nil
 	}, "refused hot-add visible on /status as retrying/platform_denied")
@@ -1161,5 +1175,53 @@ func TestManagerStopConvergesWhileEverySurvivorIsInBackoff(t *testing.T) {
 	}
 	if factory.startCount() != 1 {
 		t.Fatalf("group starts = %d, want no rebuild while every survivor is in backoff", factory.startCount())
+	}
+}
+
+func TestManagerRestartOfAWithheldRouteWaitsForItsReAdd(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	factory := newFakeGroupFactory()
+	manager, err := NewManager(registry, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 10 * time.Millisecond }
+	manager.refusalDelay = func(int) time.Duration { return 150 * time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	runner := factory.runner(1)
+	runner.failRoute("connector-b", errors.Join(connectorshare.ErrResourceGone, errors.New("resource_not_found")))
+	waitManagerCondition(t, func() bool {
+		return manager.Diagnostics()["b"].State == diagnosticStateRetrying
+	}, "b in refusal backoff")
+	// The user re-publishes b (an epoch bump with the same target) while the
+	// group has withdrawn it: nothing must be restarted on a route the group
+	// does not hold, and the restart must land once b is re-added.
+	republish := daemonShare("b", 2, "on")
+	registry.setShare(&republish)
+	manager.Trigger()
+	time.Sleep(60 * time.Millisecond)
+	for _, id := range runner.restartedRoutes() {
+		if id == "connector-b" {
+			t.Fatal("RestartRoute was issued for a route the group had withdrawn")
+		}
+	}
+	waitManagerCondition(t, func() bool {
+		for _, id := range runner.restartedRoutes() {
+			if id == "connector-b" {
+				return true
+			}
+		}
+		return false
+	}, "restart applied after the route was re-added")
+	if got := manager.Diagnostics()["a"].State; got != diagnosticStateServing {
+		t.Fatalf("sibling a state = %q, want serving", got)
 	}
 }
