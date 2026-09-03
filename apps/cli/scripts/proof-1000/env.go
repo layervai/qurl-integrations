@@ -90,8 +90,9 @@ func resolveEnvironment(ctx context.Context, opts *options) (*environment, error
 	}
 	home, _ := os.UserHomeDir()
 	env.redactor = newRedactor(home, hubLiteral(agent, env.childEnv)...)
-	env.Hostname, _ = os.Hostname()
-	env.redactor.literals = append(env.redactor.literals, [2]string{env.Hostname, "<host>"})
+	if env.Hostname, _ = os.Hostname(); strings.TrimSpace(env.Hostname) != "" {
+		env.redactor.literals = append(env.redactor.literals, [2]string{env.Hostname, "<host>"})
+	}
 	if err := env.preflight(ctx, opts); err != nil {
 		return nil, err
 	}
@@ -116,16 +117,7 @@ func (e *environment) buildChildEnv(opts *options, agent *launchAgent) error {
 	default:
 		e.EndpointSource = "cli-config"
 	}
-	_, hostSet := os.LookupEnv(hub.EnvHost)
-	switch {
-	case hostSet:
-		e.HubSource = "env"
-	case agent != nil && agent.hubHost != "" && agent.hubPort != "" && agent.hubKey != "":
-		set[hub.EnvHost], set[hub.EnvPort], set[hub.EnvServerPublicKey] = agent.hubHost, agent.hubPort, agent.hubKey
-		e.HubSource = "launch-agent"
-	default:
-		e.HubSource = "build-default"
-	}
+	e.HubSource = resolveHubEnv(agent, set)
 	if agent != nil && agent.endpoint != "" {
 		effective := set[envEndpoint]
 		if effective == "" {
@@ -152,6 +144,38 @@ func (e *environment) buildChildEnv(opts *options, agent *launchAgent) error {
 		e.Endpoint = "(cli config)"
 	}
 	return nil
+}
+
+// resolveHubEnv fills every Hub trust variable the process environment
+// leaves unset from the resident daemon's job definition and names the
+// source. The triple is all-or-none for the CLI, so a partially exported
+// triple is completed rather than passed through to fail closed at preflight.
+func resolveHubEnv(agent *launchAgent, set map[string]string) string {
+	hubVars := map[string]string{}
+	if agent != nil {
+		hubVars[hub.EnvHost], hubVars[hub.EnvPort], hubVars[hub.EnvServerPublicKey] = agent.hubHost, agent.hubPort, agent.hubKey
+	}
+	fromEnv, fromAgent := 0, 0
+	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
+		if _, ok := os.LookupEnv(name); ok {
+			fromEnv++
+			continue
+		}
+		if hubVars[name] != "" {
+			set[name] = hubVars[name]
+			fromAgent++
+		}
+	}
+	switch {
+	case fromEnv == 3:
+		return "env"
+	case fromEnv > 0 && fromAgent > 0:
+		return "env+launch-agent"
+	case fromAgent == 3:
+		return "launch-agent"
+	default:
+		return "build-default"
+	}
 }
 
 func childValue(env []string, key string) string {

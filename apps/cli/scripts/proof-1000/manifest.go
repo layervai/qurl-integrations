@@ -43,15 +43,16 @@ type manifest struct {
 	Shares    map[string]*shareRecord `json:"shares"`
 
 	path string
+	red  *redactor
 	mu   sync.Mutex
 }
 
-func loadOrCreateManifest(dir, runName string, n, port int, endpoint string) (*manifest, error) {
+func loadOrCreateManifest(dir, runName string, n, port int, endpoint string, red *redactor) (*manifest, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(dir, manifestFile)
-	m := &manifest{Run: runName, N: n, Port: port, Endpoint: endpoint, CreatedAt: time.Now().UTC(), Shares: map[string]*shareRecord{}, path: path}
+	m := &manifest{Run: runName, N: n, Port: port, Endpoint: endpoint, CreatedAt: time.Now().UTC(), Shares: map[string]*shareRecord{}, path: path, red: red}
 	raw, err := os.ReadFile(filepath.Clean(path))
 	if errors.Is(err, os.ErrNotExist) {
 		if err := m.save(); err != nil {
@@ -71,6 +72,7 @@ func loadOrCreateManifest(dir, runName string, n, port int, endpoint string) (*m
 	if m.Shares == nil {
 		m.Shares = map[string]*shareRecord{}
 	}
+	m.red = red
 	m.N = n
 	if m.Port == 0 {
 		m.Port = port
@@ -84,7 +86,29 @@ func loadOrCreateManifest(dir, runName string, n, port int, endpoint string) (*m
 func (m *manifest) save() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return writeJSONAtomic(m.path, m)
+	return writeRedactedJSON(m.path, m, m.red)
+}
+
+// inScope reports whether a manifest id belongs to indexes 1..N of this
+// invocation. A manifest can carry more shares than --n after a wider
+// earlier run; those stay durable (teardown still covers them) but are
+// neither waited for nor measured.
+func (m *manifest) inScope(id string) bool {
+	index := shareIndex(m.Run, id)
+	return index >= 1 && index <= m.N
+}
+
+// extraShares counts manifest rows outside 1..N.
+func (m *manifest) extraShares() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	extra := 0
+	for id := range m.Shares {
+		if !m.inScope(id) {
+			extra++
+		}
+	}
+	return extra
 }
 
 func (m *manifest) record(id string) *shareRecord {
@@ -103,8 +127,10 @@ func (m *manifest) ordered() []*shareRecord {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]*shareRecord, 0, len(m.Shares))
-	for _, rec := range m.Shares {
-		out = append(out, rec)
+	for id, rec := range m.Shares {
+		if m.inScope(id) {
+			out = append(out, rec)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -114,8 +140,8 @@ func (m *manifest) resourceIDs() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ids := make([]string, 0, len(m.Shares))
-	for _, rec := range m.Shares {
-		if rec.ResourceID != "" {
+	for id, rec := range m.Shares {
+		if rec.ResourceID != "" && m.inScope(id) {
 			ids = append(ids, rec.ResourceID)
 		}
 	}
@@ -131,14 +157,6 @@ func writeRedactedJSON(path string, value any, red *redactor) error {
 		return err
 	}
 	return writeFileAtomic(path, []byte(red.apply(string(raw))))
-}
-
-func writeJSONAtomic(path string, value any) error {
-	raw, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(path, raw)
 }
 
 func writeFileAtomic(path string, raw []byte) error {

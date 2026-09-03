@@ -161,6 +161,22 @@ func connectorID(runName string, i int) string {
 	return fmt.Sprintf("proof-%s-%04d", runName, i)
 }
 
+// shareIndex returns the 1-based index encoded in a run's Connector ID, or 0.
+func shareIndex(runName, id string) int {
+	suffix, ok := strings.CutPrefix(id, "proof-"+runName+"-")
+	if !ok || len(suffix) < 4 {
+		return 0
+	}
+	index := 0
+	for _, c := range suffix {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		index = index*10 + int(c-'0')
+	}
+	return index
+}
+
 // connectorIDPattern matches every Connector ID one run can have produced,
 // and nothing else: teardown deletes only what this matches.
 func connectorIDPattern(runName string) *regexp.Regexp {

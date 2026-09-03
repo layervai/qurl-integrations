@@ -55,13 +55,16 @@ func (l *logger) close() {
 func runProof(ctx context.Context, opts *options, env *environment, stdout, stderr *os.File) int {
 	lg := newLogger(stderr, filepath.Join(opts.out, "run.log"), env.redactor)
 	defer lg.close()
-	m, err := loadOrCreateManifest(opts.out, opts.run, opts.n, opts.port, env.Endpoint)
+	m, err := loadOrCreateManifest(opts.out, opts.run, opts.n, opts.port, env.Endpoint, env.redactor)
 	if err != nil {
 		lg.logf("manifest: %v", err)
 		return exitUsage
 	}
 	if m.Port != opts.port {
 		lg.logf("run %s was created with origin port %d; keeping it so shares are not restarted", opts.run, m.Port)
+	}
+	if extra := m.extraShares(); extra > 0 {
+		lg.logf("run %s carries %d shares beyond --n %d from an earlier, wider run; they are left as-is and excluded from this measurement (teardown still covers them)", opts.run, extra, opts.n)
 	}
 	o, err := startOrigin(ctx, m.Port)
 	if err != nil {

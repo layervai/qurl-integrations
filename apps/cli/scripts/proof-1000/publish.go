@@ -176,9 +176,8 @@ func publishAll(ctx context.Context, opts *options, env *environment, m *manifes
 
 func (p *publisher) publishOne(ctx context.Context, id string) {
 	rec := p.m.record(id)
-	if rec.CRID != "" && rec.ResourceID != "" && !rec.TimedOut && rec.Error == "" {
-		rec.Resumed = true
-		p.event(id, outcomeResumed, 0, 0, 0, 0)
+	if p.markResumed(rec) {
+		p.event(id, outcomeResumed, 0, 0, 0, 0, cliExitOK)
 		return
 	}
 	for attempt := 1; attempt <= 1+p.opts.publishRetries; attempt++ {
@@ -189,7 +188,7 @@ func (p *publisher) publishOne(ctx context.Context, id string) {
 		res := runCLI(ctx, p.env.QurlBin, p.env.childEnv, publishTimeout,
 			"-v", "publish", p.target, "--id", id, flagOutput, outputJSON)
 		throttled := res.ExitCode == cliExitRateLimited || res.Calls.TooMany > 0
-		p.lim.release(throttled, res.Calls.RetryWaits)
+		p.lim.release(throttled, res.Calls.RetryWaitSum)
 		p.m.mu.Lock()
 		rec.Attempts++
 		rec.APICalls += res.Calls.Total
@@ -197,12 +196,12 @@ func (p *publisher) publishOne(ctx context.Context, id string) {
 		rec.ExitCode = res.ExitCode
 		p.m.mu.Unlock()
 		outcome := p.applyResult(ctx, rec, res)
-		p.event(id, outcome, res.Wall.Milliseconds(), limit, res.Calls.Total, res.Calls.TooMany)
+		p.event(id, outcome, res.Wall.Milliseconds(), limit, res.Calls.Total, res.Calls.TooMany, res.ExitCode)
 		_ = p.m.save()
 		if outcome != outcomeRetry {
 			return
 		}
-		backoff := res.Calls.RetryWaits
+		backoff := res.Calls.RetryWaitSum
 		if backoff <= 0 {
 			backoff = min(defaultRetryAfter*time.Duration(attempt), maxRetryBackoff)
 		}
@@ -252,13 +251,26 @@ func (p *publisher) applyResult(ctx context.Context, rec *shareRecord, res *cliR
 	}
 }
 
-func (p *publisher) event(id, outcome string, wallMS int64, limit, calls, tooMany int) {
+// markResumed reports whether the share is already published and healthy in
+// the manifest; the read happens under the manifest lock because save()
+// marshals every record concurrently.
+func (p *publisher) markResumed(rec *shareRecord) bool {
+	p.m.mu.Lock()
+	defer p.m.mu.Unlock()
+	if rec.CRID == "" || rec.ResourceID == "" || rec.TimedOut || rec.Error != "" {
+		return false
+	}
+	rec.Resumed = true
+	return true
+}
+
+func (p *publisher) event(id, outcome string, wallMS int64, limit, calls, tooMany, exitCode int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 	p.summary.Events = append(p.summary.Events, publishEvent{
 		At: now, Elapsed: now.Sub(p.started).Seconds(), ID: id, Outcome: outcome, WallMS: wallMS,
-		Limit: limit, Calls: calls, HTTP429: tooMany, ExitCode: p.m.record(id).ExitCode,
+		Limit: limit, Calls: calls, HTTP429: tooMany, ExitCode: exitCode,
 	})
 	switch outcome {
 	case outcomePublished:

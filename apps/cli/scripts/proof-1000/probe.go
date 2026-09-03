@@ -65,7 +65,9 @@ func probeAccess(ctx context.Context, env *environment, crid string) *fetchDiagn
 		case errors.Is(err, qurl.ErrServerOverloaded):
 			d.Overloaded = true
 		default:
-			d.Detail = env.redactor.apply(err.Error())
+			// The minted link carries a credential; scrub it literally before
+			// the generic redactor, whatever position the SDK embedded it in.
+			d.Detail = env.redactor.apply(strings.ReplaceAll(err.Error(), link, "<share-link>"))
 		}
 		return d
 	}

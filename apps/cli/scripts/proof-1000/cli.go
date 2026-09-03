@@ -30,10 +30,12 @@ const (
 // access-flow traffic (the platform knock and content fetch) is not logged
 // there and is deliberately not counted.
 type apiCalls struct {
-	Total      int            `json:"total"`
-	ByStatus   map[string]int `json:"by_status,omitempty"`
-	TooMany    int            `json:"http_429"`
-	RetryWaits time.Duration  `json:"-"`
+	Total    int            `json:"total"`
+	ByStatus map[string]int `json:"by_status,omitempty"`
+	TooMany  int            `json:"http_429"`
+	// RetryWaitSum is the sum of every "retrying in" pause the CLI reported,
+	// so a caller's pause is at least as long as the CLI's own.
+	RetryWaitSum time.Duration `json:"-"`
 }
 
 type cliResult struct {
@@ -45,6 +47,11 @@ type cliResult struct {
 	Err      error
 }
 
+// TODO(upstream-contract): these mirror the CLI transport's own verbose
+// lines (apps/cli/internal/api/transport.go: "> %s %s", "< HTTP %d" and
+// "< HTTP %d, retrying in %s", printed through the "[debug] " logger). If
+// that wording changes, parseAPICalls reads zero calls and the report says
+// so instead of printing a budget bound (see computeEstimate).
 var (
 	verboseRequest  = regexp.MustCompile(`^\[debug\] > [A-Z]+ /`)
 	verboseResponse = regexp.MustCompile(`^\[debug\] < HTTP (\d{3})(?:, retrying in (\S+))?`)
@@ -101,7 +108,7 @@ func parseAPICalls(stderr string) apiCalls {
 		}
 		if m[2] != "" {
 			if d, err := time.ParseDuration(m[2]); err == nil {
-				calls.RetryWaits += d
+				calls.RetryWaitSum += d
 			}
 		}
 	}

@@ -159,4 +159,7 @@ share (the tunnel is up but nothing listens locally). After a run, only the
 
 Owner ids, key prefixes, bearer tokens, in-link credentials, the Hub trust
 values, the hostname, and the home directory are redacted from everything
-written to the run directory, so a run directory can be shared as-is.
+written to the run directory (`run.json`, `report.json`, `report.md`,
+`teardown.json`, and both logs go through the same redactor). CRIDs, routing
+hosts, resource ids and the API endpoint are kept on purpose — they are the
+evidence — so a run directory shared *before* teardown names live resources.

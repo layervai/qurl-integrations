@@ -186,14 +186,20 @@ func machineEstablished(ctx context.Context, sample *usageSample) (total, toTunn
 	return total, toTunnel
 }
 
-// remotePortIs matches the foreign-address column of netstat (ip.port) or
-// ss (ip:port) against one port.
+// remotePortIs matches only the foreign-address column against one port:
+// netstat prints "proto recv send local foreign state" (ip.port), ss with
+// -H prints "recv send local peer" (ip:port). The local column is never
+// consulted, so a listener on the tunnel port cannot inflate the count.
 func remotePortIs(line, port string) bool {
 	fields := strings.Fields(line)
-	for _, field := range fields {
-		if strings.HasSuffix(field, "."+port) || strings.HasSuffix(field, ":"+port) {
-			return true
-		}
+	var foreign string
+	switch {
+	case len(fields) >= 6 && strings.HasPrefix(fields[0], "tcp"):
+		foreign = fields[4]
+	case len(fields) >= 4 && !strings.HasPrefix(fields[0], "tcp"):
+		foreign = fields[3]
+	default:
+		return false
 	}
-	return false
+	return strings.HasSuffix(foreign, "."+port) || strings.HasSuffix(foreign, ":"+port)
 }

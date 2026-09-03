@@ -11,13 +11,13 @@ import (
 )
 
 const (
-	fetchTimeout      = 2 * time.Minute
-	autoSampleAll     = 100
-	autoSampleRandom  = 100
-	autoSampleEdges   = 10
-	fetchArgFile      = "--file"
-	fetchArgStdout    = "-"
-	hostSuffixQURLSte = ".qurl.site."
+	fetchTimeout       = 2 * time.Minute
+	autoSampleAll      = 100
+	autoSampleRandom   = 100
+	autoSampleEdges    = 10
+	fetchArgFile       = "--file"
+	fetchArgStdout     = "-"
+	hostSuffixQURLSite = ".qurl.site."
 )
 
 // fetchResult is one end-to-end fetch through the platform: the consume CLI
@@ -118,11 +118,14 @@ func fetchShare(ctx context.Context, env *environment, o *origin, rec *shareReco
 	}
 	if rec.RoutingID != "" {
 		result.HostChecked = true
-		result.HostOK = strings.HasPrefix(body.Host, rec.RoutingID+".") && strings.Contains(body.Host, hostSuffixQURLSte)
+		result.HostOK = strings.HasPrefix(body.Host, rec.RoutingID+".") && strings.Contains(body.Host, hostSuffixQURLSite)
 	}
 	result.OK = result.NonceOK && result.RequestSeen && (!result.HostChecked || result.HostOK)
 	if !result.OK {
 		result.Error = "nonce_ok=" + boolStr(result.NonceOK) + " request_seen=" + boolStr(result.RequestSeen) + " host_ok=" + boolStr(result.HostOK)
+		if ctx.Err() == nil {
+			result.Diagnosis = probeAccess(ctx, env, rec.CRID)
+		}
 	}
 	return result
 }

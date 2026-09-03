@@ -391,11 +391,21 @@ func printSummary(w io.Writer, r *report, dir string) {
 			u.PID, u.RSSKB/1024, u.Threads, u.FDs, u.TCPEstablished, u.TCPByRemotePort, u.UDPSockets, u.MachineTCPEstablished, tunnel))
 	}
 	e := r.Estimate
-	tw.row("n=1000", fmt.Sprintf("budget bound %.1f publishes/min at %d req/min -> %.0f min; measured %.1f/min -> %.0f min",
-		e.BudgetBoundPublishesPerMin, e.AssumedRatePerMinute, e.BudgetBoundMinutesFor1000, e.MeasuredPublishesPerMin, e.MeasuredMinutesFor1000))
+	tw.row("n=1000", estimateLine(&e))
 	tw.row("failures", itoa(len(r.Failures)))
 	tw.flush()
 	out("\nreport: %s\n", filepath.Join(dir, "report.md"))
+}
+
+// estimateLine renders the N=1000 projection, saying "n/a" rather than "0
+// min" when no API calls were parsed: zero calls means the CLI's verbose
+// format was not recognized, not that publishing is free.
+func estimateLine(e *estimate) string {
+	if e.CallsPerPublish <= 0 {
+		return "n/a (no API calls parsed from the CLI's -v output; the budget bound cannot be computed)"
+	}
+	return fmt.Sprintf("budget bound %.1f publishes/min at %d req/min -> %.0f min; measured %.1f/min -> %.0f min",
+		e.BudgetBoundPublishesPerMin, e.AssumedRatePerMinute, e.BudgetBoundMinutesFor1000, e.MeasuredPublishesPerMin, e.MeasuredMinutesFor1000)
 }
 
 func passFail(ok bool) string {
@@ -442,9 +452,9 @@ func renderMarkdown(r *report) string {
 	renderVerify(&b, r)
 	renderUsage(&b, r)
 	if r.Hold != nil {
-		fmt.Fprintf(&b, "\n## Steady-state hold\n\n%.0fs, %d status samples, %d degraded (%d inside known windows, %d outside), min serving %d, %d fetches, %d failed (%d inside, %d outside)\n",
+		fmt.Fprintf(&b, "\n## Steady-state hold\n\n%.0fs, %d status samples, %d degraded (%d inside known windows, %d outside), min serving %d, %d fetches, %d failed (%d inside, %d outside), %d fetch ticks skipped because the previous fetch was still in flight\n",
 			r.Hold.DurationS, r.Hold.Samples, r.Hold.DegradedSamples, r.Hold.DegradedInWindow, r.Hold.DegradedOutside, r.Hold.MinServing,
-			r.Hold.Fetches, r.Hold.FetchFailures, r.Hold.FetchFailuresInWindow, r.Hold.FetchFailuresOutside)
+			r.Hold.Fetches, r.Hold.FetchFailures, r.Hold.FetchFailuresInWindow, r.Hold.FetchFailuresOutside, r.Hold.FetchesSkipped)
 		renderCurve(&b, "Hold curve", thinCurve(r.Hold.Curve, 24))
 		renderHoldFetches(&b, r.Hold.FetchResults)
 	}
@@ -456,6 +466,9 @@ func renderMarkdown(r *report) string {
 
 func renderEnvironment(b *strings.Builder, r *report) {
 	e := r.Environment
+	if e == nil {
+		e = &environment{}
+	}
 	fmt.Fprintf(b, "\n## Environment\n\n| | |\n|---|---|\n")
 	fmt.Fprintf(b, "| started | %s |\n| generated | %s |\n", r.Started.UTC().Format(time.RFC3339), r.GeneratedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(b, "| qurl (publish/list/delete) | `%s` — %s |\n| qurl (get) | `%s` — %s |\n", e.QurlBin, e.QurlVersion, e.ConsumeBin, e.ConsumeVersion)
@@ -558,6 +571,10 @@ func renderUsage(b *strings.Builder, r *report) {
 func renderEstimate(b *strings.Builder, r *report) {
 	e := r.Estimate
 	fmt.Fprintf(b, "\n## Implied cost of N=%d on this client\n\n", targetN)
+	if e.CallsPerPublish <= 0 {
+		fmt.Fprintf(b, "- n/a: no API calls were parsed from the CLI's -v output, so the budget bound cannot be computed.\n")
+		return
+	}
 	fmt.Fprintf(b, "- %.1f API calls per publish; at the assumed per-owner budget of %d requests/min that bounds publishing to %.1f shares/min → %.0f min for %d.\n",
 		e.CallsPerPublish, e.AssumedRatePerMinute, e.BudgetBoundPublishesPerMin, e.BudgetBoundMinutesFor1000, targetN)
 	fmt.Fprintf(b, "- Measured %.1f publishes/min in this run → %.0f min for %d at the same rate.\n", e.MeasuredPublishesPerMin, e.MeasuredMinutesFor1000, targetN)

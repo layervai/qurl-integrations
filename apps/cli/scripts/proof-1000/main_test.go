@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestParseAPICallsCountsRequestsAndStatuses(t *testing.T) {
 		"Error: something",
 	}, "\n")
 	calls := parseAPICalls(stderr)
-	if calls.Total != 2 || calls.TooMany != 1 || calls.ByStatus["200"] != 2 || calls.RetryWaits != 2*time.Second {
+	if calls.Total != 2 || calls.TooMany != 1 || calls.ByStatus["200"] != 2 || calls.RetryWaitSum != 2*time.Second {
 		t.Fatalf("calls = %+v", calls)
 	}
 	if got := lastErrorLine(stderr); got != "Error: something" {
@@ -110,7 +111,7 @@ func TestLimiterAdapts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	blocked, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	blocked, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
 	if err := l.acquire(blocked); err == nil {
 		t.Fatal("fifth acquire should block at limit 4")
@@ -122,7 +123,7 @@ func TestLimiterAdapts(t *testing.T) {
 	for range 3 {
 		l.release(false, 0)
 	}
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	for range limiterGrowStreak {
 		if err := l.acquire(ctx); err != nil {
 			t.Fatal(err)
@@ -171,7 +172,7 @@ func TestParseOptionsRejectsBadInput(t *testing.T) {
 		}
 	}
 	opts, err := parseOptions([]string{"--run", "r1", "--n", "25"}, io.Discard)
-	if err != nil || opts.n != 25 || opts.consumeBin != opts.qurlBin || !strings.HasSuffix(opts.out, "proof-1000-runs/r1") {
+	if err != nil || opts.n != 25 || opts.consumeBin != opts.qurlBin || !strings.HasSuffix(opts.out, filepath.Join("proof-1000-runs", "r1")) {
 		t.Fatalf("opts = %+v err = %v", opts, err)
 	}
 }
@@ -184,10 +185,14 @@ func TestTunnelPortAndRemotePort(t *testing.T) {
 	if tunnelPort(nil, "18080") != "" {
 		t.Fatal("empty map should yield no port")
 	}
-	if !remotePortIs("tcp4  0  0  192.0.2.1.54321  198.51.100.1.7000  ESTABLISHED", "7000") ||
-		remotePortIs("tcp4  0  0  192.0.2.1.7000  198.51.100.1.443  ESTABLISHED", "7000") == false ||
-		remotePortIs("ESTAB 0 0 192.0.2.1:54321 198.51.100.1:7001", "7000") {
-		t.Fatal("remotePortIs")
+	if !remotePortIs("tcp4  0  0  192.0.2.1.54321  198.51.100.1.7000  ESTABLISHED", "7000") {
+		t.Fatal("netstat foreign column should match")
+	}
+	if remotePortIs("tcp4  0  0  192.0.2.1.7000  198.51.100.1.443  ESTABLISHED", "7000") {
+		t.Fatal("a local listener on the tunnel port must not count")
+	}
+	if !remotePortIs("0 0 192.0.2.1:54321 198.51.100.1:7000", "7000") || remotePortIs("0 0 192.0.2.1:7000 198.51.100.1:443", "7000") || remotePortIs("short", "7000") {
+		t.Fatal("ss peer column")
 	}
 }
 

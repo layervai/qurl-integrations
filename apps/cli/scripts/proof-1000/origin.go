@@ -42,7 +42,11 @@ type origin struct {
 	mu     sync.Mutex
 	seq    int64
 	byHost map[string]int
-	seen   map[string]string
+	// seen and older form a two-generation window: a request id stays
+	// answerable for at least maxSeenRequests further requests, so a fetch in
+	// flight across a generation swap is never reported as unseen.
+	seen  map[string]string
+	older map[string]string
 }
 
 func startOrigin(ctx context.Context, port int) (*origin, error) {
@@ -54,6 +58,9 @@ func startOrigin(ctx context.Context, port int) (*origin, error) {
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
 		return nil, err
+	}
+	if addr, ok := listener.Addr().(*net.TCPAddr); ok {
+		o.port = addr.Port
 	}
 	o.server = &http.Server{Handler: o, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = o.server.Serve(listener) }()
@@ -72,7 +79,7 @@ func (o *origin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body.Seq = o.seq
 	o.byHost[r.Host]++
 	if len(o.seen) >= maxSeenRequests {
-		o.seen = map[string]string{}
+		o.older, o.seen = o.seen, map[string]string{}
 	}
 	o.seen[body.RequestID] = r.Host
 	o.mu.Unlock()
@@ -88,6 +95,9 @@ func (o *origin) sawRequest(requestID string) (string, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	host, ok := o.seen[requestID]
+	if !ok {
+		host, ok = o.older[requestID]
+	}
 	return host, ok
 }
 

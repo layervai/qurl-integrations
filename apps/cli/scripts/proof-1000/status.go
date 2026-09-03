@@ -113,9 +113,9 @@ func waitAllServing(ctx context.Context, resourceIDs []string, socket string, st
 	waitCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	for {
-		sample := takeStatusSample(ctx, resourceIDs, socket, start)
+		sample := takeStatusSample(waitCtx, resourceIDs, socket, start)
 		onSample(sample)
-		if sample.Err == "" && sample.Serving == sample.Total {
+		if sample.Err == "" && sample.Total > 0 && sample.Serving == sample.Total {
 			return sample, true
 		}
 		select {
