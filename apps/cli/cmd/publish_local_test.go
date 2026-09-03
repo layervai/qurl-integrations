@@ -250,7 +250,7 @@ func TestLocalEnrollmentAdvancesDefaultIDOnlyAfterDurableRetirement(t *testing.T
 		t.Fatalf("retire first binding = %t, %v", retired, err)
 	}
 
-	want, err := generatedReplacementLocalConnectorID(baseID, first.ResourceID)
+	want, err := connectorstate.ReplacementConnectorID(baseID, first.ResourceID)
 	if err != nil {
 		t.Fatal(err)
 	}

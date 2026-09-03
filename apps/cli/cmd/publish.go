@@ -318,7 +318,7 @@ func (e *localEnrollment) resolveID(ctx context.Context, stateDir, agentID strin
 		if generation == 1024 {
 			return "", errors.New("local Connector replacement chain exceeds the durable state limit")
 		}
-		id, err = generatedReplacementLocalConnectorID(id, binding.ResourceID)
+		id, err = connectorstate.ReplacementConnectorID(id, binding.ResourceID)
 		if err != nil {
 			return "", err
 		}

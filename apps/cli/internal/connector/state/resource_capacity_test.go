@@ -41,44 +41,64 @@ func TestConnectorResourceCapsFitRegistryAndChurn(t *testing.T) {
 	}
 }
 
-// TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap fills bindings and
-// pending to the hard per-map cap with maximal entries (64-char Connector and
-// knock identities, every pending request asserting its binding's identity,
-// which is the larger of the two legal pending shapes) and proves the file
-// round-trips well under the byte cap with room to spare.
+// TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap fills the maps to
+// the hard per-map cap with maximal entries (64-char Connector and knock
+// identities; resource identities and CRIDs are fixed-length) in the two
+// shapes the loader accepts, and proves each round-trips well under the byte
+// cap with room to spare. "assertions" fills bindings and pending with every
+// request asserting its binding's identity: retiring an ID would displace one
+// of those assertions with a smaller retired entry and a smaller fresh
+// request, so this is the byte maximum. "retired" fills all three maps, which
+// forces every pending request onto a fresh ID with no assertion. Every field
+// is already at its largest legal size, so the measurement moves only if the
+// schema does, and then the cap must be re-measured anyway.
 func TestConnectorResourceStateRoundTripsMaxItemsUnderByteCap(t *testing.T) {
 	t.Parallel()
-	dir := secureStateTestDir(t)
-	state := emptyConnectorResourcesState()
-	for i := 0; i < connectorResourcesMaxItems; i++ {
-		binding := testResourceBinding(t, fmt.Sprintf("c%063d", i))
-		binding.KnockResourceID = strings.Repeat("k", 64)
-		state.Bindings[binding.ConnectorID] = binding
-		state.Pending[binding.ConnectorID] = PendingConnectorResourceRequest{
-			ConnectorID: binding.ConnectorID, RequestNonce: testRequestNonce(t), ExpectedResourceID: binding.ResourceID,
-		}
-	}
-	if err := writeConnectorResources(dir, state); err != nil {
-		t.Fatalf("write %d-entry state: %v", connectorResourcesMaxItems, err)
-	}
-	info, err := os.Stat(filepath.Join(dir, ConnectorResourcesFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("%d-binding, %d-pending state file size: %d bytes (cap %d)", connectorResourcesMaxItems, connectorResourcesMaxItems, info.Size(), connectorResourcesMaxBytes)
-	if info.Size() >= connectorResourcesMaxBytes {
-		t.Fatalf("state file size %d is not under the %d-byte cap", info.Size(), connectorResourcesMaxBytes)
-	}
-	// A generous margin: a full state must not sit within a hair of the cap.
-	if info.Size() > connectorResourcesMaxBytes/2 {
-		t.Fatalf("state file size %d leaves less than 2x headroom under the %d-byte cap", info.Size(), connectorResourcesMaxBytes)
-	}
-	loaded, err := loadConnectorResources(dir)
-	if err != nil {
-		t.Fatalf("reload %d-entry state: %v", connectorResourcesMaxItems, err)
-	}
-	if len(loaded.Bindings) != connectorResourcesMaxItems || len(loaded.Pending) != connectorResourcesMaxItems {
-		t.Fatalf("reloaded %d bindings and %d pending, want %d each", len(loaded.Bindings), len(loaded.Pending), connectorResourcesMaxItems)
+	for _, shape := range []struct {
+		name    string
+		retired bool
+	}{{name: "assertions", retired: false}, {name: "retired", retired: true}} {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
+			dir := secureStateTestDir(t)
+			state := emptyConnectorResourcesState()
+			for i := 0; i < connectorResourcesMaxItems; i++ {
+				binding := testResourceBinding(t, fmt.Sprintf("c%063d", i))
+				binding.KnockResourceID = strings.Repeat("k", 64)
+				state.Bindings[binding.ConnectorID] = binding
+				if !shape.retired {
+					state.Pending[binding.ConnectorID] = PendingConnectorResourceRequest{
+						ConnectorID: binding.ConnectorID, RequestNonce: testRequestNonce(t), ExpectedResourceID: binding.ResourceID,
+					}
+					continue
+				}
+				state.Retired[binding.ConnectorID] = true
+				fresh := fmt.Sprintf("p%063d", i)
+				state.Pending[fresh] = PendingConnectorResourceRequest{ConnectorID: fresh, RequestNonce: testRequestNonce(t)}
+			}
+			if err := writeConnectorResources(dir, state); err != nil {
+				t.Fatalf("write %d-entry state: %v", connectorResourcesMaxItems, err)
+			}
+			info, err := os.Stat(filepath.Join(dir, ConnectorResourcesFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("%s shape: %d bindings, %d pending, %d retired: %d bytes (cap %d)", shape.name, len(state.Bindings), len(state.Pending), len(state.Retired), info.Size(), connectorResourcesMaxBytes)
+			if info.Size() >= connectorResourcesMaxBytes {
+				t.Fatalf("state file size %d is not under the %d-byte cap", info.Size(), connectorResourcesMaxBytes)
+			}
+			// A generous margin: a full state must not sit within a hair of the cap.
+			if info.Size() > connectorResourcesMaxBytes/2 {
+				t.Fatalf("state file size %d leaves less than 2x headroom under the %d-byte cap", info.Size(), connectorResourcesMaxBytes)
+			}
+			loaded, err := loadConnectorResources(dir)
+			if err != nil {
+				t.Fatalf("reload %d-entry state: %v", connectorResourcesMaxItems, err)
+			}
+			if len(loaded.Bindings) != len(state.Bindings) || len(loaded.Pending) != len(state.Pending) || len(loaded.Retired) != len(state.Retired) {
+				t.Fatalf("reloaded %d/%d/%d bindings/pending/retired, want %d/%d/%d", len(loaded.Bindings), len(loaded.Pending), len(loaded.Retired), len(state.Bindings), len(state.Pending), len(state.Retired))
+			}
+		})
 	}
 }
 
@@ -402,4 +422,217 @@ func testRequestNonce(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// testRetiredChain seeds links retired default-ID links from root, each
+// derived from its predecessor exactly as the publish command derives them,
+// and returns the link IDs in walk order plus the ID the walk reaches after
+// the last link; the caller decides whether that tail is live or absent.
+func testRetiredChain(t *testing.T, state *connectorResourcesState, root string, links int) (chain []string, tail string) {
+	t.Helper()
+	id := root
+	for i := 0; i < links; i++ {
+		binding := testResourceBinding(t, id)
+		state.Bindings[id] = binding
+		state.Retired[id] = true
+		chain = append(chain, id)
+		next, err := ReplacementConnectorID(id, binding.ResourceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = next
+	}
+	return chain, id
+}
+
+// walkDefaultID mirrors the publish command's default-ID resolution: follow
+// retired bindings from root and stop at the first ID that is absent or live.
+func walkDefaultID(t *testing.T, state connectorResourcesState, root string) string {
+	t.Helper()
+	id := root
+	for range state.Retired {
+		binding, bound := state.Bindings[id]
+		if !bound || !state.Retired[id] {
+			return id
+		}
+		next, err := ReplacementConnectorID(id, binding.ResourceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = next
+	}
+	return id
+}
+
+// TestConnectorResourceRetiredEvictionKeepsLiveTailedChains proves what
+// eviction does to a default-ID chain. Links of a chain that still ends in a
+// live share are never cut while anything else can be forgotten, so the
+// publish command keeps resolving to that live share; a chain whose tail was
+// itself deleted is cut wherever key order says and restarts there, with the
+// links beyond the cut decaying as ordinary leftovers; and when every
+// remembered retirement leads to a live share, the forced cut lands on one
+// link only and the walk restarts at it.
+func TestConnectorResourceRetiredEvictionKeepsLiveTailedChains(t *testing.T) {
+	t.Parallel()
+	const root = "chain-root"
+	fill := func(t *testing.T, state *connectorResourcesState, count int) {
+		t.Helper()
+		for i := 0; i < count; i++ {
+			binding := testResourceBinding(t, fmt.Sprintf("old-%04d", i))
+			state.Bindings[binding.ConnectorID] = binding
+			state.Retired[binding.ConnectorID] = true
+		}
+	}
+	retireLive := func(t *testing.T, store *Store, id string) connectorResourcesState {
+		t.Helper()
+		live := testResourceBinding(t, id)
+		commitTestBinding(t, store, &live)
+		retired, err := store.RetireConnectorResource(context.Background(), live.CRID)
+		if err != nil || !retired {
+			t.Fatalf("RetireConnectorResource(%s) = %t, %v, want true", id, retired, err)
+		}
+		loaded, err := loadConnectorResources(store.Dir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded.Retired) != connectorResourcesMaxRetired || !loaded.Retired[id] {
+			t.Fatalf("after retiring %s: %d retired (want %d), kept=%t", id, len(loaded.Retired), connectorResourcesMaxRetired, loaded.Retired[id])
+		}
+		return loaded
+	}
+
+	t.Run("live tail is never cut", func(t *testing.T) {
+		t.Parallel()
+		store := openTestStore(t)
+		state := emptyConnectorResourcesState()
+		chain, tail := testRetiredChain(t, &state, root, 2)
+		live := testResourceBinding(t, tail)
+		state.Bindings[tail] = live
+		fill(t, &state, connectorResourcesMaxRetired-len(chain))
+		if err := writeConnectorResources(store.Dir(), state); err != nil {
+			t.Fatal(err)
+		}
+		loaded := retireLive(t, store, "zz-extra")
+		for _, link := range chain {
+			if !loaded.Retired[link] || loaded.Bindings[link] != state.Bindings[link] {
+				t.Fatalf("chain link %s was cut: retired=%t binding=%+v", link, loaded.Retired[link], loaded.Bindings[link])
+			}
+		}
+		if loaded.Bindings[tail] != live || loaded.Retired[tail] {
+			t.Fatalf("live tail changed: %+v retired=%t", loaded.Bindings[tail], loaded.Retired[tail])
+		}
+		if _, bound := loaded.Bindings["old-0000"]; bound {
+			t.Fatal("the oldest-in-file unlinked retirement should have been forgotten instead")
+		}
+		if got := walkDefaultID(t, loaded, root); got != tail {
+			t.Fatalf("default walk resolved %q, want the live tail %q", got, tail)
+		}
+	})
+
+	t.Run("deleted tail restarts at the cut and decays", func(t *testing.T) {
+		t.Parallel()
+		store := openTestStore(t)
+		state := emptyConnectorResourcesState()
+		chain, tail := testRetiredChain(t, &state, root, 3)
+		fill(t, &state, connectorResourcesMaxRetired-len(chain))
+		if err := writeConnectorResources(store.Dir(), state); err != nil {
+			t.Fatal(err)
+		}
+		// Nothing leads to a live share, so key order decides: the root sorts
+		// before every "local-" link and every "old-" leftover.
+		loaded := retireLive(t, store, "zz-extra")
+		if _, bound := loaded.Bindings[root]; bound || loaded.Retired[root] {
+			t.Fatalf("root should have been cut: bound=%t retired=%t", bound, loaded.Retired[root])
+		}
+		if got := walkDefaultID(t, loaded, root); got != root {
+			t.Fatalf("default walk resolved %q, want a restart at the cut root %q", got, root)
+		}
+		for _, link := range chain[1:] {
+			if !loaded.Retired[link] {
+				t.Fatalf("link %s beyond the cut should still be remembered for now", link)
+			}
+		}
+		if _, bound := loaded.Bindings[tail]; bound {
+			t.Fatalf("deleted tail %s should never have been bound", tail)
+		}
+		// The orphaned links beyond the cut are ordinary leftovers now: the next
+		// eviction takes one of them (every "local-" link sorts ahead of every
+		// "old-" entry; which link is key order among the links themselves).
+		loaded = retireLive(t, store, "zz-extra-2")
+		decayed := 0
+		for _, link := range chain[1:] {
+			if _, bound := loaded.Bindings[link]; !bound && !loaded.Retired[link] {
+				decayed++
+			}
+		}
+		if decayed != 1 {
+			t.Fatalf("%d orphaned links decayed on the next eviction, want exactly one", decayed)
+		}
+		if _, bound := loaded.Bindings["old-0000"]; !bound {
+			t.Fatal("an old leftover was evicted ahead of an orphaned link")
+		}
+	})
+
+	t.Run("forced cut when every retirement leads to a live share", func(t *testing.T) {
+		t.Parallel()
+		store := openTestStore(t)
+		state := emptyConnectorResourcesState()
+		chain, tail := testRetiredChain(t, &state, root, connectorResourcesMaxRetired)
+		live := testResourceBinding(t, tail)
+		state.Bindings[tail] = live
+		if err := writeConnectorResources(store.Dir(), state); err != nil {
+			t.Fatal(err)
+		}
+		loaded := retireLive(t, store, "zz-extra")
+		cut := 0
+		for _, link := range chain {
+			if _, bound := loaded.Bindings[link]; !bound {
+				cut++
+			}
+		}
+		if cut != 1 {
+			t.Fatalf("forced eviction cut %d links, want exactly one", cut)
+		}
+		if loaded.Bindings[tail] != live || loaded.Retired[tail] {
+			t.Fatalf("live tail changed: %+v retired=%t", loaded.Bindings[tail], loaded.Retired[tail])
+		}
+		got := walkDefaultID(t, loaded, root)
+		if _, bound := loaded.Bindings[got]; bound || got == tail {
+			t.Fatalf("default walk resolved %q, want a restart at the cut link", got)
+		}
+	})
+}
+
+func TestReplacementConnectorID(t *testing.T) {
+	t.Parallel()
+	first, err := ReplacementConnectorID("local-a234567890123456", strings.Repeat("a", 91))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := ReplacementConnectorID("local-a234567890123456", strings.Repeat("a", 91))
+	other, _ := ReplacementConnectorID("local-a234567890123456", strings.Repeat("b", 91))
+	if first != again || first == other || !strings.HasPrefix(first, "local-") || len(first) != len("local-")+16 {
+		t.Fatalf("replacement IDs first=%q again=%q other=%q", first, again, other)
+	}
+	if err := validateConnectorID(first); err != nil {
+		t.Fatalf("replacement ID invalid: %v", err)
+	}
+	if _, err := ReplacementConnectorID("", "resource"); err == nil {
+		t.Fatal("empty predecessor identity was accepted")
+	}
+	if _, err := ReplacementConnectorID("local-a234567890123456", " "); err == nil {
+		t.Fatal("blank resource identity was accepted")
+	}
+}
+
+// TestReplacementConnectorIDGolden pins the derivation to the value the
+// publish command produced before it moved here, so a drift in the domain
+// string or encoding cannot silently change every existing user's next
+// default Connector ID.
+func TestReplacementConnectorIDGolden(t *testing.T) {
+	t.Parallel()
+	got, err := ReplacementConnectorID("local-a234567890123456", strings.Repeat("a", 91))
+	if err != nil || got != "local-knu7h5msm6nxb3nf" {
+		t.Fatalf("ReplacementConnectorID() = %q, %v, want %q", got, err, "local-knu7h5msm6nxb3nf")
+	}
 }
