@@ -130,6 +130,9 @@ describe('Discord install callback', () => {
       expect(DISCORD_INSTALL_SESSION_COOKIE).toMatch(/^__Host-/);
       expect(cookieHeader).toMatch(/Secure/i);
       expect(cookieHeader).toMatch(/Path=\/(?:;|\s|$)/);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_SESSION_COOKIE)).toBeNull();
+      expect(cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE)).toBeNull();
     });
 
     it('mints a fresh install state for every request', async () => {
@@ -172,7 +175,7 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/Secure/i);
     });
 
-    it('keeps the shared OAuth rate limiter mounted on the public install entrypoint', async () => {
+    it('keeps a bounded OAuth rate limiter mounted on the public install entrypoint', async () => {
       for (let i = 0; i < config.RATE_LIMIT_MAX_REQUESTS; i++) {
         // Sequential requests make the expected bucket consumption explicit.
         // Each response is a local redirect; no Discord network call occurs.
@@ -184,6 +187,31 @@ describe('Discord install callback', () => {
       const throttled = await request(app).get('/oauth/discord/install');
       expect(throttled.status).toBe(429);
       expect(throttled.text).toContain('Slow Down');
+    });
+
+    it('does not let install-page traffic consume the in-flight callback budget', async () => {
+      for (let i = 0; i < config.RATE_LIMIT_MAX_REQUESTS; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await request(app).get('/oauth/discord/install');
+      }
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({
+            access_token: 'disc-token', guild: { id: 'guild-1' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+
+      const callback = await discordCallback(
+        '/oauth/discord/callback?code=ok-code&guild_id=guild-1',
+      );
+
+      expect(callback.status).toBe(302);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -269,7 +297,7 @@ describe('Discord install callback', () => {
       expect(clearedCookieHeader(
         res.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
-      )).toBeDefined();
+      )).toBeUndefined();
     });
 
     it('uses one CSP nonce in the HTTP header and style tag', async () => {
@@ -325,7 +353,7 @@ describe('Discord install callback', () => {
       expect(clearedCookieHeader(
         res.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
-      )).toBeDefined();
+      )).toBeUndefined();
     });
 
     it('502s when Discord token exchange fails', async () => {

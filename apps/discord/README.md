@@ -105,6 +105,7 @@ setup) means required to use that feature.
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
+| `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
 | `QURL_API_KEY` | No | Optional fallback qURL API key. Each server normally connects its own key via `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
@@ -189,7 +190,8 @@ See `.env.example` for the local-development environment setup.
 - **Connector** — uploads and serves shared files through the qURL connector
   behind an SSRF-guarded fetch.
 - **HTTP surface** — `/health` for load-balancer probes, `/metrics` (bearer
-  authenticated), and the OAuth callback that completes the `/qurl setup` flow.
+  authenticated), `/oauth/discord/install` plus its callback for customer
+  installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
 ## Troubleshooting
 

@@ -23,7 +23,8 @@ function renderNotConfiguredPage(res, surface, reason) {
   // Belt-and-suspenders: pin the log shape so on-call has a uniform
   // grep target across both routers (`/qurl-setup not configured`
   // and `discord-install not configured`).
-  const context = surface.startsWith('discord-install') ? 'discord-install' : 'qurl-setup';
+  const isDiscordInstall = typeof surface === 'string' && surface.startsWith('discord-install');
+  const context = isDiscordInstall ? 'discord-install' : 'qurl-setup';
   logger.info(`${context} not configured`, { reason });
 
   let message;
@@ -37,9 +38,9 @@ function renderNotConfiguredPage(res, surface, reason) {
   }
 
   return res.status(503).send(res.renderPage({
-    title: surface.startsWith('discord-install') ? 'Discord Install Not Configured' : 'qURL Setup Not Configured',
+    title: isDiscordInstall ? 'Discord Install Not Configured' : 'qURL Setup Not Configured',
     icon: '⚠️',
-    heading: surface.startsWith('discord-install')
+    heading: isDiscordInstall
       ? 'Discord install is not configured yet'
       : 'qURL setup is not configured yet',
     message,

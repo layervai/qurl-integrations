@@ -33,7 +33,7 @@ const config = require('../config');
 const logger = require('../logger');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { createPkcePair } = require('../utils/oauth-pkce');
-const { rateLimit } = require('../utils/oauth-rate-limit');
+const { rateLimit, installRateLimit } = require('../utils/oauth-rate-limit');
 const {
   DISCORD_INSTALL_SESSION_COOKIE,
   setQurlOAuthCookie,
@@ -80,7 +80,7 @@ function installStateMatches(req, state) {
   return timingSafeStringEqual(cookieState, state);
 }
 
-router.get('/install', rateLimit, (req, res) => {
+router.get('/install', installRateLimit, (req, res) => {
   if (!config.isDiscordInstallConfigured) {
     return renderNotConfiguredPage(res, 'discord-install-entry', config.discordInstallNotConfiguredReason);
   }
@@ -132,10 +132,6 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
-  // Consume the install session before any external call. A timeout may leave
-  // the Discord code's redemption state ambiguous, so retries intentionally
-  // restart from the stable /install entrypoint instead of replaying callback.
-  clearDiscordInstallSessionCookie(res);
   // Round-9 item #5: funnel through singleStringParam for symmetry.
   const errorParam = singleStringParam(req.query.error);
   if (errorParam) {
@@ -152,6 +148,11 @@ router.get('/callback', rateLimit, async (req, res) => {
   if (!code) {
     return renderError(res, 400, 'Missing authorization code', 'Discord did not return an authorization code.');
   }
+  // Ask the browser to consume the install session immediately before the
+  // first external call. Declined/malformed callbacks preserve it because no
+  // Discord code could have been redeemed; once exchange begins, a timeout can
+  // leave redemption ambiguous and recovery intentionally restarts at /install.
+  clearDiscordInstallSessionCookie(res);
   if (grantedPermissions && grantedPermissions !== DISCORD_BOT_PERMISSIONS) {
     // Diagnostic only: Discord's installed role/channel overrides remain
     // authoritative. The command-side permission check gives the admin the

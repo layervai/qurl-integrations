@@ -1,11 +1,10 @@
 // Shared rate-limit middleware for OAuth callback routes.
 //
 // Extracted from src/routes/oauth.js so the GitHub OAuth flow, the qURL
-// OAuth flow, and the Discord install flow all share the same per-IP
-// budget — otherwise each router carries its own counter and an attacker
-// can amplify by hammering the same IP across multiple routes.
-// The public Discord install entrypoint also spends this callback budget, so a
-// large burst behind one NAT can temporarily throttle an in-flight callback.
+// OAuth flow, and the Discord install callback share the same per-IP budget.
+// The public Discord install entrypoint gets a separate bucket in the same
+// bounded store: entry-page traffic must not starve an in-flight callback,
+// whose short-lived Discord authorization code cannot simply wait out a 429.
 //
 // SCALING: single-instance only. If this bot ever runs horizontally
 // (multiple ECS tasks behind a LB), move this to Redis so limits are
@@ -40,15 +39,16 @@ const MAX_REQUESTS_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
 // until the next sweep reclaims space — better to shed load than OOM.
 const MAX_STORE_SIZE = 20000;
 
-function rateLimit(req, res, next) {
+function rateLimitForBucket(bucket, req, res, next) {
   const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
+  const storeKey = `${bucket}:${ip}`;
   const now = Date.now();
   const windowStart = now - config.RATE_LIMIT_WINDOW_MS;
 
   // Hard memory ceiling: if the store is already at MAX_STORE_SIZE and
   // this is a new IP, shed the request rather than grow the Map further.
   // Known IPs still get served because they're not growing the Map.
-  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
+  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(storeKey)) {
     logger.warn('Rate limit store at hard cap, rejecting new IP', { ip, size: rateLimitStore.size });
     return res.status(429).send(res.renderPage({
       title: 'Too Many Requests',
@@ -59,9 +59,9 @@ function rateLimit(req, res, next) {
     }));
   }
 
-  const requests = (rateLimitStore.get(ip) || []).filter(time => time > windowStart);
+  const requests = (rateLimitStore.get(storeKey) || []).filter(time => time > windowStart);
   if (requests.length >= config.RATE_LIMIT_MAX_REQUESTS) {
-    logger.warn('OAuth rate limit exceeded', { ip, path: req.path });
+    logger.warn('OAuth rate limit exceeded', { ip, path: req.path, bucket });
     return res.status(429).send(res.renderPage({
       title: 'Too Many Requests',
       icon: '⏳',
@@ -77,7 +77,7 @@ function rateLimit(req, res, next) {
   if (requests.length > MAX_REQUESTS_PER_IP) {
     requests.splice(0, requests.length - MAX_REQUESTS_PER_IP);
   }
-  rateLimitStore.set(ip, requests);
+  rateLimitStore.set(storeKey, requests);
   // Under a distributed attack from many unique IPs, evicting only one
   // entry at a time can't keep up. When we cross 10k, drop the oldest
   // 10% (Map iteration is insertion order) so the store reclaims
@@ -94,4 +94,12 @@ function rateLimit(req, res, next) {
   return next();
 }
 
-module.exports = { rateLimit, rateLimitStore };
+function rateLimit(req, res, next) {
+  return rateLimitForBucket('callback', req, res, next);
+}
+
+function installRateLimit(req, res, next) {
+  return rateLimitForBucket('discord-install-entry', req, res, next);
+}
+
+module.exports = { rateLimit, installRateLimit, rateLimitStore };
