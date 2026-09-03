@@ -5,7 +5,8 @@ describe('utils/cookies', () => {
     it.each([
       ['same', 'same', true],
       ['same', 'different', false],
-      ['', '', true],
+      // CSRF bindings must fail closed when both inputs are absent/empty.
+      ['', '', false],
       ['é', 'é', true],
       ['é', 'e', false],
       [null, 'same', false],

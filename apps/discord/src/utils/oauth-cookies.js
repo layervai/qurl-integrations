@@ -16,8 +16,11 @@ const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
 const QURL_OAUTH_PKCE_COOKIE = 'qurl_setup_pkce';
 const QURL_OAUTH_COOKIE_PATH = '/oauth/qurl';
 const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
-const DISCORD_INSTALL_SESSION_COOKIE = 'qurl_discord_install_session';
-const DISCORD_INSTALL_COOKIE_PATH = '/oauth/discord';
+// The install flow accepts a Discord guild binding, so prevent sibling
+// subdomains from shadowing this cookie. __Host- requires Secure, Path=/,
+// and no Domain attribute.
+const DISCORD_INSTALL_SESSION_COOKIE = '__Host-qurl_discord_install_session';
+const DISCORD_INSTALL_COOKIE_PATH = '/';
 // Discord's authorization-code callback is interactive and can include a
 // server picker, so its browser binding gets ten minutes rather than the
 // five-minute qURL setup window.
@@ -29,10 +32,10 @@ const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
 // in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
 // — flipping that off would silently downgrade prod cookies. Keeping
 // the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
-function setCookie(res, req, name, value, { path, ttlSeconds }) {
+function setCookie(res, req, name, value, { path, ttlSeconds, secure = req.protocol === 'https' }) {
   res.cookie(name, value, {
     httpOnly: true,
-    secure: req.protocol === 'https',
+    secure,
     sameSite: 'lax',
     maxAge: ttlSeconds * 1000,
     path,
@@ -59,6 +62,7 @@ function setDiscordInstallSessionCookie(res, req, state) {
   setCookie(res, req, DISCORD_INSTALL_SESSION_COOKIE, state, {
     path: DISCORD_INSTALL_COOKIE_PATH,
     ttlSeconds: DISCORD_INSTALL_COOKIE_TTL_SECONDS,
+    secure: true,
   });
 }
 
@@ -73,7 +77,10 @@ function clearQurlOAuthPkceCookie(res) {
 }
 
 function clearDiscordInstallSessionCookie(res) {
-  res.clearCookie(DISCORD_INSTALL_SESSION_COOKIE, { path: DISCORD_INSTALL_COOKIE_PATH });
+  res.clearCookie(DISCORD_INSTALL_SESSION_COOKIE, {
+    path: DISCORD_INSTALL_COOKIE_PATH,
+    secure: true,
+  });
 }
 
 module.exports = {

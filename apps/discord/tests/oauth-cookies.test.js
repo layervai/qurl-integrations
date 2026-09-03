@@ -96,7 +96,7 @@ describe('utils/oauth-cookies', () => {
   });
 
   describe('Discord install session cookie', () => {
-    it('uses a ten-minute host-only session scoped to /oauth/discord', () => {
+    it('uses a ten-minute __Host- session with Secure and Path=/', () => {
       const res = fakeRes();
 
       setDiscordInstallSessionCookie(res, { protocol: 'https' }, 'install-state');
@@ -114,14 +114,14 @@ describe('utils/oauth-cookies', () => {
       }]);
     });
 
-    it('clears with the same /oauth/discord path', () => {
+    it('clears with the same host-prefix attributes', () => {
       const res = fakeRes();
 
       clearDiscordInstallSessionCookie(res);
 
       expect(res.clearCookieCalls).toEqual([{
         name: DISCORD_INSTALL_SESSION_COOKIE,
-        opts: { path: DISCORD_INSTALL_COOKIE_PATH },
+        opts: { path: DISCORD_INSTALL_COOKIE_PATH, secure: true },
       }]);
     });
   });

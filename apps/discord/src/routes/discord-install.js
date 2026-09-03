@@ -61,8 +61,9 @@ function renderNotConfigured(res, reason, beforeInstall = false) {
 }
 
 // `detail` describes the immediate failure; we append a remediation
-// hint that fits AFTER a Discord OAuth handshake failure (bot is
-// already installed, retry through /qurl setup in-Discord). Other
+// hint that fits any failure during the callback. Discord's external
+// Require OAuth2 Code Grant setting determines whether the bot is already
+// installed, so offer both safe recovery paths. Other
 // surfaces (the encryption-at-rest 503) use res.renderPage directly with
 // surface-specific copy — see the inline call site.
 function renderError(res, statusCode, headline, detail) {
@@ -70,7 +71,7 @@ function renderError(res, statusCode, headline, detail) {
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' If the bot is already in your server, run /qurl setup directly.',
+    message: detail + ' Start again from Add to Discord. If the bot is already in your server, you can instead run /qurl setup.',
     type: 'error',
   }));
 }
@@ -117,23 +118,24 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Single log line lives in renderNotConfiguredPage (round-9 item
     // #7). Reason is computed here because the helper would otherwise
     // need access to two config flags.
-    return renderNotConfigured(res, notConfiguredReason(), true);
+    return renderNotConfigured(res, notConfiguredReason());
   }
   const installState = singleStringParam(req.query.state);
   const stateMatches = installStateMatches(req, installState);
   if (!stateMatches) {
     logger.warn('Discord install callback rejected invalid session state', { ip: req.ip });
-    return renderError(res, 400, 'Invalid install link', 'Start again from the Add to Discord button on layerv.ai.');
+    return renderError(res, 400, 'Invalid install link', 'This install session is invalid or expired.');
   }
 
   // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. With
-  // Require OAuth2 Code Grant enabled, Discord has not installed the bot yet;
-  // installation finishes only after the code exchange below. Without this,
+  // Require OAuth2 Code Grant should be enabled so Discord has not installed
+  // the bot yet, but that Developer Portal setting is external to this service.
+  // Without this,
   // we'd burn the Discord code on a token exchange + a Users /@me round-trip
   // + an Auth0 round-trip before failing at the qURL callback's persist-time
   // guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
-    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset', true);
+    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset');
   }
   clearDiscordInstallSessionCookie(res);
   // Round-9 item #5: funnel through singleStringParam for symmetry.

@@ -30,7 +30,7 @@ function renderNotConfiguredPage(res, surface, reason) {
   if (surface === 'discord-install-entry') {
     message = 'Nothing was installed. Try Add to Discord again after your layerv.ai operator finishes provisioning, or contact them out of band.';
   } else if (surface === 'discord-install') {
-    message = 'The bot was added to your server. Setup will be available once your layerv.ai operator finishes provisioning — try /qurl setup in your server later, or contact them out of band.';
+    message = 'The bot may already be in your server. If it is, run /qurl setup after your layerv.ai operator finishes provisioning. Otherwise, try Add to Discord again then, or contact them out of band.';
   } else {
     message = 'The Auth0 application for the qURL Discord bot has not been registered yet. '
       + 'Run /qurl setup again later, or contact your layerv.ai admin.';

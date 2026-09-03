@@ -36,6 +36,7 @@ function timingSafeStringEqual(left, right) {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length === 0 || rightBuffer.length === 0) return false;
   return leftBuffer.length === rightBuffer.length
     && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }

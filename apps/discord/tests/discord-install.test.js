@@ -59,12 +59,13 @@ const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
+  DISCORD_INSTALL_SESSION_COOKIE,
 } = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
+const { rateLimitStore } = require('../src/utils/oauth-rate-limit');
 const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
-const DISCORD_INSTALL_SESSION_COOKIE = 'qurl_discord_install_session';
 const DISCORD_INSTALL_STATE = 'a'.repeat(43);
 
 function discordCallback(query, { cookieState = DISCORD_INSTALL_STATE } = {}) {
@@ -88,6 +89,7 @@ function extractStyleNonce(res) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  rateLimitStore.clear();
   globalThis.fetch = originalFetch;
 });
 
@@ -119,7 +121,9 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
       expect(cookieHeader).toMatch(/Max-Age=600/i);
-      expect(cookieHeader).toMatch(/Path=\/oauth\/discord(?:;|\s|$)/);
+      expect(DISCORD_INSTALL_SESSION_COOKIE).toMatch(/^__Host-/);
+      expect(cookieHeader).toMatch(/Secure/i);
+      expect(cookieHeader).toMatch(/Path=\/(?:;|\s|$)/);
     });
 
     it('mints a fresh install state for every request', async () => {
@@ -148,10 +152,8 @@ describe('Discord install callback', () => {
       }
     });
 
-    it('sets Secure on the install-session cookie behind the production proxy', async () => {
-      const res = await request(app)
-        .get('/oauth/discord/install')
-        .set('X-Forwarded-Proto', 'https');
+    it('sets Secure on the host-prefixed install-session cookie even on local HTTP', async () => {
+      const res = await request(app).get('/oauth/discord/install');
 
       const cookieHeader = Array.isArray(res.headers['set-cookie'])
         ? res.headers['set-cookie'].join('\n')
@@ -185,11 +187,23 @@ describe('Discord install callback', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
+    it('rejects duplicate install-session cookies before Discord token exchange', async () => {
+      globalThis.fetch = jest.fn();
+      const res = await request(app)
+        .get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${DISCORD_INSTALL_STATE}`)
+        .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}; ${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}`);
+
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('invalid or expired');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it('validates state before returning a generic KEY_ENCRYPTION_KEY 503', async () => {
       // With Require OAuth2 Code Grant enabled, Discord does not finish
       // installing the bot until the code exchange succeeds. Failing here
-      // saves the code from being burned on a doomed flow and must not tell
-      // the admin that the bot is already installed.
+      // saves the code from being burned on a doomed flow. The service cannot
+      // observe Discord's external Code Grant setting, so recovery must cover
+      // both the installed and not-yet-installed states.
       const saved = process.env.KEY_ENCRYPTION_KEY;
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
@@ -201,8 +215,8 @@ describe('Discord install callback', () => {
         expect(invalid.text).toContain('Invalid install link');
         expect(res.status).toBe(503);
         expect(res.text).toMatch(/not configured/i);
-        expect(res.text).toContain('Nothing was installed');
-        expect(res.text).not.toContain('The bot was added');
+        expect(res.text).toContain('may already be in your server');
+        expect(res.text).toContain('/qurl setup');
         expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
@@ -265,6 +279,21 @@ describe('Discord install callback', () => {
       });
 
       const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+
+      expect(res.status).toBe(502);
+      expect(res.text).toContain('Discord returned an unexpected response');
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('502s when Discord token response returns a non-string guild ID', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve({
+          access_token: 'disc-token', token_type: 'Bearer', guild: { id: 123 },
+        }),
+      });
+
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123');
 
       expect(res.status).toBe(502);
       expect(res.text).toContain('Discord returned an unexpected response');
@@ -372,8 +401,7 @@ describe('Discord install callback', () => {
     });
 
     it('consumes the install-session cookie after a valid callback', async () => {
-      const agent = request.agent(app);
-      const install = await agent.get('/oauth/discord/install');
+      const install = await request(app).get('/oauth/discord/install');
       const state = new URL(install.headers.location).searchParams.get('state');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -388,10 +416,16 @@ describe('Discord install callback', () => {
         });
       const callback = `/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${state}`;
 
-      const first = await agent.get(callback);
-      const replay = await agent.get(callback);
+      const first = await request(app)
+        .get(callback)
+        .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${state}`);
+      const replay = await request(app).get(callback);
 
       expect(first.status).toBe(302);
+      expect(clearedCookieHeader(
+        first.headers['set-cookie'],
+        DISCORD_INSTALL_SESSION_COOKIE,
+      )).toMatch(/Secure/i);
       expect(replay.status).toBe(400);
       expect(replay.text).toContain('Invalid install link');
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
@@ -587,7 +621,13 @@ describe('discord-install — not configured', () => {
           expect(res.text).not.toMatch(/AUTH0_[A-Z_]+/);
           expect(res.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
           expect(res.text).not.toMatch(/Reason:/i);
+          expect(cookieValue(
+            res.headers['set-cookie'],
+            DISCORD_INSTALL_SESSION_COOKIE,
+          )).toBeNull();
         }
+        expect(responses[0].text).toContain('Nothing was installed');
+        expect(responses[1].text).toContain('may already be in your server');
       });
     } finally {
       Object.assign(process.env, saved);
@@ -635,6 +675,10 @@ describe('discord-install — not configured', () => {
             expect(res.text).not.toMatch(/DISCORD_CLIENT_ID/);
             expect(res.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
             expect(res.text).not.toMatch(/Reason:/i);
+            expect(cookieValue(
+              res.headers['set-cookie'],
+              DISCORD_INSTALL_SESSION_COOKIE,
+            )).toBeNull();
           }
         });
       } finally {
