@@ -16,7 +16,9 @@ process.env.AUTH0_CLIENT_ID = 'test-auth0-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-auth0-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.DISCORD_CLIENT_ID = '234567890123456789';
-process.env.DISCORD_CLIENT_SECRET = 'test-discord-secret';
+// Real SSM writes can accidentally carry surrounding whitespace. Config must
+// normalize it once so the Discord token exchange receives the actual secret.
+process.env.DISCORD_CLIENT_SECRET = ' test-discord-secret\n';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.GUILD_ID = '123456789012345678';
@@ -184,10 +186,10 @@ describe('Discord install callback', () => {
     });
 
     it('validates state before returning a generic KEY_ENCRYPTION_KEY 503', async () => {
-      // Bot is in the server already (Discord install ran), but the
-      // chained Auth0 leg can't safely proceed without encryption-at-
-      // rest configured. Failing here saves the Discord code from
-      // being burned on a doomed flow.
+      // With Require OAuth2 Code Grant enabled, Discord does not finish
+      // installing the bot until the code exchange succeeds. Failing here
+      // saves the code from being burned on a doomed flow and must not tell
+      // the admin that the bot is already installed.
       const saved = process.env.KEY_ENCRYPTION_KEY;
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
@@ -199,6 +201,8 @@ describe('Discord install callback', () => {
         expect(invalid.text).toContain('Invalid install link');
         expect(res.status).toBe(503);
         expect(res.text).toMatch(/not configured/i);
+        expect(res.text).toContain('Nothing was installed');
+        expect(res.text).not.toContain('The bot was added');
         expect(res.text).not.toContain('KEY_ENCRYPTION_KEY');
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;

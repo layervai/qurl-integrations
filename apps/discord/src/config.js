@@ -246,6 +246,7 @@ const isQurlOAuthConfigured = Boolean(
 const discordClientId = process.env.DISCORD_CLIENT_ID;
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
+const normalizedDiscordClientSecret = discordClientSecret?.trim();
 let discordInstallNotConfiguredReason = null;
 if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
@@ -253,9 +254,9 @@ if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
 } else if (!DISCORD_SNOWFLAKE_RE.test(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
-} else if (!discordClientSecret) {
+} else if (!normalizedDiscordClientSecret) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
-} else if (discordClientSecret.trim() === SSM_PLACEHOLDER_SENTINEL) {
+} else if (normalizedDiscordClientSecret === SSM_PLACEHOLDER_SENTINEL) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
 }
 const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
@@ -337,7 +338,7 @@ module.exports = {
   // installs the bot via the install link. Optional: omit and the
   // /oauth/discord/callback route will return 503 with a documented
   // "not configured" page until an operator sets the secret.
-  DISCORD_CLIENT_SECRET: discordClientSecret,
+  DISCORD_CLIENT_SECRET: normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,

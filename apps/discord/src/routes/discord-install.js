@@ -117,7 +117,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Single log line lives in renderNotConfiguredPage (round-9 item
     // #7). Reason is computed here because the helper would otherwise
     // need access to two config flags.
-    return renderNotConfigured(res, notConfiguredReason());
+    return renderNotConfigured(res, notConfiguredReason(), true);
   }
   const installState = singleStringParam(req.query.state);
   const stateMatches = installStateMatches(req, installState);
@@ -126,15 +126,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 400, 'Invalid install link', 'Start again from the Add to Discord button on layerv.ai.');
   }
 
-  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start.
-  // Bot is already in the server at this point (Discord install ran
-  // before this redirect), so failing here just blocks the chained
-  // qURL OAuth — admin can run /qurl setup later to retry. Without
-  // this, we'd burn the Discord code on a token exchange + a Users
-  // /@me round-trip + an Auth0 round-trip before failing at the qURL
-  // callback's persist-time guard.
+  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. With
+  // Require OAuth2 Code Grant enabled, Discord has not installed the bot yet;
+  // installation finishes only after the code exchange below. Without this,
+  // we'd burn the Discord code on a token exchange + a Users /@me round-trip
+  // + an Auth0 round-trip before failing at the qURL callback's persist-time
+  // guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
-    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset');
+    return renderNotConfigured(res, 'KEY_ENCRYPTION_KEY unset', true);
   }
   clearDiscordInstallSessionCookie(res);
   // Round-9 item #5: funnel through singleStringParam for symmetry.
