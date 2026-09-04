@@ -46,6 +46,10 @@ jest.mock('../src/store', () => ({
   consumePendingLink: jest.fn(),
 }));
 
+jest.mock('../src/guild-webhook-link', () => ({
+  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+}));
+
 // commands.js still requires verifyStateBinding for the GitHub OAuth route;
 // stub it to avoid pulling in the full command tree at module load.
 jest.mock('../src/commands', () => ({
@@ -72,6 +76,7 @@ const config = require('../src/config');
 const db = require('../src/store');
 const discord = require('../src/discord');
 const logger = require('../src/logger');
+const guildWebhookLink = require('../src/guild-webhook-link');
 const { AUDIT_EVENTS } = require('../src/constants');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
@@ -80,6 +85,7 @@ const {
 } = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
 const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
+const { rateLimitStore } = require('../src/utils/oauth-rate-limit');
 
 const originalFetch = globalThis.fetch;
 const TEST_PKCE_VERIFIER = 'a'.repeat(43);
@@ -115,6 +121,7 @@ function expectQurlOAuthCookiesCleared(res) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  rateLimitStore.clear();
   globalThis.fetch = originalFetch;
 });
 
@@ -452,6 +459,10 @@ describe('qurl-oauth routes', () => {
       // Failure path must not distort the dispatch / DM metrics —
       // sendDM is reserved for successful provisioning.
       expect(discord.sendDM).not.toHaveBeenCalled();
+      expect(logger.audit).not.toHaveBeenCalledWith(
+        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        expect.anything(),
+      );
     });
 
     it('falls through to generic 502 when qurl-service returns valid JSON without error.code', async () => {
@@ -511,6 +522,7 @@ describe('qurl-oauth routes', () => {
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
+        key_prefix: 'lv_live_abc1',
         qurl_account_subject_fingerprint: AUTH0_ABC_FINGERPRINT,
         qurl_account_fingerprint_key_epoch: SUBJECT_FINGERPRINT_KEY_EPOCH,
       });
@@ -591,6 +603,46 @@ describe('qurl-oauth routes', () => {
       expect(logger.warn).toHaveBeenCalledWith(
         'qURL OAuth audit fingerprint unavailable (setup continues)',
         expect.objectContaining({ guildId: 'guild-1' }),
+      );
+    });
+
+    it('degrades audit emission failures after persistence and still finishes setup', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      logger.audit.mockImplementationOnce(() => {
+        throw new Error('audit sink unavailable');
+      });
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({
+            data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' },
+          }),
+        });
+
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('qURL is connected');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2');
+      expect(discord.sendDM).toHaveBeenCalledWith(
+        'admin-2', expect.stringContaining('qURL is connected'),
+      );
+      expect(guildWebhookLink.fireAndForgetLinkGuildWebhookSubscription)
+        .toHaveBeenCalledWith({
+          guildId: 'guild-1',
+          apiKey: 'lv_live_abc',
+          via: 'oauth',
+          configuredBy: 'admin-2',
+        });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'qURL OAuth audit emission failed (setup continues)',
+        { error: 'audit sink unavailable', guildId: 'guild-1' },
       );
     });
 
@@ -745,23 +797,34 @@ describe('qurl-oauth routes', () => {
   });
 });
 
-// Separate describe — exercises the not-configured 503 path. Uses
-// jest.isolateModules with the AUTH0_* env vars temporarily wiped so
-// the route's `config.isQurlOAuthConfigured` evaluates false on this
-// branch only. Without isolateModules, unsetting env after `config.js`
-// has been required wouldn't change the cached `isQurlOAuthConfigured`.
-describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
-  it('returns 503 with a "not configured" page on /start', async () => {
+// Separate describe — exercises both not-configured 503 paths. Uses
+// jest.isolateModules so the route's derived configuration is evaluated
+// against each temporary env shape. Without isolateModules, changing env
+// after `config.js` has been required would leave its cached flags unchanged.
+describe('qurl-oauth — not configured', () => {
+  it.each([
+    ['AUTH0_* is unset', {
+      AUTH0_DOMAIN: undefined,
+      AUTH0_CLIENT_ID: undefined,
+      AUTH0_CLIENT_SECRET: undefined,
+      AUTH0_AUDIENCE: undefined,
+      AUTH0_EMAIL_CONNECTION: undefined,
+    }],
+    ['AUTH0_EMAIL_CONNECTION is rejected', {
+      AUTH0_EMAIL_CONNECTION: 'email!',
+    }],
+  ])('returns 503 from /start and /callback when %s', async (_label, overrides) => {
     const saved = {
       AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
       AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
       AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
       AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+      AUTH0_EMAIL_CONNECTION: process.env.AUTH0_EMAIL_CONNECTION,
     };
-    delete process.env.AUTH0_DOMAIN;
-    delete process.env.AUTH0_CLIENT_ID;
-    delete process.env.AUTH0_CLIENT_SECRET;
-    delete process.env.AUTH0_AUDIENCE;
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     try {
       await jest.isolateModulesAsync(async () => {
         // Re-mock dependencies inside the isolate so the freshly-loaded
@@ -813,7 +876,10 @@ describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
       });
     } finally {
       // Restore env so subsequent tests run against the configured router.
-      Object.assign(process.env, saved);
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 });

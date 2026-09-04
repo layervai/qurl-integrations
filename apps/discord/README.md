@@ -37,7 +37,7 @@ revocable at any time.
 | `self-destruct` | No | Countdown after the first open (default: no timer) |
 | `personal-message` | No | A note included in each recipient's DM |
 
-`/qurl map` shares a location instead of a file: it takes a required `location`
+When `MAP_COMMAND_ENABLED=true`, `/qurl map` shares a location instead of a file: it takes a required `location`
 (a Google Maps URL, or a place/address to search) in place of `attachment`, the
 same `recipients` / `expires-in` / `self-destruct` / `personal-message` options,
 and an optional `location-name` to override the label recipients see.
@@ -46,9 +46,25 @@ and an optional `location-name` to override the label recipients see.
 
 ### 1. Add the bot to your server
 
-Invite the qURL bot using the install link from your qURL operator. The bot
-requests only four permissions: **View Channels**, **Send Messages**,
-**Embed Links**, and **Use Application Commands**.
+Use the **Add to Discord** link on layerv.ai. It opens the bot's
+`/oauth/discord/install` endpoint, where the deployment builds the matching
+Discord authorization URL and chains the install into qURL sign-in. The
+Discord OAuth request includes `identify` because the callback uses
+`/users/@me` to bind setup to the installing admin. The Discord application
+must register the deployment's exact `/oauth/discord/callback` URL and enable
+**Require OAuth2 Code Grant** so Discord waits for the callback exchange before
+finishing the bot installation. The callback always binds the server from the
+authoritative guild in Discord's token response. Grant only **View Channels**, **Send Messages**,
+**Embed Links**, and **Use Application Commands** (permission bitfield
+`2147503104`).
+
+After seeding or rotating `DISCORD_CLIENT_SECRET`, restart the HTTP service;
+ECS injects the SSM value and the bot derives install readiness only at process
+start.
+
+**Require OAuth2 Code Grant** applies to the entire Discord application. Deploy
+the callback endpoint and register its exact URL before enabling the setting;
+legacy static invite links do not complete installation after it is enabled.
 
 > On the multi-tenant public bot, slash commands can take up to an hour to
 > appear the first time the bot joins a server, while Discord propagates the
@@ -57,10 +73,11 @@ requests only four permissions: **View Channels**, **Send Messages**,
 
 ### 2. Connect qURL (admin)
 
-A server admin runs `/qurl setup` once and follows the prompts to connect this
-server to its own qURL account — by authorizing qURL or entering an API key,
-depending on the deployment. The key is stored **encrypted at rest** and scoped
-to the server. Run `/qurl status` to confirm the connection.
+The Add to Discord flow prompts the installing admin to sign in to qURL and
+connects the server automatically. For a bot that is already installed, a
+server admin can run `/qurl setup` to complete or replace that connection. The
+key is stored **encrypted at rest** and scoped to the server. Run `/qurl status`
+to confirm the connection.
 
 ### 3. Share
 
@@ -88,13 +105,14 @@ setup) means required to use that feature.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | Yes | Discord bot token |
-| `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
+| `DISCORD_CLIENT_ID` | Customer install | Numeric Discord application ID for the one-click Add to Discord flow; `PLACEHOLDER` or a malformed value disables that flow |
+| `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
 | `QURL_API_KEY` | No | Optional fallback qURL API key. Each server normally connects its own key via `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
 | `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
-| `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
+| `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
@@ -175,7 +193,8 @@ See `.env.example` for the local-development environment setup.
 - **Connector** — uploads and serves shared files through the qURL connector
   behind an SSRF-guarded fetch.
 - **HTTP surface** — `/health` for load-balancer probes, `/metrics` (bearer
-  authenticated), and the OAuth callback that completes the `/qurl setup` flow.
+  authenticated), `/oauth/discord/install` plus its callback for customer
+  installs, and the qURL OAuth start/callback routes used by `/qurl setup`.
 
 ## Troubleshooting
 

@@ -1,4 +1,5 @@
 const os = require('os');
+const { SSM_PLACEHOLDER_SENTINEL } = require('./utils/ssm-placeholder');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
 // NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
@@ -164,6 +165,12 @@ function intEnv(key, defaultVal, opts = {}) {
   return v;
 }
 
+const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/;
+
+function isDiscordSnowflake(value) {
+  return typeof value === 'string' && DISCORD_SNOWFLAKE_RE.test(value);
+}
+
 // Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
 // Any other value — including an unset env, the literal string "PLACEHOLDER"
 // that SSM-seeded params carry, or a whitespace-only value — normalizes to
@@ -174,7 +181,7 @@ const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
   const trimmed = rawGuildId.trim();
-  if (/^\d{17,20}$/.test(trimmed)) {
+  if (isDiscordSnowflake(trimmed)) {
     normalizedGuildId = trimmed;
   } else {
     // logger isn't loaded this early in config import — use console directly.
@@ -221,48 +228,102 @@ function isValidAuth0DomainShape(d) {
   return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
 }
 
-function normalizeAuth0EmailConnection(raw) {
+function parseAuth0EmailConnection(raw) {
   const value = (raw || '').trim();
-  if (!value) return '';
-  if (value.length > 128
-      || value.toUpperCase() === 'PLACEHOLDER'
-      || !/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
-    // Keep the rest of the bot available and fall back to the explicitly
-    // logged unpinned flow. A malformed optional setting should not take down
-    // /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (received ${value.length} trimmed characters; must be at most 128 characters, must not be PLACEHOLDER, must begin and end with a letter or digit, and may contain only letters, digits, underscores, and hyphens); leaving Auth0 connection unpinned.`);
-    return '';
+  if (!value) return { value: '', state: 'unset' };
+  const isPlaceholder = value === SSM_PLACEHOLDER_SENTINEL;
+  if (isPlaceholder) {
+    // Infra seeds optional SSM values before their consumers are enabled.
+    // Treat that rollout state exactly like unset so adding the task-env
+    // plumbing cannot take customer install offline between deploys.
+    console.warn('[config] AUTH0_EMAIL_CONNECTION matches the reserved SSM placeholder; treating the connection pin as unset.');
+    return { value: '', state: 'unset' };
   }
-  return value;
+  let rejectionReason = null;
+  if (value.length > 128) {
+    rejectionReason = `received ${value.length} trimmed characters, which exceeds the 128-character limit`;
+  } else if (!/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
+    rejectionReason = 'contains characters outside the required [A-Za-z0-9_-] shape or does not begin and end with a letter or digit';
+  }
+  if (rejectionReason) {
+    // Keep the rest of the bot available while failing only OAuth setup
+    // closed. A malformed optional setting must not weaken account selection,
+    // but it also must not take down /qurl send, webhooks, or the gateway.
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); disabling OAuth setup until corrected while other bot operations remain available.`);
+    return { value: '', state: 'rejected' };
+  }
+  return { value, state: 'pinned' };
 }
 
-const auth0EmailConnection = normalizeAuth0EmailConnection(
-  process.env.AUTH0_EMAIL_CONNECTION,
-);
+const rawAuth0EmailConnection = process.env.AUTH0_EMAIL_CONNECTION;
+const {
+  value: auth0EmailConnection,
+  state: auth0EmailConnectionState,
+} = parseAuth0EmailConnection(rawAuth0EmailConnection);
+const isAuth0EmailConnectionRejected = auth0EmailConnectionState === 'rejected';
 
-// True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
-// well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
-// flow. False = degrade to the legacy modal-paste flow (kept until
-// Justin registers the Auth0 app + sets prod SSM secrets). Single
-// derivation point so commands.js + routes/qurl-oauth.js + server.js
-// agree on what "configured" means.
+// True when all four required Auth0 env vars are present and AUTH0_DOMAIN is
+// a well-shaped hostname. Keep this independent from the optional connection
+// pin: production boot checks still need to validate BASE_URL, encryption,
+// and state signing when the pin itself is malformed.
 const isQurlOAuthConfigured = Boolean(
   isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
   && process.env.AUTH0_CLIENT_ID
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,
 );
+// The user-facing setup routes require both the core Auth0 configuration and
+// an accepted optional connection policy. A rejected policy blocks setup
+// without suppressing independent boot diagnostics or normal bot operation.
+const isQurlSetupAvailable = isQurlOAuthConfigured
+  && !isAuth0EmailConnectionRejected;
+
+const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
+
+function canRetainSecureInstallCookie(baseUrl) {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol === 'https:') return true;
+    // Browsers treat localhost as a trustworthy development origin even over
+    // HTTP. Keep the documented local smoke-test path while rejecting staging
+    // and preview HTTP origins that silently discard the __Host- cookie.
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    return parsed.protocol === 'http:'
+      && (hostname === 'localhost' || hostname.endsWith('.localhost'));
+  } catch {
+    return false;
+  }
+}
 
 // True when the Stage-2 "Add to Discord, select server" install flow can
 // run end-to-end: needs the bot's Discord OAuth2 client secret (separate
 // from the bot token used for normal operations) on top of qURL OAuth.
-// The /oauth/discord/callback route gates on this; it returns 503 with a
-// "not configured" page when false, so the install link still completes
-// (bot lands in the server) but the chained Auth0 leg won't run until
-// Justin sets DISCORD_CLIENT_SECRET in SSM.
-const isDiscordInstallConfigured = Boolean(
-  isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
-);
+// The /oauth/discord/install and /callback routes gate on this; both return
+// a generic 503 page when false, so the first-party customer flow cannot
+// begin until every required Auth0 and Discord credential is configured.
+const discordClientId = process.env.DISCORD_CLIENT_ID;
+const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
+const normalizedDiscordClientId = discordClientId?.trim();
+const normalizedDiscordClientSecret = discordClientSecret?.trim();
+let discordInstallNotConfiguredReason = null;
+if (isAuth0EmailConnectionRejected) {
+  discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
+} else if (!isQurlOAuthConfigured) {
+  discordInstallNotConfiguredReason = 'AUTH0_* unset';
+} else if (!normalizedDiscordClientId) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
+} else if (normalizedDiscordClientId === SSM_PLACEHOLDER_SENTINEL) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
+} else if (!isDiscordSnowflake(normalizedDiscordClientId)) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
+} else if (!normalizedDiscordClientSecret) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
+} else if (normalizedDiscordClientSecret === SSM_PLACEHOLDER_SENTINEL) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
+} else if (!canRetainSecureInstallCookie(normalizedBaseUrl)) {
+  discordInstallNotConfiguredReason = 'BASE_URL cannot retain the Secure install cookie';
+}
+const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
 
 // Shard identifier for the shard-aware composite flow_id
 // (`<shard_id>#<guild_id>#<channel_id>#<user_id>`, see src/flow-id.js).
@@ -334,18 +395,25 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+  // Invalid values normalize to null so the optional customer-install route
+  // cannot build an OAuth URL for a placeholder/non-snowflake application ID.
+  // Normal command registration gets its app ID from Discord's READY payload.
+  DISCORD_CLIENT_ID: isDiscordSnowflake(normalizedDiscordClientId)
+    ? normalizedDiscordClientId
+    : null,
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
-  // installs the bot via the install link. Optional: omit and the
-  // /oauth/discord/callback route will return 503 with a documented
-  // "not configured" page until Justin sets the secret.
-  DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
+  // installs the bot via the install link. Omit it to disable the customer
+  // install flow: both /oauth/discord/install and its callback return a
+  // documented 503 until an operator sets the secret.
+  DISCORD_CLIENT_SECRET: normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
+  isQurlSetupAvailable,
   isDiscordInstallConfigured,
+  discordInstallNotConfiguredReason,
 
   // Legacy shared HMAC secret for OAuth state tokens. Retained as the
   // fallback below QURL_OAUTH_STATE_SECRET so a deploy that predates
@@ -379,8 +447,17 @@ module.exports = {
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
   // Optional Auth0 connection pinned on every Discord setup authorize
   // redirect. Validated at config load; unlike Slack, empty or unset means no
-  // pin (#1365).
+  // pin (#1365). The shared env-var name is an operator-facing cross-service
+  // contract, not permission to share one task env bundle: Discord and Slack
+  // deliberately read independently provisioned values during the staged
+  // rollout because Discord cannot pin until its Auth0 app enables email.
   AUTH0_EMAIL_CONNECTION: auth0EmailConnection,
+  // Parser-owned state keeps logs and route policy aligned without
+  // reconstructing whether an empty normalized value was unset or rejected.
+  auth0EmailConnectionState,
+  // Preserve the difference between intentionally unset and rejected input so
+  // structured boot telemetry cannot misreport a fail-open pin as "unset".
+  isAuth0EmailConnectionRejected,
 
   // Flow-dedicated HMAC secret for the qURL OAuth state token
   // (utils/qurl-oauth-state.js) — the preferred key, so ops can rotate
@@ -391,7 +468,7 @@ module.exports = {
 
   // Server
   PORT: intEnv('PORT', 3000),
-  BASE_URL: normalizeBaseUrl(process.env.BASE_URL),
+  BASE_URL: normalizedBaseUrl,
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
@@ -712,4 +789,5 @@ module.exports = {
   // Exposed as a function, NOT a property — second call returns
   // undefined.
   takeGatewayHandoffHmac,
+  isDiscordSnowflake,
 };

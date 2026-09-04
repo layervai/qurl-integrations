@@ -3,7 +3,6 @@
 // (routes/discord-install.js) also chains into. Step-by-step user
 // experience and CSRF posture live in the PR #177 description; Stage-2
 // confused-deputy mitigation is documented in discord-install.js.
-const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
 const db = require('../store');
@@ -17,7 +16,7 @@ const {
 } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
-const { readCookie } = require('../utils/cookies');
+const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
 const {
   buildAuth0AuthorizeUrl,
@@ -116,7 +115,7 @@ function clearQurlOAuthCookies(res) {
 // in a different browser, the cookie is absent and /callback rejects
 // before any Auth0 token exchange or qurl-service mint runs.
 router.get('/start', rateLimit, async (req, res) => {
-  if (!config.isQurlOAuthConfigured) {
+  if (!config.isQurlSetupAvailable) {
     // Single log line per request lives in renderNotConfiguredPage —
     // dropping the route-level warn (round-9 item #7 harmonization
     // with discord-install.js's surface).
@@ -155,7 +154,7 @@ router.get('/start', rateLimit, async (req, res) => {
 // Validate state, exchange code → access_token, mint a guild-scoped API
 // key on qurl-service, persist it via the Store abstraction, DM the admin.
 router.get('/callback', rateLimit, async (req, res) => {
-  if (!config.isQurlOAuthConfigured) {
+  if (!config.isQurlSetupAvailable) {
     clearQurlOAuthCookies(res);
     return renderNotConfigured(res);
   }
@@ -212,14 +211,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
-  // Both inputs are strings (cookieState early-returned if null;
-  // state came through singleStringParam, which returns '' for any
-  // non-string), so Buffer.from doesn't throw. Length check before
-  // timingSafeEqual handles the only remaining failure mode.
-  const cookieBuf = Buffer.from(cookieState);
-  const stateBuf = Buffer.from(state);
-  const cookieMatches = cookieBuf.length === stateBuf.length
-    && crypto.timingSafeEqual(cookieBuf, stateBuf);
+  const cookieMatches = timingSafeStringEqual(cookieState, state);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
     clearQurlOAuthCookies(res);
@@ -456,9 +448,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     guildId, configuredBy: discordUserId, keyPrefix,
   });
   // Audit evidence must never break setup. Compute only after persistence,
-  // on the path that emits it, and keep both values atomic so an epoch failure
-  // cannot leave a fingerprint that operators might compare without its
-  // rotation boundary.
+  // on the path that emits it. A fingerprint is never emitted without its
+  // epoch; an epoch without a fingerprint is expected when no verified Auth0
+  // subject was available and is inert for owner comparisons.
   let qurlAccountSubjectFingerprint = null;
   let qurlAccountFingerprintEpoch = null;
   try {
@@ -480,12 +472,22 @@ router.get('/callback', rateLimit, async (req, res) => {
   // across bind events to detect qURL-owner changes. The id_token is
   // JWKS-verified but not nonce-bound, so this is observability only; durable
   // owner identity and fail-closed comparison belong in #1366.
-  logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
-    guild_id: guildId,
-    configured_by: discordUserId,
-    qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
-    qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
-  });
+  try {
+    logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+      guild_id: guildId,
+      configured_by: discordUserId,
+      // Prefix is already shown in the success page and info log; including it
+      // makes this forensic event self-contained without exposing the API key.
+      key_prefix: keyPrefix || null,
+      qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
+      qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
+    });
+  } catch (err) {
+    logger.warn('qURL OAuth audit emission failed (setup continues)', {
+      error: err?.message,
+      guildId,
+    });
+  }
 
   // 3a. Link webhook view counting: reuse the default owner or provision
   //     a BYOK subscription. Fire-and-forget via the centralized helper.
