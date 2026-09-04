@@ -32,7 +32,7 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
-const { resourcePath } = require('../src/utils/resource-id');
+const { qurlApiErrorMessage, resourcePath } = require('../src/utils/resource-id');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
@@ -508,7 +508,9 @@ describe('reclaim', () => {
   it('revokes the rest when one resource fails', async () => {
     const ledger = tempLedger(['r_1', 'r_2', 'r_3', 'r_4', 'r_5'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      if (id === 'r_2') throw new Error('qURL API DELETE /resources/r_2 failed (500)');
+      if (id === 'r_2') {
+        throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 500));
+      }
     });
 
     const result = await reclaim(ledger);
@@ -526,20 +528,24 @@ describe('reclaim', () => {
     // thousands of ids would print thousands of "1x" lines instead of one.
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      throw new Error(`qURL API DELETE ${resourcePath(id)} failed (401)`);
+      throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 401));
     });
 
     const result = await reclaim(ledger);
 
     expect(result).toMatchObject({ revoked: 0, failed: 3 });
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('3x qURL API DELETE /resources/<id> failed (401)'),
+      expect.stringContaining(
+        `3x ${qurlApiErrorMessage('DELETE', resourcePath('<id>'), 401)}`,
+      ),
     );
   });
 
   it('counts an already-gone resource as revoked, not failed', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(new Error('qURL API DELETE /resources/r_1 failed (404)'));
+    deleteLink.mockRejectedValue(
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_1'), 404)),
+    );
 
     const result = await reclaim(ledger);
 
@@ -550,7 +556,7 @@ describe('reclaim', () => {
   it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
     const ledger = tempLedger(line('r_legacy42'));
     deleteLink.mockRejectedValue(
-      new Error('qURL API DELETE /resources/r_legacy42 failed (400)'),
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_legacy42'), 400)),
     );
 
     const result = await reclaim(ledger);
@@ -562,7 +568,7 @@ describe('reclaim', () => {
   it('does not read a 404 inside the resource ID as already gone', async () => {
     const ledger = tempLedger(line('abc404def'));
     deleteLink.mockRejectedValue(
-      new Error('qURL API DELETE /resources/abc404def failed (500)'),
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)),
     );
 
     const result = await reclaim(ledger);
@@ -666,7 +672,9 @@ describe('reclaim', () => {
 
   it('counts a 410 as already-gone, the same as a 404', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(new Error('qURL API DELETE /resources/r_1 failed (410)'));
+    deleteLink.mockRejectedValue(
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_1'), 410)),
+    );
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
   });

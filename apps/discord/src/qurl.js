@@ -7,7 +7,12 @@ const {
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
-const { qurlPath, resourcePath, validateResourceId } = require('./utils/resource-id');
+const {
+  qurlApiErrorMessage,
+  qurlPath,
+  resourcePath,
+  validateResourceId,
+} = require('./utils/resource-id');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -114,7 +119,7 @@ async function callQurl(method, path, fn) {
     // a status-only error so that body can't leak through a caller that logs
     // `err.message`.
     if (status > 0) {
-      throw new Error(`qURL API ${method} ${path} failed (${status})`);
+      throw new Error(qurlApiErrorMessage(method, path, status));
     }
     // status 0: re-wrap ONLY a coded SDK error outside the body-free SAFE set —
     // i.e. one whose synthesized message could embed a body snippet (e.g.
@@ -124,7 +129,7 @@ async function callQurl(method, path, fn) {
     // error like a TypeError, which carries no server body) propagates verbatim,
     // so its message and stack survive for debugging.
     if (typeof err?.code === 'string' && !SAFE_STATUS0_CODES.has(err.code)) {
-      throw new Error(`qURL API ${method} ${path} failed (${err.code})`);
+      throw new Error(qurlApiErrorMessage(method, path, err.code));
     }
     throw err;
   }

@@ -163,7 +163,11 @@ if (require.main === module && fs.existsSync(envFile)) {
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
-const { hasSafeResourceIdShape, maskResourceIdPath } = require('../src/utils/resource-id');
+const {
+  hasSafeResourceIdShape,
+  isGoneQurlApiError,
+  maskResourceIdPath,
+} = require('../src/utils/resource-id');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -962,7 +966,9 @@ async function trackCreate(fn) {
 function recordResource(resourceId, kind) {
   // Share deleteLink's transport guard so every recorded ID is sweepable.
   // Warn rather than stopping: a malformed upload response is worth surfacing,
-  // but must not silently truncate the rest of a load-test round.
+  // but must not silently truncate the rest of a load-test round. `res-1` is
+  // the repo-wide resource-ID fixture convention; making this warning fatal
+  // previously stopped ordinary fixture-backed rounds after their first batch.
   if (!hasSafeResourceIdShape(resourceId)) {
     console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
     return;
@@ -1177,7 +1183,7 @@ async function reclaim(ledgerPath) {
         // uses for a resource that no longer exists. If it adopts another,
         // nothing here fails loudly — a re-run would simply sweep the same
         // ids forever, reporting them as failures.
-        if (/failed \((404|410)\)$/.test(e?.message)) {
+        if (isGoneQurlApiError(e)) {
           revoked++;
           outstanding.delete(id);
         } else {

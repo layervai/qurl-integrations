@@ -14,6 +14,7 @@ const RESOURCE_ID_MASK = '<id>';
 // Status returns the qURL aggregate response shape; whole-resource revoke uses
 // the resource action. Keeping both names here makes that split deliberate.
 const QURL_PATH_PREFIX = '/qurls/';
+const GONE_QURL_API_ERROR = /^qURL API [A-Z]+ \S+ failed \((404|410)\)$/;
 
 function hasSafeResourceIdShape(resourceId) {
   return typeof resourceId === 'string'
@@ -29,8 +30,13 @@ function typePreview(value) {
 function validateResourceId(resourceId) {
   if (!hasSafeResourceIdShape(resourceId)) {
     const preview = typeof resourceId === 'string'
-      ? resourceId.slice(0, ERROR_PREVIEW_LENGTH)
+      ? `${resourceId.slice(0, ERROR_PREVIEW_LENGTH)}${
+        resourceId.length > ERROR_PREVIEW_LENGTH ? ` (len=${resourceId.length})` : ''
+      }`
       : typePreview(resourceId);
+    // The stable prefix is the operator-facing contract-change tripwire. Keep
+    // this helper pure: boundary callers already log surfaced failures, while
+    // logging here would duplicate them and attach a rejected value twice.
     throw new Error(`Invalid resource ID format: ${preview}`);
   }
 }
@@ -45,31 +51,46 @@ function qurlPath(resourceId) {
   return `${QURL_PATH_PREFIX}${resourceId}`;
 }
 
+function qurlApiErrorMessage(method, path, statusOrCode) {
+  return `qURL API ${method} ${path} failed (${statusOrCode})`;
+}
+
+function isGoneQurlApiError(error) {
+  const message = typeof error === 'string' ? error : error?.message;
+  return typeof message === 'string' && GONE_QURL_API_ERROR.test(message);
+}
+
 function maskResourceIdPath(message) {
   let masked = typeof message === 'string'
     ? message
     : typePreview(message);
-  let searchFrom = 0;
+  if (!masked) return '<empty>';
 
-  for (;;) {
-    const start = masked.indexOf(RESOURCE_PATH_PREFIX, searchFrom);
-    if (start === -1) return masked;
+  for (const prefix of [RESOURCE_PATH_PREFIX, QURL_PATH_PREFIX]) {
+    let searchFrom = 0;
+    for (;;) {
+      const start = masked.indexOf(prefix, searchFrom);
+      if (start === -1) break;
 
-    const idStart = start + RESOURCE_PATH_PREFIX.length;
-    const resourceId = masked.slice(idStart).match(/^\S+/)?.[0];
-    if (!resourceId) {
-      searchFrom = idStart;
-      continue;
+      const idStart = start + prefix.length;
+      const resourceId = masked.slice(idStart).match(/^\S+/)?.[0];
+      if (!resourceId) {
+        searchFrom = idStart;
+        continue;
+      }
+      masked = `${masked.slice(0, idStart)}${RESOURCE_ID_MASK}${masked.slice(idStart + resourceId.length)}`;
+      searchFrom = idStart + RESOURCE_ID_MASK.length;
     }
-    masked = `${masked.slice(0, idStart)}${RESOURCE_ID_MASK}${masked.slice(idStart + resourceId.length)}`;
-    searchFrom = idStart + RESOURCE_ID_MASK.length;
   }
+  return masked;
 }
 
 module.exports = {
   hasSafeResourceIdShape,
+  isGoneQurlApiError,
   maskResourceIdPath,
   qurlPath,
+  qurlApiErrorMessage,
   resourcePath,
   validateResourceId,
 };

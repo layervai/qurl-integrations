@@ -1,7 +1,9 @@
 const {
   hasSafeResourceIdShape,
+  isGoneQurlApiError,
   maskResourceIdPath,
   qurlPath,
+  qurlApiErrorMessage,
   resourcePath,
   validateResourceId,
 } = require('../src/utils/resource-id');
@@ -29,7 +31,7 @@ describe('resource ID transport guard', () => {
     const resourceId = 'z'.repeat(1025);
 
     expect(() => validateResourceId(resourceId)).toThrow(
-      new Error(`Invalid resource ID format: ${'z'.repeat(64)}`),
+      new Error(`Invalid resource ID format: ${'z'.repeat(64)} (len=1025)`),
     );
   });
 
@@ -45,14 +47,35 @@ describe('resource ID transport guard', () => {
     expect(qurlPath(CRID_RESOURCE_ID)).toBe(`/qurls/${CRID_RESOURCE_ID}`);
   });
 
-  it('masks every resource route and handles non-string causes', () => {
+  it('formats and classifies terminal qURL API failures from one contract', () => {
+    const gone = qurlApiErrorMessage('DELETE', resourcePath(CRID_RESOURCE_ID), 404);
+
+    expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (404)`);
+    expect(isGoneQurlApiError(new Error(gone))).toBe(true);
+    expect(isGoneQurlApiError(`${gone} request-id=123`)).toBe(false);
+    expect(isGoneQurlApiError('unrelated operation failed (404)')).toBe(false);
+    expect(isGoneQurlApiError(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)))
+      .toBe(false);
+  });
+
+  it('masks every resource-ID route and handles unusual causes', () => {
     const path = resourcePath(CRID_RESOURCE_ID);
-    const message = `first ${path} failed; second ${resourcePath('other-id')} failed`;
+    const message = `first ${path} failed; second ${qurlPath('other-id')} failed`;
 
     expect(maskResourceIdPath(message))
-      .toBe('first /resources/<id> failed; second /resources/<id> failed');
+      .toBe('first /resources/<id> failed; second /qurls/<id> failed');
     expect(maskResourceIdPath('network request failed')).toBe('network request failed');
+    expect(maskResourceIdPath('')).toBe('<empty>');
     expect(maskResourceIdPath(undefined)).toBe('<undefined>');
     expect(maskResourceIdPath(Object.create(null))).toBe('<object>');
+  });
+
+  it.each([
+    'DELETE /resources/',
+    'DELETE /resources/ failed',
+    'GET /qurls/',
+    'GET /qurls/ failed',
+  ])('leaves an empty route tail unchanged without looping: %s', (message) => {
+    expect(maskResourceIdPath(message)).toBe(message);
   });
 });
