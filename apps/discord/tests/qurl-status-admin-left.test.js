@@ -189,6 +189,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
       guild_id: 'guild-1',
       status: expectedStatus,
+      failure_stage: 'qurl_service',
     });
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
   });
@@ -212,6 +213,29 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toMatch(/check could not be completed/i);
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
+  });
+
+  it('distinguishes a stored-key read failure without logging the error text', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    db.getGuildApiKey.mockRejectedValueOnce(new Error(`KMS failure for ${STORED_KEY}`));
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._editReply.mock.calls[0][0].content)
+      .toMatch(/check could not be completed/i);
+    expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
+      guild_id: 'guild-1',
+      status: null,
+      failure_stage: 'key_store',
+    });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
   });
 
   it('renders an empty service-reported scope list explicitly', async () => {
@@ -287,7 +311,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
       configured_by: 'admin-departed',
-      updated_at: '2026-01-01T00:00:00Z'.repeat(20),
+      updated_at: '2026-01-01T00:00:00Z'.repeat(100),
     });
     mockGetIdentity.mockResolvedValueOnce({
       api_key: {
@@ -306,6 +330,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent.length).toBeLessThanOrEqual(2000);
+    expect(replyContent).toContain('qURL is configured');
     expect(replyContent).toContain('Configured by: <@admin-departed>');
     expect(replyContent).toContain('Last updated:');
     expect(replyContent).toContain('again to take over billing.');

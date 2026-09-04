@@ -178,11 +178,22 @@ async function getIdentity(apiKey) {
     // TODO(upstream-contract): mirrors qurl-service's GET /v1/me envelope.
     const identity = body?.data;
     const key = identity?.api_key;
-    if (typeof key?.key_prefix !== 'string' || !Array.isArray(key.scopes) ||
-        key.scopes.some(scope => typeof scope !== 'string')) {
+    if (!key || typeof key !== 'object' || Array.isArray(key)) {
       throw new Error('qURL identity response had an unexpected shape');
     }
-    return identity;
+    // A 200 already proves the service accepted the key. Display fields are
+    // optional in the shared /v1/me consumer contract, so degrade them rather
+    // than turning a valid key into an unavailable verdict.
+    return {
+      ...identity,
+      api_key: {
+        ...key,
+        key_prefix: typeof key.key_prefix === 'string' ? key.key_prefix : '',
+        scopes: Array.isArray(key.scopes)
+          ? key.scopes.filter(scope => typeof scope === 'string')
+          : [],
+      },
+    };
   });
 }
 

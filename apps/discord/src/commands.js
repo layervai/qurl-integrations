@@ -8747,16 +8747,28 @@ const commands = [
           // membership. Catch inside the promise so an early rejection cannot
           // become unhandled while members.fetch is still pending.
           const identityResultPromise = (async () => {
+            let failureStage = 'key_store';
             try {
               // Keep the decrypted key out of the longer-lived config object,
               // even though the explicit accessor costs a second DDB read.
               const apiKey = await db.getGuildApiKey(interaction.guildId);
               if (!apiKey) return { keyUnavailable: true };
+              failureStage = 'qurl_service';
               return { identity: await getIdentity(apiKey) };
             } catch (error) {
-              return { error };
+              return { error, failureStage };
             }
           })();
+
+          // Stored values are normally a Discord snowflake and an ISO timestamp;
+          // bound their display form so a corrupt row cannot crowd out the key
+          // verdict or the admin-offboarding guidance.
+          const sanitizeStoredStatusValue = (value) => capUtf16Units(
+            sanitizeDisplayNamePlain(value, { fallback: 'unknown' }).replace(/`/g, ''),
+            64,
+          );
+          const configuredByDisplay = sanitizeStoredStatusValue(guildConfig.configured_by);
+          const updatedAtDisplay = sanitizeStoredStatusValue(guildConfig.updated_at);
 
           // #185 admin-offboarding nudge: the qURL key is owned by the
           // admin who ran setup (Auth0 sub claim); usage bills to their
@@ -8776,18 +8788,18 @@ const commands = [
               if (err?.code === 10007) {
                 originalAdminLeftNotice =
                   '\n\n⚠️ The admin who originally ran `/qurl setup` (<@' +
-                  guildConfig.configured_by + '>) has left this server. ' +
+                  configuredByDisplay + '>) has left this server. ' +
                   'qURL usage continues to bill to their layerv.ai account. ' +
                   'A current `ManageGuild` admin can run `/qurl setup` again to take over billing.';
               }
             }
           }
           const configurationDetails =
-            `Configured by: <@${guildConfig.configured_by}>\n` +
-            `Last updated: ${guildConfig.updated_at}` +
+            `Configured by: <@${configuredByDisplay}>\n` +
+            `Last updated: ${updatedAtDisplay}` +
             originalAdminLeftNotice;
 
-          const { identity, error, keyUnavailable } = await identityResultPromise;
+          const { identity, error, keyUnavailable, failureStage } = await identityResultPromise;
           const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
           // Every outcome renders as `<verdict copy> + configurationDetails`;
           // only the verdict differs, so build it here and share one exit.
@@ -8800,6 +8812,7 @@ const commands = [
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
+              failure_stage: failureStage,
             });
             // Same 401/403 → "invalid key" policy the legacy setup validator
             // applies at the top of this file; #1370 tracks consolidating them.
@@ -8838,15 +8851,8 @@ const commands = [
           const truncationIndicator = '…(truncated)';
           let content = verdict + configurationDetails;
           if (content.length > STATUS_CONTENT_MAX) {
-            if (configurationDetails.length + truncationIndicator.length >= STATUS_CONTENT_MAX) {
-              content = capUtf16Units(
-                configurationDetails,
-                STATUS_CONTENT_MAX - truncationIndicator.length,
-              ) + truncationIndicator;
-            } else {
-              const verdictLimit = STATUS_CONTENT_MAX - configurationDetails.length - truncationIndicator.length;
-              content = capUtf16Units(verdict, verdictLimit) + truncationIndicator + configurationDetails;
-            }
+            const verdictLimit = STATUS_CONTENT_MAX - configurationDetails.length - truncationIndicator.length;
+            content = capUtf16Units(verdict, verdictLimit) + truncationIndicator + configurationDetails;
           }
           return interaction.editReply({
             content,

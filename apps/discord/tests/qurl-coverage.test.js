@@ -131,11 +131,22 @@ describe('qURL client — getIdentity', () => {
     expect(error.message).not.toContain('secret response fragment');
   });
 
-  it('rejects an identity response missing display fields', async () => {
+  it('normalizes missing or malformed identity display fields after a successful check', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
       owner_id: 'owner-123',
       auth_type: 'api_key',
-      api_key: { key_id: 'key-123' },
+      api_key: { key_id: 'key-123', scopes: ['qurl:read', null] },
+    }));
+
+    await expect(qurl.getIdentity('stored-guild-key')).resolves.toMatchObject({
+      api_key: { key_prefix: '', scopes: ['qurl:read'] },
+    });
+  });
+
+  it('rejects an identity response missing the API-key identity block', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: 'owner-123',
+      auth_type: 'api_key',
     }));
 
     await expect(qurl.getIdentity('stored-guild-key'))
