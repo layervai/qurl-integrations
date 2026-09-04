@@ -14,18 +14,27 @@ var (
 	// Accept environment prefixes, quoted shell snippets, Docker heredocs, and
 	// supported npm options before the subcommand. The explicit path-scoping
 	// forms consume their separate value; other supported flags are value-less
-	// or use --flag=value.
-	npmInstallCommand = regexp.MustCompile(`(?m)\bnpm\b[ \t]+(?:(?:(?:--(?:prefix|workspace)|-[wC])[ \t]+[^ \t&|;"'\r\n]+|--?[^ \t&|;"'\r\n]+)[ \t]+)*(ci|install|i)\b[^&|;\r\n]*`)
-	noAuditFlag       = regexp.MustCompile(`(?:^|[ \t])--no-audit(?:$|[ \t"'\\])`)
-	shellContinuation = regexp.MustCompile(`\\\r?\n[ \t]*`)
+	// or use --flag=value. unclassifiedNPMInvocations makes an unknown form
+	// fail closed rather than silently escaping this matcher.
+	npmInstallCommand  = regexp.MustCompile(`(?m)\bnpm\b[ \t]+(?:(?:(?:--(?:prefix|workspace|registry|cache|userconfig)|-[wC])[ \t]+[^ \t&|;"'\r\n]+|--?[^ \t&|;"'\r\n]+)[ \t]+)*(ci|install|i)\b[^&|;\r\n]*`)
+	noAuditFlag        = regexp.MustCompile(`(?:^|[ \t])--no-audit(?:$|[ \t"'\\])`)
+	shellContinuation  = regexp.MustCompile(`\\\r?\n[ \t]*`)
+	npmInvocation      = regexp.MustCompile(`(?m)\bnpm\b[ \t]+[^&|;\r\n]*`)
+	npmNonInstall      = regexp.MustCompile(`^npm[ \t]+(?:run|test|cache|audit|exec|version|--version)\b`)
+	directAuditCommand = regexp.MustCompile(
+		`(?m)\b(?:npm[ \t]+audit\b|node[ \t]+scripts/audit-production-dependencies\.js\b)[^&|;\r\n]*`,
+	)
+	trailingShellComment = regexp.MustCompile(`[ \t]+#.*$`)
 )
+
+const discordAuditStepName = "Audit dependencies"
 
 func findNPMInstallCommands(source string) [][]string {
 	return npmInstallCommand.FindAllStringSubmatch(source, -1)
 }
 
 func hasNoAuditFlag(command string) bool {
-	return noAuditFlag.MatchString(command)
+	return noAuditFlag.MatchString(trailingShellComment.ReplaceAllString(command, ""))
 }
 
 func logicalShellSource(source string) string {
@@ -40,6 +49,25 @@ func logicalShellSource(source string) string {
 	return shellContinuation.ReplaceAllString(uncommented.String(), " ")
 }
 
+func unclassifiedNPMInvocations(source string) []string {
+	var unclassified []string
+	for _, invocation := range npmInvocation.FindAllString(source, -1) {
+		trimmed := strings.TrimSpace(invocation)
+		if npmInstallCommand.MatchString(trimmed) || npmNonInstall.MatchString(trimmed) {
+			continue
+		}
+		unclassified = append(unclassified, trimmed)
+	}
+	return unclassified
+}
+
+func checkNPMInvocationsClassified(t *testing.T, location, source string) {
+	t.Helper()
+	if unclassified := unclassifiedNPMInvocations(source); len(unclassified) > 0 {
+		t.Errorf("%s contains npm invocation(s) the dependency-audit contract cannot classify; extend the parser before merging: %q", location, unclassified)
+	}
+}
+
 func TestDiscordNPMInstallCommandShapes(t *testing.T) {
 	t.Parallel()
 
@@ -48,18 +76,33 @@ func TestDiscordNPMInstallCommandShapes(t *testing.T) {
 		mode       string
 		hasNoAudit bool
 	}{
-		"environment prefix":            {`NODE_ENV=production npm ci --no-audit`, "ci", true},
-		"npm prefix option":             {`npm --prefix apps/discord ci --no-audit`, "ci", true},
-		"npm short workspace":           {`npm -w apps/discord ci --no-audit`, "ci", true},
-		"npm short global":              {`npm -g i --no-audit`, "i", true},
-		"quoted shell":                  {`sh -c "npm ci --no-audit"`, "ci", true},
-		"Docker heredoc":                {"RUN <<EOF\nnpm ci --no-audit\nEOF", "ci", true},
-		"comment before continuation":   {"# example \\\nRUN npm ci --no-audit", "ci", true},
-		"bare install":                  {`npm ci`, "ci", false},
-		"non-lockfile install":          {`npm install --no-audit`, "install", true},
-		"inverted no-audit flag":        {`npm ci --no-audit=false`, "ci", false},
-		"environment audit suppression": {`NPM_CONFIG_AUDIT=false npm ci`, "ci", false},
+		"environment prefix":             {`NODE_ENV=production npm ci --no-audit`, "ci", true},
+		"npm prefix option":              {`npm --prefix apps/discord ci --no-audit`, "ci", true},
+		"npm registry option":            {`npm --registry https://registry.example ci --no-audit`, "ci", true},
+		"npm cache option":               {`npm --cache /tmp/npm ci --no-audit`, "ci", true},
+		"npm userconfig option":          {`npm --userconfig .npmrc ci --no-audit`, "ci", true},
+		"npm short workspace":            {`npm -w apps/discord ci --no-audit`, "ci", true},
+		"npm short global":               {`npm -g i --no-audit`, "i", true},
+		"quoted shell":                   {`sh -c "npm ci --no-audit"`, "ci", true},
+		"Docker heredoc":                 {"RUN <<EOF\nnpm ci --no-audit\nEOF", "ci", true},
+		"comment before continuation":    {"# example \\\nRUN npm ci --no-audit", "ci", true},
+		"continued production chain":     {"npm ci --omit=dev --ignore-scripts --no-audit \\\n  && npm cache clean --force", "ci", true},
+		"bare install":                   {`npm ci`, "ci", false},
+		"non-lockfile install":           {`npm install --no-audit`, "install", true},
+		"inverted no-audit flag":         {`npm ci --no-audit=false`, "ci", false},
+		"environment audit suppression":  {`NPM_CONFIG_AUDIT=false npm ci`, "ci", false},
+		"trailing comment is not a flag": {`npm ci # --no-audit is configured elsewhere`, "ci", false},
+		"flag before trailing comment":   {`npm ci --no-audit # explicit suppression`, "ci", true},
+		"plural lookalike flag":          {`npm ci --no-audits`, "ci", false},
 	}
+
+	t.Run("unknown npm option cannot hide an install", func(t *testing.T) {
+		t.Parallel()
+		source := logicalShellSource(`npm --future-option value ci --no-audit`)
+		if got := unclassifiedNPMInvocations(source); len(got) != 1 {
+			t.Fatalf("unclassified npm invocations = %q, want the future-option install", got)
+		}
+	})
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -94,6 +137,38 @@ func TestDiscordNPMInstallCommandShapes(t *testing.T) {
 	}
 }
 
+func TestDiscordDirectAuditCommandShapes(t *testing.T) {
+	t.Parallel()
+
+	for name, source := range map[string]string{
+		"plain":              `npm audit --json`,
+		"environment prefix": `NPM_CONFIG_LOGLEVEL=silly npm audit --json`,
+		"single pipe":        `printf ready | npm audit --json`,
+		"quoted shell":       `sh -c "npm audit signatures"`,
+		"command wrapper":    `time npm audit --json`,
+		"wrapper":            `node scripts/audit-production-dependencies.js`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := directAuditCommand.FindAllString(logicalShellSource(source), -1); len(got) != 1 {
+				t.Fatalf("direct audit matches = %q, want one for %q", got, source)
+			}
+		})
+	}
+
+	for name, source := range map[string]string{
+		"install":      `npm ci --no-audit`,
+		"line comment": `# npm audit --json`,
+	} {
+		t.Run("no match: "+name, func(t *testing.T) {
+			t.Parallel()
+			if got := directAuditCommand.FindAllString(logicalShellSource(source), -1); len(got) != 0 {
+				t.Fatalf("direct audit matches = %q, want none for %q", got, source)
+			}
+		})
+	}
+}
+
 // TestDiscordDependencyAuditContract keeps dependency installation separate
 // from the one explicit, production-only audit gate. npm ci enables its own
 // registry audit by default; leaving that enabled duplicates the
@@ -116,9 +191,6 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 		t.Parallel()
 
 		workflow := readWorkflow(t, spec.path)
-		auditCommand := regexp.MustCompile(`(?m)(?:^[ \t]*|(?:&&|\|\||;)[ \t]*)(?:npm[ \t]+audit\b|node[ \t]+scripts/audit-production-dependencies\.js\b)[^&|;\r\n]*`)
-
-		const auditStepName = "Audit dependencies"
 		var audit *step
 		installCount := 0
 		directAuditCommandCount := 0
@@ -132,11 +204,12 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 				logicalRun := logicalShellSource(current.Run)
 				installs := findNPMInstallCommands(logicalRun)
 				location := fmt.Sprintf("%s job %q step %q", spec.path, jobID, current.Name)
+				checkNPMInvocationsClassified(t, location, logicalRun)
 				installCount += checkLockfileInstalls(t, location, installs)
-				directAuditCommandCount += len(auditCommand.FindAllString(logicalRun, -1))
-				if current.Name == auditStepName {
+				directAuditCommandCount += len(directAuditCommand.FindAllString(logicalRun, -1))
+				if current.Name == discordAuditStepName {
 					if audit != nil {
-						t.Fatalf("%s has more than one %q step", spec.path, auditStepName)
+						t.Fatalf("%s has more than one %q step", spec.path, discordAuditStepName)
 					}
 					audit = current
 				}
@@ -151,7 +224,7 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 
 		const explicitAudit = "node scripts/audit-production-dependencies.js"
 		if audit == nil {
-			t.Fatalf("%s is missing the %q step", spec.path, auditStepName)
+			t.Fatalf("%s is missing the %q step", spec.path, discordAuditStepName)
 		}
 		auditFields := strings.Fields(audit.Run)
 		if len(auditFields) < 2 || auditFields[0] != "node" || auditFields[1] != "scripts/audit-production-dependencies.js" {
@@ -167,10 +240,12 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", dockerfilePath, err)
 		}
+		logicalDockerfile := logicalShellSource(string(dockerfile))
+		checkNPMInvocationsClassified(t, "Discord Dockerfile", logicalDockerfile)
 		dockerInstallCount := checkLockfileInstalls(
 			t,
 			"Discord Dockerfile",
-			findNPMInstallCommands(logicalShellSource(string(dockerfile))),
+			findNPMInstallCommands(logicalDockerfile),
 		)
 		if dockerInstallCount == 0 {
 			t.Fatalf("Discord Dockerfile has no npm dependency-install commands")
@@ -197,6 +272,7 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 				logicalRecipe := logicalShellSource(string(recipe[1]))
 				installs := findNPMInstallCommands(logicalRecipe)
 				location := fmt.Sprintf("Makefile target %q", target)
+				checkNPMInvocationsClassified(t, location, logicalRecipe)
 				if checkLockfileInstalls(t, location, installs) == 0 {
 					t.Fatalf("%s has no npm dependency-install commands", location)
 				}
@@ -231,11 +307,11 @@ func TestDiscordAuditRetryBudgetFitsStepTimeout(t *testing.T) {
 	var timeoutMinutes int
 	foundAuditStep := false
 	for i := range job.Steps {
-		if job.Steps[i].Name != "Audit dependencies" {
+		if job.Steps[i].Name != discordAuditStepName {
 			continue
 		}
 		if !strings.Contains(job.Steps[i].Run, "audit-production-dependencies.js") {
-			t.Fatalf("Audit dependencies step no longer runs the retry wrapper: %q", job.Steps[i].Run)
+			t.Fatalf("%s %q step no longer runs the retry wrapper: %q", spec.path, discordAuditStepName, job.Steps[i].Run)
 		}
 		foundAuditStep = true
 		value, ok := job.Steps[i].TimeoutMinutes.(int)
@@ -246,7 +322,7 @@ func TestDiscordAuditRetryBudgetFitsStepTimeout(t *testing.T) {
 		break
 	}
 	if !foundAuditStep {
-		t.Fatal("discord.yml is missing the Audit dependencies step")
+		t.Fatalf("%s is missing the %q step", spec.path, discordAuditStepName)
 	}
 	if timeoutMinutes == 0 {
 		t.Fatalf("%s Audit dependencies step is missing a positive timeout-minutes", spec.path)

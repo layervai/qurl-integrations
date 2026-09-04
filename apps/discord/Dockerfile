@@ -9,11 +9,11 @@ ENV NODE_ENV=production
 
 # `RUN chown node:node /app` + `USER node` below let `npm ci` run as
 # the non-root `node` user and write a node-owned node_modules tree
-# directly — neither a build-stage chown nor a post-install chown -R
-# is needed. `--omit=dev` keeps jest + aws-sdk-client-mock out of the runtime
-# image; `--ignore-scripts` is safe now that the last native-compile dependency
-# (better-sqlite3) is gone and every remaining dependency is pure-JS with no
-# postinstall steps; `--no-audit` skips npm's advisory-only registry request;
+# directly — possible now that the last native-compile dependency
+# (better-sqlite3) is gone. Neither a build-stage chown nor a post-install
+# chown -R is needed. `--omit=dev` keeps jest + aws-sdk-client-mock out of the
+# runtime image; `--ignore-scripts` is safe because every remaining dependency
+# is pure JS with no postinstall steps; `--no-audit` skips npm's advisory-only registry request;
 # `npm cache clean --force` shaves the ~/.npm cache layer
 # (the prior two-stage build dropped this incidentally via the
 # `COPY --from=build node_modules` carry-over).
