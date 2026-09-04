@@ -980,7 +980,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, expect.any(Object));
     });
 
-    it('host-pin compares the complete target and returned qurl_site hostnames case-insensitively', () => {
+    it('host-pin compares complete target and returned qurl_site hosts after URL case normalization', () => {
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         'https://R_ABC12345678.QURL.SITE/api/detect',
         TUNNEL_SITE,
@@ -992,6 +992,16 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         'https://r_other123456.qurl.site/api/detect',
         TUNNEL_SITE,
       )).toThrow(/does not match the returned qurl_site/);
+    });
+
+    it.each([
+      ['empty', 'https://.qurl.site'],
+      ['empty interior', 'https://a..qurl.site'],
+    ])('host-pin rejects an %s label under an allowed suffix', (_label, qurlSite) => {
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        `${qurlSite}/api/detect`,
+        qurlSite,
+      )).toThrow(/expected qURL tunnel domain/);
     });
 
     it('ignores a non-empty resolve target_url and still POSTs to qurl_site', async () => {
@@ -1725,6 +1735,9 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
       expect(mockClient.resolve).toHaveBeenCalledTimes(1);
       expect(get().url).toBe(TUNNEL_TARGET);
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel resolve omitted resource_id; integrity check skipped',
+      );
     });
 
     it('propagates a resolve() failure (knock/transport) and does NOT POST', async () => {

@@ -673,7 +673,7 @@ function extractAccessToken(qurlLink) {
 // The authenticated mint is the authority for the complete target hostname.
 function detectQurlSiteHostname(qurlSite) {
   try {
-    return new URL(qurlSite).hostname.toLowerCase();
+    return new URL(qurlSite).hostname;
   } catch {
     return '';
   }
@@ -728,12 +728,18 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   // future caller using a different target source fails closed. resolve()'s
   // resource_id check below independently binds the fresh access token to the
   // slug-resolved opaque public key when that response field is present.
-  const targetHost = parsed.hostname.toLowerCase();
+  // WHATWG URL parsing canonicalizes ASCII DNS hostname case on both values.
+  const targetHost = parsed.hostname;
   const expectedHost = detectQurlSiteHostname(expectedQurlSite);
   if (!expectedHost || targetHost !== expectedHost) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
   }
-  if (!DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => targetHost.endsWith(suffix))) {
+  const hasAllowedSuffix = DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => {
+    if (!targetHost.endsWith(suffix)) return false;
+    const prefix = targetHost.slice(0, -suffix.length);
+    return prefix.split('.').every(Boolean);
+  });
+  if (!hasAllowedSuffix) {
     throw new Error('Detect tunnel qurl_site host is not under an expected qURL tunnel domain');
   }
 }
@@ -757,7 +763,9 @@ function buildDetectTargetUrl(qurlSite) {
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  return new URL(DETECT_TARGET_PATH, parsed).toString();
+  const targetUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
+  assertPublicHttpsTarget(targetUrl, qurlSite);
+  return targetUrl;
 }
 
 // Scrub any `at_…` access token from a free-text error message before logging.
@@ -931,7 +939,6 @@ async function resolveDetectTarget() {
   }
   try {
     targetUrl = buildDetectTargetUrl(minted?.qurl_site);
-    assertPublicHttpsTarget(targetUrl, minted?.qurl_site);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
     // lookup and mint, so keep the cached resource id and retry the mint after
@@ -968,6 +975,11 @@ async function resolveDetectTarget() {
   // present, but do not make the tunnel POST depend on optional resolve metadata
   // from older/variant API shapes; qurl_site came from the authenticated mint.
   const resolvedResourceId = resolved?.resource_id;
+  if (!resolvedResourceId) {
+    logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped');
+  }
+  // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
+  // preserve exact serialization on list and resolve responses.
   if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
     const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
     // The knock already happened, but the Bearer-carrying image POST must not.
