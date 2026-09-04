@@ -994,9 +994,17 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       )).toThrow(/does not match the returned qurl_site/);
     });
 
+    it('host-pin reports an unparseable returned qurl_site separately from a host mismatch', () => {
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        TUNNEL_TARGET,
+        'https://[',
+      )).toThrow(/returned qurl_site is unparseable/);
+    });
+
     it.each([
       ['empty', 'https://.qurl.site'],
       ['empty interior', 'https://a..qurl.site'],
+      ['bare suffix apex', 'https://qurl.site'],
     ])('host-pin rejects an %s label under an allowed suffix', (_label, qurlSite) => {
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         `${qurlSite}/api/detect`,
@@ -1715,7 +1723,13 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('rejects a resolve resource_id that differs only by case', async () => {
-      const caseChangedResourceId = `m${RESOURCE_ID.slice(1)}`;
+      const caseChangedResourceId = RESOURCE_ID.replace(/[a-z]/i, (character) => (
+        character === character.toLowerCase()
+          ? character.toUpperCase()
+          : character.toLowerCase()
+      ));
+      expect(caseChangedResourceId).not.toBe(RESOURCE_ID);
+      expect(caseChangedResourceId.toLowerCase()).toBe(RESOURCE_ID.toLowerCase());
       captureDetect(
         { detected: false },
         { resolveResult: { target_url: '', resource_id: caseChangedResourceId } },
@@ -1737,6 +1751,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(get().url).toBe(TUNNEL_TARGET);
       expect(logger.warn).toHaveBeenCalledWith(
         'Detect tunnel resolve omitted resource_id; integrity check skipped',
+        { expected_resource_id: RESOURCE_ID },
       );
     });
 

@@ -668,9 +668,9 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-// TODO(upstream-contract): qurl_site may use an `r_` Traefik routing label, but
-// that label carries no resource identity: resource IDs are opaque public keys.
-// The authenticated mint is the authority for the complete target hostname.
+// qurl_site may use an `r_` Traefik routing label, but that label carries no
+// resource identity: resource IDs are opaque public keys. The authenticated
+// mint is the authority for the complete target hostname.
 function detectQurlSiteHostname(qurlSite) {
   try {
     return new URL(qurlSite).hostname;
@@ -705,8 +705,9 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   if (parsed.protocol !== 'https:') {
     throw new Error('Detect tunnel qurl_site target must be an https: URL');
   }
-  // buildDetectTargetUrl deliberately retains any credentials from its base so
-  // this final-target guard can reject them before the NHP knock or image POST.
+  // buildDetectTargetUrl deliberately retains any credentials in its candidate
+  // URL so this final-target guard can reject them before returning the
+  // credential-free target, issuing the NHP knock, or posting image bytes.
   if (parsed.username || parsed.password) {
     throw new Error('Detect tunnel qurl_site target must not contain userinfo');
   }
@@ -731,9 +732,15 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   // WHATWG URL parsing canonicalizes ASCII DNS hostname case on both values.
   const targetHost = parsed.hostname;
   const expectedHost = detectQurlSiteHostname(expectedQurlSite);
-  if (!expectedHost || targetHost !== expectedHost) {
+  if (!expectedHost) {
+    throw new Error('Detect tunnel returned qurl_site is unparseable');
+  }
+  if (targetHost !== expectedHost) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
   }
+  // TODO(upstream-contract): qurl_site is an authenticated, host-only tunnel
+  // origin whose routing labels are opaque. If qurl-service changes its tunnel
+  // hostname shapes, update this namespace pin and its deployment allowlists.
   const hasAllowedSuffix = DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => {
     if (!targetHost.endsWith(suffix)) return false;
     const prefix = targetHost.slice(0, -suffix.length);
@@ -763,9 +770,9 @@ function buildDetectTargetUrl(qurlSite) {
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  const targetUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
-  assertPublicHttpsTarget(targetUrl, qurlSite);
-  return targetUrl;
+  const candidateUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
+  assertPublicHttpsTarget(candidateUrl, qurlSite);
+  return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
 }
 
 // Scrub any `at_…` access token from a free-text error message before logging.
@@ -782,7 +789,7 @@ function redactAccessToken(message) {
 }
 
 // Host for the qurl_site rejection breadcrumb below. Every guard behind that
-// breadcrumb throws a CONSTANT message — assertPublicHttpsTarget's four, plus
+// breadcrumb throws a CONSTANT message — assertPublicHttpsTarget's guards, plus
 // buildDetectTargetUrl's own DetectQurlSiteError branches — so without this it
 // says THAT a target was rejected but not WHICH host tripped it: an IPv4-mapped
 // literal, a 10.x, and a public `fd…` name misclassified by isPrivateHost's ULA
@@ -976,7 +983,9 @@ async function resolveDetectTarget() {
   // from older/variant API shapes; qurl_site came from the authenticated mint.
   const resolvedResourceId = resolved?.resource_id;
   if (!resolvedResourceId) {
-    logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped');
+    logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped', {
+      expected_resource_id: resourceId,
+    });
   }
   // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
   // preserve exact serialization on list and resolve responses.
