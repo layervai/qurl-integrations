@@ -682,6 +682,8 @@ describe('Discord install callback', () => {
     });
 
     it('omits the connection pin on Add to Discord when the setting is unset', async () => {
+      // The app and route captured this singleton at module load, so loading a
+      // fresh config module would not affect this request.
       const configuredConnection = config.AUTH0_EMAIL_CONNECTION;
       config.AUTH0_EMAIL_CONNECTION = '';
       try {

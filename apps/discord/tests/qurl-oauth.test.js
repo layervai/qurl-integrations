@@ -368,6 +368,7 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(200);
       const tokenBody = new URLSearchParams(fetchSpy.mock.calls[0][1].body.toString());
       expect(tokenBody.get('code_verifier')).toBe(codeVerifier);
+      expect(tokenBody.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
     });
 
     it('502s when qurl-service mint fails', async () => {
