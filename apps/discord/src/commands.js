@@ -2583,6 +2583,22 @@ async function executeSendPipeline(interaction, {
           }
           await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+          if (!revoked.barrierEstablished) {
+            revokeResultUserNames = [];
+            revokeResultTotal = 0;
+            revokeResultSuccess = 0;
+            revokeShowAll = false;
+            revokeResultKnown = false;
+            // Terminal for this collector even though the exact reason is
+            // intentionally hidden (unknown, foreign, or concurrently
+            // finalized all share the store's fail-closed result).
+            revokeSucceeded = true;
+            await interaction.editReply({
+              content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+              components: [],
+            }).catch(logIgnoredDiscordErr);
+            return;
+          }
           // Iterate `recipients` (canonical send-confirmation order)
           // and filter by membership — `successUserIds` walks Set
           // insertion order from resource-grouped iteration, which
@@ -2646,7 +2662,7 @@ async function executeSendPipeline(interaction, {
           let content = ALREADY_REVOKING_SEND_MSG;
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
-              content = 'This send has already been revoked. Add Recipients is disabled.';
+              content = 'This send is no longer revocable. Add Recipients is disabled.';
             } else if (revokeResultTotal === 0) {
               content = 'No live links remain for this send.';
             } else if (revokeResultSuccess < revokeResultTotal) {
@@ -2796,7 +2812,7 @@ async function executeSendPipeline(interaction, {
         if (revokeSucceeded) {
           if (!revokeResultKnown) {
             interaction.editReply({
-              content: 'Links for this send have already been revoked.',
+              content: 'This send is no longer revocable.',
               components: [],
             }).catch(logIgnoredDiscordErr);
             return;
@@ -3605,6 +3621,13 @@ async function handleRevokeSelect(interaction, { flow_id }) {
 
   const sendId = interaction.values[0];
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+
+  if (!revoked.barrierEstablished) {
+    return interaction.update({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+  }
 
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
@@ -8283,7 +8306,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // The durable store returns false for unknown, finalized, or foreign sends.
   // Never issue a DELETE unless it positively confirms the barrier.
   if (!barrierEstablished) {
-    return { success: 0, total: 0, successUserIds: [], failureUserIds: [] };
+    return {
+      barrierEstablished: false,
+      success: 0,
+      total: 0,
+      successUserIds: [],
+      failureUserIds: [],
+    };
   }
 
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
@@ -8491,7 +8520,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // header reports the exact unconfirmed count and tells the operator to
   // retry/reconnect; callers can use this list for a future named-failure
   // detail without inferring that DELETE failure means the link was opened.
-  return { success, total, successUserIds, failureUserIds };
+  return {
+    barrierEstablished: true,
+    success,
+    total,
+    successUserIds,
+    failureUserIds,
+  };
 }
 
 // Time-based sweep every 60s (was 5min). With high user counts the Map can

@@ -1132,6 +1132,19 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
   });
 
+  it('does not claim 0/0 success when the durable revoke barrier rejects the send', async () => {
+    mockDb.markSendRevoking.mockResolvedValueOnce(false);
+    const interaction = makeSelectInteraction({ values: ['foreign-or-finalized'] });
+
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+  });
+
   it('retries a temporary DELETE failure and finalizes after the next selection', async () => {
     mockDb.getSendItems.mockReturnValue([
       { resource_id: 'res-1', recipient_discord_id: 'u-1' },

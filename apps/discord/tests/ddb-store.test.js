@@ -670,6 +670,33 @@ describe('qurl sends', () => {
     ]);
   });
 
+  test('getRecentSends: pending retries cannot occupy every slot when a live send is available', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({
+          Items: [
+            ...Array.from({ length: 5 }, (_, i) => ({
+              send_id: `pending-${i + 1}`,
+              sender_discord_id: 'sender',
+              created_at: `2026-09-03T1${5 - i}:00:00Z`,
+            })),
+            { send_id: 'live-1', sender_discord_id: 'sender', created_at: '2026-09-03T09:00:00Z' },
+          ],
+        });
+      }
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+      Item: input.Key.send_id.startsWith('pending-') ? { revoking_at: 'now' } : {},
+    }));
+
+    const result = await store.getRecentSends('sender', 5);
+
+    expect(result).toHaveLength(5);
+    expect(result.filter(row => row.revocation_pending)).toHaveLength(4);
+    expect(result.at(-1).send_id).toBe('live-1');
+  });
+
   test('markSendRevoking: records an idempotent owner-scoped intent without setting revoked_at', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' },

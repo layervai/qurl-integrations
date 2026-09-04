@@ -857,14 +857,20 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
-  // Pending revocations are the urgent action-required rows this menu exists
-  // to retry. Keep them visible ahead of ordinary live sends; #1376 tracks an
-  // explicit audited dismissal path if permanently-unconfirmable rows build up.
-  rows.sort((a, b) => (
-    Number(b.revocation_pending) - Number(a.revocation_pending)
-    || (b.created_at || '').localeCompare(a.created_at || '')
-  ));
-  return rows.slice(0, limit);
+  // Pending revocations are urgent, but a permanently-unconfirmable row must
+  // not displace every live send from the bounded Discord menu. Keep at least
+  // one live slot whenever the fetched candidate set contains one. #1376
+  // tracks an explicit audited dismissal path for old pending rows.
+  const newestFirst = (a, b) => (b.created_at || '').localeCompare(a.created_at || '');
+  const pending = rows.filter(row => row.revocation_pending).sort(newestFirst);
+  const live = rows.filter(row => !row.revocation_pending).sort(newestFirst);
+  if (live.length === 0) return pending.slice(0, limit);
+  const pendingLimit = Math.max(0, limit - 1);
+  const selectedPending = pending.slice(0, pendingLimit);
+  return [
+    ...selectedPending,
+    ...live.slice(0, limit - selectedPending.length),
+  ];
 }
 
 async function flipRevokedAt(sendId, senderDiscordId) {

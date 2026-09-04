@@ -1097,6 +1097,7 @@ describe('revokeAllLinks', () => {
     expect(mockDeleteLink.mock.invocationCallOrder.at(-1))
       .toBeLessThan(mockDb.markSendRevoked.mock.invocationCallOrder[0]);
     expect(result).toEqual({
+      barrierEstablished: true,
       success: 3,
       total: 3,
       successUserIds: ['user-1', 'user-2', 'user-3'],
@@ -1151,7 +1152,7 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(result).toEqual({ success: 0, total: 0, successUserIds: [], failureUserIds: [] });
+    expect(result).toEqual({ barrierEstablished: true, success: 0, total: 0, successUserIds: [], failureUserIds: [] });
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(mockDb.markSendRevoking).toHaveBeenCalled();
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
@@ -1162,7 +1163,7 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('foreign-send', 'sender-1', 'apikey');
 
-    expect(result).toEqual({ success: 0, total: 0, successUserIds: [], failureUserIds: [] });
+    expect(result).toEqual({ barrierEstablished: false, success: 0, total: 0, successUserIds: [], failureUserIds: [] });
     expect(mockDb.getSendItems).not.toHaveBeenCalled();
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
@@ -1352,6 +1353,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(1); // only bob (alice has a failure)
     expect(result.successUserIds).toEqual(['bob']);
     expect(result.failureUserIds).toEqual(['alice']);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
   describe('post-revoke DM edit', () => {
@@ -2670,7 +2672,27 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
 
     expect(addClick.reply).toHaveBeenCalledWith({
-      content: 'This send has already been revoked. Add Recipients is disabled.',
+      content: 'This send is no longer revocable. Add Recipients is disabled.',
+      ephemeral: true,
+    });
+  });
+
+  it('does not claim success when the durable revoke barrier rejects the send', async () => {
+    const { collect, interaction, makeClick } = await setupRevocableSend();
+    mockDb.markSendRevoking.mockResolvedValueOnce(false);
+
+    await collect(makeClick('revoke'));
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'This send is no longer revocable. Add Recipients is disabled.',
       ephemeral: true,
     });
   });
