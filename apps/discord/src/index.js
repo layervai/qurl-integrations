@@ -665,7 +665,10 @@ let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
-async function gracefulShutdownTeardown({ awaitConnectionWatchdog = true } = {}) {
+async function gracefulShutdownTeardown({
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+} = {}) {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
     // and process.exit() called immediately after would truncate an OAuth
     // callback mid-flight, leaving the admin's /qurl setup without a
@@ -730,19 +733,18 @@ async function gracefulShutdownTeardown({ awaitConnectionWatchdog = true } = {})
     // teardown across every HTTP-only / combined replica that never
     // built the hot-standby surface.
     //
-    // No per-call timeout on the helper's close/stop calls: a wedged
-    // gatewayLeader.stop() (e.g., DDB hanging in the final renew)
-    // is bounded by the 10 s `force-exit` setTimeout at the top of
-    // this function — which itself sits inside ECS's 30 s SIGTERM
-    // deadline. That layered ceiling is the deliberate outermost
-    // belt; introducing a third per-call timeout here would just
-    // multiply the moving parts without changing the worst-case.
+    // Normal shutdown awaits both stop calls; a wedged final renew is bounded
+    // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
+    // invokes both idempotent stop methods to set their guards, but does not
+    // await work parked behind manager.connect(): gatewayShim.stop() below must
+    // retain the budget to flush the resumable session before process exit.
     if (config.ENABLE_GATEWAY_HOT_STANDBY) {
       await stopGatewayHotStandby({
         controlChannelServer,
         connectionWatchdog,
         gatewayLeader,
         awaitConnectionWatchdog,
+        awaitGatewayLeader,
         logger,
       });
     }
@@ -779,7 +781,10 @@ async function gracefulShutdownTeardown({ awaitConnectionWatchdog = true } = {})
     logger.info('Shutdown complete');
 }
 
-async function gracefulShutdown(code = 0, { awaitConnectionWatchdog = true } = {}) {
+async function gracefulShutdown(code = 0, {
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+} = {}) {
   return runGracefulShutdown({
     code,
     claimShutdown: () => {
@@ -787,7 +792,10 @@ async function gracefulShutdown(code = 0, { awaitConnectionWatchdog = true } = {
       isShuttingDown = true;
       return true;
     },
-    teardown: () => gracefulShutdownTeardown({ awaitConnectionWatchdog }),
+    teardown: () => gracefulShutdownTeardown({
+      awaitConnectionWatchdog,
+      awaitGatewayLeader,
+    }),
     logger,
   });
 }

@@ -171,15 +171,16 @@ describe('stopGatewayHotStandby', () => {
     expect(order).toEqual(['control', 'watchdog', 'leader']);
   });
 
-  it('stops but does not await the watchdog on IDENTIFY-fatal teardown', async () => {
+  it('stops but does not await watchdog or leader on IDENTIFY-fatal teardown', async () => {
     const connectionWatchdog = { stop: jest.fn(() => new Promise(() => {})) };
-    const gatewayLeader = { stop: jest.fn().mockResolvedValue(undefined) };
+    const gatewayLeader = { stop: jest.fn(() => new Promise(() => {})) };
 
     await expect(stopGatewayHotStandby({
       controlChannelServer: null,
       connectionWatchdog,
       gatewayLeader,
       awaitConnectionWatchdog: false,
+      awaitGatewayLeader: false,
       logger: makeFakeLogger(),
     })).resolves.toBeUndefined();
 
@@ -220,6 +221,7 @@ describe('runGatewayFatalShutdown', () => {
     expect(order).toEqual(['fatal-timer', 'shutdown', 'watchdog-stop']);
     expect(gracefulShutdown).toHaveBeenCalledWith(1, {
       awaitConnectionWatchdog: false,
+      awaitGatewayLeader: false,
     });
     expect(forceExit).toEqual(expect.any(Function));
     await result;
@@ -282,6 +284,7 @@ describe('runGatewayFatalShutdown', () => {
 
     expect(gracefulShutdown).toHaveBeenCalledWith(1, {
       awaitConnectionWatchdog: false,
+      awaitGatewayLeader: false,
     });
   });
 
@@ -641,6 +644,14 @@ describe('tryStop', () => {
       });
     },
   );
+
+  it('contains logger failure while reporting a stop rejection', async () => {
+    const logger = makeFakeLogger();
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+    const handle = { stop: jest.fn().mockRejectedValue('stop-failure') };
+
+    await expect(tryStop('leader', handle, logger)).resolves.toBeUndefined();
+  });
 });
 
 describe('tryClose', () => {

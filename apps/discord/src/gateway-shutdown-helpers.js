@@ -58,10 +58,15 @@ async function tryStop(name, handle, logger) {
   } catch (err) {
     // Include the stack so a stuck SIGTERM drain log has both the
     // symptom and the call site.
-    logger.warn(`${name} stop failed`, {
-      error: err?.message ?? String(err),
-      stack: err?.stack,
-    });
+    try {
+      logger.warn(`${name} stop failed`, {
+        error: err?.message ?? String(err),
+        stack: err?.stack,
+      });
+    } catch {
+      // Logging is best-effort too: this helper must never re-reject and
+      // truncate the remaining teardown when its returned promise is floated.
+    }
   }
 }
 
@@ -118,20 +123,22 @@ async function tryClose(name, server, logger) {
 }
 
 // Stops the hot-standby control plane in dependency order. The IDENTIFY-fatal
-// path calls connectionWatchdog.stop() to set its synchronous stopping guard,
-// but must skip awaiting that deliberately blocked in-flight connect so the
+// path calls both stop methods to set their synchronous guards, but must skip
+// awaiting tasks that may be parked behind manager.connect() so the
 // session-store final flush retains the shutdown budget.
 async function stopGatewayHotStandby({
   controlChannelServer,
   connectionWatchdog,
   gatewayLeader,
   awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
   logger,
 }) {
   await tryClose('control-channel server', controlChannelServer, logger);
   const watchdogStopped = tryStop('connection-watchdog', connectionWatchdog, logger);
   if (awaitConnectionWatchdog) await watchdogStopped;
-  await tryStop('gateway-leader', gatewayLeader, logger);
+  const leaderStopped = tryStop('gateway-leader', gatewayLeader, logger);
+  if (awaitGatewayLeader) await leaderStopped;
 }
 
 // Plain graceful-shutdown envelope shared by every non-push exit path. The
@@ -203,7 +210,10 @@ function runGatewayFatalShutdown({
   }, fatalCeilingMs);
   if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
 
-  const shutdown = gracefulShutdown(1, { awaitConnectionWatchdog: false });
+  const shutdown = gracefulShutdown(1, {
+    awaitConnectionWatchdog: false,
+    awaitGatewayLeader: false,
+  });
   const connectionWatchdog = getConnectionWatchdog();
   if (!connectionWatchdog) return shutdown;
 
