@@ -23,7 +23,7 @@ function auditResult(status, body = {}, stderr = '') {
   return { status, stdout: `${JSON.stringify(body)}\n`, stderr };
 }
 
-function passingAuditBody(vulnerabilities = { high: 0, critical: 0 }, prod = 1) {
+function passingAuditBody(vulnerabilities = { high: 0, critical: 0 }, prod = 2) {
   return { metadata: { vulnerabilities, dependencies: { prod } } };
 }
 
@@ -374,6 +374,7 @@ describe('production dependency audit', () => {
   test.each([
     ['missing production dependency metadata', undefined],
     ['zero audited production dependencies', 0],
+    ['only the npm-counted project root', 1],
     ['invalid production dependency count', '1'],
   ])('fails closed on a zero-vulnerability result with %s', async (_label, prod) => {
     const body = passingAuditBody();

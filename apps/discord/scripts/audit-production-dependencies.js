@@ -193,11 +193,14 @@ function writeSuccess(result, body, stdout, stderr) {
     );
     return false;
   }
-  const productionDependencies = body?.metadata?.dependencies?.prod;
-  if (!Number.isSafeInteger(productionDependencies) || productionDependencies <= 0) {
+  const productionTreeNodes = body?.metadata?.dependencies?.prod;
+  // npm 10.9.4 counts the project root as one production node. Require at
+  // least one additional node so an empty audit graph cannot pass as `prod: 1`.
+  if (!Number.isSafeInteger(productionTreeNodes) || productionTreeNodes <= 1) {
     stderr.write('npm audit failed closed: invalid audited production dependency count.\n');
     return false;
   }
+  const productionDependencies = productionTreeNodes - 1;
   const lowerSeverity = count('info') + count('low') + count('moderate');
   stdout.write(
     `npm audit passed: ${high} high, ${critical} critical; `
