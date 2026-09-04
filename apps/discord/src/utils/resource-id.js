@@ -5,12 +5,16 @@
 // TODO(upstream-contract): Keep this alphabet superset and safety ceiling
 // aligned with the ResourceId schema in qurl-service's api/openapi.yaml.
 const MAX_RESOURCE_ID_LENGTH = 1024;
-// Accepted IDs can appear at their full (bounded) length in API diagnostics;
-// this smaller preview applies only to values the transport guard rejects.
-const ERROR_PREVIEW_LENGTH = 64;
+const { createHash } = require('crypto');
+
 const RESOURCE_ID_CHARACTER_CLASS = '[\\w-]';
 const RESOURCE_ID_CHARACTERS = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
 const LEGACY_RESOURCE_ID_PREFIX = 'r_';
+// TODO(upstream-contract): qurl-service owns this lowercase bearer-token
+// prefix. Reject it before building an HTTP path so a cross-wired qURL fragment
+// cannot reach intermediary access logs. Matching is deliberately case-exact:
+// issued access tokens are lowercase and public IDs remain opaque.
+const QURL_ACCESS_TOKEN_PREFIX = 'at_';
 const RESOURCE_PATH_PREFIX = '/resources/';
 const RESOURCE_ID_MASK = '<id>';
 // Shared sticky state is safe while this helper stays synchronous: lastIndex
@@ -24,7 +28,8 @@ function hasSafeResourceIdShape(resourceId) {
   return typeof resourceId === 'string'
     && resourceId.length > 0
     && resourceId.length <= MAX_RESOURCE_ID_LENGTH
-    && RESOURCE_ID_CHARACTERS.test(resourceId);
+    && RESOURCE_ID_CHARACTERS.test(resourceId)
+    && !resourceId.startsWith(QURL_ACCESS_TOKEN_PREFIX);
 }
 
 // Deliberately shape-only: consulting constructors or stringifying objects can
@@ -33,18 +38,16 @@ function typePreview(value) {
   return `<${value === null ? 'null' : typeof value}>`;
 }
 
-function rejectedValuePreview(value) {
-  if (typeof value !== 'string') return typePreview(value);
-  const length = value.length > ERROR_PREVIEW_LENGTH ? ` (len=${value.length})` : '';
-  return `${JSON.stringify(value.slice(0, ERROR_PREVIEW_LENGTH))}${length}`;
+function resourceIdLogRef(resourceId) {
+  if (typeof resourceId !== 'string') return typePreview(resourceId);
+  return `sha256:${createHash('sha256').update(resourceId, 'utf8').digest('hex').slice(0, 12)}`;
 }
 
 function validateResourceId(resourceId) {
   if (!hasSafeResourceIdShape(resourceId)) {
-    // The stable prefix is the operator-facing contract-change tripwire. Keep
-    // this helper pure: boundary callers already log surfaced failures, while
-    // logging here would duplicate them and attach a rejected value twice.
-    throw new Error(`Invalid resource ID format: ${rejectedValuePreview(resourceId)}`);
+    // Keep this helper pure and the error generic: the rejected value may be a
+    // bearer credential, including under a future namespace unknown here.
+    throw new Error('Invalid resource ID format');
   }
 }
 
@@ -91,6 +94,7 @@ module.exports = {
   LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
   qurlPath,
+  resourceIdLogRef,
   resourcePath,
   validateResourceId,
 };

@@ -49,6 +49,7 @@ const {
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
+const { resourceIdLogRef } = require('./utils/resource-id');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -2865,7 +2866,10 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
-      failed.push({ resourceId: resourceIds[index], error: result.reason?.message });
+      failed.push({
+        resource_ref: resourceIdLogRef(resourceIds[index]),
+        error: result.reason?.message,
+      });
     }
   });
   if (failed.length > 0) {
@@ -8286,7 +8290,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
       for (const id of recipientIds) seenFailure.add(id);
-      logger.error('Failed to revoke QURL', { resource_id: resourceId, error: results[i].reason?.message });
+      logger.error('Failed to revoke QURL', {
+        resource_ref: resourceIdLogRef(resourceId),
+        error: results[i].reason?.message,
+      });
     }
   }
   // Strict success = revoked AND not in any failure bucket.

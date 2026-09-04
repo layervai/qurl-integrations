@@ -268,6 +268,28 @@ describe('Connector client — coverage boost', () => {
         return () => bodyJSON;
       }
 
+      it('rejects a qURL access token used as a resource ID without echoing it', async () => {
+        const logger = require('../src/logger');
+        const accessToken = ['at', 'connector-sensitive-marker'].join('_');
+        globalThis.fetch = jest.fn();
+
+        const thrown = await connector.mintLinks(accessToken, {
+          expiresAt: '2099-01-01T00:00:00Z',
+          n: 1,
+        }).catch(error => error);
+
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(thrown.message).toBe('Invalid resource ID format');
+        expect(thrown.message).not.toContain(accessToken);
+        expect(JSON.stringify([
+          logger.debug.mock.calls,
+          logger.info.mock.calls,
+          logger.warn.mock.calls,
+          logger.error.mock.calls,
+          logger.audit.mock.calls,
+        ])).not.toContain(accessToken);
+      });
+
       it('sends session_duration when selfDestructSeconds provided', async () => {
         const getBody = captureMintBody();
         await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, selfDestructSeconds: 30 });
