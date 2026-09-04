@@ -99,7 +99,19 @@ var (
 	// TODO(upstream-contract): that fallback assumes the qURL service keeps
 	// permitting an ordinarily deleted Connector ID to be published again.
 	ErrConnectorResourceRetired = errors.New("connector resource was deliberately retired")
+	// ErrConnectorResourceState marks a local resource journal whose contents
+	// or file security contract is invalid. An unattended daemon must stop and
+	// expose this condition because retries cannot repair deterministic state
+	// corruption. Transient filesystem errors do not carry this sentinel.
+	ErrConnectorResourceState = errors.New("connector resource state is unusable")
 )
+
+func invalidConnectorResourceState(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrConnectorResourceState, err)
+}
 
 // ConnectorResourceCommitError rejects an authenticated response that
 // contradicts durable Connector state. Commit retains every accepted binding
@@ -135,11 +147,16 @@ type ConnectorResourceBinding struct {
 
 // PendingConnectorResourceRequest is the exact logical LST that must be
 // replayed after an uncertain outcome. The nonce is generated and persisted
-// before the first packet is sent.
+// before the first packet is sent. A configured request stores its CRID,
+// routing ID, and effective knock ID here; its Connector and resource IDs use
+// the two request fields shared with ordinary publish.
 type PendingConnectorResourceRequest struct {
-	ConnectorID        string `json:"connector_id"`
-	RequestNonce       string `json:"request_nonce"`
-	ExpectedResourceID string `json:"expected_resource_id,omitempty"`
+	ConnectorID                  string `json:"connector_id"`
+	RequestNonce                 string `json:"request_nonce"`
+	ExpectedResourceID           string `json:"expected_resource_id,omitempty"`
+	ConfiguredCRID               string `json:"configured_crid,omitempty"`
+	ConfiguredConnectorRoutingID string `json:"configured_connector_routing_id,omitempty"`
+	ConfiguredKnockResourceID    string `json:"configured_knock_resource_id,omitempty"`
 }
 
 type connectorResourcesState struct {
@@ -157,6 +174,7 @@ type ConnectorResourceTransaction struct {
 	store    *Store
 	state    connectorResourcesState
 	request  qurl.NativeConnectorResourceRequest
+	expected *ConnectorResourceBinding
 	unlock   func() error
 	finished bool
 	closed   bool
@@ -167,6 +185,25 @@ type ConnectorResourceTransaction struct {
 // one. A warm request always carries the cached public resource identity as a
 // continuity assertion.
 func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) (_ *ConnectorResourceTransaction, retErr error) {
+	return s.beginConnectorResource(ctx, connectorID, nil)
+}
+
+// BeginConfiguredConnectorResource starts an exact resource ensure for a
+// deployment-supplied binding. The configured values are continuity claims,
+// not authority: the assigned cell must authenticate and return the complete
+// same binding before Commit accepts it.
+func (s *Store) BeginConfiguredConnectorResource(ctx context.Context, configured *ConnectorResourceBinding) (_ *ConnectorResourceTransaction, retErr error) {
+	if configured == nil {
+		return nil, fmt.Errorf("%w: begin configured Connector resource transaction: binding is nil", ErrConnectorResourceVerification)
+	}
+	if err := validateBinding(configured); err != nil {
+		return nil, fmt.Errorf("%w: begin configured Connector resource transaction: %w", ErrConnectorResourceVerification, err)
+	}
+	expected := *configured
+	return s.beginConnectorResource(ctx, expected.ConnectorID, &expected)
+}
+
+func (s *Store) beginConnectorResource(ctx context.Context, connectorID string, configured *ConnectorResourceBinding) (_ *ConnectorResourceTransaction, retErr error) {
 	if s == nil {
 		return nil, fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
 	}
@@ -219,20 +256,11 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 	if current.Retired[connectorID] {
 		return nil, fmt.Errorf("%w: Connector ID %q", ErrConnectorResourceRetired, connectorID)
 	}
-	pending, ok := current.Pending[connectorID]
-	if !ok {
-		expected := ""
-		if binding, exists := current.Bindings[connectorID]; exists {
-			expected = binding.ResourceID
-		}
-		request, err := qurl.NewNativeConnectorResourceRequest(connectorID, expected)
-		if err != nil {
-			return nil, fmt.Errorf("prepare native Connector resource request: %w", err)
-		}
-		pending = PendingConnectorResourceRequest{
-			ConnectorID: connectorID, RequestNonce: request.RequestNonce,
-			ExpectedResourceID: expected,
-		}
+	pending, created, err := current.preparePendingConnectorResource(connectorID, configured)
+	if err != nil {
+		return nil, err
+	}
+	if created {
 		current.Pending[connectorID] = pending
 		current.prunePending(connectorID)
 		if err := writeConnectorResources(s.dir, current); err != nil {
@@ -243,6 +271,14 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 		}
 	}
 
+	pendingConfigured, hasConfigured, err := pending.configuredBinding()
+	if err != nil {
+		return nil, fmt.Errorf("%w: validate configured Connector resource request: %w", ErrConnectorResourceVerification, err)
+	}
+	var expected *ConnectorResourceBinding
+	if hasConfigured {
+		expected = &pendingConfigured
+	}
 	return &ConnectorResourceTransaction{
 		store: s,
 		state: current,
@@ -251,8 +287,64 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 			RequestNonce:       pending.RequestNonce,
 			ExpectedResourceID: pending.ExpectedResourceID,
 		},
-		unlock: unlock,
+		expected: expected,
+		unlock:   unlock,
 	}, nil
+}
+
+func (s *connectorResourcesState) preparePendingConnectorResource(connectorID string, configured *ConnectorResourceBinding) (PendingConnectorResourceRequest, bool, error) {
+	if configured != nil {
+		if binding, exists := s.Bindings[connectorID]; exists {
+			if field := configuredBindingMismatch(&binding, configured, false); field != "" {
+				return PendingConnectorResourceRequest{}, false, fmt.Errorf("%w: configured %s does not match durable binding", ErrConnectorResourceVerification, field)
+			}
+		}
+	}
+	if pending, exists := s.Pending[connectorID]; exists {
+		pendingConfigured, hasConfigured, err := pending.configuredBinding()
+		if err != nil {
+			return PendingConnectorResourceRequest{}, false, fmt.Errorf("%w: pending continuity assertion is invalid: %w", ErrConnectorResourceVerification, err)
+		}
+		if configured == nil && hasConfigured {
+			return PendingConnectorResourceRequest{}, false, fmt.Errorf("%w: pending request requires the headless Connector configuration", ErrConnectorResourceVerification)
+		}
+		if configured != nil && !hasConfigured {
+			return PendingConnectorResourceRequest{}, false, fmt.Errorf("%w: pending request was not created from the headless Connector configuration", ErrConnectorResourceVerification)
+		}
+		if configured != nil {
+			if field := configuredBindingMismatch(&pendingConfigured, configured, false); field != "" {
+				return PendingConnectorResourceRequest{}, false, fmt.Errorf("%w: configured %s does not match the pending continuity assertion", ErrConnectorResourceVerification, field)
+			}
+			if pending.ConfiguredKnockResourceID != configured.KnockResourceID {
+				// The knock override is local deployment input and is not part of
+				// the native request fingerprint. Persist a deliberate rotation
+				// before replay while keeping every platform identity pinned.
+				pending.ConfiguredKnockResourceID = configured.KnockResourceID
+				return pending, true, nil
+			}
+		}
+		return pending, false, nil
+	}
+	expectedResourceID := ""
+	if binding, exists := s.Bindings[connectorID]; exists {
+		expectedResourceID = binding.ResourceID
+	} else if configured != nil {
+		expectedResourceID = configured.ResourceID
+	}
+	request, err := qurl.NewNativeConnectorResourceRequest(connectorID, expectedResourceID)
+	if err != nil {
+		return PendingConnectorResourceRequest{}, false, fmt.Errorf("prepare native Connector resource request: %w", err)
+	}
+	pending := PendingConnectorResourceRequest{
+		ConnectorID: connectorID, RequestNonce: request.RequestNonce,
+		ExpectedResourceID: expectedResourceID,
+	}
+	if configured != nil {
+		pending.ConfiguredCRID = configured.CRID
+		pending.ConfiguredConnectorRoutingID = configured.ConnectorRoutingID
+		pending.ConfiguredKnockResourceID = configured.KnockResourceID
+	}
+	return pending, true, nil
 }
 
 // PrepareConnectorResourceReuse authorizes an explicitly selected Connector ID
@@ -475,6 +567,27 @@ func (t *ConnectorResourceTransaction) Request() *qurl.NativeConnectorResourceRe
 // A failed durable clear leaves the transaction open and reports the required
 // state-access repair instead of claiming the request was discarded.
 func (t *ConnectorResourceTransaction) Commit(binding *ConnectorResourceBinding) error {
+	if t != nil && t.expected != nil && binding != nil {
+		if err := t.validateOpen(); err != nil {
+			return err
+		}
+		return t.rejectCommit(ErrConnectorResourceVerification, "configured Connector resource requires CommitConfigured")
+	}
+	return t.commit(binding, binding)
+}
+
+// CommitConfigured accepts the platform binding only when its effective knock
+// operand and every other identity match the deployment configuration.
+func (t *ConnectorResourceTransaction) CommitConfigured(binding *ConnectorResourceBinding, effectiveKnockResourceID string) error {
+	if binding == nil {
+		return t.commit(nil, nil)
+	}
+	configuredResult := *binding
+	configuredResult.KnockResourceID = effectiveKnockResourceID
+	return t.commit(binding, &configuredResult)
+}
+
+func (t *ConnectorResourceTransaction) commit(binding, configuredResult *ConnectorResourceBinding) error {
 	if err := t.validateOpen(); err != nil {
 		return err
 	}
@@ -484,11 +597,16 @@ func (t *ConnectorResourceTransaction) Commit(binding *ConnectorResourceBinding)
 	if binding.ConnectorID != t.request.ConnectorID {
 		return t.rejectCommit(ErrConnectorResourceVerification, "response Connector ID does not match the durable request")
 	}
+	if err := validateBinding(binding); err != nil {
+		return t.rejectCommit(ErrConnectorResourceVerification, fmt.Sprintf("response binding is invalid: %v", err))
+	}
 	if t.request.ExpectedResourceID != "" && binding.ResourceID != t.request.ExpectedResourceID {
 		return t.rejectCommit(ErrConnectorResourceVerification, "response identity does not match the continuity assertion")
 	}
-	if err := validateBinding(binding); err != nil {
-		return t.rejectCommit(ErrConnectorResourceVerification, fmt.Sprintf("response binding is invalid: %v", err))
+	if t.expected != nil {
+		if field := configuredBindingMismatch(configuredResult, t.expected, true); field != "" {
+			return t.rejectCommit(ErrConnectorResourceVerification, fmt.Sprintf("authenticated response %s does not match the configured Connector binding", field))
+		}
 	}
 	committed := *binding
 	if existing, ok := t.state.Bindings[binding.ConnectorID]; ok {
@@ -818,13 +936,13 @@ func loadConnectorResources(dir string) (connectorResourcesState, error) {
 		return connectorResourcesState{}, fmt.Errorf("inspect Connector resource state: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return connectorResourcesState{}, errors.New("connector resource state must be a non-symlink regular file")
+		return connectorResourcesState{}, invalidConnectorResourceState(errors.New("connector resource state must be a non-symlink regular file"))
 	}
 	if err := validateConnectorResourceFile(path, info); err != nil {
-		return connectorResourcesState{}, err
+		return connectorResourcesState{}, invalidConnectorResourceState(err)
 	}
 	if info.Size() > connectorResourcesMaxBytes {
-		return connectorResourcesState{}, fmt.Errorf("connector resource state exceeds %d bytes", connectorResourcesMaxBytes)
+		return connectorResourcesState{}, invalidConnectorResourceState(fmt.Errorf("connector resource state exceeds %d bytes", connectorResourcesMaxBytes))
 	}
 	file, err := openConnectorResourceState(path)
 	if err != nil {
@@ -836,7 +954,13 @@ func loadConnectorResources(dir string) (connectorResourcesState, error) {
 		return connectorResourcesState{}, fmt.Errorf("inspect opened Connector resource state: %w", err)
 	}
 	currentInfo, err := os.Lstat(path)
-	if err != nil || currentInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
+	if err != nil {
+		return connectorResourcesState{}, fmt.Errorf("reinspect opened Connector resource state: %w", err)
+	}
+	if currentInfo.Mode()&os.ModeSymlink != 0 {
+		return connectorResourcesState{}, invalidConnectorResourceState(errors.New("connector resource state became a symlink while it was opened"))
+	}
+	if !os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
 		return connectorResourcesState{}, errors.New("connector resource state changed while it was opened")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, connectorResourcesMaxBytes+1))
@@ -844,11 +968,11 @@ func loadConnectorResources(dir string) (connectorResourcesState, error) {
 		return connectorResourcesState{}, fmt.Errorf("read Connector resource state: %w", err)
 	}
 	if len(data) > connectorResourcesMaxBytes {
-		return connectorResourcesState{}, fmt.Errorf("connector resource state exceeds %d bytes", connectorResourcesMaxBytes)
+		return connectorResourcesState{}, invalidConnectorResourceState(fmt.Errorf("connector resource state exceeds %d bytes", connectorResourcesMaxBytes))
 	}
 	state, err := decodeConnectorResources(data)
 	if err != nil {
-		return connectorResourcesState{}, fmt.Errorf("invalid Connector resource state: %w", err)
+		return connectorResourcesState{}, invalidConnectorResourceState(fmt.Errorf("invalid Connector resource state: %w", err))
 	}
 	return state, nil
 }
@@ -918,22 +1042,35 @@ func validateConnectorResourcesState(state connectorResourcesState) error {
 		resourceOwners[binding.ResourceID] = key
 		routingOwners[binding.ConnectorRoutingID] = key
 	}
+	if err := validatePendingConnectorResources(state); err != nil {
+		return err
+	}
+	return validateRetiredConnectorResources(state)
+}
+
+func validatePendingConnectorResources(state connectorResourcesState) error {
 	for key, pending := range state.Pending {
 		if key != pending.ConnectorID {
 			return fmt.Errorf("pending key %q does not match Connector ID %q", key, pending.ConnectorID)
 		}
-		if err := validatePending(pending); err != nil {
+		if err := validatePending(&pending); err != nil {
+			return fmt.Errorf("pending %q: %w", key, err)
+		}
+		configured, hasConfigured, err := pending.configuredBinding()
+		if err != nil {
 			return fmt.Errorf("pending %q: %w", key, err)
 		}
 		binding, exists := state.Bindings[key]
 		switch {
 		case exists && pending.ExpectedResourceID != binding.ResourceID:
 			return fmt.Errorf("pending %q does not assert its cached resource identity", key)
-		case !exists && pending.ExpectedResourceID != "":
-			return fmt.Errorf("pending %q asserts an identity without a cached binding", key)
+		case exists && hasConfigured && configuredBindingMismatch(&binding, &configured, false) != "":
+			return fmt.Errorf("pending %q configured binding does not match its cached binding", key)
+		case !exists && pending.ExpectedResourceID != "" && !hasConfigured:
+			return fmt.Errorf("pending %q asserts an identity without a cached or configured binding", key)
 		}
 	}
-	return validateRetiredConnectorResources(state)
+	return nil
 }
 
 func validateRetiredConnectorResources(state connectorResourcesState) error {
@@ -978,7 +1115,10 @@ func validateBinding(binding *ConnectorResourceBinding) error {
 	return nil
 }
 
-func validatePending(pending PendingConnectorResourceRequest) error {
+func validatePending(pending *PendingConnectorResourceRequest) error {
+	if pending == nil {
+		return errors.New("pending request is nil")
+	}
 	if err := validateConnectorID(pending.ConnectorID); err != nil {
 		return err
 	}
@@ -992,6 +1132,45 @@ func validatePending(pending PendingConnectorResourceRequest) error {
 		}
 	}
 	return nil
+}
+
+func (pending *PendingConnectorResourceRequest) configuredBinding() (ConnectorResourceBinding, bool, error) {
+	if pending == nil {
+		return ConnectorResourceBinding{}, false, errors.New("pending request is nil")
+	}
+	present := pending.ConfiguredCRID != "" || pending.ConfiguredConnectorRoutingID != "" || pending.ConfiguredKnockResourceID != ""
+	if !present {
+		return ConnectorResourceBinding{}, false, nil
+	}
+	binding := ConnectorResourceBinding{
+		ConnectorID: pending.ConnectorID, ResourceID: pending.ExpectedResourceID,
+		CRID: pending.ConfiguredCRID, ConnectorRoutingID: pending.ConfiguredConnectorRoutingID,
+		KnockResourceID: pending.ConfiguredKnockResourceID,
+	}
+	if err := validateBinding(&binding); err != nil {
+		return ConnectorResourceBinding{}, false, fmt.Errorf("configured binding: %w", err)
+	}
+	return binding, true, nil
+}
+
+func configuredBindingMismatch(actual, expected *ConnectorResourceBinding, compareKnock bool) string {
+	if actual == nil || expected == nil {
+		return "binding"
+	}
+	switch {
+	case actual.ConnectorID != expected.ConnectorID:
+		return "Connector ID"
+	case actual.ResourceID != expected.ResourceID:
+		return "resource ID"
+	case actual.CRID != expected.CRID:
+		return "CRID"
+	case actual.ConnectorRoutingID != expected.ConnectorRoutingID:
+		return "routing ID"
+	case compareKnock && actual.KnockResourceID != expected.KnockResourceID:
+		return "knock resource ID"
+	default:
+		return ""
+	}
 }
 
 func validateConnectorID(id string) error {
@@ -1046,7 +1225,7 @@ func validKnockResourceID(value string) bool {
 func writeConnectorResources(dir string, state connectorResourcesState) error {
 	data, err := encodeConnectorResources(state)
 	if err != nil {
-		return err
+		return invalidConnectorResourceState(err)
 	}
 	path := filepath.Join(dir, ConnectorResourcesFile)
 	if err := validateConnectorResourcesWriteTarget(path); err != nil {
@@ -1072,10 +1251,10 @@ func encodeConnectorResources(state connectorResourcesState) ([]byte, error) {
 func validateConnectorResourcesWriteTarget(path string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New("connector resource state must be a non-symlink regular file")
+			return invalidConnectorResourceState(errors.New("connector resource state must be a non-symlink regular file"))
 		}
 		if err := validateConnectorResourceFile(path, info); err != nil {
-			return err
+			return invalidConnectorResourceState(err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect Connector resource state before write: %w", err)
@@ -1288,10 +1467,11 @@ func rejectNonCanonicalResourceFields(data []byte) error {
 	}
 	return rejectNonCanonicalResourceMap(envelope["pending"], "pending", map[string]bool{
 		"connector_id": true, "request_nonce": true, "expected_resource_id": true,
-	}, "expected_resource_id")
+		"configured_crid": true, "configured_connector_routing_id": true, "configured_knock_resource_id": true,
+	}, "expected_resource_id", "configured_crid", "configured_connector_routing_id", "configured_knock_resource_id")
 }
 
-func rejectNonCanonicalResourceMap(raw json.RawMessage, field string, allowed map[string]bool, optional string) error {
+func rejectNonCanonicalResourceMap(raw json.RawMessage, field string, allowed map[string]bool, optional ...string) error {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil // The typed validator reports a missing/null required map.
 	}
@@ -1309,13 +1489,15 @@ func rejectNonCanonicalResourceMap(raw json.RawMessage, field string, allowed ma
 				return fmt.Errorf("%s[%q]: unknown field %q", field, entryKey, key)
 			}
 		}
-		if value, present := entry[optional]; present {
-			trimmed := bytes.TrimSpace(value)
-			switch {
-			case bytes.Equal(trimmed, []byte("null")):
-				return fmt.Errorf("%s[%q]: %s must be absent rather than null", field, entryKey, optional)
-			case bytes.Equal(trimmed, []byte(`""`)):
-				return fmt.Errorf("%s[%q]: %s must be absent rather than empty", field, entryKey, optional)
+		for _, optionalField := range optional {
+			if value, present := entry[optionalField]; present {
+				trimmed := bytes.TrimSpace(value)
+				switch {
+				case bytes.Equal(trimmed, []byte("null")):
+					return fmt.Errorf("%s[%q]: %s must be absent rather than null", field, entryKey, optionalField)
+				case bytes.Equal(trimmed, []byte(`""`)):
+					return fmt.Errorf("%s[%q]: %s must be absent rather than empty", field, entryKey, optionalField)
+				}
 			}
 		}
 	}

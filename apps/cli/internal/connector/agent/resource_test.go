@@ -144,6 +144,56 @@ func TestResolveResourcePersistsBeforeDispatchAndCommitsCompleteBinding(t *testi
 	}
 }
 
+func TestResolveConfiguredResourceReauthorizesExactBinding(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "headless-api")
+	t.Setenv(EnvKnockResourceID, "headless-knock-override")
+	configured := &state.ConnectorResourceBinding{
+		ConnectorID: resource.Slug, ResourceID: resource.ResourceID, CRID: resource.CRID,
+		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: "headless-knock-override",
+	}
+	installResourceResolver(t, func(_ context.Context, _ *qurl.AgentRuntimeBinding, request *qurl.NativeConnectorResourceRequest, _ ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		if request.ConnectorID != configured.ConnectorID || request.ExpectedResourceID != configured.ResourceID || request.RequestNonce == "" {
+			t.Fatalf("configured native request = %+v", request)
+		}
+		return &qurl.ConnectorResourceResolution{Resource: resource, FoundExisting: true}, nil
+	})
+
+	result, err := ResolveConfiguredResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Resource != resource || result.FoundExisting == nil || !*result.FoundExisting {
+		t.Fatalf("configured result = %+v", result)
+	}
+	durable, retired, found, err := store.ConnectorResourceBinding(context.Background(), configured.ConnectorID)
+	if err != nil || !found || retired || durable.KnockResourceID != resource.KnockResourceID {
+		t.Fatalf("durable platform binding = %+v retired=%t found=%t err=%v", durable, retired, found, err)
+	}
+}
+
+func TestResolveConfiguredResourceRejectsEffectiveKnockMismatch(t *testing.T) {
+	store := openResourceTestStore(t)
+	resource := testNativeResource(t, "headless-api")
+	configured := &state.ConnectorResourceBinding{
+		ConnectorID: resource.Slug, ResourceID: resource.ResourceID, CRID: resource.CRID,
+		ConnectorRoutingID: resource.ConnectorRoutingID, KnockResourceID: "configured-knock-override",
+	}
+	t.Setenv(EnvKnockResourceID, "different-knock-override")
+	installResourceResolver(t, func(context.Context, *qurl.AgentRuntimeBinding, *qurl.NativeConnectorResourceRequest, ...qurl.AgentRuntimeUDPOption) (*qurl.ConnectorResourceResolution, error) {
+		t.Fatal("conflicting local knock override reached the assigned cell")
+		return nil, errors.New("unexpected resolver call")
+	})
+
+	_, err := ResolveConfiguredResourceWithResult(context.Background(), &qurl.AgentRuntimeBinding{}, store, configured)
+	if !errors.Is(err, state.ErrConnectorResourceVerification) || !strings.Contains(err.Error(), EnvKnockResourceID) {
+		t.Fatalf("effective knock mismatch = %v, want actionable verification error", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(store.Dir(), state.ConnectorResourcesFile)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("effective knock mismatch changed resource state: %v", statErr)
+	}
+}
+
 func TestResolveResourceLostResponseReplaysExactNonceThenWarmStartPinsIdentity(t *testing.T) {
 	for _, reuse := range []bool{false, true} {
 		name := "fresh name"

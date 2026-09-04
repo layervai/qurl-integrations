@@ -102,6 +102,165 @@ func TestConnectorResourceTransactionPersistsExactRequestAndWarmContinuity(t *te
 	}
 }
 
+func TestConfiguredConnectorResourceRequiresExactAuthenticatedBinding(t *testing.T) {
+	store := openTestStore(t)
+	configured := testResourceBinding(t, "headless-api")
+	tx, err := store.BeginConfiguredConnectorResource(context.Background(), &configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := tx.Request()
+	if request == nil || request.ExpectedResourceID != configured.ResourceID || request.RequestNonce == "" {
+		t.Fatalf("configured request = %+v, want exact public identity and nonce", request)
+	}
+	firstRequest := *request
+	if err := tx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginConnectorResource(context.Background(), configured.ConnectorID); !errors.Is(err, ErrConnectorResourceVerification) {
+		t.Fatalf("ordinary publish over configured pending = %v, want verification error", err)
+	}
+	tx, err = store.BeginConfiguredConnectorResource(context.Background(), &configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay := tx.Request(); replay == nil || *replay != firstRequest {
+		t.Fatalf("configured replay = %+v, want exact request %+v", replay, firstRequest)
+	}
+	contradictory := configured
+	contradictory.ConnectorRoutingID = testResourceBinding(t, "other-api").ConnectorRoutingID
+	if err := tx.CommitConfigured(&contradictory, contradictory.KnockResourceID); !errors.Is(err, ErrConnectorResourceVerification) {
+		t.Fatalf("contradictory configured binding = %v, want verification error", err)
+	}
+	if err := tx.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := store.BeginConfiguredConnectorResource(context.Background(), &configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := retry.CommitConfigured(&configured, configured.KnockResourceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := retry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, retired, found, err := store.ConnectorResourceBinding(context.Background(), configured.ConnectorID)
+	if err != nil || !found || retired || got != configured {
+		t.Fatalf("configured binding = %+v retired=%t found=%t err=%v", got, retired, found, err)
+	}
+	misuseTx, err := store.BeginConfiguredConnectorResource(context.Background(), &configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := misuseTx.Commit(&configured); !errors.Is(err, ErrConnectorResourceVerification) || !strings.Contains(err.Error(), "requires CommitConfigured") {
+		t.Fatalf("generic commit on configured transaction = %v", err)
+	}
+	if err := misuseTx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	effective := configured
+	effective.KnockResourceID = "deployment-knock-override"
+	overrideTx, err := store.BeginConfiguredConnectorResource(context.Background(), &effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overrideRequest := *overrideTx.Request()
+	if err := overrideTx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	effective.KnockResourceID = "rotated-deployment-knock-override"
+	overrideTx, err = store.BeginConfiguredConnectorResource(context.Background(), &effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay := overrideTx.Request(); replay == nil || *replay != overrideRequest {
+		t.Fatalf("knock override rotation changed native request = %+v, want %+v", replay, overrideRequest)
+	}
+	if err := overrideTx.CommitConfigured(&configured, "wrong-knock-override"); !errors.Is(err, ErrConnectorResourceVerification) {
+		_ = overrideTx.Close()
+		t.Fatalf("wrong effective knock = %v, want verification error", err)
+	}
+	if err := overrideTx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	overrideTx, err = store.BeginConfiguredConnectorResource(context.Background(), &effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := overrideTx.CommitConfigured(&configured, effective.KnockResourceID); err != nil {
+		_ = overrideTx.Close()
+		t.Fatal(err)
+	}
+	if err := overrideTx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, retired, found, err = store.ConnectorResourceBinding(context.Background(), configured.ConnectorID)
+	if err != nil || !found || retired || got != configured {
+		t.Fatalf("durable binding after override = %+v retired=%t found=%t err=%v", got, retired, found, err)
+	}
+}
+
+func TestConfiguredConnectorResourceRejectsOrdinaryPendingRequest(t *testing.T) {
+	store := openTestStore(t)
+	configured := testResourceBinding(t, "headless-api")
+	ordinary, err := store.BeginConnectorResource(context.Background(), configured.ConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRequest := *ordinary.Request()
+	if err := ordinary.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.BeginConfiguredConnectorResource(context.Background(), &configured); !errors.Is(err, ErrConnectorResourceVerification) {
+		t.Fatalf("configured ensure over ordinary pending = %v, want verification error", err)
+	}
+	replay, err := store.BeginConnectorResource(context.Background(), configured.ConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = replay.Close() }()
+	if got := replay.Request(); got == nil || *got != firstRequest {
+		t.Fatalf("ordinary pending after rejected configured ensure = %+v, want %+v", got, firstRequest)
+	}
+}
+
+func TestConfiguredConnectorResourceRejectsInvalidInputAsVerificationFailure(t *testing.T) {
+	store := openTestStore(t)
+	tests := []struct {
+		name       string
+		configured *ConnectorResourceBinding
+	}{
+		{name: "nil"},
+		{name: "invalid", configured: &ConnectorResourceBinding{ConnectorID: "headless-api"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := store.BeginConfiguredConnectorResource(context.Background(), test.configured); !errors.Is(err, ErrConnectorResourceVerification) {
+				t.Fatalf("configured input error = %v, want verification error", err)
+			}
+		})
+	}
+}
+
+func TestConnectorResourceFilesystemErrorsRemainRetryable(t *testing.T) {
+	if isWindows(t) {
+		t.Skip("Windows maps a non-directory path component to the valid missing-journal case")
+	}
+	nondirectory := filepath.Join(t.TempDir(), "state-file")
+	if err := os.WriteFile(nondirectory, []byte("not-a-directory\n"), connectorResourceFileMode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConnectorResources(nondirectory); err == nil || errors.Is(err, ErrConnectorResourceState) {
+		t.Fatalf("filesystem read error = %v, want unclassified retryable error", err)
+	}
+	if err := writeConnectorResources(nondirectory, emptyConnectorResourcesState()); err == nil || errors.Is(err, ErrConnectorResourceState) {
+		t.Fatalf("filesystem write error = %v, want unclassified retryable error", err)
+	}
+}
+
 func TestRetireConnectorResourcePreservesIdentityAndBlocksReuse(t *testing.T) {
 	store := openTestStore(t)
 	binding := testResourceBinding(t, "deleted-api")
@@ -250,6 +409,8 @@ func TestConnectorResourceStateRejectsCorruptionAndUnsafeEntries(t *testing.T) {
 		{name: "null map", data: `{"version":2,"bindings":null,"pending":{},"retired":{}}`},
 		{name: "null optional expected identity", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":null}},"retired":{}}`},
 		{name: "empty optional expected identity", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":""}},"retired":{}}`},
+		{name: "null configured CRID", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","configured_crid":null}},"retired":{}}`},
+		{name: "partial configured binding", data: `{"version":2,"bindings":{},"pending":{"safe-api":{"connector_id":"safe-api","request_nonce":"` + validNonce + `","expected_resource_id":"` + validBinding.ResourceID + `","configured_crid":"` + validBinding.CRID + `"}},"retired":{}}`},
 		{name: "null optional crid", data: `{"version":2,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":null}},"pending":{},"retired":{}}`},
 		{name: "empty optional crid", data: `{"version":2,"bindings":{"safe-api":{"connector_id":"safe-api","resource_id":"` + validBinding.ResourceID + `","connector_routing_id":"` + validBinding.ConnectorRoutingID + `","knock_resource_id":"nhp-target-safe-api","crid":""}},"pending":{},"retired":{}}`},
 		{name: "excessive nesting", data: `{"version":2,"bindings":[[[[[[[[[[]]]]]]]]]],"pending":{},"retired":{}}`},

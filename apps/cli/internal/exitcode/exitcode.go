@@ -439,6 +439,10 @@ func connectorResourceSentinelCode(err error) (int, bool) {
 		return Unavailable, true
 	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceResponse):
 		return ServerError, true
+	case errors.Is(err, state.ErrConnectorResourceState):
+		// The local journal is corrupt or violates its security contract. Every
+		// specific joined resource outcome takes priority above this fallback.
+		return General, true
 	default:
 		return 0, false
 	}
