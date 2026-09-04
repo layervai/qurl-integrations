@@ -35,6 +35,7 @@ describe('buildAuth0AuthorizeUrl', () => {
       expect(url.searchParams.get('code_challenge')).toBe(PKCE_CHALLENGE);
       expect(url.searchParams.get('code_challenge_method')).toBe('S256');
       expect(url.searchParams.get('prompt')).toBe('login consent');
+      expect(url.search).toContain('prompt=login+consent');
       expect(url.searchParams.get('connection')).toBeNull();
     });
   });

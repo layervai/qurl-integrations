@@ -246,7 +246,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    binding readout (sanity-check display, not a security boundary).
   let accessToken;
   let qurlAccountEmail;
-  let qurlAccountSubjectFingerprint;
+  let qurlAccountSubject;
   try {
     // OAuth2 spec is application/x-www-form-urlencoded for the token
     // endpoint. Auth0 accepts JSON too, but form-urlencoded is the
@@ -313,7 +313,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         }
         const subject = idTokenVerified.payload?.sub;
         if (typeof subject === 'string' && subject) {
-          qurlAccountSubjectFingerprint = fingerprintQurlAccountSubject(subject);
+          qurlAccountSubject = subject;
         }
       } else {
         // Severity at this call site mirrors auth0-jwks.js's internal
@@ -332,6 +332,10 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.error('Auth0 token exchange threw', { error: err?.message });
     return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl setup again.');
   }
+
+  const qurlAccountSubjectFingerprint = qurlAccountSubject
+    ? fingerprintQurlAccountSubject(qurlAccountSubject)
+    : undefined;
 
   // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
   //    the admin's qURL account (the Auth0 JWT's sub claim is the owner).

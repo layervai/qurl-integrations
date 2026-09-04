@@ -13,6 +13,7 @@ const qurlWebhookRouter = require('./routes/qurl-webhook');
 const webhookSubscriptions = require('./webhook-subscriptions');
 
 const app = express();
+const AUTH0_CONNECTION_POLICY_EVENT = 'qurl_oauth_auth0_connection_policy';
 
 function generateCspNonce() {
   return crypto.randomBytes(16).toString('base64url');
@@ -215,28 +216,25 @@ function noStoreHeaders(req, res, next) {
 // flipping the AUTH0_* secrets in SSM is the only step needed to turn
 // OAuth on — no code change or env-flag re-flip required.
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
+const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
+const auth0ConnectionPolicyMetadata = {
+  event: AUTH0_CONNECTION_POLICY_EVENT,
+  connection: auth0Connection,
+};
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
-  if (config.AUTH0_EMAIL_CONNECTION) {
-    logger.info(
-      `AUTH0_EMAIL_CONNECTION="${config.AUTH0_EMAIL_CONNECTION}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`,
-      {
-        event: 'qurl_oauth_auth0_connection_policy',
-        connection: config.AUTH0_EMAIL_CONNECTION,
-      },
-    );
-  }
+  const inactiveConnectionMessage = auth0Connection
+    ? `AUTH0_EMAIL_CONNECTION="${auth0Connection}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`
+    : 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
+  logger.info(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
 } else {
-  const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
   const auth0ConnectionMessage = auth0Connection
     ? `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`
     : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
   // Stable event metadata supports exact grep/filter matching while the
   // human-readable message remains self-sufficient if metadata is flattened.
-  logger.info(auth0ConnectionMessage, {
-    event: 'qurl_oauth_auth0_connection_policy',
-    connection: auth0Connection,
-  });
+  const logConnectionPolicy = auth0Connection ? logger.info : logger.warn;
+  logConnectionPolicy(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
 }
 
 // Stage-2 Discord install callback. Mounts at /oauth/discord/callback —

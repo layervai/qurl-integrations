@@ -84,11 +84,18 @@ const originalFetch = globalThis.fetch;
 const TEST_PKCE_VERIFIER = 'a'.repeat(43);
 const SUBJECT_FINGERPRINT_SECRET = process.env.QURL_OAUTH_STATE_SECRET
   || process.env.OAUTH_STATE_SECRET;
-const AUTH0_ABC_FINGERPRINT = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_SECRET)
+const SUBJECT_FINGERPRINT_KEY = crypto.hkdfSync(
+  'sha256',
+  SUBJECT_FINGERPRINT_SECRET,
+  Buffer.alloc(0),
+  'qurl-account-fingerprint:v1',
+  32,
+);
+const AUTH0_ABC_FINGERPRINT = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_KEY)
   .update('qurl-account-subject:auth0|abc')
   .digest('hex');
-const SUBJECT_FINGERPRINT_KEY_EPOCH = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_SECRET)
-  .update('qurl-account-fingerprint-key-epoch')
+const SUBJECT_FINGERPRINT_KEY_EPOCH = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_KEY)
+  .update('qurl-account-fingerprint-key-epoch:v1')
   .digest('hex')
   .slice(0, 12);
 
@@ -128,9 +135,8 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('scope')).toContain('qurl:read');
       // offline_access dropped per PR #177 review — no refresh-token use.
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
-      // `login` forces a fresh sign-in so an ambient Auth0 session can't
-      // bind the guild to the wrong account; `consent` is load-bearing
-      // for key rotation — re-running /qurl setup must actually
+      // `login` asks Auth0 not to reuse its ambient session; `consent` is
+      // load-bearing for key rotation — re-running /qurl setup must actually
       // re-prompt. Pin both so a future refactor can't drop either.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
       // No connection pin unless AUTH0_EMAIL_CONNECTION is set; both builder
