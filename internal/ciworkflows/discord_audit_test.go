@@ -17,7 +17,7 @@ var (
 	// or use --flag=value. unclassifiedNPMInvocations makes an unknown form
 	// fail closed rather than silently escaping this matcher.
 	npmInstallCommand  = regexp.MustCompile(`(?m)\bnpm\b[ \t]+(?:(?:(?:--(?:prefix|workspace|registry|cache|userconfig)|-[wC])[ \t]+[^ \t&|;"'\r\n]+|--?[^ \t&|;"'\r\n]+)[ \t]+)*(ci|install|i)\b[^&|;\r\n]*`)
-	noAuditFlag        = regexp.MustCompile(`(?:^|[ \t])--no-audit(?:$|[ \t"'\\])`)
+	noAuditFlag        = regexp.MustCompile(`(?:^|[ \t"'])--no-audit(?:$|[ \t"'\\])`)
 	shellContinuation  = regexp.MustCompile(`\\\r?\n[ \t]*`)
 	npmInvocation      = regexp.MustCompile(`(?m)\bnpm\b[ \t]+[^&|;\r\n]*`)
 	npmNonInstall      = regexp.MustCompile(`^npm[ \t]+(?:run|test|cache|audit|exec|version|--version)\b`)
@@ -35,6 +35,15 @@ func findNPMInstallCommands(source string) [][]string {
 
 func hasNoAuditFlag(command string) bool {
 	return noAuditFlag.MatchString(trailingShellComment.ReplaceAllString(command, ""))
+}
+
+func findDirectAuditCommands(source string) []string {
+	var commands []string
+	for line := range strings.SplitSeq(source, "\n") {
+		withoutComment := trailingShellComment.ReplaceAllString(line, "")
+		commands = append(commands, directAuditCommand.FindAllString(withoutComment, -1)...)
+	}
+	return commands
 }
 
 func logicalShellSource(source string) string {
@@ -93,6 +102,7 @@ func TestDiscordNPMInstallCommandShapes(t *testing.T) {
 		"environment audit suppression":  {`NPM_CONFIG_AUDIT=false npm ci`, "ci", false},
 		"trailing comment is not a flag": {`npm ci # --no-audit is configured elsewhere`, "ci", false},
 		"flag before trailing comment":   {`npm ci --no-audit # explicit suppression`, "ci", true},
+		"quoted no-audit flag":           {`npm ci "--no-audit"`, "ci", true},
 		"plural lookalike flag":          {`npm ci --no-audits`, "ci", false},
 	}
 
@@ -150,19 +160,20 @@ func TestDiscordDirectAuditCommandShapes(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if got := directAuditCommand.FindAllString(logicalShellSource(source), -1); len(got) != 1 {
+			if got := findDirectAuditCommands(logicalShellSource(source)); len(got) != 1 {
 				t.Fatalf("direct audit matches = %q, want one for %q", got, source)
 			}
 		})
 	}
 
 	for name, source := range map[string]string{
-		"install":      `npm ci --no-audit`,
-		"line comment": `# npm audit --json`,
+		"install":          `npm ci --no-audit`,
+		"line comment":     `# npm audit --json`,
+		"trailing comment": `npm ci --no-audit # npm audit runs separately`,
 	} {
 		t.Run("no match: "+name, func(t *testing.T) {
 			t.Parallel()
-			if got := directAuditCommand.FindAllString(logicalShellSource(source), -1); len(got) != 0 {
+			if got := findDirectAuditCommands(logicalShellSource(source)); len(got) != 0 {
 				t.Fatalf("direct audit matches = %q, want none for %q", got, source)
 			}
 		})
@@ -177,8 +188,9 @@ func TestDiscordDirectAuditCommandShapes(t *testing.T) {
 //
 // The audit count covers direct shell invocations of npm audit and the
 // repository's Node wrapper. It does not infer audits hidden behind package
-// scripts, npx commands, or uses actions. Every direct npm audit kind,
-// including signatures, is deliberately review-gated by the count below.
+// scripts (including install/prepare hooks), npx commands, or uses actions.
+// Every direct npm audit kind, including signatures, is deliberately
+// review-gated by the count below.
 // Each install must carry a literal --no-audit: NPM_CONFIG_AUDIT=false and an
 // .npmrc audit=false default intentionally do not satisfy this contract.
 func TestDiscordDependencyAuditContract(t *testing.T) {
@@ -206,7 +218,7 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 				location := fmt.Sprintf("%s job %q step %q", spec.path, jobID, current.Name)
 				checkNPMInvocationsClassified(t, location, logicalRun)
 				installCount += checkLockfileInstalls(t, location, installs)
-				directAuditCommandCount += len(directAuditCommand.FindAllString(logicalRun, -1))
+				directAuditCommandCount += len(findDirectAuditCommands(logicalRun))
 				if current.Name == discordAuditStepName {
 					if audit != nil {
 						t.Fatalf("%s has more than one %q step", spec.path, discordAuditStepName)
