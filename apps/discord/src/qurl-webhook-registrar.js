@@ -95,11 +95,40 @@ const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
 // value. The allowlist distinguishes reusable values from SSM seed
 // sentinels and rejects response drift before it can reach persistence.
 const SERVER_SECRET_PREFIX = 'whsec_';
+// qurl-service currently emits a 43-character base64url body. Keep a
+// smaller but still meaningful floor so the registrar tolerates a future
+// generator change without accepting a prefix plus a token-sized stub.
+const SERVER_SECRET_MIN_BODY_LENGTH = 16;
+
+// TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// Terraform seeds the SSM parameter with this literal so it exists before
+// the registrar's first write. Classification is observability-only; the
+// reuse decision remains the server-issued format allowlist above.
+const INFRA_SEED_SENTINEL = 'PLACEHOLDER';
 
 function isServerIssuedSecret(value) {
   return typeof value === 'string'
-    && value.length > SERVER_SECRET_PREFIX.length
+    && value.length >= SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN_BODY_LENGTH
     && value.startsWith(SERVER_SECRET_PREFIX);
+}
+
+function assertServerIssuedSecret(value, operation) {
+  const expected = `${SERVER_SECRET_PREFIX} prefix with at least ${SERVER_SECRET_MIN_BODY_LENGTH} characters after it`;
+  if (value === undefined || value === null || value === '') {
+    throw new Error(`${operation}: contract drift (response secret is missing; expected ${expected})`);
+  }
+  if (typeof value !== 'string') {
+    throw new Error(`${operation}: contract drift (response secret has wrong type ${typeof value}; expected a string matching ${expected})`);
+  }
+  if (!isServerIssuedSecret(value)) {
+    throw new Error(`${operation}: contract drift (response secret has invalid format; expected ${expected}; observed length ${value.length})`);
+  }
+}
+
+function secretLengthBucket(value) {
+  if (value.length < 16) return '<16';
+  if (value.length < 64) return '16-63';
+  return '>=64';
 }
 
 // Strip secret-shaped fields anywhere in a parsed body before
@@ -703,9 +732,7 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
       || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0) {
     throw new Error('createSubscription: contract drift (response missing or empty webhook_id)');
   }
-  if (!isServerIssuedSecret(data.secret)) {
-    throw new Error('createSubscription: contract drift (response secret is not server-issued)');
-  }
+  assertServerIssuedSecret(data.secret, 'createSubscription');
   return data;
 }
 
@@ -717,9 +744,7 @@ async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
     apiKey,
   });
   const data = resp?.data;
-  if (!data || !isServerIssuedSecret(data.secret)) {
-    throw new Error('rotateSecret: contract drift (response secret is not server-issued)');
-  }
+  assertServerIssuedSecret(data?.secret, 'rotateSecret');
   return data;
 }
 
@@ -920,9 +945,9 @@ async function ensureWebhookSubscription(opts) {
   // Force a rotate so SSM gets a known-good value tied to the
   // survivor. One-time cost on dedupe; subsequent restarts reuse.
   // "Real" means server-issued: qurl-service mints every webhook secret
-  // with a fixed `whsec_` prefix. The SSM parameter the Lambda reads is
-  // seeded by terraform with a sentinel ("PLACEHOLDER") so it exists
-  // before the first registrar run; a non-empty check alone would reuse
+  // with a fixed `whsec_` prefix and a token-length body. The SSM parameter
+  // the Lambda reads is seeded by terraform with a sentinel ("PLACEHOLDER")
+  // so it exists before the first registrar run; a non-empty check alone would reuse
   // that sentinel whenever a subscription already exists for the bridge
   // URL (a sub that predates the parameter, or an SSM reset), and the
   // receiver would then 401 every delivery until an operator noticed.
@@ -935,8 +960,8 @@ async function ensureWebhookSubscription(opts) {
     // not a denylist coupled to terraform's current sentinel literal.
     logger.warn('qURL webhook initial secret has unrecognized format — rotating instead of reusing', {
       webhookId: existing.webhook_id,
-      seedSentinel: initialSecret === 'PLACEHOLDER',
-      valueLength: initialSecret.length,
+      seedSentinel: initialSecret === INFRA_SEED_SENTINEL,
+      valueLengthBucket: secretLengthBucket(initialSecret),
     });
   }
 
