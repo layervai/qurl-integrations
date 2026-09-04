@@ -93,6 +93,8 @@ function readGatewayHealth(client, now = Date.now) {
 
   const healthy =
     isReady &&
+    // Zero is a legitimate sub-millisecond @discordjs/ws heartbeat latency;
+    // -1 remains the pre-first-ACK sentinel on both client paths.
     ping_ms >= 0 &&
     ack_age_ms !== null &&
     ack_age_ms < HEARTBEAT_ACK_AGE_THRESHOLD_MS;

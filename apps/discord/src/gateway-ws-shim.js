@@ -123,6 +123,7 @@ const MAX_IDENTIFY_ATTEMPTS = 1;
 // typically under 5 s; 30 s is a generous ceiling that surfaces
 // "Discord API unreachable" as a fast-fail rather than a hang.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+// TODO(upstream-contract): Discord caps GET /users/@me/guilds at 200 rows.
 const USER_GUILDS_PAGE_LIMIT = 200;
 // One shard supports at most 2,500 guilds; 25 pages leaves 2x headroom while
 // bounding a malformed/non-advancing upstream pagination walk at 5,000 rows.
@@ -178,13 +179,18 @@ function createGatewayWsShim({
   // @discordjs/ws exposes heartbeat ACK telemetry as a manager-level
   // HeartbeatComplete event rather than discord.js Client.ws shard fields.
   // Mirror the latest sample so gateway-metrics can keep the same positive-
-  // signal alarm contract on the resume/hot-standby path.
+  // signal alarm contract on the resume/hot-standby path. Same single-shard
+  // assumption as wsConnected above: with multiple shards this newest ACK
+  // could mask a stale shard, while the legacy sampler deliberately uses the
+  // oldest. Generalize all three mirrors together before enabling sharding.
   let lastHeartbeatAckAt = null;
   let lastHeartbeatLatencyMs = -1;
   let hasConnected = false;
   // READY carries the complete guild membership list. A pure RESUME does
   // not, so that path lazily seeds from Discord's paginated user-guilds
-  // endpoint before publishing an exact ActiveGuildCount metric.
+  // endpoint before publishing an exact ActiveGuildCount metric. Also single-
+  // shard: each READY replaces the set wholesale; per-shard sets must be
+  // unioned before deploying more than SHARD_ID=0:1.
   let activeGuildIds = null;
   let guildSeedPromise = null;
   const pendingGuildAdds = new Set();
@@ -304,6 +310,8 @@ function createGatewayWsShim({
         if (stopped) return;
         const eventType = data?.t;
         if (eventType === 'READY') {
+          // TODO(upstream-contract): Discord READY.d.guilds is the complete
+          // guild-membership snapshot for this shard.
           // application.id is the OAuth2 application snowflake —
           // identical to client.application.id in the legacy path.
           // RegisterCommands needs this to address the global-
@@ -355,6 +363,8 @@ function createGatewayWsShim({
           }
         } else if (
           eventType === 'GUILD_DELETE'
+          // TODO(upstream-contract): Discord marks temporary unavailability
+          // with unavailable=true; other GUILD_DELETE events are real leaves.
           && data?.d?.unavailable !== true
           && typeof data?.d?.id === 'string'
         ) {
@@ -605,10 +615,12 @@ function createGatewayWsShim({
     },
 
     getGatewayHeartbeatState() {
-      // A hot standby that has never held the lock has no gateway-health
-      // opinion. The active replica is the sole source of healthy/unhealthy
-      // samples until this process has actually connected once.
-      if (!hasConnected) return null;
+      // A never-connected standby, a stopped process, and a disconnected
+      // former leader have no gateway-health opinion. The positive-signal
+      // missing-data alarm still catches the absence of a connected replica;
+      // suppressing the companion unhealthy event prevents an idle standby
+      // from emitting an unbounded false-unhealthy stream after demotion.
+      if (!hasConnected || stopped || !wsConnected) return null;
       return {
         // isReady intentionally stays true through transient reconnects for
         // the ECS /health probe. The positive heartbeat must be stricter:
@@ -622,7 +634,9 @@ function createGatewayWsShim({
     async getActiveGuildCount() {
       // A hot standby must not publish a fabricated zero while it is not the
       // lock-holding gateway. The connected replica will provide the gauge.
-      if (!isReady || !wsConnected) return null;
+      // `stopped`/REST guard also closes the failed-start race where READY can
+      // land immediately before connect() times out and clears restInstance.
+      if (stopped || !restInstance || !isReady || !wsConnected) return null;
       if (activeGuildIds) return activeGuildIds.size;
 
       if (!guildSeedPromise) {
@@ -637,7 +651,11 @@ function createGatewayWsShim({
               );
             }
             const query = new URLSearchParams({ limit: String(USER_GUILDS_PAGE_LIMIT) });
+            // TODO(upstream-contract): Discord paginates this route in
+            // ascending snowflake order via `after`; a short page is final.
             if (after) query.set('after', after);
+            // TODO(upstream-contract): Routes.userGuilds() maps to Discord's
+            // GET /users/@me/guilds endpoint.
             const page = await restInstance.get(Routes.userGuilds(), { query });
             if (!Array.isArray(page)) {
               throw new Error('gateway-ws-shim: current-user guilds response was not an array');

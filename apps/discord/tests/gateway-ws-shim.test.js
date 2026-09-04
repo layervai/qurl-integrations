@@ -302,11 +302,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     });
 
     manager.emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
-    expect(shim.getGatewayHeartbeatState()).toEqual({
-      isReady: false,
-      pingMs: -1,
-      lastHeartbeatAckAt: null,
-    });
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
 
     manager.emit(WebSocketShardEvents.Resumed, { shardId: 0 });
     expect(shim.getGatewayHeartbeatState()).toEqual({
@@ -327,6 +323,8 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
 
   it('tracks an exact active-guild count from READY and later guild lifecycle dispatches', async () => {
     const { shim, managerInstances, restInstances } = makeShim();
+    const dispatchHandler = jest.fn();
+    shim.onDispatch(dispatchHandler);
     await shim.start({ connect: false });
     const manager = managerInstances[0];
     manager.emit(WebSocketShardEvents.Ready, { data: {}, shardId: 0 });
@@ -352,6 +350,9 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     });
 
     expect(await shim.getActiveGuildCount()).toBe(2);
+    expect(dispatchHandler.mock.calls.map(([payload]) => payload.data.t)).toEqual([
+      'READY', 'GUILD_CREATE', 'GUILD_DELETE', 'GUILD_DELETE',
+    ]);
   });
 
   it('seeds active-guild count from REST after a pure RESUME and paginates past 200', async () => {
@@ -370,6 +371,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
 
     expect(await shim.getActiveGuildCount()).toBe(202);
     expect(restInstances[0].get).toHaveBeenCalledTimes(2);
+    expect(restInstances[0].get.mock.calls[0][0]).toBe('/users/@me/guilds');
     expect(restInstances[0].get.mock.calls[1][1].query.get('after')).toBe('g199');
     expect(await shim.getActiveGuildCount()).toBe(202);
     expect(restInstances[0].get).toHaveBeenCalledTimes(2);
@@ -381,6 +383,37 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
 
     expect(await shim.getActiveGuildCount()).toBe(null);
     expect(restInstances[0].get).not.toHaveBeenCalled();
+  });
+
+  it('returns no metric opinion after stop even if the shim previously connected', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const manager = managerInstances[0];
+    manager.emit(WebSocketShardEvents.Ready, { shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' }, guilds: [{ id: 'g1' }] } },
+      shardId: 0,
+    });
+    await shim.stop({ flushFinal: false });
+
+    expect(shim.getGatewayHeartbeatState()).toBe(null);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(null);
+  });
+
+  it('returns no guild metric after a failed start nulls REST during a late-ready race', async () => {
+    const { SlowFakeManager, instances } = makeSlowManagerCtor();
+    const { shim } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
+    const startPromise = shim.start({ timeoutMs: 5 });
+    await Promise.resolve();
+    const manager = instances[0];
+    manager.emit(WebSocketShardEvents.Ready, { shardId: 0 });
+    manager.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+
+    await expect(startPromise).rejects.toThrow(/timed out/);
+    await expect(shim.getActiveGuildCount()).resolves.toBe(null);
   });
 
   it('folds guild lifecycle dispatches into an in-flight pure-RESUME REST seed', async () => {
@@ -1108,6 +1141,8 @@ describe('constants are pinned', () => {
     expect(installedMajorMinor).toBe(VERIFIED_DJS_WS_MAJOR_MINOR);
 
     const typeDeclarations = fs.readFileSync(path.join(wsRoot, 'dist', 'index.d.mts'), 'utf8');
+    // If this trips on a dependency bump, re-read the matching upstream event
+    // emitter before updating the declaration regex and version contract.
     expect(typeDeclarations).toMatch(
       /\[WebSocketShardEvents\.HeartbeatComplete\]: \[payload: \{\s*ackAt: number;\s*heartbeatAt: number;\s*latency: number;/,
     );

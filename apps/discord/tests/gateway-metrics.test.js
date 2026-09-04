@@ -306,13 +306,21 @@ describe('startGatewayHeartbeat', () => {
     const source = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');
     const startMarker = 'await gatewayShim.start({ connect: !config.ENABLE_GATEWAY_HOT_STANDBY });';
     const branchStart = source.indexOf(startMarker);
+    expect(branchStart).toBeGreaterThanOrEqual(0);
     const branchEnd = source.indexOf('} else if (isGateway) {', branchStart);
+    expect(branchEnd).toBeGreaterThan(branchStart);
     const shimBranch = source.slice(branchStart, branchEnd);
 
-    expect(branchStart).toBeGreaterThanOrEqual(0);
-    expect(branchEnd).toBeGreaterThan(branchStart);
     expect(shimBranch).toContain('gatewayHeartbeatTimer = startGatewayHeartbeat(gatewayShim);');
     expect(shimBranch).toContain('activeGuildCountTimer = startActiveGuildCount(gatewayShim);');
+
+    const shutdownStart = source.indexOf('async function gracefulShutdown(code = 0) {');
+    const shutdownEnd = source.indexOf('async function start() {', shutdownStart);
+    expect(shutdownStart).toBeGreaterThanOrEqual(0);
+    expect(shutdownEnd).toBeGreaterThan(shutdownStart);
+    const shutdownBranch = source.slice(shutdownStart, shutdownEnd);
+    expect(shutdownBranch).toContain('clearInterval(gatewayHeartbeatTimer);');
+    expect(shutdownBranch).toContain('clearInterval(activeGuildCountTimer);');
   });
 
   test('logs healthy → unhealthy transition exactly once (edge-triggered, not per-tick)', () => {
@@ -446,6 +454,17 @@ describe('startActiveGuildCount', () => {
       AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
       { count: 9 },
     );
+  });
+
+  test('emits no gauge when an async gateway-shim sampler has no opinion', async () => {
+    const shim = {
+      getActiveGuildCount: jest.fn().mockResolvedValue(null),
+    };
+
+    startActiveGuildCount(shim, { intervalMs: 60_000 });
+    await jest.advanceTimersByTimeAsync(0);
+
+    expect(logger.audit).not.toHaveBeenCalled();
   });
 
   test('does not overlap async gateway-shim samples when a REST seed is still pending', async () => {
