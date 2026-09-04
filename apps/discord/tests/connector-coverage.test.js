@@ -783,15 +783,18 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
   // runs through globalThis.fetch — so "no POST happened" = globalThis.fetch not
   // called (distinct from the SDK mint/resolve legs).
   describe('detectWatermark — self-mint-then-POST tunnel contract', () => {
-    // A known-good public https tunnel qurl_site the mint leg hands back — the
-    // real qURL reverse-tunnel host form `r_<id>.qurl.site` (qurl-service
-    // resourceIDPattern), which the assertPublicHttpsTarget host-pin allows.
+    // A known-good public https tunnel qurl_site the mint leg hands back. Its
+    // short `r_` label is an internal Traefik routing label, not resource
+    // identity; the resource_id below is the opaque P-256 public key.
     const TUNNEL_SITE = 'https://r_abc12345678.qurl.site';
     const SANDBOX_TUNNEL_SITE = 'https://r_abc12345678.qurl.site.layerv.xyz';
     const STAGING_TUNNEL_SITE = 'https://r_abc12345678.qurl.site.layerv.ai';
     const TUNNEL_TARGET = `${TUNNEL_SITE}/api/detect`;
-    // The resource_id the listAllResources({slug}) lookup resolves to.
-    const RESOURCE_ID = 'r_abc12345678';
+    // An unpadded base64url P-256 SPKI resource_id, matching the service's
+    // public-key resource identity contract.
+    const RESOURCE_ID = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2ifzReg5Fb3RadAQRn_oYpEYDKDXp0InOyQpO8Wo392Hmm92wvsORreNjzdi18er8WjAQzqP3KUgkYJxjO0ZpQ';
+    const OTHER_RESOURCE_ID = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUdo9dFoITY7YjKpcsqAqirgvnBqmd4UqOI1rJoZr2vZfm5gY1gj-6ixqU6A4mUoic1tVyopTsrLI1RhI7V57CA';
+    const REVOKED_RESOURCE_ID = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEF7Eb1T4TJIa4uUdFdxiMl1ARZRlmvpts6WkeCY5RUN-DnrmyXbOVkKgsjRFxqhteXp-ybrf6j07zeJRjb7HFvQ';
     // The mint's qurl_link: the at_ access token rides in the fragment.
     const MINT_LINK = 'https://qurl.link.layerv.xyz/#at_testtoken123';
 
@@ -968,17 +971,27 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(get()).toBeNull();
     });
 
-    it('normalizes the API-sourced resource_id before comparing it to the lowercased tunnel host label', async () => {
+    it('accepts an r_-labelled qurl_site for an opaque public-key resource_id', async () => {
       const get = captureDetect(
         { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
-        {
-          resources: [{ resource_id: RESOURCE_ID.toUpperCase(), status: 'active' }],
-          resolveResult: { target_url: '', resource_id: RESOURCE_ID.toUpperCase() },
-        },
       );
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9', apiKey: 'k-detect' });
       expect(get().url).toBe(TUNNEL_TARGET);
-      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID.toUpperCase(), expect.any(Object));
+      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, expect.any(Object));
+    });
+
+    it('host-pin compares the complete target and returned qurl_site hostnames case-insensitively', () => {
+      expect(connector.__testExports.allowedDetectTunnelHost(
+        'R_ABC12345678.QURL.SITE',
+        'r_abc12345678.qurl.site',
+      )).toBe(true);
+    });
+
+    it('host-pin fails closed when the detect target hostname differs from the returned qurl_site', () => {
+      expect(connector.__testExports.allowedDetectTunnelHost(
+        'r_other123456.qurl.site',
+        'r_abc12345678.qurl.site',
+      )).toBe(false);
     });
 
     it('ignores a non-empty resolve target_url and still POSTs to qurl_site', async () => {
@@ -995,7 +1008,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
         {
           resources: [
-            { resource_id: 'r_old', slug: 'detect-sandbox', status: 'revoked' },
+            { resource_id: REVOKED_RESOURCE_ID, slug: 'detect-sandbox', status: 'revoked' },
             { resource_id: RESOURCE_ID, slug: 'detect-sandbox', status: 'active' },
           ],
           resolveResult: { target_url: '', resource_id: RESOURCE_ID },
@@ -1010,7 +1023,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
     it('finds the active detect resource after many revoked rows via the SDK auto-paginator', async () => {
       const revokedRows = Array.from({ length: 150 }, (_, i) => ({
-        resource_id: `r_revoked${String(i).padStart(4, '0')}`,
+        resource_id: `${REVOKED_RESOURCE_ID.slice(0, -4)}${String(i).padStart(4, '0')}`,
         slug: 'detect-sandbox',
         status: 'revoked',
       }));
@@ -1035,8 +1048,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
         {
           resources: [
-            { resource_id: 'r_active11111', slug: 'detect-sandbox', status: 'active' },
-            { resource_id: 'r_active22222', slug: 'detect-sandbox', status: 'active' },
+            { resource_id: RESOURCE_ID, slug: 'detect-sandbox', status: 'active' },
+            { resource_id: OTHER_RESOURCE_ID, slug: 'detect-sandbox', status: 'active' },
           ],
         },
       );
@@ -1057,8 +1070,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       try {
         const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
         mockListAllResourcesOnce([
-          { resource_id: 'r_active11111', slug: 'detect-sandbox', status: 'active' },
-          { resource_id: 'r_active22222', slug: 'detect-sandbox', status: 'active' },
+          { resource_id: RESOURCE_ID, slug: 'detect-sandbox', status: 'active' },
+          { resource_id: OTHER_RESOURCE_ID, slug: 'detect-sandbox', status: 'active' },
         ]);
 
         await expect(
@@ -1469,7 +1482,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     // #1035: the same guard, reached via an IPv4-mapped IPv6 literal. `new URL()`
     // re-serializes this to `[::ffff:a9fe:a9fe]`, which the pre-fix isPrivateHost
     // classified as PUBLIC. This case was never exploitable here — the
-    // `r_*.qurl.site` host-pin below isPrivateHost rejects a bracketed literal
+    // qURL tunnel suffix pin below rejects a bracketed literal
     // regardless — but it pins the ORDER: the private-address layer must fire
     // first, so the mapped form is rejected as private rather than falling
     // through to the host-pin's "not under an expected qURL tunnel domain".
@@ -1517,7 +1530,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     it('SSRF guard: a PUBLIC non-qURL host throws and NO knock or POST happens', async () => {
       // Host-pin: even a perfectly public, non-private https host is rejected
       // unless it's under the qURL tunnel domain (qurl.site) — so a compromised
-      // or spoofed resolve() can't redirect the image bytes + Bearer to an
+      // or spoofed mint response can't redirect the image bytes + Bearer to an
       // attacker endpoint. isPrivateHost would NOT fire on a public host; only
       // the host-pin catches this.
       const get = captureDetect({ detected: false }, { qurlSite: 'https://evil.example.com' });
@@ -1541,31 +1554,12 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     it('host-pin rejects the look-alike suffix `evilqurl.site` (no dot separator)', async () => {
       // Guards the endsWith boundary: `evilqurl.site` must NOT satisfy the
       // `.qurl.site` suffix (no dot separator), so it's rejected like any other
-      // non-qURL host. (The valid `*.qurl.site` subdomain form — the only shape a
-      // real tunnel host `r_<id>.qurl.site` takes — is covered by the happy-path
-      // tests above via TUNNEL_TARGET.)
+      // non-qURL host. The valid `*.qurl.site` subdomain form is covered by the
+      // happy-path tests above via TUNNEL_TARGET.
       const get = captureDetect({ detected: false }, { qurlSite: 'https://evilqurl.site' });
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/qURL tunnel domain/);
-      expect(get()).toBeNull();
-    });
-
-    it('host-pin rejects a qURL tunnel host with a non-resource-id label', async () => {
-      const get = captureDetect({ detected: false }, { qurlSite: 'https://r_too_long_for_pin.qurl.site' });
-      await expect(
-        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
-      ).rejects.toThrow(/qURL tunnel domain/);
-      expect(mockClient.resolve).not.toHaveBeenCalled();
-      expect(get()).toBeNull();
-    });
-
-    it('host-pin rejects a qURL tunnel host for a different resource_id before the knock', async () => {
-      const get = captureDetect({ detected: false }, { qurlSite: 'https://r_other123456.qurl.site' });
-      await expect(
-        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
-      ).rejects.toThrow(/qURL tunnel domain/);
-      expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(get()).toBeNull();
     });
 
@@ -1575,8 +1569,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
         mockClient.createQurlForResource
           .mockResolvedValueOnce({ qurl_id: 'q1', qurl_link: MINT_LINK, qurl_site: TUNNEL_SITE })
-          .mockResolvedValueOnce({ qurl_id: 'q2', qurl_link: MINT_LINK, qurl_site: 'https://r_other123456.qurl.site' })
-          .mockResolvedValueOnce({ qurl_id: 'q3', qurl_link: MINT_LINK, qurl_site: 'https://r_other123456.qurl.site' })
+          .mockResolvedValueOnce({ qurl_id: 'q2', qurl_link: MINT_LINK, qurl_site: 'https://r_abc12345678.evil.example.com' })
+          .mockResolvedValueOnce({ qurl_id: 'q3', qurl_link: MINT_LINK, qurl_site: 'https://r_abc12345678.evil.example.com' })
           .mockResolvedValueOnce({ qurl_id: 'q3', qurl_link: MINT_LINK, qurl_site: TUNNEL_SITE });
 
         await connector.detectWatermark(Buffer.from('a'), { guildId: 'g', apiKey: 'k' });
@@ -1673,11 +1667,11 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       try {
         captureDetect(
           { detected: false },
-          { resolveResult: { target_url: '', resource_id: 'r_other' } },
+          { resolveResult: { target_url: '', resource_id: OTHER_RESOURCE_ID } },
         );
         mockClient.resolve
-          .mockResolvedValueOnce({ target_url: '', resource_id: 'r_other' })
-          .mockResolvedValueOnce({ target_url: '', resource_id: 'r_other' })
+          .mockResolvedValueOnce({ target_url: '', resource_id: OTHER_RESOURCE_ID })
+          .mockResolvedValueOnce({ target_url: '', resource_id: OTHER_RESOURCE_ID })
           .mockResolvedValueOnce({ target_url: '', resource_id: RESOURCE_ID });
         await expect(
           connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
@@ -1685,7 +1679,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         expect(globalThis.fetch).not.toHaveBeenCalled();
         expect(logger.warn).toHaveBeenCalledWith(
           'Detect tunnel resolve returned mismatched resource_id',
-          expect.objectContaining({ expected_resource_id: RESOURCE_ID, actual_resource_id: 'r_other' }),
+          expect.objectContaining({ expected_resource_id: RESOURCE_ID, actual_resource_id: OTHER_RESOURCE_ID }),
         );
         await expect(
           connector.detectWatermark(Buffer.from('y'), { guildId: 'g', apiKey: 'k' }),
@@ -1705,6 +1699,19 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       } finally {
         clock.restore();
       }
+    });
+
+    it('rejects a resolve resource_id that differs only by case', async () => {
+      const caseChangedResourceId = `m${RESOURCE_ID.slice(1)}`;
+      captureDetect(
+        { detected: false },
+        { resolveResult: { target_url: '', resource_id: caseChangedResourceId } },
+      );
+
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/mismatched resource_id/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
     it('allows a resolve response that omits resource_id and still POSTs to qurl_site', async () => {

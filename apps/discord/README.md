@@ -104,16 +104,20 @@ setup) means required to use that feature.
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
 
-When enabling `/qurl detect`, the minted `qurl_site` must be host-only, and the
-host must be the tunnel resource id (`r_<id>`) under a supported qURL tunnel
-suffix. Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
+When enabling `/qurl detect`, the minted `qurl_site` must be host-only. The
+constructed detect target's complete hostname must match that authenticated
+mint value case-insensitively and sit under a supported qURL tunnel suffix. A
+qURL site may use an `r_<11 chars>` Traefik routing label, but that label carries
+no resource identity and is not compared with the resource's opaque public-key
+ID.
+Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
 (`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`,
 `api.staging.layerv.ai`); the endpoint host does not bind to one specific
 non-prod suffix. Unknown endpoint hosts, including unlisted `.local` hosts, fail
-closed to production tunnel suffixes. If tunnel infra adds regional/sharded host
-labels or a path-based `qurl_site`, update the detect host-pin/path contract and
-tests before flipping `DETECT_COMMAND_ENABLED=true`.
+closed to production tunnel suffixes. If tunnel infra adds a suffix or a
+path-based `qurl_site`, update the detect host-pin/path contract and tests before
+flipping `DETECT_COMMAND_ENABLED=true`.
 The built-in non-prod set above can be extended via
 `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` and `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES`
 (comma-separated, trimmed, lowercased; suffixes must start with `.`) — e.g.

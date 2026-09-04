@@ -668,18 +668,14 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-function allowedDetectTunnelHost(hostname, expectedResourceId) {
-  const host = hostname.toLowerCase();
-  const expectedLabel = String(expectedResourceId || '').toLowerCase();
-  return DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => {
-    if (!host.endsWith(suffix)) return false;
-    const tunnelLabel = host.slice(0, -suffix.length);
-    // TODO(upstream-contract): keep the host label in lockstep with
-    // qurl-service's resourceIDPattern (`^r_[a-z0-9_-]{11}$`).
-    // The suffix list only scopes known qURL tunnel domains; the exact
-    // resource-id equality is the Bearer-carrying POST guard.
-    return /^r_[a-z0-9_-]{11}$/.test(tunnelLabel) && tunnelLabel === expectedLabel;
-  });
+// The qurl_site label may be an `r_` Traefik routing label, but it carries no
+// resource identity: resource IDs are opaque public keys. Bind the target to
+// the complete hostname returned by the authenticated mint instead.
+function allowedDetectTunnelHost(hostname, expectedQurlSiteHostname) {
+  const host = String(hostname || '').toLowerCase();
+  const expectedHost = String(expectedQurlSiteHostname || '').toLowerCase();
+  return host === expectedHost
+    && DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
 class DetectQurlSiteError extends Error {}
@@ -696,12 +692,12 @@ class DetectQurlSiteError extends Error {}
 // from a TRUSTED authenticated mint (not user input) and resolve-per-call keeps
 // the knock window tight, so a DNS round-trip per detect isn't warranted. A
 // future reader should NOT assume this carries the link guard's DNS guarantee.
-function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
+function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHostname) {
   let parsed;
   try {
     parsed = new URL(targetUrl);
   } catch {
-    // buildDetectTargetUrl passes a serialized URL today; keep this as
+    // buildDetectTargetUrl passes the serialized target URL today; keep this as
     // defense-in-depth if a future caller validates a raw target directly.
     throw new Error('Detect tunnel qurl_site target is unparseable');
   }
@@ -715,16 +711,17 @@ function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
     throw new Error('Detect tunnel qurl_site target points to a private/internal address');
   }
   // Host-pin (defense-in-depth on this Bearer-carrying oracle leg): the POST
-  // target MUST be an `r_...` qURL reverse-tunnel resource-id host. Production
-  // currently uses `*.qurl.site`; sandbox has been observed as
+  // target host MUST exactly match the authenticated mint's qurl_site host and
+  // be under an allowed qURL reverse-tunnel suffix. Production currently uses
+  // `*.qurl.site`; sandbox has been observed as
   // `*.qurl.site.layerv.xyz`; staging may use `*.qurl.site.layerv.ai`.
   // Non-prod suffixes are accepted only for an explicit non-prod QURL_ENDPOINT
   // host; unknown endpoint shapes fail closed to prod-only tunnel hosts.
   // A malformed mint returning a public NON-qURL host then can't receive the
   // image bytes + our API-key Bearer. (NOT qurl.link — that's the short-link /
   // ALB domain, not the tunnel.)
-  if (!allowedDetectTunnelHost(parsed.hostname, expectedResourceId)) {
-    throw new Error('Detect tunnel qurl_site host is not under an expected qURL tunnel domain');
+  if (!allowedDetectTunnelHost(parsed.hostname, expectedQurlSiteHostname)) {
+    throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site or an expected qURL tunnel domain');
   }
 }
 
@@ -734,7 +731,7 @@ function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
 // CreateQurlForResourceRequest) and resolve's `target_url` is deliberately
 // ignored (it is "" for tunnels). Keep it that way: dropping the join would
 // silently POST image bytes to the tunnel root.
-function buildDetectTargetUrl(qurlSite, expectedResourceId) {
+function buildDetectTargetUrl(qurlSite) {
   let parsed;
   try {
     parsed = new URL(qurlSite);
@@ -747,8 +744,9 @@ function buildDetectTargetUrl(qurlSite, expectedResourceId) {
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  assertPublicHttpsTarget(parsed.toString(), expectedResourceId);
-  return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
+  const targetUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
+  assertPublicHttpsTarget(targetUrl, parsed.hostname);
+  return targetUrl;
 }
 
 // Scrub any `at_…` access token from a free-text error message before logging.
@@ -921,9 +919,9 @@ async function resolveDetectTarget() {
     throw err;
   }
   try {
-    targetUrl = buildDetectTargetUrl(minted?.qurl_site, resourceId);
+    targetUrl = buildDetectTargetUrl(minted?.qurl_site);
   } catch (err) {
-    // qurl_site/resource-id host-pin failures happen after a successful slug
+    // qurl_site hostname-pin failures happen after a successful slug
     // lookup and mint, so keep the cached resource id and retry the mint after
     // the short failure window instead of re-walking slug history. The mint
     // created an unredeemed 5m qURL, but failing before resolve() is the safe
@@ -958,7 +956,7 @@ async function resolveDetectTarget() {
   // present, but do not make the tunnel POST depend on optional resolve metadata
   // from older/variant API shapes; qurl_site came from the authenticated mint.
   const resolvedResourceId = resolved?.resource_id;
-  if (resolvedResourceId && String(resolvedResourceId).toLowerCase() !== resourceId.toLowerCase()) {
+  if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
     const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
     // The knock already happened, but the Bearer-carrying image POST must not.
     // The minted qURL is unused and expires quickly; clear the cache so the
@@ -1105,3 +1103,6 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 }
 
 module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = { allowedDetectTunnelHost };
+}
