@@ -163,7 +163,7 @@ if (require.main === module && fs.existsSync(envFile)) {
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
-const { hasSafeResourceIdShape } = require('../src/utils/resource-id');
+const { hasSafeResourceIdShape, maskResourceIdPath } = require('../src/utils/resource-id');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -1188,7 +1188,7 @@ async function reclaim(ledgerPath) {
           // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
           // instead of "5000x", defeating the tally and flooding the very
           // scrollback the heartbeat is trying to keep readable.
-          const cause = e.message.replace(/\/resources\/\S+/, '/resources/<id>');
+          const cause = maskResourceIdPath(e.message);
           causes.set(cause, (causes.get(cause) || 0) + 1);
         }
       }

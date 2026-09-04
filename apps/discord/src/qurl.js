@@ -7,7 +7,7 @@ const {
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
-const { validateResourceId } = require('./utils/resource-id');
+const { resourcePath, validateResourceId } = require('./utils/resource-id');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -224,13 +224,14 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 async function deleteLink(resourceId, apiKey) {
   validateResourceId(resourceId);
   const client = makeClient(apiKey);
+  const path = resourcePath(resourceId);
   // Revoke at the resource level: every link minted on the resource stops
   // resolving, and repeats are idempotent. SDK 0.3.0's delete() rejects current
   // public IDs using a retired `r_` prefix check before any request is sent.
   // qurl-typescript#244 fixes that older SDK method for other consumers; keep
   // deleteResource() here because it directly names this whole-resource action.
-  await callQurl('DELETE', `/resources/${resourceId}`, () => client.deleteResource(resourceId));
-  logger.info('Revoked qURL', { resource_id: resourceId });
+  await callQurl('DELETE', path, () => client.deleteResource(resourceId));
+  logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {

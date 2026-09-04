@@ -32,6 +32,7 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
+const { resourcePath } = require('../src/utils/resource-id');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
@@ -525,7 +526,7 @@ describe('reclaim', () => {
     // thousands of ids would print thousands of "1x" lines instead of one.
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      throw new Error(`qURL API DELETE /resources/${id} failed (401)`);
+      throw new Error(`qURL API DELETE ${resourcePath(id)} failed (401)`);
     });
 
     const result = await reclaim(ledger);

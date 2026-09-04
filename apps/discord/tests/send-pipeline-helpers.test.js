@@ -641,6 +641,10 @@ describe('qURL client', () => {
       const [url, opts] = globalThis.fetch.mock.calls[0];
       expect(url).toBe(`https://api.test.local/v1/resources/${resourceId}`);
       expect(opts.method).toBe('DELETE');
+      const logger = require('../src/logger');
+      expect(logger.info).toHaveBeenCalledWith('Revoked qURL resource', {
+        resource_id: resourceId,
+      });
     });
 
     it('reports the resource path in an auth-failure audit event', async () => {
