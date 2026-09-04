@@ -249,6 +249,24 @@ describe('runGatewayFatalShutdown', () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
+  it('still forces exit when fatal-timeout logging throws', async () => {
+    let forceExit;
+    const logger = makeFakeLogger();
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+    const exit = jest.fn();
+
+    await runGatewayFatalShutdown({
+      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      getConnectionWatchdog: () => null,
+      logger,
+      scheduleHardExit: (callback) => { forceExit = callback; return { unref() {} }; },
+      exit,
+    });
+
+    expect(() => forceExit()).toThrow('logger-failure');
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
   it('tolerates a fatal before the connection watchdog is constructed', async () => {
     const gracefulShutdown = jest.fn().mockResolvedValue(undefined);
 
@@ -605,6 +623,20 @@ describe('tryStop', () => {
       expect.objectContaining({ error: 'boom' }),
     );
   });
+
+  it.each([null, undefined, 'stop-failure'])(
+    'contains a non-Error stop rejection: %p',
+    async (rejection) => {
+      const logger = makeFakeLogger();
+      const handle = { stop: jest.fn().mockRejectedValue(rejection) };
+
+      await expect(tryStop('leader', handle, logger)).resolves.toBeUndefined();
+      expect(logger.warn).toHaveBeenCalledWith('leader stop failed', {
+        error: String(rejection),
+        stack: undefined,
+      });
+    },
+  );
 });
 
 describe('tryClose', () => {
@@ -777,6 +809,26 @@ describe('runPushHandoffShutdown', () => {
     // Release the never-resolving handoff so the orphan shutdown
     // promise settles, then await it so Jest doesn't warn about
     // an open async-context.
+    handoffResolvers.resolve({ transferred: true, pushAcked: true });
+    await shutdown;
+  });
+
+  it('still forces exit when push-handoff timeout logging throws', async () => {
+    const handoffResolvers = {};
+    const handoffPromise = new Promise((resolve) => { handoffResolvers.resolve = resolve; });
+    const logger = makeFakeLogger();
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+    const deps = makeDeps({
+      logger,
+      gatewayLeader: { pushHandoff: jest.fn().mockReturnValue(handoffPromise) },
+    });
+
+    const shutdown = runPushHandoffShutdown({ code: 0, ...deps });
+    await new Promise((resolve) => { setImmediate(resolve); });
+
+    expect(() => deps.scheduleHardExit.timers[0].cb()).toThrow('logger-failure');
+    expect(deps.exit).toHaveBeenCalledWith(1);
+
     handoffResolvers.resolve({ transferred: true, pushAcked: true });
     await shutdown;
   });

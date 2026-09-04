@@ -58,7 +58,10 @@ async function tryStop(name, handle, logger) {
   } catch (err) {
     // Include the stack so a stuck SIGTERM drain log has both the
     // symptom and the call site.
-    logger.warn(`${name} stop failed`, { error: err.message, stack: err.stack });
+    logger.warn(`${name} stop failed`, {
+      error: err?.message ?? String(err),
+      stack: err?.stack,
+    });
   }
 }
 
@@ -283,8 +286,11 @@ async function runPushHandoffShutdown({
 }) {
   logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
   const hardExit = scheduleHardExit(() => {
-    logger.error('PushHandoff shutdown timed out, forcing exit');
-    exit(forcedExitCode);
+    try {
+      logger.error('PushHandoff shutdown timed out, forcing exit');
+    } finally {
+      exit(forcedExitCode);
+    }
   }, ceilingMs);
   if (hardExit && typeof hardExit.unref === 'function') {
     // `.unref()` so the timer can't pin shutdown past the explicit

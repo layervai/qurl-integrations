@@ -86,8 +86,9 @@
 // same token, a malformed RESUME bouncing fresh sessions) can
 // burn the entire budget in minutes. MAX_IDENTIFY_ATTEMPTS bounds
 // the count of CONSECUTIVE IDENTIFYs without an intervening READY
-// — when a successful READY lands the counter resets to zero. The
-// counter is process-global because today's deployment is one shard;
+// or RESUMED — when either successful session acknowledgement lands
+// the counter resets to zero. The counter is process-global because
+// today's deployment is one shard;
 // multi-shard support must make the cap shard-aware.
 //
 // Reset-on-READY-or-RESUMED is what makes cap=1 safe for long-lived processes.
@@ -95,7 +96,7 @@
 // start one — a network blip >60s (resume buffer expires on
 // Discord's side) would burn the budget and ECS would crash-loop
 // the task while Discord refused to accept fresh IDENTIFYs from
-// the replacement. With reset-on-READY, every successful session
+// the replacement. With reset-on-READY-or-RESUMED, every successful session
 // gets a fresh budget for the next reconnect.
 //
 // What the cap still catches: IDENTIFY-without-READY loops. A
@@ -249,7 +250,10 @@ function createGatewayWsShim({
     // This is a terminal process state. Fail health and reject any watchdog
     // reconnect immediately; production onFatal enters gracefulShutdown(),
     // which synchronously arms its independent 10-second force-exit backstop.
-    // stop() remains reachable because its idempotency uses stopCompleted.
+    // `stopped` also halts dispatch fan-out intentionally: publisher draining
+    // starts as part of this terminal transition, so accepting new interactions
+    // after that boundary could enqueue work after the drain snapshot. stop()
+    // remains reachable because its idempotency uses stopCompleted.
     isReady = false;
     wsConnected = false;
     stopped = true;
