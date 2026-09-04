@@ -77,6 +77,9 @@ const RELEASE_LOCK_CEILING_MS = 3_000;
 // fail-loud-then-replace posture (the leader caps tighter because
 // it's gated on the SIGTERM ECS deadline). On timeout we throw
 // like a connect rejection; the attempts ladder advances normally.
+// An IDENTIFY-budget fatal calls stop() immediately but deliberately does not
+// await this in-flight ceiling before flushing the gateway session; its own
+// bounded process-exit path owns termination instead.
 const CONNECT_CEILING_MS = 8_000;
 
 // `manager` is conventionally the gateway-ws-shim instance (passed

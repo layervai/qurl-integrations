@@ -114,6 +114,24 @@ async function tryClose(name, server, logger) {
   });
 }
 
+// Stops the hot-standby control plane in dependency order. The IDENTIFY-fatal
+// path has already called connectionWatchdog.stop() to set its synchronous
+// stopping guard; it must skip awaiting that deliberately blocked in-flight
+// connect so the session-store final flush retains the shutdown budget.
+async function stopGatewayHotStandby({
+  controlChannelServer,
+  connectionWatchdog,
+  gatewayLeader,
+  awaitConnectionWatchdog = true,
+  logger,
+}) {
+  await tryClose('control-channel server', controlChannelServer, logger);
+  if (awaitConnectionWatchdog) {
+    await tryStop('connection-watchdog', connectionWatchdog, logger);
+  }
+  await tryStop('gateway-leader', gatewayLeader, logger);
+}
+
 // Plain graceful-shutdown envelope shared by every non-push exit path. The
 // ownership gate and hard-exit timer run synchronously before teardown is
 // invoked, so a stalled first cleanup await cannot leave the process healthy
@@ -147,7 +165,7 @@ async function runGracefulShutdown({
   try {
     await teardown();
   } catch (error) {
-    logger.error('Error during shutdown', { error: error.message });
+    logger.error('Error during shutdown', { error: error?.message ?? String(error) });
   }
   clearHardExit(hardExit);
   exitOnce(code);
@@ -161,21 +179,36 @@ function runGatewayFatalShutdown({
   gracefulShutdown,
   getConnectionWatchdog,
   logger,
+  fatalCeilingMs = 15_000,
+  scheduleHardExit = setTimeout,
+  exit = (code) => process.exit(code),
 }) {
+  // Independent of gracefulShutdown's ownership gate: every path that owns
+  // shutdown today has its own 10/12-second backstop, but this fatal boundary
+  // must remain terminal if a future owner forgets one. Fifteen seconds stays
+  // inside ECS's 30-second SIGTERM window and trails both existing ceilings.
+  const hardExit = scheduleHardExit(() => {
+    try {
+      logger.error('Gateway fatal shutdown timed out, forcing exit');
+    } finally {
+      exit(1);
+    }
+  }, fatalCeilingMs);
+  if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
+
   const shutdown = gracefulShutdown(1);
   const connectionWatchdog = getConnectionWatchdog();
   if (!connectionWatchdog) return shutdown;
 
-  try {
-    Promise.resolve(connectionWatchdog.stop()).catch((error) => {
-      logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
-        error: error?.message ?? String(error),
-      });
-    });
-  } catch (error) {
+  const warnStopFailed = (error) => {
     logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
       error: error?.message ?? String(error),
     });
+  };
+  try {
+    Promise.resolve(connectionWatchdog.stop()).catch(warnStopFailed);
+  } catch (error) {
+    warnStopFailed(error);
   }
   return shutdown;
 }
@@ -309,6 +342,7 @@ module.exports = {
   awaitServerListening,
   tryStop,
   tryClose,
+  stopGatewayHotStandby,
   runGracefulShutdown,
   runGatewayFatalShutdown,
   runPushHandoffShutdown,

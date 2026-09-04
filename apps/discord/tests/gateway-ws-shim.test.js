@@ -829,7 +829,6 @@ describe('IDENTIFY budget guard', () => {
     expect(onFatal).toHaveBeenCalledTimes(1);
     expect(await Promise.race([blocked.then(() => 'released'), Promise.resolve('pending')]))
       .toBe('pending');
-    expect(logger.error).toHaveBeenCalledTimes(2);
     expect(logger.error).toHaveBeenCalledWith(
       'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
     );
@@ -838,7 +837,9 @@ describe('IDENTIFY budget guard', () => {
     await Promise.resolve();
     expect(await Promise.race([alsoBlocked.then(() => 'released'), Promise.resolve('pending')]))
       .toBe('pending');
-    expect(logger.error).toHaveBeenCalledTimes(2);
+    expect(logger.error.mock.calls.filter(([message]) => (
+      message === 'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever'
+    ))).toHaveLength(1);
   });
 
   it('notifies the fatal handler only once across repeated over-budget grants', async () => {

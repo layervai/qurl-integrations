@@ -17,8 +17,8 @@ const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
   awaitServerListening,
-  tryStop,
   tryClose,
+  stopGatewayHotStandby,
   runGracefulShutdown,
   runGatewayFatalShutdown,
   runPushHandoffShutdown,
@@ -413,7 +413,7 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // (the leader factory needs the shim's WebSocketManager handle, which
 // only exists after `gatewayShim.start({ connect: false })` resolves).
 // Hoisted to module scope so gracefulShutdown + signal handlers can
-// see them; tryClose/tryStop are null-guarded so a SIGTERM mid-
+// see them; the shutdown helper is null-guarded so a SIGTERM mid-
 // construction is safe, and the `isShuttingDown` re-check in
 // startHotStandby closes the inverse race.
 let gatewayLeader = null;
@@ -665,7 +665,7 @@ let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
-async function gracefulShutdownTeardown() {
+async function gracefulShutdownTeardown({ awaitConnectionWatchdog = true } = {}) {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
     // and process.exit() called immediately after would truncate an OAuth
     // callback mid-flight, leaving the admin's /qurl setup without a
@@ -725,12 +725,12 @@ async function gracefulShutdownTeardown() {
     //
     // Gated on ENABLE_GATEWAY_HOT_STANDBY for symmetry with the
     // Pillar 2 shim block below: all three handles are null when
-    // hot-standby is off, so the tryClose/tryStop calls are no-ops,
+    // hot-standby is off, so the helper's close/stop calls are no-ops,
     // but skipping the gate would still pay 3 microtask hops per
     // teardown across every HTTP-only / combined replica that never
     // built the hot-standby surface.
     //
-    // No per-call timeout on tryStop/tryClose: a wedged
+    // No per-call timeout on the helper's close/stop calls: a wedged
     // gatewayLeader.stop() (e.g., DDB hanging in the final renew)
     // is bounded by the 10 s `force-exit` setTimeout at the top of
     // this function — which itself sits inside ECS's 30 s SIGTERM
@@ -738,9 +738,13 @@ async function gracefulShutdownTeardown() {
     // belt; introducing a third per-call timeout here would just
     // multiply the moving parts without changing the worst-case.
     if (config.ENABLE_GATEWAY_HOT_STANDBY) {
-      await tryClose('control-channel server', controlChannelServer, logger);
-      await tryStop('connection-watchdog', connectionWatchdog, logger);
-      await tryStop('gateway-leader', gatewayLeader, logger);
+      await stopGatewayHotStandby({
+        controlChannelServer,
+        connectionWatchdog,
+        gatewayLeader,
+        awaitConnectionWatchdog,
+        logger,
+      });
     }
 
     // Discord client shutdown only meaningful when we're the gateway
@@ -775,7 +779,7 @@ async function gracefulShutdownTeardown() {
     logger.info('Shutdown complete');
 }
 
-async function gracefulShutdown(code = 0) {
+async function gracefulShutdown(code = 0, { awaitConnectionWatchdog = true } = {}) {
   return runGracefulShutdown({
     code,
     claimShutdown: () => {
@@ -783,14 +787,14 @@ async function gracefulShutdown(code = 0) {
       isShuttingDown = true;
       return true;
     },
-    teardown: gracefulShutdownTeardown,
+    teardown: () => gracefulShutdownTeardown({ awaitConnectionWatchdog }),
     logger,
   });
 }
 
 function gatewayFatalShutdown() {
   return runGatewayFatalShutdown({
-    gracefulShutdown,
+    gracefulShutdown: (code) => gracefulShutdown(code, { awaitConnectionWatchdog: false }),
     getConnectionWatchdog: () => connectionWatchdog,
     logger,
   });

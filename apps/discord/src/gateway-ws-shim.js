@@ -90,7 +90,7 @@
 // counter is process-global because today's deployment is one shard;
 // multi-shard support must make the cap shard-aware.
 //
-// Reset-on-READY is what makes cap=1 safe for long-lived processes.
+// Reset-on-READY-or-RESUMED is what makes cap=1 safe for long-lived processes.
 // Without it, the only IDENTIFY a task could ever do is its cold-
 // start one — a network blip >60s (resume buffer expires on
 // Discord's side) would burn the budget and ECS would crash-loop
@@ -102,8 +102,8 @@
 // token-contention scenario (two processes claiming the same
 // identity) produces fast IDENTIFY-reject churn with no READY
 // arriving between attempts — the counter never resets, the cap
-// trips on the second attempt, and the task exits cleanly
-// instead of burning Discord's per-bot quota.
+// trips on the second attempt, and the terminal onFatal contract replaces the
+// task instead of burning Discord's per-bot quota.
 
 const {
   SimpleIdentifyThrottler,

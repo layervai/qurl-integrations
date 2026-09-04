@@ -5,6 +5,7 @@ const {
   awaitServerListening,
   tryStop,
   tryClose,
+  stopGatewayHotStandby,
   runGracefulShutdown,
   runGatewayFatalShutdown,
   runPushHandoffShutdown,
@@ -99,11 +100,76 @@ describe('runGracefulShutdown', () => {
     expect(teardown).not.toHaveBeenCalled();
     expect(exit).not.toHaveBeenCalled();
   });
+
+  it('contains a non-Error teardown rejection and exits with the requested code', async () => {
+    const logger = makeFakeLogger();
+    const exit = jest.fn();
+    const clearHardExit = jest.fn();
+    const hardExit = { unref: jest.fn() };
+
+    await runGracefulShutdown({
+      code: 7,
+      claimShutdown: () => true,
+      teardown: () => Promise.reject('teardown-failure'),
+      logger,
+      scheduleHardExit: () => hardExit,
+      clearHardExit,
+      exit,
+    });
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Error during shutdown',
+      { error: 'teardown-failure' },
+    );
+    expect(clearHardExit).toHaveBeenCalledWith(hardExit);
+    expect(exit).toHaveBeenCalledWith(7);
+  });
+});
+
+describe('stopGatewayHotStandby', () => {
+  it('stops control listener, watchdog, and leader in order on normal shutdown', async () => {
+    const order = [];
+    const controlChannelServer = {
+      close: (callback) => { order.push('control'); callback(); },
+    };
+    const connectionWatchdog = {
+      stop: async () => { order.push('watchdog'); },
+    };
+    const gatewayLeader = {
+      stop: async () => { order.push('leader'); },
+    };
+
+    await stopGatewayHotStandby({
+      controlChannelServer,
+      connectionWatchdog,
+      gatewayLeader,
+      logger: makeFakeLogger(),
+    });
+
+    expect(order).toEqual(['control', 'watchdog', 'leader']);
+  });
+
+  it('does not await or repeat watchdog stop on IDENTIFY-fatal teardown', async () => {
+    const connectionWatchdog = { stop: jest.fn(() => new Promise(() => {})) };
+    const gatewayLeader = { stop: jest.fn().mockResolvedValue(undefined) };
+
+    await expect(stopGatewayHotStandby({
+      controlChannelServer: null,
+      connectionWatchdog,
+      gatewayLeader,
+      awaitConnectionWatchdog: false,
+      logger: makeFakeLogger(),
+    })).resolves.toBeUndefined();
+
+    expect(connectionWatchdog.stop).not.toHaveBeenCalled();
+    expect(gatewayLeader.stop).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('runGatewayFatalShutdown', () => {
   it('starts graceful shutdown before stopping an in-flight watchdog', async () => {
     const order = [];
+    let forceExit;
     const shutdownResult = Promise.resolve('shutdown');
     const gracefulShutdown = jest.fn(() => {
       order.push('shutdown');
@@ -120,12 +186,45 @@ describe('runGatewayFatalShutdown', () => {
       gracefulShutdown,
       getConnectionWatchdog: () => watchdog,
       logger: makeFakeLogger(),
+      scheduleHardExit: (callback) => {
+        order.push('fatal-timer');
+        forceExit = callback;
+        return { unref: jest.fn() };
+      },
+      exit: jest.fn(),
     });
 
     expect(result).toBe(shutdownResult);
-    expect(order).toEqual(['shutdown', 'watchdog-stop']);
+    expect(order).toEqual(['fatal-timer', 'shutdown', 'watchdog-stop']);
     expect(gracefulShutdown).toHaveBeenCalledWith(1);
+    expect(forceExit).toEqual(expect.any(Function));
     await result;
+  });
+
+  it('forces exit if the delegated shutdown does not terminate the process', async () => {
+    let forceExit;
+    const logger = makeFakeLogger();
+    const exit = jest.fn();
+    const timer = { unref: jest.fn() };
+    const shutdown = runGatewayFatalShutdown({
+      // Models gracefulShutdown returning immediately because another path
+      // already owns its internal shutdown gate.
+      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      getConnectionWatchdog: () => null,
+      logger,
+      scheduleHardExit: (callback) => { forceExit = callback; return timer; },
+      exit,
+    });
+
+    expect(timer.unref).toHaveBeenCalledTimes(1);
+    await shutdown;
+    expect(exit).not.toHaveBeenCalled();
+
+    forceExit();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Gateway fatal shutdown timed out, forcing exit',
+    );
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it('tolerates a fatal before the connection watchdog is constructed', async () => {
