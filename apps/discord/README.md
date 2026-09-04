@@ -111,6 +111,12 @@ qURL site may use an `r_<11 chars>` Traefik routing label, but that label carrie
 no resource identity and is not compared with the resource's opaque public-key
 ID.
 
+The authenticated mint is the authority for that hostname. The suffix
+allowlist constrains it to a trusted qURL tunnel namespace; it is not a tenant
+identity signal. The case-sensitive `resource_id` returned by `resolve()` is
+checked against the slug-resolved public key when that response field is
+present.
+
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
 (`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`,

@@ -1539,6 +1539,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/qURL tunnel domain/);
+      // Target validation must fail before resolve() performs the NHP knock.
       expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(get()).toBeNull();
       // And it's logged via the SSRF-rejection breadcrumb, naming the host —

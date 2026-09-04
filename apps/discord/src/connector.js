@@ -670,17 +670,13 @@ function extractAccessToken(qurlLink) {
 
 // TODO(upstream-contract): qurl_site may use an `r_` Traefik routing label, but
 // that label carries no resource identity: resource IDs are opaque public keys.
-// Bind the target to the complete hostname returned by the authenticated mint.
-function allowedDetectTunnelHost(hostname, expectedQurlSite) {
-  const host = String(hostname || '').toLowerCase();
-  let expectedHost = '';
+// The authenticated mint is the authority for the complete target hostname.
+function detectQurlSiteHostname(qurlSite) {
   try {
-    expectedHost = new URL(expectedQurlSite).hostname.toLowerCase();
+    return new URL(qurlSite).hostname.toLowerCase();
   } catch {
-    // A missing or malformed authenticated qurl_site cannot authorize a target.
+    return '';
   }
-  return host === expectedHost
-    && DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
 class DetectQurlSiteError extends Error {}
@@ -709,6 +705,8 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   if (parsed.protocol !== 'https:') {
     throw new Error('Detect tunnel qurl_site target must be an https: URL');
   }
+  // buildDetectTargetUrl deliberately retains any credentials from its base so
+  // this final-target guard can reject them before the NHP knock or image POST.
   if (parsed.username || parsed.password) {
     throw new Error('Detect tunnel qurl_site target must not contain userinfo');
   }
@@ -725,12 +723,18 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   // A malformed mint returning a public NON-qURL host then can't receive the
   // image bytes + our API-key Bearer. (NOT qurl.link — that's the short-link /
   // ALB domain, not the tunnel.)
-  // The authenticated mint is the authority for this host; the equality check
-  // protects the target-construction boundary, while resolve()'s resource_id
-  // check below independently binds the fresh access token to the slug-resolved
-  // opaque public key when that response field is present.
-  if (!allowedDetectTunnelHost(parsed.hostname, expectedQurlSite)) {
-    throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site or an expected qURL tunnel domain');
+  // The target is derived from qurl_site today, so equality is a construction
+  // invariant rather than a second identity source. Keep it explicit so a
+  // future caller using a different target source fails closed. resolve()'s
+  // resource_id check below independently binds the fresh access token to the
+  // slug-resolved opaque public key when that response field is present.
+  const targetHost = parsed.hostname.toLowerCase();
+  const expectedHost = detectQurlSiteHostname(expectedQurlSite);
+  if (!expectedHost || targetHost !== expectedHost) {
+    throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
+  }
+  if (!DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => targetHost.endsWith(suffix))) {
+    throw new Error('Detect tunnel qurl_site host is not under an expected qURL tunnel domain');
   }
 }
 
