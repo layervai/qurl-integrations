@@ -418,9 +418,10 @@ module.exports = {
   // in commands.js for the full set of MAP_COMMAND_ENABLED gates.
   //
   // Snapshot semantics: this value is read ONCE at module load and
-  // baked into the slash registration (commands.js IIFE) +
-  // SETUP_SUCCESS_MSG. Flipping MAP_COMMAND_ENABLED at runtime is
-  // a no-op until the task restarts; the deploy model handles this
+  // baked into the slash registration (commands.js IIFE),
+  // SETUP_SUCCESS_MSG, and the OAuth success/DM copy.
+  // Flipping MAP_COMMAND_ENABLED at runtime is a no-op until the task
+  // restarts; the deploy model handles this
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 
