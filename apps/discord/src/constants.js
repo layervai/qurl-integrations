@@ -153,9 +153,10 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 // filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // pattern-match these strings, so a typo at a call site silently disables
 // the metric. Always import from here rather than passing literal strings.
-// Adding a new event: add the constant here, the call site, AND the
+// Adding a new metric event: add the constant here, the call site, AND the
 // terraform filter (in the same merge train, since the filter is a no-op
-// without the emission and vice versa).
+// without the emission and vice versa). A query-only forensic event may omit
+// the filter when its entry documents that exception explicitly.
 //
 // Scope: this set covers events the qURL service cannot see — transport-
 // layer (DM dispatch), bulk-revoke outcomes (per-link API calls happen

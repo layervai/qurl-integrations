@@ -122,7 +122,15 @@ describe('qurl-oauth routes', () => {
   describe('GET /oauth/qurl/start', () => {
     it('redirects to Auth0 authorize URL with the right params on valid state', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+      const configuredConnection = config.AUTH0_EMAIL_CONNECTION;
+      config.AUTH0_EMAIL_CONNECTION = 'email';
+      let res;
+      try {
+        res = await request(app)
+          .get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+      } finally {
+        config.AUTH0_EMAIL_CONNECTION = configuredConnection;
+      }
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
       expect(loc.host).toBe('layerv-test.auth0.com');
@@ -140,9 +148,7 @@ describe('qurl-oauth routes', () => {
       // load-bearing for key rotation — re-running /qurl setup must actually
       // re-prompt. Pin both so a future refactor can't drop either.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
-      // No connection pin unless AUTH0_EMAIL_CONNECTION is set; both builder
-      // branches are covered directly in auth0-authorize-url.test.js.
-      expect(loc.searchParams.get('connection')).toBeNull();
+      expect(loc.searchParams.get('connection')).toBe('email');
       expect(loc.searchParams.get('state')).toBe(state);
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
 

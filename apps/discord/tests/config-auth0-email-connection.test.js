@@ -19,6 +19,13 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     });
   });
 
+  it('accepts a connection name at the 128-character limit', () => {
+    const value = 'a'.repeat(128);
+    withFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (config) => {
+      expect(config.AUTH0_EMAIL_CONNECTION).toBe(value);
+    });
+  });
+
   it.each([
     'email connection', 'email!', '.email', '-email', 'email_', '_',
     'PLACEHOLDER', 'a'.repeat(129),
@@ -31,4 +38,12 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
       });
     },
   );
+
+  it('does not echo a rejected configured value into the boot warning', () => {
+    const value = 'private looking value';
+    captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (_config, warns) => {
+      expect(warns).toContainEqual(expect.stringContaining('AUTH0_EMAIL_CONNECTION'));
+      expect(warns.join('\n')).not.toContain(value);
+    });
+  });
 });
