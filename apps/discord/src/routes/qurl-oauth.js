@@ -13,6 +13,7 @@ const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
+const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
@@ -137,43 +138,7 @@ router.get('/start', rateLimit, async (req, res) => {
   const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
-  const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
-  authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
-  authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/qurl/callback`);
-  // Drop offline_access — we don't store/use refresh tokens (the API key
-  // mint is one-shot), so requesting them is unnecessary attack surface
-  // per PR #177 review.
-  // Scope set: qurl:write + qurl:read for the API-key mint, openid +
-  // email for the id_token's email claim (used by the success-page
-  // binding readout). `profile` was previously requested but never
-  // read — narrowing per PR #177 follow-up C.2 to tighten the
-  // consent-screen "what is this app asking for?" UX.
-  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
-  authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
-  authorizeUrl.searchParams.set('state', state);
-  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
-  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // Force a fresh sign-in AND the consent screen on every setup path.
-  // `login` stops an ambient auth.layerv.ai session (the desktop app, the
-  // dashboard, a colleague's account on a shared browser) from silently
-  // binding this guild — and its billing — to whichever qURL account that
-  // session belongs to: the admin must authenticate as the account that
-  // will own the guild's key. `consent` is what lets a re-run actually
-  // issue a new key (Auth0 otherwise reuses the prior consent). Same
-  // contract as the Slack bot's /qurl setup.
-  authorizeUrl.searchParams.set('prompt', 'login consent');
-  // Optional connection pin (the Slack bot's AUTH0_EMAIL_CONNECTION knob).
-  // When set, Auth0 skips its connection picker and signs the admin in
-  // through that connection — normally `email`, the passwordless
-  // connection qurl-desktop uses, so one human keeps one Auth0 subject
-  // across surfaces. Unset, the tenant's default login page is used.
-  // Pinning a connection the Auth0 application does not have enabled
-  // fails at /authorize ("the connection is not enabled"), so enable it
-  // on the application before setting this.
-  if (config.AUTH0_EMAIL_CONNECTION) {
-    authorizeUrl.searchParams.set('connection', config.AUTH0_EMAIL_CONNECTION);
-  }
+  const authorizeUrl = buildAuth0AuthorizeUrl({ state, codeChallenge });
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -429,6 +394,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
   //    previous key (if any) remains valid on qurl-service until the
   //    admin manually revokes it via layerv.ai.
+  // TODO(#1366): persist the verified qURL owner identity and reject a
+  // setup re-run that would silently repoint this guild to another owner.
   try {
     await db.setGuildApiKey(guildId, apiKey, discordUserId);
   } catch (err) {

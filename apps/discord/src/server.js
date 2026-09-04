@@ -229,6 +229,11 @@ app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install flow mounted in not-configured mode (credentials incomplete/invalid or BASE_URL unsafe for Secure cookies).');
 }
+if (config.isQurlOAuthConfigured && config.AUTH0_EMAIL_CONNECTION) {
+  logger.info('qURL OAuth authorize redirects pin an Auth0 connection; the Auth0 application must enable it.', {
+    connection: config.AUTH0_EMAIL_CONNECTION,
+  });
+}
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
 // eslint-disable-next-line no-unused-vars

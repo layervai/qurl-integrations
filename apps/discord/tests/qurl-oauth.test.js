@@ -15,6 +15,7 @@ process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
+delete process.env.AUTH0_EMAIL_CONNECTION;
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
 // KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
@@ -37,11 +38,7 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
-  // Default: pretend a prior config exists, so existing tests cover the
-  // re-run path (prompt=consent set). First-install behavior (no prior
-  // configured_by → prompt omitted) is exercised by an explicit override
-  // via .mockResolvedValueOnce(undefined) in its own test.
-  getGuildConfig: jest.fn().mockResolvedValue({ guild_id: 'guild-1', configured_by: 'admin-2' }),
+  getGuildConfig: jest.fn(),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
 }));
@@ -224,13 +221,7 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(400);
     });
 
-    it('forces login + consent on first install too, without reading guild config', async () => {
-      // The prompt no longer depends on whether the guild was configured
-      // before: every setup path re-authenticates (an ambient Auth0
-      // session must not pick the account) and re-consents (so a re-run
-      // can mint a new key). So /start has no reason to touch DDB.
-      db.getGuildConfig.mockResolvedValueOnce(undefined);
-      db.getGuildConfig.mockClear();
+    it('forces login + consent without reading guild config', async () => {
       const state = signQurlOAuthState('guild-fresh', 'admin-fresh');
       const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
       expect(res.status).toBe(302);

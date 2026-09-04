@@ -15,6 +15,7 @@ process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-auth0-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-auth0-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
+process.env.AUTH0_EMAIL_CONNECTION = ' email ';
 process.env.DISCORD_CLIENT_ID = '234567890123456789';
 // Real SSM writes can accidentally carry surrounding whitespace. Config must
 // normalize it once so the Discord token exchange receives the actual secret.
@@ -37,10 +38,6 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
-  // Default: no prior config — Stage 2 is normally a first install.
-  // Re-install path (prior `configured_by` present → prompt=consent set
-  // on the chained Auth0 redirect) gets its own test below.
-  getGuildConfig: jest.fn().mockResolvedValue(undefined),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
 }));
@@ -611,12 +608,11 @@ describe('Discord install callback', () => {
       // Auth0 scope must NOT include offline_access (refresh tokens not
       // stored/used; dropped per PR #177 review item 5).
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
-      // Round-9 item #1: Stage-2 ALWAYS sets prompt=consent (independent
-      // of first-install vs re-install). Stage-2 is the URL-forwarding
-      // attack surface (forwarded /oauth/discord/callback → confused
-      // deputy); the explicit consent screen is one extra defense
-      // gate before the qURL key is bound to the admin's account.
-      expect(loc.searchParams.get('prompt')).toBe('consent');
+      // Both halves are load-bearing on every Auth0 entry path: `login`
+      // prevents an ambient Auth0 session from choosing the account, and
+      // `consent` lets a setup re-run mint a new key.
+      expect(loc.searchParams.get('prompt')).toBe('login consent');
+      expect(loc.searchParams.get('connection')).toBe('email');
 
       // The state Discord callback minted must round-trip through the
       // qURL OAuth state verifier with the right guild + discord-user

@@ -401,8 +401,8 @@ module.exports = {
   AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
-  // Optional Auth0 connection pinned on the /qurl setup authorize redirect
-  // (routes/qurl-oauth.js). Trimmed; empty or unset means no pin.
+  // Optional Auth0 connection pinned on every Discord setup authorize
+  // redirect. Trimmed; unlike Slack, empty or unset means no pin (#1365).
   AUTH0_EMAIL_CONNECTION: (process.env.AUTH0_EMAIL_CONNECTION || '').trim(),
 
   // Flow-dedicated HMAC secret for the qURL OAuth state token
