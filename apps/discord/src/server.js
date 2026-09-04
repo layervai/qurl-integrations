@@ -238,7 +238,10 @@ if (!config.isQurlOAuthConfigured) {
   } else {
     inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
   }
-  logger.info(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
+  const logInactivePolicy = config.isAuth0EmailConnectionRejected
+    ? logger.error
+    : logger.info;
+  logInactivePolicy(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
 } else {
   let auth0ConnectionMessage;
   if (auth0Connection) {

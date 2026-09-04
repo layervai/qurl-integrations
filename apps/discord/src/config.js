@@ -228,9 +228,9 @@ function isValidAuth0DomainShape(d) {
   return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
 }
 
-function normalizeAuth0EmailConnection(raw) {
+function parseAuth0EmailConnection(raw) {
   const value = (raw || '').trim();
-  if (!value) return '';
+  if (!value) return { value: '', rejected: false };
   // Be case-insensitive for hand-entered values while deriving the sentinel
   // itself from the infra-synchronized single source of truth.
   const isPlaceholder = value.toUpperCase() === SSM_PLACEHOLDER_SENTINEL.toUpperCase();
@@ -239,7 +239,7 @@ function normalizeAuth0EmailConnection(raw) {
     // Treat that rollout state exactly like unset so adding the task-env
     // plumbing cannot take customer install offline between deploys.
     console.warn('[config] AUTH0_EMAIL_CONNECTION matches the reserved SSM placeholder; treating the connection pin as unset.');
-    return '';
+    return { value: '', rejected: false };
   }
   let rejectionReason = null;
   if (value.length > 128) {
@@ -252,22 +252,16 @@ function normalizeAuth0EmailConnection(raw) {
     // closed. A malformed optional setting must not weaken account selection,
     // but it also must not take down /qurl send, webhooks, or the gateway.
     console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); disabling OAuth setup until corrected while other bot operations remain available.`);
-    return '';
+    return { value: '', rejected: true };
   }
-  return value;
+  return { value, rejected: false };
 }
 
 const rawAuth0EmailConnection = process.env.AUTH0_EMAIL_CONNECTION;
-const auth0EmailConnection = normalizeAuth0EmailConnection(rawAuth0EmailConnection);
-const isAuth0EmailConnectionPlaceholder = (
-  (rawAuth0EmailConnection || '').trim().toUpperCase()
-  === SSM_PLACEHOLDER_SENTINEL.toUpperCase()
-);
-const isAuth0EmailConnectionRejected = Boolean(
-  (rawAuth0EmailConnection || '').trim()
-  && !auth0EmailConnection
-  && !isAuth0EmailConnectionPlaceholder,
-);
+const {
+  value: auth0EmailConnection,
+  rejected: isAuth0EmailConnectionRejected,
+} = parseAuth0EmailConnection(rawAuth0EmailConnection);
 
 // True when all four Auth0 env vars are present, AUTH0_DOMAIN is a
 // well-shaped hostname, and any configured connection was accepted —

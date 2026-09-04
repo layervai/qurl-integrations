@@ -472,15 +472,22 @@ router.get('/callback', rateLimit, async (req, res) => {
   // across bind events to detect qURL-owner changes. The id_token is
   // JWKS-verified but not nonce-bound, so this is observability only; durable
   // owner identity and fail-closed comparison belong in #1366.
-  logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
-    guild_id: guildId,
-    configured_by: discordUserId,
-    // Prefix is already shown in the success page and info log; including it
-    // makes this forensic event self-contained without exposing the API key.
-    key_prefix: keyPrefix || null,
-    qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
-    qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
-  });
+  try {
+    logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+      guild_id: guildId,
+      configured_by: discordUserId,
+      // Prefix is already shown in the success page and info log; including it
+      // makes this forensic event self-contained without exposing the API key.
+      key_prefix: keyPrefix || null,
+      qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
+      qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
+    });
+  } catch (err) {
+    logger.warn('qURL OAuth audit emission failed (setup continues)', {
+      error: err?.message,
+      guildId,
+    });
+  }
 
   // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
   //     view counter). Fire-and-forget via the centralized helper.

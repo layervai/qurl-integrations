@@ -1161,11 +1161,14 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
 
       expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith({
-        content: expect.stringMatching(
-          /setup is temporarily unavailable[\s\S]*AUTH0_EMAIL_CONNECTION/i,
-        ),
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
         ephemeral: true,
       });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('AUTH0_EMAIL_CONNECTION');
+      expect(require('../src/logger').error).toHaveBeenCalledWith(
+        'Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
+      );
     } finally {
       config.isAuth0EmailConnectionRejected = originalRejected;
     }

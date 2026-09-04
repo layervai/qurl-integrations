@@ -8626,9 +8626,10 @@ const commands = [
         // gateway/send operations available, but make setup fail closed until
         // the operator corrects the deployment value.
         if (config.isAuth0EmailConnectionRejected) {
+          logger.error('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
           return interaction.reply({
             content: '❌ **qURL setup is temporarily unavailable.**\n\n'
-              + 'The bot operator must correct the invalid `AUTH0_EMAIL_CONNECTION` deployment setting.',
+              + 'The bot operator must correct an invalid authentication setting in the deployment.',
             ephemeral: true,
           });
         }

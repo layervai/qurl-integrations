@@ -27,6 +27,7 @@ function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
       calls = {
         info: [...logger.info.mock.calls],
         warn: [...logger.warn.mock.calls],
+        error: [...logger.error.mock.calls],
       };
     } finally {
       stopIntervals?.();
@@ -64,7 +65,7 @@ describe('server Auth0 connection policy log', () => {
   });
 
   it('fails OAuth setup closed and distinguishes a rejected pin from an unset pin', () => {
-    expect(captureServerLogs('email!').info).toContainEqual([
+    expect(captureServerLogs('email!').error).toContainEqual([
       'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
       {
         event: 'qurl_oauth_auth0_connection_policy',
@@ -98,7 +99,7 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_CLIENT_ID: undefined,
       AUTH0_CLIENT_SECRET: undefined,
       AUTH0_AUDIENCE: undefined,
-    }).info).toContainEqual([
+    }).error).toContainEqual([
       'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
       {
         event: 'qurl_oauth_auth0_connection_policy',

@@ -46,6 +46,10 @@ jest.mock('../src/store', () => ({
   consumePendingLink: jest.fn(),
 }));
 
+jest.mock('../src/guild-webhook-link', () => ({
+  fireAndForgetLinkGuildWebhookSubscription: jest.fn(),
+}));
+
 // commands.js still requires verifyStateBinding for the GitHub OAuth route;
 // stub it to avoid pulling in the full command tree at module load.
 jest.mock('../src/commands', () => ({
@@ -72,6 +76,7 @@ const config = require('../src/config');
 const db = require('../src/store');
 const discord = require('../src/discord');
 const logger = require('../src/logger');
+const guildWebhookLink = require('../src/guild-webhook-link');
 const { AUDIT_EVENTS } = require('../src/constants');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
@@ -80,6 +85,7 @@ const {
 } = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
 const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
+const { rateLimitStore } = require('../src/utils/oauth-rate-limit');
 
 const originalFetch = globalThis.fetch;
 const TEST_PKCE_VERIFIER = 'a'.repeat(43);
@@ -115,6 +121,7 @@ function expectQurlOAuthCookiesCleared(res) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  rateLimitStore.clear();
   globalThis.fetch = originalFetch;
 });
 
@@ -596,6 +603,46 @@ describe('qurl-oauth routes', () => {
       expect(logger.warn).toHaveBeenCalledWith(
         'qURL OAuth audit fingerprint unavailable (setup continues)',
         expect.objectContaining({ guildId: 'guild-1' }),
+      );
+    });
+
+    it('degrades audit emission failures after persistence and still finishes setup', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      logger.audit.mockImplementationOnce(() => {
+        throw new Error('audit sink unavailable');
+      });
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({
+            data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' },
+          }),
+        });
+
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('qURL is connected');
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc', 'admin-2');
+      expect(discord.sendDM).toHaveBeenCalledWith(
+        'admin-2', expect.stringContaining('qURL is connected'),
+      );
+      expect(guildWebhookLink.fireAndForgetLinkGuildWebhookSubscription)
+        .toHaveBeenCalledWith({
+          guildId: 'guild-1',
+          apiKey: 'lv_live_abc',
+          via: 'oauth',
+          configuredBy: 'admin-2',
+        });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'qURL OAuth audit emission failed (setup continues)',
+        { error: 'audit sink unavailable', guildId: 'guild-1' },
       );
     });
 
