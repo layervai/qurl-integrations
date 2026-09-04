@@ -216,10 +216,11 @@ router.get('/callback', rateLimit, async (req, res) => {
       signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
     });
     if (!tokenResp.ok) {
-      const errBody = await tokenResp.text().catch(() => '');
-      logger.error('Discord token exchange failed', {
-        status: tokenResp.status, body: errBody.slice(0, 500),
-      });
+      // Drain for connection reuse, but never log the upstream body: an OAuth
+      // provider or intermediary can reflect the authorization code or other
+      // credential material into an error response.
+      await tokenResp.text().catch(() => undefined);
+      logger.error('Discord token exchange failed', { status: tokenResp.status });
       return renderError(res, 502, 'Authorization failed', 'Could not complete the Discord install.');
     }
     const tokenJson = await tokenResp.json();

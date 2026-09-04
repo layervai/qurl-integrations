@@ -390,12 +390,15 @@ describe('Discord install callback', () => {
     });
 
     it('502s when Discord token exchange fails', async () => {
+      const reflectedCode = 'reflected-oauth-code-must-not-be-logged';
+      const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
       globalThis.fetch = jest.fn().mockResolvedValueOnce({
-        ok: false, status: 401, text: () => Promise.resolve('invalid_grant'),
+        ok: false, status: 401, text: () => Promise.resolve(reflectedCode),
       });
       const res = await discordCallback('/oauth/discord/callback?code=bad-code&guild_id=123456789012345678');
       expect(res.status).toBe(502);
       expect(res.text).toContain('Authorization failed');
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(reflectedCode);
     });
 
     it('502s when Discord token response omits the installed guild', async () => {
