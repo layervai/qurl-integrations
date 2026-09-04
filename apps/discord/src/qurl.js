@@ -11,7 +11,6 @@ const {
   qurlApiErrorMessage,
   qurlPath,
   resourcePath,
-  validateResourceId,
 } = require('./utils/resource-id');
 const dns = require('dns').promises;
 
@@ -227,12 +226,13 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 }
 
 async function deleteLink(resourceId, apiKey) {
-  validateResourceId(resourceId);
-  const client = makeClient(apiKey);
   const path = resourcePath(resourceId);
+  const client = makeClient(apiKey);
   // Revoke at the resource level: every link minted on the resource stops
-  // resolving, and repeats are idempotent. SDK 0.3.0's delete() rejects current
-  // public IDs using a retired `r_` prefix check before any request is sent.
+  // resolving. Repeats against an existing revoked row are idempotent 204;
+  // a never-existent public ID remains 404, so a corrupt send-row ID cannot
+  // report false success. SDK 0.3.0's delete() rejects current public IDs using
+  // a retired `r_` prefix check before any request is sent.
   // qurl-typescript#244 fixes that older SDK method for other consumers; keep
   // deleteResource() here because it directly names this whole-resource action.
   await callQurl('DELETE', path, () => client.deleteResource(resourceId));
@@ -240,13 +240,13 @@ async function deleteLink(resourceId, apiKey) {
 }
 
 async function getResourceStatus(resourceId, apiKey) {
-  validateResourceId(resourceId);
+  const path = qurlPath(resourceId);
   const client = makeClient(apiKey);
   // SDK 0.3.0's get() applies only its non-empty-ID guard; unlike delete(), it
   // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
-  return callQurl('GET', qurlPath(resourceId), () => client.get(resourceId));
+  return callQurl('GET', path, () => client.get(resourceId));
 }
 
 module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };

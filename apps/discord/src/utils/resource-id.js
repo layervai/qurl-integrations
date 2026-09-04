@@ -14,6 +14,8 @@ const RESOURCE_ID_MASK = '<id>';
 // Status returns the qURL aggregate response shape; whole-resource revoke uses
 // the resource action. Keeping both names here makes that split deliberate.
 const QURL_PATH_PREFIX = '/qurls/';
+// Must match qurlApiErrorMessage output exactly: loosening this changes which
+// reclaim failures are classified as terminal success.
 const GONE_QURL_API_ERROR = /^qURL API [A-Z]+ \S+ failed \((404|410)\)$/;
 
 function hasSafeResourceIdShape(resourceId) {
@@ -27,27 +29,30 @@ function typePreview(value) {
   return `<${value === null ? 'null' : typeof value}>`;
 }
 
+function rejectedValuePreview(value) {
+  if (typeof value !== 'string') return typePreview(value);
+  const length = value.length > ERROR_PREVIEW_LENGTH ? ` (len=${value.length})` : '';
+  return `${JSON.stringify(value.slice(0, ERROR_PREVIEW_LENGTH))}${length}`;
+}
+
 function validateResourceId(resourceId) {
   if (!hasSafeResourceIdShape(resourceId)) {
-    const preview = typeof resourceId === 'string'
-      ? `${resourceId.slice(0, ERROR_PREVIEW_LENGTH)}${
-        resourceId.length > ERROR_PREVIEW_LENGTH ? ` (len=${resourceId.length})` : ''
-      }`
-      : typePreview(resourceId);
     // The stable prefix is the operator-facing contract-change tripwire. Keep
     // this helper pure: boundary callers already log surfaced failures, while
     // logging here would duplicate them and attach a rejected value twice.
-    throw new Error(`Invalid resource ID format: ${preview}`);
+    throw new Error(`Invalid resource ID format: ${rejectedValuePreview(resourceId)}`);
   }
 }
 
-// Callers must pass validateResourceId first; path helpers intentionally avoid
-// encoding because the transport guard already limits IDs to URL-safe bytes.
+// Path builders validate structurally and intentionally avoid encoding because
+// the transport guard limits IDs to URL-safe bytes.
 function resourcePath(resourceId) {
+  validateResourceId(resourceId);
   return `${RESOURCE_PATH_PREFIX}${resourceId}`;
 }
 
 function qurlPath(resourceId) {
+  validateResourceId(resourceId);
   return `${QURL_PATH_PREFIX}${resourceId}`;
 }
 
@@ -73,7 +78,7 @@ function maskResourceIdPath(message) {
       if (start === -1) break;
 
       const idStart = start + prefix.length;
-      const resourceId = masked.slice(idStart).match(/^\S+/)?.[0];
+      const resourceId = masked.slice(idStart).match(/^[\w-]+/)?.[0];
       if (!resourceId) {
         searchFrom = idStart;
         continue;

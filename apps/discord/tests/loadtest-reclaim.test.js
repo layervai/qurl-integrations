@@ -536,7 +536,7 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ revoked: 0, failed: 3 });
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining(
-        `3x ${qurlApiErrorMessage('DELETE', resourcePath('<id>'), 401)}`,
+        `3x ${qurlApiErrorMessage('DELETE', '/resources/<id>', 401)}`,
       ),
     );
   });

@@ -31,8 +31,13 @@ describe('resource ID transport guard', () => {
     const resourceId = 'z'.repeat(1025);
 
     expect(() => validateResourceId(resourceId)).toThrow(
-      new Error(`Invalid resource ID format: ${'z'.repeat(64)} (len=1025)`),
+      new Error(`Invalid resource ID format: "${'z'.repeat(64)}" (len=1025)`),
     );
+  });
+
+  it('escapes control characters in rejected string diagnostics', () => {
+    expect(() => validateResourceId('bad\nresource'))
+      .toThrow(new Error('Invalid resource ID format: "bad\\nresource"'));
   });
 
   it('labels null and unexpected objects without stringifying them', () => {
@@ -47,9 +52,15 @@ describe('resource ID transport guard', () => {
     expect(qurlPath(CRID_RESOURCE_ID)).toBe(`/qurls/${CRID_RESOURCE_ID}`);
   });
 
+  it.each([resourcePath, qurlPath])('makes route-builder validation structural', (buildPath) => {
+    expect(() => buildPath('../qurls/x')).toThrow(/Invalid resource ID format/);
+  });
+
   it('formats and classifies terminal qURL API failures from one contract', () => {
     const gone = qurlApiErrorMessage('DELETE', resourcePath(CRID_RESOURCE_ID), 404);
 
+    // Load-bearing literal: this pins the wire-error family independently of
+    // the shared formatter used by reclaim's mock fixtures and expectations.
     expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (404)`);
     expect(isGoneQurlApiError(new Error(gone))).toBe(true);
     expect(isGoneQurlApiError(`${gone} request-id=123`)).toBe(false);
@@ -77,5 +88,10 @@ describe('resource ID transport guard', () => {
     'GET /qurls/ failed',
   ])('leaves an empty route tail unchanged without looping: %s', (message) => {
     expect(maskResourceIdPath(message)).toBe(message);
+  });
+
+  it('masks only the ID segment instead of swallowing a path suffix', () => {
+    expect(maskResourceIdPath('DELETE /resources/abc-123/qurls failed'))
+      .toBe('DELETE /resources/<id>/qurls failed');
   });
 });

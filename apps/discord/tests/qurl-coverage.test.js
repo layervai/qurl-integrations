@@ -11,7 +11,10 @@
  * `.text()`. `apiOk` / `apiError` build SDK-parseable doubles.
  */
 
-const { PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
+const {
+  CRID_RESOURCE_ID,
+  PUBLIC_KEY_RESOURCE_ID,
+} = require('./helpers/qurl-fixtures');
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -71,25 +74,28 @@ describe('qURL client — getResourceStatus', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('sends GET request to /v1/qurls/:resourceId and returns data', async () => {
+  it.each([
+    ['public key', PUBLIC_KEY_RESOURCE_ID],
+    ['CRID', CRID_RESOURCE_ID],
+  ])('sends a real-shaped %s ID to GET /v1/qurls/:resourceId', async (_, resourceId) => {
     globalThis.fetch = jest.fn().mockResolvedValue(
       apiOk(200, {
-        resource_id: 'res-123',
+        resource_id: PUBLIC_KEY_RESOURCE_ID,
         qurls: [{ qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01' }],
       }),
     );
 
-    const result = await qurl.getResourceStatus('res-123');
+    const result = await qurl.getResourceStatus(resourceId);
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     const [url, opts] = globalThis.fetch.mock.calls[0];
-    expect(url).toBe('https://api.test.local/v1/qurls/res-123');
+    expect(url).toBe(`https://api.test.local/v1/qurls/${resourceId}`);
     expect(opts.method).toBe('GET');
     expect(opts.headers.Authorization).toBe('Bearer test-api-key');
     // The bot's User-Agent is preserved across the SDK migration (literal wire
     // identifier per CLAUDE.md).
     expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
-    expect(result.resource_id).toBe('res-123');
+    expect(result.resource_id).toBe(PUBLIC_KEY_RESOURCE_ID);
     // The SDK renames the API's wire-format `qurls` field to `access_tokens`.
     expect(result.access_tokens).toHaveLength(1);
   });
