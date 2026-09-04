@@ -3,6 +3,7 @@ const {
   LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
   qurlPath,
+  resourceIdLogRef,
   resourcePath,
   validateResourceId,
 } = require('../src/utils/resource-id');
@@ -30,24 +31,30 @@ describe('resource ID transport guard', () => {
     expect(hasSafeResourceIdShape(CRID_RESOURCE_ID)).toBe(true);
   });
 
-  it('bounds the rejected value included in its diagnostic', () => {
-    const resourceId = 'z'.repeat(1025);
-
-    expect(() => validateResourceId(resourceId)).toThrow(
-      new Error(`Invalid resource ID format: "${'z'.repeat(64)}" (len=1025)`),
-    );
+  it.each([
+    '',
+    'z'.repeat(1025),
+    'bad\nresource',
+    null,
+    Object.create(null),
+    'at_sensitive-access-token',
+  ])('rejects without echoing a potentially sensitive value: %p', (resourceId) => {
+    expect(() => validateResourceId(resourceId))
+      .toThrow(new Error('Invalid resource ID format'));
   });
 
-  it('escapes control characters in rejected string diagnostics', () => {
-    expect(() => validateResourceId('bad\nresource'))
-      .toThrow(new Error('Invalid resource ID format: "bad\\nresource"'));
+  it('keeps the bearer-token prefix case-exact', () => {
+    expect(() => validateResourceId('AT_public-opaque-id')).not.toThrow();
   });
 
-  it('labels null and unexpected objects without stringifying them', () => {
-    expect(() => validateResourceId(null))
-      .toThrow(new Error('Invalid resource ID format: <null>'));
-    expect(() => validateResourceId(Object.create(null)))
-      .toThrow(new Error('Invalid resource ID format: <object>'));
+  it('derives a stable non-echoing correlation reference', () => {
+    const sensitive = 'at_sensitive-access-token';
+    const ref = resourceIdLogRef(sensitive);
+
+    expect(ref).toMatch(/^sha256:[a-f0-9]{12}$/);
+    expect(ref).toBe(resourceIdLogRef(sensitive));
+    expect(ref).not.toContain(sensitive);
+    expect(resourceIdLogRef(null)).toBe('<null>');
   });
 
   it('builds both deliberately distinct resource-ID route families', () => {

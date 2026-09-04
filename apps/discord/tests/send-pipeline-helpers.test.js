@@ -647,9 +647,10 @@ describe('qURL client', () => {
       });
     });
 
-    it('reports the resource path in an auth-failure audit event', async () => {
+    it('reports a static resource path in auth telemetry', async () => {
       const logger = require('../src/logger');
       const { AUDIT_EVENTS } = require('../src/constants');
+      const { resourceIdLogRef } = require('../src/utils/resource-id');
       logger.audit.mockClear();
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
@@ -668,8 +669,12 @@ describe('qURL client', () => {
           dependency: 'qurl_service',
           status: 401,
           method: 'DELETE',
-          path: `/resources/${CRID_RESOURCE_ID}`,
+          path: '/resources/:resourceId',
         }),
+      );
+      expect(logger.debug).toHaveBeenCalledWith(
+        'qURL API error',
+        expect.objectContaining({ resource_ref: resourceIdLogRef(CRID_RESOURCE_ID) }),
       );
     });
 

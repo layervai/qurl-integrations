@@ -209,16 +209,39 @@ describe('qURL client — getResourceStatus', () => {
       new Error(`delete rejected ${unknownCredential}`),
       { status: 0, code: ERROR_CODE_CLIENT_VALIDATION },
     );
-    const deleteSpy = jest.spyOn(QURLClient.prototype, 'delete').mockRejectedValueOnce(clientError);
+    const deleteSpy = jest.spyOn(QURLClient.prototype, 'deleteResource').mockRejectedValueOnce(clientError);
 
     try {
       const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
 
       expect(thrown.message).toBe(
-        'qURL API DELETE /qurls/:resourceId failed (client_validation)',
+        'qURL API DELETE /resources/:resourceId failed (client_validation)',
       );
       expect(thrown.message).not.toContain(unknownCredential);
       expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(unknownCredential);
+    } finally {
+      deleteSpy.mockRestore();
+    }
+  });
+
+  it('re-wraps an uncoded SDK throw without echoing a resource credential', async () => {
+    const logger = require('../src/logger');
+    const { QURLClient } = require('@layervai/qurl');
+    const unknownCredential = 'ak_sensitive-uncoded-credential';
+    const deleteSpy = jest.spyOn(QURLClient.prototype, 'deleteResource')
+      .mockRejectedValueOnce(new TypeError(`delete rejected ${unknownCredential}`));
+
+    try {
+      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+
+      expect(thrown.message).toBe(
+        'qURL API DELETE /resources/:resourceId failed (unknown_error)',
+      );
+      expect(JSON.stringify([
+        thrown.message,
+        logger.debug.mock.calls,
+        logger.audit.mock.calls,
+      ])).not.toContain(unknownCredential);
     } finally {
       deleteSpy.mockRestore();
     }
@@ -422,6 +445,7 @@ describe('qURL client — retry + audit behavior', () => {
   it('redacts the resource ID from DELETE error logs and auth audit metadata', async () => {
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
+    const { resourceIdLogRef } = require('../src/utils/resource-id');
     const resourceId = 'r_sensitive_resource_marker';
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(401));
 
@@ -432,9 +456,13 @@ describe('qURL client — retry + audit behavior', () => {
 
     expect(thrown.message).not.toContain(resourceId);
     expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(resourceId);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL API error',
+      expect.objectContaining({ resource_ref: resourceIdLogRef(resourceId) }),
+    );
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
-      expect.objectContaining({ method: 'DELETE', path: '/qurls/:resourceId' }),
+      expect.objectContaining({ method: 'DELETE', path: '/resources/:resourceId' }),
     );
   });
 });
@@ -473,6 +501,28 @@ describe('qURL client — createOneTimeLink happy path', () => {
     await expect(qurl.createOneTimeLink('https://example.com/file', '1h', 'label'))
       .rejects.toThrow(/qURL API POST.*failed.*503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('redacts uncoded SDK validation text that could echo the target URL', async () => {
+    const logger = require('../src/logger');
+    const { QURLClient } = require('@layervai/qurl');
+    const targetUrl = 'https://example.com/file?secret=sensitive-target-marker';
+    const createSpy = jest.spyOn(QURLClient.prototype, 'create')
+      .mockRejectedValueOnce(new Error(`invalid target_url: ${targetUrl}`));
+
+    try {
+      const thrown = await qurl.createOneTimeLink(targetUrl, '1h', 'label')
+        .catch(error => error);
+
+      expect(thrown.message).toBe('qURL API POST /qurls failed (unknown_error)');
+      expect(JSON.stringify([
+        thrown.message,
+        logger.debug.mock.calls,
+        logger.audit.mock.calls,
+      ])).not.toContain(targetUrl);
+    } finally {
+      createSpy.mockRestore();
+    }
   });
 
   it('rejects when DNS lookup fails', async () => {

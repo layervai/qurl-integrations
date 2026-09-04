@@ -8,6 +8,7 @@ const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 const {
   qurlPath,
+  resourceIdLogRef,
   resourcePath,
   validateResourceId,
 } = require('./utils/resource-id');
@@ -47,6 +48,7 @@ const USER_AGENT = 'qurl-discord-bot/1.0';
 // cross-wired credential from reaching logs or audit events.
 const QURL_ID_LOG_PATH = '/qurls/:resourceId';
 const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
+const UNKNOWN_STATUS0_CODE = 'unknown_error';
 
 // status-0 SDK error codes whose message the SDK synthesizes itself (no server
 // body) — the only status-0 errors callQurl surfaces verbatim. See its
@@ -98,12 +100,12 @@ function makeClient(apiKey) {
  *     — e.g. an unexpected-response shape error that could embed a body snippet
  *     — is re-wrapped to a code-only message, so the invariant holds structurally
  *     rather than by trusting SDK internals. Body-free SDK errors (network /
- *     timeout) and non-SDK throws (programming errors, which carry no server
- *     body) propagate verbatim so their stack survives. Client-validation
- *     messages are re-wrapped because a future SDK validator could echo the
- *     rejected identifier. Pinned by tests/qurl-coverage.test.js.
+ *     timeout) propagate verbatim. Every other status-0 throw, including an
+ *     uncoded plain Error, is re-wrapped: item calls may carry a cross-wired
+ *     credential, while create validation may echo a secret-bearing target
+ *     URL. Pinned by tests/qurl-coverage.test.js.
  */
-async function callQurl(method, path, fn) {
+async function callQurl(method, path, fn, logContext = {}) {
   try {
     return await fn();
   } catch (err) {
@@ -111,7 +113,9 @@ async function callQurl(method, path, fn) {
     // errors; a positive status is a real HTTP status from the API.
     const status = Number.isInteger(err?.status) ? err.status : 0;
     // Redaction: status + error code only — never err.message / err.detail.
-    logger.debug('qURL API error', { method, path, status, code: err?.code });
+    logger.debug('qURL API error', {
+      method, path, status, code: err?.code, ...logContext,
+    });
     if (status === 401 || status === 403) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
         dependency: 'qurl_service',
@@ -126,16 +130,12 @@ async function callQurl(method, path, fn) {
     if (status > 0) {
       throw qurlApiError(method, path, status);
     }
-    // status 0: re-wrap ONLY a coded SDK error outside the body-free SAFE set —
-    // i.e. one whose synthesized message could embed a body snippet (e.g.
-    // `unexpected_response`). Defense-in-depth: the SDK doesn't embed bodies in
-    // status-0 messages today, but we don't rely on it. A body-free SDK error
-    // (network / timeout) or a non-SDK throw (a programming error like a
-    // TypeError, which carries no server body) propagates verbatim, so its
-    // message and stack survive for debugging. Client-validation is deliberately
-    // excluded: a future SDK validator may echo the rejected identifier.
-    if (typeof err?.code === 'string' && !SAFE_STATUS0_CODES.has(err.code)) {
-      throw qurlApiError(method, path, err.code);
+    // status 0: only the SDK's known body-free network/timeout errors may keep
+    // their message. Client validation, unexpected response shapes, and plain
+    // uncoded throws are generic because any of them can echo request input.
+    const code = typeof err?.code === 'string' ? err.code : UNKNOWN_STATUS0_CODE;
+    if (!SAFE_STATUS0_CODES.has(code)) {
+      throw qurlApiError(method, path, code);
     }
     throw err;
   }
@@ -244,7 +244,12 @@ async function deleteLink(resourceId, apiKey) {
   // a retired `r_` prefix check before any request is sent.
   // qurl-typescript#244 fixes that older SDK method for other consumers; keep
   // deleteResource() here because it directly names this whole-resource action.
-  await callQurl('DELETE', RESOURCE_ID_LOG_PATH, () => client.deleteResource(resourceId));
+  await callQurl(
+    'DELETE',
+    RESOURCE_ID_LOG_PATH,
+    () => client.deleteResource(resourceId),
+    { resource_ref: resourceIdLogRef(resourceId) },
+  );
   logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
@@ -255,7 +260,12 @@ async function getResourceStatus(resourceId, apiKey) {
   // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
-  return callQurl('GET', QURL_ID_LOG_PATH, () => client.get(resourceId));
+  return callQurl(
+    'GET',
+    QURL_ID_LOG_PATH,
+    () => client.get(resourceId),
+    { resource_ref: resourceIdLogRef(resourceId) },
+  );
 }
 
 module.exports = {

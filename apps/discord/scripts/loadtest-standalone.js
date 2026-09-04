@@ -966,7 +966,8 @@ async function trackCreate(fn) {
 // deleting the parent file resource revokes every qURL minted against it
 // (shared/client/client.go documents the cascade).
 function recordResource(resourceId, kind) {
-  // Share deleteLink's transport guard so every recorded ID is sweepable.
+  // Share deleteLink's transport guard so every recorded ID is sweepable and
+  // a malformed service response cannot persist a bearer token in the ledger.
   // Warn rather than stopping: a malformed upload response is worth surfacing,
   // but must not silently truncate the rest of a load-test round. `res-1` is
   // the repo-wide resource-ID fixture convention; making this warning fatal
@@ -1200,12 +1201,9 @@ async function reclaim(ledgerPath) {
           if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
           else if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX) && status === 400) legacyRejected++;
           else if (status === 404) ambiguousNotFound++;
-          // Keyed on the cause, not the raw message. callQurl embeds the
-          // request path — and therefore the resource id — in every message,
-          // so keying on it verbatim gives one bucket per failing id: a
-          // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
-          // instead of "5000x", defeating the tally and flooding the very
-          // scrollback the heartbeat is trying to keep readable.
+          // Keyed on a scrubbed cause. callQurl uses a static route label, but
+          // this also protects aggregation from foreign/serialized errors that
+          // still contain a concrete resource path.
           const cause = maskResourceIdPath(e?.message ?? e);
           causes.set(cause, (causes.get(cause) || 0) + 1);
         }
