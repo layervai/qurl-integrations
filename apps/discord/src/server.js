@@ -229,10 +229,12 @@ app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install flow mounted in not-configured mode (credentials incomplete/invalid or BASE_URL unsafe for Secure cookies).');
 }
-if (config.isQurlOAuthConfigured && config.AUTH0_EMAIL_CONNECTION) {
-  logger.info('qURL OAuth authorize redirects pin an Auth0 connection; the Auth0 application must enable it.', {
-    connection: config.AUTH0_EMAIL_CONNECTION,
-  });
+if (config.isQurlOAuthConfigured) {
+  const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
+  const auth0ConnectionMessage = auth0Connection
+    ? 'qURL OAuth authorize redirects pin an Auth0 connection; the Auth0 application must enable it.'
+    : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); using the tenant default login page until #1365.';
+  logger.info(auth0ConnectionMessage, { connection: auth0Connection });
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
