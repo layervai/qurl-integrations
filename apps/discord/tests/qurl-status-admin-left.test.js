@@ -232,6 +232,30 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(interaction._editReply.mock.calls[0][0].content).toContain('Scopes: _none_');
   });
 
+  it('summarizes service-reported scopes beyond the display limit', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({
+      api_key: {
+        key_id: 'key-123',
+        key_prefix: 'lv_live_aaa',
+        scopes: Array.from({ length: 12 }, (_, i) => `qurl:scope-${i}`),
+      },
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent).toContain('_+2 more_');
+    expect(replyContent).not.toContain('`qurl:scope-10`');
+  });
+
   it('sanitizes service-reported prefix and scopes before rendering them', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
@@ -263,7 +287,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
       configured_by: 'admin-departed',
-      updated_at: '2026-01-01T00:00:00Z'.repeat(100),
+      updated_at: '2026-01-01T00:00:00Z'.repeat(20),
     });
     mockGetIdentity.mockResolvedValueOnce({
       api_key: {
@@ -280,7 +304,11 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    expect(interaction._editReply.mock.calls[0][0].content.length).toBeLessThanOrEqual(2000);
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent.length).toBeLessThanOrEqual(2000);
+    expect(replyContent).toContain('Configured by: <@admin-departed>');
+    expect(replyContent).toContain('Last updated:');
+    expect(replyContent).toContain('again to take over billing.');
   });
 
   it('replies to the deferred interaction when the guild is not configured', async () => {

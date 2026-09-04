@@ -8809,10 +8809,10 @@ const commands = [
                 + 'Please try `/qurl status` again later.\n\n';
           } else {
             // `key_prefix` replaces the old locally-computed sha256 finger-
-            // print: it is qurl-service's own display prefix and identifies
-            // the key the service actually accepted rather than only the bytes
-            // we stored. It can hint at the tenant, reinforcing the existing
-            // ManageGuild gate above.
+            // print: qurl-service exposes it as a non-secret display prefix
+            // identifying the key the service actually accepted rather than
+            // only the bytes we stored. It can hint at the tenant, reinforcing
+            // the existing ManageGuild gate above.
             //
             // Inline-code content renders backslashes literally, so strip
             // backticks instead of applying general Markdown escaping. The
@@ -8835,12 +8835,21 @@ const commands = [
           // Keep Discord's 2,000-UTF-16-unit content limit an invariant of the
           // code rather than of a copy budget spread across the fields above.
           const STATUS_CONTENT_MAX = 2000;
-          const content = verdict + configurationDetails;
           const truncationIndicator = '…(truncated)';
+          let content = verdict + configurationDetails;
+          if (content.length > STATUS_CONTENT_MAX) {
+            if (configurationDetails.length + truncationIndicator.length >= STATUS_CONTENT_MAX) {
+              content = capUtf16Units(
+                configurationDetails,
+                STATUS_CONTENT_MAX - truncationIndicator.length,
+              ) + truncationIndicator;
+            } else {
+              const verdictLimit = STATUS_CONTENT_MAX - configurationDetails.length - truncationIndicator.length;
+              content = capUtf16Units(verdict, verdictLimit) + truncationIndicator + configurationDetails;
+            }
+          }
           return interaction.editReply({
-            content: content.length <= STATUS_CONTENT_MAX
-              ? content
-              : capUtf16Units(content, STATUS_CONTENT_MAX - truncationIndicator.length) + truncationIndicator,
+            content,
           });
         }
         // Branch the not-configured copy on the active setup flow so

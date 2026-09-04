@@ -123,8 +123,12 @@ describe('qURL client — getIdentity', () => {
       json: async () => { throw new SyntaxError('secret response fragment'); },
     });
 
-    await expect(qurl.getIdentity('stored-guild-key'))
-      .rejects.toThrow('qURL identity response was not valid JSON');
+    const error = await qurl.getIdentity('stored-guild-key').then(
+      () => { throw new Error('expected rejection'); },
+      err => err,
+    );
+    expect(error.message).toBe('qURL identity response was not valid JSON');
+    expect(error.message).not.toContain('secret response fragment');
   });
 
   it('rejects an identity response missing display fields', async () => {
