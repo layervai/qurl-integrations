@@ -346,6 +346,8 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDb.markSendRevoking.mockReset();
+  mockDb.markSendRevoking.mockResolvedValue(true);
   revokingSendLocks.clear();
   // clearAllMocks resets call records but NOT queued one-shot
   // implementations, so a `mockResolvedValueOnce` a test queues but the
@@ -1290,6 +1292,27 @@ describe('revokeAllLinks', () => {
     expect(result.failureUserIds).toEqual([]);
   });
 
+  it('counts one recipient once when all of their links across resources are revoked', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-a', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-b', recipient_discord_id: 'u-1' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-duplicate-recipient', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: 1,
+      total: 1,
+      successUserIds: ['u-1'],
+      failureUserIds: [],
+    });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(
+      'send-duplicate-recipient', 'sender-1',
+    );
+  });
+
   it('groups items by resource_id — shared-resource failure fans out to all sharing recipients', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
@@ -1942,6 +1965,7 @@ describe('renderRevokeMsg', () => {
   it('returns a truthful fallback for an undefined authoritative success count', () => {
     const rendered = renderRevokeMsg('send-missing', ['alice'], 1, false);
     expect(rendered.content).toMatch(/could not display the revocation result/i);
+    expect(rendered.content).toContain('If this send still appears in `/qurl revoke`, retry it there.');
     expect(rendered.row).toBeNull();
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to render revoke result',

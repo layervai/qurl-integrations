@@ -716,10 +716,13 @@ async function clearConsumedDMEdited(sendId, recipientDiscordId) {
 // the door" — re-editing to "Closed N ago" would overwrite that copy
 // with a less-specific message and obscure the revoke signal.
 //
-// Reads qurl_send_configs (the table the revoke state machine writes to);
+// Reads qurl_send_configs (the table the revoke state machine writes to).
 // Returns true only once revocation finishes. A revoking_at-only row means at
 // least one DELETE may have failed and the recipient link may still be live;
 // expiry/consumed events must therefore keep their normal DM-edit behavior.
+// On a partial revoke this may replace the stronger revoke copy for recipients
+// whose links did close. The state is send-level, so preserving truthful access
+// status for the unconfirmed recipients takes priority over that cosmetic loss.
 // Falsy / missing rows return false so config-less legacy sends still get the
 // expiry-edit treatment.
 async function isSendRevoked(sendId) {
@@ -854,11 +857,11 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
-  // Keep live sends actionable even when old, permanently-unconfirmable
-  // revocations accumulate. Pending retries fill only remaining menu slots;
-  // #1376 tracks an explicit audited dismissal path for those rows.
+  // Pending revocations are the urgent action-required rows this menu exists
+  // to retry. Keep them visible ahead of ordinary live sends; #1376 tracks an
+  // explicit audited dismissal path if permanently-unconfirmable rows build up.
   rows.sort((a, b) => (
-    Number(a.revocation_pending) - Number(b.revocation_pending)
+    Number(b.revocation_pending) - Number(a.revocation_pending)
     || (b.created_at || '').localeCompare(a.created_at || '')
   ));
   return rows.slice(0, limit);
@@ -912,7 +915,8 @@ async function flipRevokingAt(sendId, senderDiscordId) {
       Key: { send_id: sendId },
       ConsistentRead: true,
     }));
-    return res.Item?.sender_discord_id === senderDiscordId
+    if (!res.Item) return false;
+    return res.Item.sender_discord_id === senderDiscordId
       && Boolean(res.Item.revoking_at)
       && !res.Item.revoked_at;
   }
@@ -966,7 +970,9 @@ async function markSendRevoking(sendId, senderDiscordId) {
 async function markSendRevoked(sendId, senderDiscordId) {
   // Two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
-  // (b) Legacy path: config row doesn't exist — insert minimal row.
+  // (b) Legacy path: config row doesn't exist — insert minimal row. Current
+  // revokeAllLinks establishes markSendRevoking first, but keep this branch for
+  // direct store callers during mixed-version rollout/backward compatibility.
   // Scoped to senderDiscordId for defense-in-depth.
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,

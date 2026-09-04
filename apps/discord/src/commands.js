@@ -8207,7 +8207,7 @@ function revokeRenderFallback(sendId, success, total, err) {
   });
   // DELETEs may already have completed. Avoid a dead Discord interaction
   // while making no claim about an outcome whose counts are inconsistent.
-  return 'qURL could not display the revocation result. Run `/qurl revoke` to check and retry any unconfirmed links.';
+  return 'qURL could not display the revocation result. If this send still appears in `/qurl revoke`, retry it there.';
 }
 
 function safeRevokeHeader(sendId, success, total) {

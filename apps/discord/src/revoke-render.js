@@ -30,7 +30,7 @@ function buildRevokeHeader(success, total) {
   ) {
     throw new TypeError('revoke success and total must be non-negative integers with success <= total');
   }
-  const failed = Math.max(0, total - success);
+  const failed = total - success;
   const failure = failed > 0
     ? ` Could not confirm revocation for ${failed} user${failed !== 1 ? 's' : ''}. Retry with \`/qurl revoke\`; if this continues, run \`/qurl setup\` and reconnect.`
     : '';

@@ -642,13 +642,17 @@ describe('qurl sends', () => {
     });
   });
 
-  test('getRecentSends: live sends sort ahead of permanently pending retries', async () => {
+  test('getRecentSends: keeps a pending retry visible in the production five-slot menu', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       if (input.IndexName) {
         return Promise.resolve({
           Items: [
-            { send_id: 'pending', sender_discord_id: 'sender', created_at: '2026-09-03T12:00:00Z' },
-            { send_id: 'live', sender_discord_id: 'sender', created_at: '2026-09-03T11:00:00Z' },
+            { send_id: 'live-1', sender_discord_id: 'sender', created_at: '2026-09-03T15:00:00Z' },
+            { send_id: 'live-2', sender_discord_id: 'sender', created_at: '2026-09-03T14:00:00Z' },
+            { send_id: 'live-3', sender_discord_id: 'sender', created_at: '2026-09-03T13:00:00Z' },
+            { send_id: 'live-4', sender_discord_id: 'sender', created_at: '2026-09-03T12:00:00Z' },
+            { send_id: 'live-5', sender_discord_id: 'sender', created_at: '2026-09-03T11:00:00Z' },
+            { send_id: 'pending', sender_discord_id: 'sender', created_at: '2026-09-03T10:00:00Z' },
           ],
         });
       }
@@ -658,10 +662,12 @@ describe('qurl sends', () => {
       Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
     }));
 
-    const result = await store.getRecentSends('sender', 1);
+    const result = await store.getRecentSends('sender', 5);
 
-    expect(result).toHaveLength(1);
-    expect(result[0].send_id).toBe('live');
+    expect(result).toHaveLength(5);
+    expect(result.map(row => row.send_id)).toEqual([
+      'pending', 'live-1', 'live-2', 'live-3', 'live-4',
+    ]);
   });
 
   test('markSendRevoking: records an idempotent owner-scoped intent without setting revoked_at', async () => {
@@ -776,6 +782,17 @@ describe('qurl sends', () => {
     await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
 
     expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('markSendRevoking: a CCFE re-read with no row returns false even for a missing caller id', async () => {
+    const conflict = new Error('exists');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: undefined } })
+      .resolvesOnce({});
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoking('s1', undefined)).resolves.toBe(false);
   });
 
   test('markSendRevoked: primary path includes :s in ExpressionAttributeValues (regression guard)', async () => {
