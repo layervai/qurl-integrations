@@ -19,6 +19,7 @@ const {
   awaitServerListening,
   tryStop,
   tryClose,
+  runGracefulShutdown,
   runPushHandoffShutdown,
 } = require('./gateway-shutdown-helpers');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
@@ -454,10 +455,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
     intents: GATEWAY_INTENTS_BITFIELD,
     store: sessionStore,
     logger,
-    // gracefulShutdown synchronously flips its re-entry guard and arms the
-    // 10-second force-exit timer before its first await, so this remains
-    // self-terminating even if one cleanup step stalls.
-    onFatal: () => gracefulShutdown(1),
+    onFatal: gatewayFatalShutdown,
   });
   logger.info('gateway-resume shim constructed', {
     tableName: `${ddbTablePrefix}gateway-session`,
@@ -666,15 +664,7 @@ let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
-async function gracefulShutdown(code = 0) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  // Force exit after 10s if shutdown hangs
-  setTimeout(() => { logger.error('Shutdown timed out, forcing exit'); process.exit(1); }, 10000).unref();
-
-  logger.info('Graceful shutdown initiated...');
-
+async function gracefulShutdownTeardown() {
   try {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
     // and process.exit() called immediately after would truncate an OAuth
@@ -786,8 +776,37 @@ async function gracefulShutdown(code = 0) {
   } catch (error) {
     logger.error('Error during shutdown', { error: error.message });
   }
+}
 
-  process.exit(code);
+async function gracefulShutdown(code = 0) {
+  return runGracefulShutdown({
+    code,
+    claimShutdown: () => {
+      if (isShuttingDown) return false;
+      isShuttingDown = true;
+      return true;
+    },
+    teardown: gracefulShutdownTeardown,
+    logger,
+  });
+}
+
+function gatewayFatalShutdown() {
+  // Start graceful shutdown first: runGracefulShutdown synchronously claims
+  // the process and arms its hard-exit timer before the first cleanup await.
+  const shutdown = gracefulShutdown(1);
+  // A fatal can occur inside the watchdog's manager.connect(). Stop its retry
+  // ladder immediately so it cannot race graceful shutdown with its own
+  // release-lock/process.exit path. The regular teardown awaits the same
+  // idempotent stop later.
+  if (connectionWatchdog) {
+    Promise.resolve(connectionWatchdog.stop()).catch((error) => {
+      logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
+        error: error.message,
+      });
+    });
+  }
+  return shutdown;
 }
 
 // Hot-standby push-handoff SIGTERM path. The body lives in

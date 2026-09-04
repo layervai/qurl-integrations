@@ -114,6 +114,45 @@ async function tryClose(name, server, logger) {
   });
 }
 
+// Plain graceful-shutdown envelope shared by every non-push exit path. The
+// ownership gate and hard-exit timer run synchronously before teardown is
+// invoked, so a stalled first cleanup await cannot leave the process healthy
+// indefinitely. Dependencies are injected to make that ordering executable in
+// tests rather than relying on source-shape assertions in index.js.
+async function runGracefulShutdown({
+  code = 0,
+  claimShutdown,
+  teardown,
+  logger,
+  ceilingMs = 10_000,
+  exit = (c) => process.exit(c),
+  scheduleHardExit = setTimeout,
+  clearHardExit = clearTimeout,
+}) {
+  if (!claimShutdown()) return;
+
+  let exited = false;
+  const exitOnce = (exitCode) => {
+    if (exited) return;
+    exited = true;
+    exit(exitCode);
+  };
+  const hardExit = scheduleHardExit(() => {
+    logger.error('Shutdown timed out, forcing exit');
+    exitOnce(1);
+  }, ceilingMs);
+  if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
+
+  logger.info('Graceful shutdown initiated...');
+  try {
+    await teardown();
+  } catch (error) {
+    logger.error('Error during shutdown', { error: error.message });
+  }
+  clearHardExit(hardExit);
+  exitOnce(code);
+}
+
 // Push-handoff SIGTERM body. Distinct from gracefulShutdown because
 // the active replica's job is to transfer ownership ASAP — not run
 // the full drain (close DB, flush its own session row, etc.) — the
@@ -243,5 +282,6 @@ module.exports = {
   awaitServerListening,
   tryStop,
   tryClose,
+  runGracefulShutdown,
   runPushHandoffShutdown,
 };

@@ -33,10 +33,11 @@
 //   - start({ timeoutMs }) — wire callbacks, register dispatch
 //                          listener, call manager.connect(). Resolves
 //                          after the WS is open; rejects on timeout.
-//   - stop({ flushFinal }) — stop dispatch/reconnect work, flush the
-//                          session store, do NOT call
+//   - stop({ flushFinal }) — stop dispatch work, flush the session
+//                          store, do NOT call
 //                          manager.destroy() (see SIGTERM contract
-//                          below).
+//                          below). The caller owns watchdog
+//                          cancellation.
 //   - isReady()          — true after the first READY dispatch.
 //   - onDispatch(handler) — register a (payload) => void listener
 //                          for every gateway dispatch. Returns an
@@ -114,7 +115,7 @@ const { REST } = require('@discordjs/rest');
 // Tightly bounded per the budget rationale above. Enforcement lives
 // at @discordjs/ws's identify-throttler boundary — session retrieval
 // also happens during heartbeats and dispatch processing, so it is
-// not an IDENTIFY signal. TODO(upstream-contract): @discordjs/ws v1.2.x
+// not an IDENTIFY signal. TODO(upstream-contract): @discordjs/ws v1.2.3
 // calls buildIdentifyThrottler(manager), awaits waitForIdentify immediately
 // before op 2, supplies a shard-close AbortSignal, and continues to the
 // IDENTIFY send after a custom throttler rejection. Blocking an over-budget
@@ -127,13 +128,13 @@ const MAX_IDENTIFY_ATTEMPTS = 1;
 // "Discord API unreachable" as a fast-fail rather than a hang.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 
-// The @discordjs/ws major.minor range whose WebSocketShard.onMessage
+// The exact @discordjs/ws version whose WebSocketShard.onMessage
 // dispatch ordering (shard.emit(Ready) BEFORE shard.emit(Dispatch))
 // the Pillar 3 wsConnected mirror depends on, and whose custom identify-
 // throttler behavior is documented above. The version-contract test asserts
-// the installed range starts with this string — a minor bump must re-verify
-// both upstream paths before updating this constant.
-const VERIFIED_DJS_WS_MAJOR_MINOR = '1.2';
+// the installed version equals this string — any bump must re-verify both
+// upstream paths before updating this constant.
+const VERIFIED_DJS_WS_VERSION = '1.2.3';
 
 function createGatewayWsShim({
   token,
@@ -214,7 +215,7 @@ function createGatewayWsShim({
 
   function waitForAbort(signal) {
     return new Promise((_, reject) => {
-      // @discordjs/ws v1.2.x always supplies the shard-close signal. If that
+      // @discordjs/ws v1.2.3 always supplies the shard-close signal. If that
       // upstream contract drifts, blocking forever is the safe fail-closed
       // behavior: resolving or rejecting here could release an over-budget
       // IDENTIFY. The process is already unhealthy and its shutdown backstop
@@ -310,10 +311,24 @@ function createGatewayWsShim({
     }
     return {
       async waitForIdentify(shardId, signal) {
+        // Once the budget has tripped, every later grant remains blocked on
+        // the shard-close signal. Do not call the delegate or inflate the
+        // diagnostic attempt count while shutdown is already in progress.
+        if (identifyBudgetFatalSignaled) {
+          await waitForAbort(signal);
+          return;
+        }
         // Delegate first: an aborted or failed throttle wait never
         // reaches the IDENTIFY-send boundary and must not burn our
         // process-local attempt allowance.
         await delegate.waitForIdentify(shardId, signal);
+        // Concurrent grants may both enter before the first one trips the
+        // budget. Re-check after the awaited delegate so only the first grant
+        // records and reports the terminal over-budget attempt.
+        if (identifyBudgetFatalSignaled) {
+          await waitForAbort(signal);
+          return;
+        }
         // Upstream only suppresses IDENTIFY when an aborted throttle wait
         // rejects. If the shard closes exactly as the delegate releases,
         // reject with that reason before incrementing so its catch returns
@@ -336,7 +351,7 @@ function createGatewayWsShim({
         error.code = 'GATEWAY_IDENTIFY_BUDGET';
         signalIdentifyBudgetFatal(error);
 
-        // Do not throw. @discordjs/ws v1.2.x catches custom throttler errors,
+        // Do not throw. @discordjs/ws v1.2.3 catches custom throttler errors,
         // destroys/reconnects, and then falls through to its IDENTIFY send.
         // Holding this grant lets onFatal replace the process without leaking
         // an over-budget IDENTIFY or producing reconnect churn.
@@ -477,7 +492,7 @@ function createGatewayWsShim({
       // already Ready, throwing "Tried to connect a shard that
       // wasn't idle" upstream as an unhandled rejection.
       //
-      // Version contract: see VERIFIED_DJS_WS_MAJOR_MINOR above.
+      // Version contract: see VERIFIED_DJS_WS_VERSION above.
       // `stopped` guard mirrors the Dispatch listener: drops late
       // shard events between a failed-start catch and shim.stop().
       manager.on(WebSocketShardEvents.Ready, () => {
@@ -488,7 +503,7 @@ function createGatewayWsShim({
         if (stopped) return;
         wsConnected = true;
       });
-      // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
+      // Note: @discordjs/ws v1.2.3 Closed payload is `{ code, shardId }`
       // only. We destructure `reason` defensively against a future
       // minor adding it (some Discord 4xxx close frames carry one);
       // today it's always undefined, logged as null.
@@ -690,5 +705,5 @@ module.exports = {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
-  VERIFIED_DJS_WS_MAJOR_MINOR,
+  VERIFIED_DJS_WS_VERSION,
 };

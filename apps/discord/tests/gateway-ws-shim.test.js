@@ -22,12 +22,13 @@ const {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
-  VERIFIED_DJS_WS_MAJOR_MINOR,
+  VERIFIED_DJS_WS_VERSION,
 } = require('../src/gateway-ws-shim');
 const {
   SimpleContextFetchingStrategy,
   SimpleIdentifyThrottler,
   WebSocketManager,
+  WebSocketShard,
   WebSocketShardEvents,
 } = require('@discordjs/ws');
 
@@ -350,7 +351,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
   });
 
   it('isConnected() flips true on shard Resumed event (Pillar 2 happy path)', async () => {
-    // @discordjs/ws v1.2.x emits Resumed with `(shardId: number)` —
+    // @discordjs/ws v1.2.3 emits Resumed with `(shardId: number)` —
     // a bare number, not an object. Match upstream shape so the
     // fixture documents the real contract.
     const { shim, managerInstances } = makeShim();
@@ -367,7 +368,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
       shardId: 0,
     });
     expect(shim.isConnected()).toBe(true);
-    // @discordjs/ws v1.2.x Closed payload is `{ code, shardId }` —
+    // @discordjs/ws v1.2.3 Closed payload is `{ code, shardId }` —
     // no `reason`. Listener destructures `reason` defensively
     // against a future minor adding it; the fallback logs null.
     managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
@@ -516,6 +517,42 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
 });
 
 describe('IDENTIFY budget guard', () => {
+  it('fails health immediately when the budget trips inside an in-flight start connect', async () => {
+    let overBudgetController;
+    const managerInstances = [];
+    function BudgetTripManager(args) {
+      const inst = Object.assign(new EventEmitter(), {
+        _constructorArgs: args,
+        fetchGatewayInformation: jest.fn().mockResolvedValue({
+          session_start_limit: { max_concurrency: 1 },
+        }),
+      });
+      inst.connect = jest.fn(async () => {
+        const throttler = await args.buildIdentifyThrottler(inst);
+        await throttler.waitForIdentify(0, new AbortController().signal);
+        overBudgetController = new AbortController();
+        return throttler.waitForIdentify(0, overBudgetController.signal);
+      });
+      managerInstances.push(inst);
+      return inst;
+    }
+    let resolveFatal;
+    const fatalObserved = new Promise(resolve => { resolveFatal = resolve; });
+    const onFatal = jest.fn(() => { resolveFatal(); });
+    const { shim } = makeShim({ WebSocketManagerCtor: BudgetTripManager, onFatal });
+
+    const starting = shim.start({ timeoutMs: 5_000 });
+    await fatalObserved;
+
+    expect(managerInstances[0].connect).toHaveBeenCalledTimes(1);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(shim.isReady()).toBe(false);
+    expect(shim.isConnected()).toBe(false);
+
+    const closed = new Error('closed during fatal shutdown');
+    overBudgetController.abort(closed);
+    await expect(starting).rejects.toBe(closed);
+  });
   it('keeps retrieveSessionInfo a pure pass-through across repeated pre-READY reads', async () => {
     const { shim, store, managerInstances } = makeShim();
     await shim.start();
@@ -804,6 +841,7 @@ describe('IDENTIFY budget guard', () => {
     await Promise.resolve();
 
     expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(2);
     controllers.forEach(controller => controller.abort(new Error('closed')));
     await Promise.allSettled(blocked);
   });
@@ -1189,11 +1227,11 @@ describe('constants are pinned', () => {
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(30_000);
   });
 
-  it('VERIFIED_DJS_WS_MAJOR_MINOR matches the installed @discordjs/ws major.minor', () => {
+  it('VERIFIED_DJS_WS_VERSION matches the exact installed @discordjs/ws version', () => {
     // The wsConnected mirror depends on WebSocketShard.onMessage emitting
     // Ready/Resumed before Dispatch. The identify guard also depends on the
-    // v1.2.x custom-throttler catch falling through to IDENTIFY, so an upgrade
-    // must re-read both upstream paths before changing the pinned range.
+    // v1.2.3 custom-throttler catch falling through to IDENTIFY, so any upgrade
+    // must re-read both upstream paths before changing the pinned version.
     // @discordjs/ws's exports field blocks require('.../package.json'),
     // so locate the install via require.resolve (works regardless of
     // whether the dep landed in apps/discord/node_modules or got
@@ -1211,8 +1249,33 @@ describe('constants are pinned', () => {
     }
     const wsRoot = wsEntry.slice(0, markerIdx) + marker.slice(0, -1);
     const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
-    const installedMajorMinor = djsWsVersion.split('.').slice(0, 2).join('.');
-    expect(installedMajorMinor).toBe(VERIFIED_DJS_WS_MAJOR_MINOR);
+    expect(djsWsVersion).toBe(VERIFIED_DJS_WS_VERSION);
+  });
+
+  it('pins the upstream rejection behavior that requires a blocking budget guard', async () => {
+    const strategy = {
+      waitForIdentify: jest.fn().mockRejectedValue(new Error('custom throttle rejected')),
+      options: {
+        token: 'shape-contract-only',
+        identifyProperties: {},
+        intents: 0,
+        shardCount: 1,
+        readyTimeout: 1,
+      },
+    };
+    const shard = new WebSocketShard(strategy, 0);
+    shard.destroy = jest.fn().mockResolvedValue(undefined);
+    shard.send = jest.fn().mockResolvedValue(undefined);
+    shard.waitForEvent = jest.fn().mockResolvedValue(undefined);
+
+    await shard.identify();
+
+    expect(shard.destroy).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'Identify throttling logic failed',
+    }));
+    expect(shard.send).toHaveBeenCalledWith(expect.objectContaining({ op: 2 }));
+    expect(shard.destroy.mock.invocationCallOrder[0])
+      .toBeLessThan(shard.send.mock.invocationCallOrder[0]);
   });
 
   it('real @discordjs/ws exposes and honors the configured identify throttler', async () => {
@@ -1239,11 +1302,10 @@ describe('constants are pinned', () => {
     expect(delegate.waitForIdentify).toHaveBeenCalledWith(0, signal);
   });
 
-  it('production wires identify-budget fatal errors to graceful shutdown', () => {
+  it('production wires identify-budget fatal errors through the watchdog-safe shutdown path', () => {
     const fs = require('node:fs');
     const path = require('node:path');
     const source = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
-    expect(source).toContain('onFatal: () => gracefulShutdown(1)');
-    expect(source).toContain('Shutdown timed out, forcing exit');
+    expect(source).toContain('onFatal: gatewayFatalShutdown');
   });
 });

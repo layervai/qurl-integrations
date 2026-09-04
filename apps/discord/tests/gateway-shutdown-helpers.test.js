@@ -5,6 +5,7 @@ const {
   awaitServerListening,
   tryStop,
   tryClose,
+  runGracefulShutdown,
   runPushHandoffShutdown,
 } = require('../src/gateway-shutdown-helpers');
 
@@ -23,6 +24,81 @@ function makeFakeLogger() {
     debug: jest.fn(),
   };
 }
+
+describe('runGracefulShutdown', () => {
+  it('claims shutdown and arms the hard-exit backstop before teardown starts', async () => {
+    const order = [];
+    let finishTeardown;
+    const hardExit = { unref: jest.fn() };
+    const scheduleHardExit = jest.fn(() => {
+      order.push('timer');
+      return hardExit;
+    });
+    const clearHardExit = jest.fn();
+    const exit = jest.fn();
+    const shutdown = runGracefulShutdown({
+      code: 1,
+      claimShutdown: () => { order.push('claim'); return true; },
+      teardown: async () => {
+        order.push('teardown');
+        await new Promise(resolve => { finishTeardown = resolve; });
+      },
+      logger: makeFakeLogger(),
+      scheduleHardExit,
+      clearHardExit,
+      exit,
+    });
+
+    expect(order).toEqual(['claim', 'timer', 'teardown']);
+    expect(hardExit.unref).toHaveBeenCalledTimes(1);
+    expect(exit).not.toHaveBeenCalled();
+
+    finishTeardown();
+    await shutdown;
+    expect(clearHardExit).toHaveBeenCalledWith(hardExit);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('exits only once when the hard timeout wins the teardown race', async () => {
+    let forceExit;
+    let finishTeardown;
+    const exit = jest.fn();
+    const shutdown = runGracefulShutdown({
+      claimShutdown: () => true,
+      teardown: () => new Promise(resolve => { finishTeardown = resolve; }),
+      logger: makeFakeLogger(),
+      scheduleHardExit: (callback) => { forceExit = callback; return { unref() {} }; },
+      clearHardExit: jest.fn(),
+      exit,
+    });
+
+    forceExit();
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    finishTeardown();
+    await shutdown;
+    expect(exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when another shutdown path already owns the gate', async () => {
+    const teardown = jest.fn();
+    const scheduleHardExit = jest.fn();
+    const exit = jest.fn();
+
+    await runGracefulShutdown({
+      claimShutdown: () => false,
+      teardown,
+      logger: makeFakeLogger(),
+      scheduleHardExit,
+      exit,
+    });
+
+    expect(scheduleHardExit).not.toHaveBeenCalled();
+    expect(teardown).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+  });
+});
 
 describe('shouldUsePushHandoffShutdown', () => {
   it('returns false when hot-standby is off (legacy / Pillar 2 only)', () => {

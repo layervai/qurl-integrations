@@ -565,6 +565,31 @@ describe('loop backstop — survives unexpected throws from step()', () => {
 });
 
 describe('start() / stop() lifecycle', () => {
+  it('does not enter the exhaustion exit after stop lands during an in-flight connect', async () => {
+    let rejectConnect;
+    let releasePoll;
+    const manager = makeFakeManager();
+    manager.connect.mockImplementation(() => new Promise((_, reject) => { rejectConnect = reject; }));
+    const sleep = jest.fn(() => new Promise(resolve => { releasePoll = resolve; }));
+    const releaseLock = jest.fn();
+    const exit = jest.fn();
+    const { watchdog } = makeWatchdog({
+      manager, sleep, releaseLock, exit, maxAttempts: 1, connectCeilingMs: 5_000,
+    });
+
+    watchdog.start();
+    releasePoll();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(manager.connect).toHaveBeenCalledTimes(1);
+
+    const stopped = watchdog.stop();
+    rejectConnect(new Error('connect failed during shutdown'));
+    await stopped;
+
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+  });
   it('start() schedules ticks via the injected sleep + stop() halts the loop', async () => {
     const manager = makeFakeManager({ initialConnected: true });
     const sleepResolvers = [];

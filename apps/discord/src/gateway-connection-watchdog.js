@@ -175,6 +175,7 @@ function createConnectionWatchdog({
   let loopPromise = null;
   let attempts = 0;
   let closed = false;
+  let stopping = false;
 
   // Run one iteration of the watchdog. Public for tests; production
   // calls it from the `start()` loop. Returns once the iteration
@@ -210,9 +211,14 @@ function createConnectionWatchdog({
       // Bounded by CONNECT_CEILING_MS — a hung connect would otherwise
       // pin this tick and the failure-exit recovery would never fire.
       await raceWithCeiling(manager.connect(), connectCeilingMs, 'watchdog_connect_ceiling');
+      if (stopping) return;
       attempts = 0;
       logger.info('connection-watchdog: connect succeeded');
     } catch (err) {
+      // stop() may land while manager.connect() is in flight. Do not let the
+      // rejected/ceiling result continue into an independent exhaustion exit
+      // that races the shutdown path which requested the stop.
+      if (stopping) return;
       if (attempts >= maxAttempts) {
         logger.error('connection-watchdog: connect retries exhausted, releasing lock', {
           error: err.message, attempts,
@@ -293,6 +299,7 @@ function createConnectionWatchdog({
     // not spawn a second concurrent loop. Callers that need to
     // re-start MUST await `stop()` first.
     if (loopPromise || closed) return;
+    stopping = false;
     running = true;
     loopPromise = loop().finally(() => { loopPromise = null; });
   }
@@ -303,6 +310,7 @@ function createConnectionWatchdog({
   // the loop check sees running=false). Idempotent. Callers that
   // want to re-start the watchdog MUST await this.
   function stop() {
+    stopping = true;
     running = false;
     return loopPromise ?? Promise.resolve();
   }
