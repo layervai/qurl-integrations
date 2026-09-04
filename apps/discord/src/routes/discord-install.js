@@ -55,6 +55,9 @@ const DISCORD_BOT_PERMISSIONS = DISCORD_BOT_PERMISSION_BITS
   .reduce((permissions, bit) => permissions | (1n << BigInt(bit)), 0n)
   .toString();
 const DISCORD_INSTALL_SCOPES = 'identify bot applications.commands';
+// Discord requires the authorize request and token exchange to use a
+// byte-for-byte identical redirect URI. Keep one value for both legs.
+const DISCORD_REDIRECT_URI = `${config.BASE_URL}/oauth/discord/callback`;
 
 const router = express.Router();
 
@@ -103,7 +106,7 @@ router.get('/install', installRateLimit, (req, res) => {
   // for GET /users/@me so it can bind setup to the installing Discord admin.
   authorizeUrl.searchParams.set('scope', DISCORD_INSTALL_SCOPES);
   authorizeUrl.searchParams.set('response_type', 'code');
-  authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/discord/callback`);
+  authorizeUrl.searchParams.set('redirect_uri', DISCORD_REDIRECT_URI);
   authorizeUrl.searchParams.set('state', state);
   return res.redirect(302, authorizeUrl.toString());
 });
@@ -201,7 +204,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         client_secret: config.DISCORD_CLIENT_SECRET,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: `${config.BASE_URL}/oauth/discord/callback`,
+        redirect_uri: DISCORD_REDIRECT_URI,
       }),
       signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
     });
@@ -273,8 +276,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   const { codeVerifier, codeChallenge } = createPkcePair();
   // Same double-submit CSRF cookie /oauth/qurl/start sets — Stage-2
   // chain shares the cookie with the qurl-oauth callback. Together with
-  // the install-session cookie checked above, both OAuth legs remain bound
-  // to the browser that began the first-party install flow.
+  // the host-prefixed install-session cookie checked above, both OAuth legs
+  // remain bound to the browser that began the first-party install flow.
+  // The existing qURL cookies are not host-prefixed; their residual sibling-
+  // subdomain shadowing posture is unchanged by this install entrypoint.
   setQurlOAuthCookie(res, req, qurlState);
   setQurlOAuthPkceCookie(res, req, codeVerifier);
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);

@@ -34,8 +34,10 @@ const sweepHandle = setInterval(() => {
 }, 30 * 1000);
 sweepHandle.unref();
 
-// Absolute cap on how many timestamps we keep per IP so an abusive IP
-// can't grow its array unboundedly between eviction sweeps.
+// Absolute cap on how many timestamps we keep per logical bucket per IP so
+// an abusive IP can't grow an array unboundedly between eviction sweeps.
+// Total per-IP retention is this cap times the fixed bucket count (currently
+// two); adding another bucket must account for that linear memory increase.
 const MAX_REQUESTS_PER_BUCKET_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs the 10% drop eviction can't keep up if new IPs arrive faster
