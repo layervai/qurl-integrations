@@ -167,6 +167,10 @@ function intEnv(key, defaultVal, opts = {}) {
 
 const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/;
 
+function isDiscordSnowflake(value) {
+  return typeof value === 'string' && DISCORD_SNOWFLAKE_RE.test(value);
+}
+
 // Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
 // Any other value — including an unset env, the literal string "PLACEHOLDER"
 // that SSM-seeded params carry, or a whitespace-only value — normalizes to
@@ -177,7 +181,7 @@ const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
   const trimmed = rawGuildId.trim();
-  if (DISCORD_SNOWFLAKE_RE.test(trimmed)) {
+  if (isDiscordSnowflake(trimmed)) {
     normalizedGuildId = trimmed;
   } else {
     // logger isn't loaded this early in config import — use console directly.
@@ -242,7 +246,7 @@ const isQurlOAuthConfigured = Boolean(
 // from the bot token used for normal operations) on top of qURL OAuth.
 // The /oauth/discord/install and /callback routes gate on this; both return
 // a generic 503 page when false, so the first-party customer flow cannot
-// begin until DISCORD_CLIENT_SECRET is configured.
+// begin until every required Auth0 and Discord credential is configured.
 const discordClientId = process.env.DISCORD_CLIENT_ID;
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
@@ -254,7 +258,7 @@ if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
 } else if (normalizedDiscordClientId === SSM_PLACEHOLDER_SENTINEL) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
-} else if (!DISCORD_SNOWFLAKE_RE.test(normalizedDiscordClientId)) {
+} else if (!isDiscordSnowflake(normalizedDiscordClientId)) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
 } else if (!normalizedDiscordClientSecret) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
@@ -704,4 +708,5 @@ module.exports = {
   // Exposed as a function, NOT a property — second call returns
   // undefined.
   takeGatewayHandoffHmac,
+  isDiscordSnowflake,
 };

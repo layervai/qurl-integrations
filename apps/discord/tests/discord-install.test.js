@@ -98,6 +98,12 @@ beforeEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+afterEach(() => {
+  // Ensure a failed assertion cannot leave a logger spy installed for the
+  // remaining cases in this file.
+  jest.restoreAllMocks();
+});
+
 describe('Discord install callback', () => {
   describe('GET /oauth/discord/install', () => {
     it('redirects to the complete Discord authorization-code install flow', async () => {
@@ -198,7 +204,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -207,11 +213,13 @@ describe('Discord install callback', () => {
         });
 
       const callback = await discordCallback(
-        '/oauth/discord/callback?code=ok-code&guild_id=guild-1',
+        '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678',
       );
 
       expect(callback.status).toBe(302);
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      // Separate logical buckets must still occupy one bounded entry per IP.
+      expect(rateLimitStore.size).toBe(1);
     });
   });
 
@@ -220,16 +228,16 @@ describe('Discord install callback', () => {
       globalThis.fetch = jest.fn();
 
       const missing = await request(app)
-        .get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+        .get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       const mismatch = await discordCallback(
-        '/oauth/discord/callback?code=ok-code&guild_id=guild-1',
+        '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678',
         { cookieState: 'b'.repeat(43) },
       );
       const empty = await request(app)
-        .get('/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=')
+        .get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&state=')
         .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=`);
       const duplicateState = await request(app)
-        .get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${DISCORD_INSTALL_STATE}&state=${DISCORD_INSTALL_STATE}`)
+        .get(`/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&state=${DISCORD_INSTALL_STATE}&state=${DISCORD_INSTALL_STATE}`)
         .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}`);
 
       for (const res of [missing, mismatch, empty, duplicateState]) {
@@ -248,7 +256,7 @@ describe('Discord install callback', () => {
     it('rejects duplicate install-session cookies before Discord token exchange', async () => {
       globalThis.fetch = jest.fn();
       const res = await request(app)
-        .get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${DISCORD_INSTALL_STATE}`)
+        .get(`/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&state=${DISCORD_INSTALL_STATE}`)
         .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}; ${DISCORD_INSTALL_SESSION_COOKIE}=${DISCORD_INSTALL_STATE}`);
 
       expect(res.status).toBe(400);
@@ -267,8 +275,8 @@ describe('Discord install callback', () => {
       delete process.env.KEY_ENCRYPTION_KEY;
       try {
         const invalid = await request(app)
-          .get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
-        const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+          .get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
+        const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
 
         expect(invalid.status).toBe(400);
         expect(invalid.text).toContain('Invalid install link');
@@ -291,7 +299,7 @@ describe('Discord install callback', () => {
     });
 
     it('400s on missing code', async () => {
-      const res = await discordCallback('/oauth/discord/callback?guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?guild_id=123456789012345678');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Missing authorization code');
       expect(clearedCookieHeader(
@@ -301,7 +309,7 @@ describe('Discord install callback', () => {
     });
 
     it('uses one CSP nonce in the HTTP header and style tag', async () => {
-      const res = await discordCallback('/oauth/discord/callback?guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?guild_id=123456789012345678');
       expect(res.status).toBe(400);
 
       const nonce = extractStyleNonce(res);
@@ -314,8 +322,8 @@ describe('Discord install callback', () => {
     });
 
     it('generates a fresh CSP nonce for each response', async () => {
-      const first = await discordCallback('/oauth/discord/callback?guild_id=guild-1');
-      const second = await discordCallback('/oauth/discord/callback?guild_id=guild-1');
+      const first = await discordCallback('/oauth/discord/callback?guild_id=123456789012345678');
+      const second = await discordCallback('/oauth/discord/callback?guild_id=123456789012345678');
 
       expect(extractStyleNonce(first)).not.toBe(extractStyleNonce(second));
     });
@@ -325,7 +333,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', token_type: 'Bearer', guild: { id: 'guild-1' },
+            access_token: 'disc-token', token_type: 'Bearer', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -337,7 +345,7 @@ describe('Discord install callback', () => {
 
       expect(res.status).toBe(302);
       expect(verifyQurlOAuthState(new URL(res.headers.location).searchParams.get('state')).payload.guildId)
-        .toBe('guild-1');
+        .toBe('123456789012345678');
       expect(clearedCookieHeader(
         res.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
@@ -346,7 +354,7 @@ describe('Discord install callback', () => {
 
     it('400s on Discord error param (admin declined consent)', async () => {
       const res = await discordCallback(
-        '/oauth/discord/callback?error=access_denied&error_description=user+declined&guild_id=guild-1',
+        '/oauth/discord/callback?error=access_denied&error_description=user+declined&guild_id=123456789012345678',
       );
       expect(res.status).toBe(400);
       expect(res.text).toContain('Authorization declined');
@@ -360,7 +368,7 @@ describe('Discord install callback', () => {
       globalThis.fetch = jest.fn().mockResolvedValueOnce({
         ok: false, status: 401, text: () => Promise.resolve('invalid_grant'),
       });
-      const res = await discordCallback('/oauth/discord/callback?code=bad-code&guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?code=bad-code&guild_id=123456789012345678');
       expect(res.status).toBe(502);
       expect(res.text).toContain('Authorization failed');
     });
@@ -378,11 +386,14 @@ describe('Discord install callback', () => {
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('502s when Discord token response returns a non-string guild ID', async () => {
+    it.each([
+      ['a non-string guild ID', 123],
+      ['a malformed string guild ID', 'guild-not-a-snowflake'],
+    ])('502s when Discord token response returns %s', async (_label, guildId) => {
       globalThis.fetch = jest.fn().mockResolvedValueOnce({
         ok: true, status: 200,
         json: () => Promise.resolve({
-          access_token: 'disc-token', token_type: 'Bearer', guild: { id: 123 },
+          access_token: 'disc-token', token_type: 'Bearer', guild: { id: guildId },
         }),
       });
 
@@ -399,11 +410,11 @@ describe('Discord install callback', () => {
         json: () => Promise.resolve({
           access_token: 'disc-token',
           token_type: 'Bearer',
-          guild: { id: 'authoritative-guild' },
+          guild: { id: '345678901234567890' },
         }),
       });
 
-      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=forged-guild');
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=456789012345678901');
 
       expect(res.status).toBe(400);
       expect(res.text).toContain('selected server did not match');
@@ -420,7 +431,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -429,7 +440,7 @@ describe('Discord install callback', () => {
         });
 
       const res = await discordCallback(
-        '/oauth/discord/callback?code=ok-code&guild_id=guild-1&permissions=1024',
+        '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&permissions=1024',
       );
 
       expect(res.status).toBe(302);
@@ -449,7 +460,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -458,7 +469,7 @@ describe('Discord install callback', () => {
         });
 
       const res = await discordCallback(
-        `/oauth/discord/callback?code=ok-code&guild_id=guild-1&permissions=${REQUIRED_DISCORD_PERMISSIONS}`,
+        `/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&permissions=${REQUIRED_DISCORD_PERMISSIONS}`,
       );
 
       expect(res.status).toBe(302);
@@ -475,7 +486,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -484,7 +495,7 @@ describe('Discord install callback', () => {
         });
 
       const res = await discordCallback(
-        '/oauth/discord/callback?code=ok-code&guild_id=guild-1&permissions=not-a-bitfield',
+        '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&permissions=not-a-bitfield',
       );
 
       expect(res.status).toBe(302);
@@ -503,14 +514,14 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', token_type: 'Bearer', guild: { id: 'guild-1' },
+            access_token: 'disc-token', token_type: 'Bearer', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
           ok: false, status: 500,
           text: () => Promise.resolve('Discord API error'),
         });
-      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       expect(res.status).toBe(502);
       expect(res.text).toContain('Could not identify the installing user');
     });
@@ -520,14 +531,14 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', token_type: 'Bearer', guild: { id: 'guild-1' },
+            access_token: 'disc-token', token_type: 'Bearer', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({ id: '987654321098765432', username: 'admin' }),
         });
-      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       expect(res.status).toBe(302);
       expect(clearedCookieHeader(
         res.headers['set-cookie'],
@@ -555,7 +566,7 @@ describe('Discord install callback', () => {
       const state = loc.searchParams.get('state');
       const verified = verifyQurlOAuthState(state);
       expect(verified.ok).toBe(true);
-      expect(verified.payload.guildId).toBe('guild-1');
+      expect(verified.payload.guildId).toBe('123456789012345678');
       expect(verified.payload.discordUserId).toBe('987654321098765432');
 
       const codeVerifier = cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE);
@@ -581,21 +592,21 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
-    it('consumes the install-session cookie after a valid callback', async () => {
+    it('asks the browser to clear the install-session cookie after a valid callback', async () => {
       const install = await request(app).get('/oauth/discord/install');
       const state = new URL(install.headers.location).searchParams.get('state');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({ id: '987654321098765432' }),
         });
-      const callback = `/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${state}`;
+      const callback = `/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&state=${state}`;
 
       const first = await request(app)
         .get(callback)
@@ -621,14 +632,14 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({ id: '987654321098765432' }),
         });
-      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1')
+      const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678')
         .set('X-Forwarded-Proto', 'https');
       expect(res.status).toBe(302);
       const cookieHeader = (Array.isArray(res.headers['set-cookie']) ? res.headers['set-cookie'].join('\n') : res.headers['set-cookie']) || '';
@@ -643,7 +654,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -667,14 +678,14 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({ id: '987654321098765432' }),
         });
-      const stage2 = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      const stage2 = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       expect(stage2.status).toBe(302);
       const setCookie = Array.isArray(stage2.headers['set-cookie'])
         ? stage2.headers['set-cookie'].join('\n')
@@ -719,7 +730,7 @@ describe('Discord install callback', () => {
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({
-            access_token: 'disc-token', guild: { id: 'guild-1' },
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
           }),
         })
         .mockResolvedValueOnce({
@@ -727,7 +738,7 @@ describe('Discord install callback', () => {
           json: () => Promise.resolve({ id: '111' }),
         });
       globalThis.fetch = fetchSpy;
-      await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       expect(fetchSpy).toHaveBeenCalled();
       const tokenCall = fetchSpy.mock.calls[0];
       expect(tokenCall[0]).toBe('https://discord.com/api/oauth2/token');
@@ -786,7 +797,7 @@ describe('discord-install — not configured', () => {
         const { app: freshApp } = require('../src/server');
         const responses = await Promise.all([
           supertest(freshApp).get('/oauth/discord/install'),
-          supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1'),
+          supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678'),
         ]);
         for (const res of responses) {
           expect(res.status).toBe(503);
@@ -844,7 +855,7 @@ describe('discord-install — not configured', () => {
           const { app: freshApp } = require('../src/server');
           const responses = await Promise.all([
             supertest(freshApp).get('/oauth/discord/install'),
-            supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1'),
+            supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678'),
           ]);
           for (const res of responses) {
             expect(res.status).toBe(503);
@@ -923,11 +934,16 @@ describe('discord-install — not configured', () => {
     }
   });
 
-  it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n'])(
-    'returns 503 while DISCORD_CLIENT_ID still has an infrastructure placeholder (%j)',
-    async (placeholder) => {
+  it.each([
+    ['PLACEHOLDER', 'DISCORD_CLIENT_ID is the SSM placeholder'],
+    [' PLACEHOLDER ', 'DISCORD_CLIENT_ID is the SSM placeholder'],
+    ['PLACEHOLDER\n', 'DISCORD_CLIENT_ID is the SSM placeholder'],
+    ['test-discord-client-id', 'DISCORD_CLIENT_ID is not a valid Discord snowflake'],
+  ])(
+    'returns 503 while DISCORD_CLIENT_ID is invalid (%j)',
+    async (invalidClientId, expectedReason) => {
       const saved = process.env.DISCORD_CLIENT_ID;
-      process.env.DISCORD_CLIENT_ID = placeholder;
+      process.env.DISCORD_CLIENT_ID = invalidClientId;
       try {
         await jest.isolateModulesAsync(async () => {
           jest.doMock('../src/discord', () => ({
@@ -951,7 +967,7 @@ describe('discord-install — not configured', () => {
           // eslint-disable-next-line global-require
           const freshConfig = require('../src/config');
           expect(freshConfig.discordInstallNotConfiguredReason)
-            .toBe('DISCORD_CLIENT_ID is the SSM placeholder');
+            .toBe(expectedReason);
           // eslint-disable-next-line global-require
           const supertest = require('supertest');
           // eslint-disable-next-line global-require
@@ -961,7 +977,7 @@ describe('discord-install — not configured', () => {
 
           expect(res.status).toBe(503);
           expect(res.text).toMatch(/not configured/i);
-          expect(res.text).not.toContain('PLACEHOLDER');
+          expect(res.text).not.toContain(invalidClientId.trim());
         });
       } finally {
         process.env.DISCORD_CLIENT_ID = saved;

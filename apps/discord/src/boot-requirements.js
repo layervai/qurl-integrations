@@ -149,8 +149,8 @@ function baseUrlForError(rawBaseUrl) {
 // (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
 // and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
 // localhost BASE_URL silently dead-ends setup at the redirect — in plain
-// single-guild and multi-tenant deploys alike (#619). The Stage-2 Discord
-// install callback (routes/discord-install.js) embeds BASE_URL too, but
+// single-guild and multi-tenant deploys alike (#619). Both Stage-2 Discord
+// install routes (routes/discord-install.js) embed BASE_URL too, but
 // isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
 // isQurlOAuthConfigured gate already covers it.
 //

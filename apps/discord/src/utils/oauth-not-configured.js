@@ -25,7 +25,7 @@ function renderNotConfiguredPage(res, surface, reason) {
   // and `discord-install not configured`).
   const isDiscordInstall = typeof surface === 'string' && surface.startsWith('discord-install');
   const context = isDiscordInstall ? 'discord-install' : 'qurl-setup';
-  logger.info(`${context} not configured`, { reason });
+  logger.info(`${context} not configured`, { surface, reason });
 
   let message;
   if (surface === 'discord-install-entry') {

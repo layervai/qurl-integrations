@@ -22,17 +22,21 @@ const rateLimitStore = new Map();
 // not matter as load.
 const sweepHandle = setInterval(() => {
   const cutoff = Date.now() - config.RATE_LIMIT_WINDOW_MS * 2;
-  for (const [ip, requests] of rateLimitStore) {
-    const recent = requests.filter(t => t > cutoff);
-    if (recent.length === 0) rateLimitStore.delete(ip);
-    else rateLimitStore.set(ip, recent);
+  for (const [ip, buckets] of rateLimitStore) {
+    const recentBuckets = {};
+    for (const [bucket, requests] of Object.entries(buckets)) {
+      const recent = requests.filter(t => t > cutoff);
+      if (recent.length > 0) recentBuckets[bucket] = recent;
+    }
+    if (Object.keys(recentBuckets).length === 0) rateLimitStore.delete(ip);
+    else rateLimitStore.set(ip, recentBuckets);
   }
 }, 30 * 1000);
 sweepHandle.unref();
 
 // Absolute cap on how many timestamps we keep per IP so an abusive IP
 // can't grow its array unboundedly between eviction sweeps.
-const MAX_REQUESTS_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
+const MAX_REQUESTS_PER_BUCKET_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs the 10% drop eviction can't keep up if new IPs arrive faster
 // than the sweep runs. Once the Map exceeds this, new-IP requests get 429
@@ -41,15 +45,16 @@ const MAX_STORE_SIZE = 20000;
 
 function rateLimitForBucket(bucket, req, res, next) {
   const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
-  const storeKey = `${bucket}:${ip}`;
   const now = Date.now();
   const windowStart = now - config.RATE_LIMIT_WINDOW_MS;
 
   // Hard memory ceiling: if the store is already at MAX_STORE_SIZE and
   // this is a new IP, shed the request rather than grow the Map further.
   // Known IPs still get served because they're not growing the Map.
-  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(storeKey)) {
-    logger.warn('Rate limit store at hard cap, rejecting new IP', { ip, size: rateLimitStore.size });
+  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
+    logger.warn('Rate limit store at hard cap, rejecting new IP', {
+      ip, bucket, size: rateLimitStore.size,
+    });
     return res.status(429).send(res.renderPage({
       title: 'Too Many Requests',
       icon: '⏳',
@@ -59,7 +64,8 @@ function rateLimitForBucket(bucket, req, res, next) {
     }));
   }
 
-  const requests = (rateLimitStore.get(storeKey) || []).filter(time => time > windowStart);
+  const buckets = rateLimitStore.get(ip) || {};
+  const requests = (buckets[bucket] || []).filter(time => time > windowStart);
   if (requests.length >= config.RATE_LIMIT_MAX_REQUESTS) {
     logger.warn('OAuth rate limit exceeded', { ip, path: req.path, bucket });
     return res.status(429).send(res.renderPage({
@@ -72,12 +78,12 @@ function rateLimitForBucket(bucket, req, res, next) {
   }
 
   requests.push(now);
-  // Trim the per-IP array to MAX_REQUESTS_PER_IP so one IP can't
-  // accumulate thousands of timestamps between sweeps.
-  if (requests.length > MAX_REQUESTS_PER_IP) {
-    requests.splice(0, requests.length - MAX_REQUESTS_PER_IP);
+  // Trim each per-IP bucket so one IP cannot accumulate thousands of
+  // timestamps between sweeps.
+  if (requests.length > MAX_REQUESTS_PER_BUCKET_PER_IP) {
+    requests.splice(0, requests.length - MAX_REQUESTS_PER_BUCKET_PER_IP);
   }
-  rateLimitStore.set(storeKey, requests);
+  rateLimitStore.set(ip, { ...buckets, [bucket]: requests });
   // Under a distributed attack from many unique IPs, evicting only one
   // entry at a time can't keep up. When we cross 10k, drop the oldest
   // 10% (Map iteration is insertion order) so the store reclaims

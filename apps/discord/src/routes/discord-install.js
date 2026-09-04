@@ -148,10 +148,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   if (!code) {
     return renderError(res, 400, 'Missing authorization code', 'Discord did not return an authorization code.');
   }
-  // Ask the browser to consume the install session immediately before the
-  // first external call. Declined/malformed callbacks preserve it because no
-  // Discord code could have been redeemed; once exchange begins, a timeout can
-  // leave redemption ambiguous and recovery intentionally restarts at /install.
+  // Stage a Set-Cookie deletion on the response immediately before the first
+  // external call. Declined/malformed callbacks preserve the session because
+  // no Discord code could have been redeemed; once exchange begins, a timeout
+  // can leave redemption ambiguous and recovery intentionally restarts at /install.
   clearDiscordInstallSessionCookie(res);
   if (grantedPermissions && grantedPermissions !== DISCORD_BOT_PERMISSIONS) {
     // Diagnostic only: Discord's installed role/channel overrides remain
@@ -222,8 +222,8 @@ router.get('/callback', rateLimit, async (req, res) => {
     // currently the authoritative install result. Revalidate this contract
     // when Discord publishes a versioned replacement for OAuth2 bot installs.
     guildId = tokenJson?.guild?.id;
-    if (typeof guildId !== 'string' || !guildId) {
-      logger.error('Discord token response missing installed guild', {
+    if (!config.isDiscordSnowflake(guildId)) {
+      logger.error('Discord token response missing or malformed installed guild', {
         responseKeys: tokenJson ? Object.keys(tokenJson) : null,
       });
       return renderError(res, 502, 'Authorization failed', 'Discord returned an unexpected response.');
