@@ -168,6 +168,7 @@ func TestPrepareConnectorResourceReuseConcurrentRetriesKeepNonce(t *testing.T) {
 func TestPrepareConnectorResourceReuseBoundsPendingMemory(t *testing.T) {
 	store := openTestStore(t)
 	binding := testResourceBinding(t, "aaa-reused-api")
+	// This ID sorts first: pruning must protect it explicitly, not by order.
 	seed := emptyConnectorResourcesState()
 	seed.Bindings[binding.ConnectorID] = binding
 	seed.Retired[binding.ConnectorID] = true

@@ -226,6 +226,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if deleted.err != nil {
 		t.Fatalf("delete while daemon is serving: %v; stderr %q", deleted.err, deleted.stderr)
 	}
+	assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
 	shares, present, err := connectorstate.ReadLocalSharesIfPresent(context.Background(), stateDir)
 	if err != nil || !present {
 		t.Fatalf("read local registry after delete = (present %v, %v)", present, err)
@@ -270,6 +271,7 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if removedReplacement.err != nil {
 		t.Fatalf("delete replacement CRID: %v; stderr %q", removedReplacement.err, removedReplacement.stderr)
 	}
+	assertExternalSandboxDeleted(t, binary, cliEnv, replacementCRID)
 }
 
 // TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild drives the exact

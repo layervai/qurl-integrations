@@ -15,6 +15,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 type emptyConnectorEnrollmentClient struct{ qurlapi.Client }
@@ -263,5 +264,59 @@ func TestLocalEnrollmentAdvancesDefaultIDOnlyAfterDurableRetirement(t *testing.T
 	explicit := &localEnrollment{target: target, requestedID: baseID}
 	if got, err := explicit.resolveID(context.Background(), stateDir, "agent-one"); err != nil || got != baseID {
 		t.Fatalf("retired explicit resolveID() = %q, %v, want original name %q", got, err, baseID)
+	}
+}
+
+func TestLocalPublishReuseConflictExplainsDeleteRecovery(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		name := "flag in plain output"
+		if configured {
+			name = "environment in JSON output"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			local := localShareFixture(srv)
+			seedLocalConnectorResourceBinding(t, stateDir, &local)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"QURL_API_KEY": testAPIKey}
+			deleted := runCLI(t, &runOpts{
+				args: []string{"--endpoint", srv.URL, "delete", local.CRID, "--yes"},
+				env:  env, shareRegistry: registry, shareStateDir: stateDir,
+			})
+			if deleted.code != 0 {
+				t.Fatalf("delete = %d: %s", deleted.code, deleted.stderr.String())
+			}
+			args := []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000"}
+			if configured {
+				env["QURL_CONNECTOR_ID"] = local.ConnectorID
+				args = append(args, "-o", "json")
+			} else {
+				args = append(args, "--id", local.ConnectorID)
+			}
+			res := runCLI(t, &runOpts{
+				args: args, env: env, shareRegistry: registry, shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error { return nil },
+				localResource: func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+					id, err := resolveID("agent-one")
+					if err != nil || id != local.ConnectorID {
+						t.Fatalf("reuse resolved %q, %v, want %q", id, err, local.ConnectorID)
+					}
+					return nil, qurl.ErrConnectorResourceIdentityConflict
+				},
+			})
+			if res.code != exitcode.Conflict {
+				t.Fatalf("publish = %d: %s", res.code, res.stderr.String())
+			}
+			for _, want := range []string{"identity conflict", "if this happened after qurl delete", "qurl delete <CRID> --yes", "deleted resource's CRID", "keep the local state unchanged"} {
+				if !strings.Contains(res.stderr.String(), want) {
+					t.Fatalf("reuse conflict lacks %q: %s", want, res.stderr.String())
+				}
+			}
+			mustEmptyStdout(t, res)
+		})
 	}
 }

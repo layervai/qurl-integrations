@@ -262,6 +262,8 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 // deleting this local binding does not restore the deleted resource or its links.
 // Live or absent IDs are unchanged, including any exact request pending there.
 // Therefore retries and concurrent callers keep the first prepared nonce.
+// Retirement pruning removes the old binding with its marker, so a forgotten
+// retirement is already an absent ID and needs no preparation.
 func (s *Store) PrepareConnectorResourceReuse(ctx context.Context, connectorID string) (retErr error) {
 	if s == nil {
 		return fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
