@@ -111,14 +111,29 @@ function awaitServerListening(server) {
 async function tryClose(name, server, logger) {
   if (!server) return;
   await new Promise(resolve => {
-    server.close(err => {
-      // Stack alongside message — symmetric with tryStop. Most
-      // net.Server.close errors are low-information ("listener
-      // already detached"), but the next failure mode introduced
-      // here will benefit from the call-site trace.
-      if (err) logger.warn(`${name} close reported error`, { error: err.message, stack: err.stack });
+    const reportCloseError = (err) => {
+      try {
+        logger.warn(`${name} close reported error`, {
+          error: err?.message ?? String(err),
+          stack: err?.stack,
+        });
+      } catch {
+        // Logging is best-effort too: floated fatal cleanup must not reject.
+      }
+    };
+    try {
+      server.close(err => {
+        // Stack alongside message — symmetric with tryStop. Most
+        // net.Server.close errors are low-information ("listener
+        // already detached"), but the next failure mode introduced
+        // here will benefit from the call-site trace.
+        if (err) reportCloseError(err);
+        resolve();
+      });
+    } catch (err) {
+      reportCloseError(err);
       resolve();
-    });
+    }
   });
 }
 
@@ -132,11 +147,13 @@ async function stopGatewayHotStandby({
   controlChannelServer,
   connectionWatchdog,
   gatewayLeader,
+  awaitControlChannelServer = true,
   awaitConnectionWatchdog = true,
   awaitGatewayLeader = true,
   logger,
 }) {
-  await tryClose('control-channel server', controlChannelServer, logger);
+  const controlClosed = tryClose('control-channel server', controlChannelServer, logger);
+  if (awaitControlChannelServer) await controlClosed;
   const watchdogStopped = tryStop('connection-watchdog', connectionWatchdog, logger);
   if (awaitConnectionWatchdog) await watchdogStopped;
   const leaderStopped = tryStop('gateway-leader', gatewayLeader, logger);
@@ -213,6 +230,7 @@ function runGatewayFatalShutdown({
   if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
 
   const shutdown = gracefulShutdown(1, {
+    awaitControlChannelServer: false,
     awaitConnectionWatchdog: false,
     awaitGatewayLeader: false,
   });

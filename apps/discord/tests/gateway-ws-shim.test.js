@@ -743,6 +743,25 @@ describe('IDENTIFY budget guard', () => {
     );
   });
 
+  it('still starts fatal shutdown and blocks the grant when fatal logging throws', async () => {
+    const { shim, logger, managerInstances, onFatal } = makeShim();
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    const controller = new AbortController();
+
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(shim.isReady()).toBe(false);
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+  });
+
   it.each([
     ['throws synchronously', () => { throw new Error('sync shutdown failure'); }, 'threw'],
     ['rejects asynchronously', async () => { throw new Error('async shutdown failure'); }, 'rejected'],
@@ -778,6 +797,23 @@ describe('IDENTIFY budget guard', () => {
 
     await expect(throttler.waitForIdentify(0, controller.signal)).rejects.toBe(reason);
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+
+  it('uses an AbortError fallback when a malformed aborted signal omits its reason', async () => {
+    const { shim, managerInstances, onFatal } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    await expect(throttler.waitForIdentify(0, {
+      aborted: true,
+      reason: undefined,
+    })).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'gateway-ws-shim: shard aborted during identify throttle',
+    });
+    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
     expect(onFatal).not.toHaveBeenCalled();
   });
 

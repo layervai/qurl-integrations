@@ -172,18 +172,21 @@ describe('stopGatewayHotStandby', () => {
   });
 
   it('stops but does not await watchdog or leader on IDENTIFY-fatal teardown', async () => {
+    const controlChannelServer = { close: jest.fn() };
     const connectionWatchdog = { stop: jest.fn(() => new Promise(() => {})) };
     const gatewayLeader = { stop: jest.fn(() => new Promise(() => {})) };
 
     await expect(stopGatewayHotStandby({
-      controlChannelServer: null,
+      controlChannelServer,
       connectionWatchdog,
       gatewayLeader,
+      awaitControlChannelServer: false,
       awaitConnectionWatchdog: false,
       awaitGatewayLeader: false,
       logger: makeFakeLogger(),
     })).resolves.toBeUndefined();
 
+    expect(controlChannelServer.close).toHaveBeenCalledTimes(1);
     expect(connectionWatchdog.stop).toHaveBeenCalledTimes(1);
     expect(gatewayLeader.stop).toHaveBeenCalledTimes(1);
   });
@@ -220,6 +223,7 @@ describe('runGatewayFatalShutdown', () => {
     expect(result).toBe(shutdownResult);
     expect(order).toEqual(['fatal-timer', 'shutdown', 'watchdog-stop']);
     expect(gracefulShutdown).toHaveBeenCalledWith(1, {
+      awaitControlChannelServer: false,
       awaitConnectionWatchdog: false,
       awaitGatewayLeader: false,
     });
@@ -283,6 +287,7 @@ describe('runGatewayFatalShutdown', () => {
     })).resolves.toBeUndefined();
 
     expect(gracefulShutdown).toHaveBeenCalledWith(1, {
+      awaitControlChannelServer: false,
       awaitConnectionWatchdog: false,
       awaitGatewayLeader: false,
     });
@@ -688,6 +693,25 @@ describe('tryClose', () => {
       'HTTP server close reported error',
       expect.objectContaining({ error: 'boom' }),
     );
+  });
+
+  it('contains logger failure while reporting a close error', async () => {
+    const logger = makeFakeLogger();
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+    const server = { close: jest.fn((cb) => cb(new Error('close-failure'))) };
+
+    await expect(tryClose('HTTP server', server, logger)).resolves.toBeUndefined();
+  });
+
+  it('contains a synchronous server.close throw', async () => {
+    const logger = makeFakeLogger();
+    const server = { close: jest.fn(() => { throw new Error('close-failure'); }) };
+
+    await expect(tryClose('HTTP server', server, logger)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith('HTTP server close reported error', {
+      error: 'close-failure',
+      stack: expect.any(String),
+    });
   });
 });
 

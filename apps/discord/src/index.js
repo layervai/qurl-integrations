@@ -666,6 +666,7 @@ let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdownTeardown({
+  awaitControlChannelServer = true,
   awaitConnectionWatchdog = true,
   awaitGatewayLeader = true,
 } = {}) {
@@ -743,6 +744,7 @@ async function gracefulShutdownTeardown({
         controlChannelServer,
         connectionWatchdog,
         gatewayLeader,
+        awaitControlChannelServer,
         awaitConnectionWatchdog,
         awaitGatewayLeader,
         logger,
@@ -782,6 +784,7 @@ async function gracefulShutdownTeardown({
 }
 
 async function gracefulShutdown(code = 0, {
+  awaitControlChannelServer = true,
   awaitConnectionWatchdog = true,
   awaitGatewayLeader = true,
 } = {}) {
@@ -793,6 +796,7 @@ async function gracefulShutdown(code = 0, {
       return true;
     },
     teardown: () => gracefulShutdownTeardown({
+      awaitControlChannelServer,
       awaitConnectionWatchdog,
       awaitGatewayLeader,
     }),

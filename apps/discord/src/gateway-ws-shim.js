@@ -213,6 +213,22 @@ function createGatewayWsShim({
   // event-publisher + noteGatewayActivity).
   const dispatchHandlers = new Set();
 
+  function logFatalErrorBestEffort(...args) {
+    try {
+      logger.error(...args);
+    } catch {
+      // A diagnostic must never turn the fail-closed throttle into an upstream
+      // rejection; @discordjs/ws would continue to the IDENTIFY send.
+    }
+  }
+
+  function abortReason(signal) {
+    if (signal.reason !== undefined) return signal.reason;
+    const error = new Error('gateway-ws-shim: shard aborted during identify throttle');
+    error.name = 'AbortError';
+    return error;
+  }
+
   function buildRetrieveCallback() {
     // Pure pass-through. @discordjs/ws calls this during connect,
     // heartbeat, dispatch, and invalid-session processing; treating
@@ -231,20 +247,20 @@ function createGatewayWsShim({
       if (!signal) {
         if (!missingAbortSignalLogged) {
           missingAbortSignalLogged = true;
-          logger.error(
+          logFatalErrorBestEffort(
             'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
           );
         }
         return;
       }
       if (signal.aborted) {
-        reject(signal.reason);
+        reject(abortReason(signal));
         return;
       }
       if (typeof signal.addEventListener !== 'function') {
         if (!unusableAbortSignalLogged) {
           unusableAbortSignalLogged = true;
-          logger.error(
+          logFatalErrorBestEffort(
             'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
             { errorName: 'TypeError' },
           );
@@ -252,11 +268,11 @@ function createGatewayWsShim({
         return;
       }
       try {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        signal.addEventListener('abort', () => reject(abortReason(signal)), { once: true });
       } catch (error) {
         if (!unusableAbortSignalLogged) {
           unusableAbortSignalLogged = true;
-          logger.error(
+          logFatalErrorBestEffort(
             'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
             { errorName: error?.name ?? typeof error },
           );
@@ -278,18 +294,18 @@ function createGatewayWsShim({
     isReady = false;
     wsConnected = false;
     stopped = true;
-    logger.error('gateway-ws-shim: IDENTIFY budget exhausted; shutting down', {
+    logFatalErrorBestEffort('gateway-ws-shim: IDENTIFY budget exhausted; shutting down', {
       attempt: identifyAttempts,
       cap: MAX_IDENTIFY_ATTEMPTS,
     });
     try {
       Promise.resolve(onFatal(error)).catch((fatalError) => {
-        logger.error('gateway-ws-shim: fatal shutdown handler rejected', {
+        logFatalErrorBestEffort('gateway-ws-shim: fatal shutdown handler rejected', {
           error: fatalError?.message ?? String(fatalError),
         });
       });
     } catch (fatalError) {
-      logger.error('gateway-ws-shim: fatal shutdown handler threw', {
+      logFatalErrorBestEffort('gateway-ws-shim: fatal shutdown handler threw', {
         error: fatalError?.message ?? String(fatalError),
       });
     }
@@ -343,7 +359,7 @@ function createGatewayWsShim({
       delegate = {
         async waitForIdentify(_shardId, signal) {
           if (signal?.aborted) {
-            throw signal.reason ?? new Error('gateway-ws-shim: shard aborted during identify throttle');
+            throw abortReason(signal);
           }
         },
       };
@@ -374,7 +390,7 @@ function createGatewayWsShim({
         // reject with that reason before incrementing so its catch returns
         // instead of falling through to op 2.
         if (signal?.aborted) {
-          throw signal.reason ?? new Error('gateway-ws-shim: shard aborted during identify throttle');
+          throw abortReason(signal);
         }
         identifyAttempts += 1;
         if (identifyAttempts <= MAX_IDENTIFY_ATTEMPTS) {
