@@ -5,11 +5,94 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+var (
+	// Accept environment prefixes, quoted shell snippets, Docker heredocs, and
+	// supported npm options before the subcommand. The explicit path-scoping
+	// forms consume their separate value; other supported flags are value-less
+	// or use --flag=value.
+	npmInstallCommand = regexp.MustCompile(`(?m)\bnpm\b[ \t]+(?:(?:(?:--(?:prefix|workspace)|-[wC])[ \t]+[^ \t&|;"'\r\n]+|--?[^ \t&|;"'\r\n]+)[ \t]+)*(ci|install|i)\b[^&|;\r\n]*`)
+	noAuditFlag       = regexp.MustCompile(`(?:^|[ \t])--no-audit(?:$|[ \t"'\\])`)
+	shellContinuation = regexp.MustCompile(`\\\r?\n[ \t]*`)
+)
+
+func findNPMInstallCommands(source string) [][]string {
+	return npmInstallCommand.FindAllStringSubmatch(source, -1)
+}
+
+func hasNoAuditFlag(command string) bool {
+	return noAuditFlag.MatchString(command)
+}
+
+func logicalShellSource(source string) string {
+	var uncommented strings.Builder
+	for line := range strings.SplitSeq(source, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		uncommented.WriteString(line)
+		uncommented.WriteByte('\n')
+	}
+	return shellContinuation.ReplaceAllString(uncommented.String(), " ")
+}
+
+func TestDiscordNPMInstallCommandShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		source     string
+		mode       string
+		hasNoAudit bool
+	}{
+		"environment prefix":            {`NODE_ENV=production npm ci --no-audit`, "ci", true},
+		"npm prefix option":             {`npm --prefix apps/discord ci --no-audit`, "ci", true},
+		"npm short workspace":           {`npm -w apps/discord ci --no-audit`, "ci", true},
+		"npm short global":              {`npm -g i --no-audit`, "i", true},
+		"quoted shell":                  {`sh -c "npm ci --no-audit"`, "ci", true},
+		"Docker heredoc":                {"RUN <<EOF\nnpm ci --no-audit\nEOF", "ci", true},
+		"comment before continuation":   {"# example \\\nRUN npm ci --no-audit", "ci", true},
+		"bare install":                  {`npm ci`, "ci", false},
+		"non-lockfile install":          {`npm install --no-audit`, "install", true},
+		"inverted no-audit flag":        {`npm ci --no-audit=false`, "ci", false},
+		"environment audit suppression": {`NPM_CONFIG_AUDIT=false npm ci`, "ci", false},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			installs := findNPMInstallCommands(logicalShellSource(test.source))
+			if len(installs) != 1 {
+				t.Fatalf("install matches = %d, want 1 for %q", len(installs), test.source)
+			}
+			if installs[0][1] != test.mode {
+				t.Fatalf("install command = %q, want %q", installs[0][1], test.mode)
+			}
+			if got := hasNoAuditFlag(installs[0][0]); got != test.hasNoAudit {
+				t.Fatalf("hasNoAuditFlag(%q) = %t, want %t", installs[0][0], got, test.hasNoAudit)
+			}
+		})
+	}
+
+	falsePositives := map[string]string{
+		"run script":    `npm run ci`,
+		"test ci flag":  `npm test -- --ci --silent`,
+		"npx command":   `npx jest --ci`,
+		"shell comment": `# npm install --no-audit`,
+	}
+	for name, source := range falsePositives {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if installs := findNPMInstallCommands(logicalShellSource(source)); len(installs) != 0 {
+				t.Fatalf("install matches = %q, want none for %q", installs, source)
+			}
+		})
+	}
+}
 
 // TestDiscordDependencyAuditContract keeps dependency installation separate
 // from the one explicit, production-only audit gate. npm ci enables its own
@@ -17,24 +100,17 @@ import (
 // network-dependent request and can stall both the test job and image build
 // before the intentional gate reports a useful result.
 //
-// The install scan covers direct npm ci/install/i commands at shell-command
-// boundaries and in Docker RUN instructions. Environment prefixes, npm global
-// flags, shell wrappers, and Docker heredocs are outside that deliberately
-// shape-sensitive contract.
-//
 // The audit count covers direct shell invocations of npm audit and the
 // repository's Node wrapper. It does not infer audits hidden behind package
 // scripts, npx commands, or uses actions. Every direct npm audit kind,
 // including signatures, is deliberately review-gated by the count below.
+// Each install must carry a literal --no-audit: NPM_CONFIG_AUDIT=false and an
+// .npmrc audit=false default intentionally do not satisfy this contract.
 func TestDiscordDependencyAuditContract(t *testing.T) {
 	t.Parallel()
 
 	spec := requiredWorkflowSpecByName(t, "discord")
-	appPath := filepath.Join("..", "..", "apps", spec.name)
-	shellContinuation := regexp.MustCompile(`\\\r?\n[ \t]*`)
-	const npmInstallPattern = `npm[ \t]+(ci|install|i)\b[^&|;\r\n]*`
-	installCommand := regexp.MustCompile(`(?m)(?:^[ \t]*|(?:&&|\|\||;)[ \t]*)` + npmInstallPattern)
-	dockerInstallCommand := regexp.MustCompile(`(?:^[ \t]*(?i:RUN)(?:[ \t]+--[^ \t]+)*[ \t]+|(?:&&|\|\||;)[ \t]*)` + npmInstallPattern)
+	appPath := filepath.Join("..", "..", "apps", "discord")
 
 	t.Run("workflow", func(t *testing.T) {
 		t.Parallel()
@@ -53,8 +129,8 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 			}
 			for index := range job.Steps {
 				current := &job.Steps[index]
-				logicalRun := shellContinuation.ReplaceAllString(current.Run, " ")
-				installs := installCommand.FindAllStringSubmatch(logicalRun, -1)
+				logicalRun := logicalShellSource(current.Run)
+				installs := findNPMInstallCommands(logicalRun)
 				location := fmt.Sprintf("%s job %q step %q", spec.path, jobID, current.Name)
 				installCount += checkLockfileInstalls(t, location, installs)
 				directAuditCommandCount += len(auditCommand.FindAllString(logicalRun, -1))
@@ -77,8 +153,9 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 		if audit == nil {
 			t.Fatalf("%s is missing the %q step", spec.path, auditStepName)
 		}
-		if strings.TrimSpace(audit.Run) != explicitAudit {
-			t.Errorf("Discord workflow explicit audit = %q, want %q", audit.Run, explicitAudit)
+		auditFields := strings.Fields(audit.Run)
+		if len(auditFields) < 2 || auditFields[0] != "node" || auditFields[1] != "scripts/audit-production-dependencies.js" {
+			t.Errorf("Discord workflow explicit audit = %q, want an invocation of %q", audit.Run, explicitAudit)
 		}
 	})
 
@@ -86,17 +163,15 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 		t.Parallel()
 
 		dockerfilePath := filepath.Join(appPath, "Dockerfile")
-		dockerfile, err := os.ReadFile(dockerfilePath) // #nosec G304 -- fixed checked-in path.
+		dockerfile, err := os.ReadFile(dockerfilePath) //nolint:gosec // G304: fixed checked-in path.
 		if err != nil {
 			t.Fatalf("read %s: %v", dockerfilePath, err)
 		}
-		logicalDockerfile := shellContinuation.ReplaceAllString(string(dockerfile), " ")
-		runInstructions := regexp.MustCompile(`(?im)^[ \t]*RUN\b[^\r\n]*`).FindAllString(logicalDockerfile, -1)
-		dockerInstallCount := 0
-		for _, instruction := range runInstructions {
-			installs := dockerInstallCommand.FindAllStringSubmatch(instruction, -1)
-			dockerInstallCount += checkLockfileInstalls(t, "Discord Dockerfile", installs)
-		}
+		dockerInstallCount := checkLockfileInstalls(
+			t,
+			"Discord Dockerfile",
+			findNPMInstallCommands(logicalShellSource(string(dockerfile))),
+		)
 		if dockerInstallCount == 0 {
 			t.Fatalf("Discord Dockerfile has no npm dependency-install commands")
 		}
@@ -106,7 +181,7 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 		t.Parallel()
 
 		makefilePath := filepath.Join("..", "..", "Makefile")
-		makefile, err := os.ReadFile(makefilePath) // #nosec G304 -- fixed checked-in path.
+		makefile, err := os.ReadFile(makefilePath) //nolint:gosec // G304: fixed checked-in path.
 		if err != nil {
 			t.Fatalf("read %s: %v", makefilePath, err)
 		}
@@ -119,8 +194,8 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 				if len(recipe) != 2 {
 					t.Fatalf("%s has no %s recipe", makefilePath, target)
 				}
-				logicalRecipe := shellContinuation.ReplaceAllString(string(recipe[1]), " ")
-				installs := installCommand.FindAllStringSubmatch(logicalRecipe, -1)
+				logicalRecipe := logicalShellSource(string(recipe[1]))
+				installs := findNPMInstallCommands(logicalRecipe)
 				location := fmt.Sprintf("Makefile target %q", target)
 				if checkLockfileInstalls(t, location, installs) == 0 {
 					t.Fatalf("%s has no npm dependency-install commands", location)
@@ -137,7 +212,7 @@ func checkLockfileInstalls(t *testing.T, location string, installs [][]string) i
 		if install[1] != "ci" {
 			t.Errorf("%s uses non-lockfile npm %s; use npm ci for application dependencies or update the contract for an intentional tool install: %q", location, install[1], install[0])
 		}
-		if !slices.Contains(strings.Fields(install[0]), "--no-audit") {
+		if !hasNoAuditFlag(install[0]) {
 			t.Errorf("%s install still runs npm's implicit audit: %q", location, install[0])
 		}
 	}
