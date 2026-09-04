@@ -107,11 +107,11 @@ async function callQurl(method, path, fn, auditFields = {}) {
     logger.debug('qURL API error', { method, path, status, code: err?.code });
     if (status === 401 || status === 403) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
+        ...auditFields,
         dependency: 'qurl_service',
         status,
         method,
         path,
-        ...auditFields,
       });
     }
     // A real HTTP status means the SDK error wraps a server response body — throw

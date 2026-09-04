@@ -131,6 +131,14 @@ describe('qURL client — getIdentity', () => {
     expect(error.message).not.toContain('secret response fragment');
   });
 
+  it('propagates a fetch rejection without retrying', async () => {
+    const networkError = new TypeError('fetch failed');
+    globalThis.fetch = jest.fn().mockRejectedValue(networkError);
+
+    await expect(qurl.getIdentity('stored-guild-key')).rejects.toBe(networkError);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('normalizes missing or malformed identity display fields after a successful check', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
       owner_id: 'owner-123',
@@ -147,6 +155,17 @@ describe('qURL client — getIdentity', () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
       owner_id: 'owner-123',
       auth_type: 'api_key',
+    }));
+
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL identity response had an unexpected shape');
+  });
+
+  it('rejects an array in place of the API-key identity block', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: 'owner-123',
+      auth_type: 'api_key',
+      api_key: [],
     }));
 
     await expect(qurl.getIdentity('stored-guild-key'))

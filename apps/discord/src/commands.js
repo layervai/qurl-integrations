@@ -8772,12 +8772,10 @@ const commands = [
           })();
 
           // Stored values are normally a Discord snowflake and an ISO timestamp;
-          // bound their display form so a corrupt row cannot crowd out the key
-          // verdict or the admin-offboarding guidance.
-          const sanitizeStoredStatusValue = (value) => capUtf16Units(
-            sanitizeDisplayNamePlain(value, { fallback: 'unknown' }).replace(/`/g, ''),
-            64,
-          );
+          // escape Markdown and bound their source form so a corrupt row cannot
+          // inject content or crowd out the key verdict/offboarding guidance.
+          const sanitizeStoredStatusValue = (value) =>
+            sanitizeContentLabel(value, 64) || 'unknown';
           const configuredByDisplay = sanitizeStoredStatusValue(guildConfig.configured_by);
           const updatedAtDisplay = sanitizeStoredStatusValue(guildConfig.updated_at);
           const configuredByReference = guildConfig.configured_by
@@ -8830,7 +8828,7 @@ const commands = [
             });
             // Same 401/403 → "invalid key" policy the legacy setup validator
             // applies at the top of this file; #1370 tracks consolidating them.
-            verdict = status === 401 || status === 403
+            verdict = failureStage === 'qurl_service' && (status === 401 || status === 403)
               ? '❌ **The stored qURL key is revoked or invalid.**\n\n' + reconnectCopy
               : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
                 + 'Please try `/qurl status` again later.\n\n';

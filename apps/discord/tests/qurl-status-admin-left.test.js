@@ -281,18 +281,22 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
       configured_by: 'admin-original',
       updated_at: '2026-01-01T00:00:00Z',
     });
-    db.getGuildApiKey.mockRejectedValueOnce(new Error(`KMS failure for ${STORED_KEY}`));
+    db.getGuildApiKey.mockRejectedValueOnce(Object.assign(
+      new Error(`KMS failure for ${STORED_KEY}`),
+      { status: 403 },
+    ));
     const interaction = makeStatusInteraction({
       memberFetchBehavior: async () => ({ id: 'admin-original' }),
     });
 
     await handleCommand(interaction);
 
-    expect(interaction._editReply.mock.calls[0][0].content)
-      .toMatch(/check could not be completed/i);
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent).toMatch(/check could not be completed/i);
+    expect(replyContent).not.toMatch(/revoked|invalid/i);
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
       guild_id: 'guild-1',
-      status: null,
+      status: 403,
       failure_stage: 'key_store',
     });
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
@@ -360,6 +364,45 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('_+2 more_');
     expect(replyContent).not.toContain('`qurl:scope-10`');
+  });
+
+  it('does not show an omitted-scope summary at the display limit', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({
+      api_key: {
+        key_id: 'key-123',
+        key_prefix: 'lv_live_aaa',
+        scopes: Array.from({ length: 10 }, (_, i) => `qurl:scope-${i}`),
+      },
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._editReply.mock.calls[0][0].content).not.toContain('more_');
+  });
+
+  it('escapes markdown in stored status metadata', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '[click here](https://evil.example)',
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent).not.toContain('[click here](https://evil.example)');
+    expect(replyContent).toContain('\\[click here\\]\\(https://evil.example\\)');
   });
 
   it('sanitizes service-reported prefix and scopes before rendering them', async () => {
