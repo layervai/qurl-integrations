@@ -2,6 +2,14 @@
 // branching + /health probe selection. Extracted from index.js so the
 // contracts are unit-testable without the full bot bootstrap.
 
+function logBestEffort(logger, level, ...args) {
+  try {
+    logger[level](...args);
+  } catch {
+    // Shutdown progress and the requested exit must not depend on diagnostics.
+  }
+}
+
 // True when this replica's SIGTERM should invoke pushHandoff-then-exit
 // (active branch). Reads `gatewayLeader.isHoldingLock()` at call time
 // so an inbound handoff that already moved the lock to our peer
@@ -192,11 +200,13 @@ async function runGracefulShutdown({
   }, ceilingMs);
   if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
 
-  logger.info('Graceful shutdown initiated...');
+  logBestEffort(logger, 'info', 'Graceful shutdown initiated...');
   try {
     await teardown();
   } catch (error) {
-    logger.error('Error during shutdown', { error: error?.message ?? String(error) });
+    logBestEffort(logger, 'error', 'Error during shutdown', {
+      error: error?.message ?? String(error),
+    });
   }
   clearHardExit(hardExit);
   exitOnce(code);
@@ -208,6 +218,12 @@ async function runGracefulShutdown({
 // non-blocking. This helper also owns the fatal-path teardown option: graceful
 // teardown re-invokes the same idempotent stop, but does not await the blocked
 // connect before flushing the resumable session.
+//
+// Unlike an ordinary SIGTERM, this path deliberately does not push handoff.
+// The budget can trip during cold start before READY/RESUMED has confirmed a
+// resumable session; instructing the peer to connect from that unconfirmed
+// state can merely transfer the token contention that tripped the guard. The
+// process exits fail-closed and DDB lease TTL gates the peer's later takeover.
 function runGatewayFatalShutdown({
   gracefulShutdown,
   getConnectionWatchdog,
@@ -238,7 +254,7 @@ function runGatewayFatalShutdown({
   if (!connectionWatchdog) return shutdown;
 
   const warnStopFailed = (error) => {
-    logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
+    logBestEffort(logger, 'warn', 'connection-watchdog stop failed during gateway fatal shutdown', {
       error: error?.message ?? String(error),
     });
   };

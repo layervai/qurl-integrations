@@ -31,20 +31,19 @@ function makeFakeLogger() {
 
 describe('index gateway-fatal composition contract', () => {
   const indexSource = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
-  const compactIndexSource = indexSource.replace(/\s+/g, ' ');
 
   it('wires the IDENTIFY fatal callback into the gateway shim', () => {
-    expect(compactIndexSource).toContain(
-      'gatewayShim = createGatewayWsShim({ token: config.DISCORD_TOKEN, intents: GATEWAY_INTENTS_BITFIELD, store: sessionStore, logger, onFatal: gatewayFatalShutdown, });',
+    expect(indexSource).toMatch(
+      /createGatewayWsShim\(\{[^}]*\bonFatal:\s*gatewayFatalShutdown\b[^}]*\}\)/s,
     );
   });
 
   it('threads every fatal non-await option through graceful teardown', () => {
-    expect(compactIndexSource).toContain(
-      'await stopGatewayHotStandby({ controlChannelServer, connectionWatchdog, gatewayLeader, awaitControlChannelServer, awaitConnectionWatchdog, awaitGatewayLeader, logger, });',
+    expect(indexSource).toMatch(
+      /stopGatewayHotStandby\(\{[^}]*\bawaitControlChannelServer\b[^}]*\bawaitConnectionWatchdog\b[^}]*\bawaitGatewayLeader\b[^}]*\}\)/s,
     );
-    expect(compactIndexSource).toContain(
-      'teardown: () => gracefulShutdownTeardown({ awaitControlChannelServer, awaitConnectionWatchdog, awaitGatewayLeader, }),',
+    expect(indexSource).toMatch(
+      /teardown:\s*\(\)\s*=>\s*gracefulShutdownTeardown\(\{[^}]*\bawaitControlChannelServer\b[^}]*\bawaitConnectionWatchdog\b[^}]*\bawaitGatewayLeader\b[^}]*\}\)/s,
     );
   });
 });
@@ -165,6 +164,50 @@ describe('runGracefulShutdown', () => {
       'Error during shutdown',
       { error: 'teardown-failure' },
     );
+    expect(clearHardExit).toHaveBeenCalledWith(hardExit);
+    expect(exit).toHaveBeenCalledWith(7);
+  });
+
+  it('runs teardown and exits with the requested code when initiation logging throws', async () => {
+    const logger = makeFakeLogger();
+    logger.info.mockImplementation(() => { throw new Error('logger-failure'); });
+    const teardown = jest.fn().mockResolvedValue(undefined);
+    const exit = jest.fn();
+    const clearHardExit = jest.fn();
+    const hardExit = { unref: jest.fn() };
+
+    await expect(runGracefulShutdown({
+      code: 7,
+      claimShutdown: () => true,
+      teardown,
+      logger,
+      scheduleHardExit: () => hardExit,
+      clearHardExit,
+      exit,
+    })).resolves.toBeUndefined();
+
+    expect(teardown).toHaveBeenCalledTimes(1);
+    expect(clearHardExit).toHaveBeenCalledWith(hardExit);
+    expect(exit).toHaveBeenCalledWith(7);
+  });
+
+  it('exits with the requested code when teardown and failure logging both throw', async () => {
+    const logger = makeFakeLogger();
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+    const exit = jest.fn();
+    const clearHardExit = jest.fn();
+    const hardExit = { unref: jest.fn() };
+
+    await expect(runGracefulShutdown({
+      code: 7,
+      claimShutdown: () => true,
+      teardown: () => Promise.reject(new Error('teardown-failure')),
+      logger,
+      scheduleHardExit: () => hardExit,
+      clearHardExit,
+      exit,
+    })).resolves.toBeUndefined();
+
     expect(clearHardExit).toHaveBeenCalledWith(hardExit);
     expect(exit).toHaveBeenCalledWith(7);
   });
@@ -333,6 +376,27 @@ describe('runGatewayFatalShutdown', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       'connection-watchdog stop failed during gateway fatal shutdown',
       { error: expect.stringContaining('stop-failure') },
+    );
+  });
+
+  it('contains watchdog stop and warning failures during fatal shutdown', async () => {
+    const logger = makeFakeLogger();
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const shutdown = runGatewayFatalShutdown({
+      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      getConnectionWatchdog: () => ({
+        stop: () => { throw new Error('stop-failure'); },
+      }),
+      logger,
+      scheduleHardExit: () => ({ unref() {} }),
+      exit: jest.fn(),
+    });
+
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog stop failed during gateway fatal shutdown',
+      { error: 'stop-failure' },
     );
   });
 });

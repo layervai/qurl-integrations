@@ -315,12 +315,13 @@ function createGatewayWsShim({
   }
 
   async function buildIdentifyThrottler(managerInstance) {
+    let gatewayInfo;
     let rawMaxConcurrency;
     let gatewayInfoFetched = false;
     try {
-      const info = await managerInstance.fetchGatewayInformation();
+      gatewayInfo = await managerInstance.fetchGatewayInformation();
       gatewayInfoFetched = true;
-      rawMaxConcurrency = info?.session_start_limit?.max_concurrency;
+      rawMaxConcurrency = gatewayInfo?.session_start_limit?.max_concurrency;
     } catch (error) {
       // This callback is awaited inside @discordjs/ws's swallow-and-send
       // identify path. It must always return our guard: propagating the fetch
@@ -343,6 +344,14 @@ function createGatewayWsShim({
         'warn',
         'gateway-ws-shim: gateway info has invalid max_concurrency; defaulting to 1',
         { observedMaxConcurrency: rawMaxConcurrency ?? null },
+      );
+    }
+    const recommendedShards = gatewayInfo?.shards;
+    if (gatewayInfoFetched && Number.isInteger(recommendedShards) && recommendedShards > 1) {
+      logBestEffort(
+        'error',
+        'gateway-ws-shim: Discord recommends more than one shard',
+        { recommendedShards, configuredShards: 1 },
       );
     }
     let delegate;

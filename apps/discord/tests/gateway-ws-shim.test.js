@@ -743,6 +743,29 @@ describe('IDENTIFY budget guard', () => {
     );
   });
 
+  it('reports a Discord shard recommendation above the process-global single-shard ceiling', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockResolvedValue({
+      shards: 2,
+      session_start_limit: { max_concurrency: 1 },
+    });
+    logger.error.mockImplementation((message) => {
+      if (message === 'gateway-ws-shim: Discord recommends more than one shard') {
+        throw new Error('logger-failure');
+      }
+    });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: Discord recommends more than one shard',
+      { recommendedShards: 2, configuredShards: 1 },
+    );
+  });
+
   it('retains the guard when gateway-fetch fallback logging throws', async () => {
     const { shim, logger, managerInstances } = makeShim();
     await shim.start();
