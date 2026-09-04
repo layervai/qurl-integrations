@@ -9,9 +9,9 @@ const AUTH0_ENV = {
 const PKCE_CHALLENGE = 'a'.repeat(43);
 
 function withBuilder(envOverrides, run) {
-  withFreshConfig({ ...AUTH0_ENV, ...envOverrides }, () => {
+  withFreshConfig({ ...AUTH0_ENV, ...envOverrides }, (config) => {
     const authorizeUrl = require('../src/utils/auth0-authorize-url');
-    run(authorizeUrl);
+    run(authorizeUrl, config);
   });
 }
 
@@ -19,7 +19,7 @@ describe('buildAuth0AuthorizeUrl', () => {
   it('builds the shared security contract without a connection pin by default', () => {
     withBuilder({ AUTH0_EMAIL_CONNECTION: undefined }, ({
       buildAuth0AuthorizeUrl,
-      QURL_OAUTH_CALLBACK_URL,
+      qurlOAuthCallbackUrl,
     }) => {
       const url = buildAuth0AuthorizeUrl({ state: 'signed-state', codeChallenge: PKCE_CHALLENGE });
 
@@ -27,8 +27,8 @@ describe('buildAuth0AuthorizeUrl', () => {
       expect(url.pathname).toBe('/authorize');
       expect(url.searchParams.get('response_type')).toBe('code');
       expect(url.searchParams.get('client_id')).toBe('test-client-id');
-      expect(QURL_OAUTH_CALLBACK_URL).toBe('http://localhost:3000/oauth/qurl/callback');
-      expect(url.searchParams.get('redirect_uri')).toBe(QURL_OAUTH_CALLBACK_URL);
+      expect(qurlOAuthCallbackUrl()).toBe('http://localhost:3000/oauth/qurl/callback');
+      expect(url.searchParams.get('redirect_uri')).toBe(qurlOAuthCallbackUrl());
       expect(url.searchParams.get('scope')).toBe('qurl:write qurl:read openid email');
       expect(url.searchParams.get('audience')).toBe('https://api.layerv.test');
       expect(url.searchParams.get('state')).toBe('signed-state');
@@ -36,6 +36,13 @@ describe('buildAuth0AuthorizeUrl', () => {
       expect(url.searchParams.get('code_challenge_method')).toBe('S256');
       expect(url.searchParams.get('prompt')).toBe('login consent');
       expect(url.searchParams.get('connection')).toBeNull();
+    });
+  });
+
+  it('reads the callback base URL from the same live config as other parameters', () => {
+    withBuilder({}, ({ qurlOAuthCallbackUrl }, config) => {
+      config.BASE_URL = 'https://discord.example.test';
+      expect(qurlOAuthCallbackUrl()).toBe('https://discord.example.test/oauth/qurl/callback');
     });
   });
 

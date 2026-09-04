@@ -17,9 +17,6 @@ process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
-// Keep the subject-fingerprint HMAC deterministic; setup-env.js pins the
-// fallback OAUTH_STATE_SECRET to `0`.repeat(64).
-delete process.env.QURL_OAUTH_STATE_SECRET;
 // KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
 // review round 2; matches the legacy modal-paste path's existing check.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
@@ -69,6 +66,7 @@ jest.mock('../src/utils/auth0-jwks', () => ({
 }));
 
 const request = require('supertest');
+const crypto = require('crypto');
 const { app } = require('../src/server');
 const db = require('../src/store');
 const discord = require('../src/discord');
@@ -84,6 +82,11 @@ const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
 const TEST_PKCE_VERIFIER = 'a'.repeat(43);
+const SUBJECT_FINGERPRINT_SECRET = process.env.QURL_OAUTH_STATE_SECRET
+  || process.env.OAUTH_STATE_SECRET;
+const AUTH0_ABC_FINGERPRINT = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_SECRET)
+  .update('qurl-account-subject:auth0|abc')
+  .digest('hex');
 
 function cookieFor(state, codeVerifier = TEST_PKCE_VERIFIER) {
   return `${QURL_OAUTH_SESSION_COOKIE}=${encodeURIComponent(state)}; `
@@ -490,7 +493,7 @@ describe('qurl-oauth routes', () => {
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
-        qurl_account_subject_fingerprint: '6a65c71a4b220e0d743fae6a0d6f2131ce58caf808d6828bad2c62df258a9364',
+        qurl_account_subject_fingerprint: AUTH0_ABC_FINGERPRINT,
       });
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
 

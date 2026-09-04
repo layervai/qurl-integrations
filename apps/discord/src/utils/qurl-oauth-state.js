@@ -48,7 +48,10 @@ const qurlOAuthStateSigner = createStateSigner({
 // Domain-separate the audit fingerprint from signed OAuth-state payloads even
 // though both use the same flow-dedicated HMAC key. This is pseudonymous (not
 // anonymous): it supports equality queries within one key-rotation epoch, but
-// intentionally changes when the OAuth state secret rotates.
+// intentionally changes when the OAuth state secret rotates. Comparisons
+// across that boundary are invalid and must not be interpreted as owner
+// changes. The ':' separator also makes this preimage disjoint from the
+// base64url-only state payloads accepted by verifyQurlOAuthState.
 function fingerprintQurlAccountSubject(subject) {
   if (typeof subject !== 'string' || !subject) {
     throw new TypeError('fingerprintQurlAccountSubject: subject must be a non-empty string');

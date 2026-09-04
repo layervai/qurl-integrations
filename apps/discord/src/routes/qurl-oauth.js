@@ -19,7 +19,7 @@ const { readCookie, timingSafeStringEqual } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
 const {
   buildAuth0AuthorizeUrl,
-  QURL_OAUTH_CALLBACK_URL,
+  qurlOAuthCallbackUrl,
 } = require('../utils/auth0-authorize-url');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
@@ -255,7 +255,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         // Guaranteed valid by the cookie gate above; Auth0 matches it against
         // the S256 challenge stored for this authorization code.
         code_verifier: codeVerifier,
-        redirect_uri: QURL_OAUTH_CALLBACK_URL,
+        redirect_uri: qurlOAuthCallbackUrl(),
       }),
       signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
     });

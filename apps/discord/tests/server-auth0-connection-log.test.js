@@ -7,10 +7,10 @@ const AUTH0_ENV = {
   AUTH0_AUDIENCE: 'https://api.layerv.test',
 };
 
-function captureServerLogs(connection) {
+function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
   let calls;
   withFreshEnv({
-    ...AUTH0_ENV,
+    ...auth0Env,
     AUTH0_EMAIL_CONNECTION: connection,
   }, () => {
     jest.doMock('../src/logger', () => ({
@@ -44,6 +44,18 @@ describe('server Auth0 connection policy log', () => {
     expect(captureServerLogs(undefined)).toContainEqual([
       'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.',
       { event: 'qurl_oauth_auth0_connection_policy', connection: null },
+    ]);
+  });
+
+  it('reports a configured connection that is inactive without the Auth0 app settings', () => {
+    expect(captureServerLogs('email', {
+      AUTH0_DOMAIN: undefined,
+      AUTH0_CLIENT_ID: undefined,
+      AUTH0_CLIENT_SECRET: undefined,
+      AUTH0_AUDIENCE: undefined,
+    })).toContainEqual([
+      'AUTH0_EMAIL_CONNECTION="email" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.',
+      { event: 'qurl_oauth_auth0_connection_policy', connection: 'email' },
     ]);
   });
 });
