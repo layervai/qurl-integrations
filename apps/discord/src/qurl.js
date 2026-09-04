@@ -233,7 +233,7 @@ async function deleteLink(resourceId, apiKey) {
   // Revoke at the resource level: every link minted on the resource stops
   // resolving. Repeats against an existing revoked row are idempotent 204;
   // a never-existent public ID remains 404, so a corrupt send-row ID cannot
-  // report false success. SDK 0.3.0's delete() rejects current public IDs using
+  // report false success. SDK 0.3.x's delete() rejects current public IDs using
   // a retired `r_` prefix check before any request is sent.
   // qurl-typescript#244 fixes that older SDK method for other consumers; keep
   // deleteResource() here because it directly names this whole-resource action.
@@ -244,7 +244,7 @@ async function deleteLink(resourceId, apiKey) {
 async function getResourceStatus(resourceId, apiKey) {
   const path = qurlPath(resourceId);
   const client = makeClient(apiKey);
-  // SDK 0.3.0's get() applies only its non-empty-ID guard; unlike delete(), it
+  // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
   // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).

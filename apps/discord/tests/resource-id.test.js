@@ -1,5 +1,6 @@
 const {
   hasSafeResourceIdShape,
+  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
   qurlPath,
   resourcePath,
@@ -11,6 +12,10 @@ const {
 } = require('./helpers/qurl-fixtures');
 
 describe('resource ID transport guard', () => {
+  it('pins the retired private-ID prefix used by reclaim diagnostics', () => {
+    expect(LEGACY_RESOURCE_ID_PREFIX).toBe('r_');
+  });
+
   it.each([undefined, null, '', 12345, '../qurls/x'])('rejects an unsafe shape: %p', (resourceId) => {
     expect(hasSafeResourceIdShape(resourceId)).toBe(false);
   });

@@ -13,6 +13,9 @@ const RESOURCE_ID_CHARACTERS = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
 const LEGACY_RESOURCE_ID_PREFIX = 'r_';
 const RESOURCE_PATH_PREFIX = '/resources/';
 const RESOURCE_ID_MASK = '<id>';
+// Shared sticky state is safe while this helper stays synchronous: lastIndex
+// is assigned immediately before every exec, so no caller can interleave.
+const RESOURCE_ID_SCAN = new RegExp(`${RESOURCE_ID_CHARACTER_CLASS}+`, 'y');
 // Status returns the qURL aggregate response shape; whole-resource revoke uses
 // the resource action. Keeping both names here makes that split deliberate.
 const QURL_PATH_PREFIX = '/qurls/';
@@ -58,9 +61,6 @@ function qurlPath(resourceId) {
 }
 
 function maskResourceIdPath(message) {
-  // Per-call sticky state scans in place without sharing mutable lastIndex
-  // across callers.
-  const resourceIdScan = new RegExp(`${RESOURCE_ID_CHARACTER_CLASS}+`, 'y');
   let masked = typeof message === 'string'
     ? message
     : typePreview(message);
@@ -73,8 +73,8 @@ function maskResourceIdPath(message) {
       if (start === -1) break;
 
       const idStart = start + prefix.length;
-      resourceIdScan.lastIndex = idStart;
-      const resourceId = resourceIdScan.exec(masked)?.[0];
+      RESOURCE_ID_SCAN.lastIndex = idStart;
+      const resourceId = RESOURCE_ID_SCAN.exec(masked)?.[0];
       if (!resourceId) {
         searchFrom = idStart;
         continue;

@@ -13,8 +13,8 @@
  *     mistyped path is how thousands of live resources get abandoned;
  *   - one failing revoke must not abandon the remaining thousands (the
  *     natural refactor to Promise.all breaks this silently);
- *   - an already-gone resource counts as reclaimed, or re-running --reclaim
- *     after a partial sweep can never report clean.
+ *   - only an explicit terminal response counts as reclaimed; an ambiguous
+ *     404 stays visible for manual verification.
  */
 
 const fs = require('node:fs');
@@ -261,8 +261,7 @@ describe('recordResource', () => {
   });
 
   // A malformed id would otherwise be recorded, then fail every sweep with
-  // "Invalid resource ID format" — a message matching neither 404 nor 410 —
-  // so it would be retried forever instead of reported as unreclaimable.
+  // "Invalid resource ID format" and require manual ledger repair.
   it.each([
     ['missing', undefined],
     ['empty', ''],
@@ -521,6 +520,9 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ missing: false, revoked: 4, failed: 1 });
     // Only the failure survives, so a re-run sweeps just that one.
     expect(readLedger(ledger)).toEqual(['r_2']);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 other resource(s) failed with potentially retryable errors'),
+    );
   });
 
   it('aggregates failures sharing a cause into one tally line', async () => {
@@ -552,6 +554,12 @@ describe('reclaim', () => {
 
     expect(result).toMatchObject({ revoked: 0, failed: 1 });
     expect(readLedger(ledger)).toEqual(['r_1']);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 resource(s) returned 404'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('re-run with --reclaim'),
+    );
   });
 
   it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
@@ -566,6 +574,28 @@ describe('reclaim', () => {
     expect(readLedger(ledger)).toEqual(['r_legacy42']);
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('1 legacy resource ID(s) were rejected with 400'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('re-run with --reclaim'),
+    );
+  });
+
+  it('continues after an invalid non-string ledger ID and flags manual repair', async () => {
+    const ledger = tempLedger(`${line(12345)}${line('valid-id')}`);
+    deleteLink.mockImplementation(async (id) => {
+      if (typeof id !== 'string') throw new Error('Invalid resource ID format: <number>');
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(deleteLink).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ revoked: 1, failed: 1 });
+    expect(readLedger(ledger)).toEqual([12345]);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 invalid ledger resource ID(s) cannot be reclaimed automatically'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('re-run with --reclaim'),
     );
   });
 

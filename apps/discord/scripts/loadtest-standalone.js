@@ -126,8 +126,9 @@
  *   a ledger the operator is trying to clean up. Reclaim resolves its host
  *   from the ambient QURL_ENDPOINT, so each ledger line records the endpoint
  *   it was written against and a sweep refuses to run against a different one.
- *   Re-running is safe: revoked ids are pruned and an already-gone resource
- *   counts as reclaimed.
+ *   Re-running is safe: revoked ids are pruned, and only an explicit terminal
+ *   response counts an already-gone resource as reclaimed. Ambiguous 404s
+ *   remain in the ledger for manual verification.
  *
  *   Two windows this cannot close, both leaking exactly the resource in hand:
  *   a create that succeeds server-side whose response is then lost, and a
@@ -1093,8 +1094,8 @@ function pruneLedger(ledgerPath, remainingIds) {
 }
 
 // Revoke everything recorded in the ledger. Returns { missing, revoked, failed }.
-// Safe to re-run: successfully revoked ids are pruned, and an already-gone
-// resource counts as revoked rather than failed.
+// Safe to re-run: successfully revoked ids are pruned, and only an explicit
+// terminal response counts an already-gone resource as revoked.
 async function reclaim(ledgerPath) {
   stopping = true;
 
@@ -1141,6 +1142,8 @@ async function reclaim(ledgerPath) {
   const causes = new Map();
   let revoked = 0;
   let legacyRejected = 0;
+  let ambiguousNotFound = 0;
+  let invalidLedgerIds = 0;
 
   // Drain rather than sweep once. An in-flight round can append after the
   // snapshot is taken, so keep passing until a pass finds nothing new.
@@ -1177,9 +1180,9 @@ async function reclaim(ledgerPath) {
         revoked++;
         outstanding.delete(id);
       } catch (e) {
-        // An already-gone resource is the successful end state for a reclaim.
-        // callQurl preserves the HTTP status structurally; an exact formatted
-        // message fallback covers serialized/rethrown errors that lost it.
+        // An explicitly gone resource is the successful end state for a
+        // reclaim. callQurl preserves the HTTP status structurally; an exact
+        // formatted message fallback covers serialized errors that lost it.
         //
         // TODO(upstream-contract): DELETE /resources returns 204 for a known
         // revoked row. A 404 is ambiguous (absent, wrong owner/key, or public-ID
@@ -1190,11 +1193,13 @@ async function reclaim(ledgerPath) {
           outstanding.delete(id);
         } else {
           outstanding.add(id);
+          const status = qurlApiErrorStatus(e);
           // TODO(upstream-contract): qurl-service public routes reject the
           // retired private r_ identifier cohort with 400. Those rows cannot
           // drain automatically, so distinguish them from transient failures.
-          if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX)
-            && qurlApiErrorStatus(e) === 400) legacyRejected++;
+          if (!hasSafeResourceIdShape(id)) invalidLedgerIds++;
+          else if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX) && status === 400) legacyRejected++;
+          else if (status === 404) ambiguousNotFound++;
           // Keyed on the cause, not the raw message. callQurl embeds the
           // request path — and therefore the resource id — in every message,
           // so keying on it verbatim gives one bucket per failing id: a
@@ -1235,8 +1240,15 @@ async function reclaim(ledgerPath) {
   if (legacyRejected > 0) {
     console.error(`Reclaim: ${legacyRejected} legacy resource ID(s) were rejected with 400 and cannot be reclaimed automatically; remove them only after confirming their links expired.`);
   }
-  if (failed > 0) {
-    console.error(`Reclaim: ${failed} resource(s) still on the tenancy — re-run with --reclaim ${ledgerPath}`);
+  if (ambiguousNotFound > 0) {
+    console.error(`Reclaim: ${ambiguousNotFound} resource(s) returned 404 and remain in the ledger; verify the owner/key and absence manually before pruning.`);
+  }
+  if (invalidLedgerIds > 0) {
+    console.error(`Reclaim: ${invalidLedgerIds} invalid ledger resource ID(s) cannot be reclaimed automatically; correct or remove them only after manual verification.`);
+  }
+  const retryable = failed - legacyRejected - ambiguousNotFound - invalidLedgerIds;
+  if (retryable > 0) {
+    console.error(`Reclaim: ${retryable} other resource(s) failed with potentially retryable errors — re-run with --reclaim ${ledgerPath}`);
   }
   return { missing: false, revoked, failed };
 }
