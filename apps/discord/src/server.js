@@ -224,14 +224,15 @@ const auth0ConnectionPolicyMetadata = {
   event: LOG_EVENTS.QURL_OAUTH_AUTH0_CONNECTION_POLICY,
   connection: auth0Connection,
   state: auth0ConnectionState,
+  oauth_configured: config.isQurlOAuthConfigured,
 };
 if (!config.isQurlOAuthConfigured) {
-  logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
+  logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* incomplete/invalid or connection rejected). /qurl setup will fall back to the legacy modal-paste path.');
   let inactiveConnectionMessage;
-  if (auth0Connection) {
+  if (config.isAuth0EmailConnectionRejected) {
+    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.';
+  } else if (auth0Connection) {
     inactiveConnectionMessage = `AUTH0_EMAIL_CONNECTION="${auth0Connection}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`;
-  } else if (config.isAuth0EmailConnectionRejected) {
-    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth AUTH0_* settings are incomplete.';
   } else {
     inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
   }
@@ -240,8 +241,6 @@ if (!config.isQurlOAuthConfigured) {
   let auth0ConnectionMessage;
   if (auth0Connection) {
     auth0ConnectionMessage = `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`;
-  } else if (config.isAuth0EmailConnectionRejected) {
-    auth0ConnectionMessage = 'qURL OAuth authorize redirects send no connection pin because AUTH0_EMAIL_CONNECTION was rejected; correct the deployment value before enabling the pin.';
   } else {
     auth0ConnectionMessage = 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
   }

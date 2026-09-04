@@ -243,10 +243,10 @@ function normalizeAuth0EmailConnection(raw) {
     rejectionReason = 'contains characters outside the required [A-Za-z0-9_-] shape or does not begin and end with a letter or digit';
   }
   if (rejectionReason) {
-    // Keep the rest of the bot available and fall back to the explicitly
-    // logged unpinned flow. A malformed optional setting should not take down
-    // /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); leaving Auth0 connection unpinned.`);
+    // Keep the rest of the bot available while failing only OAuth setup
+    // closed. A malformed optional setting must not weaken account selection,
+    // but it also must not take down /qurl send, webhooks, or the gateway.
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); disabling OAuth setup until corrected while other bot operations remain available.`);
     return '';
   }
   return value;
@@ -258,9 +258,10 @@ const isAuth0EmailConnectionRejected = Boolean(
   (rawAuth0EmailConnection || '').trim() && !auth0EmailConnection,
 );
 
-// True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
-// well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
-// flow. False = degrade to the legacy modal-paste flow (kept until
+// True when all four Auth0 env vars are present, AUTH0_DOMAIN is a
+// well-shaped hostname, and any configured connection was accepted —
+// `/qurl setup` then uses the OAuth-redirect flow. False = degrade to the
+// legacy modal-paste flow (kept until
 // Justin registers the Auth0 app + sets prod SSM secrets). Single
 // derivation point so commands.js + routes/qurl-oauth.js + server.js
 // agree on what "configured" means.
@@ -268,7 +269,8 @@ const isQurlOAuthConfigured = Boolean(
   isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
   && process.env.AUTH0_CLIENT_ID
   && process.env.AUTH0_CLIENT_SECRET
-  && process.env.AUTH0_AUDIENCE,
+  && process.env.AUTH0_AUDIENCE
+  && !isAuth0EmailConnectionRejected,
 );
 
 const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
@@ -299,7 +301,9 @@ const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
 const normalizedDiscordClientSecret = discordClientSecret?.trim();
 let discordInstallNotConfiguredReason = null;
-if (!isQurlOAuthConfigured) {
+if (isAuth0EmailConnectionRejected) {
+  discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
+} else if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
 } else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';

@@ -452,6 +452,10 @@ describe('qurl-oauth routes', () => {
       // Failure path must not distort the dispatch / DM metrics —
       // sendDM is reserved for successful provisioning.
       expect(discord.sendDM).not.toHaveBeenCalled();
+      expect(logger.audit).not.toHaveBeenCalledWith(
+        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        expect.anything(),
+      );
     });
 
     it('falls through to generic 502 when qurl-service returns valid JSON without error.code', async () => {

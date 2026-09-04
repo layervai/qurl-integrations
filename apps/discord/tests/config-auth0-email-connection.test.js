@@ -5,6 +5,13 @@ const {
 } = require('./helpers/fresh-config');
 
 describe('config.AUTH0_EMAIL_CONNECTION', () => {
+  const AUTH0_ENV = {
+    AUTH0_DOMAIN: 'layerv-test.auth0.com',
+    AUTH0_CLIENT_ID: 'test-client-id',
+    AUTH0_CLIENT_SECRET: 'test-client-secret',
+    AUTH0_AUDIENCE: 'https://api.layerv.test',
+  };
+
   it('is empty (no pin) when unset', () => {
     withFreshConfig({ AUTH0_EMAIL_CONNECTION: undefined }, (config) => {
       expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
@@ -52,6 +59,20 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (_config, warns) => {
       expect(warns).toContainEqual(expect.stringContaining('AUTH0_EMAIL_CONNECTION'));
       expect(warns.join('\n')).not.toContain(value);
+    });
+  });
+
+  it('disables only OAuth setup when a configured connection is rejected', () => {
+    captureFreshConfig({
+      ...AUTH0_ENV,
+      AUTH0_EMAIL_CONNECTION: 'email!',
+    }, (config) => {
+      expect(config.isAuth0EmailConnectionRejected).toBe(true);
+      expect(config.isQurlOAuthConfigured).toBe(false);
+      expect(config.isDiscordInstallConfigured).toBe(false);
+      expect(config.discordInstallNotConfiguredReason).toBe(
+        'AUTH0_EMAIL_CONNECTION rejected',
+      );
     });
   });
 

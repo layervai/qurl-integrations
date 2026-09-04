@@ -42,21 +42,36 @@ describe('server Auth0 connection policy log', () => {
   it('names the pinned connection in the message and metadata', () => {
     expect(captureServerLogs('email').info).toContainEqual([
       'qURL OAuth authorize redirects pin Auth0 connection "email"; the Auth0 application must enable it.',
-      { event: 'qurl_oauth_auth0_connection_policy', connection: 'email', state: 'pinned' },
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: 'email',
+        state: 'pinned',
+        oauth_configured: true,
+      },
     ]);
   });
 
   it('makes the unpinned deployment state explicit', () => {
     expect(captureServerLogs(undefined).warn).toContainEqual([
       'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.',
-      { event: 'qurl_oauth_auth0_connection_policy', connection: null, state: 'unset' },
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: null,
+        state: 'unset',
+        oauth_configured: true,
+      },
     ]);
   });
 
-  it('distinguishes a rejected pin from an unset pin', () => {
-    expect(captureServerLogs('email!').warn).toContainEqual([
-      'qURL OAuth authorize redirects send no connection pin because AUTH0_EMAIL_CONNECTION was rejected; correct the deployment value before enabling the pin.',
-      { event: 'qurl_oauth_auth0_connection_policy', connection: null, state: 'rejected' },
+  it('fails OAuth setup closed and distinguishes a rejected pin from an unset pin', () => {
+    expect(captureServerLogs('email!').info).toContainEqual([
+      'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: null,
+        state: 'rejected',
+        oauth_configured: false,
+      },
     ]);
   });
 
@@ -68,7 +83,12 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_AUDIENCE: undefined,
     }).info).toContainEqual([
       'AUTH0_EMAIL_CONNECTION="email" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.',
-      { event: 'qurl_oauth_auth0_connection_policy', connection: 'email', state: 'pinned' },
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: 'email',
+        state: 'pinned',
+        oauth_configured: false,
+      },
     ]);
   });
 
@@ -79,8 +99,13 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_CLIENT_SECRET: undefined,
       AUTH0_AUDIENCE: undefined,
     }).info).toContainEqual([
-      'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth AUTH0_* settings are incomplete.',
-      { event: 'qurl_oauth_auth0_connection_policy', connection: null, state: 'rejected' },
+      'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: null,
+        state: 'rejected',
+        oauth_configured: false,
+      },
     ]);
   });
 
@@ -92,7 +117,12 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_AUDIENCE: undefined,
     }).info).toContainEqual([
       'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.',
-      { event: 'qurl_oauth_auth0_connection_policy', connection: null, state: 'unset' },
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: null,
+        state: 'unset',
+        oauth_configured: false,
+      },
     ]);
   });
 
