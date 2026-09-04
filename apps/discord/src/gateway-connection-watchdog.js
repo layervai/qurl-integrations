@@ -221,6 +221,10 @@ function createConnectionWatchdog({
       // stop() may land while manager.connect() is in flight. Do not let the
       // rejected/ceiling result continue into an independent exhaustion exit
       // that races the shutdown path which requested the stop.
+      // This applies to ordinary SIGTERM as well as IDENTIFY-fatal teardown:
+      // once stop() owns continuity, the watchdog must not independently
+      // release the lease from a late connect failure. If that shutdown path
+      // does not hand off or release it, the lease expires through its TTL.
       if (stopping) return;
       if (attempts >= maxAttempts) {
         logger.error('connection-watchdog: connect retries exhausted, releasing lock', {

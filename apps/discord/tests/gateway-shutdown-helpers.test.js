@@ -1,4 +1,6 @@
 const { EventEmitter } = require('events');
+const fs = require('fs');
+const path = require('path');
 const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
@@ -26,6 +28,26 @@ function makeFakeLogger() {
     debug: jest.fn(),
   };
 }
+
+describe('index gateway-fatal composition contract', () => {
+  const indexSource = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
+  const compactIndexSource = indexSource.replace(/\s+/g, ' ');
+
+  it('wires the IDENTIFY fatal callback into the gateway shim', () => {
+    expect(compactIndexSource).toContain(
+      'gatewayShim = createGatewayWsShim({ token: config.DISCORD_TOKEN, intents: GATEWAY_INTENTS_BITFIELD, store: sessionStore, logger, onFatal: gatewayFatalShutdown, });',
+    );
+  });
+
+  it('threads every fatal non-await option through graceful teardown', () => {
+    expect(compactIndexSource).toContain(
+      'await stopGatewayHotStandby({ controlChannelServer, connectionWatchdog, gatewayLeader, awaitControlChannelServer, awaitConnectionWatchdog, awaitGatewayLeader, logger, });',
+    );
+    expect(compactIndexSource).toContain(
+      'teardown: () => gracefulShutdownTeardown({ awaitControlChannelServer, awaitConnectionWatchdog, awaitGatewayLeader, }),',
+    );
+  });
+});
 
 describe('runGracefulShutdown', () => {
   it('claims shutdown and arms the hard-exit backstop before teardown starts', async () => {

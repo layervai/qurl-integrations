@@ -912,6 +912,34 @@ describe('IDENTIFY budget guard', () => {
     await expect(blocked).rejects.toThrow('closed');
   });
 
+  it('contains logger failure when a shard closes during terminal teardown', async () => {
+    const {
+      shim, logger, managerInstances,
+    } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    logger.info.mockImplementation((message) => {
+      if (message === 'gateway-ws-shim: shard closed during terminal teardown') {
+        throw new Error('logger-failure');
+      }
+    });
+
+    expect(() => mgr.emit(WebSocketShardEvents.Closed, {
+      code: 1000, reason: 'shutdown', shardId: 0,
+    })).not.toThrow();
+
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+    await shim.stop();
+  });
+
   it('keeps an over-budget grant pending and logs once if upstream omits the abort signal', async () => {
     const { shim, logger, managerInstances, onFatal } = makeShim();
     await shim.start();

@@ -575,7 +575,7 @@ function createGatewayWsShim({
       // today it's always undefined, logged as null.
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
         if (stopped) {
-          logger.info('gateway-ws-shim: shard closed during terminal teardown', {
+          logBestEffort('info', 'gateway-ws-shim: shard closed during terminal teardown', {
             shardId, code, reason: reason ?? null,
           });
           return;
