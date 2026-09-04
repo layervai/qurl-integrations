@@ -4,6 +4,11 @@ const config = require('../config');
 // guild to the Auth0 account selected here. Keep every security-relevant
 // authorize parameter in one builder so the entry paths cannot drift.
 function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
+  if (typeof state !== 'string' || !state
+      || typeof codeChallenge !== 'string' || !codeChallenge) {
+    throw new TypeError('state and codeChallenge must be non-empty strings');
+  }
+
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -21,13 +26,14 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   // a new key instead of silently reusing an earlier grant.
   authorizeUrl.searchParams.set('prompt', 'login consent');
 
-  // This setting is deliberately opt-in for Discord, unlike Slack: unset
-  // means no connection pin until #1365 enables the passwordless connection
-  // on every Discord Auth0 application. A configured but disabled or misspelled
-  // connection makes Auth0 reject every setup at /authorize.
-  // TODO(upstream-contract): keep the configured connection in lockstep with
-  // qurl-desktop src/main/auth.ts (browserAuthorizationOptions). Otherwise the
-  // same human can receive different Auth0 subjects across the two surfaces.
+  // Discord is deliberately unpinned until #1365 enables passwordless on each
+  // Auth0 application. While unset, the tenant login page can select a different
+  // connection from qurl-desktop and give the same human another Auth0 subject.
+  // TODO(upstream-contract): #1365 must close that gap by pinning the same
+  // passwordless connection as qurl-desktop src/main/auth.ts
+  // (browserAuthorizationOptions). A social or database connection can silently
+  // fork the qURL account; a disabled or misspelled connection rejects every
+  // setup at /authorize.
   if (config.AUTH0_EMAIL_CONNECTION) {
     authorizeUrl.searchParams.set('connection', config.AUTH0_EMAIL_CONNECTION);
   }

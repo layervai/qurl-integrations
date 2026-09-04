@@ -15,7 +15,6 @@ process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
-delete process.env.AUTH0_EMAIL_CONNECTION;
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
 // KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
@@ -118,8 +117,8 @@ describe('qurl-oauth routes', () => {
       // for key rotation — re-running /qurl setup must actually
       // re-prompt. Pin both so a future refactor can't drop either.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
-      // No connection pin unless AUTH0_EMAIL_CONNECTION is set (covered
-      // in qurl-oauth-connection-pin.test.js).
+      // No connection pin unless AUTH0_EMAIL_CONNECTION is set; both builder
+      // branches are covered directly in auth0-authorize-url.test.js.
       expect(loc.searchParams.get('connection')).toBeNull();
       expect(loc.searchParams.get('state')).toBe(state);
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');

@@ -42,6 +42,11 @@ process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 // override the var before their own require of config.
 process.env.OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET || '0'.repeat(64);
 
+// No Auth0 connection pin unless a suite opts in. setupFiles runs before each
+// suite, so this also clears module-level overrides left by an earlier suite in
+// the same worker and keeps authorize-URL tests order-independent.
+delete process.env.AUTH0_EMAIL_CONNECTION;
+
 // Spawn-test caveat: `tests/store-contract.test.js`'s `spawnStoreBoot`
 // helper pins DDB_TABLE_PREFIX (sentinel `'jest-spawn-'`) + AWS_REGION
 // explicitly in the child env (insulating those specific values from

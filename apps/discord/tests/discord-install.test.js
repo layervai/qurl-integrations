@@ -49,6 +49,7 @@ jest.mock('../src/commands', () => ({
 
 const request = require('supertest');
 const { app } = require('../src/server');
+const config = require('../src/config');
 const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -58,6 +59,18 @@ const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
 const { cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
+
+function mockSuccessfulDiscordIdentity() {
+  globalThis.fetch = jest.fn()
+    .mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ access_token: 'disc-token', token_type: 'Bearer' }),
+    })
+    .mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ id: '987654321098765432', username: 'admin' }),
+    });
+}
 
 function extractStyleNonce(res) {
   const csp = res.headers['content-security-policy'];
@@ -157,15 +170,7 @@ describe('Discord install callback', () => {
     });
 
     it('302s to Auth0 on happy path with a valid qURL OAuth state and sets the CSRF cookie', async () => {
-      globalThis.fetch = jest.fn()
-        .mockResolvedValueOnce({
-          ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'disc-token', token_type: 'Bearer' }),
-        })
-        .mockResolvedValueOnce({
-          ok: true, status: 200,
-          json: () => Promise.resolve({ id: '987654321098765432', username: 'admin' }),
-        });
+      mockSuccessfulDiscordIdentity();
       const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
@@ -213,6 +218,22 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
       expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
       expect(cookieHeader).toContain(encodeURIComponent(state));
+    });
+
+    it('omits the connection pin on Add to Discord when the setting is unset', async () => {
+      const configuredConnection = config.AUTH0_EMAIL_CONNECTION;
+      config.AUTH0_EMAIL_CONNECTION = '';
+      try {
+        mockSuccessfulDiscordIdentity();
+        const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+
+        expect(res.status).toBe(302);
+        const loc = new URL(res.headers.location);
+        expect(loc.searchParams.get('prompt')).toBe('login consent');
+        expect(loc.searchParams.get('connection')).toBeNull();
+      } finally {
+        config.AUTH0_EMAIL_CONNECTION = configuredConnection;
+      }
     });
 
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
