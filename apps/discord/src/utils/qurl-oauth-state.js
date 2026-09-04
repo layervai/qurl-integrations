@@ -59,6 +59,14 @@ function fingerprintQurlAccountSubject(subject) {
   return qurlOAuthStateSigner.sign(`qurl-account-subject:${subject}`);
 }
 
+// Short, non-secret tag shared by every fingerprint produced under the same
+// HMAC key. Audit queries group by this before comparing subjects, so a key
+// rotation is visible rather than misclassified as an owner change.
+function qurlAccountFingerprintKeyEpoch() {
+  return qurlOAuthStateSigner.sign('qurl-account-fingerprint-key-epoch')
+    .slice(0, 12);
+}
+
 function b64urlEncode(buf) {
   return Buffer.from(buf).toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -135,6 +143,7 @@ module.exports = {
   signQurlOAuthState,
   verifyQurlOAuthState,
   fingerprintQurlAccountSubject,
+  qurlAccountFingerprintKeyEpoch,
   STATE_KIND,
   STATE_TTL_SECONDS,
 };

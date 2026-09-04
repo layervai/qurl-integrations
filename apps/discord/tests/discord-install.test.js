@@ -52,7 +52,10 @@ jest.mock('../src/commands', () => ({
 const request = require('supertest');
 const { app } = require('../src/server');
 const config = require('../src/config');
-const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
+const {
+  signQurlOAuthState,
+  verifyQurlOAuthState,
+} = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
@@ -679,6 +682,27 @@ describe('Discord install callback', () => {
         DISCORD_INSTALL_SESSION_COOKIE,
       )).toMatch(/Secure/i);
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps every non-ephemeral Auth0 authorize parameter identical across both entry paths', async () => {
+      mockSuccessfulDiscordIdentity();
+      const installRes = await discordCallback(
+        '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678',
+      );
+      const setupState = signQurlOAuthState(
+        '123456789012345678',
+        '987654321098765432',
+      );
+      const setupRes = await request(app)
+        .get(`/oauth/qurl/start?state=${encodeURIComponent(setupState)}`);
+
+      expect(installRes.status).toBe(302);
+      expect(setupRes.status).toBe(302);
+      const stableParams = (location) => [...new URL(location).searchParams.entries()]
+        .filter(([key]) => !['state', 'code_challenge'].includes(key))
+        .sort(([left], [right]) => left.localeCompare(right));
+      expect(stableParams(installRes.headers.location))
+        .toEqual(stableParams(setupRes.headers.location));
     });
 
     it('omits the connection pin on Add to Discord when the setting is unset', async () => {
