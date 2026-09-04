@@ -19,9 +19,8 @@ const rateLimitStore = new Map();
 
 // Evict stale entries on a 30-second timer (was 5 minutes). Under a burst
 // from many unique IPs, a longer sweep interval lets the Map grow much
-// larger than the per-request 10% eviction can keep up with. 30s is a
-// sweet spot: short enough to bound steady-state memory, long enough to
-// not matter as load.
+// larger between sweeps. The hard ceiling below bounds bursts, while 30s is
+// short enough to reclaim expired entries without making sweeps hot-path work.
 function sweepRateLimitStore() {
   const cutoff = Date.now() - config.RATE_LIMIT_WINDOW_MS * 2;
   for (const [ip, buckets] of rateLimitStore) {
@@ -44,8 +43,7 @@ sweepHandle.unref();
 // two); adding another bucket must account for that linear memory increase.
 const MAX_REQUESTS_PER_BUCKET_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
 // Hard ceiling on total Map size. Under a distributed attack from many
-// unique IPs the 10% drop eviction can't keep up if new IPs arrive faster
-// than the sweep runs. Once the Map exceeds this, new-IP requests get 429
+// unique IPs, new-IP requests get 429 once the store reaches this size
 // until the next sweep reclaims space — better to shed load than OOM.
 const MAX_STORE_SIZE = 20000;
 
@@ -104,19 +102,6 @@ function rateLimitForBucket(bucket, req, res, next) {
     requests.splice(0, requests.length - MAX_REQUESTS_PER_BUCKET_PER_IP);
   }
   rateLimitStore.set(ip, { ...buckets, [bucket]: requests });
-  // Under a distributed attack from many unique IPs, evicting only one
-  // entry at a time can't keep up. When we cross 10k, drop the oldest
-  // 10% (Map iteration is insertion order) so the store reclaims
-  // meaningfully.
-  if (rateLimitStore.size >= 10000) {
-    const dropCount = Math.max(1, Math.floor(rateLimitStore.size / 10));
-    const it = rateLimitStore.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      rateLimitStore.delete(k);
-    }
-  }
   return next();
 }
 

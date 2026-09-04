@@ -71,7 +71,7 @@ function renderError(res, statusCode, headline, detail) {
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: 'If the bot is already in your server, run /qurl setup there. Otherwise, ' + detail + ' Start again from Add to Discord.',
+    message: `If the bot is already in your server, run /qurl setup there. If it is not, start again from Add to Discord. Details: ${detail}`,
     type: 'error',
   }));
 }

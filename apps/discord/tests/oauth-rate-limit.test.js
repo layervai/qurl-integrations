@@ -72,6 +72,28 @@ describe('OAuth rate-limit store', () => {
     expect(rateLimitStore.get('legitimate-callback')).toEqual({ callback: [now] });
   });
 
+  it('can reach and hold the hard cap before shedding the next new IP', () => {
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 1; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+    const accepted = response();
+    const acceptedNext = jest.fn();
+
+    rateLimit({ ip: 'last-capacity', path: '/oauth/qurl/callback' }, accepted, acceptedNext);
+
+    expect(acceptedNext).toHaveBeenCalledTimes(1);
+    expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
+
+    const shed = response();
+    const shedNext = jest.fn();
+    jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    installRateLimit({ ip: 'over-capacity', path: '/oauth/discord/install' }, shed, shedNext);
+
+    expect(shedNext).not.toHaveBeenCalled();
+    expect(shed.status).toHaveBeenCalledWith(429);
+    expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
+  });
+
   it('still sheds new install traffic at the shared hard cap', () => {
     for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
       rateLimitStore.set(`callback-${i}`, { callback: [now] });
