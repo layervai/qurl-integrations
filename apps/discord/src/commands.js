@@ -8851,7 +8851,10 @@ const commands = [
           const truncationIndicator = '…(truncated)';
           let content = verdict + configurationDetails;
           if (content.length > STATUS_CONTENT_MAX) {
-            const verdictLimit = STATUS_CONTENT_MAX - configurationDetails.length - truncationIndicator.length;
+            const verdictLimit = Math.max(
+              0,
+              STATUS_CONTENT_MAX - configurationDetails.length - truncationIndicator.length,
+            );
             content = capUtf16Units(verdict, verdictLimit) + truncationIndicator + configurationDetails;
           }
           return interaction.editReply({

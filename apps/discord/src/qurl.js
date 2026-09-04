@@ -148,7 +148,8 @@ async function getIdentity(apiKey) {
   // fallback: a guild status check must validate the guild's own stored key,
   // never the bot's, or a guild with no key would read as configured.
   // A rejected tenant key intentionally retains callQurl's dependency-auth
-  // audit breadcrumb, matching the existing create/delete key failures.
+  // audit breadcrumb, matching existing create/delete failures; its `/me`
+  // path dimension lets alerting distinguish this interactive validation.
   return callQurl('GET', '/me', async () => {
     const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
     const response = await globalThis.fetch(`${endpoint}/v1/me`, {

@@ -57,25 +57,28 @@ const STORED_KEY = 'lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 // Minimal interaction stub for the /qurl status path. The real
 // discord.js Interaction has dozens of fields we don't need; only
 // the surface the status handler actually reads is mocked.
-function makeStatusInteraction({ memberFetchBehavior }) {
+function makeStatusInteraction({ memberFetchBehavior, isAdmin = true }) {
   const reply = jest.fn();
   const editReply = jest.fn();
+  const followUp = jest.fn();
   const interaction = {
     reply: reply.mockImplementation(() => Promise.resolve()),
     editReply: editReply.mockImplementation(() => Promise.resolve()),
+    followUp: followUp.mockImplementation(() => Promise.resolve()),
     deferred: false,
     isAutocomplete: () => false,
     isChatInputCommand: () => true,
     commandName: 'qurl',
     options: { getSubcommand: () => 'status' },
     guildId: 'guild-1',
-    memberPermissions: { has: (p) => p === PermissionFlagsBits.ManageGuild },
+    memberPermissions: { has: (p) => isAdmin && p === PermissionFlagsBits.ManageGuild },
     guild: {
       members: { fetch: jest.fn().mockImplementation(memberFetchBehavior) },
     },
     user: { id: 'admin-current' },
     _reply: reply,
     _editReply: editReply,
+    _followUp: followUp,
   };
   interaction.deferReply = jest.fn().mockImplementation(async () => {
     interaction.deferred = true;
@@ -96,6 +99,40 @@ beforeEach(() => {
 });
 
 describe('/qurl status — admin-offboarding nudge (#185)', () => {
+  it('rejects non-admins before deferring or checking the stored key', async () => {
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+      isAdmin: false,
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/only server administrators/i),
+      ephemeral: true,
+    }));
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+    expect(db.getGuildConfig).not.toHaveBeenCalled();
+    expect(mockGetIdentity).not.toHaveBeenCalled();
+  });
+
+  it('uses the deferred error path when the configuration read fails', async () => {
+    db.getGuildConfig.mockRejectedValueOnce(new Error('DDB unavailable'));
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction._reply).not.toHaveBeenCalled();
+    expect(interaction._followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'There was an error executing this command.',
+      ephemeral: true,
+    }));
+    expect(mockGetIdentity).not.toHaveBeenCalled();
+  });
+
   it('does NOT show the nudge when the original admin is still in the guild', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
@@ -117,6 +154,25 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).not.toContain(STORED_KEY);
     expect(mockGetIdentity).toHaveBeenCalledWith(STORED_KEY);
     expect(replyContent).not.toContain('has left this server');
+  });
+
+  it('uses the deferred error path when the status edit fails', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+    interaction._editReply.mockRejectedValueOnce(new Error('Unknown Webhook'));
+
+    await handleCommand(interaction);
+
+    expect(interaction._followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'There was an error executing this command.',
+      ephemeral: true,
+    }));
   });
 
   it.each([401, 403])('reports a %i response as a revoked or invalid key', async (status) => {
