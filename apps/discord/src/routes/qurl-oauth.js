@@ -333,9 +333,26 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl setup again.');
   }
 
-  const qurlAccountSubjectFingerprint = qurlAccountSubject
-    ? fingerprintQurlAccountSubject(qurlAccountSubject)
-    : undefined;
+  // Audit evidence must never break setup. Compute both values together so
+  // an epoch failure cannot leave a fingerprint that operators might compare
+  // without its rotation boundary.
+  let qurlAccountSubjectFingerprint = null;
+  let qurlAccountFingerprintEpoch = null;
+  try {
+    if (qurlAccountSubject) {
+      qurlAccountSubjectFingerprint = fingerprintQurlAccountSubject(
+        qurlAccountSubject,
+      );
+    }
+    qurlAccountFingerprintEpoch = qurlAccountFingerprintKeyEpoch();
+  } catch (err) {
+    qurlAccountSubjectFingerprint = null;
+    qurlAccountFingerprintEpoch = null;
+    logger.warn('qURL OAuth audit fingerprint unavailable (setup continues)', {
+      error: err?.message,
+      guildId,
+    });
+  }
 
   // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
   //    the admin's qURL account (the Auth0 JWT's sub claim is the owner).
@@ -465,8 +482,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
     guild_id: guildId,
     configured_by: discordUserId,
-    qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint || null,
-    qurl_account_fingerprint_key_epoch: qurlAccountFingerprintKeyEpoch(),
+    qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
+    qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
   });
 
   // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
