@@ -8748,6 +8748,8 @@ const commands = [
           // become unhandled while members.fetch is still pending.
           const identityResultPromise = (async () => {
             try {
+              // Keep the decrypted key out of the longer-lived config object,
+              // even though the explicit accessor costs a second DDB read.
               const apiKey = await db.getGuildApiKey(interaction.guildId);
               if (!apiKey) return { keyUnavailable: true };
               return { identity: await getIdentity(apiKey) };
@@ -8832,12 +8834,13 @@ const commands = [
           }
           // Keep Discord's 2,000-UTF-16-unit content limit an invariant of the
           // code rather than of a copy budget spread across the fields above.
+          const STATUS_CONTENT_MAX = 2000;
           const content = verdict + configurationDetails;
           const truncationIndicator = '…(truncated)';
           return interaction.editReply({
-            content: content.length <= 2000
+            content: content.length <= STATUS_CONTENT_MAX
               ? content
-              : capUtf16Units(content, 2000 - truncationIndicator.length) + truncationIndicator,
+              : capUtf16Units(content, STATUS_CONTENT_MAX - truncationIndicator.length) + truncationIndicator,
           });
         }
         // Branch the not-configured copy on the active setup flow so
