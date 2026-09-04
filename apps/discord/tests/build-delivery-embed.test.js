@@ -694,6 +694,23 @@ describe('buildDeliveryPayload — footer + trust button', () => {
     expect(args[0]._label).toBe('Step Through');
     expect(args[1]._label).toBe('What is qURL?');
   });
+
+  it('delivers an over-512-character qv2 link as equal-weight Markdown actions', () => {
+    const qv2Link = `https://qurl.link/#qv2t1.${'A'.repeat(600)}`;
+    expect(qv2Link.length).toBeGreaterThan(512);
+
+    const { components } = buildDeliveryPayload({
+      ...baseArgs,
+      senderAlias: 'Vik',
+      qurlLink: qv2Link,
+    });
+
+    expect(components).toEqual([]);
+    expect(capturedButtons).toHaveLength(0);
+    expect(capturedEmbeds[0]._description).toContain(`[🚪 Step Through](${qv2Link})`);
+    expect(capturedEmbeds[0]._description)
+      .toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
+  });
 });
 
 describe('packBulkDeliveryComponents — 5-per-row chunking', () => {
