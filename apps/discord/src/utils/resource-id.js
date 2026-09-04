@@ -10,6 +10,10 @@ const MAX_RESOURCE_ID_LENGTH = 1024;
 const ERROR_PREVIEW_LENGTH = 64;
 const RESOURCE_ID_CHARACTERS = /^[\w-]+$/;
 const RESOURCE_PATH_PREFIX = '/resources/';
+const RESOURCE_ID_MASK = '<id>';
+// Status returns the qURL aggregate response shape; whole-resource revoke uses
+// the resource action. Keeping both names here makes that split deliberate.
+const QURL_PATH_PREFIX = '/qurls/';
 
 function hasSafeResourceIdShape(resourceId) {
   return typeof resourceId === 'string'
@@ -18,32 +22,54 @@ function hasSafeResourceIdShape(resourceId) {
     && RESOURCE_ID_CHARACTERS.test(resourceId);
 }
 
+function typePreview(value) {
+  return `<${value === null ? 'null' : typeof value}>`;
+}
+
 function validateResourceId(resourceId) {
   if (!hasSafeResourceIdShape(resourceId)) {
     const preview = typeof resourceId === 'string'
       ? resourceId.slice(0, ERROR_PREVIEW_LENGTH)
-      : `<${typeof resourceId}>`;
+      : typePreview(resourceId);
     throw new Error(`Invalid resource ID format: ${preview}`);
   }
 }
 
+// Callers must pass validateResourceId first; path helpers intentionally avoid
+// encoding because the transport guard already limits IDs to URL-safe bytes.
 function resourcePath(resourceId) {
   return `${RESOURCE_PATH_PREFIX}${resourceId}`;
 }
 
-function maskResourceIdPath(message) {
-  const start = message.indexOf(RESOURCE_PATH_PREFIX);
-  if (start === -1) return message;
+function qurlPath(resourceId) {
+  return `${QURL_PATH_PREFIX}${resourceId}`;
+}
 
-  const idStart = start + RESOURCE_PATH_PREFIX.length;
-  const resourceId = message.slice(idStart).match(/^\S+/)?.[0];
-  if (!resourceId) return message;
-  return `${message.slice(0, idStart)}<id>${message.slice(idStart + resourceId.length)}`;
+function maskResourceIdPath(message) {
+  let masked = typeof message === 'string'
+    ? message
+    : typePreview(message);
+  let searchFrom = 0;
+
+  for (;;) {
+    const start = masked.indexOf(RESOURCE_PATH_PREFIX, searchFrom);
+    if (start === -1) return masked;
+
+    const idStart = start + RESOURCE_PATH_PREFIX.length;
+    const resourceId = masked.slice(idStart).match(/^\S+/)?.[0];
+    if (!resourceId) {
+      searchFrom = idStart;
+      continue;
+    }
+    masked = `${masked.slice(0, idStart)}${RESOURCE_ID_MASK}${masked.slice(idStart + resourceId.length)}`;
+    searchFrom = idStart + RESOURCE_ID_MASK.length;
+  }
 }
 
 module.exports = {
   hasSafeResourceIdShape,
   maskResourceIdPath,
+  qurlPath,
   resourcePath,
   validateResourceId,
 };

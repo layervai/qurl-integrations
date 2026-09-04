@@ -1177,7 +1177,7 @@ async function reclaim(ledgerPath) {
         // uses for a resource that no longer exists. If it adopts another,
         // nothing here fails loudly — a re-run would simply sweep the same
         // ids forever, reporting them as failures.
-        if (/\((404|410)\)/.test(e.message)) {
+        if (/failed \((404|410)\)$/.test(e?.message)) {
           revoked++;
           outstanding.delete(id);
         } else {
@@ -1188,7 +1188,7 @@ async function reclaim(ledgerPath) {
           // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
           // instead of "5000x", defeating the tally and flooding the very
           // scrollback the heartbeat is trying to keep readable.
-          const cause = maskResourceIdPath(e.message);
+          const cause = maskResourceIdPath(e?.message ?? e);
           causes.set(cause, (causes.get(cause) || 0) + 1);
         }
       }

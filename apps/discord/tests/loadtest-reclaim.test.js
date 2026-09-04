@@ -559,6 +559,31 @@ describe('reclaim', () => {
     expect(readLedger(ledger)).toEqual(['r_legacy42']);
   });
 
+  it('does not read a 404 inside the resource ID as already gone', async () => {
+    const ledger = tempLedger(line('abc404def'));
+    deleteLink.mockRejectedValue(
+      new Error('qURL API DELETE /resources/abc404def failed (500)'),
+    );
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['abc404def']);
+  });
+
+  it('continues reclaiming after a non-Error rejection', async () => {
+    const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
+    deleteLink.mockImplementation(async (id) => {
+      if (id === 'r_1') return Promise.reject('network unavailable');
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(deleteLink).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ revoked: 2, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['r_1']);
+  });
+
   it('revokes a repeated id once', async () => {
     const ledger = tempLedger(`${line('r_1')}${line('r_1')}${line('r_1')}`);
     await reclaim(ledger);

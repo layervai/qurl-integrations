@@ -830,10 +830,13 @@ describe('Connector client', () => {
   });
 
   describe('mintLinks', () => {
-    it('rejects an overlong resource ID before minting', async () => {
+    it.each([
+      ['a non-string resource ID', 12345],
+      ['an overlong resource ID', 'a'.repeat(1025)],
+    ])('rejects %s before minting', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn();
 
-      await expect(connector.mintLinks('a'.repeat(1025), { expiresAt: 'date', n: 1 }))
+      await expect(connector.mintLinks(resourceId, { expiresAt: 'date', n: 1 }))
         .rejects.toThrow(/Invalid resource ID format/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
