@@ -325,27 +325,6 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 502, 'Authorization failed', 'A network error occurred during the Auth0 handshake. Please run /qurl setup again.');
   }
 
-  // Audit evidence must never break setup. Compute both values together so
-  // an epoch failure cannot leave a fingerprint that operators might compare
-  // without its rotation boundary.
-  let qurlAccountSubjectFingerprint = null;
-  let qurlAccountFingerprintEpoch = null;
-  try {
-    if (qurlAccountSubject) {
-      qurlAccountSubjectFingerprint = fingerprintQurlAccountSubject(
-        qurlAccountSubject,
-      );
-    }
-    qurlAccountFingerprintEpoch = qurlAccountFingerprintKeyEpoch();
-  } catch (err) {
-    qurlAccountSubjectFingerprint = null;
-    qurlAccountFingerprintEpoch = null;
-    logger.warn('qURL OAuth audit fingerprint unavailable (setup continues)', {
-      error: err?.message,
-      guildId,
-    });
-  }
-
   // 2. Mint a guild-scoped qURL API key via POST /v1/api-keys, owned by
   //    the admin's qURL account (the Auth0 JWT's sub claim is the owner).
   let apiKey;
@@ -468,6 +447,27 @@ router.get('/callback', rateLimit, async (req, res) => {
   logger.info('qURL OAuth setup complete', {
     guildId, configuredBy: discordUserId, keyPrefix,
   });
+  // Audit evidence must never break setup. Compute only after persistence,
+  // on the path that emits it, and keep both values atomic so an epoch failure
+  // cannot leave a fingerprint that operators might compare without its
+  // rotation boundary.
+  let qurlAccountSubjectFingerprint = null;
+  let qurlAccountFingerprintEpoch = null;
+  try {
+    if (qurlAccountSubject) {
+      qurlAccountSubjectFingerprint = fingerprintQurlAccountSubject(
+        qurlAccountSubject,
+      );
+    }
+    qurlAccountFingerprintEpoch = qurlAccountFingerprintKeyEpoch();
+  } catch (err) {
+    qurlAccountSubjectFingerprint = null;
+    qurlAccountFingerprintEpoch = null;
+    logger.warn('qURL OAuth audit fingerprint unavailable (setup continues)', {
+      error: err?.message,
+      guildId,
+    });
+  }
   // Interim #1366 evidence: compare this keyed, pseudonymous fingerprint
   // across bind events to detect qURL-owner changes. It is observability only;
   // durable owner identity and fail-closed comparison belong in #1366.

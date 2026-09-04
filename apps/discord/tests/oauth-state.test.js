@@ -161,6 +161,14 @@ describe('oauth-state createStateSigner', () => {
       expect(signer.signDerived('audit:v2', 'known-data'))
         .not.toBe(signer.signDerived('audit:v1', 'known-data'));
     });
+
+    it.each([undefined, '', 42])(
+      'rejects an empty or non-string derivation context: %p',
+      (info) => {
+        expect(() => makeSigner().signDerived(info, 'known-data'))
+          .toThrow(TypeError);
+      },
+    );
   });
 
   describe('test-harness fallback', () => {

@@ -122,6 +122,9 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
   }
 
   function signDerived(info, data) {
+    if (typeof info !== 'string' || !info) {
+      throw new TypeError('signDerived: info must be a non-empty string');
+    }
     const derivedKey = crypto.hkdfSync(
       'sha256',
       stateSecret(),
