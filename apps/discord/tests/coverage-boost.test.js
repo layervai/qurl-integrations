@@ -155,7 +155,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
-  markSendRevoked: jest.fn(),
+  markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
@@ -329,4 +329,3 @@ describe('isGoogleMapsURL — goo.gl edge cases', () => {
     expect(isGoogleMapsURL('https://goo.gl/search/abc')).toBe(false);
   });
 });
-

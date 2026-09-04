@@ -2521,8 +2521,9 @@ async function executeSendPipeline(interaction, {
     // by a stale "Revoked 0/0". These flags are collector-local UX gates;
     // revokingSendLocks handles same-process cross-collector Revoke only
     // while work is active. After the lock releases, and across processes,
-    // revoked_at is the correctness boundary; recordQURLSendBatch enforces
-    // it again in the same transaction as any later Add Recipients rows.
+    // revoking_at/revoked_at are the correctness boundary;
+    // recordQURLSendBatch enforces them again in the same transaction as any
+    // later Add Recipients rows.
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
     // Authoritative DDB strict-success count. Tracked separately from
@@ -2530,6 +2531,7 @@ async function executeSendPipeline(interaction, {
     // if a successful recipient_id can't be name-resolved against
     // `recipients[]`.
     let revokeResultSuccess = 0;
+    let revokeResultFinalizationFailed = false;
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
@@ -2565,7 +2567,14 @@ async function executeSendPipeline(interaction, {
         // Toggle Show Recipients / Hide Recipients on the post-revoke list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+        const updated = renderRevokeMsg(
+          sendId,
+          revokeResultUserNames,
+          revokeResultTotal,
+          revokeShowAll,
+          revokeResultSuccess,
+          revokeResultFinalizationFailed,
+        );
         await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
@@ -2605,6 +2614,7 @@ async function executeSendPipeline(interaction, {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
             revokeResultSuccess = 0;
+            revokeResultFinalizationFailed = false;
             revokeShowAll = false;
             revokeResultKnown = false;
             // Keep revokeInFlight true after success as the collector-local
@@ -2616,6 +2626,23 @@ async function executeSendPipeline(interaction, {
           }
           await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+          if (!revoked.barrierEstablished) {
+            revokeResultUserNames = [];
+            revokeResultTotal = 0;
+            revokeResultSuccess = 0;
+            revokeResultFinalizationFailed = false;
+            revokeShowAll = false;
+            revokeResultKnown = false;
+            // Terminal for this collector even though the exact reason is
+            // intentionally hidden (unknown, foreign, or concurrently
+            // finalized all share the store's fail-closed result).
+            revokeSucceeded = true;
+            await interaction.editReply({
+              content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+              components: [],
+            }).catch(logIgnoredDiscordErr);
+            return;
+          }
           // Iterate `recipients` (canonical send-confirmation order)
           // and filter by membership — `successUserIds` walks Set
           // insertion order from resource-grouped iteration, which
@@ -2626,9 +2653,17 @@ async function executeSendPipeline(interaction, {
             .map(r => resolveRecipientAlias(r, interaction));
           revokeResultTotal = revoked.total;
           revokeResultSuccess = revoked.success;
+          revokeResultFinalizationFailed = revoked.finalizationFailed;
           revokeShowAll = false;
           revokeResultKnown = true;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
+          const initial = renderRevokeMsg(
+            sendId,
+            revokeResultUserNames,
+            revokeResultTotal,
+            false,
+            revokeResultSuccess,
+            revokeResultFinalizationFailed,
+          );
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
           // terminal gate for duplicate Revoke clicks; revokingSendLocks only
@@ -2652,8 +2687,8 @@ async function executeSendPipeline(interaction, {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Links still exist after a failed revoke, so Add Recipients can
-          // reopen. Keep only successful revokes sticky.
+          // Release only this collector's retry gate. Durable revoking_at
+          // keeps Add Recipients closed after a partial/external failure.
           revokeInFlight = false;
         } finally {
           revokingSendLocks.delete(sendId);
@@ -2674,16 +2709,18 @@ async function executeSendPipeline(interaction, {
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
         if (revokingSendLocks.has(sendId) || revokeSucceeded) {
-          // Completed revokes set revoked_at before DELETE attempts, even if
-          // individual deletes later fail, so stale Add clicks stay disabled.
+          // Durable revoking_at/revoked_at state keeps stale Add clicks
+          // disabled even after this collector-local lock is released.
           let content = ALREADY_REVOKING_SEND_MSG;
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
-              content = 'This send has already been revoked. Add Recipients is disabled.';
+              content = 'This send is no longer revocable. Add Recipients is disabled.';
+            } else if (revokeResultFinalizationFailed) {
+              content = 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.';
             } else if (revokeResultTotal === 0) {
               content = 'No live links remain for this send.';
             } else if (revokeResultSuccess < revokeResultTotal) {
-              content = 'Revoke already ran for this send. Add Recipients is disabled.';
+              content = 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.';
             } else {
               content = 'Links for this send have already been revoked.';
             }
@@ -2829,7 +2866,7 @@ async function executeSendPipeline(interaction, {
         if (revokeSucceeded) {
           if (!revokeResultKnown) {
             interaction.editReply({
-              content: 'Links for this send have already been revoked.',
+              content: 'This send is no longer revocable.',
               components: [],
             }).catch(logIgnoredDiscordErr);
             return;
@@ -2838,7 +2875,14 @@ async function executeSendPipeline(interaction, {
           // toggled), strip components. Omit `files`/`attachments`
           // so Discord keeps the existing revoked-users.txt without
           // re-uploading the same blob 15min later.
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+          const final = renderRevokeMsg(
+            sendId,
+            revokeResultUserNames,
+            revokeResultTotal,
+            revokeShowAll,
+            revokeResultSuccess,
+            revokeResultFinalizationFailed,
+          );
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
@@ -2933,13 +2977,20 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
-  // getSendConfig runs after the user-select await, so revoked_at catches
-  // button, slash-command, and out-of-band revokes that landed while the
-  // Add Recipients picker was open. recordQURLSendBatch repeats this guard
-  // in the recipient-row transaction to close the post-read write window.
+  // getSendConfig runs after the user-select await, so revoking_at/revoked_at
+  // catch button, slash-command, and out-of-band revokes that landed while
+  // the Add Recipients picker was open. recordQURLSendBatch repeats this
+  // guard in the recipient-row transaction to close the post-read write
+  // window.
   if (sendConfig.revoked_at) {
     return {
       msg: 'Cannot add recipients — this send has already been revoked.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (sendConfig.revoking_at) {
+    return {
+      msg: 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
@@ -3448,7 +3499,8 @@ function formatRevokeDescription(s) {
   const when = new Date(s.created_at).toLocaleString();
   const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
   const expiry = `expires ${s.expires_in}`;
-  const base = `${when} · ${delivery} · ${expiry}`;
+  const retry = s.revocation_pending ? 'Retry · ' : '';
+  const base = `${retry}${when} · ${delivery} · ${expiry}`;
   // If there's space left, append a truncated message preview so users
   // can disambiguate sends with the same filename but different notes.
   if (s.personal_message) {
@@ -3634,11 +3686,19 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   const sendId = interaction.values[0];
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
+  if (!revoked.barrierEstablished) {
+    await interaction.update({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+    return;
+  }
+
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
   await interaction.update({
-    content: buildRevokeHeader(revoked.success, revoked.total),
+    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
   });
 }
@@ -8204,8 +8264,17 @@ function revokeReplyPayload(rendered) {
 // Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
-function renderRevokeMsg(sendId, names, total, showAll, success = names.length) {
-  const data = renderRevokeContent({ names, total, showAll, success });
+function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false) {
+  let data;
+  try {
+    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed });
+  } catch (err) {
+    data = {
+      content: revokeRenderFallback(sendId, success, total, err),
+      needsExpand: false,
+      attachmentText: null,
+    };
+  }
   const row = data.needsExpand
     ? new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -8215,6 +8284,26 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
     )
     : null;
   return { ...data, row };
+}
+
+function revokeRenderFallback(sendId, success, total, err) {
+  logger.error('Failed to render revoke result', {
+    sendId,
+    success,
+    total,
+    error: err?.message ?? String(err),
+  });
+  // DELETEs may already have completed. Avoid a dead Discord interaction
+  // while making no claim about an outcome whose counts are inconsistent.
+  return 'qURL could not display the revocation result. If this send still appears in `/qurl revoke`, retry it there.';
+}
+
+function safeRevokeHeader(sendId, success, total, finalizationFailed = false) {
+  try {
+    return buildRevokeHeader(success, total, { finalizationFailed });
+  } catch (err) {
+    return revokeRenderFallback(sendId, success, total, err);
+  }
 }
 
 // Builds the post-send confirmation body. When the full inline render
@@ -8274,33 +8363,47 @@ function renderSendConfirm({
 // DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
 // gracefully on the recipient side.
 async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
+  // Establish the durable no-more-recipients barrier before reading the send
+  // rows. getSendItems uses a strongly consistent base-table query, so an Add
+  // transaction that committed before this barrier is included; one racing
+  // after it fails the revoking_at condition check.
+  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId);
+  // The durable store returns false for unknown, finalized, or foreign sends.
+  // Never issue a DELETE unless it positively confirms the barrier.
+  if (!barrierEstablished) {
+    return {
+      barrierEstablished: false,
+      finalizationFailed: false,
+      success: 0,
+      total: 0,
+      successUserIds: [],
+      failureUserIds: [],
+    };
+  }
+
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
   // step skips them.
-  const items = await db.getSendItems(sendId, senderDiscordId);
+  const items = await db.getSendItems(sendId, senderDiscordId, { consistentRead: true });
 
   // deleteLink deletes the whole resource; one DELETE per unique
   // resource_id, fan result out to every recipient sharing it.
   // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
   // recipients per resource, so the same resource_id is shared.
   const byResource = new Map();
+  const invalidResourceRecipientIds = new Set();
   for (const item of items) {
+    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
+      invalidResourceRecipientIds.add(item.recipient_discord_id);
+      continue;
+    }
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
   }
   const resourceEntries = [...byResource.entries()];
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
-
-  // Record the user's revocation intent before side-effecting DELETEs.
-  // If this write fails, no qURL resource has been deleted yet, so callers
-  // can safely treat the revoke as failed and leave Add Recipients available.
-  // Do not emit revoke_success/revoke_failed before this point: those audit
-  // events describe qURL DELETE outcomes, and no DELETE has happened yet.
-  // Mark regardless of per-link success: partial failures surface in the
-  // reply ("Revoked X/Y"), and re-picking the same send would not help.
-  await db.markSendRevoked(sendId, senderDiscordId);
 
   const successUserIds = [];
   const failureUserIds = [];
@@ -8316,7 +8419,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // tell the operator "alice is partial" via failure than misleadingly
   // claim full success.
   const seenSuccess = new Set();
-  const seenFailure = new Set();
+  const seenFailure = new Set(invalidResourceRecipientIds);
+  if (invalidResourceRecipientIds.size > 0) {
+    logger.error('Cannot revoke send row with missing resource identity', {
+      sendId,
+      affectedRecipients: invalidResourceRecipientIds.size,
+    });
+  }
   for (let i = 0; i < results.length; i++) {
     const [resourceId, recipientIds] = resourceEntries[i];
     if (results[i].status === 'fulfilled') {
@@ -8337,24 +8446,34 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const success = successUserIds.length;
   const total = totalUsers;
-  // Audit metric is per-resource (DELETE call), not per-recipient.
+  // Audit success/total describe actual DELETE confirmations. Malformed rows
+  // never fabricate a DELETE denominator; report their affected recipients in
+  // a separate field while keeping finalization fail-closed.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
+  const unresolvableRecipients = invalidResourceRecipientIds.size;
+  const fullyConfirmed = auditSuccess === auditTotal && unresolvableRecipients === 0;
 
   // Emit audit after DELETE attempts so the tally reflects actual qURL API
   // outcomes. The revocation-intent write happened above, before any
   // destructive side effect.
   if (total > 0) {
-    const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
-    logger.audit(event, { send_id: sendId, success: auditSuccess, total: auditTotal });
+    const event = fullyConfirmed ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
+    logger.audit(event, {
+      send_id: sendId,
+      success: auditSuccess,
+      total: auditTotal,
+      unresolvable_recipients: unresolvableRecipients,
+    });
   }
 
-  // Top-level `success/total` are per-resource (matches the audit
-  // event); per-recipient counts surface in nested `users`.
+  // Top-level `success/total` are per-resource DELETE confirmations; the
+  // nested `users` tally is the operator-facing per-recipient result.
   logger.info('Revoked send', {
     sendId,
     success: auditSuccess,
     total: auditTotal,
+    unresolvable_recipients: unresolvableRecipients,
     users: { success, total },
   });
 
@@ -8402,6 +8521,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Errors are swallowed (logged inside editDM at info/warn) — a 404 /
   // 403 / unknown-message is operational, not a bug, and must not
   // skew the revoke success counts the caller reports to the operator.
+  // A retry deliberately re-PATCHes recipients whose DELETE succeeded on a
+  // prior attempt. PATCH replaces the message with the same terminal payload,
+  // so the operation is idempotent; persisting a second per-DM marker would
+  // introduce a write/edit race that could permanently suppress the rewrite.
   if (success > 0) {
     const successSet = new Set(successUserIds);
     const editTargets = new Map(); // recipient_id → {channelId, messageId}
@@ -8467,12 +8590,48 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     }
   }
 
-  // failureUserIds is computed but not yet rendered — the "Note:
-  // already-opened links cannot be revoked" disclaimer covers the
-  // common cause. Returned for callers that want to surface partial-
-  // failure detail (e.g., a future "Failed for: …" line or follow-up
-  // alert when count is large).
-  return { success, total, successUserIds, failureUserIds };
+  // Finalize only after every resource DELETE succeeded. Keep this after the
+  // outcome audit and recipient edits: if the DDB write fails, the durable
+  // revoking_at barrier remains and the caller can retry, but the destructive
+  // work that already completed still has an audit record and visible result.
+  //
+  // TODO(upstream-contract): qurl-service's
+  // TestRevokeQurl_Idempotent_SecondRevokeDoesNotRepublish pins repeated
+  // whole-resource DELETE /v1/qurls/{id} as a successful 204 no-op. Retrying
+  // the full set is therefore safe after partial success.
+  //
+  // A permanent-looking failure intentionally does NOT clear the barrier or
+  // finalize the send. qurl-service collapses absent and wrong-owner resources
+  // to the same 404, so treating 404/client-validation as "already revoked"
+  // could hide a still-live link after a key/account mismatch. 401/403 may also
+  // recover after `/qurl setup`. Fail closed, keep the send selectable, and let
+  // the truthful UI direct the operator to retry or reconnect.
+  let finalizationFailed = false;
+  if (fullyConfirmed) {
+    try {
+      const finalized = await db.markSendRevoked(sendId, senderDiscordId);
+      if (finalized !== true) throw new Error('finalization was not confirmed');
+    } catch (err) {
+      finalizationFailed = true;
+      logger.error('Failed to finalize revoked send state', {
+        sendId,
+        error: err?.message ?? String(err),
+      });
+    }
+  }
+
+  // failureUserIds is computed but not yet rendered by name. The shared
+  // header reports the exact unconfirmed count and tells the operator to
+  // retry/reconnect; callers can use this list for a future named-failure
+  // detail without inferring that DELETE failure means the link was opened.
+  return {
+    barrierEstablished: true,
+    finalizationFailed,
+    success,
+    total,
+    successUserIds,
+    failureUserIds,
+  };
 }
 
 // Time-based sweep every 60s (was 5min). With high user counts the Map can
@@ -9513,6 +9672,7 @@ module.exports = {
       monitorLinkStatus,
       revokeAllLinks,
       renderRevokeMsg,
+      safeRevokeHeader,
       renderSendConfirm,
       // Pure view-counter render, re-exported (defined in
       // ./view-counter-render) so the wording/floor contract is pinned

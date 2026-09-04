@@ -45,6 +45,9 @@ const STORE_METHODS = Object.freeze([
   'updateSendDMStatus',
   'markSendDMDelivered',
   'getRecentSends',
+  // Resolves true only when the caller owns the send and a retryable
+  // revoking_at barrier is durably present; false means do not DELETE.
+  'markSendRevoking',
   'markSendRevoked',
   'isSendRevoked',
   'saveSendConfig',
