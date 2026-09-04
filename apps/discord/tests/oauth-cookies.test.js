@@ -11,10 +11,15 @@ const {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
   QURL_OAUTH_COOKIE_PATH,
+  DISCORD_INSTALL_SESSION_COOKIE,
+  DISCORD_INSTALL_COOKIE_PATH,
+  setCookie,
   setQurlOAuthCookie,
   setQurlOAuthPkceCookie,
+  setDiscordInstallSessionCookie,
   clearQurlOAuthCookie,
   clearQurlOAuthPkceCookie,
+  clearDiscordInstallSessionCookie,
 } = require('../src/utils/oauth-cookies');
 
 function fakeRes() {
@@ -27,6 +32,35 @@ function fakeRes() {
 }
 
 describe('utils/oauth-cookies', () => {
+  describe('setCookie validation', () => {
+    it.each([undefined, '', 'oauth/qurl'])(
+      'rejects an unsafe cookie path (%p)',
+      path => {
+        expect(() => setCookie(fakeRes(), { protocol: 'https' }, 'name', 'value', {
+          path,
+          ttlSeconds: 300,
+        })).toThrow('absolute path');
+      },
+    );
+
+    it.each([undefined, 0, -1, 1.5, Number.NaN])(
+      'rejects an unsafe cookie TTL (%p)',
+      ttlSeconds => {
+        expect(() => setCookie(fakeRes(), { protocol: 'https' }, 'name', 'value', {
+          path: '/',
+          ttlSeconds,
+        })).toThrow('positive integer');
+      },
+    );
+
+    it('requires an explicit Secure decision when no request is available', () => {
+      expect(() => setCookie(fakeRes(), null, 'name', 'value', {
+        path: '/',
+        ttlSeconds: 300,
+      })).toThrow('secure flag must be explicit');
+    });
+  });
+
   describe('setQurlOAuthCookie', () => {
     it('sets the canonical cookie shape (HttpOnly, SameSite=Lax, Secure-when-HTTPS, path=/oauth/qurl)', () => {
       const res = fakeRes();
@@ -88,6 +122,37 @@ describe('utils/oauth-cookies', () => {
       const call = res.clearCookieCalls[0];
       expect(call.name).toBe(QURL_OAUTH_PKCE_COOKIE);
       expect(call.opts).toEqual({ path: QURL_OAUTH_COOKIE_PATH });
+    });
+  });
+
+  describe('Discord install session cookie', () => {
+    it('uses a ten-minute __Host- session with Secure and Path=/', () => {
+      const res = fakeRes();
+
+      setDiscordInstallSessionCookie(res, 'install-state');
+
+      expect(res.cookieCalls).toEqual([{
+        name: DISCORD_INSTALL_SESSION_COOKIE,
+        value: 'install-state',
+        opts: {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'lax',
+          maxAge: 10 * 60 * 1000,
+          path: DISCORD_INSTALL_COOKIE_PATH,
+        },
+      }]);
+    });
+
+    it('clears with the same host-prefix attributes', () => {
+      const res = fakeRes();
+
+      clearDiscordInstallSessionCookie(res);
+
+      expect(res.clearCookieCalls).toEqual([{
+        name: DISCORD_INSTALL_SESSION_COOKIE,
+        opts: { path: DISCORD_INSTALL_COOKIE_PATH, secure: true },
+      }]);
     });
   });
 });

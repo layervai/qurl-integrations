@@ -1,4 +1,5 @@
 const os = require('os');
+const { SSM_PLACEHOLDER_SENTINEL } = require('./utils/ssm-placeholder');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
 // NODE_ENV=production. `DDB_TEST_ENDPOINT` is a local-dev / mock-test
@@ -164,6 +165,12 @@ function intEnv(key, defaultVal, opts = {}) {
   return v;
 }
 
+const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/;
+
+function isDiscordSnowflake(value) {
+  return typeof value === 'string' && DISCORD_SNOWFLAKE_RE.test(value);
+}
+
 // Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
 // Any other value — including an unset env, the literal string "PLACEHOLDER"
 // that SSM-seeded params carry, or a whitespace-only value — normalizes to
@@ -174,7 +181,7 @@ const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
   const trimmed = rawGuildId.trim();
-  if (/^\d{17,20}$/.test(trimmed)) {
+  if (isDiscordSnowflake(trimmed)) {
     normalizedGuildId = trimmed;
   } else {
     // logger isn't loaded this early in config import — use console directly.
@@ -234,16 +241,50 @@ const isQurlOAuthConfigured = Boolean(
   && process.env.AUTH0_AUDIENCE,
 );
 
+const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
+
+function canRetainSecureInstallCookie(baseUrl) {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol === 'https:') return true;
+    // Browsers treat localhost as a trustworthy development origin even over
+    // HTTP. Keep the documented local smoke-test path while rejecting staging
+    // and preview HTTP origins that silently discard the __Host- cookie.
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    return parsed.protocol === 'http:'
+      && (hostname === 'localhost' || hostname.endsWith('.localhost'));
+  } catch {
+    return false;
+  }
+}
+
 // True when the Stage-2 "Add to Discord, select server" install flow can
 // run end-to-end: needs the bot's Discord OAuth2 client secret (separate
 // from the bot token used for normal operations) on top of qURL OAuth.
-// The /oauth/discord/callback route gates on this; it returns 503 with a
-// "not configured" page when false, so the install link still completes
-// (bot lands in the server) but the chained Auth0 leg won't run until
-// Justin sets DISCORD_CLIENT_SECRET in SSM.
-const isDiscordInstallConfigured = Boolean(
-  isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
-);
+// The /oauth/discord/install and /callback routes gate on this; both return
+// a generic 503 page when false, so the first-party customer flow cannot
+// begin until every required Auth0 and Discord credential is configured.
+const discordClientId = process.env.DISCORD_CLIENT_ID;
+const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
+const normalizedDiscordClientId = discordClientId?.trim();
+const normalizedDiscordClientSecret = discordClientSecret?.trim();
+let discordInstallNotConfiguredReason = null;
+if (!isQurlOAuthConfigured) {
+  discordInstallNotConfiguredReason = 'AUTH0_* unset';
+} else if (!normalizedDiscordClientId) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
+} else if (normalizedDiscordClientId === SSM_PLACEHOLDER_SENTINEL) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is the SSM placeholder';
+} else if (!isDiscordSnowflake(normalizedDiscordClientId)) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID is not a valid Discord snowflake';
+} else if (!normalizedDiscordClientSecret) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
+} else if (normalizedDiscordClientSecret === SSM_PLACEHOLDER_SENTINEL) {
+  discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
+} else if (!canRetainSecureInstallCookie(normalizedBaseUrl)) {
+  discordInstallNotConfiguredReason = 'BASE_URL cannot retain the Secure install cookie';
+}
+const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
 
 // Shard identifier for the shard-aware composite flow_id
 // (`<shard_id>#<guild_id>#<channel_id>#<user_id>`, see src/flow-id.js).
@@ -314,18 +355,24 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+  // Invalid values normalize to null so the optional customer-install route
+  // cannot build an OAuth URL for a placeholder/non-snowflake application ID.
+  // Normal command registration gets its app ID from Discord's READY payload.
+  DISCORD_CLIENT_ID: isDiscordSnowflake(normalizedDiscordClientId)
+    ? normalizedDiscordClientId
+    : null,
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
-  // installs the bot via the install link. Optional: omit and the
-  // /oauth/discord/callback route will return 503 with a documented
-  // "not configured" page until Justin sets the secret.
-  DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
+  // installs the bot via the install link. Omit it to disable the customer
+  // install flow: both /oauth/discord/install and its callback return a
+  // documented 503 until an operator sets the secret.
+  DISCORD_CLIENT_SECRET: normalizedDiscordClientSecret,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
   isDiscordInstallConfigured,
+  discordInstallNotConfiguredReason,
 
   // Legacy shared HMAC secret for OAuth state tokens. Retained as the
   // fallback below QURL_OAUTH_STATE_SECRET so a deploy that predates
@@ -363,7 +410,7 @@ module.exports = {
 
   // Server
   PORT: intEnv('PORT', 3000),
-  BASE_URL: normalizeBaseUrl(process.env.BASE_URL),
+  BASE_URL: normalizedBaseUrl,
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
@@ -685,4 +732,5 @@ module.exports = {
   // Exposed as a function, NOT a property — second call returns
   // undefined.
   takeGatewayHandoffHmac,
+  isDiscordSnowflake,
 };
