@@ -311,7 +311,7 @@ func TestLocalPublishReuseConflictExplainsDeleteRecovery(t *testing.T) {
 			if res.code != exitcode.Conflict {
 				t.Fatalf("publish = %d: %s", res.code, res.stderr.String())
 			}
-			for _, want := range []string{"identity conflict", "if this happened after qurl delete", "qurl delete <CRID> --yes", "deleted resource's CRID", "keep the local state unchanged"} {
+			for _, want := range []string{"identity conflict", "if this happened after qurl delete", "qurl delete <CRID> --yes", "deleted resource's CRID", "publish with a different --id", "keep the local state unchanged"} {
 				if !strings.Contains(res.stderr.String(), want) {
 					t.Fatalf("reuse conflict lacks %q: %s", want, res.stderr.String())
 				}

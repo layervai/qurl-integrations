@@ -155,7 +155,7 @@ const (
 	hintConnectorResourceEntitlement = "Hint: confirm --id matches the Connector this machine was enrolled to run. To change that identity, deliberately enroll a fresh state directory with a token created for the correct Connector ID; otherwise ask your qURL administrator to grant access."
 
 	msgConnectorResourceConflict  = "The qURL platform refused this Connector resource request because of an identity conflict."
-	hintConnectorResourceConflict = "Hint: if this happened after qurl delete, repeat qurl delete <CRID> --yes with the deleted resource's CRID, then try publishing again. Otherwise, keep the local state unchanged and contact your qURL administrator or LayerV support."
+	hintConnectorResourceConflict = "Hint: if this happened after qurl delete, repeat qurl delete <CRID> --yes with the deleted resource's CRID, then try publishing again. If you no longer have that CRID, publish with a different --id. For other conflicts, keep the local state unchanged and contact your qURL administrator or LayerV support."
 
 	msgConnectorResourceQuota  = "Your qURL account has reached its limit on active Connector resources."
 	hintConnectorResourceQuota = "Hint: remove a Connector resource you no longer use with the qURL management tools, or ask your qURL administrator to raise the limit, then run the command again."

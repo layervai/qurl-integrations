@@ -313,6 +313,7 @@ or the profile's `connector_id`.
 If publishing reports an identity conflict after deletion, repeat
 `qurl delete <CRID> --yes` with the deleted resource's CRID, then publish again.
 This retries the service's name release.
+If you no longer have the deleted resource's CRID, publish with a different `--id`.
 
 Local publishing accepts `http://localhost:<port>` and IPv4 or IPv6 loopback
 addresses. It intentionally rejects HTTPS, paths, queries, fragments,

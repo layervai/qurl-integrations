@@ -45,6 +45,11 @@ func TestPrepareConnectorResourceReusePersistsExactRequestAcrossRestart(t *testi
 	if err := reopened.PrepareConnectorResourceReuse(t.Context(), old.ConnectorID); err != nil {
 		t.Fatal(err)
 	}
+	// If this was the generated default name, an interrupted explicit reuse
+	// becomes the default again and must resume this request instead of advancing.
+	if id, advanced, err := reopened.ResolveDefaultConnectorID(t.Context(), old.ConnectorID); err != nil || id != old.ConnectorID || advanced != 0 {
+		t.Fatalf("default during pending reuse = %q, %d, %v", id, advanced, err)
+	}
 	tx, err := reopened.BeginConnectorResource(t.Context(), old.ConnectorID)
 	if err != nil {
 		t.Fatal(err)

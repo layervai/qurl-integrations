@@ -264,6 +264,8 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 // Therefore retries and concurrent callers keep the first prepared nonce.
 // Retirement pruning removes the old binding with its marker, so a forgotten
 // retirement is already an absent ID and needs no preparation.
+// Explicitly reusing a generated default ID also makes it the default again.
+// That intent survives dispatch failures so retries can finish the saved request.
 func (s *Store) PrepareConnectorResourceReuse(ctx context.Context, connectorID string) (retErr error) {
 	if s == nil {
 		return fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
