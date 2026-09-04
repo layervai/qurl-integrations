@@ -52,6 +52,13 @@ describe('utils/oauth-cookies', () => {
         })).toThrow('positive integer');
       },
     );
+
+    it('requires an explicit Secure decision when no request is available', () => {
+      expect(() => setCookie(fakeRes(), null, 'name', 'value', {
+        path: '/',
+        ttlSeconds: 300,
+      })).toThrow('secure flag must be explicit');
+    });
   });
 
   describe('setQurlOAuthCookie', () => {

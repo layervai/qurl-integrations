@@ -22,6 +22,7 @@ const config = require('../config');
 const logger = require('../logger');
 
 const INSTALL_ENTRY_BUCKET = 'discord-install-entry';
+const CALLBACK_BUCKET = 'callback';
 const MAX_RATE_LIMIT_STORE_SIZE = 20000;
 
 class IndexedRateLimitStore extends Map {
@@ -33,7 +34,7 @@ class IndexedRateLimitStore extends Map {
     // Set iteration order is the eviction order. Re-adding a still
     // install-only IP moves it to the back, giving O(1) least-recently-active
     // eviction without resetting that IP's accumulated request timestamps.
-    if (buckets[INSTALL_ENTRY_BUCKET] && !buckets.callback) this.#installOnlyIps.add(ip);
+    if (buckets[INSTALL_ENTRY_BUCKET] && !buckets[CALLBACK_BUCKET]) this.#installOnlyIps.add(ip);
     return this;
   }
 
@@ -49,8 +50,8 @@ class IndexedRateLimitStore extends Map {
 
   replaceAfterSweep(ip, buckets) {
     const previous = super.get(ip);
-    const wasInstallOnly = Boolean(previous?.[INSTALL_ENTRY_BUCKET] && !previous.callback);
-    const isInstallOnly = Boolean(buckets[INSTALL_ENTRY_BUCKET] && !buckets.callback);
+    const wasInstallOnly = Boolean(previous?.[INSTALL_ENTRY_BUCKET] && !previous[CALLBACK_BUCKET]);
+    const isInstallOnly = Boolean(buckets[INSTALL_ENTRY_BUCKET] && !buckets[CALLBACK_BUCKET]);
     // Sweeping timestamps is not activity. Preserve an existing install-only
     // entry's eviction position, but index a real callback -> install-only
     // transition at the time it becomes eligible for eviction.
@@ -100,7 +101,7 @@ function rateLimitForBucket(bucket, req, res, next) {
   // page cannot globally starve an in-flight callback from a new IP. If the
   // store contains only callback traffic, the normal overload shed remains.
   if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE && !rateLimitStore.has(ip)) {
-    if (bucket === 'callback') rateLimitStore.evictInstallOnlyEntry();
+    if (bucket === CALLBACK_BUCKET) rateLimitStore.evictInstallOnlyEntry();
     if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE) {
       // This warning is the operational signal for shared OAuth saturation;
       // alert on it because every unseen callback IP is shed until a sweep.
@@ -137,7 +138,7 @@ function rateLimitForBucket(bucket, req, res, next) {
 }
 
 function rateLimit(req, res, next) {
-  return rateLimitForBucket('callback', req, res, next);
+  return rateLimitForBucket(CALLBACK_BUCKET, req, res, next);
 }
 
 function installRateLimit(req, res, next) {

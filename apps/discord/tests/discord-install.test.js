@@ -508,6 +508,37 @@ describe('Discord install callback', () => {
       warnSpy.mockRestore();
     });
 
+    it('does not warn when Discord reports a superset of the requested permissions', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({
+            access_token: 'disc-token', guild: { id: '123456789012345678' },
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+      // Bit 80 keeps this above the old 20-digit sanitizer cap and proves the
+      // decimal-string/BigInt path remains forward-compatible with new bits.
+      const grantedSuperset = (
+        BigInt(REQUIRED_DISCORD_PERMISSIONS) | (1n << 80n)
+      ).toString();
+
+      const res = await discordCallback(
+        `/oauth/discord/callback?code=ok-code&guild_id=123456789012345678&permissions=${grantedSuperset}`,
+      );
+
+      expect(res.status).toBe(302);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        'Discord install callback reported different bot permissions',
+        expect.anything(),
+      );
+      warnSpy.mockRestore();
+    });
+
     it('does not copy malformed callback permissions into operator logs', async () => {
       const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
       globalThis.fetch = jest.fn()

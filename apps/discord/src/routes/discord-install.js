@@ -57,9 +57,13 @@ const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 const DISCORD_TIMEOUT_MS = 15000;
 // View Channels + Send Messages + Embed Links + Use Application Commands.
 const DISCORD_BOT_PERMISSION_BITS = [10, 11, 14, 31];
-const DISCORD_BOT_PERMISSIONS = DISCORD_BOT_PERMISSION_BITS
-  .reduce((permissions, bit) => permissions | (1n << BigInt(bit)), 0n)
-  .toString();
+const DISCORD_BOT_PERMISSION_VALUE = DISCORD_BOT_PERMISSION_BITS
+  .reduce((permissions, bit) => permissions | (1n << BigInt(bit)), 0n);
+const DISCORD_BOT_PERMISSIONS = DISCORD_BOT_PERMISSION_VALUE.toString();
+// Discord serializes permission bitfields as decimal strings so they can grow
+// beyond JavaScript's safe integer range. BigInt keeps future high bits intact;
+// the length bound caps attacker-controlled log and parse work.
+const DISCORD_PERMISSION_VALUE_RE = /^\d{1,100}$/;
 const DISCORD_INSTALL_SCOPES = 'identify bot applications.commands';
 // Discord requires the authorize request and token exchange to use a
 // byte-for-byte identical redirect URI. Keep one value for both legs.
@@ -169,17 +173,22 @@ router.get('/callback', rateLimit, async (req, res) => {
   // no Discord code could have been redeemed; once exchange begins, a timeout
   // can leave redemption ambiguous and recovery intentionally restarts at /install.
   clearDiscordInstallSessionCookie(res);
-  if (grantedPermissions && grantedPermissions !== DISCORD_BOT_PERMISSIONS) {
-    // Diagnostic only: Discord's installed role/channel overrides remain
-    // authoritative. The command-side permission check gives the admin the
-    // actionable fix if one of these permissions is unavailable.
-    logger.warn('Discord install callback reported different bot permissions', {
-      grantedPermissions: /^\d{1,20}$/.test(grantedPermissions)
-        ? grantedPermissions
-        : '<malformed>',
-      requestedPermissions: DISCORD_BOT_PERMISSIONS,
-      ip: req.ip,
-    });
+  if (grantedPermissions) {
+    const grantedPermissionValue = DISCORD_PERMISSION_VALUE_RE.test(grantedPermissions)
+      ? BigInt(grantedPermissions)
+      : null;
+    const missingRequiredPermission = grantedPermissionValue !== null
+      && (grantedPermissionValue & DISCORD_BOT_PERMISSION_VALUE) !== DISCORD_BOT_PERMISSION_VALUE;
+    // Diagnostic only: a superset is healthy and must not create warning
+    // noise. Warn when a required bit is absent or the callback is malformed;
+    // command-side checks still give the admin the actionable channel fix.
+    if (grantedPermissionValue === null || missingRequiredPermission) {
+      logger.warn('Discord install callback reported different bot permissions', {
+        grantedPermissions: grantedPermissionValue === null ? '<malformed>' : grantedPermissions,
+        requestedPermissions: DISCORD_BOT_PERMISSIONS,
+        ip: req.ip,
+      });
+    }
   }
 
   // Stage-2 ALWAYS sets prompt=consent on the chained Auth0 redirect,

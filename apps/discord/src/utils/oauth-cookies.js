@@ -31,9 +31,16 @@ const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
 // in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
 // — flipping that off would silently downgrade prod cookies. Keeping
 // the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
-function setCookie(res, req, name, value, {
-  path, ttlSeconds, secure = req?.protocol === 'https',
-} = {}) {
+function setCookie(res, req, name, value, options = {}) {
+  const { path, ttlSeconds } = options;
+  const hasExplicitSecureFlag = Object.hasOwn(options, 'secure');
+  if (req == null && !hasExplicitSecureFlag) {
+    throw new TypeError('OAuth cookie secure flag must be explicit when no request is supplied');
+  }
+  const secure = hasExplicitSecureFlag ? options.secure : req.protocol === 'https';
+  if (typeof secure !== 'boolean') {
+    throw new TypeError('OAuth cookie secure flag must be a boolean');
+  }
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new TypeError('OAuth cookie path must be an absolute path');
   }
