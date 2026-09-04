@@ -306,6 +306,8 @@ recover automatically without a customer approval step.
 
 Restarting the same app on the same machine reuses its resource and CRID. Use
 `--id` only when you want to choose the Connector ID yourself.
+After `qurl delete`, you can reuse that ID to create a new resource with a new CRID.
+Old links remain invalid.
 
 Local publishing accepts `http://localhost:<port>` and IPv4 or IPv6 loopback
 addresses. It intentionally rejects HTTPS, paths, queries, fragments,

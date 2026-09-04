@@ -261,7 +261,7 @@ func TestLocalEnrollmentAdvancesDefaultIDOnlyAfterDurableRetirement(t *testing.T
 	}
 
 	explicit := &localEnrollment{target: target, requestedID: baseID}
-	if _, err := explicit.resolveID(context.Background(), stateDir, "agent-one"); err == nil || !strings.Contains(err.Error(), "choose a new value with --id") {
-		t.Fatalf("retired explicit resolveID() = %v", err)
+	if got, err := explicit.resolveID(context.Background(), stateDir, "agent-one"); err != nil || got != baseID {
+		t.Fatalf("retired explicit resolveID() = %q, %v, want original name %q", got, err, baseID)
 	}
 }
