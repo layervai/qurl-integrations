@@ -20,6 +20,9 @@ const {
 //   - GUILD_ID: optional by design — unset means multi-tenant mode, and
 //     a set value has already been snowflake-validated by config.js.
 //     Re-checking truthiness here would never catch a real misconfig.
+//   - DISCORD_CLIENT_ID: normal command registration derives the application
+//     ID from Discord's authenticated READY payload. A missing or invalid env
+//     value disables only the optional customer-install flow in config.js.
 //   - BASE_URL: config.js supplies an unconditional "http://localhost:3000"
 //     default, so `cfg.BASE_URL` is always truthy. The real enforcement is
 //     baseUrlHttpsProblem (below), called from index.js's production block,
@@ -28,7 +31,7 @@ const {
 // authority. Keeping this list to the keys whose absence is actually a
 // boot blocker.
 function bootRequired() {
-  return ['DISCORD_TOKEN', 'DISCORD_CLIENT_ID'];
+  return ['DISCORD_TOKEN'];
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is NOT

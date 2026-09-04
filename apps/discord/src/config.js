@@ -356,8 +356,9 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  // Invalid values normalize to null so command registration cannot attempt
-  // an application route for a placeholder/non-snowflake ID.
+  // Invalid values normalize to null so the optional customer-install route
+  // cannot build an OAuth URL for a placeholder/non-snowflake application ID.
+  // Normal command registration gets its app ID from Discord's READY payload.
   DISCORD_CLIENT_ID: isDiscordSnowflake(normalizedDiscordClientId)
     ? normalizedDiscordClientId
     : null,
