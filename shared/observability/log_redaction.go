@@ -33,6 +33,16 @@ var redactSubstrings = [...]string{
 	"qurl_link",
 }
 
+var qurlAccessLinkSubstrings = func() []string {
+	var substrings []string
+	for _, substring := range redactSubstrings {
+		if strings.HasPrefix(substring, "qurl") {
+			substrings = append(substrings, substring)
+		}
+	}
+	return substrings
+}()
+
 var contentHashLogKeys = [...]string{
 	logKeyHash,
 	"md5",
@@ -67,8 +77,8 @@ func NewRedactingJSONHandler(w io.Writer, opts *slog.HandlerOptions) slog.Handle
 // JSON-marshaled string scalars. Other scalars, including numbers, are
 // preserved; most matched-key containers and collections are walked by inner
 // field names rather than fully suppressed. qURL access-link containers are
-// suppressed as a unit because bare string elements have no inner key to
-// match. Map values are walked only when their Go map keys are strings.
+// suppressed as a unit because inner keys are not guaranteed to identify
+// bearer values. Map values are walked only when their Go map keys are strings.
 // Struct values passed through slog.Any are only reflected when nested
 // redaction changes them. In that case, rich struct output can differ from
 // encoding/json details like omitempty, string coercion, or embedded-field
@@ -154,11 +164,12 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 	if value.Kind() == slog.KindAny && matchedScalarNeedsRedaction(value.Any()) {
 		return slog.StringValue(redactedLogValue)
 	}
-	if isQurlAccessLinkKey(key) && (value.Kind() == slog.KindGroup ||
+	if isQurlAccessLinkKey(key) && ((value.Kind() == slog.KindGroup && len(value.Group()) > 0) ||
 		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any()))) {
 		// A qurlLinks container semantically consists of live bearer links.
-		// Bare string elements have no inner key for the recursive walker to
-		// match, so suppress the whole container instead of leaking them.
+		// Inner keys are not guaranteed to describe bearer values (for example,
+		// a user-id-to-link map), so suppress the whole non-empty container
+		// instead of risking a leak. Empty containers are safe.
 		return slog.StringValue(redactedLogValue)
 	}
 	// Match Discord's behavior: other scalars, including numbers, pass through;
@@ -172,10 +183,8 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 
 func isQurlAccessLinkKey(key string) bool {
 	key = strings.ToLower(key)
-	for _, substring := range redactSubstrings {
-		// qURL-prefixed entries in the shared substring policy are the
-		// access-link spellings; keep this filter in sync when adding one.
-		if strings.HasPrefix(substring, "qurl") && strings.Contains(key, substring) {
+	for _, substring := range qurlAccessLinkSubstrings {
+		if strings.Contains(key, substring) {
 			return true
 		}
 	}
@@ -506,7 +515,14 @@ func isSuppressibleContainer(value any) bool {
 		return false
 	}
 	kind := rv.Kind()
-	return kind == reflect.Map || kind == reflect.Struct || kind == reflect.Slice || kind == reflect.Array
+	switch kind { //nolint:exhaustive // Only container kinds can require unit suppression.
+	case reflect.Map, reflect.Slice, reflect.Array:
+		return rv.Len() > 0
+	case reflect.Struct:
+		return true
+	default:
+		return false
+	}
 }
 
 func matchedScalarNeedsRedaction(value any) bool {

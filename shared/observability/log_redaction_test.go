@@ -830,6 +830,29 @@ func TestRedactingJSONHandlerRedactsQurlLinkGroupsAsAUnit(t *testing.T) {
 	}
 }
 
+func TestRedactingJSONHandlerPreservesEmptyQurlLinkContainers(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info("minted",
+		slog.Any("qurl_links", []string{}),
+		slog.Any("qurl_link_map", map[string]string{}),
+		slog.Group("qurl_link_group"),
+	)
+
+	fields := decodeLogLine(t, buf.String())
+	if got := fields["qurl_links"].([]interface{}); len(got) != 0 {
+		t.Fatalf("qurl_links = %#v, want empty array", got)
+	}
+	if got := fields["qurl_link_map"].(map[string]interface{}); len(got) != 0 {
+		t.Fatalf("qurl_link_map = %#v, want empty object", got)
+	}
+	if _, ok := fields["qurl_link_group"]; ok {
+		t.Fatalf("empty qurl_link_group should be omitted: %#v", fields)
+	}
+}
+
 func TestIsSuppressibleContainer(t *testing.T) {
 	t.Parallel()
 
@@ -846,7 +869,9 @@ func TestIsSuppressibleContainer(t *testing.T) {
 		"pointer to slice":  {value: &slice, want: true},
 		"interface pointer": {value: interfacePointer, want: true},
 		"map":               {value: map[string]string{"key": "value"}, want: true},
+		"empty map":         {value: map[string]string{}, want: false},
 		"struct":            {value: payload{Link: "value"}, want: true},
+		"empty slice":       {value: []string{}, want: false},
 		"nil pointer":       {value: nilSlicePointer, want: false},
 		"nil":               {value: nil, want: false},
 		"string":            {value: "value", want: false},

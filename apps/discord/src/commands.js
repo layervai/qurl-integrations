@@ -1804,7 +1804,14 @@ function scrubQurlCredentialForLog(message) {
   if (typeof message !== 'string') return undefined;
   return truncForLog(message
     .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
-    .replace(/\bat(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]'));
+    .replace(/(?<![A-Za-z_])at(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]'));
+}
+
+function persistenceErrorMessageForLog(err) {
+  if (typeof err?.message === 'string') return scrubQurlCredentialForLog(err.message);
+  if (err?.message != null) return scrubQurlCredentialForLog(String(err.message));
+  if (typeof err !== 'object' || err == null) return scrubQurlCredentialForLog(String(err));
+  return undefined;
 }
 
 async function executeSendPipeline(interaction, {
@@ -2199,11 +2206,7 @@ async function executeSendPipeline(interaction, {
       errorFault: err?.$fault,
       httpStatusCode: err?.$metadata?.httpStatusCode,
       requestId: err?.$metadata?.requestId,
-      errorMessage: scrubQurlCredentialForLog(
-        typeof err?.message === 'string'
-          ? err.message
-          : (err?.name == null && err?.message == null ? String(err) : undefined),
-      ),
+      errorMessage: persistenceErrorMessageForLog(err),
       linkCount: qurlLinks.length,
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });

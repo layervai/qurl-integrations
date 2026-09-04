@@ -52,9 +52,16 @@ function shouldRedact(key) {
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
 
+const QURL_LINK_SUBSTRINGS = REDACT_SUBSTRINGS.filter(s => s.startsWith('qurl'));
+
 function isQurlAccessLinkKey(key) {
   const k = String(key).toLowerCase();
-  return REDACT_SUBSTRINGS.some(s => s.startsWith('qurl') && k.includes(s));
+  return QURL_LINK_SUBSTRINGS.some(s => k.includes(s));
+}
+
+function isNonEmptyContainer(value) {
+  if (Array.isArray(value)) return value.length > 0;
+  return value != null && typeof value === 'object' && Object.keys(value).length > 0;
 }
 
 // Exact key names that audit() refuses to emit silently — these are the
@@ -119,7 +126,7 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     const decoratedQurlLinkValue = isQurlAccessLinkKey(k)
-      && ((typeof v === 'string' && v.length > 0) || (v != null && typeof v === 'object'));
+      && ((typeof v === 'string' && v.length > 0) || isNonEmptyContainer(v));
     if (isAuditSecretKey(k) || decoratedQurlLinkValue) {
       // Blank non-empty strings; recurse into non-null objects/arrays so a
       // `{ auth_token: { ... } }` accident still has its inner sensitive
@@ -130,10 +137,11 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
       if (!secretKeys.includes(k)) secretKeys.push(k);
       if (typeof v === 'string' && v.length > 0) {
         out[k] = '[REDACTED]';
-      } else if (isQurlAccessLinkKey(k) && v != null && typeof v === 'object') {
+      } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
         // A qurlLinks container semantically consists of live bearer links;
-        // bare string elements have no inner key for the recursive walker to
-        // match, so suppress the whole container instead of leaking them.
+        // inner keys are not guaranteed to describe bearer values (for
+        // example, a user-id-to-link map), so suppress the whole non-empty
+        // container instead of risking a leak. Empty containers are safe.
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
         out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
@@ -163,7 +171,7 @@ function redact(value, depth = 0) {
       // narrowly identified qURL access-link values.
       if (typeof v === 'string' && v.length > 0) {
         out[k] = '[REDACTED]';
-      } else if (isQurlAccessLinkKey(k) && v != null && typeof v === 'object') {
+      } else if (isQurlAccessLinkKey(k) && isNonEmptyContainer(v)) {
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
         out[k] = redact(v, depth + 1);

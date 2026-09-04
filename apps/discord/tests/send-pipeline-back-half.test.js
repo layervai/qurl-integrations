@@ -2469,7 +2469,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       qurl_id: 'q_orphaned_link_one',
     }]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(
-      new TypeError('Persistence format_specifier failed for https://qurl.link/#at_secret_bearer_one at_secret_bearer_two'),
+      new TypeError('Persistence format_specifier failed for https://qurl.link/#at_secret_bearer_one at_secret_bearer_two https%3A%2F%2Fqurl.link%2F%23at_secret_bearer_three'),
     );
 
     await executeSendPipeline(interaction, makePipelineParams());
@@ -2483,6 +2483,8 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     }));
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_three');
+    expect(JSON.stringify(failureLog)).toContain('format_specifier');
   });
 
   it('keeps a scrubbed diagnostic when persistence rejects with a non-Error value', async () => {
@@ -2511,6 +2513,30 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     }));
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');
+  });
+
+  it('keeps a scalar diagnostic when a rejection object has a non-string message', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce({ name: 'WeirdFailure', message: 42 });
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorName: 'WeirdFailure',
+      errorMessage: '42',
+    }));
   });
 });
 
