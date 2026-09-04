@@ -243,6 +243,9 @@ describe('Discord install callback', () => {
       for (const res of [missing, mismatch, empty, duplicateState]) {
         expect(res.status).toBe(400);
         expect(res.text).toContain('Invalid install link');
+        expect(res.text.indexOf('/qurl setup')).toBeLessThan(
+          res.text.indexOf('install session is invalid or expired'),
+        );
         expect(clearedCookieHeader(
           res.headers['set-cookie'],
           DISCORD_INSTALL_SESSION_COOKIE,

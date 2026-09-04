@@ -1,0 +1,90 @@
+const config = require('../src/config');
+const logger = require('../src/logger');
+const {
+  MAX_RATE_LIMIT_STORE_SIZE,
+  installRateLimit,
+  rateLimit,
+  rateLimitStore,
+  sweepRateLimitStore,
+} = require('../src/utils/oauth-rate-limit');
+
+function response() {
+  return {
+    renderPage: jest.fn().mockReturnValue('rate-limited'),
+    send: jest.fn().mockReturnThis(),
+    status: jest.fn().mockReturnThis(),
+  };
+}
+
+describe('OAuth rate-limit store', () => {
+  const now = 2_000_000;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    rateLimitStore.clear();
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('sweeps expired buckets independently and preserves a live sibling bucket', () => {
+    const expired = now - config.RATE_LIMIT_WINDOW_MS * 2 - 1;
+    const recent = now - config.RATE_LIMIT_WINDOW_MS;
+    rateLimitStore.set('198.51.100.1', {
+      callback: [expired],
+      'discord-install-entry': [expired, recent],
+    });
+
+    sweepRateLimitStore();
+
+    expect(rateLimitStore.get('198.51.100.1')).toEqual({
+      'discord-install-entry': [recent],
+    });
+  });
+
+  it('removes an IP once every bucket is expired', () => {
+    const expired = now - config.RATE_LIMIT_WINDOW_MS * 2 - 1;
+    rateLimitStore.set('198.51.100.2', {
+      callback: [expired],
+      'discord-install-entry': [expired],
+    });
+
+    sweepRateLimitStore();
+
+    expect(rateLimitStore.has('198.51.100.2')).toBe(false);
+  });
+
+  it('evicts install-only traffic so the shared hard cap cannot starve a callback', () => {
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
+      rateLimitStore.set(`install-${i}`, { 'discord-install-entry': [now] });
+    }
+    const res = response();
+    const next = jest.fn();
+
+    rateLimit({ ip: 'legitimate-callback', path: '/oauth/discord/callback' }, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(rateLimitStore.size).toBeLessThanOrEqual(MAX_RATE_LIMIT_STORE_SIZE);
+    expect(rateLimitStore.has('install-0')).toBe(false);
+    expect(rateLimitStore.get('legitimate-callback')).toEqual({ callback: [now] });
+  });
+
+  it('still sheds new install traffic at the shared hard cap', () => {
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+    const res = response();
+    const next = jest.fn();
+    jest.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    installRateLimit({ ip: 'new-install', path: '/oauth/discord/install' }, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(429);
+    expect(rateLimitStore.has('new-install')).toBe(false);
+    expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
+  });
+});

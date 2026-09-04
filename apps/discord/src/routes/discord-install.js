@@ -64,15 +64,14 @@ const router = express.Router();
 // `detail` describes the immediate failure; we append a remediation
 // hint that fits any failure during the callback. Discord's external
 // Require OAuth2 Code Grant setting determines whether the bot is already
-// installed, so offer both safe recovery paths. Other
-// surfaces (the encryption-at-rest 503) use res.renderPage directly with
-// surface-specific copy — see the inline call site.
+// installed, so offer both safe recovery paths. Configuration failures use
+// renderNotConfiguredPage instead because no callback retry can repair them.
 function renderError(res, statusCode, headline, detail) {
   return res.status(statusCode).send(res.renderPage({
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' Start again from Add to Discord. If the bot is already in your server, you can instead run /qurl setup.',
+    message: 'If the bot is already in your server, run /qurl setup there. Otherwise, ' + detail + ' Start again from Add to Discord.',
     type: 'error',
   }));
 }
@@ -113,16 +112,15 @@ router.get('/install', installRateLimit, (req, res) => {
 
 router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isDiscordInstallConfigured) {
-    // Single log line lives in renderNotConfiguredPage (round-9 item
-    // #7). Reason is computed here because the helper would otherwise
-    // need access to two config flags.
+    // Single sanitized log line lives in renderNotConfiguredPage; config
+    // centralizes the ordered fail-closed reason for both install routes.
     return renderNotConfiguredPage(res, 'discord-install', config.discordInstallNotConfiguredReason);
   }
   const installState = singleStringParam(req.query.state);
   const stateMatches = installStateMatches(req, installState);
   if (!stateMatches) {
     logger.warn('Discord install callback rejected invalid session state', { ip: req.ip });
-    return renderError(res, 400, 'Invalid install link', 'This install session is invalid or expired.');
+    return renderError(res, 400, 'Invalid install link', 'this install session is invalid or expired.');
   }
 
   // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start. When

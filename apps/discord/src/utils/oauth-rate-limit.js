@@ -2,9 +2,11 @@
 //
 // Extracted from src/routes/oauth.js so the GitHub OAuth flow, the qURL
 // OAuth flow, and the Discord install callback share the same per-IP budget.
-// The public Discord install entrypoint gets a separate bucket in the same
-// bounded store: entry-page traffic must not starve an in-flight callback,
-// whose short-lived Discord authorization code cannot simply wait out a 429.
+// The public Discord install entrypoint gets a separate per-IP bucket in the
+// same bounded store, so entry-page traffic from one IP cannot consume that
+// IP's callback budget. At the global hard cap, callbacks can evict an
+// install-only entry; public entry-page traffic therefore cannot starve a
+// short-lived Discord authorization code arriving from a new IP.
 //
 // SCALING: single-instance only. If this bot ever runs horizontally
 // (multiple ECS tasks behind a LB), move this to Redis so limits are
@@ -20,7 +22,7 @@ const rateLimitStore = new Map();
 // larger than the per-request 10% eviction can keep up with. 30s is a
 // sweet spot: short enough to bound steady-state memory, long enough to
 // not matter as load.
-const sweepHandle = setInterval(() => {
+function sweepRateLimitStore() {
   const cutoff = Date.now() - config.RATE_LIMIT_WINDOW_MS * 2;
   for (const [ip, buckets] of rateLimitStore) {
     const recentBuckets = {};
@@ -31,7 +33,9 @@ const sweepHandle = setInterval(() => {
     if (Object.keys(recentBuckets).length === 0) rateLimitStore.delete(ip);
     else rateLimitStore.set(ip, recentBuckets);
   }
-}, 30 * 1000);
+}
+
+const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);
 sweepHandle.unref();
 
 // Absolute cap on how many timestamps we keep per logical bucket per IP so
@@ -45,14 +49,28 @@ const MAX_REQUESTS_PER_BUCKET_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS *
 // until the next sweep reclaims space — better to shed load than OOM.
 const MAX_STORE_SIZE = 20000;
 
+function evictInstallOnlyEntry() {
+  for (const [ip, buckets] of rateLimitStore) {
+    if (!buckets.callback) {
+      rateLimitStore.delete(ip);
+      return true;
+    }
+  }
+  return false;
+}
+
 function rateLimitForBucket(bucket, req, res, next) {
   const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
   const now = Date.now();
   const windowStart = now - config.RATE_LIMIT_WINDOW_MS;
 
-  // Hard memory ceiling: if the store is already at MAX_STORE_SIZE and
-  // this is a new IP, shed the request rather than grow the Map further.
-  // Known IPs still get served because they're not growing the Map.
+  // Hard memory ceiling: callbacks take priority over install-only entries.
+  // This preserves the bound while ensuring traffic to the public /install
+  // page cannot globally starve an in-flight callback from a new IP. If the
+  // store contains only callback traffic, the normal overload shed remains.
+  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
+    if (bucket === 'callback') evictInstallOnlyEntry();
+  }
   if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
     logger.warn('Rate limit store at hard cap, rejecting new IP', {
       ip, bucket, size: rateLimitStore.size,
@@ -110,4 +128,10 @@ function installRateLimit(req, res, next) {
   return rateLimitForBucket('discord-install-entry', req, res, next);
 }
 
-module.exports = { rateLimit, installRateLimit, rateLimitStore };
+module.exports = {
+  MAX_RATE_LIMIT_STORE_SIZE: MAX_STORE_SIZE,
+  installRateLimit,
+  rateLimit,
+  rateLimitStore,
+  sweepRateLimitStore,
+};
