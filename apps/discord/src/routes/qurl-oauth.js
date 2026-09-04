@@ -448,9 +448,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     guildId, configuredBy: discordUserId, keyPrefix,
   });
   // Audit evidence must never break setup. Compute only after persistence,
-  // on the path that emits it, and keep both values atomic so an epoch failure
-  // cannot leave a fingerprint that operators might compare without its
-  // rotation boundary.
+  // on the path that emits it. A fingerprint is never emitted without its
+  // epoch; an epoch without a fingerprint is expected when no verified Auth0
+  // subject was available and is inert for owner comparisons.
   let qurlAccountSubjectFingerprint = null;
   let qurlAccountFingerprintEpoch = null;
   try {

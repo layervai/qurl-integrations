@@ -1,4 +1,8 @@
-const { withFreshConfig, captureFreshConfig } = require('./helpers/fresh-config');
+const {
+  withFreshEnv,
+  withFreshConfig,
+  captureFreshConfig,
+} = require('./helpers/fresh-config');
 
 describe('config.AUTH0_EMAIL_CONNECTION', () => {
   it('is empty (no pin) when unset', () => {
@@ -43,6 +47,30 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     const value = 'private looking value';
     captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (_config, warns) => {
       expect(warns).toContainEqual(expect.stringContaining('AUTH0_EMAIL_CONNECTION'));
+      expect(warns.join('\n')).not.toContain(value);
+    });
+  });
+
+  it('uses the shared SSM placeholder sentinel case-insensitively', () => {
+    withFreshEnv({ AUTH0_EMAIL_CONNECTION: 'unset' }, () => {
+      jest.doMock('../src/utils/ssm-placeholder', () => ({
+        SSM_PLACEHOLDER_SENTINEL: 'UNSET',
+      }));
+      try {
+        expect(require('../src/config').AUTH0_EMAIL_CONNECTION).toBe('');
+      } finally {
+        jest.dontMock('../src/utils/ssm-placeholder');
+      }
+    });
+  });
+
+  it.each([
+    ['email!', 'contains characters outside'],
+    ['a'.repeat(129), 'exceeds the 128-character limit'],
+    ['PLACEHOLDER', 'reserved SSM placeholder'],
+  ])('reports why invalid value %p was rejected without echoing it', (value, reason) => {
+    captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (_config, warns) => {
+      expect(warns.join('\n')).toContain(reason);
       expect(warns.join('\n')).not.toContain(value);
     });
   });

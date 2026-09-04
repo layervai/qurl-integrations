@@ -30,6 +30,9 @@ function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
       };
     } finally {
       stopIntervals?.();
+      jest.dontMock('../src/logger');
+      jest.dontMock('../src/discord');
+      jest.dontMock('../src/store');
     }
   });
   return calls;
@@ -72,5 +75,11 @@ describe('server Auth0 connection policy log', () => {
       'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.',
       { event: 'qurl_oauth_auth0_connection_policy', connection: null },
     ]);
+  });
+
+  it('does not leak its module mocks to later tests', () => {
+    captureServerLogs('email');
+    expect(jest.isMockFunction(require('../src/logger').info)).toBe(false);
+    expect(jest.isMockFunction(require('../src/discord').sendDM)).toBe(false);
   });
 });

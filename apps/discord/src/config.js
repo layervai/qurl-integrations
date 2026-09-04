@@ -231,13 +231,22 @@ function isValidAuth0DomainShape(d) {
 function normalizeAuth0EmailConnection(raw) {
   const value = (raw || '').trim();
   if (!value) return '';
-  if (value.length > 128
-      || value.toUpperCase() === 'PLACEHOLDER'
-      || !/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
+  // Be case-insensitive for hand-entered values while deriving the sentinel
+  // itself from the infra-synchronized single source of truth.
+  const isPlaceholder = value.toUpperCase() === SSM_PLACEHOLDER_SENTINEL.toUpperCase();
+  let rejectionReason = null;
+  if (value.length > 128) {
+    rejectionReason = `received ${value.length} trimmed characters, which exceeds the 128-character limit`;
+  } else if (isPlaceholder) {
+    rejectionReason = 'matches the reserved SSM placeholder sentinel';
+  } else if (!/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
+    rejectionReason = 'contains characters outside the required [A-Za-z0-9_-] shape or does not begin and end with a letter or digit';
+  }
+  if (rejectionReason) {
     // Keep the rest of the bot available and fall back to the explicitly
     // logged unpinned flow. A malformed optional setting should not take down
     // /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (received ${value.length} trimmed characters; must be at most 128 characters, must not be PLACEHOLDER, must begin and end with a letter or digit, and may contain only letters, digits, underscores, and hyphens); leaving Auth0 connection unpinned.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); leaving Auth0 connection unpinned.`);
     return '';
   }
   return value;
