@@ -154,6 +154,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       sessionId: 'sess-fresh',
       resumeURL: 'wss://resume.discord.gg/?v=10&encoding=json',
       sequence: 1,
+      shardId: 0,
+      shardCount: 1,
     });
     // First write is immediate (sessionId change from null → real).
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
@@ -174,6 +176,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       sessionId: 'sess-fresh',
       resumeURL: 'wss://resume.discord.gg/?v=10&encoding=json',
       sequence: 2,
+      shardId: 0,
+      shardCount: 1,
     });
     mgr.emit(WebSocketShardEvents.Dispatch, {
       data: { op: 0, t: 'INTERACTION_CREATE', s: 2, d: { id: 'interaction-1' } },
@@ -187,11 +191,11 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     //    DDB writes deferred.
     now += 100;
     updateSessionInfo('0:1', {
-      sessionId: 'sess-fresh', resumeURL: 'wss://r/', sequence: 3,
+      sessionId: 'sess-fresh', resumeURL: 'wss://r/', sequence: 3, shardId: 0, shardCount: 1,
     });
     now += 100;
     updateSessionInfo('0:1', {
-      sessionId: 'sess-fresh', resumeURL: 'wss://r/', sequence: 42,
+      sessionId: 'sess-fresh', resumeURL: 'wss://r/', sequence: 42, shardId: 0, shardCount: 1,
     });
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1); // still just the initial.
     expect(store._getMirrorForTest()).toEqual(expect.objectContaining({ sequence: 42 }));
@@ -232,6 +236,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
         session_id: 'sess-prior',
         resume_url: 'wss://r.discord/prior',
         sequence: 42,
+        session_shard_id: 0,
+        session_shard_count: 1,
         updated_at: 1_700_000_000_000,
       },
     });
@@ -261,6 +267,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       sessionId: 'sess-prior',
       resumeURL: 'wss://r.discord/prior',
       sequence: 42,
+      shardId: 0,
+      shardCount: 1,
     });
 
     await shim.start();
@@ -275,6 +283,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
       sessionId: 'sess-prior',
       resumeURL: 'wss://r.discord/prior',
       sequence: 42,
+      shardId: 0,
+      shardCount: 1,
     });
     expect(shim._getIdentifyAttemptsForTest()).toBe(0);
     // Pre-RESUMED: isReady stays false (the WS is open but the

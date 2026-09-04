@@ -625,23 +625,37 @@ describe('IDENTIFY budget guard', () => {
     await expect(blocked).rejects.toBe(abortReason);
   });
 
-  it('does not burn an attempt when the delegate throttle rejects', async () => {
-    const throttleError = new Error('delegate aborted');
+  it('counts and bounds a non-abort delegate failure because upstream would still IDENTIFY', async () => {
+    const throttleError = Object.assign(new Error('delegate failed'), { code: 'THROTTLE_DRIFT' });
     function RejectingIdentifyThrottler() {
       return { waitForIdentify: jest.fn().mockRejectedValue(throttleError) };
     }
-    const { shim, managerInstances, onFatal } = makeShim({
+    const {
+      shim, logger, managerInstances, onFatal,
+    } = makeShim({
       IdentifyThrottlerCtor: RejectingIdentifyThrottler,
     });
     await shim.start();
     const mgr = managerInstances[0];
     const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
 
-    await expect(
-      throttler.waitForIdentify(0, new AbortController().signal),
-    ).rejects.toBe(throttleError);
-    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
-    expect(onFatal).not.toHaveBeenCalled();
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: identify throttle delegate failed; counting attempted grant',
+      { errorName: 'Error', errorCode: 'THROTTLE_DRIFT' },
+    );
+
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(2);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+
+    controller.abort(throttleError);
+    await expect(blocked).rejects.toBe(throttleError);
   });
 
   it('does not burn an attempt when the shard aborts as the delegate releases', async () => {
@@ -1530,6 +1544,50 @@ describe('constants are pinned', () => {
     await strategy.waitForIdentify(0, signal);
     expect(buildIdentifyThrottler).toHaveBeenCalledWith(manager);
     expect(delegate.waitForIdentify).toHaveBeenCalledWith(0, signal);
+  });
+
+  it('real @discordjs/ws RESUMEs a fully hydrated cross-process session', async () => {
+    class FakeWebSocket {}
+    let FreshWebSocketShard;
+    jest.doMock('ws', () => ({ WebSocket: FakeWebSocket }));
+    try {
+      jest.isolateModules(() => {
+        ({ WebSocketShard: FreshWebSocketShard } = require('@discordjs/ws'));
+      });
+    } finally {
+      jest.dontMock('ws');
+    }
+
+    const store = makeFakeStore();
+    const hydrated = {
+      sessionId: 'persisted-session',
+      resumeURL: 'wss://resume.discord.test',
+      sequence: 42,
+      shardId: 0,
+      shardCount: 1,
+    };
+    store._setMirror(hydrated);
+    const strategy = {
+      retrieveSessionInfo: store.retrieveSessionInfo,
+      options: {
+        token: 'shape-contract-only',
+        version: 10,
+        encoding: 'json',
+        compression: null,
+        shardCount: 1,
+        gatewayInformation: { url: 'wss://gateway.discord.test' },
+        helloTimeout: 1,
+      },
+    };
+    const shard = new FreshWebSocketShard(strategy, 0);
+    shard.waitForEvent = jest.fn().mockResolvedValue({ ok: true });
+    shard.resume = jest.fn().mockResolvedValue(undefined);
+    shard.identify = jest.fn().mockResolvedValue(undefined);
+
+    await shard.internalConnect();
+
+    expect(shard.resume).toHaveBeenCalledWith(hydrated);
+    expect(shard.identify).not.toHaveBeenCalled();
   });
 
 });

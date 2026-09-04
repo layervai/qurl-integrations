@@ -293,6 +293,8 @@ The DDB row for a shard (in the new `qurl_bot_gateway_session` table — PR 12):
 | `session_id` | string | from `READY` event |
 | `resume_url` | string | from `READY.resume_gateway_url` |
 | `sequence` | number | last received dispatch sequence |
+| `session_shard_id` | number | shard index from `@discordjs/ws` `SessionInfo` |
+| `session_shard_count` | number | shard count from `@discordjs/ws` `SessionInfo` |
 | `updated_at` | number | epoch ms |
 
 Writes are throttled: `updateSessionInfo` fires on every dispatch (high rate),
@@ -301,8 +303,12 @@ sequence updates. The sequence is conservatively flushed final-time on
 SIGTERM. The 60 s Discord buffer is more than enough headroom for a worst-case
 write latency of a few seconds.
 
-On boot, the standby's `retrieveSessionInfo` returns the persisted row.
-`@discordjs/ws` issues `RESUME` (op 6) instead of `IDENTIFY` (op 2). If
+On boot, the standby's `retrieveSessionInfo` returns the persisted row,
+including `shardId` and `shardCount`. The pinned `@discordjs/ws@1.2.3`
+implementation requires the stored `shardCount` to equal the manager's shard
+count before it chooses the RESUME path. Legacy rows without the explicit shard
+columns derive both values from the existing `shard_id = "k:n"` primary key.
+`@discordjs/ws` then issues `RESUME` (op 6) instead of `IDENTIFY` (op 2). If
 Discord rejects the resume (session expired, version skew, etc.), `@discordjs/ws`
 falls back to `IDENTIFY` automatically — and `updateSessionInfo(shardId, null)`
 fires so we know the resume failed. Operationally we count both paths
@@ -562,6 +568,12 @@ its own next heartbeat fires (within 2 s) AND the TTL has elapsed
 Both are well below the original ~15 s+ ceiling and bound the
 degraded-mode window. Still degraded vs the push-handoff sub-second
 path, but predictable.
+
+The IDENTIFY-budget fatal path deliberately does not push a handoff: the task
+has not observed a successful `READY` or `RESUMED`, so it has no confirmed live
+session to transfer. It stops dispatch and exits, leaving the peer to acquire
+after the same 6 s lock TTL. The resulting takeover remains bounded by the
+same ~7 s best-case / ~9 s worst-case cold-fallback window above.
 
 **Standby on `POST /control/yours`:**
 

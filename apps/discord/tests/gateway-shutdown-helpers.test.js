@@ -936,6 +936,7 @@ describe('runPushHandoffShutdown', () => {
     // an open async-context.
     handoffResolvers.resolve({ transferred: true, pushAcked: true });
     await shutdown;
+    expect(deps.exit).toHaveBeenCalledTimes(1);
   });
 
   it('still forces exit when push-handoff timeout logging throws', async () => {

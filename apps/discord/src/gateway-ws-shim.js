@@ -390,10 +390,22 @@ function createGatewayWsShim({
         if (identifyBudgetFatalSignaled) {
           return waitForAbort(signal);
         }
-        // Delegate first: an aborted or failed throttle wait never
-        // reaches the IDENTIFY-send boundary and must not burn our
-        // process-local attempt allowance.
-        await delegate.waitForIdentify(shardId, signal);
+        // Delegate first for Discord's pacing. An abort suppresses upstream's
+        // IDENTIFY and consumes no attempt. Any other delegate rejection is
+        // swallowed by @discordjs/ws before it still sends IDENTIFY, so count
+        // that attempted grant instead of letting it bypass the hard cap.
+        try {
+          await delegate.waitForIdentify(shardId, signal);
+        } catch (error) {
+          if (signal?.aborted) {
+            throw abortReason(signal);
+          }
+          logBestEffort(
+            'warn',
+            'gateway-ws-shim: identify throttle delegate failed; counting attempted grant',
+            { errorName: error?.name, errorCode: error?.code },
+          );
+        }
         // Concurrent grants may both enter before the first one trips the
         // budget. Re-check after the awaited delegate so only the first grant
         // records and reports the terminal over-budget attempt.

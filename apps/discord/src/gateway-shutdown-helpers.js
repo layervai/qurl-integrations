@@ -333,11 +333,17 @@ async function runPushHandoffShutdown({
   clearHardExit = clearTimeout,
 }) {
   logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
+  let exited = false;
+  const exitOnce = (exitCode) => {
+    if (exited) return;
+    exited = true;
+    exit(exitCode);
+  };
   const hardExit = scheduleHardExit(() => {
     try {
       logger.error('PushHandoff shutdown timed out, forcing exit');
     } finally {
-      exit(forcedExitCode);
+      exitOnce(forcedExitCode);
     }
   }, ceilingMs);
   if (hardExit && typeof hardExit.unref === 'function') {
@@ -389,7 +395,7 @@ async function runPushHandoffShutdown({
   // wrappers) would observe a spurious second exit-code-1 ~12 s
   // later without this clear.
   clearHardExit(hardExit);
-  exit(handoffThrew ? forcedExitCode : code);
+  exitOnce(handoffThrew ? forcedExitCode : code);
 }
 
 module.exports = {
