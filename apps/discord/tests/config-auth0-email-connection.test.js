@@ -19,7 +19,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     });
   });
 
-  it.each(['email connection', 'email!', '.email', 'PLACEHOLDER'])(
+  it.each(['email connection', 'email!', '.email', 'PLACEHOLDER', 'a'.repeat(129)])(
     'warns and disables the connection pin for invalid value %p',
     (value) => {
       captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (config, warns) => {

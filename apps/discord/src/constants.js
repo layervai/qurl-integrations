@@ -222,9 +222,12 @@ const AUDIT_EVENTS = {
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
 
-  // Emitted after an OAuth-minted guild key is persisted. The Auth0 subject is
-  // represented only by a stable SHA-256 fingerprint, so operators can audit
-  // owner changes while #1366 is outstanding without logging the subject.
+  // Emitted after an OAuth-minted guild key is persisted. This is a forensic
+  // Logs Insights trail while #1366 is outstanding, not a metric; no Terraform
+  // filter is paired intentionally. The Auth0 subject is represented by a
+  // keyed, pseudonymous fingerprint that changes when its HMAC key rotates.
+  // All payload fields (guild_id, configured_by, and the fingerprint) are high
+  // cardinality and MUST NOT be promoted to CloudWatch metric dimensions.
   QURL_GUILD_KEY_CONFIGURED: 'qurl_guild_key_configured',
 
   // Emitted by gateway-health.js on every /health response that

@@ -224,11 +224,13 @@ function isValidAuth0DomainShape(d) {
 function normalizeAuth0EmailConnection(raw) {
   const value = (raw || '').trim();
   if (!value) return '';
-  if (value.toUpperCase() === 'PLACEHOLDER' || !/^[A-Za-z0-9_-]+$/.test(value)) {
+  if (value.length > 128
+      || value.toUpperCase() === 'PLACEHOLDER'
+      || !/^[A-Za-z0-9_-]+$/.test(value)) {
     // Keep the rest of the bot available and fall back to the explicitly
     // logged unpinned flow. A malformed optional setting should not take down
     // /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION=${JSON.stringify(raw)} rejected (must not be PLACEHOLDER and may use only letters, digits, underscores, and hyphens); leaving Auth0 connection unpinned.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION=${JSON.stringify(raw)} rejected (must be at most 128 characters, must not be PLACEHOLDER, and may use only letters, digits, underscores, and hyphens); leaving Auth0 connection unpinned.`);
     return '';
   }
   return value;

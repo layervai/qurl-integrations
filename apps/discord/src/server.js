@@ -217,8 +217,7 @@ function noStoreHeaders(req, res, next) {
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
-}
-if (config.isQurlOAuthConfigured) {
+} else {
   const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
   const auth0ConnectionMessage = auth0Connection
     ? `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`
@@ -241,6 +240,7 @@ app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
 }
+
 // Error handler (Express requires the 4-arg signature; `next` unused)
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

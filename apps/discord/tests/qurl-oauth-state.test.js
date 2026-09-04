@@ -13,11 +13,31 @@
 // tests/setup-env.js (cross-suite convention from PR #177 review on
 // env-var leakage); this suite reads process.env.OAUTH_STATE_SECRET
 // below when hand-signing forged states.
+delete process.env.QURL_OAUTH_STATE_SECRET;
 
 const crypto = require('crypto');
-const { signQurlOAuthState, verifyQurlOAuthState, STATE_TTL_SECONDS } = require('../src/utils/qurl-oauth-state');
+const {
+  signQurlOAuthState,
+  verifyQurlOAuthState,
+  fingerprintQurlAccountSubject,
+  STATE_TTL_SECONDS,
+} = require('../src/utils/qurl-oauth-state');
 
 describe('qurl-oauth-state', () => {
+  describe('qURL account subject fingerprint', () => {
+    it('returns a stable, domain-separated HMAC rather than the raw Auth0 subject', () => {
+      expect(fingerprintQurlAccountSubject('auth0|abc')).toBe(
+        '6a65c71a4b220e0d743fae6a0d6f2131ce58caf808d6828bad2c62df258a9364',
+      );
+      expect(fingerprintQurlAccountSubject('auth0|different'))
+        .not.toBe(fingerprintQurlAccountSubject('auth0|abc'));
+    });
+
+    it('rejects a missing Auth0 subject', () => {
+      expect(() => fingerprintQurlAccountSubject('')).toThrow(TypeError);
+    });
+  });
+
   describe('round-trip', () => {
     it('signs and verifies a valid state', () => {
       const state = signQurlOAuthState('guild-1', 'user-2');
