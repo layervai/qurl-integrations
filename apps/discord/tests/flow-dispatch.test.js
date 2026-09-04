@@ -38,6 +38,7 @@ const {
   flowIdForInteraction,
   handleFlowInteraction,
   SUPERSEDED_MSG,
+  UNSUPPORTED_CONTEXT_MSG,
 } = require('../src/flow-dispatch');
 
 function makeInteraction(overrides = {}) {
@@ -180,6 +181,44 @@ describe('handleFlowInteraction', () => {
   // unique prefix.
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it('rejects a component resumed from a DM before loading flow state', async () => {
+    const handler = jest.fn();
+    registerFlow('route_dm_component', { expectedStage: 'awaiting', handler });
+    const interaction = makeInteraction({
+      customId: 'route_dm_component',
+      guildId: null,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: UNSUPPORTED_CONTEXT_MSG,
+      components: [],
+    });
+  });
+
+  it('rejects a modal resumed from a user-only install inside a guild', async () => {
+    const handler = jest.fn();
+    registerFlow('route_user_install_modal', { expectedStage: 'awaiting', handler });
+    const interaction = makeInteraction({
+      customId: 'route_user_install_modal',
+      authorizingIntegrationOwners: { 1: 'user-123' },
+      isMessageComponent: () => false,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: UNSUPPORTED_CONTEXT_MSG,
+      ephemeral: true,
+    });
   });
 
   it('routes to the registered handler when stage matches', async () => {

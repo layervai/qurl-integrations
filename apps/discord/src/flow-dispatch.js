@@ -35,6 +35,7 @@ const { buildFlowId } = require('./flow-id');
 const { loadFlow } = require('./flow-state');
 const { SHARD_ID } = require('./config');
 const logger = require('./logger');
+const { ApplicationIntegrationType } = require('discord-api-types/v10');
 
 // Module-state routing table. Registered at the bottom of commands.js
 // (and future setup/send handler modules) via `registerFlow`. Module-
@@ -142,6 +143,22 @@ function flowIdForInteraction(interaction) {
 // module-level constant so the dispatcher test can assert on it
 // without re-stating wording.
 const SUPERSEDED_MSG = 'This action was superseded — run the command again.';
+const UNSUPPORTED_CONTEXT_MSG = 'This command only works with qURL installed in this server, not from DMs or a user install.';
+
+function isUserInstallOnlyInteraction(interaction) {
+  const owners = interaction.authorizingIntegrationOwners;
+  // Discord's raw mapping uses integration-type enum keys
+  // (0 = guild install, 1 = user install). Keep this check here so slash
+  // commands and resumed component/modal flows enforce the same boundary.
+  return Boolean(
+    owners?.[ApplicationIntegrationType.UserInstall]
+    && !owners?.[ApplicationIntegrationType.GuildInstall]
+  );
+}
+
+function isUnsupportedQurlContext(interaction) {
+  return !interaction.guildId || isUserInstallOnlyInteraction(interaction);
+}
 
 // Entry point — wired from index.js's interactionCreate listener.
 // Contract: returns a Promise that resolves once the dispatch is
@@ -166,6 +183,14 @@ async function handleFlowInteraction(interaction) {
     // user's interaction will time out client-side with Discord's
     // generic "interaction failed" notice.
     logger.debug('flow-dispatch: unknown customId, dropping', { customId });
+    return;
+  }
+
+  // Components and modal submits can outlive the slash-command deploy that
+  // created them. Apply the same guild-install boundary here before touching
+  // flow state so a stale DM/user-install flow cannot resume after rollout.
+  if (isUnsupportedQurlContext(interaction)) {
+    await supersededRoutingFailureReply(interaction, UNSUPPORTED_CONTEXT_MSG);
     return;
   }
 
@@ -254,14 +279,14 @@ async function handleFlowInteraction(interaction) {
 //     the user dismissed the source ephemeral between rendering and
 //     clicking; the interaction token is still live so a fresh reply
 //     is the right recovery.
-async function supersededRoutingFailureReply(interaction) {
+async function supersededRoutingFailureReply(interaction, message = SUPERSEDED_MSG) {
   // `isMessageComponent` is guaranteed to exist — `index.js` only
   // routes here when `isMessageComponent() || isModalSubmit()` is
   // true (interactionCreate listener), and discord.js declares both
   // methods on the base Interaction class.
   if (interaction.isMessageComponent() && !interaction.replied && !interaction.deferred) {
     try {
-      await interaction.update({ content: SUPERSEDED_MSG, components: [] });
+      await interaction.update({ content: message, components: [] });
       return;
     } catch (err) {
       logger.warn('flow-dispatch: update failed on routing failure, falling back to reply', {
@@ -273,7 +298,7 @@ async function supersededRoutingFailureReply(interaction) {
       // reply still has a valid token to spend.
     }
   }
-  await safeReply(interaction, SUPERSEDED_MSG);
+  await safeReply(interaction, message);
 }
 
 // Best-effort reply that swallows Discord errors. The dispatcher may
@@ -307,7 +332,9 @@ module.exports = {
   // path for the canonical consumer.
   safeReply,
   handleFlowInteraction,
+  isUnsupportedQurlContext,
   // Exported for tests so they can assert the supersede wording
   // without duplicating the string.
   SUPERSEDED_MSG,
+  UNSUPPORTED_CONTEXT_MSG,
 };

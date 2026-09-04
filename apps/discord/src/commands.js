@@ -56,7 +56,14 @@ const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
-const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
+const {
+  flowIdForInteraction,
+  registerFlow,
+  safeReply,
+  siblingMessageForStage,
+  isUnsupportedQurlContext,
+  UNSUPPORTED_CONTEXT_MSG,
+} = require('./flow-dispatch');
 const {
   searchPlaces,
   findPlaceFromText,
@@ -9088,16 +9095,6 @@ const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
 const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 
-function isUserInstallOnlyInteraction(interaction) {
-  const owners = interaction.authorizingIntegrationOwners;
-  // TODO(upstream-contract): discord.js exposes authorizing owners by the
-  // Discord integration-type enum values (0 = guild, 1 = user).
-  return Boolean(
-    owners?.[ApplicationIntegrationType.UserInstall]
-    && !owners?.[ApplicationIntegrationType.GuildInstall]
-  );
-}
-
 // Per Discord's contract, MUST respond within 3 s. Two-layer error
 // handling: the inner try catches Places I/O failures (ticks the
 // sampled SRE counter; that's its intent — "Places is degraded"); the
@@ -9119,7 +9116,7 @@ async function handleAutocomplete(interaction) {
     // deliver autocomplete while global registration changes propagate.
     // Without this guard the invalid interaction would burn the operator's
     // global GOOGLE_MAPS_API_KEY quota for a send that's about to fail.
-    if (!interaction.guildId || isUserInstallOnlyInteraction(interaction)) {
+    if (isUnsupportedQurlContext(interaction)) {
       return await interaction.respond([]);
     }
     const subcommand = interaction.options.getSubcommand(false);
@@ -9258,15 +9255,15 @@ async function handleCommand(interaction) {
   // bypass the guild-install product boundary during that window. A user-
   // installed command may still be invoked inside a guild, so guildId alone
   // is not sufficient; inspect Discord's authorizing-integration mapping too.
-  if (!interaction.guildId || isUserInstallOnlyInteraction(interaction)) {
+  if (isUnsupportedQurlContext(interaction)) {
     try {
       await interaction.reply({
-        content: 'This command only works with qURL installed in this server, not from DMs or a user install.',
+        content: UNSUPPORTED_CONTEXT_MSG,
         ephemeral: true,
       });
       emitInteractionMetric(false, 'unsupported_context');
     } catch (err) {
-      logger.warn('Failed to reject command outside a guild', {
+      logger.warn('Failed to reject command in unsupported context', {
         command: interaction.commandName, error: err.message,
       });
       emitInteractionMetric(false, isAckTimeoutError(err) ? 'ack_timeout' : 'reply_failed');

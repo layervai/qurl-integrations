@@ -309,6 +309,7 @@ describe('handleCommand — autocomplete edge cases', () => {
     // respond() call DOES fire.
     const interaction = makeInteraction({
       commandName: 'qurl',
+      guildId: 'guild-1',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
       options: {
@@ -319,6 +320,26 @@ describe('handleCommand — autocomplete edge cases', () => {
     });
     await handleCommand(interaction);
     expect(interaction.respond).toHaveBeenCalledWith([]);
+  });
+});
+
+describe('handleCommand — supported guild-install context', () => {
+  it('executes /qurl when the guild install authorized the interaction', async () => {
+    const qurlCommand = commands.find(c => c.data.name === 'qurl');
+    const realExecute = qurlCommand.execute;
+    qurlCommand.execute = jest.fn().mockResolvedValue(undefined);
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      guildId: 'guild-1',
+      authorizingIntegrationOwners: { 0: 'guild-1' },
+    });
+
+    try {
+      await handleCommand(interaction);
+      expect(qurlCommand.execute).toHaveBeenCalledWith(interaction);
+    } finally {
+      qurlCommand.execute = realExecute;
+    }
   });
 });
 
