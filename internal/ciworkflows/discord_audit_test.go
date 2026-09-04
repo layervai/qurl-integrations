@@ -66,7 +66,7 @@ func TestDiscordDependencyAuditContract(t *testing.T) {
 	}
 
 	dockerfilePath := filepath.Join(appPath, "Dockerfile")
-	dockerfile, err := os.ReadFile(dockerfilePath) //nolint:gosec // G304: fixed repo-owned path.
+	dockerfile, err := os.ReadFile(dockerfilePath) // #nosec G304 -- fixed checked-in path.
 	if err != nil {
 		t.Fatalf("read %s: %v", dockerfilePath, err)
 	}
