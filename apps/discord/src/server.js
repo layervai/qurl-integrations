@@ -233,8 +233,11 @@ if (!config.isQurlOAuthConfigured) {
     : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
   // Stable event metadata supports exact grep/filter matching while the
   // human-readable message remains self-sufficient if metadata is flattened.
-  const logConnectionPolicy = auth0Connection ? logger.info : logger.warn;
-  logConnectionPolicy(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
+  if (auth0Connection) {
+    logger.info(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
+  } else {
+    logger.warn(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
+  }
 }
 
 // Stage-2 Discord install flow. /oauth/discord/install creates the

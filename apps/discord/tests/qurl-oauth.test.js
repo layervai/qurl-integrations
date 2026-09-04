@@ -68,6 +68,7 @@ jest.mock('../src/utils/auth0-jwks', () => ({
 const request = require('supertest');
 const crypto = require('crypto');
 const { app } = require('../src/server');
+const config = require('../src/config');
 const db = require('../src/store');
 const discord = require('../src/discord');
 const logger = require('../src/logger');
@@ -527,6 +528,63 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
       expect(res.text).toMatch(/<dt>qURL account<\/dt>\s*<dd>alice@layerv\.test<\/dd>/);
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_abc1<\/dd>/);
+    });
+
+    it('degrades audit fingerprint failures without breaking a successful setup', async () => {
+      const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const configuredStateSecret = config.QURL_OAUTH_STATE_SECRET;
+      verifyAuth0IdToken.mockImplementationOnce(async () => {
+        // State has already verified when id_token verification runs. Break
+        // the lazy secret resolver only for the later audit computation.
+        config.QURL_OAUTH_STATE_SECRET = 'short';
+        return {
+          ok: true,
+          payload: { email: 'alice@layerv.test', sub: 'auth0|abc' },
+        };
+      });
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'verified.jwt.sig' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({
+            data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' },
+          }),
+        });
+
+      let res;
+      try {
+        res = await request(app).get(
+          `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+        ).set('Cookie', cookieFor(state));
+      } finally {
+        if (configuredStateSecret === undefined) {
+          delete config.QURL_OAUTH_STATE_SECRET;
+        } else {
+          config.QURL_OAUTH_STATE_SECRET = configuredStateSecret;
+        }
+      }
+
+      expect(res.status).toBe(200);
+      expect(db.setGuildApiKey).toHaveBeenCalledWith(
+        'guild-1',
+        'lv_live_abc',
+        'admin-2',
+      );
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        expect.objectContaining({
+          qurl_account_subject_fingerprint: null,
+          qurl_account_fingerprint_key_epoch: null,
+        }),
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        'qURL OAuth audit fingerprint unavailable (setup continues)',
+        expect.objectContaining({ guildId: 'guild-1' }),
+      );
     });
 
     it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {

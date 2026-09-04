@@ -158,6 +158,8 @@ describe('oauth-state createStateSigner', () => {
         .toBe(hmacHex(derivedKey, 'known-data'));
       expect(signer.signDerived('audit:v1', 'known-data'))
         .not.toBe(signer.sign('known-data'));
+      expect(signer.signDerived('audit:v2', 'known-data'))
+        .not.toBe(signer.signDerived('audit:v1', 'known-data'));
     });
   });
 
