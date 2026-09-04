@@ -1,13 +1,101 @@
 package ciworkflows
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// TestDiscordDependencyAuditContract keeps dependency installation separate
+// from the one explicit, production-only audit gate. npm ci enables its own
+// registry audit by default; leaving that enabled duplicates the
+// network-dependent request and can stall both the test job and image build
+// before the intentional gate reports a useful result.
+//
+// The audit count covers direct shell invocations of npm audit and the
+// repository's Node wrapper. It does not infer audits hidden behind package
+// scripts, npx commands, or uses actions.
+func TestDiscordDependencyAuditContract(t *testing.T) {
+	t.Parallel()
+
+	spec := requiredWorkflowSpecByName(t, "discord")
+	appPath := filepath.Join("..", "..", "apps", spec.name)
+	workflow := readWorkflow(t, spec.path)
+	shellContinuation := regexp.MustCompile(`\\\r?\n[ \t]*`)
+	installCommand := regexp.MustCompile(`(?m)(?:^[ \t]*|(?:&&|\|\||;)[ \t]*)npm[ \t]+(ci|install|i)\b[^&|;\r\n]*`)
+	auditCommand := regexp.MustCompile(`(?m)(?:^[ \t]*|(?:&&|\|\||;)[ \t]*)(?:npm[ \t]+audit\b|node[ \t]+scripts/audit-production-dependencies\.js\b)[^&|;\r\n]*`)
+
+	const auditStepName = "Audit dependencies"
+	var audit *step
+	installCount := 0
+	auditGateCount := 0
+	for jobID, job := range workflow.Jobs {
+		for index := range job.Steps {
+			current := &job.Steps[index]
+			logicalRun := shellContinuation.ReplaceAllString(current.Run, " ")
+			installs := installCommand.FindAllStringSubmatch(logicalRun, -1)
+			location := fmt.Sprintf("%s job %q step %q", spec.path, jobID, current.Name)
+			installCount += checkLockfileInstalls(t, location, installs)
+			auditGateCount += len(auditCommand.FindAllString(logicalRun, -1))
+			if current.Name == auditStepName {
+				if audit != nil {
+					t.Fatalf("%s has more than one %q step", spec.path, auditStepName)
+				}
+				audit = current
+			}
+		}
+	}
+	if installCount == 0 {
+		t.Fatalf("%s has no npm dependency-install commands", spec.path)
+	}
+	if auditGateCount != 1 {
+		t.Errorf("Discord workflow explicit audit gates = %d, want exactly one", auditGateCount)
+	}
+
+	const explicitAudit = "node scripts/audit-production-dependencies.js"
+	if audit == nil {
+		t.Fatalf("%s is missing the %q step", spec.path, auditStepName)
+	}
+	if strings.TrimSpace(audit.Run) != explicitAudit {
+		t.Errorf("Discord workflow explicit audit = %q, want %q", audit.Run, explicitAudit)
+	}
+
+	dockerfilePath := filepath.Join(appPath, "Dockerfile")
+	dockerfile, err := os.ReadFile(dockerfilePath) //nolint:gosec // G304: fixed repo-owned path.
+	if err != nil {
+		t.Fatalf("read %s: %v", dockerfilePath, err)
+	}
+	logicalDockerfile := shellContinuation.ReplaceAllString(string(dockerfile), " ")
+	runInstructions := regexp.MustCompile(`(?im)^[ \t]*RUN\b[^\r\n]*`).FindAllString(logicalDockerfile, -1)
+	dockerInstallCommand := regexp.MustCompile(`(?:^[ \t]*(?i:RUN)(?:[ \t]+--[^ \t]+)*[ \t]+|(?:&&|\|\||;)[ \t]*)npm[ \t]+(ci|install|i)\b[^&|;\r\n]*`)
+	dockerInstallCount := 0
+	for _, instruction := range runInstructions {
+		installs := dockerInstallCommand.FindAllStringSubmatch(instruction, -1)
+		dockerInstallCount += checkLockfileInstalls(t, "Discord Dockerfile", installs)
+	}
+	if dockerInstallCount == 0 {
+		t.Fatalf("Discord Dockerfile has no npm dependency-install commands")
+	}
+}
+
+func checkLockfileInstalls(t *testing.T, location string, installs [][]string) int {
+	t.Helper()
+
+	for _, install := range installs {
+		if install[1] != "ci" {
+			t.Errorf("%s uses npm %s, want npm ci: %q", location, install[1], install[0])
+		}
+		if !slices.Contains(strings.Fields(install[0]), "--no-audit") {
+			t.Errorf("%s install still runs npm's implicit audit: %q", location, install[0])
+		}
+	}
+	return len(installs)
+}
 
 func TestDiscordAuditRetryBudgetFitsStepTimeout(t *testing.T) {
 	t.Parallel()

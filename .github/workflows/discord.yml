@@ -96,7 +96,8 @@ jobs:
 
       - name: Install dependencies
         # The next step is the sole dependency audit gate; do not duplicate its
-        # registry request inside installation.
+        # registry request inside installation. Funding output stays enabled;
+        # unlike the audit, it adds no registry request.
         run: npm ci --no-audit
 
       - name: Audit dependencies
