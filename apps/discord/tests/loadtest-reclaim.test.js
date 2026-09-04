@@ -266,6 +266,7 @@ describe('recordResource', () => {
     ['empty', ''],
     ['non-string', 12345],
     ['malformed', 'not a valid id!'],
+    ['overlong', 'a'.repeat(257)],
   ])('warns and records nothing for a %s resource_id', (_label, value) => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
@@ -543,6 +544,18 @@ describe('reclaim', () => {
 
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
     expect(readLedger(ledger)).toEqual([]);
+  });
+
+  it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
+    const ledger = tempLedger(line('r_legacy42'));
+    deleteLink.mockRejectedValue(
+      new Error('qURL API DELETE /resources/r_legacy42 failed (400)'),
+    );
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['r_legacy42']);
   });
 
   it('revokes a repeated id once', async () => {

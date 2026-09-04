@@ -7,6 +7,7 @@ const {
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
+const { validateResourceId } = require('./resource-id');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -15,7 +16,8 @@ const { isPrivateHost } = require('./utils/private-host');
  * qURL API client for the bot's link create / status / revoke calls, backed by
  * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
  * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
- * uses the same SDK. This module adds only the concerns the SDK doesn't own:
+ * uses the same SDK. Create and status use `/qurls`; whole-resource revoke
+ * uses `/resources`. This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
@@ -217,19 +219,6 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 
   logger.info('Created one-time qURL', { resource_id: result.resource_id, expires_in: expiresIn });
   return result;
-}
-
-// Bot-side charset guard, independent of the SDK client: reject characters
-// outside the current public-ID alphabets with a stable message before any
-// network work. Canonical public keys use unpadded base64url and CRIDs use
-// lowercase unpadded base32, both subsets of [\w-]; qurl-service owns their
-// lengths and semantics.
-// TODO(upstream-contract): Keep this alphabet superset aligned with the
-// ResourceId schema in qurl-service's api/openapi.yaml.
-function validateResourceId(resourceId) {
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
 }
 
 async function deleteLink(resourceId, apiKey) {

@@ -2,6 +2,7 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
+const { validateResourceId } = require('./resource-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -406,9 +407,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  */
 async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null, guildId } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
+  validateResourceId(resourceId);
   // Bound `n` defensively — callers in this codebase already cap at 10
   // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
   // so validate at the API boundary. Negative or non-integer values would

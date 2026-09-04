@@ -163,6 +163,7 @@ if (require.main === module && fs.existsSync(envFile)) {
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
+const { hasSafeResourceIdShape } = require('../src/resource-id');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -959,34 +960,10 @@ async function trackCreate(fn) {
 // deleting the parent file resource revokes every qURL minted against it
 // (shared/client/client.go documents the cascade).
 function recordResource(resourceId, kind) {
-  // The same charset guard deleteLink applies bot-side (validateResourceId,
-  // src/qurl.js), not a stricter one. A revision of this check also required
-  // qurl-service's `r_` prefix, on the reasoning that an id passing charset
-  // but failing the SDK's semantic check would be swept as a failure forever.
-  // That reasoning is sound but the check was wrong here: `validateResourceId`
-  // is charset-only *by design*, deferring the prefix to the SDK, and `res-1`
-  // is this repo's fixture convention for a resource id across eight test
-  // files. Being stricter than the codebase's own guard rejected ids the rest
-  // of it treats as valid, and warned on ordinary fixtures.
-  //
-  // The residual risk is accepted: a charset-clean non-`r_` id can only come
-  // from the server, which does not produce one, and if it ever did the
-  // repeated failure is visible in the sweep's cause tally.
-  if (!resourceId || typeof resourceId !== 'string' || !/^[\w-]+$/.test(resourceId)) {
-    // Loud, but deliberately NOT fatal to the run.
-    //
-    // An earlier revision set `stopping` here, on the reasoning that whatever
-    // produced one unusable id produces another every round. The reasoning
-    // holds; the mechanism does not. It couples a diagnostic to destructive
-    // control flow — one malformed id silently truncates the round mid-batch —
-    // and `res-1` is this repo's fixture convention for a resource id across
-    // eight test files, so any caller or suite that stubs an upload trips it.
-    // Merging #1173's re-upload leg surfaced exactly that: nine accounting
-    // tests failed because the round stopped after its first batch.
-    //
-    // In production the id is always `r_`-shaped, so this branch is
-    // effectively unreachable and stopping bought nothing real. The warning is
-    // what carries the diagnostic.
+  // Share deleteLink's transport guard so every recorded ID is sweepable.
+  // Warn rather than stopping: a malformed upload response is worth surfacing,
+  // but must not silently truncate the rest of a load-test round.
+  if (!hasSafeResourceIdShape(resourceId)) {
     console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
     return;
   }

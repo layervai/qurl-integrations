@@ -11,6 +11,8 @@
  * `.text()`. `apiOk` / `apiError` build SDK-parseable doubles.
  */
 
+const { PUBLIC_KEY_RESOURCE_ID } = require('./helpers/qurl-fixtures');
+
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -20,7 +22,6 @@ jest.mock('../src/logger', () => ({
 }));
 
 const originalFetch = globalThis.fetch;
-const { PUBLIC_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 
 // Success Response double. The SDK unwraps the `{ data }` envelope, so wrap the
 // payload the same way the API does. 204 callers pass `data: undefined`.
@@ -307,7 +308,7 @@ describe('qURL client — retry + audit behavior', () => {
     globalThis.fetch = jest.fn()
       .mockResolvedValueOnce(apiError(503))
       .mockResolvedValueOnce(apiOk(204, undefined));
-    await qurl.deleteLink(PUBLIC_RESOURCE_ID);
+    await qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 });

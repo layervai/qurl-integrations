@@ -6,11 +6,6 @@
  * (which exercises the qurl_sends + qurl_send_configs DDB tables).
  */
 
-const {
-  PUBLIC_RESOURCE_ID,
-  TEST_RESOURCE_CRID,
-} = require('./helpers/qurl-fixtures');
-
 // ---------------------------------------------------------------------------
 // Mocks — set up BEFORE requiring modules under test
 // ---------------------------------------------------------------------------
@@ -151,6 +146,10 @@ Readable.fromWeb = jest.fn(() => new Readable({ read() { this.push(null); } }));
 
 // Global fetch mock (node 18+ built-in)
 const originalFetch = globalThis.fetch;
+const {
+  PUBLIC_KEY_RESOURCE_ID,
+  CRID_RESOURCE_ID,
+} = require('./helpers/qurl-fixtures');
 
 // ---------------------------------------------------------------------------
 // Now require modules under test
@@ -628,8 +627,8 @@ describe('qURL client', () => {
 
   describe('deleteLink', () => {
     it.each([
-      ['public-key resource ID', PUBLIC_RESOURCE_ID],
-      ['CRID', TEST_RESOURCE_CRID],
+      ['public-key resource ID', PUBLIC_KEY_RESOURCE_ID],
+      ['CRID', CRID_RESOURCE_ID],
     ])('revokes a %s through DELETE /v1/resources/{id}', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: true,
@@ -657,7 +656,7 @@ describe('qURL client', () => {
         }),
       });
 
-      await expect(qurl.deleteLink(TEST_RESOURCE_CRID)).rejects.toThrow(/401/);
+      await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       expect(logger.audit).toHaveBeenCalledWith(
         AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
@@ -665,20 +664,34 @@ describe('qURL client', () => {
           dependency: 'qurl_service',
           status: 401,
           method: 'DELETE',
-          path: `/resources/${TEST_RESOURCE_CRID}`,
+          path: `/resources/${CRID_RESOURCE_ID}`,
         }),
       );
     });
 
-    it('throws on API error', async () => {
+    it('sends a legacy private ID to the service for its 400 rejection', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
-        status: 404,
+        status: 400,
         headers: { get: () => null },
-        json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404', detail: 'qURL not found' } }),
+        json: async () => ({ error: { status: 400, code: 'invalid_resource_id', title: 'HTTP 400' } }),
       });
 
-      await expect(qurl.deleteLink('r_badid1234567')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
+      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed.*400/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = globalThis.fetch.mock.calls[0];
+      expect(url).toBe('https://api.test.local/v1/resources/r_legacy42');
+      expect(opts.method).toBe('DELETE');
+    });
+
+    it.each([
+      ['path separators', '../qurls/x'],
+      ['an overlong value', 'a'.repeat(257)],
+    ])('rejects %s before network work', async (_kind, resourceId) => {
+      globalThis.fetch = jest.fn();
+
+      await expect(qurl.deleteLink(resourceId)).rejects.toThrow(/Invalid resource ID format/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
     });
   });
 });
@@ -800,6 +813,14 @@ describe('Connector client', () => {
   });
 
   describe('mintLinks', () => {
+    it('rejects an overlong resource ID before minting', async () => {
+      globalThis.fetch = jest.fn();
+
+      await expect(connector.mintLinks('a'.repeat(257), { expiresAt: 'date', n: 1 }))
+        .rejects.toThrow(/Invalid resource ID format/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it('sends POST with correct body and returns links', async () => {
       const mockLinks = [
         { qurl_link: 'https://q.test/1' },
