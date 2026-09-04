@@ -16,6 +16,7 @@ const { isPrivateHost } = require('./utils/private-host');
  * the @layervai/qurl SDK where it exposes the required route. This remains the
  * command-side client consolidated in #830; the small GET /v1/me shim below
  * uses fetch because SDK 0.3.x has no identity method.
+ *
  * This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
@@ -23,7 +24,8 @@ const { isPrivateHost } = require('./utils/private-host');
  *     assertNotPrivateAfterResolve), which are client-independent.
  */
 
-// Per-attempt timeout + SDK retry budget. Pins the SDK's resilience to the budget
+// Request timeout (per-attempt for the SDK paths, whole-request for the
+// no-retry getIdentity shim) + SDK retry budget. Pins the SDK's resilience to the budget
 // the hand-rolled client documented before this consolidation: "3 attempts
 // total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
 // attempts; `timeout` is the per-attempt deadline (matching the old
@@ -137,9 +139,13 @@ async function getIdentity(apiKey) {
     throw new Error('Guild qURL API key is not configured');
   }
 
-  // Deliberately make one attempt: this interactive verification reports
-  // transient failures as unavailable instead of copying the SDK's private
-  // retry policy. Replace this shim when the SDK exposes GET /v1/me.
+  // One attempt only: an interactive check surfaces a transient failure to the
+  // admin rather than spending the 3-attempt budget MAX_RETRIES pins for the
+  // SDK paths. Replace this shim when the SDK exposes GET /v1/me.
+  //
+  // Unlike makeClient, there is deliberately NO `apiKey || config.QURL_API_KEY`
+  // fallback: a guild status check must validate the guild's own stored key,
+  // never the bot's, or a guild with no key would read as configured.
   return callQurl('GET', '/me', async () => {
     const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
     const response = await globalThis.fetch(`${endpoint}/v1/me`, {

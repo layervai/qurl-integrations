@@ -8729,9 +8729,10 @@ const commands = [
       }
 
       // /qurl status — verify the stored key. Gate behind ManageGuild because
-      // the response includes the key's non-secret prefix and granted scopes.
-      // This on-demand admin check relies on Discord's interaction rate limit
-      // rather than sharing the mutation-oriented send/detect cooldowns.
+      // the response discloses the key's granted scopes and setup provenance,
+      // and each run spends an upstream qURL API call. This on-demand admin
+      // check relies on Discord's interaction rate limit rather than sharing
+      // the mutation-oriented send/detect cooldowns.
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
@@ -8800,6 +8801,8 @@ const commands = [
               guild_id: interaction.guildId,
               status,
             });
+            // Same 401/403 → "invalid key" policy the legacy setup validator
+            // applies at the top of this file; #1370 tracks consolidating them.
             if (status === 401 || status === 403) {
               return interaction.editReply({
                 content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
@@ -8809,23 +8812,29 @@ const commands = [
             }
             return interaction.editReply({
               content: '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
-                + 'Please try `/qurl status` again later.\n'
+                + 'Please try `/qurl status` again later.\n\n'
                 + configurationDetails,
             });
           }
 
           // Inline-code content renders backslashes literally, so strip
-          // backticks instead of applying general Markdown escaping. The
-          // plain display-name sanitizer also strips controls and caps each
-          // value at 64 codepoints; ten scopes keep the whole reply below
-          // Discord's 2,000-character content limit.
+          // backticks instead of applying general Markdown escaping. The plain
+          // display-name sanitizer also strips controls and caps each value at
+          // 64 codepoints (≤128 UTF-16 units, which is what discord.js length-
+          // checks); STATUS_SCOPE_DISPLAY_MAX scopes plus the admin-left notice
+          // keep the reply under Discord's 2,000-character content limit with
+          // ~200 to spare.
+          const STATUS_SCOPE_DISPLAY_MAX = 10;
           const sanitizeIdentityValue = (value) =>
             sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
-          const keyPrefix = sanitizeIdentityValue(identity.api_key.key_prefix) || 'unavailable';
-          const scopeValues = identity.api_key.scopes.slice(0, 10)
+          const { key_prefix: rawKeyPrefix, scopes: allScopes } = identity.api_key;
+          // 'unknown' rather than 'unavailable' — the latter is the copy for a
+          // missing stored key, a different state a few lines above.
+          const keyPrefix = sanitizeIdentityValue(rawKeyPrefix) || 'unknown';
+          const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
             .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
-          const omittedScopeCount = identity.api_key.scopes.length - scopeValues.length;
-          const scopes = (scopeValues.join(', ') || '_none_') +
+          const omittedScopeCount = allScopes.length - shownScopes.length;
+          const scopes = (shownScopes.join(', ') || '_none_') +
             (omittedScopeCount > 0 ? `, _+${omittedScopeCount} more_` : '');
           return interaction.editReply({
             content: `✅ **qURL is configured**\n` +

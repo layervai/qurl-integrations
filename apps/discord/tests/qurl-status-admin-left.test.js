@@ -183,6 +183,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toMatch(/stored qURL configuration found/i);
     expect(replyContent).not.toMatch(/revoked|invalid/i);
     expect(replyContent).not.toContain(STORED_KEY);
+    expect(replyContent).toContain('again later.\n\nConfigured by:');
     expect(replyContent).toContain('Configured by: <@admin-original>');
     expect(replyContent).toContain('Last updated: 2026-01-01T00:00:00Z');
     expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
