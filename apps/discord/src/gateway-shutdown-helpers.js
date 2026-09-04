@@ -179,7 +179,9 @@ async function runGracefulShutdown({
 // Gateway-fatal adapter: arm graceful shutdown's hard-exit backstop before
 // asking the connection watchdog to stop. A fatal can arrive from inside
 // watchdog.manager.connect(), so its stop is deliberately best-effort and
-// non-blocking; graceful teardown awaits the same idempotent stop later.
+// non-blocking. This helper also owns the fatal-path teardown option: graceful
+// teardown re-invokes the same idempotent stop, but does not await the blocked
+// connect before flushing the resumable session.
 function runGatewayFatalShutdown({
   gracefulShutdown,
   getConnectionWatchdog,
@@ -201,7 +203,7 @@ function runGatewayFatalShutdown({
   }, fatalCeilingMs);
   if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
 
-  const shutdown = gracefulShutdown(1);
+  const shutdown = gracefulShutdown(1, { awaitConnectionWatchdog: false });
   const connectionWatchdog = getConnectionWatchdog();
   if (!connectionWatchdog) return shutdown;
 

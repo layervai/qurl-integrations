@@ -794,7 +794,7 @@ async function gracefulShutdown(code = 0, { awaitConnectionWatchdog = true } = {
 
 function gatewayFatalShutdown() {
   return runGatewayFatalShutdown({
-    gracefulShutdown: (code) => gracefulShutdown(code, { awaitConnectionWatchdog: false }),
+    gracefulShutdown,
     getConnectionWatchdog: () => connectionWatchdog,
     logger,
   });

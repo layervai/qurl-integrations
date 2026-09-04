@@ -218,7 +218,9 @@ describe('runGatewayFatalShutdown', () => {
 
     expect(result).toBe(shutdownResult);
     expect(order).toEqual(['fatal-timer', 'shutdown', 'watchdog-stop']);
-    expect(gracefulShutdown).toHaveBeenCalledWith(1);
+    expect(gracefulShutdown).toHaveBeenCalledWith(1, {
+      awaitConnectionWatchdog: false,
+    });
     expect(forceExit).toEqual(expect.any(Function));
     await result;
   });
@@ -278,7 +280,9 @@ describe('runGatewayFatalShutdown', () => {
       exit: jest.fn(),
     })).resolves.toBeUndefined();
 
-    expect(gracefulShutdown).toHaveBeenCalledWith(1);
+    expect(gracefulShutdown).toHaveBeenCalledWith(1, {
+      awaitConnectionWatchdog: false,
+    });
   });
 
   it.each([
