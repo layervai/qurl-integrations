@@ -2631,6 +2631,10 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Fatal(err)
 	}
 	routingID := "c-" + strings.Repeat("a", 52)
+	resourceKey := srv.Key
+	const connectorID = "lifecycle-reusable"
+	var firstNonce string
+	creates, continuations := 0, 0
 	frpsPort := reserveCmdTCPPort(t)
 	vhostPort := reserveCmdTCPPort(t)
 	recorder := newCmdProxyRecorder(t)
@@ -2666,19 +2670,63 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 			"desired_state": "on", "serving_epoch": 1, "connection_state": "serving",
 		}, nil)
 	})
-	resolver := func(_ context.Context, _ *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
+	resolver := func(ctx context.Context, cfg *connectorshare.NativeRuntimeConfig, resolveID func(string) (string, error)) (*agent.ResolvedResource, error) {
 		id, err := resolveID("agent-journey")
 		if err != nil {
 			return nil, err
 		}
-		found := false
+		if id != connectorID {
+			t.Fatalf("explicit Connector ID changed to %q, want %q", id, connectorID)
+		}
+		// Keep the real durable request/commit boundary while the assigned cell
+		// is replaced by this fixture. A retired identity must never be sent as
+		// the continuity assertion for the replacement resource.
+		store, err := connectorstate.Open(cfg.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if err := store.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		tx, err := store.BeginConnectorResource(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if err := tx.Close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		request := tx.Request()
+		found := request.ExpectedResourceID != ""
+		if found {
+			continuations++
+			if request.ExpectedResourceID != resourceKey.ResourceID {
+				t.Fatalf("publish continued the wrong resource: %q", request.ExpectedResourceID)
+			}
+		} else {
+			creates++
+			if creates == 1 {
+				firstNonce = request.RequestNonce
+			} else if request.RequestNonce == firstNonce {
+				t.Fatal("replacement reused the deleted resource request nonce")
+			}
+		}
+		if err := tx.Commit(&connectorstate.ConnectorResourceBinding{
+			ConnectorID: id, ResourceID: resourceKey.ResourceID, CRID: resourceKey.CRID,
+			ConnectorRoutingID: routingID, KnockResourceID: "q_catalog_key",
+		}); err != nil {
+			return nil, err
+		}
 		return &agent.ResolvedResource{Resource: &qurl.ConnectorResource{
-			ResourceID: srv.Key.ResourceID, CRID: srv.Key.CRID, Slug: id,
+			ResourceID: resourceKey.ResourceID, CRID: resourceKey.CRID, Slug: id,
 			ConnectorRoutingID: routingID, KnockResourceID: "q_catalog_key",
 		}, FoundExisting: &found}, nil
 	}
 	res := runCLI(t, &runOpts{
-		args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL},
+		args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
 		env:           map[string]string{"QURL_API_KEY": testAPIKey},
 		shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
 		localResource: resolver, sharingWaitLimit: 10 * time.Second,
@@ -2690,12 +2738,12 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		t.Fatal("real FRPS observed no NewProxy")
 	}
 	publicURL := "http://127.0.0.1:" + strconv.Itoa(vhostPort)
-	requestPath := func(path string, timeout time.Duration) (string, error) {
+	requestPath := func(route, path string, timeout time.Duration) (string, error) {
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, publicURL+path, http.NoBody)
 		if err != nil {
 			return "", err
 		}
-		req.Host = routingID + ".hermetic.test"
+		req.Host = route + ".hermetic.test"
 		response, requestErr := (&http.Client{Timeout: timeout}).Do(req)
 		if requestErr != nil {
 			return "", requestErr
@@ -2705,7 +2753,7 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 		return string(body), readErr
 	}
 	requestRoute := func() bool {
-		body, err := requestPath("/", 300*time.Millisecond)
+		body, err := requestPath(routingID, "/", 300*time.Millisecond)
 		return err == nil && body == echoBody
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -2726,7 +2774,7 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	slowDone := make(chan slowResult, 1)
 	go func() {
-		body, err := requestPath("/slow", 8*time.Second)
+		body, err := requestPath(routingID, "/slow", 8*time.Second)
 		slowDone <- slowResult{body: body, err: err}
 	}()
 	select {
@@ -2823,6 +2871,73 @@ func TestPublishDaemonLifecycleServesRealHTTPAndStopsCleanly(t *testing.T) {
 	}
 	if running := daemon.manager.Running(); len(running) != 0 {
 		t.Fatalf("stop left daemon sessions running: %#v", running)
+	}
+
+	deleteResource := func(crid string) {
+		t.Helper()
+		deleted := runCLI(t, &runOpts{
+			args:          []string{"--endpoint", srv.URL, "delete", crid, "--yes"},
+			env:           map[string]string{"QURL_API_KEY": testAPIKey},
+			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+		})
+		if deleted.code != 0 {
+			t.Fatalf("delete result code=%d stderr=%s", deleted.code, deleted.stderr.String())
+		}
+	}
+	deleteResource(srv.Key.CRID)
+	assertLocalConnectorResourceRetired(t, stateDir, connectorID)
+
+	oldRoutingID := routingID
+	resourceKey = apitest.GenerateResourceKey(t)
+	routingDigest := sha256.Sum256(resourceKey.DER)
+	routingID = "c-" + base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding).EncodeToString(routingDigest[:])
+	replacementPath := "/v1/resources/" + resourceKey.CRID + "/sharing"
+	srv.Script(http.MethodGet, replacementPath, func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id": resourceKey.ResourceID, "crid": resourceKey.CRID,
+			"desired_state": "off", "serving_epoch": 0, "connection_state": "stopped",
+		}, nil)
+	})
+	servingReplacement := func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"resource_id": resourceKey.ResourceID, "crid": resourceKey.CRID,
+			"desired_state": "on", "serving_epoch": 1, "connection_state": "serving",
+		}, nil)
+	}
+	srv.ScriptRepeat(http.MethodPut, replacementPath, 2, servingReplacement)
+	srv.ScriptRepeat(http.MethodGet, replacementPath, 3, servingReplacement)
+	for range 2 {
+		republished := runCLI(t, &runOpts{
+			args:          []string{"--endpoint", srv.URL, "--quiet", "publish", echo.URL, "--id", connectorID},
+			env:           map[string]string{"QURL_API_KEY": testAPIKey},
+			shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+			localResource: resolver, sharingWaitLimit: 10 * time.Second,
+		})
+		if republished.code != 0 || republished.stdout.String() != resourceKey.CRID+"\n" {
+			t.Fatalf("same-name publish result code=%d stdout=%q stderr=%s", republished.code, republished.stdout.String(), republished.stderr.String())
+		}
+	}
+	if creates != 2 || continuations != 1 {
+		t.Fatalf("native resource requests created=%d continued=%d, want 2/1", creates, continuations)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for !requestRoute() {
+		if time.Now().After(deadline) {
+			t.Fatal("same-name replacement did not serve local HTTP bytes")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if body, err := requestPath(oldRoutingID, "/", time.Second); err == nil && body == echoBody {
+		t.Fatal("deleted resource route served the same-name replacement")
+	}
+	// An old-CRID delete retry must not retire or remove the replacement that
+	// now owns the same name.
+	deleteResource(srv.Key.CRID)
+	if _, err := registry.Get(context.Background(), resourceKey.CRID); err != nil {
+		t.Fatalf("old-CRID delete removed replacement registry row: %v", err)
+	}
+	if !requestRoute() {
+		t.Fatal("old-CRID delete interrupted the replacement route")
 	}
 }
 

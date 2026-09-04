@@ -91,7 +91,8 @@ var (
 	ErrConnectorResourceVerification = errors.New("connector resource response failed durable-state verification")
 	// ErrConnectorResourceRetired prevents a deliberately deleted Connector ID
 	// from being sent again as an implicit resource-reclamation request. The
-	// refusal is a bounded local memory (connectorResourcesMaxRetired), not a
+	// refusal can be cleared by explicit PrepareConnectorResourceReuse. It is
+	// a bounded local memory (connectorResourcesMaxRetired), not a
 	// service-side tombstone: a forgotten retirement falls back to the
 	// service's own behavior for a deleted Connector ID, which is to mint a
 	// fresh resource under it. See pruneRetired for what else forgetting costs.
@@ -254,6 +255,69 @@ func (s *Store) BeginConnectorResource(ctx context.Context, connectorID string) 
 	}, nil
 }
 
+// PrepareConnectorResourceReuse authorizes an explicitly selected Connector ID
+// to be used after a completed deletion. It atomically replaces the retired
+// binding with a fresh pending request, without asserting the deleted resource
+// identity. The service's normal create path supplies the new resource identity;
+// deleting this local binding does not restore the deleted resource or its links.
+// Live or absent IDs are unchanged, including any exact request pending there.
+// Therefore retries and concurrent callers keep the first prepared nonce.
+// Retirement pruning removes the old binding with its marker, so a forgotten
+// retirement is already an absent ID and needs no preparation.
+// Explicitly reusing a generated default ID also makes it the default again.
+// That intent survives dispatch failures so retries can finish the saved request.
+func (s *Store) PrepareConnectorResourceReuse(ctx context.Context, connectorID string) (retErr error) {
+	if s == nil {
+		return fmt.Errorf("%w: Connector state store is not open", qurl.ErrAgentStateContinuity)
+	}
+	if err := validateConnectorID(connectorID); err != nil {
+		return err
+	}
+	if ctx == nil {
+		return errors.New("prepare Connector resource reuse: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateContinuityLocked(); err != nil {
+		return err
+	}
+	unlock, err := acquireConnectorResourcesLock(ctx, s.dir)
+	if err != nil {
+		return fmt.Errorf("lock Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, unlock()) }()
+	current, err := loadConnectorResources(s.dir)
+	if err != nil {
+		return err
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return err
+	}
+	if !current.Retired[connectorID] {
+		return nil
+	}
+	request, err := qurl.NewNativeConnectorResourceRequest(connectorID, "")
+	if err != nil {
+		return fmt.Errorf("prepare native Connector resource reuse request: %w", err)
+	}
+	delete(current.Bindings, connectorID)
+	delete(current.Retired, connectorID)
+	current.Pending[connectorID] = PendingConnectorResourceRequest{
+		ConnectorID: connectorID, RequestNonce: request.RequestNonce,
+	}
+	current.prunePending(connectorID)
+	if err := writeConnectorResources(s.dir, current); err != nil {
+		return fmt.Errorf("persist native Connector resource reuse request before dispatch: %w", err)
+	}
+	if err := s.validateContinuityLocked(); err != nil {
+		return fmt.Errorf("validate state continuity after preparing Connector resource reuse: %w", err)
+	}
+	return nil
+}
+
 // ConnectorResourceBinding returns the durable binding and retirement state
 // for one exact Connector ID. It never searches by a remote-supplied alias.
 func (s *Store) ConnectorResourceBinding(ctx context.Context, connectorID string) (_ ConnectorResourceBinding, retired, found bool, retErr error) {
@@ -331,7 +395,7 @@ func (s *Store) ResolveDefaultConnectorID(ctx context.Context, root string) (id 
 
 // RetireConnectorResource records a completed user-authorized deletion by any
 // exact local public identity. The accepted binding remains available only to
-// derive a new default Connector ID; BeginConnectorResource refuses its reuse.
+// derive a new default Connector ID; reuse requires explicit preparation.
 // The retired memory is bounded: once connectorResourcesMaxRetired deletions
 // are remembered, each new one forgets another whenever one can be, binding
 // included, so deleted shares never crowd out live ones; leftovers go before

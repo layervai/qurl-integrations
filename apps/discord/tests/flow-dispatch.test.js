@@ -32,6 +32,7 @@ jest.mock('../src/config', () => ({
 }));
 
 const { loadFlow } = require('../src/flow-state');
+const logger = require('../src/logger');
 const {
   registerFlow,
   siblingMessageForStage,
@@ -39,6 +40,7 @@ const {
   handleFlowInteraction,
   SUPERSEDED_MSG,
 } = require('../src/flow-dispatch');
+const { UNSUPPORTED_CONTEXT_MSG } = require('../src/interaction-context');
 
 function makeInteraction(overrides = {}) {
   // Default to MessageComponent shape — that's the dominant routing
@@ -182,6 +184,48 @@ describe('handleFlowInteraction', () => {
     jest.clearAllMocks();
   });
 
+  it('rejects a component resumed from a DM before loading flow state', async () => {
+    const handler = jest.fn();
+    registerFlow('route_dm_component', { expectedStage: 'awaiting', handler });
+    const interaction = makeInteraction({
+      customId: 'route_dm_component',
+      guildId: null,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'flow-dispatch: unsupported interaction context, rejecting',
+      { customId: 'route_dm_component', has_guild: false },
+    );
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: UNSUPPORTED_CONTEXT_MSG,
+      components: [],
+    });
+  });
+
+  it('rejects a modal resumed from a user-only install inside a guild', async () => {
+    const handler = jest.fn();
+    registerFlow('route_user_install_modal', { expectedStage: 'awaiting', handler });
+    const interaction = makeInteraction({
+      customId: 'route_user_install_modal',
+      authorizingIntegrationOwners: { 1: 'user-123' },
+      isMessageComponent: () => false,
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: UNSUPPORTED_CONTEXT_MSG,
+      ephemeral: true,
+    });
+  });
+
   it('routes to the registered handler when stage matches', async () => {
     const handler = jest.fn().mockResolvedValue(undefined);
     registerFlow('route_match', { expectedStage: 'awaiting', handler });
@@ -205,6 +249,24 @@ describe('handleFlowInteraction', () => {
     expect(passedInteraction).toBe(interaction);
     expect(ctx.flow_id).toBe('0:1#g#c#u');
     expect(ctx.row.stage).toBe('awaiting');
+  });
+
+  it('allows a dual install when the guild authorized the resumed flow', async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    registerFlow('route_dual_install', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue({ stage: 'awaiting', version: 1 });
+    const interaction = makeInteraction({
+      customId: 'route_dual_install',
+      authorizingIntegrationOwners: {
+        0: 'guild-789',
+        1: 'user-123',
+      },
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).toHaveBeenCalledWith('0:1#guild-789#channel-456#user-123');
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('updates the source card when row is missing (component path)', async () => {

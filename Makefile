@@ -148,8 +148,9 @@ endef
 
 # Every target below uses `npm ci`, not `npm install`: CI installs the lockfile
 # exactly, and `npm install` can rewrite package-lock.json — which both dirties
-# the tree and breaks the "this predicts CI" property. `--no-audit --no-fund`
-# only mute npm output; they do not change the tree.
+# the tree and breaks the "this predicts CI" property. `--no-fund` only mutes
+# output; `--no-audit` also skips npm's implicit registry request. Neither flag
+# changes the dependency tree.
 
 # cli.yml's quality gates for the host OS, so a contributor can run them
 # before pushing. Adding or removing a gate there means updating this target
@@ -179,9 +180,10 @@ test-discord:
 	cd apps/discord && npm ci --no-audit --no-fund
 	cd apps/discord && npm test -- --ci
 
-# discord.yml's build-and-test steps minus `npm audit`, which is network
-# dependent and can newly fail with no code change. Its sibling docker-check
-# job is a separate gate and is not mirrored here.
+# discord.yml's build-and-test steps minus the network-dependent
+# `audit-production-dependencies.js` gate. Its sibling docker-check job is a
+# separate gate and is not mirrored here. Run the registry-backed gate locally
+# with `cd apps/discord && node scripts/audit-production-dependencies.js`.
 check-discord:
 	$(call node_version_warning,apps/discord)
 	cd apps/discord && npm ci --no-audit --no-fund
