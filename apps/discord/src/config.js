@@ -380,11 +380,10 @@ const detectExtraNonProdEndpointHosts = (process.env.DETECT_EXTRA_NON_PROD_QURL_
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const detectExtraNonProdHostSuffixes = (process.env.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-// Fail fast (same posture as the DDB_TEST_ENDPOINT guard above): a suffix
-// entry missing the leading '.' would never match a hostname suffix check
-// (detectTunnelHostSuffixesForEndpoint does `host.endsWith(suffix)`),
-// silently no-op'ing the operator's intended grant. Reject at config load
-// instead of shipping a quietly-inert allowlist entry.
+// Fail fast (same posture as the DDB_TEST_ENDPOINT guard above): because the
+// detect host pin uses `host.endsWith(suffix)`, an entry missing the leading
+// '.' could admit a look-alike such as `eviltunnel.example`. Reject at config
+// load instead of widening the non-prod namespace on an operator typo.
 for (const suffix of detectExtraNonProdHostSuffixes) {
   if (!suffix.startsWith('.')) {
     throw new Error(`DETECT_EXTRA_NON_PROD_HOST_SUFFIXES entry '${suffix}' must start with '.' (e.g. '.tunnel.example.internal') — fix the env var before booting.`);
@@ -518,9 +517,10 @@ module.exports = {
   // in commands.js for the full set of MAP_COMMAND_ENABLED gates.
   //
   // Snapshot semantics: this value is read ONCE at module load and
-  // baked into the slash registration (commands.js IIFE) +
-  // SETUP_SUCCESS_MSG. Flipping MAP_COMMAND_ENABLED at runtime is
-  // a no-op until the task restarts; the deploy model handles this
+  // baked into the slash registration (commands.js IIFE),
+  // SETUP_SUCCESS_MSG, and the OAuth success/DM copy.
+  // Flipping MAP_COMMAND_ENABLED at runtime is a no-op until the task
+  // restarts; the deploy model handles this
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 

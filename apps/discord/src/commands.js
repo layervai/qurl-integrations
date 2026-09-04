@@ -49,6 +49,7 @@ const {
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
+const { resourceIdLogRef } = require('./utils/resource-id');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -2865,7 +2866,10 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
-      failed.push({ resourceId: resourceIds[index], error: result.reason?.message });
+      failed.push({
+        resource_ref: resourceIdLogRef(resourceIds[index]),
+        error: result.reason?.message,
+      });
     }
   });
   if (failed.length > 0) {
@@ -8305,7 +8309,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       for (const id of recipientIds) seenSuccess.add(id);
     } else {
       for (const id of recipientIds) seenFailure.add(id);
-      logger.error('Failed to revoke QURL', { resource_id: resourceId, error: results[i].reason?.message });
+      logger.error('Failed to revoke QURL', {
+        resource_ref: resourceIdLogRef(resourceId),
+        error: results[i].reason?.message,
+      });
     }
   }
   // Strict success = revoked AND not in any failure bucket.
@@ -8921,21 +8928,23 @@ const commands = [
         // Section order: user-facing flow first (Getting started → How it
         // works), then admin-only setup (now the OAuth-redirect flow per
         // PR #177), then glossary (Terms), then operational caveat
-        // The "Setting up" section pivots based on
-        // whether OAuth is configured — when it is, we describe the
-        // /qurl setup OAuth flow + the "Add to Discord" install-flow
-        // entry point. When unset (sandbox before Auth0 secrets land),
-        // we keep the legacy "API key paste" wording so the help text
-        // matches what /qurl setup actually does at that moment.
+        // The "Setting up" section pivots on whether qURL OAuth is
+        // configured. When unset (sandbox before Auth0 secrets land), keep
+        // the legacy API-key wording so help matches what /qurl setup does.
+        // The Add to Discord entrypoint has an additional Discord client-
+        // secret dependency, so advertise it only when the full customer
+        // install flow is ready.
         const oauthSetupSection = config.isQurlSetupAvailable
           ? '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n'
-            + '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
-            + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'
           : '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        const discordInstallSection = config.isDiscordInstallConfigured
+          ? '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
+            + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'
+          : '';
         // `cmd` is used in two spots (Terms + Large servers); a
         // single token keeps them in lockstep across copy edits.
         const mapCopy = config.MAP_COMMAND_ENABLED
@@ -8973,6 +8982,7 @@ const commands = [
             '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
+            discordInstallSection +
             `**Terms:** a *protected resource* is ${mapCopy.resource} you're sharing. ` +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             `You create a qurl for a protected resource each time you run ${mapCopy.cmd}.\n\n` +

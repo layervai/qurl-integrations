@@ -298,8 +298,9 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
-  // The qURL webhook router owns a per-IP bad-sig sweep; stop it on
-  // graceful shutdown so the interval doesn't outlive the server.
+  // The qURL webhook router owns bad-signature/unknown-owner sweeps plus
+  // sender-counter caches and trailing-flush timers. Its stop hook clears all
+  // of them so shutdown and same-process test teardown cannot retain state.
   if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
   // 30s subscription-registry refresh ticker (per-guild webhook
   // secrets cache). No-op on the gateway tier where the registry was

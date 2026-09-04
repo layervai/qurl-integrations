@@ -36,6 +36,13 @@ const ORPHAN_DELETE_TIMEOUT_MS = 10000;
 
 const router = express.Router();
 
+const readyCommandsPlain = config.MAP_COMMAND_ENABLED
+  ? '/qurl send and /qurl map are ready.'
+  : '/qurl send is ready.';
+const readyCommandsMarkdown = config.MAP_COMMAND_ENABLED
+  ? '`/qurl send` and `/qurl map`'
+  : '`/qurl send`';
+
 // Browser-session cookie binding (parallel to /auth/github's qurl_oauth_session
 // pattern). /start sets a HttpOnly cookie holding a random 16-byte token;
 // /callback re-checks it. If a leaked /qurl setup ephemeral URL is opened
@@ -86,7 +93,7 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
     // CTA folded into message so the "confirm before closing" cue
     // always rides next to the binding readout, including when the
     // qURL-account-email line is missing (JWKS verify failure).
-    message: 'Confirm the binding below matches your server, then close this tab and return to Discord. /qurl send and /qurl map are ready.',
+    message: `Confirm the binding below matches your server, then close this tab and return to Discord. ${readyCommandsPlain}`,
     details,
     type: 'success',
   }));
@@ -503,7 +510,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    `/qurl status` and against the layerv.ai dashboard, which
   //    matters for spotting binding mismatches in the rare confused-
   //    deputy edge case (see PR #177 review item 3).
-  const dmLines = ['✅ **qURL is connected to your Discord server.** Your team can now use `/qurl send` and `/qurl map`. All usage will be billed to your qURL account.'];
+  const dmLines = [`✅ **qURL is connected to your Discord server.** Your team can now use ${readyCommandsMarkdown}. All usage will be billed to your qURL account.`];
   if (keyPrefix) dmLines.push(`Key prefix: \`${keyPrefix}\``);
   sendDM(discordUserId, dmLines.join('\n'))
     .catch((err) => logger.warn('Failed to DM admin after qURL setup', { error: err?.message, discordUserId }));
