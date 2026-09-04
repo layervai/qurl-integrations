@@ -6,6 +6,7 @@ const {
   tryStop,
   tryClose,
   runGracefulShutdown,
+  runGatewayFatalShutdown,
   runPushHandoffShutdown,
 } = require('../src/gateway-shutdown-helpers');
 
@@ -97,6 +98,65 @@ describe('runGracefulShutdown', () => {
     expect(scheduleHardExit).not.toHaveBeenCalled();
     expect(teardown).not.toHaveBeenCalled();
     expect(exit).not.toHaveBeenCalled();
+  });
+});
+
+describe('runGatewayFatalShutdown', () => {
+  it('starts graceful shutdown before stopping an in-flight watchdog', async () => {
+    const order = [];
+    const shutdownResult = Promise.resolve('shutdown');
+    const gracefulShutdown = jest.fn(() => {
+      order.push('shutdown');
+      return shutdownResult;
+    });
+    const watchdog = {
+      stop: jest.fn(() => {
+        order.push('watchdog-stop');
+        return Promise.resolve();
+      }),
+    };
+
+    const result = runGatewayFatalShutdown({
+      gracefulShutdown,
+      getConnectionWatchdog: () => watchdog,
+      logger: makeFakeLogger(),
+    });
+
+    expect(result).toBe(shutdownResult);
+    expect(order).toEqual(['shutdown', 'watchdog-stop']);
+    expect(gracefulShutdown).toHaveBeenCalledWith(1);
+    await result;
+  });
+
+  it('tolerates a fatal before the connection watchdog is constructed', async () => {
+    const gracefulShutdown = jest.fn().mockResolvedValue(undefined);
+
+    await expect(runGatewayFatalShutdown({
+      gracefulShutdown,
+      getConnectionWatchdog: () => null,
+      logger: makeFakeLogger(),
+    })).resolves.toBeUndefined();
+
+    expect(gracefulShutdown).toHaveBeenCalledWith(1);
+  });
+
+  it.each([
+    ['throws synchronously', { stop: () => { throw new Error('sync-stop-failure'); } }],
+    ['rejects with a non-Error value', { stop: () => Promise.reject('async-stop-failure') }],
+  ])('contains a watchdog stop that %s', async (_label, watchdog) => {
+    const logger = makeFakeLogger();
+
+    await expect(runGatewayFatalShutdown({
+      gracefulShutdown: jest.fn().mockResolvedValue(undefined),
+      getConnectionWatchdog: () => watchdog,
+      logger,
+    })).resolves.toBeUndefined();
+    await Promise.resolve();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog stop failed during gateway fatal shutdown',
+      { error: expect.stringContaining('stop-failure') },
+    );
   });
 });
 

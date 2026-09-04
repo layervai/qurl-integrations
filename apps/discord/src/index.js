@@ -20,6 +20,7 @@ const {
   tryStop,
   tryClose,
   runGracefulShutdown,
+  runGatewayFatalShutdown,
   runPushHandoffShutdown,
 } = require('./gateway-shutdown-helpers');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
@@ -788,21 +789,11 @@ async function gracefulShutdown(code = 0) {
 }
 
 function gatewayFatalShutdown() {
-  // Start graceful shutdown first: runGracefulShutdown synchronously claims
-  // the process and arms its hard-exit timer before the first cleanup await.
-  const shutdown = gracefulShutdown(1);
-  // A fatal can occur inside the watchdog's manager.connect(). Stop its retry
-  // ladder immediately so it cannot race graceful shutdown with its own
-  // release-lock/process.exit path. The regular teardown awaits the same
-  // idempotent stop later.
-  if (connectionWatchdog) {
-    Promise.resolve(connectionWatchdog.stop()).catch((error) => {
-      logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
-        error: error.message,
-      });
-    });
-  }
-  return shutdown;
+  return runGatewayFatalShutdown({
+    gracefulShutdown,
+    getConnectionWatchdog: () => connectionWatchdog,
+    logger,
+  });
 }
 
 // Hot-standby push-handoff SIGTERM path. The body lives in

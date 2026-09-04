@@ -153,6 +153,33 @@ async function runGracefulShutdown({
   exitOnce(code);
 }
 
+// Gateway-fatal adapter: arm graceful shutdown's hard-exit backstop before
+// asking the connection watchdog to stop. A fatal can arrive from inside
+// watchdog.manager.connect(), so its stop is deliberately best-effort and
+// non-blocking; graceful teardown awaits the same idempotent stop later.
+function runGatewayFatalShutdown({
+  gracefulShutdown,
+  getConnectionWatchdog,
+  logger,
+}) {
+  const shutdown = gracefulShutdown(1);
+  const connectionWatchdog = getConnectionWatchdog();
+  if (!connectionWatchdog) return shutdown;
+
+  try {
+    Promise.resolve(connectionWatchdog.stop()).catch((error) => {
+      logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
+        error: error?.message ?? String(error),
+      });
+    });
+  } catch (error) {
+    logger.warn('connection-watchdog stop failed during gateway fatal shutdown', {
+      error: error?.message ?? String(error),
+    });
+  }
+  return shutdown;
+}
+
 // Push-handoff SIGTERM body. Distinct from gracefulShutdown because
 // the active replica's job is to transfer ownership ASAP — not run
 // the full drain (close DB, flush its own session row, etc.) — the
@@ -283,5 +310,6 @@ module.exports = {
   tryStop,
   tryClose,
   runGracefulShutdown,
+  runGatewayFatalShutdown,
   runPushHandoffShutdown,
 };

@@ -614,7 +614,7 @@ describe('IDENTIFY budget guard', () => {
     // immediately so ECS replaces the task even if graceful shutdown stalls.
     expect(shim.isReady()).toBe(false);
     expect(shim.isConnected()).toBe(false);
-    await expect(shim.connect()).rejects.toThrow(/failed start|stop/);
+    await expect(shim.connect()).rejects.toThrow(/IDENTIFY-budget fatal/);
 
     const abortReason = new Error('shard closed');
     secondController.abort(abortReason);
@@ -815,8 +815,8 @@ describe('IDENTIFY budget guard', () => {
     await expect(blocked).rejects.toThrow('closed');
   });
 
-  it('keeps an over-budget grant pending if upstream omits the abort signal', async () => {
-    const { shim, managerInstances, onFatal } = makeShim();
+  it('keeps an over-budget grant pending and logs once if upstream omits the abort signal', async () => {
+    const { shim, logger, managerInstances, onFatal } = makeShim();
     await shim.start();
     const mgr = managerInstances[0];
     const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
@@ -829,6 +829,16 @@ describe('IDENTIFY budget guard', () => {
     expect(onFatal).toHaveBeenCalledTimes(1);
     expect(await Promise.race([blocked.then(() => 'released'), Promise.resolve('pending')]))
       .toBe('pending');
+    expect(logger.error).toHaveBeenCalledTimes(2);
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
+    );
+
+    const alsoBlocked = throttler.waitForIdentify(1);
+    await Promise.resolve();
+    expect(await Promise.race([alsoBlocked.then(() => 'released'), Promise.resolve('pending')]))
+      .toBe('pending');
+    expect(logger.error).toHaveBeenCalledTimes(2);
   });
 
   it('notifies the fatal handler only once across repeated over-budget grants', async () => {

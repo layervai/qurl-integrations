@@ -181,6 +181,7 @@ function createGatewayWsShim({
   let appId = null;
   let identifyAttempts = 0;
   let identifyBudgetFatalSignaled = false;
+  let missingAbortSignalLogged = false;
   // Two distinct flags:
   //
   //   `stopped`       — "drop late dispatches." Set by start()'s
@@ -220,7 +221,15 @@ function createGatewayWsShim({
       // behavior: resolving or rejecting here could release an over-budget
       // IDENTIFY. The process is already unhealthy and its shutdown backstop
       // owns termination. TODO(upstream-contract): see version gate above.
-      if (!signal) return;
+      if (!signal) {
+        if (!missingAbortSignalLogged) {
+          missingAbortSignalLogged = true;
+          logger.error(
+            'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
+          );
+        }
+        return;
+      }
       if (signal.aborted) {
         reject(signal.reason);
         return;
@@ -318,8 +327,7 @@ function createGatewayWsShim({
         // the shard-close signal. Do not call the delegate or inflate the
         // diagnostic attempt count while shutdown is already in progress.
         if (identifyBudgetFatalSignaled) {
-          await waitForAbort(signal);
-          return;
+          return waitForAbort(signal);
         }
         // Delegate first: an aborted or failed throttle wait never
         // reaches the IDENTIFY-send boundary and must not burn our
@@ -329,8 +337,7 @@ function createGatewayWsShim({
         // budget. Re-check after the awaited delegate so only the first grant
         // records and reports the terminal over-budget attempt.
         if (identifyBudgetFatalSignaled) {
-          await waitForAbort(signal);
-          return;
+          return waitForAbort(signal);
         }
         // Upstream only suppresses IDENTIFY when an aborted throttle wait
         // rejects. If the shard closes exactly as the delegate releases,
@@ -359,7 +366,7 @@ function createGatewayWsShim({
         // Holding this grant lets onFatal replace the process without leaking
         // an over-budget IDENTIFY or producing reconnect churn.
         // TODO(upstream-contract): re-verify on a ws minor bump.
-        await waitForAbort(signal);
+        return waitForAbort(signal);
       },
     };
   }
@@ -664,10 +671,15 @@ function createGatewayWsShim({
     // call it synchronously every tick, so awaiting fetchStatus()
     // there would be wrong.
     connect() {
-      // `stopped` is set by both stop() AND start()'s failed-connect
-      // catch, so the message covers both terminal states. Check it
-      // before `!manager` since stop() nulls manager.
+      // `stopped` covers stop(), a failed start(), and the IDENTIFY-budget
+      // fatal. Check it before `!manager` since stop() nulls manager; keep the
+      // fatal diagnostic distinct so watchdog logs explain task replacement.
       if (stopped) {
+        if (identifyBudgetFatalSignaled) {
+          return Promise.reject(new Error(
+            'gateway-ws-shim: connect() called after an IDENTIFY-budget fatal',
+          ));
+        }
         return Promise.reject(new Error(
           'gateway-ws-shim: connect() called after stop() or a failed start()',
         ));
