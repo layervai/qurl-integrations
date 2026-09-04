@@ -299,6 +299,20 @@ describe('handleCommand — double error (reply fail + followUp fail)', () => {
 });
 
 describe('handleCommand — autocomplete edge cases', () => {
+  it('acknowledges DM autocomplete with an empty choice list, not a command reply', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      guildId: null,
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([]);
+    expect(interaction.reply).not.toHaveBeenCalled();
+  });
+
   it('routes autocomplete to the /qurl map location handler (which gates on /qurl + map + location)', async () => {
     // Contract changed in the qurl-map-autocomplete rollout: handleCommand
     // now routes autocomplete interactions to handleAutocomplete instead

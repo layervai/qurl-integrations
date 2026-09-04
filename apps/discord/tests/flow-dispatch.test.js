@@ -38,8 +38,8 @@ const {
   flowIdForInteraction,
   handleFlowInteraction,
   SUPERSEDED_MSG,
-  UNSUPPORTED_CONTEXT_MSG,
 } = require('../src/flow-dispatch');
+const { UNSUPPORTED_CONTEXT_MSG } = require('../src/interaction-context');
 
 function makeInteraction(overrides = {}) {
   // Default to MessageComponent shape — that's the dominant routing
@@ -244,6 +244,24 @@ describe('handleFlowInteraction', () => {
     expect(passedInteraction).toBe(interaction);
     expect(ctx.flow_id).toBe('0:1#g#c#u');
     expect(ctx.row.stage).toBe('awaiting');
+  });
+
+  it('allows a dual install when the guild authorized the resumed flow', async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    registerFlow('route_dual_install', { expectedStage: 'awaiting', handler });
+    loadFlow.mockResolvedValue({ stage: 'awaiting', version: 1 });
+    const interaction = makeInteraction({
+      customId: 'route_dual_install',
+      authorizingIntegrationOwners: {
+        0: 'guild-789',
+        1: 'user-123',
+      },
+    });
+
+    await handleFlowInteraction(interaction);
+
+    expect(loadFlow).toHaveBeenCalledWith('0:1#guild-789#channel-456#user-123');
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('updates the source card when row is missing (component path)', async () => {

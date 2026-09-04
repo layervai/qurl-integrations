@@ -35,7 +35,10 @@ const { buildFlowId } = require('./flow-id');
 const { loadFlow } = require('./flow-state');
 const { SHARD_ID } = require('./config');
 const logger = require('./logger');
-const { ApplicationIntegrationType } = require('discord-api-types/v10');
+const {
+  isUnsupportedQurlContext,
+  UNSUPPORTED_CONTEXT_MSG,
+} = require('./interaction-context');
 
 // Module-state routing table. Registered at the bottom of commands.js
 // (and future setup/send handler modules) via `registerFlow`. Module-
@@ -121,12 +124,9 @@ function siblingMessageForStage(stage) {
 // Single source of truth — if these two callsites computed flow_id
 // differently the OCC contract would silently fail.
 //
-// DM context: interaction.guildId is null. Namespace DM flows under
-// `dm:<user_id>` so they can't collide with a real guild snowflake
-// (which are pure numerics — the `dm:` prefix is unambiguous). The
-// channel_id is still the DM channel ID, so two parallel DM flows for
-// the same user in different channels (theoretically possible if the
-// user opens a group DM) get distinct flow_ids.
+// DM context is rejected by handleFlowInteraction's guild-install boundary.
+// Keep this defensive namespace for direct helper callers and legacy rows so a
+// missing guild can never collide with a real guild snowflake.
 function flowIdForInteraction(interaction) {
   const guild_id = interaction.guildId ?? `dm:${interaction.user.id}`;
   return buildFlowId({
@@ -143,22 +143,6 @@ function flowIdForInteraction(interaction) {
 // module-level constant so the dispatcher test can assert on it
 // without re-stating wording.
 const SUPERSEDED_MSG = 'This action was superseded — run the command again.';
-const UNSUPPORTED_CONTEXT_MSG = 'This command only works with qURL installed in this server, not from DMs or a user install.';
-
-function isUserInstallOnlyInteraction(interaction) {
-  const owners = interaction.authorizingIntegrationOwners;
-  // Discord's raw mapping uses integration-type enum keys
-  // (0 = guild install, 1 = user install). Keep this check here so slash
-  // commands and resumed component/modal flows enforce the same boundary.
-  return Boolean(
-    owners?.[ApplicationIntegrationType.UserInstall]
-    && !owners?.[ApplicationIntegrationType.GuildInstall]
-  );
-}
-
-function isUnsupportedQurlContext(interaction) {
-  return !interaction.guildId || isUserInstallOnlyInteraction(interaction);
-}
 
 // Entry point — wired from index.js's interactionCreate listener.
 // Contract: returns a Promise that resolves once the dispatch is
@@ -332,9 +316,7 @@ module.exports = {
   // path for the canonical consumer.
   safeReply,
   handleFlowInteraction,
-  isUnsupportedQurlContext,
   // Exported for tests so they can assert the supersede wording
   // without duplicating the string.
   SUPERSEDED_MSG,
-  UNSUPPORTED_CONTEXT_MSG,
 };

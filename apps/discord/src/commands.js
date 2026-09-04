@@ -61,9 +61,11 @@ const {
   registerFlow,
   safeReply,
   siblingMessageForStage,
+} = require('./flow-dispatch');
+const {
   isUnsupportedQurlContext,
   UNSUPPORTED_CONTEXT_MSG,
-} = require('./flow-dispatch');
+} = require('./interaction-context');
 const {
   searchPlaces,
   findPlaceFromText,
