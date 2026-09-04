@@ -1,10 +1,14 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 const { setTimeout: wait } = require('node:timers/promises');
 
+const APP_ROOT = path.resolve(__dirname, '..');
 const AUDIT_ARGS = [
   'audit',
+  // TODO(upstream-contract): npm 10.9.4 applies --omit=dev to the
+  // --package-lock-only audit graph. Reverify whenever the pinned npm moves.
   '--package-lock-only',
   '--audit-level=high',
   '--omit=dev',
@@ -16,8 +20,9 @@ const AUDIT_ARGS = [
 const ATTEMPT_TIMEOUT_MS = 45_000;
 const RETRY_DELAYS_MS = Object.freeze([5_000, 10_000]);
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
-const TOTAL_RETRY_BUDGET_MS = (MAX_ATTEMPTS * ATTEMPT_TIMEOUT_MS)
-  + RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
+// Literal so the Go workflow contract can compare it with timeout-minutes;
+// Jest independently proves it still equals attempts * timeout + delays.
+const TOTAL_RETRY_BUDGET_MS = 150_000;
 const RETRYABLE_NETWORK_CODES = new Set([
   'EAI_AGAIN',
   'ECONNREFUSED',
@@ -39,17 +44,22 @@ function parseJsonPayload(value) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    // Some npm versions put warning lines around the JSON envelope on stderr.
-    // Only accept a complete object slice; classification still requires a
-    // structured retryable code/status below.
-    const firstBrace = trimmed.indexOf('{');
-    const lastBrace = trimmed.lastIndexOf('}');
-    if (firstBrace < 0 || lastBrace <= firstBrace) return null;
-    try {
-      return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
-    } catch {
-      return null;
+    // TODO(upstream-contract): npm can surround its --json envelope with
+    // warning lines. Search only column-zero object boundaries so braces in a
+    // warning cannot consume the actual envelope.
+    const lines = trimmed.split(/\r?\n/);
+    for (let start = 0; start < lines.length; start += 1) {
+      if (!lines[start].startsWith('{')) continue;
+      for (let end = lines.length - 1; end >= start; end -= 1) {
+        if (!lines[end].trimEnd().endsWith('}')) continue;
+        try {
+          return JSON.parse(lines.slice(start, end + 1).join('\n'));
+        } catch {
+          // Try the next complete column-zero object boundary.
+        }
+      }
     }
+    return null;
   }
 }
 
@@ -58,6 +68,8 @@ function auditBody(result) {
 }
 
 function auditTransportCode(result, body = auditBody(result)) {
+  // TODO(upstream-contract): npm 10.9.4 reports audit transport failures in
+  // these structured fields. Unknown shapes fail closed without a retry.
   if (typeof result?.error?.code === 'string') return result.error.code.toUpperCase();
 
   const statusCode = Number(
@@ -184,6 +196,7 @@ async function runAudit({
 } = {}) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const result = spawn('npm', AUDIT_ARGS, {
+      cwd: APP_ROOT,
       encoding: 'utf8',
       killSignal: 'SIGKILL',
       maxBuffer: 8 * 1024 * 1024,
@@ -220,7 +233,6 @@ async function runAudit({
     await sleep(delay);
   }
 
-  return 1;
 }
 
 if (require.main === module) {

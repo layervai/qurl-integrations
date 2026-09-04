@@ -1,5 +1,7 @@
 'use strict';
 
+const path = require('node:path');
+
 const {
   ATTEMPT_TIMEOUT_MS,
   AUDIT_ARGS,
@@ -55,6 +57,7 @@ describe('production dependency audit', () => {
       expect(command).toBe('npm');
       expect(args).toEqual(AUDIT_ARGS);
       expect(options).toEqual(expect.objectContaining({
+        cwd: path.resolve(__dirname, '..'),
         encoding: 'utf8',
         timeout: ATTEMPT_TIMEOUT_MS,
         killSignal: 'SIGKILL',
@@ -90,9 +93,31 @@ describe('production dependency audit', () => {
     expect(spawn).toHaveBeenCalledTimes(2);
   });
 
+  test('retries a structured envelope surrounded by warning text containing braces', async () => {
+    const spawn = jest.fn()
+      .mockReturnValueOnce({
+        status: 1,
+        stdout: '',
+        stderr: 'npm warn ignoring config {legacy}\n{\n  "error": {\n    "code": "E503",\n    "summary": "Service unavailable"\n  }\n}\nnpm warn done\n',
+      })
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+
+    await expect(runAudit({
+      spawn,
+      sleep: jest.fn().mockResolvedValue(undefined),
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(0);
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
   test.each([
     ['nested status', { error: { statusCode: 503, summary: 'Service unavailable' } }],
     ['DNS code', { error: { code: 'ENOTFOUND', summary: 'registry DNS lookup failed' } }],
+    ['top-level DNS code', { code: 'ENOTFOUND' }],
+    ['DNS code in error message', { error: { message: 'getaddrinfo ENOTFOUND registry.npmjs.org' } }],
+    ['network-timeout message', { message: 'network timeout contacting registry' }],
     ['HTTP timeout', { statusCode: 408, message: 'registry timeout' }],
   ])('retries %s only when the structured envelope identifies transport failure', async (_label, body) => {
     const spawn = jest.fn()
@@ -137,6 +162,30 @@ describe('production dependency audit', () => {
     expect(stderr.value()).toContain('https://example.test/advisory');
     expect(stderr.value()).not.toContain('"auditReportVersion"');
     expect(stdout.value()).toBe('');
+  });
+
+  test('does not retry when an advisory title contains a transport error code', async () => {
+    const spawn = jest.fn().mockReturnValue(auditResult(1, {
+      auditReportVersion: 2,
+      vulnerabilities: {
+        example: {
+          severity: 'high',
+          via: [{ title: 'ETIMEDOUT handling bypass', severity: 'high' }],
+          nodes: ['node_modules/example'],
+        },
+      },
+    }));
+    const sleep = jest.fn();
+
+    await expect(runAudit({
+      spawn,
+      sleep,
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(1);
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   test('reports a transitive vulnerability chain and fix availability', async () => {

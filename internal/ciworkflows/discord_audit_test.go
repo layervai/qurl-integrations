@@ -19,35 +19,29 @@ func TestDiscordAuditRetryBudgetFitsStepTimeout(t *testing.T) {
 	}
 	var timeoutMinutes int
 	for i := range job.Steps {
-		if job.Steps[i].Name == "Audit dependencies" {
-			value, ok := job.Steps[i].TimeoutMinutes.(int)
-			if !ok {
-				t.Fatalf("Audit dependencies timeout-minutes = %#v, want integer", job.Steps[i].TimeoutMinutes)
-			}
-			timeoutMinutes = value
-			break
+		if job.Steps[i].Name != "Audit dependencies" {
+			continue
 		}
+		if !strings.Contains(job.Steps[i].Run, "audit-production-dependencies.js") {
+			t.Fatalf("Audit dependencies step no longer runs the retry wrapper: %q", job.Steps[i].Run)
+		}
+		value, ok := job.Steps[i].TimeoutMinutes.(int)
+		if !ok {
+			t.Fatalf("Audit dependencies timeout-minutes = %#v, want integer", job.Steps[i].TimeoutMinutes)
+		}
+		timeoutMinutes = value
+		break
 	}
 	if timeoutMinutes == 0 {
 		t.Fatal("discord.yml Audit dependencies step is missing a positive timeout-minutes")
 	}
 
 	scriptPath := filepath.Join("..", "..", "apps", "discord", "scripts", "audit-production-dependencies.js")
-	source, err := os.ReadFile(scriptPath) // #nosec G304 -- fixed checked-in path.
+	source, err := os.ReadFile(scriptPath) //nolint:gosec // G304: fixed checked-in path.
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
 	}
-	attemptTimeout := parseDiscordAuditMilliseconds(t, source, `ATTEMPT_TIMEOUT_MS\s*=\s*([0-9_]+)`)
-	delayBlock := regexp.MustCompile(`RETRY_DELAYS_MS\s*=\s*Object\.freeze\(\[([^]]+)\]\)`).FindSubmatch(source)
-	if len(delayBlock) != 2 {
-		t.Fatal("could not parse RETRY_DELAYS_MS from Discord audit wrapper")
-	}
-	totalBudget := 0
-	delays := strings.Split(string(delayBlock[1]), ",")
-	for _, delay := range delays {
-		totalBudget += parseDiscordAuditInteger(t, delay)
-	}
-	totalBudget += (len(delays) + 1) * attemptTimeout
+	totalBudget := parseDiscordAuditMilliseconds(t, source, `TOTAL_RETRY_BUDGET_MS\s*=\s*([0-9_]+)`)
 
 	stepBudget := timeoutMinutes * 60_000
 	if totalBudget >= stepBudget {
