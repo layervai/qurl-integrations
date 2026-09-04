@@ -95,8 +95,9 @@ describe('qURL client — getResourceStatus', () => {
     // The bot's User-Agent is preserved across the SDK migration (literal wire
     // identifier per CLAUDE.md).
     expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
-    // CRID is an address alias; the service response keeps the canonical
-    // public-key resource_id for both request shapes.
+    // The mock returns the canonical public-key ID for both shapes. Alias
+    // resolution itself is qurl-service's contract, pinned upstream in
+    // crid_dual_accept_test.go; this test pins the SDK request URL.
     expect(result.resource_id).toBe(PUBLIC_KEY_RESOURCE_ID);
     // The SDK renames the API's wire-format `qurls` field to `access_tokens`.
     expect(result.access_tokens).toHaveLength(1);

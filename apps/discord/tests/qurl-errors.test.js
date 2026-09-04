@@ -10,11 +10,11 @@ const { CRID_RESOURCE_ID } = require('./helpers/qurl-fixtures');
 describe('qURL API error contract', () => {
   it('formats and classifies terminal failures structurally or after serialization', () => {
     const path = resourcePath(CRID_RESOURCE_ID);
-    const gone = qurlApiErrorMessage('DELETE', path, 404);
+    const gone = qurlApiErrorMessage('DELETE', path, 410);
 
     // Load-bearing literal: this pins the wire-error family independently of
     // the shared formatter used by reclaim's mock fixtures and expectations.
-    expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (404)`);
+    expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (410)`);
     expect(isGoneQurlApiError(new Error(gone))).toBe(true);
     expect(isGoneQurlApiError(`${gone} request-id=123`)).toBe(false);
 
@@ -34,6 +34,8 @@ describe('qURL API error contract', () => {
 
   it('rejects unrelated and non-terminal status messages', () => {
     expect(isGoneQurlApiError('unrelated operation failed (404)')).toBe(false);
+    expect(isGoneQurlApiError(qurlApiError('DELETE', resourcePath('missing-id'), 404)))
+      .toBe(false);
     expect(isGoneQurlApiError(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)))
       .toBe(false);
   });

@@ -33,7 +33,7 @@ jest.mock('../src/connector', () => ({
 
 const { deleteLink } = require('../src/qurl');
 const { resourcePath } = require('../src/utils/resource-id');
-const { qurlApiErrorMessage } = require('../src/utils/qurl-errors');
+const { qurlApiError, qurlApiErrorMessage } = require('../src/utils/qurl-errors');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
@@ -542,16 +542,16 @@ describe('reclaim', () => {
     );
   });
 
-  it('counts an already-gone resource as revoked, not failed', async () => {
+  it('keeps an ambiguous resource-route 404 for another reclaim attempt', async () => {
     const ledger = tempLedger(line('r_1'));
     deleteLink.mockRejectedValue(
-      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_1'), 404)),
+      qurlApiError('DELETE', resourcePath('r_1'), 404),
     );
 
     const result = await reclaim(ledger);
 
-    expect(result).toMatchObject({ revoked: 1, failed: 0 });
-    expect(readLedger(ledger)).toEqual([]);
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['r_1']);
   });
 
   it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
@@ -674,13 +674,26 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ revoked: 2, failed: 0 });
   });
 
-  it('counts a 410 as already-gone, the same as a 404', async () => {
+  it('counts a structural 410 as already gone', async () => {
+    const ledger = tempLedger(line('r_1'));
+    deleteLink.mockRejectedValue(
+      qurlApiError('DELETE', resourcePath('r_1'), 410),
+    );
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(readLedger(ledger)).toEqual([]);
+  });
+
+  it('counts a serialized 410 without structural status as already gone', async () => {
     const ledger = tempLedger(line('r_1'));
     deleteLink.mockRejectedValue(
       new Error(qurlApiErrorMessage('DELETE', resourcePath('r_1'), 410)),
     );
+
     const result = await reclaim(ledger);
+
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(readLedger(ledger)).toEqual([]);
   });
 
   it('accepts an endpoint differing only by a trailing slash', async () => {

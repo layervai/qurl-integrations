@@ -165,6 +165,7 @@ const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
 const {
   hasSafeResourceIdShape,
+  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
 } = require('../src/utils/resource-id');
 const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
@@ -1180,10 +1181,10 @@ async function reclaim(ledgerPath) {
         // callQurl preserves the HTTP status structurally; an exact formatted
         // message fallback covers serialized/rethrown errors that lost it.
         //
-        // TODO(upstream-contract): 404 and 410 are the statuses qurl-service
-        // uses for a resource that no longer exists. If it adopts another,
-        // nothing here fails loudly — a re-run would simply sweep the same
-        // ids forever, reporting them as failures.
+        // TODO(upstream-contract): DELETE /resources returns 204 for a known
+        // revoked row. A 404 is ambiguous (absent, wrong owner/key, or public-ID
+        // resolution miss) and stays retryable; only 410 proves a gone state.
+        // If that changes, re-runs retain the row and report a visible failure.
         if (isGoneQurlApiError(e)) {
           revoked++;
           outstanding.delete(id);
@@ -1192,7 +1193,8 @@ async function reclaim(ledgerPath) {
           // TODO(upstream-contract): qurl-service public routes reject the
           // retired private r_ identifier cohort with 400. Those rows cannot
           // drain automatically, so distinguish them from transient failures.
-          if (id.startsWith('r_') && qurlApiErrorStatus(e) === 400) legacyRejected++;
+          if (id.startsWith(LEGACY_RESOURCE_ID_PREFIX)
+            && qurlApiErrorStatus(e) === 400) legacyRejected++;
           // Keyed on the cause, not the raw message. callQurl embeds the
           // request path — and therefore the resource id — in every message,
           // so keying on it verbatim gives one bucket per failing id: a

@@ -10,7 +10,7 @@ const MAX_RESOURCE_ID_LENGTH = 1024;
 const ERROR_PREVIEW_LENGTH = 64;
 const RESOURCE_ID_CHARACTER_CLASS = '[\\w-]';
 const RESOURCE_ID_CHARACTERS = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
-const RESOURCE_ID_SCAN = new RegExp(`${RESOURCE_ID_CHARACTER_CLASS}+`, 'y');
+const LEGACY_RESOURCE_ID_PREFIX = 'r_';
 const RESOURCE_PATH_PREFIX = '/resources/';
 const RESOURCE_ID_MASK = '<id>';
 // Status returns the qURL aggregate response shape; whole-resource revoke uses
@@ -58,6 +58,9 @@ function qurlPath(resourceId) {
 }
 
 function maskResourceIdPath(message) {
+  // Per-call sticky state scans in place without sharing mutable lastIndex
+  // across callers.
+  const resourceIdScan = new RegExp(`${RESOURCE_ID_CHARACTER_CLASS}+`, 'y');
   let masked = typeof message === 'string'
     ? message
     : typePreview(message);
@@ -70,8 +73,8 @@ function maskResourceIdPath(message) {
       if (start === -1) break;
 
       const idStart = start + prefix.length;
-      RESOURCE_ID_SCAN.lastIndex = idStart;
-      const resourceId = RESOURCE_ID_SCAN.exec(masked)?.[0];
+      resourceIdScan.lastIndex = idStart;
+      const resourceId = resourceIdScan.exec(masked)?.[0];
       if (!resourceId) {
         searchFrom = idStart;
         continue;
@@ -85,6 +88,7 @@ function maskResourceIdPath(message) {
 
 module.exports = {
   hasSafeResourceIdShape,
+  LEGACY_RESOURCE_ID_PREFIX,
   maskResourceIdPath,
   qurlPath,
   resourcePath,

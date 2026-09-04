@@ -1,4 +1,7 @@
-const TERMINAL_RECLAIM_STATUSES = new Set([404, 410]);
+// DELETE /resources returns 204 for a known revoked row. Keep an ambiguous 404
+// (missing, wrong owner/key, or unresolved public ID) retryable; only the
+// explicit gone status is safe to remove from the reclaim ledger.
+const TERMINAL_RECLAIM_STATUS = 410;
 // Exact fallback for serialized/rethrown failures that lost the structural
 // status attached by qurlApiError. Loosening this changes which reclaim
 // failures count as terminal success.
@@ -22,7 +25,7 @@ function qurlApiErrorStatus(error) {
 }
 
 function isGoneQurlApiError(error) {
-  return TERMINAL_RECLAIM_STATUSES.has(qurlApiErrorStatus(error));
+  return qurlApiErrorStatus(error) === TERMINAL_RECLAIM_STATUS;
 }
 
 module.exports = {
