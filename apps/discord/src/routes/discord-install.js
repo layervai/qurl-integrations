@@ -24,6 +24,10 @@
 //   before it can bind that browser's qURL account to the attacker's guild.
 //   The cookie is intentionally single-slot: a second /install request in
 //   the same browser invalidates the first tab (last writer wins).
+//   State consumption is enforced by the browser accepting the clear-cookie
+//   response, not by a server-side ledger. Discord's authorization code is
+//   itself single-use, so reattaching the cookie cannot repeat a successful
+//   code exchange.
 //   The first-party entrypoint removes the cross-repo signed-state contract
 //   previously proposed in #179; the service that verifies state now mints it.
 

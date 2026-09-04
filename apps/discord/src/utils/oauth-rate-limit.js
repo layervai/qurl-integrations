@@ -12,10 +12,35 @@
 // (multiple ECS tasks behind a LB), move this to Redis so limits are
 // shared — otherwise each replica carries its own counter and effective
 // rate is N × configured.
+//
+// OVERLOAD: the store deliberately grows to the 20k hard cap and then sheds
+// every unseen IP until the periodic sweep can reclaim entries (up to two
+// rate-limit windows). This preserves accumulated per-IP counters instead of
+// weakening the limiter with bulk eviction. Callback traffic may displace an
+// install-only entry in O(1), but it cannot displace another callback entry.
 const config = require('../config');
 const logger = require('../logger');
 
-const rateLimitStore = new Map();
+const installOnlyIps = new Set();
+class IndexedRateLimitStore extends Map {
+  set(ip, buckets) {
+    super.set(ip, buckets);
+    if (buckets['discord-install-entry'] && !buckets.callback) installOnlyIps.add(ip);
+    else installOnlyIps.delete(ip);
+    return this;
+  }
+
+  delete(ip) {
+    installOnlyIps.delete(ip);
+    return super.delete(ip);
+  }
+
+  clear() {
+    installOnlyIps.clear();
+    super.clear();
+  }
+}
+const rateLimitStore = new IndexedRateLimitStore();
 
 // Evict stale entries on a 30-second timer (was 5 minutes). Under a burst
 // from many unique IPs, a longer sweep interval lets the Map grow much
@@ -37,24 +62,14 @@ function sweepRateLimitStore() {
 const sweepHandle = setInterval(sweepRateLimitStore, 30 * 1000);
 sweepHandle.unref();
 
-// Absolute cap on how many timestamps we keep per logical bucket per IP so
-// an abusive IP can't grow an array unboundedly between eviction sweeps.
-// Total per-IP retention is this cap times the fixed bucket count (currently
-// two); adding another bucket must account for that linear memory increase.
-const MAX_REQUESTS_PER_BUCKET_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs, new-IP requests get 429 once the store reaches this size
 // until the next sweep reclaims space — better to shed load than OOM.
 const MAX_STORE_SIZE = 20000;
 
 function evictInstallOnlyEntry() {
-  for (const [ip, buckets] of rateLimitStore) {
-    if (!buckets.callback) {
-      rateLimitStore.delete(ip);
-      return true;
-    }
-  }
-  return false;
+  const ip = installOnlyIps.values().next().value;
+  return ip === undefined ? false : rateLimitStore.delete(ip);
 }
 
 function rateLimitForBucket(bucket, req, res, next) {
@@ -96,11 +111,7 @@ function rateLimitForBucket(bucket, req, res, next) {
   }
 
   requests.push(now);
-  // Trim each per-IP bucket so one IP cannot accumulate thousands of
-  // timestamps between sweeps.
-  if (requests.length > MAX_REQUESTS_PER_BUCKET_PER_IP) {
-    requests.splice(0, requests.length - MAX_REQUESTS_PER_BUCKET_PER_IP);
-  }
+  // The rejection above bounds each bucket at RATE_LIMIT_MAX_REQUESTS.
   rateLimitStore.set(ip, { ...buckets, [bucket]: requests });
   return next();
 }

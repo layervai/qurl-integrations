@@ -109,4 +109,27 @@ describe('OAuth rate-limit store', () => {
     expect(rateLimitStore.has('new-install')).toBe(false);
     expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
   });
+
+  it('sheds a callback in O(1) when the full store has no install-only entry', () => {
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+    const originalIterator = rateLimitStore[Symbol.iterator];
+    rateLimitStore[Symbol.iterator] = jest.fn(() => {
+      throw new Error('at-cap callback path must not scan the store');
+    });
+    const res = response();
+    const next = jest.fn();
+    jest.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    try {
+      rateLimit({ ip: 'new-callback', path: '/oauth/qurl/callback' }, res, next);
+    } finally {
+      rateLimitStore[Symbol.iterator] = originalIterator;
+    }
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(429);
+    expect(rateLimitStore.size).toBe(MAX_RATE_LIMIT_STORE_SIZE);
+  });
 });

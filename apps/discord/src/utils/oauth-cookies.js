@@ -34,6 +34,12 @@ const DISCORD_INSTALL_COOKIE_TTL_SECONDS = 10 * 60;
 function setCookie(res, req, name, value, {
   path, ttlSeconds, secure = req?.protocol === 'https',
 } = {}) {
+  if (typeof path !== 'string' || !path.startsWith('/')) {
+    throw new TypeError('OAuth cookie path must be an absolute path');
+  }
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0) {
+    throw new TypeError('OAuth cookie TTL must be a positive integer');
+  }
   res.cookie(name, value, {
     httpOnly: true,
     secure,
@@ -93,6 +99,7 @@ module.exports = {
   DISCORD_INSTALL_SESSION_COOKIE,
   DISCORD_INSTALL_COOKIE_PATH,
   DISCORD_INSTALL_COOKIE_TTL_SECONDS,
+  setCookie,
   setQurlOAuthCookie,
   setQurlOAuthPkceCookie,
   setDiscordInstallSessionCookie,

@@ -13,6 +13,7 @@ const {
   QURL_OAUTH_COOKIE_PATH,
   DISCORD_INSTALL_SESSION_COOKIE,
   DISCORD_INSTALL_COOKIE_PATH,
+  setCookie,
   setQurlOAuthCookie,
   setQurlOAuthPkceCookie,
   setDiscordInstallSessionCookie,
@@ -31,6 +32,28 @@ function fakeRes() {
 }
 
 describe('utils/oauth-cookies', () => {
+  describe('setCookie validation', () => {
+    it.each([undefined, '', 'oauth/qurl'])(
+      'rejects an unsafe cookie path (%p)',
+      path => {
+        expect(() => setCookie(fakeRes(), { protocol: 'https' }, 'name', 'value', {
+          path,
+          ttlSeconds: 300,
+        })).toThrow('absolute path');
+      },
+    );
+
+    it.each([undefined, 0, -1, 1.5, Number.NaN])(
+      'rejects an unsafe cookie TTL (%p)',
+      ttlSeconds => {
+        expect(() => setCookie(fakeRes(), { protocol: 'https' }, 'name', 'value', {
+          path: '/',
+          ttlSeconds,
+        })).toThrow('positive integer');
+      },
+    );
+  });
+
   describe('setQurlOAuthCookie', () => {
     it('sets the canonical cookie shape (HttpOnly, SameSite=Lax, Secure-when-HTTPS, path=/oauth/qurl)', () => {
       const res = fakeRes();

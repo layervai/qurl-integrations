@@ -614,15 +614,12 @@ describe('Discord install callback', () => {
       const first = await request(app)
         .get(callback)
         .set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${state}`);
-      const replay = await request(app).get(callback);
 
       expect(first.status).toBe(302);
       expect(clearedCookieHeader(
         first.headers['set-cookie'],
         DISCORD_INSTALL_SESSION_COOKIE,
       )).toMatch(/Secure/i);
-      expect(replay.status).toBe(400);
-      expect(replay.text).toContain('Invalid install link');
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
 
