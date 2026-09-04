@@ -223,6 +223,7 @@ const mockTime = require('../src/utils/time');
 
 const { _test } = require('../src/commands');
 const logger = require('../src/logger');
+const { resourceIdLogRef } = require('../src/utils/resource-id');
 const {
   monitorLinkStatus,
   revokeAllLinks,
@@ -1114,7 +1115,11 @@ describe('revokeAllLinks', () => {
     ['network', new Error('Network request failed')],
     ['qURL 5xx', new Error('qURL API DELETE /qurls/id failed (503)')],
   ])('keeps a partial %s failure fail-closed and available for repair/retry', async (_failureKind, failure) => {
-    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
+    const sensitiveResourceId = 'at_sensitive-revoke-token';
+    mockDb.getSendItems.mockResolvedValueOnce([
+      makeItems(2)[0],
+      { resource_id: sensitiveResourceId, recipient_discord_id: 'user-2' },
+    ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(failure);
@@ -1125,7 +1130,11 @@ describe('revokeAllLinks', () => {
     expect(result.total).toBe(2);
     expect(result.successUserIds).toEqual(['user-1']);
     expect(result.failureUserIds).toEqual(['user-2']);
-    expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', expect.any(Object));
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', {
+      resource_ref: resourceIdLogRef(sensitiveResourceId),
+      error: failure.message,
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-1', success: 1, total: 2, unresolvable_recipients: 0,
     });
@@ -3131,13 +3140,14 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
   });
 
   it('logs cleanup failures but still reports revoked when the guarded write loses the race', async () => {
+    const sensitiveResourceId = 'at_sensitive-cleanup-token';
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: sensitiveResourceId, fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: sensitiveResourceId }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
@@ -3157,9 +3167,10 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [expect.objectContaining({ resourceId: 'res-new', error: 'delete failed' })],
+        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
       }),
     );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
