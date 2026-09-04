@@ -917,6 +917,18 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(get().url).toBe(`${SANDBOX_TUNNEL_SITE}/api/detect`);
     });
 
+    it('accepts multiple routing labels under the sandbox qurl_site suffix', async () => {
+      const site = 'https://edge.r_abc12345678.qurl.site.layerv.xyz';
+      const get = captureDetect(
+        { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
+        { qurlSite: site, resolveResult: { target_url: '', resource_id: RESOURCE_ID } },
+      );
+
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9', apiKey: 'k-detect' });
+
+      expect(get().url).toBe(`${site}/api/detect`);
+    });
+
     it('accepts the staging qurl_site suffix', async () => {
       const get = captureDetect(
         { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
@@ -1768,30 +1780,34 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
-    it('allows resolve responses that omit resource_id and rate-limits the warning', async () => {
-      const clock = freezeDetectClock();
-      try {
-        const get = captureDetect(
-          { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
-          { qurlSite: OTHER_TUNNEL_SITE, resolveResult: { target_url: '' } },
-        );
-        await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
-        await connector.detectWatermark(Buffer.from('y'), { guildId: 'g', apiKey: 'k' });
-        expect(logger.warn).toHaveBeenCalledTimes(1);
+    it.each([
+      ['omits', { target_url: '' }],
+      ['returns an empty', { target_url: '', resource_id: '' }],
+    ])('fails closed when resolve %s resource_id and never sends image or API key', async (_label, resolveResult) => {
+      const get = captureDetect(
+        { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
+        { qurlSite: OTHER_TUNNEL_SITE, resolveResult },
+      );
 
-        clock.advanceBy(15 * 60 * 1000 + 1);
-        await connector.detectWatermark(Buffer.from('z'), { guildId: 'g', apiKey: 'k' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/omitted resource_id/);
 
-        expect(mockClient.resolve).toHaveBeenCalledTimes(3);
-        expect(get().url).toBe(`${OTHER_TUNNEL_SITE}/api/detect`);
-        expect(logger.warn).toHaveBeenCalledTimes(2);
-        expect(logger.warn).toHaveBeenLastCalledWith(
-          'Detect tunnel resolve omitted resource_id; integrity check skipped',
-          { expected_resource_id: RESOURCE_ID },
-        );
-      } finally {
-        clock.restore();
-      }
+      expect(mockClient.resolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel resolve rejected missing resource_id',
+        { expected_resource_id: RESOURCE_ID },
+      );
+
+      // This is a deterministic response-contract failure. Back off before
+      // minting another access token rather than repeat the same unsafe flow.
+      await expect(
+        connector.detectWatermark(Buffer.from('y'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/backing off/);
+      expect(mockClient.createQurlForResource).toHaveBeenCalledTimes(1);
+      expect(mockClient.resolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
     });
 
     it('propagates a resolve() failure (knock/transport) and does NOT POST', async () => {

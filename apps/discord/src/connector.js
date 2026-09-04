@@ -478,7 +478,6 @@ const DETECT_TARGET_PATH = '/api/detect';
 const DETECT_LINK_EXPIRES_IN = '5m';
 const DETECT_RESOURCE_LIST_LIMIT = 100;
 const DETECT_RESOURCE_FAILURE_BACKOFF_MS = 30 * 1000;
-const DETECT_MISSING_RESOURCE_ID_WARN_INTERVAL_MS = 15 * 60 * 1000;
 // TODO(upstream-contract): keep these suffixes in lockstep with qurl-service /
 // qURL tunnel infra hostnames for production, sandbox, and staging.
 const DETECT_TUNNEL_PROD_HOST_SUFFIX = '.qurl.site';
@@ -538,7 +537,6 @@ let _detectResourceRetryAfter = 0;
 let _detectResourcePreviousFailure = null;
 let _detectResourceConsecutiveFailures = 0;
 let _detectResourcePreviousFailureAt = 0;
-let _detectMissingResourceIdWarnedAt = null;
 
 function clearDetectResourceFailureState() {
   _detectResourceRetryAfter = 0;
@@ -670,9 +668,11 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-// Safe host-only context for the qurl_site rejection breadcrumb. `hostname`
-// excludes credentials, port, path, query, and fragment; undefined on malformed
-// input lets JSON logging omit the field instead of echoing a URL.
+// Safe host-only context for the qurl_site rejection breadcrumb. The guards
+// intentionally throw constant URL-free messages, so this hostname is the
+// operator signal that distinguishes an infra suffix drift from an SSRF probe.
+// `hostname` excludes credentials, port, path, query, and fragment; undefined
+// on malformed input lets JSON logging omit the field instead of echoing a URL.
 function detectTargetHostname(qurlSite) {
   try {
     return new URL(qurlSite).hostname;
@@ -730,9 +730,8 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
   // invariant rather than a second identity source. Keep it explicit so a
   // future caller using a different target source fails closed. resolve()'s
   // resource_id check below independently binds the fresh access token to the
-  // slug-resolved opaque public key when that response field is present.
-  // When that optional field is absent, this suffix namespace is the sole host
-  // boundary; compatibility is deliberate and emits a rate-limited warning.
+  // slug-resolved opaque public key. A missing identity fails closed before the
+  // Bearer-carrying image POST; the suffix is a namespace, not tenant identity.
   // buildDetectTargetUrl obtains the expected value from the same WHATWG URL
   // parser, which canonicalizes ASCII DNS hostname case on both values.
   const targetHost = parsed.hostname;
@@ -960,25 +959,25 @@ async function resolveDetectTarget() {
     logger.warn('Detect tunnel resolve failed (knock/transport)', { error: redactAccessToken(err.message) });
     throw err;
   }
-  // The live response includes resource_id. Treat it as an integrity check when
-  // present, but do not make the tunnel POST depend on optional resolve metadata
-  // from older/variant API shapes; qurl_site came from the authenticated mint.
+  // Bind the fresh access token to the slug-resolved resource before sending
+  // image bytes + API-key Bearer to the minted tunnel host. qurl-service's
+  // public resolve handler validates and always serializes resource_id; a
+  // response that omits it is therefore malformed, not a compatibility shape.
   // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
   // preserve exact serialization on list and resolve responses.
   const resolvedResourceId = resolved?.resource_id;
   if (!resolvedResourceId) {
-    const now = Date.now();
-    if (_detectMissingResourceIdWarnedAt === null
-      || now - _detectMissingResourceIdWarnedAt >= DETECT_MISSING_RESOURCE_ID_WARN_INTERVAL_MS) {
-      // Keep the weakened integrity signal visible without warning on every
-      // detect invocation when an older API shape is the steady state.
-      _detectMissingResourceIdWarnedAt = now;
-      logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped', {
-        expected_resource_id: resourceId,
-      });
-    }
+    const err = new Error('Detect tunnel resolve omitted resource_id');
+    // The knock already happened, but no image/API key has left the bot. This
+    // is a deterministic response-contract failure, so retain the known slug
+    // resource and back off immediately instead of minting another token.
+    rememberDetectResourceFailure(err, { clearResourceCache: false, immediateBackoff: true });
+    logger.warn('Detect tunnel resolve rejected missing resource_id', {
+      expected_resource_id: resourceId,
+    });
+    throw err;
   }
-  if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
+  if (String(resolvedResourceId) !== resourceId) {
     const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
     // The knock already happened, but the Bearer-carrying image POST must not.
     // The minted qURL is unused and expires quickly; clear the cache so the

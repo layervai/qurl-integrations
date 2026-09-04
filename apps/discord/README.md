@@ -118,10 +118,8 @@ accepted after the URL and SSRF guards, including hostnames with multiple
 routing labels. The suffix allowlist constrains the target to a trusted qURL
 tunnel namespace; it is not a tenant identity signal. The case-sensitive
 `resource_id` returned by `resolve()` is checked against the slug-resolved
-public key when that response field is present. Older or variant resolve
-responses without `resource_id` remain compatible and emit a structured
-warning at most once every 15 minutes per bot process while the check is
-skipped.
+public key. A missing, empty, or mismatched `resource_id` fails closed before
+the bot sends image bytes or its API-key Bearer to the tunnel host.
 
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
