@@ -469,8 +469,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     });
   }
   // Interim #1366 evidence: compare this keyed, pseudonymous fingerprint
-  // across bind events to detect qURL-owner changes. It is observability only;
-  // durable owner identity and fail-closed comparison belong in #1366.
+  // across bind events to detect qURL-owner changes. The id_token is
+  // JWKS-verified but not nonce-bound, so this is observability only; durable
+  // owner identity and fail-closed comparison belong in #1366.
   logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
     guild_id: guildId,
     configured_by: discordUserId,

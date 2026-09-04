@@ -1,10 +1,10 @@
-// Global Jest setup — runs ONCE before any test file loads, via
+// Shared Jest setup — runs before EACH test file loads, via
 // jest.config.js `setupFiles`. Sets process.env vars that source
 // modules read at require-time so their fail-fast module-load guards
 // don't throw mid-import in tests.
 //
-// Why module-level setup (not per-file): once commands.js started
-// requiring flow-state in PR 5, every test file that imports
+// Why shared setup (not repeated declarations in every test): once
+// commands.js started requiring flow-state in PR 5, every test file that imports
 // commands.js (or any of its peers) indirectly loads flow-state.js,
 // which throws at the top level when `DDB_TABLE_PREFIX` or
 // `AWS_REGION` are absent. Forcing each test file to set those two
@@ -12,9 +12,9 @@
 // risk of new test files forgetting. A single setupFiles entry
 // instead.
 //
-// These vars stay set for the whole worker process. Individual test
-// files can still override via `process.env.X = ...` if they need a
-// different value (and re-require the module to re-read it). Tests
+// These defaults are restored before every suite. Individual test files can
+// still override via `process.env.X = ...` if they need a different value
+// (and re-require the module to re-read it). Tests
 // that mock flow-state entirely via `jest.mock('../src/flow-state',
 // ...)` don't observe these vars at all — the mock replaces the real
 // module before its top-level code runs.

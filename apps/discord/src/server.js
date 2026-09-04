@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
+const { LOG_EVENTS } = require('./constants');
 const { renderPage } = require('./templates/page');
 const { isPositiveFinite } = require('./utils/time');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
@@ -13,7 +14,6 @@ const qurlWebhookRouter = require('./routes/qurl-webhook');
 const webhookSubscriptions = require('./webhook-subscriptions');
 
 const app = express();
-const AUTH0_CONNECTION_POLICY_EVENT = 'qurl_oauth_auth0_connection_policy';
 
 function generateCspNonce() {
   return crypto.randomBytes(16).toString('base64url');
@@ -218,7 +218,7 @@ function noStoreHeaders(req, res, next) {
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
 const auth0ConnectionPolicyMetadata = {
-  event: AUTH0_CONNECTION_POLICY_EVENT,
+  event: LOG_EVENTS.QURL_OAUTH_AUTH0_CONNECTION_POLICY,
   connection: auth0Connection,
 };
 if (!config.isQurlOAuthConfigured) {
@@ -233,6 +233,9 @@ if (!config.isQurlOAuthConfigured) {
     : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
   // Stable event metadata supports exact grep/filter matching while the
   // human-readable message remains self-sufficient if metadata is flattened.
+  // OAuth-live + unpinned warns once per process because the risk is reachable;
+  // an inactive pin stays info-level because incomplete OAuth disables the
+  // affected flow entirely.
   if (auth0Connection) {
     logger.info(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
   } else {
