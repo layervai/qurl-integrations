@@ -670,10 +670,9 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-// Hostname parser shared by the host pin and its rejection breadcrumb.
-// `hostname` excludes credentials, port, path, query, and fragment; undefined
-// on malformed input is load-bearing both for the guard below and for JSON
-// logging to omit the field instead of echoing a URL.
+// Safe host-only context for the qurl_site rejection breadcrumb. `hostname`
+// excludes credentials, port, path, query, and fragment; undefined on malformed
+// input lets JSON logging omit the field instead of echoing a URL.
 function detectTargetHostname(qurlSite) {
   try {
     return new URL(qurlSite).hostname;
@@ -696,7 +695,7 @@ class DetectQurlSiteError extends Error {}
 // from a TRUSTED authenticated mint (not user input) and resolve-per-call keeps
 // the knock window tight, so a DNS round-trip per detect isn't warranted. A
 // future reader should NOT assume this carries the link guard's DNS guarantee.
-function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
+function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
   let parsed;
   try {
     parsed = new URL(targetUrl);
@@ -734,13 +733,10 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   // slug-resolved opaque public key when that response field is present.
   // When that optional field is absent, this suffix namespace is the sole host
   // boundary; compatibility is deliberate and emits a rate-limited warning.
-  // WHATWG URL parsing canonicalizes ASCII DNS hostname case on both values.
+  // buildDetectTargetUrl obtains the expected value from the same WHATWG URL
+  // parser, which canonicalizes ASCII DNS hostname case on both values.
   const targetHost = parsed.hostname;
-  const expectedHost = detectTargetHostname(expectedQurlSite);
-  if (!expectedHost) {
-    throw new Error('Detect tunnel returned an unparseable qurl_site');
-  }
-  if (targetHost !== expectedHost) {
+  if (targetHost !== expectedQurlSiteHost) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
   }
   // TODO(upstream-contract): qurl_site is an authenticated, host-only tunnel
@@ -776,7 +772,7 @@ function buildDetectTargetUrl(qurlSite) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
   const candidateUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
-  assertPublicHttpsTarget(candidateUrl, qurlSite);
+  assertPublicHttpsTarget(candidateUrl, parsed.hostname);
   // Rebuild from the validated origin so the value returned to fetch is also
   // structurally credential-free, independent of later guard refactors.
   return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
