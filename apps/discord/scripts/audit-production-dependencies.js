@@ -113,8 +113,10 @@ function auditTransportCode(result, body = auditBody(result)) {
   // the authoritative audit-endpoint timeout on stderr. Match only npm's
   // audit-specific warning and endpoint path; arbitrary free-text failures
   // remain non-retryable and fail closed.
+  // TODO(upstream-contract): reverify this npm 10.9.4 warning shape whenever
+  // apps/discord/.nvmrc changes its pinned npm version.
   if (typeof result?.stderr === 'string' && result.stderr.split(/\r?\n/).some(line => (
-    /^npm warn audit network timeout at: https?:\/\/\S+\/-\/npm\/v1\/security\/audits\/(?:quick|bulk)$/.test(line)
+    /^npm warn audit network timeout at: https?:\/\/\S+\/-\/npm\/v1\/security\/audits\/(?:quick|bulk)\s*$/.test(line)
   ))) {
     return 'ETIMEDOUT';
   }
@@ -144,7 +146,16 @@ function writeSuccess(result, body, stdout, stderr) {
     if (detail) stderr.write(`npm audit output: ${detail}\n`);
     return false;
   }
-  const count = severity => Number.isSafeInteger(counts[severity]) ? counts[severity] : 0;
+  const gatedCountsAreValid = ['high', 'critical'].every(
+    severity => Number.isSafeInteger(counts[severity]) && counts[severity] >= 0,
+  );
+  if (!gatedCountsAreValid) {
+    stderr.write('npm audit failed closed: invalid metadata.vulnerabilities counts.\n');
+    return false;
+  }
+  const count = severity => (
+    Number.isSafeInteger(counts[severity]) && counts[severity] >= 0 ? counts[severity] : 0
+  );
   const high = count('high');
   const critical = count('critical');
   if (high > 0 || critical > 0) {
@@ -161,7 +172,7 @@ function writeSuccess(result, body, stdout, stderr) {
   return true;
 }
 
-function writeNonRetryableFailure(result, body, stdout, stderr) {
+function writeNonRetryableFailure(result, body, stderr) {
   const vulnerabilities = body?.vulnerabilities;
   if (vulnerabilities && typeof vulnerabilities === 'object') {
     const gated = Object.entries(vulnerabilities)
@@ -247,7 +258,7 @@ async function runAudit({
     const body = result.error ? null : auditBody(result);
     const errorCode = auditTransportCode(result, body);
     if (!isRetryableTransportCode(errorCode)) {
-      writeNonRetryableFailure(result, body, stdout, stderr);
+      writeNonRetryableFailure(result, body, stderr);
       return exitCode;
     }
     if (attempt === MAX_ATTEMPTS) {

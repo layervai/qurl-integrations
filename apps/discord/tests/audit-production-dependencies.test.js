@@ -46,7 +46,7 @@ describe('production dependency audit', () => {
           detail: 'Service Unavailable',
         },
       }))
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
     const sleep = jest.fn().mockResolvedValue(undefined);
     const stdout = captureStream();
     const stderr = captureStream();
@@ -82,7 +82,7 @@ describe('production dependency audit', () => {
           },
         })}\n`,
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
     const sleep = jest.fn().mockResolvedValue(undefined);
 
     await expect(runAudit({
@@ -102,7 +102,7 @@ describe('production dependency audit', () => {
         stdout: '',
         stderr: 'npm warn ignoring config {legacy}\n{\n  "error": {\n    "code": "E503",\n    "summary": "Service unavailable"\n  }\n}\nnpm warn done\n',
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
 
     await expect(runAudit({
       spawn,
@@ -121,7 +121,7 @@ describe('production dependency audit', () => {
         stdout: '',
         stderr: 'npm warn ignoring config\n{"error":{"code":"E503","summary":"Service unavailable"}}\nnpm warn done\n',
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
 
     await expect(runAudit({
       spawn,
@@ -140,7 +140,28 @@ describe('production dependency audit', () => {
         stdout: '{"error":{"summary":"","detail":""}}\n',
         stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/audits/quick\n',
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+
+    await expect(runAudit({
+      spawn,
+      sleep: jest.fn().mockResolvedValue(undefined),
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(0);
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  test('retries npm audit endpoint timeout text with trailing whitespace', async () => {
+    const spawn = jest.fn()
+      .mockReturnValueOnce({
+        status: 1,
+        stdout: '{"error":{"summary":"","detail":""}}\n',
+        stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/audits/quick  \n',
+      })
+      .mockReturnValueOnce(auditResult(0, {
+        metadata: { vulnerabilities: { high: 0, critical: 0 } },
+      }));
 
     await expect(runAudit({
       spawn,
@@ -162,7 +183,7 @@ describe('production dependency audit', () => {
   ])('retries %s only when the structured envelope identifies transport failure', async (_label, body) => {
     const spawn = jest.fn()
       .mockReturnValueOnce(auditResult(1, body))
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
 
     await expect(runAudit({
       spawn,
@@ -280,6 +301,25 @@ describe('production dependency audit', () => {
     })).resolves.toBe(1);
 
     expect(stderr.value()).toContain('reported 1 high and 0 critical vulnerabilities');
+  });
+
+  test.each([
+    ['missing critical count', { high: 0 }],
+    ['string high count', { high: '1', critical: 0 }],
+    ['negative critical count', { high: 0, critical: -1 }],
+  ])('fails closed when npm exits zero with %s', async (_label, vulnerabilities) => {
+    const stderr = captureStream();
+
+    await expect(runAudit({
+      spawn: jest.fn().mockReturnValue(auditResult(0, {
+        metadata: { vulnerabilities },
+      })),
+      sleep: jest.fn(),
+      stdout: captureStream().stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(1);
+
+    expect(stderr.value()).toContain('invalid metadata.vulnerabilities counts');
   });
 
   test('fails closed when npm exits zero without the audit metadata envelope', async () => {
