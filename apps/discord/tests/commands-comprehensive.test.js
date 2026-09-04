@@ -524,6 +524,15 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it('emits failure_type=unsupported_context when rejecting a DM invocation', async () => {
+    const interaction = makeInteraction({ guildId: null });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: 'unsupported_context' }),
+    );
+  });
+
   it('emits failure_type=reply_failed when stale-registration reply throws non-ack error', async () => {
     // Stale-registration path tries to reply "no longer available" but
     // the reply itself fails for a non-timeout reason (e.g. permission
@@ -551,6 +560,23 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
       expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'ack_timeout' }),
+    );
+  });
+
+  it.each([
+    ['reply_failed', new Error('Missing Permissions')],
+    ['ack_timeout', Object.assign(new Error('Unknown interaction'), { code: 10062 })],
+  ])('emits failure_type=%s when the unsupported-context reply fails', async (failureType, error) => {
+    const interaction = makeInteraction({
+      guildId: null,
+      reply: jest.fn().mockRejectedValue(error),
+    });
+
+    await handleCommand(interaction);
+
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: failureType }),
     );
   });
 
