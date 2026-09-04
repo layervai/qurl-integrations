@@ -14,7 +14,8 @@
 // inbound webhooks until eventual restart. Fix in this rev: rotate
 // the secret ONLY if (a) no subscription exists yet, or (b) the
 // existing one matches our URL but the caller can't supply a
-// known-good secret to verify against (initialSecret unset/empty).
+// known-good secret to verify against (initialSecret absent or outside
+// qurl-service's server-issued format).
 // Steady-state restarts find (existing sub + real SSM secret) and
 // skip the rotate — every replica reads the same secret from SSM/env
 // and stays in lock-step.
@@ -88,6 +89,18 @@ const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
 // can never drift to different event lists. Order is irrelevant here;
 // reconcile uses set comparison.
 const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
+
+// TODO(upstream-contract): qurl-service/internal/domain/webhook.go
+// GenerateWebhookSecret prefixes every create/rotate secret with this
+// value. The allowlist distinguishes reusable values from SSM seed
+// sentinels and rejects response drift before it can reach persistence.
+const SERVER_SECRET_PREFIX = 'whsec_';
+
+function isServerIssuedSecret(value) {
+  return typeof value === 'string'
+    && value.length > SERVER_SECRET_PREFIX.length
+    && value.startsWith(SERVER_SECRET_PREFIX);
+}
 
 // Strip secret-shaped fields anywhere in a parsed body before
 // stringifying. Error messages echo response bodies into CloudWatch;
@@ -686,13 +699,12 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
   // raw TypeError with no context. Surface the contract violation
   // explicitly so the boot-log error is greppable.
   const data = resp?.data;
-  // length > 0 too — an empty-string secret would let the receiver
-  // verify against a zero-length HMAC key (any signature against ''
-  // produces the same digest), trivially bypassable.
   if (!data
-      || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0
-      || typeof data.secret !== 'string' || data.secret.length === 0) {
-    throw new Error('createSubscription: contract drift (response missing or empty webhook_id/secret)');
+      || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0) {
+    throw new Error('createSubscription: contract drift (response missing or empty webhook_id)');
+  }
+  if (!isServerIssuedSecret(data.secret)) {
+    throw new Error('createSubscription: contract drift (response secret is not server-issued)');
   }
   return data;
 }
@@ -705,8 +717,8 @@ async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
     apiKey,
   });
   const data = resp?.data;
-  if (!data || typeof data.secret !== 'string' || data.secret.length === 0) {
-    throw new Error('rotateSecret: contract drift (response missing or empty secret)');
+  if (!data || !isServerIssuedSecret(data.secret)) {
+    throw new Error('rotateSecret: contract drift (response secret is not server-issued)');
   }
   return data;
 }
@@ -775,17 +787,6 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
     target: [...TARGET_EVENTS],
   });
   await patchEvents({ apiEndpoint, apiKey, webhookId: existing.webhook_id, events: [...TARGET_EVENTS] });
-}
-
-// Prefix qurl-service puts on every webhook secret it issues (create and
-// rotate alike). Used to tell a usable in-memory/SSM secret from a seed
-// sentinel or an empty value.
-const SERVER_SECRET_PREFIX = 'whsec_';
-
-function isServerIssuedSecret(value) {
-  return typeof value === 'string'
-    && value.length > SERVER_SECRET_PREFIX.length
-    && value.startsWith(SERVER_SECRET_PREFIX);
 }
 
 /**
@@ -926,6 +927,18 @@ async function ensureWebhookSubscription(opts) {
   // URL (a sub that predates the parameter, or an SSM reset), and the
   // receiver would then 401 every delivery until an operator noticed.
   const initialIsRealSecret = isServerIssuedSecret(initialSecret);
+  if (existing
+      && typeof initialSecret === 'string'
+      && initialSecret.length > 0
+      && !initialIsRealSecret) {
+    // Observability only: the reuse decision remains a prefix allowlist,
+    // not a denylist coupled to terraform's current sentinel literal.
+    logger.warn('qURL webhook initial secret has unrecognized format — rotating instead of reusing', {
+      webhookId: existing.webhook_id,
+      seedSentinel: initialSecret === 'PLACEHOLDER',
+      valueLength: initialSecret.length,
+    });
+  }
 
   // Forwarded so per-guild callers can route inbound webhooks
   // without a second GET /v1/webhooks.
@@ -990,10 +1003,9 @@ async function ensureWebhookSubscription(opts) {
     logger.info('qURL webhook subscription created', { webhookId, url: bridgeUrl });
   }
 
-  // Note: no `if (!secret)` guard here — `createSubscription` and
-  // `rotateSecret` both validate `typeof data.secret === 'string'`
-  // and throw their own contract-drift error before returning. A
-  // second check at this point would be unreachable.
+  // Note: no second secret guard here — `createSubscription` and
+  // `rotateSecret` both enforce the server-issued format and throw
+  // their own contract-drift error before returning.
 
   await bestEffortPersist({ persistSecret, value: secret });
 

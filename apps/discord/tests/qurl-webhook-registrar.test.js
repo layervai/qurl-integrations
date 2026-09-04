@@ -98,61 +98,51 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
 });
 
 describe('ensureWebhookSubscription — existing sub, bootstrap (no real initialSecret) → rotates', () => {
-  it('finds the sub, calls POST /v1/webhooks/{id}/secret, returns the rotated secret', async () => {
-    let rotatedFor = null;
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing',
-        url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed', 'qurl.expired'],
-      }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => {
-        rotatedFor = 'wh_existing';
-        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated' } } };
-      },
-    });
-    const result = await ensureWebhookSubscription(BASE_OPTS);
-    expect(rotatedFor).toBe('wh_existing');
-    expect(result).toEqual({
-      secret: 'whsec_rotated',
-      webhookId: 'wh_existing',
-      action: 'rotated',
-    });
-  });
-
-  it('also rotates when initialSecret is the infra SSM seed sentinel rather than a server-issued whsec_ value', async () => {
+  it.each([
+    ['undefined', undefined, false],
+    ['an empty string', '', false],
+    ['the terraform seed sentinel', 'PLACEHOLDER', true],
+    ['an arbitrary non-prefixed value', 'legacy-secret', true],
+    ['the bare server prefix', 'whsec_', true],
+  ])('rotates when initialSecret is %s', async (_label, initialSecret, expectWarning) => {
     // terraform seeds /qurl-bot-discord/QURL_WEBHOOK_SECRET with a sentinel
     // so the parameter exists before the first registrar run. A sub that
-    // predates the parameter must not be "reused" with that sentinel —
-    // the receiver could never verify a delivery with it.
-    let rotated = false;
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
-      }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => {
-        rotated = true;
-        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } } };
-      },
-    });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'PLACEHOLDER' });
-    expect(rotated).toBe(true);
-    expect(result.action).toBe('rotated');
-    expect(result.secret).toBe('whsec_post_bootstrap');
-  });
+    // predates the parameter must not reuse the sentinel or any other value
+    // outside qurl-service's contract. Non-empty unexpected values warn
+    // without disclosing their contents; unset/empty is normal bootstrap.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let rotatedFor = null;
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [{
+          webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
+        }] } }),
+        'POST /v1/webhooks/wh_existing/secret': () => {
+          rotatedFor = 'wh_existing';
+          return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } } };
+        },
+      });
 
-  it('also rotates when initialSecret is the empty string (SSM param not yet populated)', async () => {
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
-      }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => ({
-        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } },
-      }),
-    });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: '' });
-    expect(result.action).toBe('rotated');
-    expect(result.secret).toBe('whsec_post_bootstrap');
+      const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret });
+
+      expect(rotatedFor).toBe('wh_existing');
+      expect(result).toEqual({
+        secret: 'whsec_post_bootstrap',
+        webhookId: 'wh_existing',
+        action: 'rotated',
+      });
+      if (expectWarning) {
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+        const warning = warnSpy.mock.calls[0][0];
+        expect(warning).toContain(`"seedSentinel":${initialSecret === 'PLACEHOLDER'}`);
+        expect(warning).toContain(`"valueLength":${initialSecret.length}`);
+        expect(warning).not.toContain(initialSecret);
+      } else {
+        expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('patches events to the target set if the existing list is missing any target event', async () => {
@@ -447,6 +437,20 @@ describe('ensureWebhookSubscription — error paths', () => {
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
   });
 
+  it('throws before persistence if create returns a non-server-issued secret', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_new', secret: 'legacy-secret',
+      } } }),
+    });
+    const persistSecret = jest.fn(async () => {});
+
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+      .rejects.toThrow(/createSubscription.*contract drift.*server-issued/);
+    expect(persistSecret).not.toHaveBeenCalled();
+  });
+
   it('throws if rotate response has no secret (contract drift)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -455,6 +459,22 @@ describe('ensureWebhookSubscription — error paths', () => {
       'POST /v1/webhooks/wh_existing/secret': () => ({ body: { data: { webhook_id: 'wh_existing' /* no secret */ } } }),
     });
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/rotateSecret.*contract drift/);
+  });
+
+  it('throws before persistence if rotate returns only the server-secret prefix', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_' } },
+      }),
+    });
+    const persistSecret = jest.fn(async () => {});
+
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+      .rejects.toThrow(/rotateSecret.*contract drift.*server-issued/);
+    expect(persistSecret).not.toHaveBeenCalled();
   });
 
   it('throws on missing required option', async () => {
@@ -520,7 +540,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [] } }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-          webhook_id: 'wh', secret: 'whsec_',
+          webhook_id: 'wh', secret: 'whsec_x',
         } } }),
       });
       const accessDenied = new Error('User is not authorized to perform: ssm:PutParameter');
@@ -546,7 +566,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [] } }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-          webhook_id: 'wh', secret: 'whsec_',
+          webhook_id: 'wh', secret: 'whsec_x',
         } } }),
       });
       const throttle = new Error('Rate exceeded');
@@ -576,7 +596,7 @@ describe('ensureWebhookSubscription — description length defense', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         sentDescription = JSON.parse(opts.body).description;
-        return { status: 201, body: { data: { webhook_id: 'wh_clipped', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh_clipped', secret: 'whsec_x' } } };
       },
     });
     await ensureWebhookSubscription({ ...BASE_OPTS, description: longDescription });
@@ -590,7 +610,7 @@ describe('ensureWebhookSubscription — description length defense', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         sentDescription = JSON.parse(opts.body).description;
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x' } } };
       },
     });
     await ensureWebhookSubscription({ ...BASE_OPTS, description: undefined });
@@ -609,7 +629,7 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
       },
       'POST /v1/webhooks': (opts) => {
         postOpts = opts;
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x' } } };
       },
     });
     await ensureWebhookSubscription(BASE_OPTS);
@@ -628,7 +648,7 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         body = JSON.parse(opts.body);
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x' } } };
       },
     });
     await ensureWebhookSubscription(BASE_OPTS);

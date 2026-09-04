@@ -36,9 +36,11 @@
 // the bot ever again.
 //
 // Rotation flow: re-invoking the Lambda rotates the secret + updates
-// SSM. The bot's task definition then needs a redeploy to pick up
-// the new secret from env. Operators script this as: invoke Lambda,
-// then `aws ecs update-service --force-new-deployment`.
+// SSM. In qurl-integrations-infra, the HTTP receiver ECS service depends
+// on `aws_lambda_invocation.webhook_registrar`; its task definition
+// resolves QURL_WEBHOOK_SECRET from SSM at task launch, so an apply writes
+// the new value before replacement tasks start. A direct/manual Lambda
+// invocation still needs `aws ecs update-service --force-new-deployment`.
 //
 // IAM scope (set in qurl-integrations-infra):
 //   - ssm:GetParameter on the QURL_API_KEY + QURL_WEBHOOK_SECRET paths
@@ -225,12 +227,14 @@ exports.handler = async (event, context) => {
   }
 
   // Read existing webhook secret (if any) so the registrar can take
-  // the reuse path when steady-state. On first-ever invocation this
-  // returns null; ensureWebhookSubscription treats null as "no real
-  // initial secret" and creates fresh. On subsequent invocations
-  // (manual rotation, scheduled rotation) the SSM value is the
-  // previously-persisted secret — ensureWebhookSubscription's
-  // initialIsRealSecret guard reuses it if the sub still matches.
+  // the reuse path when steady-state. On first-ever invocation this is
+  // either null or terraform's PLACEHOLDER seed; neither is reusable,
+  // so ensureWebhookSubscription creates or rotates as appropriate. On
+  // subsequent invocations the SSM value is the previously-persisted
+  // server-issued secret, which the registrar reuses if the sub matches.
+  // qurl-integrations-infra orders the HTTP receiver service after the
+  // synchronous Lambda invocation, so tasks resolve this parameter only
+  // after any created/rotated value has been strictly persisted below.
   const initialSecret = await readSsmSecureString({ ssmClient, name: input.ssmParamName });
 
   // Lambda STRICT-persist path: do NOT pass `persistSecret` into

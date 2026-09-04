@@ -389,7 +389,7 @@ describe('webhook-registrar Lambda — bridgeUrl normalization', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         createBody = JSON.parse(opts.body);
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x' } } };
       },
     });
     await handler({ ...BASE_EVENT, bridgeUrl: 'https://bot.test.example/webhooks/qurl/' }, CONTEXT);
