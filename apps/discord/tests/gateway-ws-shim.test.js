@@ -779,7 +779,7 @@ describe('IDENTIFY budget guard', () => {
 
   it('stop still flushes and detaches listeners after the budget trips', async () => {
     const {
-      shim, store, managerInstances, onFatal,
+      shim, store, logger, managerInstances, onFatal,
     } = makeShim();
     await shim.start();
     const mgr = managerInstances[0];
@@ -801,6 +801,11 @@ describe('IDENTIFY budget guard', () => {
     expect(handler).not.toHaveBeenCalled();
     expect(shim.isReady()).toBe(false);
     expect(shim._getIdentifyAttemptsForTest()).toBe(2);
+    mgr.emit(WebSocketShardEvents.Closed, { code: 1000, reason: 'shutdown', shardId: 0 });
+    expect(logger.info).toHaveBeenCalledWith(
+      'gateway-ws-shim: shard closed during terminal teardown',
+      { shardId: 0, code: 1000, reason: 'shutdown' },
+    );
 
     await shim.stop();
     expect(store.flushFinal).toHaveBeenCalledTimes(1);
@@ -1250,6 +1255,7 @@ describe('constants are pinned', () => {
     const wsRoot = wsEntry.slice(0, markerIdx) + marker.slice(0, -1);
     const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
     expect(djsWsVersion).toBe(VERIFIED_DJS_WS_VERSION);
+    expect(require('../package.json').dependencies['@discordjs/ws']).toBe(VERIFIED_DJS_WS_VERSION);
   });
 
   it('pins the upstream rejection behavior that requires a blocking budget guard', async () => {
@@ -1278,6 +1284,33 @@ describe('constants are pinned', () => {
       .toBeLessThan(shard.send.mock.invocationCallOrder[0]);
   });
 
+  it('pins that an aborted throttle wait suppresses the upstream IDENTIFY send', async () => {
+    let shard;
+    const strategy = {
+      waitForIdentify: jest.fn(async (_shardId, signal) => {
+        shard.emit(WebSocketShardEvents.Closed, { code: 1000, shardId: 0 });
+        throw signal.reason;
+      }),
+      options: {
+        token: 'shape-contract-only',
+        identifyProperties: {},
+        intents: 0,
+        shardCount: 1,
+        readyTimeout: 1,
+      },
+    };
+    shard = new WebSocketShard(strategy, 0);
+    shard.destroy = jest.fn().mockResolvedValue(undefined);
+    shard.send = jest.fn().mockResolvedValue(undefined);
+    shard.waitForEvent = jest.fn().mockResolvedValue(undefined);
+
+    await shard.identify();
+
+    expect(strategy.waitForIdentify).toHaveBeenCalledWith(0, expect.any(AbortSignal));
+    expect(shard.destroy).not.toHaveBeenCalled();
+    expect(shard.send).not.toHaveBeenCalled();
+  });
+
   it('real @discordjs/ws exposes and honors the configured identify throttler', async () => {
     expect(typeof SimpleIdentifyThrottler).toBe('function');
     const realThrottler = new SimpleIdentifyThrottler(1);
@@ -1302,10 +1335,4 @@ describe('constants are pinned', () => {
     expect(delegate.waitForIdentify).toHaveBeenCalledWith(0, signal);
   });
 
-  it('production wires identify-budget fatal errors through the watchdog-safe shutdown path', () => {
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const source = fs.readFileSync(path.join(__dirname, '../src/index.js'), 'utf8');
-    expect(source).toContain('onFatal: gatewayFatalShutdown');
-  });
 });

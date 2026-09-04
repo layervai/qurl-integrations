@@ -211,8 +211,8 @@ function createConnectionWatchdog({
       // Bounded by CONNECT_CEILING_MS — a hung connect would otherwise
       // pin this tick and the failure-exit recovery would never fire.
       await raceWithCeiling(manager.connect(), connectCeilingMs, 'watchdog_connect_ceiling');
-      if (stopping) return;
       attempts = 0;
+      if (stopping) return;
       logger.info('connection-watchdog: connect succeeded');
     } catch (err) {
       // stop() may land while manager.connect() is in flight. Do not let the

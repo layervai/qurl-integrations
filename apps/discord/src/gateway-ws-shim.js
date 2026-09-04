@@ -309,6 +309,9 @@ function createGatewayWsShim({
         },
       };
     }
+    // Budget state stays in the createGatewayWsShim closure, not on this
+    // returned delegate. If upstream races two builder calls, both guards
+    // therefore share one process-wide allowance.
     return {
       async waitForIdentify(shardId, signal) {
         // Once the budget has tripped, every later grant remains blocked on
@@ -508,7 +511,12 @@ function createGatewayWsShim({
       // minor adding it (some Discord 4xxx close frames carry one);
       // today it's always undefined, logged as null.
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
-        if (stopped) return;
+        if (stopped) {
+          logger.info('gateway-ws-shim: shard closed during terminal teardown', {
+            shardId, code, reason: reason ?? null,
+          });
+          return;
+        }
         wsConnected = false;
         logger.info('gateway-ws-shim: shard closed', {
           shardId, code, reason: reason ?? null,

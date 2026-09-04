@@ -268,6 +268,25 @@ describe('step() — connect retries', () => {
     expect(watchdog._getAttemptsForTest()).toBe(0);
   });
 
+  it('resets attempts when stop lands during a successful connect', async () => {
+    const manager = makeFakeManager();
+    let finishConnect;
+    manager.connect
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockImplementationOnce(() => new Promise(resolve => { finishConnect = resolve; }));
+    const { watchdog } = makeWatchdog({ manager, maxAttempts: 10 });
+
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(1);
+
+    const connecting = watchdog._stepForTest();
+    watchdog.stop();
+    finishConnect();
+    await connecting;
+
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
   it('backs off 200/400/800/1600 ms on attempts 1..4', async () => {
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('fail'));

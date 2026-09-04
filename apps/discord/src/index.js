@@ -665,7 +665,6 @@ let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdownTeardown() {
-  try {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
     // and process.exit() called immediately after would truncate an OAuth
     // callback mid-flight, leaving the admin's /qurl setup without a
@@ -773,9 +772,6 @@ async function gracefulShutdownTeardown() {
     }
     await db.close();
     logger.info('Shutdown complete');
-  } catch (error) {
-    logger.error('Error during shutdown', { error: error.message });
-  }
 }
 
 async function gracefulShutdown(code = 0) {
