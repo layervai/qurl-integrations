@@ -60,10 +60,10 @@ const STORED_KEY = 'lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 function makeStatusInteraction({ memberFetchBehavior }) {
   const reply = jest.fn();
   const editReply = jest.fn();
-  return {
+  const interaction = {
     reply: reply.mockImplementation(() => Promise.resolve()),
-    deferReply: jest.fn().mockResolvedValue(undefined),
     editReply: editReply.mockImplementation(() => Promise.resolve()),
+    deferred: false,
     isAutocomplete: () => false,
     isChatInputCommand: () => true,
     commandName: 'qurl',
@@ -77,6 +77,10 @@ function makeStatusInteraction({ memberFetchBehavior }) {
     _initialReply: reply,
     _reply: editReply,
   };
+  interaction.deferReply = jest.fn().mockImplementation(async () => {
+    interaction.deferred = true;
+  });
+  return interaction;
 }
 
 beforeEach(() => {
@@ -103,11 +107,12 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     });
     await handleCommand(interaction);
     expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction.deferred).toBe(true);
     expect(interaction._initialReply).not.toHaveBeenCalled();
     expect(interaction._reply).toHaveBeenCalledTimes(1);
     const replyContent = interaction._reply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
-    expect(replyContent).toContain('Key prefix: `lv\\_live\\_aaa`');
+    expect(replyContent).toContain('Key prefix: `lv_live_aaa`');
     expect(replyContent).toContain('Scopes: `qurl:read`, `qurl:write`');
     expect(replyContent).not.toContain(STORED_KEY);
     expect(mockGetIdentity).toHaveBeenCalledWith(STORED_KEY);
@@ -175,6 +180,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     const replyContent = interaction._reply.mock.calls[0][0].content;
     expect(replyContent).toMatch(/check could not be completed/i);
+    expect(replyContent).toMatch(/stored qURL configuration found/i);
     expect(replyContent).not.toMatch(/revoked|invalid/i);
     expect(replyContent).not.toContain(STORED_KEY);
     expect(replyContent).toContain('Configured by: <@admin-original>');
@@ -225,7 +231,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(interaction._reply.mock.calls[0][0].content).toContain('Scopes: _none_');
   });
 
-  it('escapes service-reported prefix and scopes before rendering them', async () => {
+  it('sanitizes service-reported prefix and scopes before rendering them', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
       configured_by: 'admin-original',
@@ -245,8 +251,56 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
 
     const replyContent = interaction._reply.mock.calls[0][0].content;
-    expect(replyContent).toContain('Key prefix: `lv\\_live\\_\\`prefix`');
-    expect(replyContent).toContain('Scopes: `qurl:read\\` @everyone`');
+    expect(replyContent).toContain('Key prefix: `lv_live_prefix`');
+    expect(replyContent).toContain('Scopes: `qurl:read @everyone`');
+  });
+
+  it('bounds service-reported identity fields to Discord reply limits', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({
+      api_key: {
+        key_id: 'key-123',
+        key_prefix: 'x'.repeat(3000),
+        scopes: Array.from({ length: 100 }, (_, i) => `qurl:scope-${i}-${'x'.repeat(100)}`),
+      },
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._reply.mock.calls[0][0].content.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('starts identity verification while the admin-presence check is pending', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    let releaseMemberFetch;
+    let signalMemberFetchStarted;
+    const memberFetchStarted = new Promise((resolve) => { signalMemberFetchStarted = resolve; });
+    const memberFetchFinished = new Promise((resolve) => { releaseMemberFetch = resolve; });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: () => {
+        signalMemberFetchStarted();
+        return memberFetchFinished;
+      },
+    });
+
+    const command = handleCommand(interaction);
+    await memberFetchStarted;
+    const identityStartedBeforeMemberFinished = mockGetIdentity.mock.calls.length;
+    releaseMemberFetch({ id: 'admin-original' });
+    await command;
+
+    expect(identityStartedBeforeMemberFinished).toBe(1);
   });
 
   it('asks the admin to rerun setup when the config row has no stored key', async () => {

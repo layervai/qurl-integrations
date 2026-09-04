@@ -8730,6 +8730,8 @@ const commands = [
 
       // /qurl status — verify the stored key. Gate behind ManageGuild because
       // the response includes the key's non-secret prefix and granted scopes.
+      // This on-demand admin check relies on Discord's interaction rate limit
+      // rather than sharing the mutation-oriented send/detect cooldowns.
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
@@ -8740,6 +8742,19 @@ const commands = [
         await interaction.deferReply({ ephemeral: true });
         const guildConfig = await db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
+          // Start the independent key/service work before checking guild
+          // membership. Catch inside the promise so an early rejection cannot
+          // become unhandled while members.fetch is still pending.
+          const identityResultPromise = (async () => {
+            try {
+              const apiKey = await db.getGuildApiKey(interaction.guildId);
+              if (!apiKey) return { keyUnavailable: true };
+              return { identity: await getIdentity(apiKey) };
+            } catch (error) {
+              return { error };
+            }
+          })();
+
           // #185 admin-offboarding nudge: the qURL key is owned by the
           // admin who ran setup (Auth0 sub claim); usage bills to their
           // qURL account even after they leave. Surface a passive notice
@@ -8769,23 +8784,18 @@ const commands = [
             `Last updated: ${guildConfig.updated_at}` +
             originalAdminLeftNotice;
 
-          // getGuildConfig no longer returns the decrypted key (it would
-          // leak via any row dump); go through the explicit accessor and use
-          // the plaintext only to authenticate the service-side identity check.
-          const plaintextKey = await db.getGuildApiKey(interaction.guildId);
-          if (!plaintextKey) {
+          const { identity, error, keyUnavailable } = await identityResultPromise;
+          const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
+          if (keyUnavailable) {
             logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
             return interaction.editReply({
               content: '❌ **The stored qURL key is unavailable.**\n\n'
-                + 'Re-run `/qurl setup` to connect a valid key.\n\n'
+                + reconnectCopy
                 + configurationDetails,
             });
           }
-          let identity;
-          try {
-            identity = await getIdentity(plaintextKey);
-          } catch (err) {
-            const status = Number.isInteger(err?.status) ? err.status : null;
+          if (error) {
+            const status = Number.isInteger(error.status) ? error.status : null;
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
@@ -8793,20 +8803,35 @@ const commands = [
             if (status === 401 || status === 403) {
               return interaction.editReply({
                 content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
-                  + 'Re-run `/qurl setup` to connect a valid key.\n\n'
+                  + reconnectCopy
                   + configurationDetails,
               });
             }
+            return interaction.editReply({
+              content: '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
+                + 'Please try `/qurl status` again later.\n'
+                + configurationDetails,
+            });
           }
 
-          const identitySummary = identity
-            ? `✅ **qURL is configured**\n` +
-              `Key prefix: \`${escapeDiscordMarkdown(identity.api_key.key_prefix)}\`\n` +
-              `Scopes: ${identity.api_key.scopes.map(scope => `\`${escapeDiscordMarkdown(scope)}\``).join(', ') || '_none_'}\n`
-            : '⚠️ **The qURL key check could not be completed.**\n'
-              + 'Please try `/qurl status` again later.\n';
+          // Inline-code content renders backslashes literally, so strip
+          // backticks instead of applying general Markdown escaping. The
+          // plain display-name sanitizer also strips controls and caps each
+          // value at 64 codepoints; ten scopes keep the whole reply below
+          // Discord's 2,000-character content limit.
+          const sanitizeIdentityValue = (value) =>
+            sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
+          const keyPrefix = sanitizeIdentityValue(identity.api_key.key_prefix) || 'unavailable';
+          const scopeValues = identity.api_key.scopes.slice(0, 10)
+            .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
+          const omittedScopeCount = identity.api_key.scopes.length - scopeValues.length;
+          const scopes = (scopeValues.join(', ') || '_none_') +
+            (omittedScopeCount > 0 ? `, _+${omittedScopeCount} more_` : '');
           return interaction.editReply({
-            content: identitySummary + configurationDetails,
+            content: `✅ **qURL is configured**\n` +
+              `Key prefix: \`${keyPrefix}\`\n` +
+              `Scopes: ${scopes}\n` +
+              configurationDetails,
           });
         }
         // Branch the not-configured copy on the active setup flow so

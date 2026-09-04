@@ -98,9 +98,9 @@ describe('qURL client — getIdentity', () => {
     const logger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     const secretBody = 'sensitive-body-marker-do-not-log';
-    globalThis.fetch = jest.fn().mockResolvedValue(
-      apiError(status, { code: 'auth_error', detail: secretBody }),
-    );
+    const response = apiError(status, { code: 'auth_error', detail: secretBody });
+    response.body = { cancel: jest.fn().mockResolvedValue(undefined) };
+    globalThis.fetch = jest.fn().mockResolvedValue(response);
 
     const error = await qurl.getIdentity('stored-guild-key').then(
       () => { throw new Error('expected rejection'); },
@@ -113,6 +113,7 @@ describe('qURL client — getIdentity', () => {
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       expect.objectContaining({ status, method: 'GET', path: '/me' }),
     );
+    expect(response.body.cancel).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a non-JSON identity response without exposing its body', async () => {
@@ -144,10 +145,10 @@ describe('qURL client — getIdentity', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('makes one attempt when qurl-service returns 503', async () => {
-    globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
+  it.each([429, 503])('makes one attempt when qurl-service returns %i', async (status) => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(status));
 
-    await expect(qurl.getIdentity('stored-guild-key')).rejects.toMatchObject({ status: 503 });
+    await expect(qurl.getIdentity('stored-guild-key')).rejects.toMatchObject({ status });
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 });

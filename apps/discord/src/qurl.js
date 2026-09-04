@@ -13,8 +13,9 @@ const { isPrivateHost } = require('./utils/private-host');
 
 /**
  * qURL API client for the bot's link create / status / revoke calls, backed by
- * the @layervai/qurl SDK where it exposes the required route. The small
- * GET /v1/me call below uses fetch because SDK 0.3.0 has no identity method.
+ * the @layervai/qurl SDK where it exposes the required route. This remains the
+ * command-side client consolidated in #830; the small GET /v1/me shim below
+ * uses fetch because SDK 0.3.x has no identity method.
  * This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
@@ -27,9 +28,7 @@ const { isPrivateHost } = require('./utils/private-host');
 // total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
 // attempts; `timeout` is the per-attempt deadline (matching the old
 // AbortSignal.timeout(30000)). We pin both rather than inherit SDK defaults so
-// a future default drift can't silently change this path's behavior. getIdentity
-// makes one attempt because SDK 0.3.0 exposes no supported generic request path;
-// its interactive caller reports retryable failures as temporarily unavailable.
+// a future default drift can't silently change this path's behavior.
 // (connector.js's resolve path pins maxRetries:3 — a separate call site we
 // deliberately leave untouched here.)
 const REQUEST_TIMEOUT_MS = 30000;
@@ -138,6 +137,9 @@ async function getIdentity(apiKey) {
     throw new Error('Guild qURL API key is not configured');
   }
 
+  // Deliberately make one attempt: this interactive verification reports
+  // transient failures as unavailable instead of copying the SDK's private
+  // retry policy. Replace this shim when the SDK exposes GET /v1/me.
   return callQurl('GET', '/me', async () => {
     const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
     const response = await globalThis.fetch(`${endpoint}/v1/me`, {
@@ -150,6 +152,9 @@ async function getIdentity(apiKey) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) {
+      try {
+        await response.body?.cancel();
+      } catch {}
       const error = new Error('qURL identity request failed');
       error.status = response.status;
       throw error;
