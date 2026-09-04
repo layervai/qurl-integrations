@@ -24,12 +24,12 @@ const { isPrivateHost } = require('./utils/private-host');
  *     assertNotPrivateAfterResolve), which are client-independent.
  */
 
-// Request timeout (per-attempt for the SDK paths, whole-request for the
-// no-retry getIdentity shim) + SDK retry budget. Pins the SDK's resilience to the budget
+// Request timeout + SDK retry budget. Pins the SDK's resilience to the budget
 // the hand-rolled client documented before this consolidation: "3 attempts
 // total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
 // attempts; `timeout` is the per-attempt deadline (matching the old
-// AbortSignal.timeout(30000)). We pin both rather than inherit SDK defaults so
+// AbortSignal.timeout(30000)), and the whole-request deadline for the no-retry
+// getIdentity shim below. We pin both rather than inherit SDK defaults so
 // a future default drift can't silently change this path's behavior.
 // (connector.js's resolve path pins maxRetries:3 — a separate call site we
 // deliberately leave untouched here.)

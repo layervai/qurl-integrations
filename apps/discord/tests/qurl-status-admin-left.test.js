@@ -256,26 +256,46 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('Scopes: `qurl:read @everyone`');
   });
 
+  // Worst case for the 2,000-char content limit: surrogate-pair scopes (two
+  // UTF-16 units per codepoint, which is what discord.js length-checks), an
+  // oversized updated_at, and the admin-left notice all in one reply.
   it('bounds service-reported identity fields to Discord reply limits', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
-      configured_by: 'admin-original',
-      updated_at: '2026-01-01T00:00:00Z',
+      configured_by: 'admin-departed',
+      updated_at: '2026-01-01T00:00:00Z'.repeat(100),
     });
     mockGetIdentity.mockResolvedValueOnce({
       api_key: {
         key_id: 'key-123',
-        key_prefix: 'x'.repeat(3000),
-        scopes: Array.from({ length: 100 }, (_, i) => `qurl:scope-${i}-${'x'.repeat(100)}`),
+        key_prefix: '🧪'.repeat(3000),
+        scopes: Array.from({ length: 100 }, (_, i) => `qurl:scope-${i}-${'🧪'.repeat(100)}`),
       },
     });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => {
+        throw Object.assign(new Error('Unknown Member'), { code: 10007 });
+      },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._reply.mock.calls[0][0].content.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('replies to the deferred interaction when the guild is not configured', async () => {
+    db.getGuildConfig.mockResolvedValueOnce(null);
     const interaction = makeStatusInteraction({
       memberFetchBehavior: async () => ({ id: 'admin-original' }),
     });
 
     await handleCommand(interaction);
 
-    expect(interaction._reply.mock.calls[0][0].content.length).toBeLessThanOrEqual(2000);
+    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction._initialReply).not.toHaveBeenCalled();
+    expect(interaction._reply).toHaveBeenCalledTimes(1);
+    expect(interaction._reply.mock.calls[0][0].content).toContain('not configured for this server');
+    expect(mockGetIdentity).not.toHaveBeenCalled();
   });
 
   it('starts identity verification while the admin-presence check is pending', async () => {

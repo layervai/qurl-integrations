@@ -8787,15 +8787,13 @@ const commands = [
 
           const { identity, error, keyUnavailable } = await identityResultPromise;
           const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
+          // Every outcome renders as `<verdict copy> + configurationDetails`;
+          // only the verdict differs, so build it here and share one exit.
+          let verdict;
           if (keyUnavailable) {
             logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
-            return interaction.editReply({
-              content: '❌ **The stored qURL key is unavailable.**\n\n'
-                + reconnectCopy
-                + configurationDetails,
-            });
-          }
-          if (error) {
+            verdict = '❌ **The stored qURL key is unavailable.**\n\n' + reconnectCopy;
+          } else if (error) {
             const status = Number.isInteger(error.status) ? error.status : null;
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
@@ -8803,44 +8801,37 @@ const commands = [
             });
             // Same 401/403 → "invalid key" policy the legacy setup validator
             // applies at the top of this file; #1370 tracks consolidating them.
-            if (status === 401 || status === 403) {
-              return interaction.editReply({
-                content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
-                  + reconnectCopy
-                  + configurationDetails,
-              });
-            }
-            return interaction.editReply({
-              content: '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
-                + 'Please try `/qurl status` again later.\n\n'
-                + configurationDetails,
-            });
-          }
-
-          // Inline-code content renders backslashes literally, so strip
-          // backticks instead of applying general Markdown escaping. The plain
-          // display-name sanitizer also strips controls and caps each value at
-          // 64 codepoints (≤128 UTF-16 units, which is what discord.js length-
-          // checks); STATUS_SCOPE_DISPLAY_MAX scopes plus the admin-left notice
-          // keep the reply under Discord's 2,000-character content limit with
-          // ~200 to spare.
-          const STATUS_SCOPE_DISPLAY_MAX = 10;
-          const sanitizeIdentityValue = (value) =>
-            sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
-          const { key_prefix: rawKeyPrefix, scopes: allScopes } = identity.api_key;
-          // 'unknown' rather than 'unavailable' — the latter is the copy for a
-          // missing stored key, a different state a few lines above.
-          const keyPrefix = sanitizeIdentityValue(rawKeyPrefix) || 'unknown';
-          const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
-            .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
-          const omittedScopeCount = allScopes.length - shownScopes.length;
-          const scopes = (shownScopes.join(', ') || '_none_') +
-            (omittedScopeCount > 0 ? `, _+${omittedScopeCount} more_` : '');
-          return interaction.editReply({
-            content: `✅ **qURL is configured**\n` +
+            verdict = status === 401 || status === 403
+              ? '❌ **The stored qURL key is revoked or invalid.**\n\n' + reconnectCopy
+              : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
+                + 'Please try `/qurl status` again later.\n\n';
+          } else {
+            // Inline-code content renders backslashes literally, so strip
+            // backticks instead of applying general Markdown escaping. The
+            // plain display-name sanitizer also strips controls and codepoint-
+            // caps each value; the slice below bounds how many scopes render.
+            const STATUS_SCOPE_DISPLAY_MAX = 10;
+            const sanitizeIdentityValue = (value) =>
+              sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
+            const { key_prefix: rawKeyPrefix, scopes: allScopes } = identity.api_key;
+            const keyPrefix = sanitizeIdentityValue(rawKeyPrefix) || 'unknown';
+            const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
+              .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
+            const omittedScopeCount = allScopes.length - shownScopes.length;
+            const scopes = (shownScopes.join(', ') || '_none_') +
+              (omittedScopeCount > 0 ? `, _+${omittedScopeCount} more_` : '');
+            verdict = `✅ **qURL is configured**\n` +
               `Key prefix: \`${keyPrefix}\`\n` +
-              `Scopes: ${scopes}\n` +
-              configurationDetails,
+              `Scopes: ${scopes}\n`;
+          }
+          // Keep Discord's 2,000-UTF-16-unit content limit an invariant of the
+          // code rather than of a copy budget spread across the fields above.
+          const content = verdict + configurationDetails;
+          const truncationIndicator = '…(truncated)';
+          return interaction.editReply({
+            content: content.length <= 2000
+              ? content
+              : capUtf16Units(content, 2000 - truncationIndicator.length) + truncationIndicator,
           });
         }
         // Branch the not-configured copy on the active setup flow so
