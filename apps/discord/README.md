@@ -112,15 +112,16 @@ supported qURL tunnel suffix. A qURL site may use an `r_<11 chars>` Traefik
 routing label, but that label carries no resource identity and is not compared
 with the resource's opaque public-key ID.
 
-The authenticated mint is the authority for that hostname, so any hostname it
-returns beneath an allowlisted suffix is accepted after the URL and SSRF
-guards, including hostnames with multiple non-empty routing labels. The suffix
-allowlist constrains the target to a trusted qURL tunnel namespace; it is not a
-tenant identity signal. The case-sensitive `resource_id` returned by
-`resolve()` is checked against the slug-resolved public key when that response
-field is present. Older or variant resolve responses without `resource_id`
-remain compatible and emit one structured warning per bot process that the
-check was skipped.
+The authenticated mint is the authority for that hostname, so any hostname
+with only non-empty labels that it returns beneath an allowlisted suffix is
+accepted after the URL and SSRF guards, including hostnames with multiple
+routing labels. The suffix allowlist constrains the target to a trusted qURL
+tunnel namespace; it is not a tenant identity signal. The case-sensitive
+`resource_id` returned by `resolve()` is checked against the slug-resolved
+public key when that response field is present. Older or variant resolve
+responses without `resource_id` remain compatible and emit a structured
+warning at most once every 15 minutes per bot process while the check is
+skipped.
 
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts

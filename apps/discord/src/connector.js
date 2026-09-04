@@ -478,6 +478,7 @@ const DETECT_TARGET_PATH = '/api/detect';
 const DETECT_LINK_EXPIRES_IN = '5m';
 const DETECT_RESOURCE_LIST_LIMIT = 100;
 const DETECT_RESOURCE_FAILURE_BACKOFF_MS = 30 * 1000;
+const DETECT_MISSING_RESOURCE_ID_WARN_INTERVAL_MS = 15 * 60 * 1000;
 // TODO(upstream-contract): keep these suffixes in lockstep with qurl-service /
 // qURL tunnel infra hostnames for production, sandbox, and staging.
 const DETECT_TUNNEL_PROD_HOST_SUFFIX = '.qurl.site';
@@ -537,7 +538,7 @@ let _detectResourceRetryAfter = 0;
 let _detectResourcePreviousFailure = null;
 let _detectResourceConsecutiveFailures = 0;
 let _detectResourcePreviousFailureAt = 0;
-let _didWarnDetectMissingResourceId = false;
+let _detectMissingResourceIdWarnedAt = null;
 
 function clearDetectResourceFailureState() {
   _detectResourceRetryAfter = 0;
@@ -731,6 +732,8 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   // future caller using a different target source fails closed. resolve()'s
   // resource_id check below independently binds the fresh access token to the
   // slug-resolved opaque public key when that response field is present.
+  // When that optional field is absent, this suffix namespace is the sole host
+  // boundary; compatibility is deliberate and emits a rate-limited warning.
   // WHATWG URL parsing canonicalizes ASCII DNS hostname case on both values.
   const targetHost = parsed.hostname;
   const expectedHost = detectTargetHostname(expectedQurlSite);
@@ -967,14 +970,19 @@ async function resolveDetectTarget() {
   // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
   // preserve exact serialization on list and resolve responses.
   const resolvedResourceId = resolved?.resource_id;
-  if (!resolvedResourceId && !_didWarnDetectMissingResourceId) {
-    // This compatibility path weakens the resource-integrity signal, so keep it
-    // visible in production without warning on every detect invocation.
-    _didWarnDetectMissingResourceId = true;
-    logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped', {
-      expected_resource_id: resourceId,
-    });
-  } else if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
+  if (!resolvedResourceId) {
+    const now = Date.now();
+    if (_detectMissingResourceIdWarnedAt === null
+      || now - _detectMissingResourceIdWarnedAt >= DETECT_MISSING_RESOURCE_ID_WARN_INTERVAL_MS) {
+      // Keep the weakened integrity signal visible without warning on every
+      // detect invocation when an older API shape is the steady state.
+      _detectMissingResourceIdWarnedAt = now;
+      logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped', {
+        expected_resource_id: resourceId,
+      });
+    }
+  }
+  if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
     const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
     // The knock already happened, but the Bearer-carrying image POST must not.
     // The minted qURL is unused and expires quickly; clear the cache so the
@@ -1121,8 +1129,9 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 }
 
 module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
-// Keep the security-pin helper directly testable without extending production's
-// connector API. Jest sets NODE_ENV=test, matching the precedent in logger.js.
+// Keep the future-caller exact-host invariant directly testable without
+// extending production's connector API. Jest sets NODE_ENV=test, matching the
+// precedent in logger.js.
 if (process.env.NODE_ENV === 'test') {
   module.exports.__testExports = { assertPublicHttpsTarget };
 }
