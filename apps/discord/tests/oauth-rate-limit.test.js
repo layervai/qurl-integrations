@@ -56,6 +56,24 @@ describe('OAuth rate-limit store', () => {
     expect(rateLimitStore.has('198.51.100.2')).toBe(false);
   });
 
+  it('does not let an exhausted callback bucket consume the install budget', () => {
+    const ip = '198.51.100.3';
+    for (let i = 0; i < config.RATE_LIMIT_MAX_REQUESTS; i += 1) {
+      rateLimit({ ip, path: '/oauth/qurl/callback' }, response(), jest.fn());
+    }
+    const callbackRes = response();
+    const callbackNext = jest.fn();
+    rateLimit({ ip, path: '/oauth/qurl/callback' }, callbackRes, callbackNext);
+    expect(callbackNext).not.toHaveBeenCalled();
+    expect(callbackRes.status).toHaveBeenCalledWith(429);
+
+    const installRes = response();
+    const installNext = jest.fn();
+    installRateLimit({ ip, path: '/oauth/discord/install' }, installRes, installNext);
+    expect(installNext).toHaveBeenCalledTimes(1);
+    expect(installRes.status).not.toHaveBeenCalled();
+  });
+
   it('evicts install-only traffic so the shared hard cap cannot starve a callback', () => {
     for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE; i += 1) {
       rateLimitStore.set(`install-${i}`, { 'discord-install-entry': [now] });
@@ -213,7 +231,10 @@ describe('OAuth rate-limit store', () => {
     try {
       rateLimit({ ip: 'new-callback', path: '/oauth/qurl/callback' }, res, next);
     } finally {
-      rateLimitStore[Symbol.iterator] = originalIterator;
+      // Restore the inherited Map iterator instead of leaving an own property
+      // that can leak into later tests through this shared singleton.
+      delete rateLimitStore[Symbol.iterator];
+      expect(rateLimitStore[Symbol.iterator]).toBe(originalIterator);
     }
 
     expect(next).not.toHaveBeenCalled();
