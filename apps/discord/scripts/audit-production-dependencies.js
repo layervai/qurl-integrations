@@ -27,7 +27,7 @@ const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
 // Literal so the Go workflow contract can compare it with timeout-minutes;
 // Jest independently proves it still equals attempts * timeout + delays.
 const TOTAL_RETRY_BUDGET_MS = 150_000;
-const RETRYABLE_NETWORK_CODES = new Set([
+const RETRYABLE_AUDIT_CODES = new Set([
   'EAI_AGAIN',
   'ECONNREFUSED',
   'ECONNRESET',
@@ -36,6 +36,7 @@ const RETRYABLE_NETWORK_CODES = new Set([
   'ENOTFOUND',
   'EPIPE',
   'ETIMEDOUT',
+  'EAUDITQUICKRETIRED',
 ]);
 
 // npm 10 exhausted its own fetch behavior and returned failures for the
@@ -79,10 +80,38 @@ function auditBody(result) {
   return parseJsonPayload(result?.stdout) ?? parseJsonPayload(result?.stderr);
 }
 
+function isRetiredQuickAuditFallback(body) {
+  // npm 10.9.4 tries the bulk advisory endpoint first, then falls back to
+  // /audits/quick when bulk fails. npmjs now rejects that fallback. Treat
+  // only the complete observed registry envelope as retryable: a real audit
+  // report (especially one containing vulnerabilities) must never retry.
+  if (!body || typeof body !== 'object' || body.auditReportVersion || body.vulnerabilities) {
+    return false;
+  }
+  let pathname = '';
+  try {
+    pathname = new URL(body.uri).pathname;
+  } catch {
+    return false;
+  }
+  const notices = body.headers?.['npm-notice'];
+  const noticeValues = Array.isArray(notices) ? notices : [notices];
+  return body.statusCode === 400
+    && body.method === 'POST'
+    && pathname === '/-/npm/v1/security/audits/quick'
+    && body.body?.statusCode === 400
+    && body.body?.message === 'Invalid package tree, run npm install to rebuild your package-lock.json'
+    && noticeValues.some(notice => (
+      typeof notice === 'string'
+      && notice.startsWith('This endpoint is being retired. Use the bulk advisory endpoint instead.')
+    ));
+}
+
 function auditTransportCode(result, body = auditBody(result)) {
   // TODO(upstream-contract): npm 10.9.4 reports audit transport failures in
   // these structured fields. Unknown shapes fail closed without a retry.
   if (typeof result?.error?.code === 'string') return result.error.code.toUpperCase();
+  if (isRetiredQuickAuditFallback(body)) return 'EAUDITQUICKRETIRED';
 
   const statusCode = Number(
     body?.error?.statusCode ?? body?.error?.status ?? body?.statusCode ?? body?.status,
@@ -125,7 +154,7 @@ function auditTransportCode(result, body = auditBody(result)) {
 }
 
 function isRetryableTransportCode(code) {
-  return RETRYABLE_NETWORK_CODES.has(code) || /^E(?:408|429|5\d\d)$/.test(code || '');
+  return RETRYABLE_AUDIT_CODES.has(code) || /^E(?:408|429|5\d\d)$/.test(code || '');
 }
 
 function oneLine(value, maxLength = 500) {
@@ -164,10 +193,16 @@ function writeSuccess(result, body, stdout, stderr) {
     );
     return false;
   }
+  const productionDependencies = body?.metadata?.dependencies?.prod;
+  if (!Number.isSafeInteger(productionDependencies) || productionDependencies <= 0) {
+    stderr.write('npm audit failed closed: invalid audited production dependency count.\n');
+    return false;
+  }
   const lowerSeverity = count('info') + count('low') + count('moderate');
   stdout.write(
     `npm audit passed: ${high} high, ${critical} critical; `
-    + `${lowerSeverity} lower-severity production vulnerabilities.\n`,
+    + `${lowerSeverity} lower-severity vulnerabilities across `
+    + `${productionDependencies} production dependencies.\n`,
   );
   return true;
 }

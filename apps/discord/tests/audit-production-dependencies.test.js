@@ -23,6 +23,10 @@ function auditResult(status, body = {}, stderr = '') {
   return { status, stdout: `${JSON.stringify(body)}\n`, stderr };
 }
 
+function passingAuditBody(vulnerabilities = { high: 0, critical: 0 }, prod = 1) {
+  return { metadata: { vulnerabilities, dependencies: { prod } } };
+}
+
 describe('production dependency audit', () => {
   test('pins the production lockfile audit flags literally', () => {
     expect(AUDIT_ARGS).toEqual([
@@ -46,7 +50,7 @@ describe('production dependency audit', () => {
           detail: 'Service Unavailable',
         },
       }))
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
     const sleep = jest.fn().mockResolvedValue(undefined);
     const stdout = captureStream();
     const stderr = captureStream();
@@ -82,7 +86,7 @@ describe('production dependency audit', () => {
           },
         })}\n`,
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
     const sleep = jest.fn().mockResolvedValue(undefined);
 
     await expect(runAudit({
@@ -102,7 +106,7 @@ describe('production dependency audit', () => {
         stdout: '',
         stderr: 'npm warn ignoring config {legacy}\n{\n  "error": {\n    "code": "E503",\n    "summary": "Service unavailable"\n  }\n}\nnpm warn done\n',
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
 
     await expect(runAudit({
       spawn,
@@ -121,7 +125,7 @@ describe('production dependency audit', () => {
         stdout: '',
         stderr: 'npm warn ignoring config\n{"error":{"code":"E503","summary":"Service unavailable"}}\nnpm warn done\n',
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
 
     await expect(runAudit({
       spawn,
@@ -140,7 +144,7 @@ describe('production dependency audit', () => {
         stdout: '{"error":{"summary":"","detail":""}}\n',
         stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/audits/quick\n',
       })
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
 
     await expect(runAudit({
       spawn,
@@ -159,9 +163,7 @@ describe('production dependency audit', () => {
         stdout: '{"error":{"summary":"","detail":""}}\n',
         stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/audits/quick  \n',
       })
-      .mockReturnValueOnce(auditResult(0, {
-        metadata: { vulnerabilities: { high: 0, critical: 0 } },
-      }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
 
     await expect(runAudit({
       spawn,
@@ -183,7 +185,7 @@ describe('production dependency audit', () => {
   ])('retries %s only when the structured envelope identifies transport failure', async (_label, body) => {
     const spawn = jest.fn()
       .mockReturnValueOnce(auditResult(1, body))
-      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0, critical: 0 } } }));
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
 
     await expect(runAudit({
       spawn,
@@ -193,6 +195,71 @@ describe('production dependency audit', () => {
     })).resolves.toBe(0);
 
     expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  test('retries npm 10.9.4 when its retired quick fallback rejects a timed-out bulk audit', async () => {
+    const retiredQuickFallback = {
+      message: '400 Bad Request - POST https://registry.npmjs.org/-/npm/v1/security/audits/quick - Bad Request',
+      method: 'POST',
+      uri: 'https://registry.npmjs.org/-/npm/v1/security/audits/quick',
+      headers: {
+        'npm-notice': [
+          'This endpoint is being retired. Use the bulk advisory endpoint instead. See the following docs for more info: https://api-docs.npmjs.com/#tag/Audit',
+        ],
+      },
+      statusCode: 400,
+      body: {
+        statusCode: 400,
+        error: 'Bad Request',
+        message: 'Invalid package tree, run npm install to rebuild your package-lock.json',
+      },
+      error: { summary: '', detail: '' },
+    };
+    const spawn = jest.fn()
+      .mockReturnValueOnce(auditResult(1, retiredQuickFallback))
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
+    const sleep = jest.fn().mockResolvedValue(undefined);
+    const stderr = captureStream();
+
+    await expect(runAudit({
+      spawn,
+      sleep,
+      stdout: captureStream().stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(0);
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(stderr.value()).toContain('EAUDITQUICKRETIRED');
+  });
+
+  test('does not retry a vulnerability report decorated like the retired quick fallback', async () => {
+    const spawn = jest.fn().mockReturnValue(auditResult(1, {
+      method: 'POST',
+      uri: 'https://registry.npmjs.org/-/npm/v1/security/audits/quick',
+      statusCode: 400,
+      body: {
+        statusCode: 400,
+        message: 'Invalid package tree, run npm install to rebuild your package-lock.json',
+      },
+      headers: {
+        'npm-notice': ['This endpoint is being retired. Use the bulk advisory endpoint instead.'],
+      },
+      vulnerabilities: {
+        undici: { severity: 'high', via: [], nodes: ['node_modules/undici'] },
+      },
+    }));
+    const sleep = jest.fn();
+
+    await expect(runAudit({
+      spawn,
+      sleep,
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(1);
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   test('prints a concise human-readable vulnerability report without raw JSON', async () => {
@@ -275,16 +342,17 @@ describe('production dependency audit', () => {
     const stdout = captureStream();
 
     await expect(runAudit({
-      spawn: jest.fn().mockReturnValue(auditResult(0, {
-        metadata: { vulnerabilities: { low: 2, moderate: 3, high: 0, critical: 0 } },
-      })),
+      spawn: jest.fn().mockReturnValue(auditResult(0, passingAuditBody({
+        low: 2, moderate: 3, high: 0, critical: 0,
+      }))),
       sleep: jest.fn(),
       stdout: stdout.stream,
       stderr: captureStream().stream,
     })).resolves.toBe(0);
 
     expect(stdout.value()).toBe(
-      'npm audit passed: 0 high, 0 critical; 5 lower-severity production vulnerabilities.\n',
+      'npm audit passed: 0 high, 0 critical; 5 lower-severity vulnerabilities across '
+      + '1 production dependencies.\n',
     );
   });
 
@@ -301,6 +369,26 @@ describe('production dependency audit', () => {
     })).resolves.toBe(1);
 
     expect(stderr.value()).toContain('reported 1 high and 0 critical vulnerabilities');
+  });
+
+  test.each([
+    ['missing production dependency metadata', undefined],
+    ['zero audited production dependencies', 0],
+    ['invalid production dependency count', '1'],
+  ])('fails closed on a zero-vulnerability result with %s', async (_label, prod) => {
+    const body = passingAuditBody();
+    if (prod === undefined) delete body.metadata.dependencies;
+    else body.metadata.dependencies.prod = prod;
+    const stderr = captureStream();
+
+    await expect(runAudit({
+      spawn: jest.fn().mockReturnValue(auditResult(0, body)),
+      sleep: jest.fn(),
+      stdout: captureStream().stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(1);
+
+    expect(stderr.value()).toContain('invalid audited production dependency count');
   });
 
   test.each([
