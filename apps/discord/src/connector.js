@@ -537,6 +537,7 @@ let _detectResourceRetryAfter = 0;
 let _detectResourcePreviousFailure = null;
 let _detectResourceConsecutiveFailures = 0;
 let _detectResourcePreviousFailureAt = 0;
+let _didWarnDetectMissingResourceId = false;
 
 function clearDetectResourceFailureState() {
   _detectResourceRetryAfter = 0;
@@ -670,7 +671,8 @@ function extractAccessToken(qurlLink) {
 
 // Hostname parser shared by the host pin and its rejection breadcrumb.
 // `hostname` excludes credentials, port, path, query, and fragment; undefined
-// on malformed input lets JSON logging omit the field instead of echoing a URL.
+// on malformed input is load-bearing both for the guard below and for JSON
+// logging to omit the field instead of echoing a URL.
 function detectTargetHostname(qurlSite) {
   try {
     return new URL(qurlSite).hostname;
@@ -733,7 +735,7 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   const targetHost = parsed.hostname;
   const expectedHost = detectTargetHostname(expectedQurlSite);
   if (!expectedHost) {
-    throw new Error('Detect tunnel returned qurl_site is unparseable');
+    throw new Error('Detect tunnel returned an unparseable qurl_site');
   }
   if (targetHost !== expectedHost) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
@@ -962,15 +964,17 @@ async function resolveDetectTarget() {
   // The live response includes resource_id. Treat it as an integrity check when
   // present, but do not make the tunnel POST depend on optional resolve metadata
   // from older/variant API shapes; qurl_site came from the authenticated mint.
-  const resolvedResourceId = resolved?.resource_id;
-  if (!resolvedResourceId) {
-    logger.debug('Detect tunnel resolve omitted resource_id; integrity check skipped', {
-      expected_resource_id: resourceId,
-    });
-  }
   // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
   // preserve exact serialization on list and resolve responses.
-  if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
+  const resolvedResourceId = resolved?.resource_id;
+  if (!resolvedResourceId && !_didWarnDetectMissingResourceId) {
+    // This compatibility path weakens the resource-integrity signal, so keep it
+    // visible in production without warning on every detect invocation.
+    _didWarnDetectMissingResourceId = true;
+    logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped', {
+      expected_resource_id: resourceId,
+    });
+  } else if (resolvedResourceId && String(resolvedResourceId) !== resourceId) {
     const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
     // The knock already happened, but the Bearer-carrying image POST must not.
     // The minted qURL is unused and expires quickly; clear the cache so the

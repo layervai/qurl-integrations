@@ -300,11 +300,10 @@ const detectExtraNonProdEndpointHosts = (process.env.DETECT_EXTRA_NON_PROD_QURL_
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const detectExtraNonProdHostSuffixes = (process.env.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || '')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-// Fail fast (same posture as the DDB_TEST_ENDPOINT guard above): a suffix
-// entry missing the leading '.' would never match a hostname suffix check
-// (detectTunnelHostSuffixesForEndpoint does `host.endsWith(suffix)`),
-// silently no-op'ing the operator's intended grant. Reject at config load
-// instead of shipping a quietly-inert allowlist entry.
+// Fail fast (same posture as the DDB_TEST_ENDPOINT guard above): because the
+// detect host pin uses `host.endsWith(suffix)`, an entry missing the leading
+// '.' could admit a look-alike such as `eviltunnel.example`. Reject at config
+// load instead of widening the non-prod namespace on an operator typo.
 for (const suffix of detectExtraNonProdHostSuffixes) {
   if (!suffix.startsWith('.')) {
     throw new Error(`DETECT_EXTRA_NON_PROD_HOST_SUFFIXES entry '${suffix}' must start with '.' (e.g. '.tunnel.example.internal') — fix the env var before booting.`);

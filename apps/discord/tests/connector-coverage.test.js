@@ -787,6 +787,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     // short `r_` label is an internal Traefik routing label, not resource
     // identity; the resource_id below is the opaque P-256 public key.
     const TUNNEL_SITE = 'https://r_abc12345678.qurl.site';
+    const OTHER_TUNNEL_SITE = 'https://r_other123456.qurl.site';
     const SANDBOX_TUNNEL_SITE = 'https://r_abc12345678.qurl.site.layerv.xyz';
     const STAGING_TUNNEL_SITE = 'https://r_abc12345678.qurl.site.layerv.ai';
     const TUNNEL_TARGET = `${TUNNEL_SITE}/api/detect`;
@@ -1004,7 +1005,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         TUNNEL_TARGET,
         'https://[',
-      )).toThrow(/returned qurl_site is unparseable/);
+      )).toThrow(/returned an unparseable qurl_site/);
     });
 
     it('host-pin accepts multiple non-empty routing labels under an allowed suffix', () => {
@@ -1026,11 +1027,18 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     it.each([
       ['empty', 'https://.qurl.site'],
       ['empty interior', 'https://a..qurl.site'],
-      ['bare suffix apex', 'https://qurl.site'],
     ])('host-pin rejects an %s label under an allowed suffix', (_label, qurlSite) => {
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         `${qurlSite}/api/detect`,
         qurlSite,
+      )).toThrow(/expected qURL tunnel domain/);
+    });
+
+    it('host-pin rejects the bare allowed-suffix apex', () => {
+      const suffixApex = 'https://qurl.site';
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        `${suffixApex}/api/detect`,
+        suffixApex,
       )).toThrow(/expected qURL tunnel domain/);
     });
 
@@ -1705,12 +1713,15 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(warn[1].hostname).toBeUndefined();
     });
 
-    it('backs off on repeated resolve resource_id mismatches, then re-resolves after the retry window', async () => {
+    it('rejects an allowlisted mint host when resolve identifies a different resource, then backs off', async () => {
       const clock = freezeDetectClock();
       try {
         captureDetect(
           { detected: false },
-          { resolveResult: { target_url: '', resource_id: OTHER_RESOURCE_ID } },
+          {
+            qurlSite: OTHER_TUNNEL_SITE,
+            resolveResult: { target_url: '', resource_id: OTHER_RESOURCE_ID },
+          },
         );
         mockClient.resolve
           .mockResolvedValueOnce({ target_url: '', resource_id: OTHER_RESOURCE_ID })
@@ -1763,15 +1774,17 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
-    it('allows a resolve response that omits resource_id and records a debug diagnostic', async () => {
+    it('allows resolve responses that omit resource_id and warns once per process', async () => {
       const get = captureDetect(
         { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
         { resolveResult: { target_url: '' } },
       );
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
-      expect(mockClient.resolve).toHaveBeenCalledTimes(1);
+      await connector.detectWatermark(Buffer.from('y'), { guildId: 'g', apiKey: 'k' });
+      expect(mockClient.resolve).toHaveBeenCalledTimes(2);
       expect(get().url).toBe(TUNNEL_TARGET);
-      expect(logger.debug).toHaveBeenCalledWith(
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
         'Detect tunnel resolve omitted resource_id; integrity check skipped',
         { expected_resource_id: RESOURCE_ID },
       );

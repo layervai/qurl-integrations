@@ -105,12 +105,12 @@ setup) means required to use that feature.
 | `PORT` | No | HTTP listen port (default 3000) |
 
 When enabling `/qurl detect`, the minted `qurl_site` must be host-only. The
-detect target is constructed from that value, so the complete hostname match is
-a case-insensitive construction invariant retained to make future independent
-target sources fail closed. The hostname must also sit under a supported qURL
-tunnel suffix. A qURL site may use an `r_<11 chars>` Traefik routing label, but
-that label carries no resource identity and is not compared with the resource's
-opaque public-key ID.
+detect target is constructed from that value, so both have the same hostname
+after URL case normalization. Validation retains that equality as a fail-closed
+invariant if the target source changes later. The hostname must also sit under a
+supported qURL tunnel suffix. A qURL site may use an `r_<11 chars>` Traefik
+routing label, but that label carries no resource identity and is not compared
+with the resource's opaque public-key ID.
 
 The authenticated mint is the authority for that hostname, so any hostname it
 returns beneath an allowlisted suffix is accepted after the URL and SSRF
@@ -119,8 +119,8 @@ allowlist constrains the target to a trusted qURL tunnel namespace; it is not a
 tenant identity signal. The case-sensitive `resource_id` returned by
 `resolve()` is checked against the slug-resolved public key when that response
 field is present. Older or variant resolve responses without `resource_id`
-remain compatible and emit a structured debug diagnostic that the check was
-skipped.
+remain compatible and emit one structured warning per bot process that the
+check was skipped.
 
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
