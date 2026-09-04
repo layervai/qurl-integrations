@@ -217,13 +217,10 @@ function noStoreHeaders(req, res, next) {
 // OAuth on — no code change or env-flag re-flip required.
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
-const auth0ConnectionState = auth0Connection
-  ? 'pinned'
-  : config.isAuth0EmailConnectionRejected ? 'rejected' : 'unset';
 const auth0ConnectionPolicyMetadata = {
   event: LOG_EVENTS.QURL_OAUTH_AUTH0_CONNECTION_POLICY,
   connection: auth0Connection,
-  state: auth0ConnectionState,
+  state: config.auth0EmailConnectionState,
   oauth_configured: config.isQurlOAuthConfigured,
 };
 if (!config.isQurlOAuthConfigured) {

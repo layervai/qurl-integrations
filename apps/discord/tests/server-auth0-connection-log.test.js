@@ -65,7 +65,8 @@ describe('server Auth0 connection policy log', () => {
   });
 
   it('fails OAuth setup closed and distinguishes a rejected pin from an unset pin', () => {
-    expect(captureServerLogs('email!').error).toContainEqual([
+    const logs = captureServerLogs('private invalid connection!');
+    expect(logs.error).toContainEqual([
       'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.',
       {
         event: 'qurl_oauth_auth0_connection_policy',
@@ -74,6 +75,7 @@ describe('server Auth0 connection policy log', () => {
         oauth_configured: false,
       },
     ]);
+    expect(JSON.stringify(logs)).not.toContain('private invalid connection!');
   });
 
   it('reports a configured connection that is inactive without the Auth0 app settings', () => {

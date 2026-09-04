@@ -16,6 +16,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     withFreshConfig({ AUTH0_EMAIL_CONNECTION: undefined }, (config) => {
       expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
       expect(config.isAuth0EmailConnectionRejected).toBe(false);
+      expect(config.auth0EmailConnectionState).toBe('unset');
     });
   });
 
@@ -30,6 +31,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     withFreshConfig({ AUTH0_EMAIL_CONNECTION: ' email ' }, (config) => {
       expect(config.AUTH0_EMAIL_CONNECTION).toBe('email');
       expect(config.isAuth0EmailConnectionRejected).toBe(false);
+      expect(config.auth0EmailConnectionState).toBe('pinned');
     });
   });
 
@@ -68,6 +70,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
       AUTH0_EMAIL_CONNECTION: 'email!',
     }, (config) => {
       expect(config.isAuth0EmailConnectionRejected).toBe(true);
+      expect(config.auth0EmailConnectionState).toBe('rejected');
       expect(config.isQurlOAuthConfigured).toBe(false);
       expect(config.isDiscordInstallConfigured).toBe(false);
       expect(config.discordInstallNotConfiguredReason).toBe(
@@ -79,13 +82,14 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
   it('treats the seeded SSM placeholder as intentionally unset', () => {
     captureFreshConfig({
       ...AUTH0_ENV,
-      AUTH0_EMAIL_CONNECTION: ' placeholder ',
+      AUTH0_EMAIL_CONNECTION: ' PLACEHOLDER ',
       DISCORD_CLIENT_ID: '234567890123456789',
       DISCORD_CLIENT_SECRET: 'test-discord-secret',
       BASE_URL: 'http://localhost:3000',
     }, (config, warns) => {
       expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
       expect(config.isAuth0EmailConnectionRejected).toBe(false);
+      expect(config.auth0EmailConnectionState).toBe('unset');
       expect(config.isQurlOAuthConfigured).toBe(true);
       expect(config.isDiscordInstallConfigured).toBe(true);
       expect(config.discordInstallNotConfiguredReason).toBeNull();
@@ -95,14 +99,16 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     });
   });
 
-  it('uses the shared SSM placeholder sentinel case-insensitively', () => {
+  it('uses the exact shared SSM placeholder sentinel', () => {
     withFreshEnv({ AUTH0_EMAIL_CONNECTION: 'unset' }, () => {
       jest.doMock('../src/utils/ssm-placeholder', () => ({
         SSM_PLACEHOLDER_SENTINEL: 'UNSET',
       }));
       try {
-        expect(require('../src/config').AUTH0_EMAIL_CONNECTION).toBe('');
-        expect(require('../src/config').isAuth0EmailConnectionRejected).toBe(false);
+        const config = require('../src/config');
+        expect(config.AUTH0_EMAIL_CONNECTION).toBe('unset');
+        expect(config.isAuth0EmailConnectionRejected).toBe(false);
+        expect(config.auth0EmailConnectionState).toBe('pinned');
       } finally {
         jest.dontMock('../src/utils/ssm-placeholder');
       }
