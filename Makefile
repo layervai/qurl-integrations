@@ -148,8 +148,9 @@ endef
 
 # Every target below uses `npm ci`, not `npm install`: CI installs the lockfile
 # exactly, and `npm install` can rewrite package-lock.json — which both dirties
-# the tree and breaks the "this predicts CI" property. `--no-audit --no-fund`
-# only mute npm output; they do not change the tree.
+# the tree and breaks the "this predicts CI" property. `--no-fund` only mutes
+# output; `--no-audit` also skips npm's implicit registry request. Neither flag
+# changes the dependency tree.
 
 # cli.yml's quality gates for the host OS, so a contributor can run them
 # before pushing. Adding or removing a gate there means updating this target

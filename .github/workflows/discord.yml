@@ -95,7 +95,10 @@ jobs:
           cache-dependency-path: apps/discord/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        # The next step is the sole dependency audit gate; do not duplicate its
+        # registry request inside installation. Funding output stays enabled;
+        # unlike the audit, it adds no registry request.
+        run: npm ci --no-audit
 
       - name: Audit dependencies
         # --package-lock-only: audit the graph npm ci resolves from, read from
