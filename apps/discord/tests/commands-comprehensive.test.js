@@ -29,6 +29,7 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
+  isQurlSetupAvailable: false,
   isAuth0EmailConnectionRejected: false,
 }));
 
@@ -1086,7 +1087,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     process.env.KEY_ENCRYPTION_KEY = '0'.repeat(64);
     // Force the legacy path by clearing any Auth0 hints. The config
     // mock at the top of this file doesn't define AUTH0_* and we
-    // rely on `config.isQurlOAuthConfigured` being falsy.
+    // rely on `config.isQurlSetupAvailable` being falsy.
     delete process.env.AUTH0_DOMAIN;
   });
   afterAll(() => {

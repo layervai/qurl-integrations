@@ -262,20 +262,21 @@ const {
 } = parseAuth0EmailConnection(rawAuth0EmailConnection);
 const isAuth0EmailConnectionRejected = auth0EmailConnectionState === 'rejected';
 
-// True when all four Auth0 env vars are present, AUTH0_DOMAIN is a
-// well-shaped hostname, and any configured connection was accepted —
-// `/qurl setup` then uses the OAuth-redirect flow. False = degrade to the
-// legacy modal-paste flow (kept until
-// Justin registers the Auth0 app + sets prod SSM secrets). Single
-// derivation point so commands.js + routes/qurl-oauth.js + server.js
-// agree on what "configured" means.
+// True when all four required Auth0 env vars are present and AUTH0_DOMAIN is
+// a well-shaped hostname. Keep this independent from the optional connection
+// pin: production boot checks still need to validate BASE_URL, encryption,
+// and state signing when the pin itself is malformed.
 const isQurlOAuthConfigured = Boolean(
   isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
   && process.env.AUTH0_CLIENT_ID
   && process.env.AUTH0_CLIENT_SECRET
-  && process.env.AUTH0_AUDIENCE
-  && !isAuth0EmailConnectionRejected,
+  && process.env.AUTH0_AUDIENCE,
 );
+// The user-facing setup routes require both the core Auth0 configuration and
+// an accepted optional connection policy. A rejected policy blocks setup
+// without suppressing independent boot diagnostics or normal bot operation.
+const isQurlSetupAvailable = isQurlOAuthConfigured
+  && !isAuth0EmailConnectionRejected;
 
 const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
 
@@ -410,6 +411,7 @@ module.exports = {
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
+  isQurlSetupAvailable,
   isDiscordInstallConfigured,
   discordInstallNotConfiguredReason,
 

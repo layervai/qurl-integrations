@@ -12,7 +12,7 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
       || typeof codeChallenge !== 'string' || !codeChallenge) {
     throw new TypeError('state and codeChallenge must be non-empty strings');
   }
-  if (config.auth0EmailConnectionState === 'rejected') {
+  if (config.isAuth0EmailConnectionRejected) {
     throw new Error('Auth0 email connection policy was rejected');
   }
 

@@ -8649,7 +8649,7 @@ const commands = [
         }
 
         // OAuth path — preferred when configured.
-        if (config.isQurlOAuthConfigured) {
+        if (config.isQurlSetupAvailable) {
           // Fail-fast on encryption-at-rest BEFORE minting the OAuth
           // setup link — otherwise the admin clicks through, completes
           // the full Auth0 dance, and only then sees the 503 from
@@ -8820,7 +8820,7 @@ const commands = [
         // Pre-OAuth this hardcoded `setup api_key:lv_live_your_key_here`,
         // which never matched the modal flow either; fixed in round-9.6
         // alongside the OAuth-redirect path documentation.
-        const notConfiguredCopy = config.isQurlOAuthConfigured
+        const notConfiguredCopy = config.isQurlSetupAvailable
           ? '❌ **qURL is not configured for this server.**\n\n'
             + 'Run `/qurl setup` to connect — you\'ll be redirected to layerv.ai to authorize, '
             + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.'
@@ -8927,7 +8927,7 @@ const commands = [
         // entry point. When unset (sandbox before Auth0 secrets land),
         // we keep the legacy "API key paste" wording so the help text
         // matches what /qurl setup actually does at that moment.
-        const oauthSetupSection = config.isQurlOAuthConfigured
+        const oauthSetupSection = config.isQurlSetupAvailable
           ? '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n'

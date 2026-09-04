@@ -72,7 +72,7 @@ describe('server Auth0 connection policy log', () => {
         event: 'qurl_oauth_auth0_connection_policy',
         connection: null,
         state: 'rejected',
-        oauth_configured: false,
+        oauth_configured: true,
       },
     ]);
     expect(JSON.stringify(logs)).not.toContain('private invalid connection!');

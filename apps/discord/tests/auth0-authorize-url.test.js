@@ -56,7 +56,8 @@ describe('buildAuth0AuthorizeUrl', () => {
   });
 
   it('refuses to build an unpinned authorize URL when the configured pin was rejected', () => {
-    withBuilder({ AUTH0_EMAIL_CONNECTION: 'email!' }, ({ buildAuth0AuthorizeUrl }) => {
+    withBuilder({ AUTH0_EMAIL_CONNECTION: 'email' }, ({ buildAuth0AuthorizeUrl }, config) => {
+      config.isAuth0EmailConnectionRejected = true;
       expect(() => buildAuth0AuthorizeUrl({
         state: 'signed-state',
         codeChallenge: PKCE_CHALLENGE,

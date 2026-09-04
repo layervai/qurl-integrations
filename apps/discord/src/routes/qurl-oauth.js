@@ -115,7 +115,7 @@ function clearQurlOAuthCookies(res) {
 // in a different browser, the cookie is absent and /callback rejects
 // before any Auth0 token exchange or qurl-service mint runs.
 router.get('/start', rateLimit, async (req, res) => {
-  if (!config.isQurlOAuthConfigured) {
+  if (!config.isQurlSetupAvailable) {
     // Single log line per request lives in renderNotConfiguredPage —
     // dropping the route-level warn (round-9 item #7 harmonization
     // with discord-install.js's surface).
@@ -154,7 +154,7 @@ router.get('/start', rateLimit, async (req, res) => {
 // Validate state, exchange code → access_token, mint a guild-scoped API
 // key on qurl-service, persist it via the Store abstraction, DM the admin.
 router.get('/callback', rateLimit, async (req, res) => {
-  if (!config.isQurlOAuthConfigured) {
+  if (!config.isQurlSetupAvailable) {
     clearQurlOAuthCookies(res);
     return renderNotConfigured(res);
   }

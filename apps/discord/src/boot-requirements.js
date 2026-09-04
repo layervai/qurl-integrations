@@ -67,9 +67,11 @@ function missingProdKeys(env) {
 // The trigger is passed in rather than derived here: KEY_ENCRYPTION_KEY
 // lives in raw env (index.js reads process.env for it, and the smoke
 // test below does too), while `isQurlOAuthConfigured` is a derived flag
-// config.js computes from the AUTH0_* block including its domain-shape
-// validation. Taking both keeps this helper pure and avoids a second,
-// drifting copy of that derivation.
+// config.js computes from the required AUTH0_* block including its domain-
+// shape validation. It deliberately remains true when an optional connection
+// pin is rejected, so independent encryption-at-rest diagnostics are not
+// hidden behind the first deployment error. Taking both keeps this helper
+// pure and avoids a second, drifting copy of that derivation.
 function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
   if (!isQurlOAuthConfigured) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
@@ -150,9 +152,10 @@ function baseUrlForError(rawBaseUrl) {
 // OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
 // (commands.js) and the /oauth/qurl/callback redirect_uri
 // (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
-// and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
-// localhost BASE_URL silently dead-ends setup at the redirect — in plain
-// single-guild and multi-tenant deploys alike (#619). Both Stage-2 Discord
+// and /qurl setup can take the OAuth path whenever isQurlOAuthConfigured, so
+// a localhost BASE_URL would dead-end setup after any separate optional-policy
+// error is fixed — in plain single-guild and multi-tenant deploys alike (#619).
+// Both Stage-2 Discord
 // install routes (routes/discord-install.js) embed BASE_URL too, but
 // isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
 // isQurlOAuthConfigured gate already covers it.
@@ -511,9 +514,10 @@ function invalidHotStandbyValues(cfg) {
 // in index.js sits inside the NODE_ENV=production block, keeping dev
 // localhost workflows convenient):
 //
-//   Presence — when qURL OAuth is configured (AUTH0_* set; every
-//   sign/verify call site gates on isQurlOAuthConfigured), SOME key in
-//   the signer's resolution chain must exist. Without the rule, a
+//   Presence — when qURL OAuth is configured (required AUTH0_* set), SOME key
+//   in the signer's resolution chain must exist. This deliberately stays
+//   fail-loud when a separate optional connection policy blocks setup.
+//   Without the rule, a
 //   deploy with Auth0 configured and no state secret would boot and
 //   500 on the first /qurl setup.
 //

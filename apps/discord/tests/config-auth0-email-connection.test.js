@@ -3,6 +3,11 @@ const {
   withFreshConfig,
   captureFreshConfig,
 } = require('./helpers/fresh-config');
+const {
+  baseUrlHttpsProblem,
+  invalidStateSecretValues,
+  missingKekRequiredKeys,
+} = require('../src/boot-requirements');
 
 describe('config.AUTH0_EMAIL_CONNECTION', () => {
   const AUTH0_ENV = {
@@ -17,6 +22,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
       expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
       expect(config.isAuth0EmailConnectionRejected).toBe(false);
       expect(config.auth0EmailConnectionState).toBe('unset');
+      expect(config.isQurlSetupAvailable).toBe(false);
     });
   });
 
@@ -68,13 +74,28 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     captureFreshConfig({
       ...AUTH0_ENV,
       AUTH0_EMAIL_CONNECTION: 'email!',
+      BASE_URL: 'http://localhost:3000',
+      OAUTH_STATE_SECRET: undefined,
+      QURL_OAUTH_STATE_SECRET: undefined,
     }, (config) => {
       expect(config.isAuth0EmailConnectionRejected).toBe(true);
       expect(config.auth0EmailConnectionState).toBe('rejected');
-      expect(config.isQurlOAuthConfigured).toBe(false);
+      // The core Auth0 settings remain configured so independent production
+      // boot checks still run; only the user-facing setup surface is blocked.
+      expect(config.isQurlOAuthConfigured).toBe(true);
+      expect(config.isQurlSetupAvailable).toBe(false);
       expect(config.isDiscordInstallConfigured).toBe(false);
       expect(config.discordInstallNotConfiguredReason).toBe(
         'AUTH0_EMAIL_CONNECTION rejected',
+      );
+      expect(missingKekRequiredKeys({}, config.isQurlOAuthConfigured)).toEqual([
+        'KEY_ENCRYPTION_KEY',
+      ]);
+      expect(baseUrlHttpsProblem(config, true)).toContain(
+        'BASE_URL must be a public bare https:// origin',
+      );
+      expect(invalidStateSecretValues(config)).toContainEqual(
+        expect.stringContaining('no state-signing secret is available'),
       );
     });
   });
@@ -91,6 +112,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
       expect(config.isAuth0EmailConnectionRejected).toBe(false);
       expect(config.auth0EmailConnectionState).toBe('unset');
       expect(config.isQurlOAuthConfigured).toBe(true);
+      expect(config.isQurlSetupAvailable).toBe(true);
       expect(config.isDiscordInstallConfigured).toBe(true);
       expect(config.discordInstallNotConfiguredReason).toBeNull();
       expect(warns).toContainEqual(expect.stringContaining(

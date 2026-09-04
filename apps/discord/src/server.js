@@ -211,10 +211,11 @@ function noStoreHeaders(req, res, next) {
 // always mount because /qurl setup is the canonical path for any guild
 // (multi-tenant or single-guild) to configure a qURL API key, and the
 // route gates internally on
-// config.isQurlOAuthConfigured (returns 503 with a "not configured yet"
+// config.isQurlSetupAvailable (returns 503 with a "not configured yet"
 // page when AUTH0_* env vars are unset, rather than a hard 404). That way
-// flipping the AUTH0_* secrets in SSM is the only step needed to turn
-// OAuth on — no code change or env-flag re-flip required.
+// setting valid AUTH0_* secrets and an accepted optional connection policy in
+// SSM is all that is needed to turn OAuth on — no code change or feature-flag
+// re-flip required.
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
 const auth0ConnectionPolicyMetadata = {
@@ -223,7 +224,7 @@ const auth0ConnectionPolicyMetadata = {
   state: config.auth0EmailConnectionState,
   oauth_configured: config.isQurlOAuthConfigured,
 };
-if (!config.isQurlOAuthConfigured) {
+if (!config.isQurlSetupAvailable) {
   logger.info(config.isAuth0EmailConnectionRejected
     ? 'qURL OAuth routes mounted in not-configured mode because AUTH0_EMAIL_CONNECTION was rejected. /qurl setup is blocked until the deployment value is corrected; other bot operations remain available.'
     : 'qURL OAuth routes mounted in not-configured mode because AUTH0_* settings are incomplete/invalid. /qurl setup will fall back to the legacy modal-paste path.');
@@ -235,10 +236,11 @@ if (!config.isQurlOAuthConfigured) {
   } else {
     inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
   }
-  const logInactivePolicy = config.isAuth0EmailConnectionRejected
-    ? logger.error
-    : logger.info;
-  logInactivePolicy(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
+  if (config.isAuth0EmailConnectionRejected) {
+    logger.error(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
+  } else {
+    logger.info(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
+  }
 } else {
   let auth0ConnectionMessage;
   if (auth0Connection) {
