@@ -42,6 +42,19 @@ class IndexedRateLimitStore extends Map {
     installOnlyIps.clear();
     super.clear();
   }
+
+  replaceAfterSweep(ip, buckets) {
+    const previous = super.get(ip);
+    const wasInstallOnly = Boolean(previous?.['discord-install-entry'] && !previous.callback);
+    const isInstallOnly = Boolean(buckets['discord-install-entry'] && !buckets.callback);
+    // Sweeping timestamps is not activity. Preserve an existing install-only
+    // entry's eviction position, but index a real callback -> install-only
+    // transition at the time it becomes eligible for eviction.
+    super.set(ip, buckets);
+    if (wasInstallOnly === isInstallOnly) return;
+    if (isInstallOnly) installOnlyIps.add(ip);
+    else installOnlyIps.delete(ip);
+  }
 }
 const rateLimitStore = new IndexedRateLimitStore();
 
@@ -58,7 +71,7 @@ function sweepRateLimitStore() {
       if (recent.length > 0) recentBuckets[bucket] = recent;
     }
     if (Object.keys(recentBuckets).length === 0) rateLimitStore.delete(ip);
-    else rateLimitStore.set(ip, recentBuckets);
+    else rateLimitStore.replaceAfterSweep(ip, recentBuckets);
   }
 }
 

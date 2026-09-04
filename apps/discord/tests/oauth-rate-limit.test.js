@@ -115,6 +115,51 @@ describe('OAuth rate-limit store', () => {
     expect(rateLimitStore.get('new-callback')).toEqual({ callback: [now] });
   });
 
+  it('preserves least-recently-active order when a sweep filters timestamps', () => {
+    const staleButRetained = now - config.RATE_LIMIT_WINDOW_MS * 2 + 1;
+    rateLimitStore.set('old-but-refreshed', { 'discord-install-entry': [staleButRetained] });
+    rateLimitStore.set('least-recent', { 'discord-install-entry': [now - 5] });
+    rateLimitStore.set('old-but-refreshed', {
+      'discord-install-entry': [staleButRetained, now],
+    });
+    sweepRateLimitStore();
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 2; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+
+    rateLimit(
+      { ip: 'new-callback', path: '/oauth/discord/callback' },
+      response(),
+      jest.fn(),
+    );
+
+    expect(rateLimitStore.has('least-recent')).toBe(false);
+    expect(rateLimitStore.get('old-but-refreshed')).toEqual({
+      'discord-install-entry': [staleButRetained, now],
+    });
+  });
+
+  it('removes an install-only IP from the eviction index when it later calls back', () => {
+    rateLimitStore.set('now-callback', { 'discord-install-entry': [now] });
+    rateLimit(
+      { ip: 'now-callback', path: '/oauth/discord/callback' },
+      response(),
+      jest.fn(),
+    );
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 1; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+
+    const res = response();
+    const next = jest.fn();
+    jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    rateLimit({ ip: 'new-callback', path: '/oauth/discord/callback' }, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(429);
+    expect(rateLimitStore.has('now-callback')).toBe(true);
+  });
+
   it('can reach and hold the hard cap before shedding the next new IP', () => {
     for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 1; i += 1) {
       rateLimitStore.set(`callback-${i}`, { callback: [now] });
