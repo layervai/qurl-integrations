@@ -96,7 +96,7 @@ function makeClient(apiKey) {
  *     carry no server body) propagate verbatim so their stack survives. Pinned
  *     by tests/qurl-coverage.test.js.
  */
-async function callQurl(method, path, fn) {
+async function callQurl(method, path, fn, auditFields = {}) {
   try {
     return await fn();
   } catch (err) {
@@ -111,6 +111,7 @@ async function callQurl(method, path, fn) {
         status,
         method,
         path,
+        ...auditFields,
       });
     }
     // A real HTTP status means the SDK error wraps a server response body — throw
@@ -135,7 +136,7 @@ async function callQurl(method, path, fn) {
   }
 }
 
-async function getIdentity(apiKey) {
+async function getIdentity(apiKey, guildId) {
   if (!apiKey) {
     throw new Error('Guild qURL API key is not configured');
   }
@@ -195,7 +196,7 @@ async function getIdentity(apiKey) {
           : [],
       },
     };
-  });
+  }, guildId ? { guild_id: guildId } : {});
 }
 
 // The syntactic private/loopback/link-local screen lives in utils/private-host.js

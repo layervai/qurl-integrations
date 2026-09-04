@@ -8741,7 +8741,18 @@ const commands = [
           });
         }
         await interaction.deferReply({ ephemeral: true });
-        const guildConfig = await db.getGuildConfig(interaction.guildId);
+        let guildConfig;
+        try {
+          guildConfig = await db.getGuildConfig(interaction.guildId);
+        } catch {
+          logger.warn('qURL status configuration read failed', {
+            guild_id: interaction.guildId,
+          });
+          return interaction.editReply({
+            content: '⚠️ **The qURL status check could not be completed.**\n'
+              + 'Please try `/qurl status` again later.',
+          });
+        }
         if (guildConfig) {
           // Start the independent key/service work before checking guild
           // membership. Catch inside the promise so an early rejection cannot
@@ -8754,7 +8765,7 @@ const commands = [
               const apiKey = await db.getGuildApiKey(interaction.guildId);
               if (!apiKey) return { keyUnavailable: true };
               failureStage = 'qurl_service';
-              return { identity: await getIdentity(apiKey) };
+              return { identity: await getIdentity(apiKey, interaction.guildId) };
             } catch (error) {
               return { error, failureStage };
             }
@@ -8769,6 +8780,9 @@ const commands = [
           );
           const configuredByDisplay = sanitizeStoredStatusValue(guildConfig.configured_by);
           const updatedAtDisplay = sanitizeStoredStatusValue(guildConfig.updated_at);
+          const configuredByReference = guildConfig.configured_by
+            ? `<@${configuredByDisplay}>`
+            : configuredByDisplay;
 
           // #185 admin-offboarding nudge: the qURL key is owned by the
           // admin who ran setup (Auth0 sub claim); usage bills to their
@@ -8795,7 +8809,7 @@ const commands = [
             }
           }
           const configurationDetails =
-            `Configured by: <@${configuredByDisplay}>\n` +
+            `Configured by: ${configuredByReference}\n` +
             `Last updated: ${updatedAtDisplay}` +
             originalAdminLeftNotice;
 
@@ -8821,11 +8835,10 @@ const commands = [
               : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
                 + 'Please try `/qurl status` again later.\n\n';
           } else {
-            // `key_prefix` replaces the old locally-computed sha256 finger-
-            // print: qurl-service exposes it as a non-secret display prefix
-            // identifying the key the service actually accepted rather than
-            // only the bytes we stored. It can hint at the tenant, reinforcing
-            // the existing ManageGuild gate above.
+            // TODO(upstream-contract): qurl-service exposes `key_prefix` as a
+            // non-secret display prefix identifying the key it actually
+            // accepted. It can hint at the tenant, reinforcing the existing
+            // ManageGuild gate above; keep this decision aligned with /v1/me.
             //
             // Inline-code content renders backslashes literally, so strip
             // backticks instead of applying general Markdown escaping. The
@@ -8857,8 +8870,10 @@ const commands = [
             );
             content = capUtf16Units(verdict, verdictLimit) + truncationIndicator + configurationDetails;
           }
+          content = capUtf16Units(content, STATUS_CONTENT_MAX);
           return interaction.editReply({
             content,
+            allowedMentions: { parse: [] },
           });
         }
         // Branch the not-configured copy on the active setup flow so

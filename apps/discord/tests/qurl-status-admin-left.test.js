@@ -116,7 +116,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(mockGetIdentity).not.toHaveBeenCalled();
   });
 
-  it('uses the deferred error path when the configuration read fails', async () => {
+  it('resolves the deferred response when the configuration read fails', async () => {
     db.getGuildConfig.mockRejectedValueOnce(new Error('DDB unavailable'));
     const interaction = makeStatusInteraction({
       memberFetchBehavior: async () => ({ id: 'admin-original' }),
@@ -126,10 +126,10 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
     expect(interaction._reply).not.toHaveBeenCalled();
-    expect(interaction._followUp).toHaveBeenCalledWith(expect.objectContaining({
-      content: 'There was an error executing this command.',
-      ephemeral: true,
+    expect(interaction._editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/status check could not be completed/i),
     }));
+    expect(interaction._followUp).not.toHaveBeenCalled();
     expect(mockGetIdentity).not.toHaveBeenCalled();
   });
 
@@ -152,7 +152,11 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('Key prefix: `lv_live_aaa`');
     expect(replyContent).toContain('Scopes: `qurl:read`, `qurl:write`');
     expect(replyContent).not.toContain(STORED_KEY);
-    expect(mockGetIdentity).toHaveBeenCalledWith(STORED_KEY);
+    expect(mockGetIdentity).toHaveBeenCalledTimes(1);
+    expect(mockGetIdentity).toHaveBeenCalledWith(STORED_KEY, 'guild-1');
+    expect(interaction._editReply).toHaveBeenCalledWith(expect.objectContaining({
+      allowedMentions: { parse: [] },
+    }));
     expect(replyContent).not.toContain('has left this server');
   });
 
@@ -312,6 +316,28 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(interaction._editReply.mock.calls[0][0].content).toContain('Scopes: _none_');
   });
 
+  it('renders normalized empty identity fields with explicit fallbacks', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: null,
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({
+      api_key: { key_id: 'key-123', key_prefix: '', scopes: [''] },
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent).toContain('Key prefix: `unknown`');
+    expect(replyContent).toContain('Scopes: `unnamed`');
+    expect(replyContent).toContain('Configured by: unknown');
+    expect(replyContent).not.toContain('<@unknown>');
+  });
+
   it('summarizes service-reported scopes beyond the display limit', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
@@ -413,6 +439,14 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
       configured_by: 'admin-original',
       updated_at: '2026-01-01T00:00:00Z',
     });
+    let releaseKeyRead;
+    let signalKeyReadStarted;
+    const keyReadStarted = new Promise((resolve) => { signalKeyReadStarted = resolve; });
+    const keyReadFinished = new Promise((resolve) => { releaseKeyRead = resolve; });
+    db.getGuildApiKey.mockImplementationOnce(() => {
+      signalKeyReadStarted();
+      return keyReadFinished;
+    });
     let releaseMemberFetch;
     let signalMemberFetchStarted;
     const memberFetchStarted = new Promise((resolve) => { signalMemberFetchStarted = resolve; });
@@ -425,7 +459,9 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     });
 
     const command = handleCommand(interaction);
-    await memberFetchStarted;
+    await Promise.all([keyReadStarted, memberFetchStarted]);
+    releaseKeyRead(STORED_KEY);
+    await Promise.resolve();
     const identityStartedBeforeMemberFinished = mockGetIdentity.mock.calls.length;
     releaseMemberFetch({ id: 'admin-original' });
     await command;

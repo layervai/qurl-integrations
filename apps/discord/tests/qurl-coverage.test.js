@@ -102,7 +102,7 @@ describe('qURL client — getIdentity', () => {
     response.body = { cancel: jest.fn().mockResolvedValue(undefined) };
     globalThis.fetch = jest.fn().mockResolvedValue(response);
 
-    const error = await qurl.getIdentity('stored-guild-key').then(
+    const error = await qurl.getIdentity('stored-guild-key', 'guild-1').then(
       () => { throw new Error('expected rejection'); },
       (err) => err,
     );
@@ -111,7 +111,7 @@ describe('qURL client — getIdentity', () => {
     expect(error.message).not.toContain(secretBody);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
-      expect.objectContaining({ status, method: 'GET', path: '/me' }),
+      expect.objectContaining({ status, method: 'GET', path: '/me', guild_id: 'guild-1' }),
     );
     expect(response.body.cancel).toHaveBeenCalledTimes(1);
   });
