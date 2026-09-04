@@ -13,8 +13,8 @@
  *     mistyped path is how thousands of live resources get abandoned;
  *   - one failing revoke must not abandon the remaining thousands (the
  *     natural refactor to Promise.all breaks this silently);
- *   - an already-gone resource counts as reclaimed, or re-running --reclaim
- *     after a partial sweep can never report clean.
+ *   - only an explicit terminal response counts as reclaimed; an ambiguous
+ *     404 stays visible for manual verification.
  */
 
 const fs = require('node:fs');
@@ -32,6 +32,8 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
+const { resourcePath } = require('../src/utils/resource-id');
+const { qurlApiError, qurlApiErrorMessage } = require('../src/utils/qurl-errors');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
@@ -259,13 +261,13 @@ describe('recordResource', () => {
   });
 
   // A malformed id would otherwise be recorded, then fail every sweep with
-  // "Invalid resource ID format" — a message matching neither 404 nor 410 —
-  // so it would be retried forever instead of reported as unreclaimable.
+  // "Invalid resource ID format" and require manual ledger repair.
   it.each([
     ['missing', undefined],
     ['empty', ''],
     ['non-string', 12345],
     ['malformed', 'not a valid id!'],
+    ['overlong', 'a'.repeat(1025)],
   ])('warns and records nothing for a %s resource_id', (_label, value) => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
@@ -506,7 +508,9 @@ describe('reclaim', () => {
   it('revokes the rest when one resource fails', async () => {
     const ledger = tempLedger(['r_1', 'r_2', 'r_3', 'r_4', 'r_5'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      if (id === 'r_2') throw new Error('qURL API DELETE /qurls/r_2 failed (500)');
+      if (id === 'r_2') {
+        throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 500));
+      }
     });
 
     const result = await reclaim(ledger);
@@ -516,6 +520,9 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ missing: false, revoked: 4, failed: 1 });
     // Only the failure survives, so a re-run sweeps just that one.
     expect(readLedger(ledger)).toEqual(['r_2']);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 other resource(s) failed with potentially retryable errors'),
+    );
   });
 
   it('aggregates failures sharing a cause into one tally line', async () => {
@@ -524,25 +531,97 @@ describe('reclaim', () => {
     // thousands of ids would print thousands of "1x" lines instead of one.
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      throw new Error(`qURL API DELETE /qurls/${id} failed (401)`);
+      throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 401));
     });
 
     const result = await reclaim(ledger);
 
     expect(result).toMatchObject({ revoked: 0, failed: 3 });
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('3x qURL API DELETE /qurls/<id> failed (401)'),
+      expect.stringContaining(
+        `3x ${qurlApiErrorMessage('DELETE', '/resources/<id>', 401)}`,
+      ),
     );
   });
 
-  it('counts an already-gone resource as revoked, not failed', async () => {
+  it('keeps an ambiguous resource-route 404 for another reclaim attempt', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(new Error('qURL API DELETE /qurls/r_1 failed (404)'));
+    deleteLink.mockRejectedValue(
+      qurlApiError('DELETE', resourcePath('r_1'), 404),
+    );
 
     const result = await reclaim(ledger);
 
-    expect(result).toMatchObject({ revoked: 1, failed: 0 });
-    expect(readLedger(ledger)).toEqual([]);
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['r_1']);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 resource(s) returned 404'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('re-run with --reclaim'),
+    );
+  });
+
+  it('keeps a legacy-ID 400 visible for another reclaim attempt', async () => {
+    const ledger = tempLedger(line('r_legacy42'));
+    deleteLink.mockRejectedValue(
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_legacy42'), 400)),
+    );
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['r_legacy42']);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 legacy resource ID(s) were rejected with 400'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('re-run with --reclaim'),
+    );
+  });
+
+  it('continues after an invalid non-string ledger ID and flags manual repair', async () => {
+    const ledger = tempLedger(`${line(12345)}${line('valid-id')}`);
+    deleteLink.mockImplementation(async (id) => {
+      if (typeof id !== 'string') throw new Error('Invalid resource ID format: <number>');
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(deleteLink).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ revoked: 1, failed: 1 });
+    expect(readLedger(ledger)).toEqual([12345]);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 invalid ledger resource ID(s) cannot be reclaimed automatically'),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('re-run with --reclaim'),
+    );
+  });
+
+  it('does not read a 404 inside the resource ID as already gone', async () => {
+    const ledger = tempLedger(line('abc404def'));
+    deleteLink.mockRejectedValue(
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)),
+    );
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 0, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['abc404def']);
+  });
+
+  it('continues reclaiming after a non-Error rejection', async () => {
+    const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
+    deleteLink.mockImplementation(async (id) => {
+      if (id === 'r_1') return Promise.reject('network unavailable');
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(deleteLink).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ revoked: 2, failed: 1 });
+    expect(readLedger(ledger)).toEqual(['r_1']);
   });
 
   it('revokes a repeated id once', async () => {
@@ -625,11 +704,26 @@ describe('reclaim', () => {
     expect(result).toMatchObject({ revoked: 2, failed: 0 });
   });
 
-  it('counts a 410 as already-gone, the same as a 404', async () => {
+  it('counts a structural 410 as already gone', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(new Error('qURL API DELETE /qurls/r_1 failed (410)'));
+    deleteLink.mockRejectedValue(
+      qurlApiError('DELETE', resourcePath('r_1'), 410),
+    );
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(readLedger(ledger)).toEqual([]);
+  });
+
+  it('counts a serialized 410 without structural status as already gone', async () => {
+    const ledger = tempLedger(line('r_1'));
+    deleteLink.mockRejectedValue(
+      new Error(qurlApiErrorMessage('DELETE', resourcePath('r_1'), 410)),
+    );
+
+    const result = await reclaim(ledger);
+
+    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(readLedger(ledger)).toEqual([]);
   });
 
   it('accepts an endpoint differing only by a trailing slash', async () => {

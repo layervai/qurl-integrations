@@ -131,6 +131,13 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
     const [route, opts] = mockPut.mock.calls[0];
     expect(route).toBe('/applications/app-123/commands');
     expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
+    expect(opts.body).toHaveLength(1);
+    expect(opts.body[0]).toMatchObject({
+      name: 'qurl',
+      integration_types: [0],
+      contexts: [0],
+    });
+    expect(opts.body[0]).not.toHaveProperty('dm_permission');
   });
 
   it('single-guild: registers the same command set on the guild endpoint', async () => {
@@ -152,6 +159,12 @@ describe('multi-tenant mode — registerCommands registration scope', () => {
     expect(route).toBe('/applications/app-123/guilds/123456789012345678/commands');
     // Same surface in both modes — only the registration scope differs.
     expect(opts.body.map(c => c.name).sort()).toEqual(['qurl']);
+    // Discord only accepts installation/interaction contexts on global
+    // commands. Strip even undefined builder fields so a future builder
+    // setter cannot leak them into this payload.
+    expect(opts.body[0]).not.toHaveProperty('integration_types');
+    expect(opts.body[0]).not.toHaveProperty('contexts');
+    expect(opts.body[0]).not.toHaveProperty('dm_permission');
   });
 
   it('ships no GitHub account-linking or contributor commands in either mode (#1026)', async () => {
@@ -292,9 +305,13 @@ describe('handleCommand dispatch-time filter', () => {
     jest.resetModules();
   });
 
-  it.each(['link', 'leaderboard', 'forcelink'])(
+  it.each([
+    ['link', undefined],
+    ['leaderboard', { 0: '123456789012345678' }],
+    ['forcelink', { 0: '123456789012345678', 1: 'user-1' }],
+  ])(
     'stale /%s interaction gets an ephemeral "no longer available" reply',
-    async (commandName) => {
+    async (commandName, authorizingIntegrationOwners) => {
       process.env.GUILD_ID = '123456789012345678';
 
       // Mock dependencies that commands.js transitively pulls in
@@ -319,6 +336,8 @@ describe('handleCommand dispatch-time filter', () => {
         isAutocomplete: () => false,
         isChatInputCommand: () => true,
         commandName,
+        guildId: '123456789012345678',
+        authorizingIntegrationOwners,
         user: { id: 'u1' },
         reply,
       };
@@ -331,6 +350,40 @@ describe('handleCommand dispatch-time filter', () => {
       }));
     },
   );
+
+  it.each([
+    ['DM', { guildId: null, user: { id: 'user-1' } }],
+    ['user install inside a guild', {
+      guildId: 'guild-1',
+      authorizingIntegrationOwners: { 1: 'user-1' },
+      user: { id: 'user-1' },
+    }],
+  ])('rejects a stale %s /qurl interaction before subcommand dispatch', async (_label, context) => {
+    jest.doMock('../src/store', () => ({}));
+    jest.doMock('../src/discord', () => ({
+      sendDM: jest.fn(),
+      client: { user: { id: 'bot' } },
+    }));
+
+    const { handleCommand } = require('../src/commands');
+    const reply = jest.fn().mockResolvedValue(undefined);
+    const interaction = {
+      isAutocomplete: () => false,
+      isChatInputCommand: () => true,
+      commandName: 'qurl',
+      options: { getSubcommand: jest.fn(() => 'help') },
+      reply,
+      ...context,
+    };
+
+    await handleCommand(interaction);
+
+    expect(reply).toHaveBeenCalledWith({
+      content: 'qURL only works inside a server where it is installed, not in DMs or from a user install.',
+      ephemeral: true,
+    });
+    expect(interaction.options.getSubcommand).not.toHaveBeenCalled();
+  });
 });
 
 describe('server.js — the GitHub OAuth + webhook surfaces are gone (#1026)', () => {
