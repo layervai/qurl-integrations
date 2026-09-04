@@ -22,7 +22,6 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
-  getGuildConfig: jest.fn().mockResolvedValue(undefined),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
 }));
