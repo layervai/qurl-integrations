@@ -30,10 +30,11 @@
 //
 // The Lambda reuses `apps/discord/src/qurl-webhook-registrar.js`'s
 // `ensureWebhookSubscription` + `buildSsmPersistSecret` directly —
-// same library, different runtime. Bot HTTP tier now only RECEIVES
-// webhooks (reads QURL_WEBHOOK_SECRET from SSM-injected env at boot,
-// verifies signatures, writes to DDB). No registration calls from
-// the bot ever again.
+// same library, different runtime. The bot HTTP tier no longer runs
+// default-key registration on boot; it reads QURL_WEBHOOK_SECRET from
+// SSM-injected env, verifies signatures, and writes to DDB. Per-guild
+// API-key linking still calls the shared registrar from guild-webhook-link.js
+// without reading this Lambda's SSM secret.
 //
 // Invocation flow: with a matching subscription, a valid SSM secret is reused
 // while a missing or unrecognized value rotates; with no match, a new secret
@@ -41,8 +42,9 @@
 // on `aws_lambda_invocation.webhook_registrar`; its task definition resolves
 // QURL_WEBHOOK_SECRET from SSM at task launch, so an apply writes any new value
 // before replacement tasks start. A manual invocation only forces rotation
-// after the operator first clears or reseeds SSM; if it creates/rotates,
-// immediately force a new ECS deployment after it succeeds.
+// after the operator first clears or reseeds SSM; invalid legacy state and
+// dedupe recovery can also rotate. Whenever it creates/rotates, immediately
+// force a new ECS deployment after it succeeds.
 // TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/http_rehome_v2.tf
 //
 // IAM scope (set in qurl-integrations-infra):

@@ -95,10 +95,12 @@ const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
 // value. The allowlist distinguishes reusable values from SSM seed
 // sentinels and rejects response drift before it can reach persistence.
 const SERVER_SECRET_PREFIX = 'whsec_';
-// qurl-service currently emits a 43-character base64url body. Keep a
-// smaller but still meaningful floor so the registrar tolerates a future
-// generator change without accepting a prefix plus a token-sized stub.
+// qurl-service currently emits a 43-character base64url body. This smaller
+// floor tolerates future length changes, but prefix drift deliberately blocks
+// deployment: accepting unknown key material is less safe than failing closed.
 const SERVER_SECRET_MIN_BODY_LENGTH = 16;
+const SERVER_SECRET_MIN_LENGTH = SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN_BODY_LENGTH;
+const SERVER_SECRET_EXPECTED_FORMAT = `${SERVER_SECRET_PREFIX} prefix with at least ${SERVER_SECRET_MIN_BODY_LENGTH} characters after it`;
 
 // TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // Terraform seeds the SSM parameter with this literal so it exists before
@@ -108,26 +110,30 @@ const INFRA_SEED_SENTINEL = 'PLACEHOLDER';
 
 function isServerIssuedSecret(value) {
   return typeof value === 'string'
-    && value.length >= SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN_BODY_LENGTH
+    && value.length >= SERVER_SECRET_MIN_LENGTH
     && value.startsWith(SERVER_SECRET_PREFIX);
 }
 
+// Reject absent or degenerate HMAC keys and surface truncated responses as
+// contract drift before persistence. Length is a format guard, not proof of
+// origin or entropy; the upstream generator remains the source of both.
 function assertServerIssuedSecret(value, operation) {
-  const expected = `${SERVER_SECRET_PREFIX} prefix with at least ${SERVER_SECRET_MIN_BODY_LENGTH} characters after it`;
   if (value === undefined || value === null || value === '') {
-    throw new Error(`${operation}: contract drift (response secret is missing; expected ${expected})`);
+    throw new Error(`${operation}: contract drift (response secret is missing; expected ${SERVER_SECRET_EXPECTED_FORMAT})`);
   }
   if (typeof value !== 'string') {
-    throw new Error(`${operation}: contract drift (response secret has wrong type ${typeof value}; expected a string matching ${expected})`);
+    throw new Error(`${operation}: contract drift (response secret has wrong type ${typeof value}; expected a string matching ${SERVER_SECRET_EXPECTED_FORMAT})`);
   }
   if (!isServerIssuedSecret(value)) {
-    throw new Error(`${operation}: contract drift (response secret has invalid format; expected ${expected}; observed length ${value.length})`);
+    throw new Error(`${operation}: contract drift (response secret has invalid format; expected ${SERVER_SECRET_EXPECTED_FORMAT}; observed length ${value.length})`);
   }
 }
 
 function secretLengthBucket(value) {
-  if (value.length < 16) return '<16';
-  if (value.length < 64) return '16-63';
+  if (value.length < SERVER_SECRET_MIN_LENGTH) return `<${SERVER_SECRET_MIN_LENGTH}`;
+  // 64 is an intentionally coarse observability boundary, not part of the
+  // acceptance contract; it avoids disclosing the exact stored-value length.
+  if (value.length < 64) return `${SERVER_SECRET_MIN_LENGTH}-63`;
   return '>=64';
 }
 
@@ -951,18 +957,28 @@ async function ensureWebhookSubscription(opts) {
   // that sentinel whenever a subscription already exists for the bridge
   // URL (a sub that predates the parameter, or an SSM reset), and the
   // receiver would then 401 every delivery until an operator noticed.
+  // guild-webhook-link intentionally passes no initialSecret, so this
+  // classifier changes only the Lambda/SSM path; its existing per-guild
+  // rotate-and-propagate behavior is unchanged.
   const initialIsRealSecret = isServerIssuedSecret(initialSecret);
   if (existing
       && typeof initialSecret === 'string'
       && initialSecret.length > 0
       && !initialIsRealSecret) {
-    // Observability only: the reuse decision remains a prefix allowlist,
-    // not a denylist coupled to terraform's current sentinel literal.
-    logger.warn('qURL webhook initial secret has unrecognized format — rotating instead of reusing', {
+    // Observability only: the reuse decision remains a format allowlist,
+    // not a denylist coupled to terraform's current sentinel literal. The
+    // sentinel is designed bootstrap state, so reserve WARN for surprises.
+    const seedSentinel = initialSecret === INFRA_SEED_SENTINEL;
+    const meta = {
       webhookId: existing.webhook_id,
-      seedSentinel: initialSecret === INFRA_SEED_SENTINEL,
+      seedSentinel,
       valueLengthBucket: secretLengthBucket(initialSecret),
-    });
+    };
+    if (seedSentinel) {
+      logger.info('qURL webhook SSM secret is the infra seed sentinel — rotating as designed', meta);
+    } else {
+      logger.warn('qURL webhook initial secret has unrecognized format — rotating instead of reusing', meta);
+    }
   }
 
   // Forwarded so per-guild callers can route inbound webhooks

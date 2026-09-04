@@ -107,19 +107,21 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
 
 describe('ensureWebhookSubscription — existing sub, bootstrap (no real initialSecret) → rotates', () => {
   it.each([
-    ['undefined', undefined, null],
-    ['an empty string', '', null],
-    ['the terraform seed sentinel', 'PLACEHOLDER', '<16'],
-    ['an arbitrary non-prefixed value', 'legacy-do-not-log-value', '16-63'],
-    ['the bare server prefix', 'whsec_', '<16'],
-    ['a prefixed value below the minimum body length', `whsec_${'x'.repeat(15)}`, '16-63'],
-  ])('rotates when initialSecret is %s', async (_label, initialSecret, expectedLengthBucket) => {
+    ['undefined', undefined, null, null],
+    ['an empty string', '', null, null],
+    ['the terraform seed sentinel', 'PLACEHOLDER', 'info', '<22'],
+    ['an arbitrary non-prefixed value', 'legacy-do-not-log-value', 'warn', '22-63'],
+    ['the bare server prefix', 'whsec_', 'warn', '<22'],
+    ['a prefixed value below the minimum body length', `whsec_${'x'.repeat(15)}`, 'warn', '<22'],
+  ])('rotates when initialSecret is %s', async (_label, initialSecret, expectedLogLevel, expectedLengthBucket) => {
     // terraform seeds /qurl-bot-discord/QURL_WEBHOOK_SECRET with a sentinel
     // so the parameter exists before the first registrar run. A sub that
     // predates the parameter must not reuse the sentinel or any other value
-    // outside qurl-service's contract. Non-empty unexpected values warn
-    // without disclosing their contents; unset/empty is normal bootstrap.
+    // outside qurl-service's contract. The designed sentinel path logs at
+    // info; other non-empty unexpected values warn without disclosing their
+    // contents; unset/empty is normal bootstrap and emits neither.
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const infoSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       let rotatedFor = null;
       mockFetchResponses({
@@ -140,19 +142,28 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
         webhookId: 'wh_existing',
         action: 'rotated',
       });
-      if (expectedLengthBucket) {
-        const warning = warnSpy.mock.calls
+      if (expectedLogLevel) {
+        const expectedMessage = expectedLogLevel === 'info'
+          ? 'infra seed sentinel — rotating as designed'
+          : 'initial secret has unrecognized format';
+        const spy = expectedLogLevel === 'info' ? infoSpy : warnSpy;
+        const logLine = spy.mock.calls
           .map(([message]) => message)
-          .find(message => message.includes('initial secret has unrecognized format'));
-        expect(warning).toBeDefined();
-        expect(warning).toContain(`"seedSentinel":${initialSecret === 'PLACEHOLDER'}`);
-        expect(warning).toContain(`"valueLengthBucket":"${expectedLengthBucket}"`);
-        if (initialSecret.includes('do-not-log')) expect(warning).not.toContain('do-not-log');
+          .find(message => message.includes(expectedMessage));
+        expect(logLine).toBeDefined();
+        expect(logLine).toContain(`"seedSentinel":${initialSecret === 'PLACEHOLDER'}`);
+        expect(logLine).toContain(`"valueLengthBucket":"${expectedLengthBucket}"`);
+        if (initialSecret.includes('do-not-log')) expect(logLine).not.toContain('do-not-log');
+        if (expectedLogLevel === 'info') {
+          expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+        }
       } else {
         expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+        expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('infra seed sentinel — rotating as designed'));
       }
     } finally {
       warnSpy.mockRestore();
+      infoSpy.mockRestore();
     }
   });
 
