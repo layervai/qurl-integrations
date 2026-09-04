@@ -68,21 +68,31 @@ function footerText() {
 }
 
 /**
- * @param {{ testFilePath: string, numPassingTests: number, numFailingTests: number, numTotalTests: number, testResults: Array<{ status: string, title: string }> }} suite
+ * @param {{ testFilePath: string, numPassingTests: number, numFailingTests: number, testExecError?: unknown, testResults: Array<{ status: string, title: string }> }} suite
  * @returns {{ name: string, value: string }}
  */
 function buildField(suite) {
   const file = path.basename(suite.testFilePath);
-  // `numTotalTests` includes pending/todo, not just pass+fail. Using
-  // the partial sum was misleading: a `3 passes + 1 it.skip` file
-  // would have rendered `✅ 3/3` despite running 4. Per claude-review.
+  // TODO(upstream-contract): Jest TestResult.testResults remains one entry per
+  // assertion and testExecError remains the per-file execution-failure signal.
+  // Jest has no per-file `numTotalTests`; that field is aggregate-only.
+  // Every assertion, including pending/todo entries, is present in
+  // `testResults`, so its length is the per-file equivalent.
+  // Using pass+fail here would make `3 passes + 1 it.skip` render 3/3.
+  const total = suite.testResults.length;
   const ran = suite.numPassingTests + suite.numFailingTests;
-  const skipped = suite.numTotalTests - ran;
-  const icon = suite.numFailingTests === 0 ? '✅' : '❌';
+  const skipped = total - ran;
+  const icon = suite.testExecError || suite.numFailingTests > 0
+    ? '❌'
+    : suite.numPassingTests > 0 ? '✅' : '⚠️';
   const skippedSuffix = skipped > 0 ? ` ⏭ ${skipped}` : '';
-  let value = `${icon} ${suite.numPassingTests}/${suite.numTotalTests}${skippedSuffix}`;
+  let value = `${icon} ${suite.numPassingTests}/${total}${skippedSuffix}`;
 
-  if (suite.numFailingTests > 0) {
+  if (suite.testExecError) {
+    // The workflow URL carries the diagnostic. Do not copy module paths or
+    // dependency error text into Discord; those may contain environment data.
+    value = '❌ failed to run';
+  } else if (suite.numFailingTests > 0) {
     const failing = suite.testResults
       .filter((t) => t.status === 'failed')
       .slice(0, MAX_FAILING_TESTS_PER_FILE)
@@ -103,6 +113,7 @@ function buildEmbed(results) {
   const passed = results.numPassedTests;
   const failed = results.numFailedTests;
   const total = results.numTotalTests;
+  const runtimeFailed = results.testResults.filter((suite) => suite.testExecError).length;
   const durationSec = ((Date.now() - results.startTime) / 1000).toFixed(1);
   const label = envLabel();
   const title = `qURL E2E Test Suite${label ? ` — ${label}` : ''}`;
@@ -116,7 +127,12 @@ function buildEmbed(results) {
   const skippedSuffix = skipped > 0 ? ` (${skipped} skipped)` : '';
   let color;
   let description;
-  if (total === 0) {
+  if (runtimeFailed > 0) {
+    color = COLOR_RED;
+    const suiteWord = runtimeFailed === 1 ? 'suite' : 'suites';
+    const failedTests = failed > 0 ? `, ❌ ${failed} failed` : '';
+    description = `❌ ${runtimeFailed} test ${suiteWord} failed to run${failedTests}, ✅ ${passed} passed${skippedSuffix} · ${durationSec}s`;
+  } else if (total === 0) {
     color = COLOR_YELLOW;
     description = `⚠️ No tests ran · ${durationSec}s`;
   } else if (passed === 0 && failed === 0) {

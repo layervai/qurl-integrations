@@ -126,8 +126,9 @@ jobs:
       # `npm test` would turn every PR into live-API traffic.
       #
       # Only jest.unit.config.ts is safe here. jest.config.ts loads
-      # setupFiles: ['dotenv/config']; the unit config does not, and
-      # unit/**'s tests touch no process.env, so this needs no .env.
+      # setupFiles: ['dotenv/config']; the unit config does not. Unit
+      # tests supply and restore any process.env values they need, so
+      # this step needs no .env.
       - name: Run unit tests
         run: npm run test:unit
 
