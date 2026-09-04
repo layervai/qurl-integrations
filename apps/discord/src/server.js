@@ -217,6 +217,15 @@ function noStoreHeaders(req, res, next) {
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
+  if (config.AUTH0_EMAIL_CONNECTION) {
+    logger.info(
+      `AUTH0_EMAIL_CONNECTION="${config.AUTH0_EMAIL_CONNECTION}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`,
+      {
+        event: 'qurl_oauth_auth0_connection_policy',
+        connection: config.AUTH0_EMAIL_CONNECTION,
+      },
+    );
+  }
 } else {
   const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
   const auth0ConnectionMessage = auth0Connection

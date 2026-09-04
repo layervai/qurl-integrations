@@ -226,6 +226,8 @@ const AUDIT_EVENTS = {
   // Logs Insights trail while #1366 is outstanding, not a metric; no Terraform
   // filter is paired intentionally. The Auth0 subject is represented by a
   // keyed, pseudonymous fingerprint that changes when its HMAC key rotates.
+  // Historical comparisons across that rotation boundary are invalid; #1366
+  // owns durable identity and rotation semantics.
   // All payload fields (guild_id, configured_by, and the fingerprint) are high
   // cardinality and MUST NOT be promoted to CloudWatch metric dimensions.
   QURL_GUILD_KEY_CONFIGURED: 'qurl_guild_key_configured',

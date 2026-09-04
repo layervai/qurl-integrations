@@ -3,7 +3,9 @@ const config = require('../config');
 // Both /qurl setup and Add to Discord end at the same callback and bind a
 // guild to the Auth0 account selected here. Keep every security-relevant
 // authorize parameter in one builder so the entry paths cannot drift.
-const QURL_OAUTH_CALLBACK_URL = `${config.BASE_URL}/oauth/qurl/callback`;
+function qurlOAuthCallbackUrl() {
+  return `${config.BASE_URL}/oauth/qurl/callback`;
+}
 
 function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   if (typeof state !== 'string' || !state
@@ -14,7 +16,7 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
-  authorizeUrl.searchParams.set('redirect_uri', QURL_OAUTH_CALLBACK_URL);
+  authorizeUrl.searchParams.set('redirect_uri', qurlOAuthCallbackUrl());
   // The API-key mint needs qurl:read/write. openid + email provide the
   // id_token email claim shown on the success-page binding readout. There is
   // no refresh-token use, so offline_access is deliberately absent.
@@ -49,4 +51,4 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   return authorizeUrl;
 }
 
-module.exports = { buildAuth0AuthorizeUrl, QURL_OAUTH_CALLBACK_URL };
+module.exports = { buildAuth0AuthorizeUrl, qurlOAuthCallbackUrl };

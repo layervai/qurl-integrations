@@ -226,11 +226,11 @@ function normalizeAuth0EmailConnection(raw) {
   if (!value) return '';
   if (value.length > 128
       || value.toUpperCase() === 'PLACEHOLDER'
-      || !/^[A-Za-z0-9_-]+$/.test(value)) {
+      || !/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
     // Keep the rest of the bot available and fall back to the explicitly
     // logged unpinned flow. A malformed optional setting should not take down
     // /qurl send, webhooks, or the gateway.
-    console.warn(`[config] AUTH0_EMAIL_CONNECTION=${JSON.stringify(raw)} rejected (must be at most 128 characters, must not be PLACEHOLDER, and may use only letters, digits, underscores, and hyphens); leaving Auth0 connection unpinned.`);
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION=${JSON.stringify(raw)} rejected (must be at most 128 characters, must not be PLACEHOLDER, must begin and end with a letter or digit, and may contain only letters, digits, underscores, and hyphens); leaving Auth0 connection unpinned.`);
     return '';
   }
   return value;
