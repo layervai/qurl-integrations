@@ -1284,6 +1284,10 @@ describe('constants are pinned', () => {
     shard.send = jest.fn().mockResolvedValue(undefined);
     shard.waitForEvent = jest.fn().mockResolvedValue(undefined);
 
+    expect(typeof shard.identify).toBe('function');
+    // These mocks pin upstream control flow only: a rejected throttle reaches
+    // destroy and then the op-2 send branch. They do not claim a destroyed
+    // real transport could successfully transmit that frame.
     await shard.identify();
 
     expect(shard.destroy).toHaveBeenCalledWith(expect.objectContaining({

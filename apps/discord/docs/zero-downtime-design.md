@@ -325,9 +325,12 @@ callback.
 A second related guard: cap consecutive failed `IDENTIFY` attempts. Discord's
 per-bot identify budget is 1000 per 24 h; an unexpected churn loop (e.g.,
 another process contending for the same token) can blow through it. The
-production code aborts the shard after N consecutive identifies without a
-successful READY and falls back to a controlled process exit + ECS
-restart — same shape as the spike's `MAX_IDENTIFY_ATTEMPTS` guard.
+production code counts grants at `@discordjs/ws`'s identify-throttler boundary,
+fails readiness after N consecutive identifies without a successful READY,
+blocks the over-budget grant until shard abort, and starts a bounded process
+exit so ECS replaces the task. Session retrieval is deliberately not a proxy
+for IDENTIFY: the library also reads session state during normal heartbeat and
+dispatch processing.
 
 **Contract gotcha: don't call `manager.destroy()` if you want the session to
 survive into the next process.** Reading `@discordjs/ws@1.2.3`'s `destroy()`

@@ -274,7 +274,7 @@ describe('step() — connect retries', () => {
     manager.connect
       .mockRejectedValueOnce(new Error('transient'))
       .mockImplementationOnce(() => new Promise(resolve => { finishConnect = resolve; }));
-    const { watchdog } = makeWatchdog({ manager, maxAttempts: 10 });
+    const { watchdog, logger } = makeWatchdog({ manager, maxAttempts: 10 });
 
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(1);
@@ -285,6 +285,7 @@ describe('step() — connect retries', () => {
     await connecting;
 
     expect(watchdog._getAttemptsForTest()).toBe(0);
+    expect(logger.info).not.toHaveBeenCalledWith('connection-watchdog: connect succeeded');
   });
 
   it('backs off 200/400/800/1600 ms on attempts 1..4', async () => {

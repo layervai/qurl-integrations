@@ -149,6 +149,11 @@ function createGatewayWsShim({
   RESTCtor = REST,
   IdentifyThrottlerCtor = SimpleIdentifyThrottler,
   rest, // pre-built REST instance (test seam); production constructs internally
+  // Required terminal-process callback. It MUST initiate a bounded process
+  // exit even when another shutdown path already owns its internal gate; the
+  // shim fails readiness and blocks the over-budget grant but does not call
+  // process.exit itself. Production gatewayFatalShutdown composes the two
+  // bounded shutdown paths that satisfy this contract.
   onFatal,
 } = {}) {
   if (!token) throw new Error('createGatewayWsShim: token is required');
