@@ -1794,16 +1794,17 @@ function truncForLog(v) {
   return s;
 }
 
-// Preserve a useful message for local/programming failures without allowing a
-// URL or qURL bearer copied into the message to reach logs. AWS service errors
-// stay on their structured name/fault/status/request-id fields because validation
-// messages can echo request values beyond the access-token contract.
+// Best-effort scrub for persistence diagnostics: every HTTP(S) URL is removed,
+// and scheme-less access tokens using qurl-service's current prefix are removed.
+// TODO(upstream-contract): qurl-service owns the `at_` access-token prefix.
+// Other scheme-less credential formats are intentionally outside this narrow
+// helper; callers must still omit raw bearer fields, while the structured
+// logger redacts metadata whose key is shaped like a qURL access link.
 function scrubQurlCredentialForLog(message) {
   if (typeof message !== 'string') return undefined;
-  return message
+  return truncForLog(message
     .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
-    .replace(/\bat(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]')
-    .slice(0, 500);
+    .replace(/\bat(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]'));
 }
 
 async function executeSendPipeline(interaction, {
@@ -2189,8 +2190,8 @@ async function executeSendPipeline(interaction, {
     // cleanup used by this bot (DELETE /v1/qurls/{resourceId}); qurlId lets an
     // operator correlate each orphaned token in that resource.
     // TODO(upstream-contract): qurl-service owns the whole-resource DELETE.
-    // Avoid err.message here too: an upstream validation error may echo an
-    // offending attribute value, including the live qURL access link.
+    // Scrub err.message even for AWS service exceptions: validation messages
+    // can echo offending request values, but contain useful failure details.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
       sendId,
       errorName: err?.name,
@@ -2198,9 +2199,11 @@ async function executeSendPipeline(interaction, {
       errorFault: err?.$fault,
       httpStatusCode: err?.$metadata?.httpStatusCode,
       requestId: err?.$metadata?.requestId,
-      errorMessage: (err?.$metadata || err?.$fault)
-        ? undefined
-        : scrubQurlCredentialForLog(err?.message),
+      errorMessage: scrubQurlCredentialForLog(
+        typeof err?.message === 'string'
+          ? err.message
+          : (err?.name == null && err?.message == null ? String(err) : undefined),
+      ),
       linkCount: qurlLinks.length,
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });

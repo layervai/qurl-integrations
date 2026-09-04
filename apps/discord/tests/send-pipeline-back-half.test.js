@@ -2441,6 +2441,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       errorFault: 'client',
       httpStatusCode: 400,
       requestId: 'ddb-request-123',
+      errorMessage: 'DDB rejected [REDACTED_URL]',
     }));
     const everythingLogged = JSON.stringify([
       logger.error.mock.calls,
@@ -2478,7 +2479,35 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     );
     expect(failureLog[1]).toEqual(expect.objectContaining({
       errorName: 'TypeError',
-      errorMessage: 'Persistence format_specifier failed for [REDACTED_URL] at_[REDACTED]',
+      errorMessage: expect.stringContaining('Persistence format_specifier failed for [REDACTED_URL]'),
+    }));
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');
+  });
+
+  it('keeps a scrubbed diagnostic when persistence rejects with a non-Error value', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(
+      'persistence rejected at_secret_bearer_two',
+    );
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog).toBeDefined();
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorMessage: 'persistence rejected at_[REDACTED]',
     }));
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');

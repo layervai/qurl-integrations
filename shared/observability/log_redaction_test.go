@@ -811,6 +811,58 @@ func TestRedactingJSONHandlerRedactsQurlLinkStringSlicesAsAUnit(t *testing.T) {
 	}
 }
 
+func TestRedactingJSONHandlerRedactsQurlLinkGroupsAsAUnit(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(NewRedactingJSONHandler(&buf, nil))
+	logger.Info("minted", slog.Group("qurl_links",
+		slog.String("first", "https://qurl.link/#at_live_bearer"),
+	))
+
+	line := buf.String()
+	if bytes.Contains(buf.Bytes(), []byte("at_live_bearer")) {
+		t.Fatalf("log line leaked qURL access token: %s", line)
+	}
+	fields := decodeLogLine(t, line)
+	if got := fields["qurl_links"]; got != redactedLogValue {
+		t.Fatalf("qurl_links = %#v, want %q; line=%s", got, redactedLogValue, line)
+	}
+}
+
+func TestIsSuppressibleContainer(t *testing.T) {
+	t.Parallel()
+
+	type payload struct{ Link string }
+	slice := []string{"value"}
+	var interfacePointer any = &slice
+	var nilSlicePointer *[]string
+
+	tests := map[string]struct {
+		value any
+		want  bool
+	}{
+		"slice":             {value: slice, want: true},
+		"pointer to slice":  {value: &slice, want: true},
+		"interface pointer": {value: interfacePointer, want: true},
+		"map":               {value: map[string]string{"key": "value"}, want: true},
+		"struct":            {value: payload{Link: "value"}, want: true},
+		"nil pointer":       {value: nilSlicePointer, want: false},
+		"nil":               {value: nil, want: false},
+		"string":            {value: "value", want: false},
+		"integer":           {value: 1, want: false},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSuppressibleContainer(test.value); got != test.want {
+				t.Fatalf("isSuppressibleContainer(%T) = %t, want %t", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRedactingJSONHandlerRedactsNestedQurlLinkContainers(t *testing.T) {
 	t.Parallel()
 

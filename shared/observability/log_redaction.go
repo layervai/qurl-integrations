@@ -173,6 +173,8 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 func isQurlAccessLinkKey(key string) bool {
 	key = strings.ToLower(key)
 	for _, substring := range redactSubstrings {
+		// qURL-prefixed entries in the shared substring policy are the
+		// access-link spellings; keep this filter in sync when adding one.
 		if strings.HasPrefix(substring, "qurl") && strings.Contains(key, substring) {
 			return true
 		}
@@ -312,11 +314,13 @@ func anonymousJSONFieldIsFlattened(field *reflect.StructField) bool {
 }
 
 func fieldNeedsRedaction(key string, value any, depth int) bool {
-	if shouldRedactKey(key) && matchedScalarNeedsRedaction(value) {
-		return true
-	}
-	if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
-		return true
+	if shouldRedactKey(key) {
+		if matchedScalarNeedsRedaction(value) {
+			return true
+		}
+		if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+			return true
+		}
 	}
 	return anyNeedsRedaction(value, depth+1)
 }
@@ -483,9 +487,9 @@ func redactAnyField(key string, value any, depth int) (any, bool) {
 		if matchedScalarNeedsRedaction(value) {
 			return redactedLogValue, true
 		}
-	}
-	if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
-		return redactedLogValue, true
+		if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+			return redactedLogValue, true
+		}
 	}
 	return redactAny(value, depth+1)
 }

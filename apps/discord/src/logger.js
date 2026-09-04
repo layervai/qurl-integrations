@@ -77,8 +77,9 @@ const AUDIT_SECRET_KEYS = new Set([
   // info/warn/debug path's substring redactor catches it; this closes the
   // audit serializer too.
   'interaction_token',
-  // Keep canonical qURL link shapes explicit; redactAuditSecrets additionally
-  // applies isQurlAccessLinkKey to decorated string/container fields.
+  // Keep canonical qURL link shapes explicit for documentation and so a
+  // scalar under one of these names still emits the secret-shaped-key warning;
+  // redactAuditSecrets additionally covers decorated string/container fields.
   'qurllink', 'qurl_link', 'qurllinkurl', 'qurl_link_url',
   'qurllinks', 'qurl_links',
   // Content-derived hash names — see REDACT_EXACT_KEYS above for rationale.
