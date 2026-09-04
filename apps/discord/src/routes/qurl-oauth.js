@@ -7,6 +7,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
+const { AUDIT_EVENTS } = require('../constants');
 const { sendDM } = require('../discord');
 const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
@@ -233,6 +234,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    binding readout (sanity-check display, not a security boundary).
   let accessToken;
   let qurlAccountEmail;
+  let qurlAccountSubjectHash;
   try {
     // OAuth2 spec is application/x-www-form-urlencoded for the token
     // endpoint. Auth0 accepts JSON too, but form-urlencoded is the
@@ -293,9 +295,15 @@ router.get('/callback', rateLimit, async (req, res) => {
       // Auth0 id_token JWKS verification result. Same shape, different
       // payload — keep them lexically separate to avoid reader confusion.
       const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token);
-      if (idTokenVerified.ok && typeof idTokenVerified.payload?.email === 'string') {
-        qurlAccountEmail = idTokenVerified.payload.email;
-      } else if (!idTokenVerified.ok) {
+      if (idTokenVerified.ok) {
+        if (typeof idTokenVerified.payload?.email === 'string') {
+          qurlAccountEmail = idTokenVerified.payload.email;
+        }
+        const subject = idTokenVerified.payload?.sub;
+        if (typeof subject === 'string' && subject) {
+          qurlAccountSubjectHash = crypto.createHash('sha256').update(subject).digest('hex');
+        }
+      } else {
         // Severity at this call site mirrors auth0-jwks.js's internal
         // split (round-9 item #6): clock-skew expiry is benign + noisy;
         // signature/claim/JWKS failures are the only signal of a forged
@@ -401,6 +409,14 @@ router.get('/callback', rateLimit, async (req, res) => {
   // setup re-run that would silently repoint this guild to another owner.
   try {
     await db.setGuildApiKey(guildId, apiKey, discordUserId);
+    // Interim #1366 evidence: compare this non-PII fingerprint across bind
+    // events to detect qURL-owner changes. It is observability only; the
+    // durable owner identity and fail-closed comparison belong in #1366.
+    logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+      guild_id: guildId,
+      configured_by: discordUserId,
+      qurl_account_subject_hash: qurlAccountSubjectHash || null,
+    });
   } catch (err) {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,

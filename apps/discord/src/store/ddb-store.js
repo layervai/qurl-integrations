@@ -1425,7 +1425,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
-  const res = await ddb.send(new UpdateCommand({
+  await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
@@ -1434,17 +1434,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
       ':b': configuredBy,
       ':u': now,
     },
-    // Reuse the write response for the interim #1366 audit signal; this avoids
-    // restoring a separate read to the setup redirect path.
-    ReturnValues: 'UPDATED_OLD',
   }));
-  const previousConfiguredBy = res.Attributes?.configured_by;
-  if (previousConfiguredBy && previousConfiguredBy !== configuredBy) {
-    logger.warn(
-      'Guild qURL key replaced by a different Discord admin; verify the qURL owner binding.',
-      { guildId, previousConfiguredBy, configuredBy },
-    );
-  }
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is
