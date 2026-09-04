@@ -48,6 +48,12 @@
 
 const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
+const {
+  SERVER_SECRET_MIN_LENGTH,
+  isInfraSeedSentinel,
+  isServerIssuedSecret,
+  assertUsableResponseSecret,
+} = require('./utils/webhook-secret');
 
 // Normalize a string env-var to a boolean using a small allowlist of
 // truthy literals. Used by both call paths (Lambda + bot) so the
@@ -90,51 +96,20 @@ const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
 // reconcile uses set comparison.
 const TARGET_EVENTS = Object.freeze([QURL_ACCESSED, QURL_EXPIRED]);
 
-// TODO(upstream-contract): qurl-service/internal/domain/webhook.go
-// GenerateWebhookSecret prefixes every create/rotate secret with this
-// value. The allowlist distinguishes reusable values from SSM seed
-// sentinels and rejects response drift before it can reach persistence.
-const SERVER_SECRET_PREFIX = 'whsec_';
-// qurl-service currently emits a 43-character base64url body. This smaller
-// floor tolerates future length changes, but prefix drift deliberately blocks
-// deployment: accepting unknown key material is less safe than failing closed.
-const SERVER_SECRET_MIN_BODY_LENGTH = 16;
-const SERVER_SECRET_MIN_LENGTH = SERVER_SECRET_PREFIX.length + SERVER_SECRET_MIN_BODY_LENGTH;
-const SERVER_SECRET_EXPECTED_FORMAT = `${SERVER_SECRET_PREFIX} prefix with at least ${SERVER_SECRET_MIN_BODY_LENGTH} characters after it`;
-
-// TODO(upstream-contract): qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
-// Terraform seeds the SSM parameter with this literal so it exists before
-// the registrar's first write. Classification is observability-only; the
-// reuse decision remains the server-issued format allowlist above.
-const INFRA_SEED_SENTINEL = 'PLACEHOLDER';
-
-function isServerIssuedSecret(value) {
-  return typeof value === 'string'
-    && value.length >= SERVER_SECRET_MIN_LENGTH
-    && value.startsWith(SERVER_SECRET_PREFIX);
-}
-
-// Reject absent or degenerate HMAC keys and surface truncated responses as
-// contract drift before persistence. Length is a format guard, not proof of
-// origin or entropy; the upstream generator remains the source of both.
-function assertServerIssuedSecret(value, operation) {
-  if (value === undefined || value === null || value === '') {
-    throw new Error(`${operation}: contract drift (response secret is missing; expected ${SERVER_SECRET_EXPECTED_FORMAT})`);
-  }
-  if (typeof value !== 'string') {
-    throw new Error(`${operation}: contract drift (response secret has wrong type ${typeof value}; expected a string matching ${SERVER_SECRET_EXPECTED_FORMAT})`);
-  }
-  if (!isServerIssuedSecret(value)) {
-    throw new Error(`${operation}: contract drift (response secret has invalid format; expected ${SERVER_SECRET_EXPECTED_FORMAT}; observed length ${value.length})`);
-  }
-}
-
 function secretLengthBucket(value) {
   if (value.length < SERVER_SECRET_MIN_LENGTH) return `<${SERVER_SECRET_MIN_LENGTH}`;
-  // 64 is an intentionally coarse observability boundary, not part of the
-  // acceptance contract; it avoids disclosing the exact stored-value length.
   if (value.length < 64) return `${SERVER_SECRET_MIN_LENGTH}-63`;
   return '>=64';
+}
+
+function validateResponseSecret(value, operation) {
+  assertUsableResponseSecret(value, operation);
+  if (!isServerIssuedSecret(value)) {
+    logger.warn(`${operation} response secret has an unexpected server format; persisting the authenticated response to avoid discarding an already-committed secret`, {
+      op: operation,
+      valueLengthBucket: secretLengthBucket(value),
+    });
+  }
 }
 
 // Strip secret-shaped fields anywhere in a parsed body before
@@ -738,7 +713,7 @@ async function createSubscription({ apiEndpoint, apiKey, bridgeUrl, description 
       || typeof data.webhook_id !== 'string' || data.webhook_id.length === 0) {
     throw new Error('createSubscription: contract drift (response missing or empty webhook_id)');
   }
-  assertServerIssuedSecret(data.secret, 'createSubscription');
+  validateResponseSecret(data.secret, 'createSubscription');
   return data;
 }
 
@@ -750,7 +725,7 @@ async function rotateSecret({ apiEndpoint, apiKey, webhookId }) {
     apiKey,
   });
   const data = resp?.data;
-  assertServerIssuedSecret(data?.secret, 'rotateSecret');
+  validateResponseSecret(data?.secret, 'rotateSecret');
   return data;
 }
 
@@ -968,7 +943,7 @@ async function ensureWebhookSubscription(opts) {
     // Observability only: the reuse decision remains a format allowlist,
     // not a denylist coupled to terraform's current sentinel literal. The
     // sentinel is designed bootstrap state, so reserve WARN for surprises.
-    const seedSentinel = initialSecret === INFRA_SEED_SENTINEL;
+    const seedSentinel = isInfraSeedSentinel(initialSecret);
     const meta = {
       webhookId: existing.webhook_id,
       seedSentinel,
@@ -1045,8 +1020,8 @@ async function ensureWebhookSubscription(opts) {
   }
 
   // Note: no second secret guard here — `createSubscription` and
-  // `rotateSecret` both enforce the server-issued format and throw
-  // their own contract-drift error before returning.
+  // `rotateSecret` both reject unusable/public-seed responses before
+  // returning, while preserving authenticated format-drift responses.
 
   await bestEffortPersist({ persistSecret, value: secret });
 

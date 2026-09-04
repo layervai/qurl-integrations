@@ -26,7 +26,7 @@ jest.mock('../src/logger', () => ({
 
 process.env.QURL_API_KEY = 'lv_test_abc';
 process.env.QURL_ENDPOINT = 'https://qurl.layerv.ai';
-process.env.QURL_WEBHOOK_SECRET = 'default-key-secret';
+process.env.QURL_WEBHOOK_SECRET = 'whsec_default_key_secret_value';
 process.env.BASE_URL = 'http://localhost:3000';
 // AWS_REGION + DDB_TABLE_PREFIX are required by config.js validators
 // even though this test never touches DDB through the real path.
@@ -76,7 +76,7 @@ describe('webhook-subscriptions registry — priming + lookup', () => {
     expect(subs.isPrimed()).toBe(true);
     // discoverDefaultOwnerId returned usr_default + QURL_WEBHOOK_SECRET
     // env is wired as the default secret.
-    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_default_key_secret_value');
   });
 
   it('rebuilds (not merges) on each scan — a removed row drops from the cache', async () => {

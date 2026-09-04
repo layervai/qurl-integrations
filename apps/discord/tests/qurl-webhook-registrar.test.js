@@ -466,7 +466,7 @@ describe('ensureWebhookSubscription — error paths', () => {
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
   });
 
-  it('throws before persistence if create returns a non-server-issued secret', async () => {
+  it('persists a non-empty create secret after warning on server format drift', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
@@ -475,9 +475,18 @@ describe('ensureWebhookSubscription — error paths', () => {
     });
     const persistSecret = jest.fn(async () => {});
 
-    await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
-      .rejects.toThrow(/createSubscription.*invalid format.*expected whsec_.*at least 16.*observed length 13/);
-    expect(persistSecret).not.toHaveBeenCalled();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+        .resolves.toMatchObject({ action: 'created', secret: 'legacy-secret' });
+      expect(persistSecret).toHaveBeenCalledWith('legacy-secret');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'createSubscription response secret has an unexpected server format',
+      ));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('legacy-secret');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('reports the observed type when create returns a non-string secret', async () => {
@@ -492,6 +501,20 @@ describe('ensureWebhookSubscription — error paths', () => {
       .rejects.toThrow(/createSubscription.*wrong type number.*expected a string matching whsec_/);
   });
 
+  it('rejects the public infrastructure seed if create returns it', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_new', secret: 'PLACEHOLDER',
+      } } }),
+    });
+    const persistSecret = jest.fn(async () => {});
+
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+      .rejects.toThrow(/createSubscription.*public infrastructure seed sentinel/);
+    expect(persistSecret).not.toHaveBeenCalled();
+  });
+
   it('throws if rotate response has no secret (contract drift)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -503,7 +526,7 @@ describe('ensureWebhookSubscription — error paths', () => {
       .rejects.toThrow(/rotateSecret.*response secret is missing.*expected whsec_.*at least 16/);
   });
 
-  it('throws before persistence if rotate returns only the server-secret prefix', async () => {
+  it('persists a non-empty rotated secret before warning on server format drift', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
@@ -514,9 +537,18 @@ describe('ensureWebhookSubscription — error paths', () => {
     });
     const persistSecret = jest.fn(async () => {});
 
-    await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
-      .rejects.toThrow(/rotateSecret.*invalid format.*expected whsec_.*at least 16.*observed length 6/);
-    expect(persistSecret).not.toHaveBeenCalled();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+        .resolves.toMatchObject({ action: 'rotated', secret: 'whsec_' });
+      expect(persistSecret).toHaveBeenCalledWith('whsec_');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'rotateSecret response secret has an unexpected server format',
+      ));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('"whsec_"');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('throws on missing required option', async () => {
