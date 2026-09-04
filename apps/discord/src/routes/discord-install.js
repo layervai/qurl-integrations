@@ -24,6 +24,8 @@
 //   before it can bind that browser's qURL account to the attacker's guild.
 //   The cookie is intentionally single-slot: a second /install request in
 //   the same browser invalidates the first tab (last writer wins).
+//   A cross-site request can also start a second install and overwrite that
+//   slot; this can interrupt consent but cannot bind an account or guild.
 //   State consumption is enforced by the browser accepting the clear-cookie
 //   response, not by a server-side ledger. Discord's authorization code is
 //   itself single-use, so reattaching the cookie cannot repeat a successful
@@ -123,7 +125,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   const installState = singleStringParam(req.query.state);
   const stateMatches = installStateMatches(req, installState);
   if (!stateMatches) {
-    logger.warn('Discord install callback rejected invalid session state', { ip: req.ip });
+    logger.warn('Discord install callback rejected invalid session state', {
+      ip: req.ip,
+      hasCookie: Boolean(readCookie(req, DISCORD_INSTALL_SESSION_COOKIE)),
+    });
     return renderError(res, 400, 'Invalid install link', 'this install session is invalid or expired.');
   }
 

@@ -267,6 +267,28 @@ describe('Discord install callback', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
+    it('logs only whether a rejected callback carried an install cookie', async () => {
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+
+      await request(app)
+        .get(`/oauth/discord/callback?code=ok-code&state=${DISCORD_INSTALL_STATE}`);
+      await discordCallback('/oauth/discord/callback?code=ok-code', {
+        cookieState: 'b'.repeat(43),
+      });
+
+      expect(warn).toHaveBeenNthCalledWith(
+        1,
+        'Discord install callback rejected invalid session state',
+        expect.objectContaining({ hasCookie: false }),
+      );
+      expect(warn).toHaveBeenNthCalledWith(
+        2,
+        'Discord install callback rejected invalid session state',
+        expect.objectContaining({ hasCookie: true }),
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('b'.repeat(43));
+    });
+
     it('validates state before returning a generic KEY_ENCRYPTION_KEY 503', async () => {
       // With Require OAuth2 Code Grant enabled, Discord does not finish
       // installing the bot until the code exchange succeeds. Failing here

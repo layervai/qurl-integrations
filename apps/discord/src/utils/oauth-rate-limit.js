@@ -25,8 +25,11 @@ const installOnlyIps = new Set();
 class IndexedRateLimitStore extends Map {
   set(ip, buckets) {
     super.set(ip, buckets);
+    installOnlyIps.delete(ip);
+    // Set iteration order is the eviction order. Re-adding a still
+    // install-only IP moves it to the back, giving O(1) least-recently-active
+    // eviction without resetting that IP's accumulated request timestamps.
     if (buckets['discord-install-entry'] && !buckets.callback) installOnlyIps.add(ip);
-    else installOnlyIps.delete(ip);
     return this;
   }
 
@@ -83,18 +86,20 @@ function rateLimitForBucket(bucket, req, res, next) {
   // store contains only callback traffic, the normal overload shed remains.
   if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
     if (bucket === 'callback') evictInstallOnlyEntry();
-  }
-  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
-    logger.warn('Rate limit store at hard cap, rejecting new IP', {
-      ip, bucket, size: rateLimitStore.size,
-    });
-    return res.status(429).send(res.renderPage({
-      title: 'Too Many Requests',
-      icon: '⏳',
-      heading: 'Service Overloaded',
-      message: 'The service is under heavy load. Please try again in a moment.',
-      type: 'warning',
-    }));
+    if (rateLimitStore.size >= MAX_STORE_SIZE) {
+      // This warning is the operational signal for shared OAuth saturation;
+      // alert on it because every unseen callback IP is shed until a sweep.
+      logger.warn('Rate limit store at hard cap, rejecting new IP', {
+        ip, bucket, size: rateLimitStore.size,
+      });
+      return res.status(429).send(res.renderPage({
+        title: 'Too Many Requests',
+        icon: '⏳',
+        heading: 'Service Overloaded',
+        message: 'The service is under heavy load. Please try again in a moment.',
+        type: 'warning',
+      }));
+    }
   }
 
   const buckets = rateLimitStore.get(ip) || {};

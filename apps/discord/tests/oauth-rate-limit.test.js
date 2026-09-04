@@ -72,6 +72,49 @@ describe('OAuth rate-limit store', () => {
     expect(rateLimitStore.get('legitimate-callback')).toEqual({ callback: [now] });
   });
 
+  it('evicts the least-recently-active install-only entry without resetting active counters', () => {
+    rateLimitStore.set('old-but-refreshed', { 'discord-install-entry': [now - 10] });
+    rateLimitStore.set('least-recent', { 'discord-install-entry': [now - 5] });
+    // Refreshing an existing entry must move its index position without
+    // discarding the timestamp that still counts against its per-IP budget.
+    rateLimitStore.set('old-but-refreshed', {
+      'discord-install-entry': [now - 10, now],
+    });
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 2; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+
+    const res = response();
+    const next = jest.fn();
+    rateLimit({ ip: 'new-callback', path: '/oauth/discord/callback' }, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(rateLimitStore.has('least-recent')).toBe(false);
+    expect(rateLimitStore.get('old-but-refreshed')).toEqual({
+      'discord-install-entry': [now - 10, now],
+    });
+  });
+
+  it('re-indexes an install-only IP when sweep expires its callback bucket', () => {
+    const expired = now - config.RATE_LIMIT_WINDOW_MS * 2 - 1;
+    rateLimitStore.set('becomes-install-only', {
+      callback: [expired],
+      'discord-install-entry': [now],
+    });
+    sweepRateLimitStore();
+    for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 1; i += 1) {
+      rateLimitStore.set(`callback-${i}`, { callback: [now] });
+    }
+
+    const res = response();
+    const next = jest.fn();
+    rateLimit({ ip: 'new-callback', path: '/oauth/discord/callback' }, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(rateLimitStore.has('becomes-install-only')).toBe(false);
+    expect(rateLimitStore.get('new-callback')).toEqual({ callback: [now] });
+  });
+
   it('can reach and hold the hard cap before shedding the next new IP', () => {
     for (let i = 0; i < MAX_RATE_LIMIT_STORE_SIZE - 1; i += 1) {
       rateLimitStore.set(`callback-${i}`, { callback: [now] });

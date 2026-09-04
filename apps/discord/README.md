@@ -52,8 +52,9 @@ Discord authorization URL and chains the install into qURL sign-in. The
 Discord OAuth request includes `identify` because the callback uses
 `/users/@me` to bind setup to the installing admin. The Discord application
 must register the deployment's exact `/oauth/discord/callback` URL and enable
-**Require OAuth2 Code Grant** so the token response identifies the installed
-server authoritatively. Grant only **View Channels**, **Send Messages**,
+**Require OAuth2 Code Grant** so Discord waits for the callback exchange before
+finishing the bot installation. The callback always binds the server from the
+authoritative guild in Discord's token response. Grant only **View Channels**, **Send Messages**,
 **Embed Links**, and **Use Application Commands** (permission bitfield
 `2147503104`).
 
