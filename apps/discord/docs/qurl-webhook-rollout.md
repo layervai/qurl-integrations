@@ -68,6 +68,12 @@ Terraform-side ordering (config lives in `qurl-integrations-infra`):
    Rolling deploy replaces tasks; new tasks read the current secret;
    receiver verifies inbound webhooks.
 
+Every process that can call the guild webhook linker must receive
+`QURL_WEBHOOK_SECRET` in a default-subscription deployment, including gateway
+tasks that serve `/qurl setup`. The one-shot backfill enforces this at startup;
+`QURL_WEBHOOK_PURE_BYOK=true` is the explicit opt-out for deployments with no
+default subscription.
+
 ## Rotation
 
 Re-invoke the Lambda (manual `aws lambda invoke`, scheduled EventBridge
@@ -114,10 +120,14 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   means the bot key's owner has no listable subscriptions; invoke the registrar
   Lambda and verify the default subscription first. For qurl-service transport or
   contract failures, inspect the accompanying application warning in
-  CloudWatch. `DEFAULT_WEBHOOK_OWNER_CONFIG` means the shared secret exists but
-  the default API key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT`
-  means the response shape was malformed; `DEFAULT_WEBHOOK_OWNER_CONFLICT`
-  means one key listed multiple owners. HTTP failures commonly use
+  CloudWatch. `DEFAULT_WEBHOOK_OWNER_CONFIG` means the shared secret is missing
+  without the explicit pure-BYOK flag, or the secret exists but the default API
+  key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT`
+  means at least one response row was malformed (strictly, even if a sibling
+  row has an owner); `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key listed
+  multiple owners. `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild
+  key ciphertext cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED`
+  means a concurrent re-key won. HTTP failures commonly use
   `error_code=Error`; network and timeout failures use their runtime error name.
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`.** A
   complete legacy DDB row may contain the only secret that still matches the

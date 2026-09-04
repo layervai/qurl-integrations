@@ -187,6 +187,28 @@ it('does not publish the environment secret when owner-only persistence rejects'
   expect(requests.filter(({ method }) => method === 'POST')).toHaveLength(0);
 });
 
+it('fails closed before the registrar when the default secret is unexpectedly absent', async () => {
+  const config = require('../src/config');
+  const originalSecret = config.QURL_WEBHOOK_SECRET;
+  const originalPureByok = config.QURL_WEBHOOK_PURE_BYOK;
+  config.QURL_WEBHOOK_SECRET = undefined;
+  config.QURL_WEBHOOK_PURE_BYOK = false;
+  try {
+    const result = await linkGuildWebhookSubscription({
+      guildId: 'g_misconfigured',
+      apiKey: 'lv_alias_for_default_owner',
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'register-failed' });
+    expect(requests).toHaveLength(0);
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+    expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+  } finally {
+    config.QURL_WEBHOOK_SECRET = originalSecret;
+    config.QURL_WEBHOOK_PURE_BYOK = originalPureByok;
+  }
+});
+
 it('reuses the default owner while unprimed and lets the first scan publish its secret', async () => {
   const result = await linkGuildWebhookSubscription({
     guildId: 'g_unprimed',

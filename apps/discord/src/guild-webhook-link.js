@@ -120,9 +120,9 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
   // same owner cannot rotate the shared default secret. Resolution is lazy so
   // this also works on gateway-only processes and in the backfill script,
   // neither of which starts the HTTP registry scan.
-  let defaultOwnerId;
+  let matchedDefaultOwnerId;
   try {
-    defaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey);
+    matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey);
   } catch (err) {
     logger.warn('Per-guild webhook owner resolution failed', {
       error: err?.message, guildId,
@@ -134,13 +134,13 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
   }
 
-  if (defaultOwnerId) {
+  if (matchedDefaultOwnerId) {
     try {
       // Store the ownership relationship only. Copying the environment
       // secret into this row would make the DDB-backed cache entry shadow
       // QURL_WEBHOOK_SECRET on the next registry scan.
       await db.setGuildDefaultWebhookOwner(guildId, {
-        webhookOwnerId: defaultOwnerId,
+        webhookOwnerId: matchedDefaultOwnerId,
         expectedDefaultWebhookSecret: config.QURL_WEBHOOK_SECRET,
         expectedApiKey: apiKey,
       });
@@ -155,8 +155,11 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
     }
 
+    // The CAS does not return a prior owner, so this replica may retain a stale
+    // old-owner guildIds membership until the next scan. guildIds is not used
+    // for authorization or routing; the authoritative owner secret stays safe.
     try {
-      subs.ensureDefaultOwnerCacheEntry(defaultOwnerId);
+      subs.ensureDefaultOwnerCacheEntry(matchedDefaultOwnerId);
     } catch (err) {
       logger.warn('subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)', {
         error: err?.message, guildId,

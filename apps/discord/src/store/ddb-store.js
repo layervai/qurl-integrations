@@ -1511,6 +1511,23 @@ async function setGuildWebhookSubscription(guildId, { webhookId, webhookSecret, 
   }));
 }
 
+function decryptDefaultOwnerGuildApiKey(ciphertext) {
+  if (!ciphertext) return null;
+  try {
+    return decrypt(ciphertext);
+  } catch (cause) {
+    const err = new Error('setGuildDefaultWebhookOwner: stored guild API key could not be decrypted', { cause });
+    err.code = 'DEFAULT_WEBHOOK_OWNER_KEY_INVALID';
+    throw err;
+  }
+}
+
+function defaultOwnerKeyChangedError() {
+  const err = new Error('setGuildDefaultWebhookOwner: guild API key changed during owner resolution');
+  err.code = 'DEFAULT_WEBHOOK_OWNER_KEY_CHANGED';
+  return err;
+}
+
 // Associate a guild with the bot's default-key owner without copying the
 // default subscription's secret into the guild row. Removing any prior
 // webhook_id / webhook_secret is load-bearing: scanGuildSubscriptions prefers
@@ -1534,8 +1551,9 @@ async function setGuildDefaultWebhookOwner(
     ConsistentRead: true,
   }));
   const row = current.Item;
-  if (!row?.qurl_api_key || decrypt(row.qurl_api_key) !== expectedApiKey) {
-    throw new Error('setGuildDefaultWebhookOwner: guild API key changed during owner resolution');
+  const currentApiKey = decryptDefaultOwnerGuildApiKey(row?.qurl_api_key);
+  if (currentApiKey !== expectedApiKey) {
+    throw defaultOwnerKeyChangedError();
   }
   const hasStoredSecret = Object.hasOwn(row, 'webhook_secret');
   const hasStoredWebhookId = Object.hasOwn(row, 'webhook_id');
@@ -1610,9 +1628,9 @@ async function setGuildDefaultWebhookOwner(
       ConsistentRead: true,
     }));
     const latestRow = latest.Item;
-    const achieved = latestRow?.qurl_api_key
-      && decrypt(latestRow.qurl_api_key) === expectedApiKey
-      && latestRow.webhook_owner_id === webhookOwnerId
+    const latestApiKey = decryptDefaultOwnerGuildApiKey(latestRow?.qurl_api_key);
+    if (latestApiKey !== expectedApiKey) throw defaultOwnerKeyChangedError();
+    const achieved = latestRow.webhook_owner_id === webhookOwnerId
       && !Object.hasOwn(latestRow, 'webhook_id')
       && !Object.hasOwn(latestRow, 'webhook_secret');
     if (!achieved) throw err;

@@ -26,10 +26,11 @@
 //   3  MAX_PAGES hit — cursor likely not advancing, investigate
 //      before re-running
 //
-// Required env: BASE_URL, QURL_ENDPOINT, AWS credentials with read +
-// UpdateItem on the guild_configs table, KEY_ENCRYPTION_KEY (for
-// decrypting stored qurl_api_keys), and any other env the bot's
-// config.js validates at boot. Easiest invocation is `npm run
+// Required env: BASE_URL, QURL_ENDPOINT, QURL_WEBHOOK_SECRET and QURL_API_KEY
+// (unless the deployment explicitly sets QURL_WEBHOOK_PURE_BYOK=true), AWS credentials
+// with read + UpdateItem on the guild_configs table, KEY_ENCRYPTION_KEY (for
+// decrypting stored qurl_api_keys), and any other env the bot's config.js
+// validates at boot. Easiest invocation is `npm run
 // provision-guild-subscriptions` after sourcing the bot's task-def
 // env (e.g. via ECS Exec or a sandbox shell with the same envs).
 //
@@ -67,13 +68,26 @@ function buildGuildScanInput(tableName, exclusiveStartKey) {
   };
 }
 
-async function main() {
-  if (!config.QURL_ENDPOINT || !config.BASE_URL) {
-    console.error('FATAL: QURL_ENDPOINT and BASE_URL must be set');
-    process.exit(1);
+function getProvisioningConfigError(runtimeConfig) {
+  if (!runtimeConfig.QURL_ENDPOINT || !runtimeConfig.BASE_URL) {
+    return 'QURL_ENDPOINT and BASE_URL must be set';
   }
-  if (!config.DDB_TABLE_PREFIX || !config.DDB_TABLE_PREFIX.endsWith('-')) {
-    console.error(`FATAL: DDB_TABLE_PREFIX must be set and end with "-" (got ${JSON.stringify(config.DDB_TABLE_PREFIX)})`);
+  if (!runtimeConfig.QURL_WEBHOOK_SECRET && !runtimeConfig.QURL_WEBHOOK_PURE_BYOK) {
+    return 'QURL_WEBHOOK_SECRET must be set (or set QURL_WEBHOOK_PURE_BYOK=true for a deployment with no default subscription)';
+  }
+  if (runtimeConfig.QURL_WEBHOOK_SECRET && !runtimeConfig.QURL_API_KEY) {
+    return 'QURL_API_KEY must be set when QURL_WEBHOOK_SECRET is configured';
+  }
+  if (!runtimeConfig.DDB_TABLE_PREFIX || !runtimeConfig.DDB_TABLE_PREFIX.endsWith('-')) {
+    return `DDB_TABLE_PREFIX must be set and end with "-" (got ${JSON.stringify(runtimeConfig.DDB_TABLE_PREFIX)})`;
+  }
+  return null;
+}
+
+async function main() {
+  const configError = getProvisioningConfigError(config);
+  if (configError) {
+    console.error(`FATAL: ${configError}`);
     process.exit(1);
   }
 
@@ -203,4 +217,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildGuildScanInput };
+module.exports = { buildGuildScanInput, getProvisioningConfigError };

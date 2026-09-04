@@ -146,9 +146,11 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
 // an in-flight scan: no rotation occurred, so a complete DDB row may still
 // contain the only secret that matches qurl-service.
 function ensureDefaultOwnerCacheEntry(ownerId) {
-  if (typeof ownerId !== 'string' || ownerId !== defaultOwnerId
-      || typeof config.QURL_WEBHOOK_SECRET !== 'string' || !config.QURL_WEBHOOK_SECRET.length) {
+  if (typeof ownerId !== 'string' || ownerId !== defaultOwnerId) {
     throw new Error('ensureDefaultOwnerCacheEntry: the discovered default owner is required');
+  }
+  if (typeof config.QURL_WEBHOOK_SECRET !== 'string' || !config.QURL_WEBHOOK_SECRET.length) {
+    throw new Error('ensureDefaultOwnerCacheEntry: QURL_WEBHOOK_SECRET is required');
   }
 
   const entry = subscriptions.get(ownerId);
@@ -213,42 +215,46 @@ function removeGuild({ guildId, ownerId }) {
 // there needs a coordinated rework here.
 async function discoverOwnerId(apiKey) {
   if (!apiKey || !config.QURL_ENDPOINT) return null;
-  // Inspect one bounded page: one valid owner is enough under the binding
-  // contract below, while conflicting owners fail closed.
-  // Go through callQurlService for consistency with the rest of the
-  // registrar surface — same QurlServiceError shape, same op-tagged
-  // network-error handling, same 10s timeout default. The receiver
-  // shouldn't grow a second bespoke fetch path.
-  const body = await callQurlService({
-    method: 'GET',
-    path: '/v1/webhooks?limit=100',
-    apiEndpoint: config.QURL_ENDPOINT,
-    apiKey,
-  });
-  if (!Array.isArray(body?.data)) {
-    const err = new Error('discoverOwnerId: qurl-service response data must be an array');
-    err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
-    throw err;
-  }
-  // Local name `webhooks` (not `subs`) so it doesn't shadow the
-  // module convention everyone else uses for the registry import.
-  const webhooks = body.data;
-  if (webhooks.length === 0) return null;
+  // Walk the same bounded surface the registrar can select from. Validating
+  // only page 1 would let it mutate a malformed default subscription on a
+  // later page after discovery inferred the owner from a sibling.
   let ownerId = null;
-  for (const w of webhooks) {
-    if (typeof w?.owner_id !== 'string' || !w.owner_id.length) {
-      const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
+  let cursor = '';
+  for (let page = 0; page < 50; page++) {
+    const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
+    const body = await callQurlService({
+      method: 'GET',
+      path: `/v1/webhooks${qs}`,
+      apiEndpoint: config.QURL_ENDPOINT,
+      apiKey,
+    });
+    if (!Array.isArray(body?.data)) {
+      const err = new Error('discoverOwnerId: qurl-service response data must be an array');
       err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
       throw err;
     }
-    if (ownerId && w.owner_id !== ownerId) {
-      const err = new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
-      err.code = 'DEFAULT_WEBHOOK_OWNER_CONFLICT';
-      throw err;
+    for (const webhook of body.data) {
+      // Strict per row: skipping a malformed subscription could let the
+      // registrar rotate that row using an owner inferred from a valid sibling.
+      if (typeof webhook?.owner_id !== 'string' || !webhook.owner_id.length) {
+        const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
+        err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+        throw err;
+      }
+      if (ownerId && webhook.owner_id !== ownerId) {
+        const err = new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
+        err.code = 'DEFAULT_WEBHOOK_OWNER_CONFLICT';
+        throw err;
+      }
+      ownerId = webhook.owner_id;
     }
-    ownerId = w.owner_id;
+    const next = body?.meta?.next_cursor;
+    if (!next) return ownerId;
+    cursor = next;
   }
-  return ownerId;
+  const err = new Error('discoverOwnerId: pagination cap hit (50 pages, ~5000 subscriptions)');
+  err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+  throw err;
 }
 
 async function discoverDefaultOwnerId() {
@@ -269,10 +275,12 @@ async function discoverDefaultOwnerId() {
 // environment-managed account onto a guild-secret path and break Lambda
 // recovery.
 async function resolveDefaultOwnerForApiKey(apiKey) {
-  // No configured secret declares that this is a pure-BYOK deployment with no
-  // Lambda-managed default subscription. A deployment that has such a
-  // subscription but omits its secret violates that configuration contract.
-  if (!config.QURL_WEBHOOK_SECRET) return null;
+  if (!config.QURL_WEBHOOK_SECRET) {
+    if (config.QURL_WEBHOOK_PURE_BYOK) return null;
+    const err = new Error('resolveDefaultOwnerForApiKey: QURL_WEBHOOK_SECRET is required unless QURL_WEBHOOK_PURE_BYOK=true');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
+    throw err;
+  }
   if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) {
     const err = new Error('resolveDefaultOwnerForApiKey: default subscription discovery config is incomplete');
     err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
@@ -290,6 +298,7 @@ async function resolveDefaultOwnerForApiKey(apiKey) {
     throw err;
   }
   defaultOwnerId = ownerId;
+  discoveryConsecutiveFailures = 0;
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
     ? ownerId

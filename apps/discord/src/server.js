@@ -192,7 +192,11 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
 // the linking flow registered.
 app.use('/webhooks', qurlWebhookRouter);
 if (!config.QURL_WEBHOOK_SECRET) {
-  logger.warn('QURL_WEBHOOK_SECRET unset — running pure-BYOK mode (no default-key subscription; per-guild registrations only)');
+  if (config.QURL_WEBHOOK_PURE_BYOK) {
+    logger.warn('QURL_WEBHOOK_SECRET unset with QURL_WEBHOOK_PURE_BYOK=true — running without a default-key subscription');
+  } else {
+    logger.error('QURL_WEBHOOK_SECRET unset without QURL_WEBHOOK_PURE_BYOK=true — guild webhook linking will fail closed');
+  }
 }
 
 // Cache-Control: no-store on every response from the OAuth surfaces —

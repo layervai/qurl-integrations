@@ -441,6 +441,19 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(subs.getSecretForOwner('usr_other')).toBeNull();
   });
 
+  it('reports a missing shared secret separately from an owner mismatch', async () => {
+    await subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+    const config = require('../src/config');
+    const original = config.QURL_WEBHOOK_SECRET;
+    config.QURL_WEBHOOK_SECRET = undefined;
+    try {
+      expect(() => subs.ensureDefaultOwnerCacheEntry('usr_default'))
+        .toThrow(/QURL_WEBHOOK_SECRET is required/);
+    } finally {
+      config.QURL_WEBHOOK_SECRET = original;
+    }
+  });
+
   it('does not seed a secret while resolving a different owner before the first scan', async () => {
     global.fetch = jest.fn(async (_url, opts) => {
       const ownerId = opts.headers.Authorization === 'Bearer lv_test_abc'
@@ -484,13 +497,32 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
 
   it('skips discovery when no shared default secret is configured', async () => {
     const config = require('../src/config');
-    const original = config.QURL_WEBHOOK_SECRET;
+    const originalSecret = config.QURL_WEBHOOK_SECRET;
+    const originalPureByok = config.QURL_WEBHOOK_PURE_BYOK;
     config.QURL_WEBHOOK_SECRET = undefined;
+    config.QURL_WEBHOOK_PURE_BYOK = true;
     try {
       await expect(subs.resolveDefaultOwnerForApiKey('lv_byok')).resolves.toBeNull();
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
-      config.QURL_WEBHOOK_SECRET = original;
+      config.QURL_WEBHOOK_SECRET = originalSecret;
+      config.QURL_WEBHOOK_PURE_BYOK = originalPureByok;
+    }
+  });
+
+  it('fails closed when the shared secret is absent without an explicit opt-out', async () => {
+    const config = require('../src/config');
+    const originalSecret = config.QURL_WEBHOOK_SECRET;
+    const originalPureByok = config.QURL_WEBHOOK_PURE_BYOK;
+    config.QURL_WEBHOOK_SECRET = undefined;
+    config.QURL_WEBHOOK_PURE_BYOK = false;
+    try {
+      await expect(subs.resolveDefaultOwnerForApiKey('lv_byok'))
+        .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_CONFIG' });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      config.QURL_WEBHOOK_SECRET = originalSecret;
+      config.QURL_WEBHOOK_PURE_BYOK = originalPureByok;
     }
   });
 
@@ -578,6 +610,42 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
         code: 'DEFAULT_WEBHOOK_OWNER_CONFLICT',
         message: expect.stringMatching(/conflicting owner_id values/),
       });
+  });
+
+  test.each([
+    ['omits owner_id', { webhook_id: 'wh_malformed' }, 'DEFAULT_WEBHOOK_OWNER_CONTRACT'],
+    ['conflicts with page one', { owner_id: 'usr_other' }, 'DEFAULT_WEBHOOK_OWNER_CONFLICT'],
+  ])('fails closed when a later webhook page %s', async (_case, secondPageRow, code) => {
+    global.fetch = jest.fn(async (url) => {
+      const cursor = new URL(url).searchParams.get('cursor');
+      const body = cursor
+        ? { data: [secondPageRow] }
+        : { data: [{ owner_id: 'usr_default' }], meta: { next_cursor: 'page-2' } };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    });
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .rejects.toMatchObject({ code });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls[1][0]).toContain('cursor=page-2&limit=100');
+  });
+
+  it('fails closed at the webhook discovery pagination cap', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [{ owner_id: 'usr_default' }],
+        meta: { next_cursor: 'more' },
+      }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT',
+        message: expect.stringMatching(/pagination cap hit/),
+      });
+    expect(global.fetch).toHaveBeenCalledTimes(50);
   });
 
   // When GET /v1/webhooks returns an empty list (Lambda hasn't run
