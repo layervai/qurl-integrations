@@ -658,6 +658,32 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
 });
 
 describe('/qurl help subcommand', () => {
+  // Config derivation guarantees discordInstall implies qurlOAuth; this helper
+  // accepts both values so the rendering branches stay isolated unit tests.
+  async function renderHelp({ qurlOAuth, discordInstall }) {
+    const config = require('../src/config');
+    const originalQurlOAuth = config.isQurlOAuthConfigured;
+    const originalDiscordInstall = config.isDiscordInstallConfigured;
+    config.isQurlOAuthConfigured = qurlOAuth;
+    config.isDiscordInstallConfigured = discordInstall;
+
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeInteraction({
+        commandName: 'qurl',
+        options: {
+          ...makeInteraction().options,
+          getSubcommand: jest.fn(() => 'help'),
+        },
+      });
+      await cmd.execute(interaction);
+      return interaction.reply.mock.calls[0][0].content;
+    } finally {
+      config.isQurlOAuthConfigured = originalQurlOAuth;
+      config.isDiscordInstallConfigured = originalDiscordInstall;
+    }
+  }
+
   it('replies with help text', async () => {
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeInteraction({
@@ -710,6 +736,29 @@ describe('/qurl help subcommand', () => {
     // section explains the role-fanout caveat to end-users without
     // naming the underlying GUILD_PRESENCES intent.
     expect(content).not.toContain('GUILD_PRESENCES');
+  });
+
+  it('does not advertise Add to Discord when only qURL OAuth is configured', async () => {
+    const content = await renderHelp({ qurlOAuth: true, discordInstall: false });
+
+    expect(content).toContain('`/qurl setup` — connect qURL via OAuth');
+    expect(content).not.toContain('Adding the bot to a new server');
+    expect(content).not.toContain('Add to Discord');
+  });
+
+  it('keeps legacy setup copy and no install CTA before qURL OAuth is configured', async () => {
+    const content = await renderHelp({ qurlOAuth: false, discordInstall: false });
+
+    expect(content).toContain('`/qurl setup` — configure your API key');
+    expect(content).not.toContain('connect qURL via OAuth');
+    expect(content).not.toContain('Add to Discord');
+  });
+
+  it('advertises Add to Discord when the customer install flow is configured', async () => {
+    const content = await renderHelp({ qurlOAuth: true, discordInstall: true });
+
+    expect(content).toContain('Adding the bot to a new server');
+    expect(content).toContain('Add to Discord');
   });
 });
 

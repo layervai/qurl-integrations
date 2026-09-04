@@ -179,9 +179,10 @@ test-discord:
 	cd apps/discord && npm ci --no-audit --no-fund
 	cd apps/discord && npm test -- --ci
 
-# discord.yml's build-and-test steps minus `npm audit`, which is network
-# dependent and can newly fail with no code change. Its sibling docker-check
-# job is a separate gate and is not mirrored here.
+# discord.yml's build-and-test steps minus the network-dependent
+# `audit-production-dependencies.js` gate. Its sibling docker-check job is a
+# separate gate and is not mirrored here. Run the registry-backed gate locally
+# with `cd apps/discord && node scripts/audit-production-dependencies.js`.
 check-discord:
 	$(call node_version_warning,apps/discord)
 	cd apps/discord && npm ci --no-audit --no-fund
