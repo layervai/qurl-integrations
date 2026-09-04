@@ -137,7 +137,7 @@ describe('qURL client — getIdentity', () => {
       .rejects.toThrow('qURL identity response had an unexpected shape');
   });
 
-  it('rejects a missing guild key without falling back to the bot key', async () => {
+  it('rejects a missing guild key before making a request', async () => {
     globalThis.fetch = jest.fn();
 
     await expect(qurl.getIdentity(null)).rejects.toThrow('Guild qURL API key is not configured');

@@ -8740,36 +8740,6 @@ const commands = [
         await interaction.deferReply({ ephemeral: true });
         const guildConfig = await db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
-          // getGuildConfig no longer returns the decrypted key (it would
-          // leak via any row dump); go through the explicit accessor and use
-          // the plaintext only to authenticate the service-side identity check.
-          const plaintextKey = await db.getGuildApiKey(interaction.guildId);
-          if (!plaintextKey) {
-            logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
-            return interaction.editReply({
-              content: '❌ **The stored qURL key is unavailable.**\n\n'
-                + 'Re-run `/qurl setup` to connect a valid key.',
-            });
-          }
-          let identity;
-          let identityUnavailable = false;
-          try {
-            identity = await getIdentity(plaintextKey);
-          } catch (err) {
-            const status = Number.isInteger(err?.status) ? err.status : null;
-            logger.warn('qURL status identity check failed', {
-              guild_id: interaction.guildId,
-              status,
-            });
-            if (err?.status === 401 || err?.status === 403) {
-              return interaction.editReply({
-                content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
-                  + 'Re-run `/qurl setup` to connect a valid key.',
-              });
-            }
-            identityUnavailable = true;
-          }
-
           // #185 admin-offboarding nudge: the qURL key is owned by the
           // admin who ran setup (Auth0 sub claim); usage bills to their
           // qURL account even after they leave. Surface a passive notice
@@ -8794,18 +8764,49 @@ const commands = [
               }
             }
           }
+          const configurationDetails =
+            `Configured by: <@${guildConfig.configured_by}>\n` +
+            `Last updated: ${guildConfig.updated_at}` +
+            originalAdminLeftNotice;
 
-          const identitySummary = identityUnavailable
-            ? '⚠️ **The qURL key check could not be completed.**\n'
-              + 'Please try `/qurl status` again later.\n'
-            : `✅ **qURL is configured**\n` +
-              `Key prefix: \`${identity.api_key.key_prefix}\`\n` +
-              `Scopes: ${identity.api_key.scopes.map(scope => `\`${scope}\``).join(', ') || '_none_'}\n`;
+          // getGuildConfig no longer returns the decrypted key (it would
+          // leak via any row dump); go through the explicit accessor and use
+          // the plaintext only to authenticate the service-side identity check.
+          const plaintextKey = await db.getGuildApiKey(interaction.guildId);
+          if (!plaintextKey) {
+            logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
+            return interaction.editReply({
+              content: '❌ **The stored qURL key is unavailable.**\n\n'
+                + 'Re-run `/qurl setup` to connect a valid key.\n\n'
+                + configurationDetails,
+            });
+          }
+          let identity;
+          try {
+            identity = await getIdentity(plaintextKey);
+          } catch (err) {
+            const status = Number.isInteger(err?.status) ? err.status : null;
+            logger.warn('qURL status identity check failed', {
+              guild_id: interaction.guildId,
+              status,
+            });
+            if (status === 401 || status === 403) {
+              return interaction.editReply({
+                content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
+                  + 'Re-run `/qurl setup` to connect a valid key.\n\n'
+                  + configurationDetails,
+              });
+            }
+          }
+
+          const identitySummary = identity
+            ? `✅ **qURL is configured**\n` +
+              `Key prefix: \`${escapeDiscordMarkdown(identity.api_key.key_prefix)}\`\n` +
+              `Scopes: ${identity.api_key.scopes.map(scope => `\`${escapeDiscordMarkdown(scope)}\``).join(', ') || '_none_'}\n`
+            : '⚠️ **The qURL key check could not be completed.**\n'
+              + 'Please try `/qurl status` again later.\n';
           return interaction.editReply({
-            content: identitySummary +
-              `Configured by: <@${guildConfig.configured_by}>\n` +
-              `Last updated: ${guildConfig.updated_at}` +
-              originalAdminLeftNotice,
+            content: identitySummary + configurationDetails,
           });
         }
         // Branch the not-configured copy on the active setup flow so
