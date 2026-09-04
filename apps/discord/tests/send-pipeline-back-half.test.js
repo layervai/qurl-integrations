@@ -2468,7 +2468,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       qurl_id: 'q_orphaned_link_one',
     }]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(
-      new TypeError('Persistence callback failed for https://qurl.link/#at_secret_bearer_one at_secret_bearer_two'),
+      new TypeError('Persistence format_specifier failed for https://qurl.link/#at_secret_bearer_one at_secret_bearer_two'),
     );
 
     await executeSendPipeline(interaction, makePipelineParams());
@@ -2478,7 +2478,7 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     );
     expect(failureLog[1]).toEqual(expect.objectContaining({
       errorName: 'TypeError',
-      errorMessage: 'Persistence callback failed for [REDACTED_URL] at_[REDACTED]',
+      errorMessage: 'Persistence format_specifier failed for [REDACTED_URL] at_[REDACTED]',
     }));
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
     expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');

@@ -1802,7 +1802,7 @@ function scrubQurlCredentialForLog(message) {
   if (typeof message !== 'string') return undefined;
   return message
     .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
-    .replace(/at(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]')
+    .replace(/\bat(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]')
     .slice(0, 500);
 }
 

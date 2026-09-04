@@ -154,7 +154,8 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 	if value.Kind() == slog.KindAny && matchedScalarNeedsRedaction(value.Any()) {
 		return slog.StringValue(redactedLogValue)
 	}
-	if isQurlAccessLinkKey(key) && (value.Kind() == slog.KindAny || value.Kind() == slog.KindGroup) {
+	if isQurlAccessLinkKey(key) && (value.Kind() == slog.KindGroup ||
+		(value.Kind() == slog.KindAny && isSuppressibleContainer(value.Any()))) {
 		// A qurlLinks container semantically consists of live bearer links.
 		// Bare string elements have no inner key for the recursive walker to
 		// match, so suppress the whole container instead of leaking them.
@@ -171,7 +172,12 @@ func redactMatchedValue(key string, value slog.Value, depth int) slog.Value {
 
 func isQurlAccessLinkKey(key string) bool {
 	key = strings.ToLower(key)
-	return strings.Contains(key, "qurllink") || strings.Contains(key, "qurl_link")
+	for _, substring := range redactSubstrings {
+		if strings.HasPrefix(substring, "qurl") && strings.Contains(key, substring) {
+			return true
+		}
+	}
+	return false
 }
 
 func redactAny(value any, depth int) (any, bool) {
@@ -307,6 +313,9 @@ func anonymousJSONFieldIsFlattened(field *reflect.StructField) bool {
 
 func fieldNeedsRedaction(key string, value any, depth int) bool {
 	if shouldRedactKey(key) && matchedScalarNeedsRedaction(value) {
+		return true
+	}
+	if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
 		return true
 	}
 	return anyNeedsRedaction(value, depth+1)
@@ -475,7 +484,25 @@ func redactAnyField(key string, value any, depth int) (any, bool) {
 			return redactedLogValue, true
 		}
 	}
+	if isQurlAccessLinkKey(key) && isSuppressibleContainer(value) {
+		return redactedLogValue, true
+	}
 	return redactAny(value, depth+1)
+}
+
+func isSuppressibleContainer(value any) bool {
+	rv := reflect.ValueOf(value)
+	for rv.IsValid() && (rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface) {
+		if rv.IsNil() {
+			return false
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() {
+		return false
+	}
+	kind := rv.Kind()
+	return kind == reflect.Map || kind == reflect.Struct || kind == reflect.Slice || kind == reflect.Array
 }
 
 func matchedScalarNeedsRedaction(value any) bool {

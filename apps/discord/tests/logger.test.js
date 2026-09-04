@@ -142,6 +142,22 @@ describe('logger', () => {
     },
   );
 
+  it('redacts nested qURL link arrays while preserving adjacent numeric dimensions', () => {
+    process.env.LOG_LEVEL = 'debug';
+    logger = require('../src/logger');
+
+    logger.info('minted', {
+      payload: {
+        orphaned_qurl_links: ['https://qurl.link/#at_live_bearer'],
+        qurl_link_count: 3,
+      },
+    });
+
+    const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0].slice(consoleSpy.log.mock.calls[0][0].indexOf('{')));
+    expect(parsed.payload.orphaned_qurl_links).toBe('[REDACTED]');
+    expect(parsed.payload.qurl_link_count).toBe(3);
+  });
+
   it('omits meta string when no meta keys', () => {
     process.env.LOG_LEVEL = 'info';
     logger = require('../src/logger');
@@ -267,6 +283,23 @@ describe('logger', () => {
         expect(allOutput).not.toContain('at_live_bearer');
       },
     );
+
+    it('redacts decorated qURL link containers without flagging numeric dimensions', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('qurl_minted', {
+        orphaned_qurl_links: ['https://qurl.link/#at_live_bearer'],
+        qurl_link_count: 3,
+      });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.orphaned_qurl_links).toBe('[REDACTED]');
+      expect(parsed.audit.qurl_link_count).toBe(3);
+      const warnings = consoleSpy.error.mock.calls.map(c => c[0]).join('\n');
+      expect(warnings).toContain('orphaned_qurl_links');
+      expect(warnings).not.toContain('qurl_link_count');
+    });
 
     it('redacts interaction_token (the PR-B view-counter bearer cred) in the audit path', () => {
       // The audit path is EXACT-match, so the bare 'token' entry does NOT
