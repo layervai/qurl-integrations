@@ -30,10 +30,11 @@
 //
 // The Lambda reuses `apps/discord/src/qurl-webhook-registrar.js`'s
 // `ensureWebhookSubscription` + `buildSsmPersistSecret` directly —
-// same library, different runtime. Bot HTTP tier now only RECEIVES
-// webhooks (reads QURL_WEBHOOK_SECRET from SSM-injected env at boot,
-// verifies signatures, writes to DDB). No registration calls from
-// the bot ever again.
+// same library, different runtime. The bot HTTP tier only RECEIVES
+// webhooks for the default subscription (reads QURL_WEBHOOK_SECRET
+// from SSM-injected env at boot, verifies signatures, writes to DDB).
+// It does not register that default subscription; `/qurl setup` still
+// invokes the registrar for guild BYOK subscriptions.
 //
 // Rotation flow: re-invoking the Lambda rotates the secret + updates
 // SSM. The bot's task definition then needs a redeploy to pick up

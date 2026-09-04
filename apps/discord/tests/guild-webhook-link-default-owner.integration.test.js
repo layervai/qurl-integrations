@@ -81,10 +81,6 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  subscriptions._resetForTesting();
-});
-
 afterAll(() => {
   global.fetch = realFetch;
 });

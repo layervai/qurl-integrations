@@ -1,8 +1,9 @@
-// Per-guild qurl-service webhook subscription provisioning.
+// Per-guild qurl-service webhook linking. Default-owner guilds reuse the
+// Lambda-managed subscription; different owners get a BYOK subscription.
 // Called from the two setGuildApiKey call sites + the backfill script.
 // Never re-throws to the caller: the OAuth callback / /qurl setup
 // should succeed for key linking even when view-counter wiring fails
-// (the polling fallback covers it until backfill catches up).
+// (the polling fallback covers it until the link is retried or remediated).
 
 const config = require('./config');
 const db = require('./store');
@@ -89,7 +90,8 @@ function auditLinkFailure(guildId, reason, extra) {
   });
 }
 
-// Provision (idempotent) a per-guild webhook subscription.
+// Link a guild to a webhook owner. The default owner gets an owner-only
+// mapping; a different owner gets an idempotently provisioned subscription.
 // `action` mirrors ensureWebhookSubscription: 'created' | 'rotated' | 'reused'.
 //
 // `descriptionContext` is interpolated into a qurl-service UI string
@@ -294,8 +296,8 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 // in sync — a future audit-log shape change should touch one place.
 //
 // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
-// in-flight work; the operator runs /qurl setup again or the
-// backfill script catches it. Polling fallback covers correctness.
+// in-flight work. The operator runs /qurl setup again; the backfill script
+// also catches first-time API-key-only rows. Polling fallback covers correctness.
 function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
   linkGuildWebhookSubscription({
     guildId,

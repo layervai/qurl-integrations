@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// One-shot backfill: register a qurl.accessed webhook subscription
-// for every linked guild that doesn't have one yet.
+// One-shot backfill for guild webhook linkage: record an owner-only mapping
+// when the key belongs to the default owner; register a BYOK qurl.accessed
+// subscription otherwise.
 //
 // Run AFTER deploying the BYOK view-counter change (the migration
 // that introduced setGuildApiKey-time subscription registration).
-// Already-linked guilds wouldn't otherwise pick up a subscription
-// until they manually re-link via `/qurl setup`; this script catches
-// them in one pass.
+// Already-linked guilds wouldn't otherwise pick up that linkage until they
+// manually re-link via `/qurl setup`; this script catches them in one pass.
 //
 // Idempotent: rows that already have a `webhook_id` or an owner-only default
 // mapping (`webhook_owner_id` without a copied secret) are skipped.
@@ -34,13 +34,15 @@
 // SCOPE: only operates on the qurl_api_key + webhook_* attributes of
 // the `guild_configs` DDB table. Does not touch any other table.
 //
-// PERFORMANCE NOTE: each linkGuildWebhookSubscription call transitively
-// invokes propagateGuildWebhookSubscription, which today does a full-
-// table ConsistentRead scan of guild_configs. The backfill is
-// therefore O(rows²) RCU. Acceptable at current scale (≤10 BYOK
-// guilds in prod); a re-run after the #486 GSI migration on
-// webhook_owner_id reduces this to O(rows × ownersScanned), and is
-// effectively free thereafter.
+// PERFORMANCE NOTE: each different-owner link resolves the candidate owner
+// before the registrar performs its own bounded subscription listing, then
+// invokes propagateGuildWebhookSubscription, which today does a full-table
+// ConsistentRead scan of guild_configs. Default-owner links return after the
+// first listing. The duplicate request on the different-owner path avoids
+// coupling the registrar to default-owner policy; worst-case backfill remains
+// O(rows²) RCU. Acceptable at current scale (≤10 BYOK guilds in prod); a re-run
+// after the #486 GSI migration on webhook_owner_id reduces this to
+// O(rows × ownersScanned), and is effectively free thereafter.
 
 'use strict';
 
@@ -52,6 +54,22 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 
 const DRY_RUN = process.argv.includes('--dry-run');
+const SCAN_FILTER_EXPRESSION = 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)';
+
+function isProvisioningCandidate(row) {
+  return Boolean(row
+    && Object.hasOwn(row, 'qurl_api_key')
+    && !Object.hasOwn(row, 'webhook_id')
+    && !Object.hasOwn(row, 'webhook_owner_id'));
+}
+
+function buildGuildScanInput(tableName, exclusiveStartKey) {
+  return {
+    TableName: tableName,
+    ExclusiveStartKey: exclusiveStartKey,
+    FilterExpression: SCAN_FILTER_EXPRESSION,
+  };
+}
 
 async function main() {
   if (!config.QURL_ENDPOINT || !config.BASE_URL) {
@@ -106,16 +124,11 @@ async function main() {
     // client-side memory pressure and suppresses noise from rows
     // that obviously have nothing to provision (no qurl_api_key,
     // already-provisioned webhook_id, or an owner-only default mapping).
-    const res = await ddb.send(new ScanCommand({
-      TableName: TABLE,
-      ExclusiveStartKey,
-      FilterExpression: 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)',
-    }));
+    const res = await ddb.send(new ScanCommand(buildGuildScanInput(TABLE, ExclusiveStartKey)));
     const rows = res.Items || [];
     for (const row of rows) {
       scanned += 1;
-      if (!row.qurl_api_key) { skipped += 1; continue; }
-      if (row.webhook_id || row.webhook_owner_id) { skipped += 1; continue; }
+      if (!isProvisioningCandidate(row)) { skipped += 1; continue; }
       candidates += 1;
       const guildId = row.guild_id;
       // Decrypt step isolated so a failure increments failedDecrypt
@@ -184,8 +197,12 @@ async function main() {
   process.exit(failedTotal > 0 ? 2 : 0);
 }
 
-main().catch((err) => {
-  logger.error('provision-guild-subscriptions crashed', { error: err.message, stack: err.stack });
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    logger.error('provision-guild-subscriptions crashed', { error: err.message, stack: err.stack });
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { buildGuildScanInput, isProvisioningCandidate };

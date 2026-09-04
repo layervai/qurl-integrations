@@ -433,6 +433,14 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(global.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer lv_test_abc');
   });
 
+  it('rejects cache updates for an owner other than the discovered default', async () => {
+    await subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+
+    expect(() => subs.ensureDefaultOwnerCacheEntry('usr_other'))
+      .toThrow(/discovered default owner is required/);
+    expect(subs.getSecretForOwner('usr_other')).toBeNull();
+  });
+
   it('does not seed a secret while resolving a different owner before the first scan', async () => {
     global.fetch = jest.fn(async (_url, opts) => {
       const ownerId = opts.headers.Authorization === 'Bearer lv_test_abc'
@@ -474,17 +482,20 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('skips discovery in a pure-BYOK configuration', async () => {
-    const config = require('../src/config');
-    const originalSecret = config.QURL_WEBHOOK_SECRET;
-    config.QURL_WEBHOOK_SECRET = undefined;
-    try {
-      await expect(subs.resolveDefaultOwnerForApiKey('lv_byok')).resolves.toBeNull();
-      expect(global.fetch).not.toHaveBeenCalled();
-    } finally {
-      config.QURL_WEBHOOK_SECRET = originalSecret;
-    }
-  });
+  test.each(['QURL_WEBHOOK_SECRET', 'QURL_API_KEY', 'QURL_ENDPOINT'])(
+    'skips discovery when %s is unset',
+    async (configKey) => {
+      const config = require('../src/config');
+      const original = config[configKey];
+      config[configKey] = undefined;
+      try {
+        await expect(subs.resolveDefaultOwnerForApiKey('lv_byok')).resolves.toBeNull();
+        expect(global.fetch).not.toHaveBeenCalled();
+      } finally {
+        config[configKey] = original;
+      }
+    },
+  );
 
   it('reuses the cached default owner while still resolving an alias key', async () => {
     global.fetch = jest.fn(async () => ({

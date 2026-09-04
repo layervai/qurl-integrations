@@ -295,7 +295,40 @@ describe('guild configs', () => {
     });
 
     await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
-      .rejects.toThrow(/stored webhook secret has no owner/);
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_MISSING',
+        message: expect.stringMatching(/stored webhook secret has no owner/),
+      });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('setGuildDefaultWebhookOwner: normalizes malformed same-owner secret errors', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        guild_id: 'g_default',
+        qurl_api_key: mockCiphertext('lv_default_alias'),
+        webhook_owner_id: 'usr_default',
+        webhook_secret: 'enc:v1:malformed',
+      },
+    });
+
+    await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+        message: expect.stringMatching(/could not be decrypted/),
+      });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test.each([
+    ['guildId', '', defaultOwnerArgs()],
+    ['webhookOwnerId', 'g_default', defaultOwnerArgs({ webhookOwnerId: '' })],
+    ['expectedDefaultWebhookSecret', 'g_default', defaultOwnerArgs({ expectedDefaultWebhookSecret: '' })],
+    ['expectedApiKey', 'g_default', defaultOwnerArgs({ expectedApiKey: '' })],
+  ])('setGuildDefaultWebhookOwner validates %s', async (_field, guildId, args) => {
+    await expect(store.setGuildDefaultWebhookOwner(guildId, args))
+      .rejects.toThrow(/required/);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 

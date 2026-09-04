@@ -123,44 +123,28 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
     );
   });
 
-  it('happy path emits SUBSCRIPTION_REGISTERED audit and upserts the cache', async () => {
+  it('keeps a different owner on the per-guild path and publishes the result', async () => {
     const result = await linkGuildWebhookSubscription({
       guildId: 'g_happy', apiKey: 'lv_guild_happy',
     });
     expect(result).toEqual({ ok: true, action: 'created' });
+    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledWith('lv_guild_happy');
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'lv_guild_happy' }),
+    );
+    expect(mockSetGuildWebhookSubscription).toHaveBeenCalledWith('g_happy', {
+      webhookId: 'wh_ok', webhookSecret: 'sec_ok', webhookOwnerId: 'usr_ok',
+    });
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
     expect(mockUpsertGuild).toHaveBeenCalledWith({
       guildId: 'g_happy', ownerId: 'usr_ok', webhookId: 'wh_ok', webhookSecret: 'sec_ok',
     });
+    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
       expect.objectContaining({ guild_id: 'g_happy', action: 'created' }),
     );
-  });
-
-  it('keeps a different resolved owner on the existing per-guild subscription path', async () => {
-    mockResolveDefaultOwnerForApiKey.mockResolvedValue(null);
-    mockEnsureWebhookSubscription.mockResolvedValueOnce({
-      webhookId: 'wh_other', secret: 'sec_other', action: 'created', ownerId: 'usr_other',
-    });
-
-    const result = await linkGuildWebhookSubscription({
-      guildId: 'g_other', apiKey: 'lv_other',
-    });
-
-    expect(result).toEqual({ ok: true, action: 'created' });
-    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledWith('lv_other');
-    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
-    expect(mockEnsureWebhookSubscription).toHaveBeenCalledWith(
-      expect.objectContaining({ apiKey: 'lv_other' }),
-    );
-    expect(mockSetGuildWebhookSubscription).toHaveBeenCalledWith('g_other', {
-      webhookId: 'wh_other', webhookSecret: 'sec_other', webhookOwnerId: 'usr_other',
-    });
-    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
-    expect(mockUpsertGuild).toHaveBeenCalledWith({
-      guildId: 'g_other', ownerId: 'usr_other', webhookId: 'wh_other', webhookSecret: 'sec_other',
-    });
-    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
   });
 });
 

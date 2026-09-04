@@ -1540,10 +1540,19 @@ async function setGuildDefaultWebhookOwner(
   const hasStoredWebhookId = Object.hasOwn(row, 'webhook_id');
   const hasStoredOwner = Object.hasOwn(row, 'webhook_owner_id');
   if (hasStoredSecret && !row.webhook_owner_id) {
-    throw new Error('setGuildDefaultWebhookOwner: stored webhook secret has no owner');
+    const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret has no owner');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_MISSING';
+    throw err;
   }
   if (hasStoredSecret && row.webhook_owner_id === webhookOwnerId) {
-    const storedSecret = decrypt(row.webhook_secret);
+    let storedSecret;
+    try {
+      storedSecret = decrypt(row.webhook_secret);
+    } catch (cause) {
+      const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret could not be decrypted', { cause });
+      err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+      throw err;
+    }
     if (storedSecret !== expectedDefaultWebhookSecret) {
       const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret does not match QURL_WEBHOOK_SECRET');
       err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';

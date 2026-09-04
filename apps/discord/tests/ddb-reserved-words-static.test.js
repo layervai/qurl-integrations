@@ -250,6 +250,7 @@ describe('DDB reserved-words static check — full src scan', () => {
     // many literals into template-with-substitutions doesn't quietly
     // defeat the check. Today's expected dynamic sites:
     //   - flow-state.js (a few template-with-expression Filter/Update)
+    //   - ddb-store.js (setGuildDefaultWebhookOwner's audited CAS join)
     // If this assertion fires, audit each newly-dynamic expression
     // against the reserved-words list manually + raise the ceiling.
     const dynamic = [];

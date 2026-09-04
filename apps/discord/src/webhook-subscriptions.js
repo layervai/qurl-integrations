@@ -204,7 +204,7 @@ function removeGuild({ guildId, ownerId }) {
 // proceeds through the registrar's create path. Network / HTTP errors are
 // surfaced so each caller can apply its existing failure policy.
 //
-// ASSUMPTION: owner_id is identical across every webhook owned by a
+// TODO(upstream-contract): owner_id is identical across every webhook owned by a
 // single API key in qurl-service. True today by qurl-service's auth0
 // owner-binding contract. If qurl-service ever multi-tenants a key
 // (rare but plausible for partner-shared identities), discovery fails
@@ -225,11 +225,11 @@ async function discoverOwnerId(apiKey) {
     apiEndpoint: config.QURL_ENDPOINT,
     apiKey,
   });
-  // Local name `webhooks` (not `subs`) so it doesn't shadow the
-  // module convention everyone else uses for the registry import.
   if (!Array.isArray(body?.data)) {
     throw new Error('discoverOwnerId: qurl-service response data must be an array');
   }
+  // Local name `webhooks` (not `subs`) so it doesn't shadow the
+  // module convention everyone else uses for the registry import.
   const webhooks = body.data;
   if (webhooks.length === 0) return null;
   let ownerId = null;
@@ -254,8 +254,9 @@ async function discoverDefaultOwnerId() {
 // but cannot be discovered, throw rather than falling through to the
 // per-guild registrar and risking a rotation of the shared default secret.
 // This deliberately trades link availability for secret integrity during the
-// short fresh-deploy gap: without the default owner, an unrelated key cannot
-// be distinguished safely from an alias of the default key.
+// fresh-deploy gap or a persistent registrar/configuration failure: without the
+// default owner, an unrelated key cannot be distinguished safely from an alias
+// of the default key.
 async function resolveDefaultOwnerForApiKey(apiKey) {
   if (!config.QURL_WEBHOOK_SECRET || !config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
 
