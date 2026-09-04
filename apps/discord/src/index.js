@@ -17,8 +17,10 @@ const {
   shouldUsePushHandoffShutdown,
   selectGatewayReadinessProbe,
   awaitServerListening,
-  tryStop,
   tryClose,
+  stopGatewayHotStandby,
+  runGracefulShutdown,
+  runGatewayFatalShutdown,
   runPushHandoffShutdown,
 } = require('./gateway-shutdown-helpers');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
@@ -411,7 +413,7 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // (the leader factory needs the shim's WebSocketManager handle, which
 // only exists after `gatewayShim.start({ connect: false })` resolves).
 // Hoisted to module scope so gracefulShutdown + signal handlers can
-// see them; tryClose/tryStop are null-guarded so a SIGTERM mid-
+// see them; the shutdown helper is null-guarded so a SIGTERM mid-
 // construction is safe, and the `isShuttingDown` re-check in
 // startHotStandby closes the inverse race.
 let gatewayLeader = null;
@@ -454,6 +456,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
     intents: GATEWAY_INTENTS_BITFIELD,
     store: sessionStore,
     logger,
+    onFatal: gatewayFatalShutdown,
   });
   logger.info('gateway-resume shim constructed', {
     tableName: `${ddbTablePrefix}gateway-session`,
@@ -662,16 +665,11 @@ let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
-async function gracefulShutdown(code = 0) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  // Force exit after 10s if shutdown hangs
-  setTimeout(() => { logger.error('Shutdown timed out, forcing exit'); process.exit(1); }, 10000).unref();
-
-  logger.info('Graceful shutdown initiated...');
-
-  try {
+async function gracefulShutdownTeardown({
+  awaitControlChannelServer = true,
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+} = {}) {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
     // and process.exit() called immediately after would truncate an OAuth
     // callback mid-flight, leaving the admin's /qurl setup without a
@@ -731,22 +729,26 @@ async function gracefulShutdown(code = 0) {
     //
     // Gated on ENABLE_GATEWAY_HOT_STANDBY for symmetry with the
     // Pillar 2 shim block below: all three handles are null when
-    // hot-standby is off, so the tryClose/tryStop calls are no-ops,
+    // hot-standby is off, so the helper's close/stop calls are no-ops,
     // but skipping the gate would still pay 3 microtask hops per
     // teardown across every HTTP-only / combined replica that never
     // built the hot-standby surface.
     //
-    // No per-call timeout on tryStop/tryClose: a wedged
-    // gatewayLeader.stop() (e.g., DDB hanging in the final renew)
-    // is bounded by the 10 s `force-exit` setTimeout at the top of
-    // this function — which itself sits inside ECS's 30 s SIGTERM
-    // deadline. That layered ceiling is the deliberate outermost
-    // belt; introducing a third per-call timeout here would just
-    // multiply the moving parts without changing the worst-case.
+    // Normal shutdown awaits both stop calls; a wedged final renew is bounded
+    // by runGracefulShutdown's 10 s force-exit. IDENTIFY-fatal shutdown still
+    // invokes both idempotent stop methods to set their guards, but does not
+    // await work parked behind manager.connect(): gatewayShim.stop() below must
+    // retain the budget to flush the resumable session before process exit.
     if (config.ENABLE_GATEWAY_HOT_STANDBY) {
-      await tryClose('control-channel server', controlChannelServer, logger);
-      await tryStop('connection-watchdog', connectionWatchdog, logger);
-      await tryStop('gateway-leader', gatewayLeader, logger);
+      await stopGatewayHotStandby({
+        controlChannelServer,
+        connectionWatchdog,
+        gatewayLeader,
+        awaitControlChannelServer,
+        awaitConnectionWatchdog,
+        awaitGatewayLeader,
+        logger,
+      });
     }
 
     // Discord client shutdown only meaningful when we're the gateway
@@ -779,11 +781,35 @@ async function gracefulShutdown(code = 0) {
     }
     await db.close();
     logger.info('Shutdown complete');
-  } catch (error) {
-    logger.error('Error during shutdown', { error: error.message });
-  }
+}
 
-  process.exit(code);
+async function gracefulShutdown(code = 0, {
+  awaitControlChannelServer = true,
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+} = {}) {
+  return runGracefulShutdown({
+    code,
+    claimShutdown: () => {
+      if (isShuttingDown) return false;
+      isShuttingDown = true;
+      return true;
+    },
+    teardown: () => gracefulShutdownTeardown({
+      awaitControlChannelServer,
+      awaitConnectionWatchdog,
+      awaitGatewayLeader,
+    }),
+    logger,
+  });
+}
+
+function gatewayFatalShutdown() {
+  return runGatewayFatalShutdown({
+    gracefulShutdown,
+    getConnectionWatchdog: () => connectionWatchdog,
+    logger,
+  });
 }
 
 // Hot-standby push-handoff SIGTERM path. The body lives in

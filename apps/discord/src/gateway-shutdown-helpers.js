@@ -2,6 +2,14 @@
 // branching + /health probe selection. Extracted from index.js so the
 // contracts are unit-testable without the full bot bootstrap.
 
+function logBestEffort(logger, level, ...args) {
+  try {
+    logger[level](...args);
+  } catch {
+    // Shutdown progress and the requested exit must not depend on diagnostics.
+  }
+}
+
 // True when this replica's SIGTERM should invoke pushHandoff-then-exit
 // (active branch). Reads `gatewayLeader.isHoldingLock()` at call time
 // so an inbound handoff that already moved the lock to our peer
@@ -58,7 +66,15 @@ async function tryStop(name, handle, logger) {
   } catch (err) {
     // Include the stack so a stuck SIGTERM drain log has both the
     // symptom and the call site.
-    logger.warn(`${name} stop failed`, { error: err.message, stack: err.stack });
+    try {
+      logger.warn(`${name} stop failed`, {
+        error: err?.message ?? String(err),
+        stack: err?.stack,
+      });
+    } catch {
+      // Logging is best-effort too: this helper must never re-reject and
+      // truncate the remaining teardown when its returned promise is floated.
+    }
   }
 }
 
@@ -103,15 +119,151 @@ function awaitServerListening(server) {
 async function tryClose(name, server, logger) {
   if (!server) return;
   await new Promise(resolve => {
-    server.close(err => {
-      // Stack alongside message — symmetric with tryStop. Most
-      // net.Server.close errors are low-information ("listener
-      // already detached"), but the next failure mode introduced
-      // here will benefit from the call-site trace.
-      if (err) logger.warn(`${name} close reported error`, { error: err.message, stack: err.stack });
+    const reportCloseError = (err) => {
+      try {
+        logger.warn(`${name} close reported error`, {
+          error: err?.message ?? String(err),
+          stack: err?.stack,
+        });
+      } catch {
+        // Logging is best-effort too: floated fatal cleanup must not reject.
+      }
+    };
+    try {
+      server.close(err => {
+        // Stack alongside message — symmetric with tryStop. Most
+        // net.Server.close errors are low-information ("listener
+        // already detached"), but the next failure mode introduced
+        // here will benefit from the call-site trace.
+        if (err) reportCloseError(err);
+        resolve();
+      });
+    } catch (err) {
+      reportCloseError(err);
       resolve();
-    });
+    }
   });
+}
+
+// Stops the hot-standby control plane in dependency order. The IDENTIFY-fatal
+// path calls both stop methods to set their synchronous guards, but must skip
+// awaiting tasks that may be parked behind manager.connect() so the
+// session-store final flush retains the shutdown budget. gatewayLeader.stop()
+// only halts its loop; it does not release the DDB lease, so skipping its await
+// cannot truncate a release write. Lease TTL remains the fatal-takeover path.
+async function stopGatewayHotStandby({
+  controlChannelServer,
+  connectionWatchdog,
+  gatewayLeader,
+  awaitControlChannelServer = true,
+  awaitConnectionWatchdog = true,
+  awaitGatewayLeader = true,
+  logger,
+}) {
+  const controlClosed = tryClose('control-channel server', controlChannelServer, logger);
+  if (awaitControlChannelServer) await controlClosed;
+  const watchdogStopped = tryStop('connection-watchdog', connectionWatchdog, logger);
+  if (awaitConnectionWatchdog) await watchdogStopped;
+  const leaderStopped = tryStop('gateway-leader', gatewayLeader, logger);
+  if (awaitGatewayLeader) await leaderStopped;
+}
+
+// Plain graceful-shutdown envelope shared by every non-push exit path. The
+// ownership gate and hard-exit timer run synchronously before teardown is
+// invoked, so a stalled first cleanup await cannot leave the process healthy
+// indefinitely. Dependencies are injected to make that ordering executable in
+// tests rather than relying on source-shape assertions in index.js.
+async function runGracefulShutdown({
+  code = 0,
+  claimShutdown,
+  teardown,
+  logger,
+  ceilingMs = 10_000,
+  exit = (c) => process.exit(c),
+  scheduleHardExit = setTimeout,
+  clearHardExit = clearTimeout,
+}) {
+  if (!claimShutdown()) return;
+
+  let exited = false;
+  const exitOnce = (exitCode) => {
+    if (exited) return;
+    exited = true;
+    exit(exitCode);
+  };
+  const hardExit = scheduleHardExit(() => {
+    try {
+      logger.error('Shutdown timed out, forcing exit');
+    } finally {
+      exitOnce(1);
+    }
+  }, ceilingMs);
+  if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
+
+  logBestEffort(logger, 'info', 'Graceful shutdown initiated...');
+  try {
+    await teardown();
+  } catch (error) {
+    logBestEffort(logger, 'error', 'Error during shutdown', {
+      error: error?.message ?? String(error),
+    });
+  }
+  clearHardExit(hardExit);
+  exitOnce(code);
+}
+
+// Gateway-fatal adapter: arm graceful shutdown's hard-exit backstop before
+// asking the connection watchdog to stop. A fatal can arrive from inside
+// watchdog.manager.connect(), so its stop is deliberately best-effort and
+// non-blocking. This helper also owns the fatal-path teardown option: graceful
+// teardown re-invokes the same idempotent stop, but does not await the blocked
+// connect before flushing the resumable session.
+//
+// Unlike an ordinary SIGTERM, this path deliberately does not push handoff.
+// The budget can trip during cold start before READY/RESUMED has confirmed a
+// resumable session; instructing the peer to connect from that unconfirmed
+// state can merely transfer the token contention that tripped the guard. The
+// process exits fail-closed and DDB lease TTL gates the peer's later takeover.
+function runGatewayFatalShutdown({
+  gracefulShutdown,
+  getConnectionWatchdog,
+  logger,
+  fatalCeilingMs = 15_000,
+  scheduleHardExit = setTimeout,
+  exit = (code) => process.exit(code),
+}) {
+  // Independent of gracefulShutdown's ownership gate: every path that owns
+  // shutdown today has its own 10/12-second backstop, but this fatal boundary
+  // must remain terminal if a future owner forgets one. Fifteen seconds stays
+  // inside ECS's 30-second SIGTERM window and trails both existing ceilings.
+  const hardExit = scheduleHardExit(() => {
+    try {
+      logger.error('Gateway fatal shutdown timed out, forcing exit');
+    } finally {
+      exit(1);
+    }
+  }, fatalCeilingMs);
+  if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
+
+  const shutdown = gracefulShutdown(1, {
+    awaitControlChannelServer: false,
+    awaitConnectionWatchdog: false,
+    awaitGatewayLeader: false,
+  });
+  const connectionWatchdog = getConnectionWatchdog();
+  if (!connectionWatchdog) return shutdown;
+
+  const warnStopFailed = (error) => {
+    logBestEffort(logger, 'warn', 'connection-watchdog stop failed during gateway fatal shutdown', {
+      error: error?.message ?? String(error),
+    });
+  };
+  try {
+    Promise.resolve(connectionWatchdog.stop()).catch(warnStopFailed);
+  } catch (error) {
+    warnStopFailed(error);
+  }
+  return shutdown;
 }
 
 // Push-handoff SIGTERM body. Distinct from gracefulShutdown because
@@ -181,9 +333,18 @@ async function runPushHandoffShutdown({
   clearHardExit = clearTimeout,
 }) {
   logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
+  let exited = false;
+  const exitOnce = (exitCode) => {
+    if (exited) return;
+    exited = true;
+    exit(exitCode);
+  };
   const hardExit = scheduleHardExit(() => {
-    logger.error('PushHandoff shutdown timed out, forcing exit');
-    exit(forcedExitCode);
+    try {
+      logger.error('PushHandoff shutdown timed out, forcing exit');
+    } finally {
+      exitOnce(forcedExitCode);
+    }
   }, ceilingMs);
   if (hardExit && typeof hardExit.unref === 'function') {
     // `.unref()` so the timer can't pin shutdown past the explicit
@@ -234,7 +395,7 @@ async function runPushHandoffShutdown({
   // wrappers) would observe a spurious second exit-code-1 ~12 s
   // later without this clear.
   clearHardExit(hardExit);
-  exit(handoffThrew ? forcedExitCode : code);
+  exitOnce(handoffThrew ? forcedExitCode : code);
 }
 
 module.exports = {
@@ -243,5 +404,8 @@ module.exports = {
   awaitServerListening,
   tryStop,
   tryClose,
+  stopGatewayHotStandby,
+  runGracefulShutdown,
+  runGatewayFatalShutdown,
   runPushHandoffShutdown,
 };

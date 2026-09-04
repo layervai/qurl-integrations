@@ -9,7 +9,7 @@
 //      clean close frame. A regression here breaks cross-process
 //      RESUME.
 //   2. IDENTIFY budget guard: MAX_IDENTIFY_ATTEMPTS = 1 enforced
-//      via thrown error from the retrieveSessionInfo wrapper. A
+//      at the actual identify-throttler boundary. A
 //      future bump to 2+ would change the Discord-quota burn
 //      profile — pin so it requires explicit test update.
 //   3. READY detection: appId plucked from data.d.application.id,
@@ -22,9 +22,15 @@ const {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
-  VERIFIED_DJS_WS_MAJOR_MINOR,
+  VERIFIED_DJS_WS_VERSION,
 } = require('../src/gateway-ws-shim');
-const { WebSocketShardEvents } = require('@discordjs/ws');
+const {
+  SimpleContextFetchingStrategy,
+  SimpleIdentifyThrottler,
+  WebSocketManager,
+  WebSocketShard,
+  WebSocketShardEvents,
+} = require('@discordjs/ws');
 
 // Fake WebSocketManager built on EventEmitter. Captures construction
 // args so tests can interrogate the callback wiring and emit fake
@@ -53,6 +59,9 @@ function makeFakeManagerCtor() {
     inst._constructorArgs = args;
     inst._destroyCalls = [];
     inst.connect = jest.fn().mockResolvedValue(undefined);
+    inst.fetchGatewayInformation = jest.fn().mockResolvedValue({
+      session_start_limit: { max_concurrency: 1 },
+    });
     inst.destroy = jest.fn().mockImplementation((opts) => {
       inst._destroyCalls.push(opts);
       return Promise.resolve();
@@ -61,6 +70,19 @@ function makeFakeManagerCtor() {
     return inst;
   }
   return { FakeManager, instances };
+}
+
+function makeFakeIdentifyThrottlerCtor() {
+  const instances = [];
+  function FakeIdentifyThrottler(maxConcurrency) {
+    const inst = {
+      maxConcurrency,
+      waitForIdentify: jest.fn().mockResolvedValue(undefined),
+    };
+    instances.push(inst);
+    return inst;
+  }
+  return { FakeIdentifyThrottler, instances };
 }
 
 function makeFakeRESTCtor() {
@@ -103,6 +125,11 @@ function makeShim(overrides = {}) {
   const { FakeREST, instances: restInstances } = makeFakeRESTCtor();
   const store = makeFakeStore();
   const logger = makeFakeLogger();
+  const onFatal = jest.fn();
+  const {
+    FakeIdentifyThrottler,
+    instances: identifyThrottlerInstances,
+  } = makeFakeIdentifyThrottlerCtor();
   const shim = createGatewayWsShim({
     token: 'test-token',
     intents: 1,
@@ -110,9 +137,19 @@ function makeShim(overrides = {}) {
     logger,
     WebSocketManagerCtor: FakeManager,
     RESTCtor: FakeREST,
+    IdentifyThrottlerCtor: FakeIdentifyThrottler,
+    onFatal,
     ...overrides,
   });
-  return { shim, store, logger, managerInstances, restInstances };
+  return {
+    shim,
+    store,
+    logger,
+    onFatal,
+    managerInstances,
+    restInstances,
+    identifyThrottlerInstances,
+  };
 }
 
 describe('createGatewayWsShim — factory validation', () => {
@@ -121,6 +158,9 @@ describe('createGatewayWsShim — factory validation', () => {
     expect(() => createGatewayWsShim({ token: 't' })).toThrow(/intents/);
     expect(() => createGatewayWsShim({ token: 't', intents: 0 })).toThrow(/store is required/);
     expect(() => createGatewayWsShim({ token: 't', intents: 0, store: {} })).toThrow(/logger is required/);
+    expect(() => createGatewayWsShim({
+      token: 't', intents: 0, store: {}, logger: {},
+    })).toThrow(/onFatal/);
   });
 });
 
@@ -145,12 +185,17 @@ describe('start — wiring + connect', () => {
     const args = managerInstances[0]._constructorArgs;
     expect(args.token).toBe('test-token');
     expect(args.intents).toBe(1);
+    // The process-global IDENTIFY cap is valid only for one shard. Pin the
+    // manager so a future Discord-recommended shard-count increase cannot
+    // silently turn shard 1's first IDENTIFY into a fatal attempt 2.
+    expect(args.shardCount).toBe(1);
     // REST was lazy-constructed since `rest` wasn't injected.
     expect(restInstances).toHaveLength(1);
     expect(restInstances[0].setToken).toHaveBeenCalledWith('test-token');
     expect(args.rest).toBe(restInstances[0]);
     expect(typeof args.retrieveSessionInfo).toBe('function');
     expect(typeof args.updateSessionInfo).toBe('function');
+    expect(typeof args.buildIdentifyThrottler).toBe('function');
   });
 
   it('rejects when start() is called twice', async () => {
@@ -310,7 +355,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
   });
 
   it('isConnected() flips true on shard Resumed event (Pillar 2 happy path)', async () => {
-    // @discordjs/ws v1.2.x emits Resumed with `(shardId: number)` —
+    // @discordjs/ws v1.2.3 emits Resumed with `(shardId: number)` —
     // a bare number, not an object. Match upstream shape so the
     // fixture documents the real contract.
     const { shim, managerInstances } = makeShim();
@@ -327,7 +372,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
       shardId: 0,
     });
     expect(shim.isConnected()).toBe(true);
-    // @discordjs/ws v1.2.x Closed payload is `{ code, shardId }` —
+    // @discordjs/ws v1.2.3 Closed payload is `{ code, shardId }` —
     // no `reason`. Listener destructures `reason` defensively
     // against a future minor adding it; the fallback logs null.
     managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
@@ -476,41 +521,541 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
 });
 
 describe('IDENTIFY budget guard', () => {
-  it('passes through when mirror is non-null (RESUME path; no budget impact)', async () => {
-    const { shim, store, managerInstances } = makeShim();
-    store._setMirror({ sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 });
+  it('fails health immediately when the budget trips inside an in-flight start connect', async () => {
+    let overBudgetController;
+    const managerInstances = [];
+    function BudgetTripManager(args) {
+      const inst = Object.assign(new EventEmitter(), {
+        _constructorArgs: args,
+        fetchGatewayInformation: jest.fn().mockResolvedValue({
+          session_start_limit: { max_concurrency: 1 },
+        }),
+      });
+      inst.connect = jest.fn(async () => {
+        const throttler = await args.buildIdentifyThrottler(inst);
+        await throttler.waitForIdentify(0, new AbortController().signal);
+        overBudgetController = new AbortController();
+        return throttler.waitForIdentify(0, overBudgetController.signal);
+      });
+      managerInstances.push(inst);
+      return inst;
+    }
+    let resolveFatal;
+    const fatalObserved = new Promise(resolve => { resolveFatal = resolve; });
+    const onFatal = jest.fn(() => { resolveFatal(); });
+    const { shim } = makeShim({ WebSocketManagerCtor: BudgetTripManager, onFatal });
 
+    const starting = shim.start({ timeoutMs: 5_000 });
+    await fatalObserved;
+
+    expect(managerInstances[0].connect).toHaveBeenCalledTimes(1);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(shim.isReady()).toBe(false);
+    expect(shim.isConnected()).toBe(false);
+
+    const closed = new Error('closed during fatal shutdown');
+    overBudgetController.abort(closed);
+    await expect(starting).rejects.toBe(closed);
+  });
+  it('keeps retrieveSessionInfo a pure pass-through across repeated pre-READY reads', async () => {
+    const { shim, store, managerInstances } = makeShim();
     await shim.start();
     const { retrieveSessionInfo } = managerInstances[0]._constructorArgs;
 
-    // 100 calls, all return the mirror, identifyAttempts stays 0.
+    // @discordjs/ws reads session state during connect, heartbeats,
+    // dispatches, and invalid-session handling. Those reads are not
+    // IDENTIFY attempts and must never consume the quota guard.
     for (let i = 0; i < 100; i++) {
-      expect(retrieveSessionInfo('0:1')).not.toBeNull();
+      expect(retrieveSessionInfo('0:1')).toBeNull();
     }
     expect(shim._getIdentifyAttemptsForTest()).toBe(0);
+
+    store._setMirror({ sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1 });
+    expect(retrieveSessionInfo('0:1')).toEqual({
+      sessionId: 'sess-A', resumeURL: 'wss://r/a', sequence: 1,
+    });
   });
 
-  it('throws on second null-mirror call (cap = 1)', async () => {
-    const { shim, managerInstances } = makeShim();
-    // Default store mirror is null.
-
+  it('counts actual identify grants and blocks a second grant while shutdown starts', async () => {
+    const {
+      shim, logger, onFatal, managerInstances, identifyThrottlerInstances,
+    } = makeShim();
     await shim.start();
-    const { retrieveSessionInfo } = managerInstances[0]._constructorArgs;
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    expect(identifyThrottlerInstances).toHaveLength(1);
+    expect(identifyThrottlerInstances[0].maxConcurrency).toBe(1);
 
-    // First call: budget=1, returns null (IDENTIFY pending).
-    expect(retrieveSessionInfo('0:1')).toBeNull();
+    await throttler.waitForIdentify(0, new AbortController().signal);
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
 
-    // Second call: budget exhausted, throws.
-    let thrown;
-    try {
-      retrieveSessionInfo('0:1');
-    } catch (err) {
-      thrown = err;
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' } } },
+      shardId: 0,
+    });
+    expect(shim.isReady()).toBe(true);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    // Throwing here is unsafe: @discordjs/ws catches throttler
+    // failures, reconnects, and then proceeds to send IDENTIFY.
+    // The over-budget grant therefore stays pending until shutdown
+    // closes the shard and aborts its signal.
+    const secondController = new AbortController();
+    const blocked = throttler.waitForIdentify(0, secondController.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    const fatalError = onFatal.mock.calls[0][0];
+    expect(fatalError.code).toBe('GATEWAY_IDENTIFY_BUDGET');
+    expect(fatalError.message).toMatch(/cap 1/);
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: IDENTIFY budget exhausted; shutting down',
+      { attempt: 2, cap: MAX_IDENTIFY_ATTEMPTS },
+    );
+    expect(shim._getIdentifyAttemptsForTest()).toBe(2);
+    // A fatal budget trip is a terminal process state. Health must fail
+    // immediately so ECS replaces the task even if graceful shutdown stalls.
+    expect(shim.isReady()).toBe(false);
+    expect(shim.isConnected()).toBe(false);
+    await expect(shim.connect()).rejects.toThrow(/IDENTIFY-budget fatal/);
+
+    const abortReason = new Error('shard closed');
+    secondController.abort(abortReason);
+    await expect(blocked).rejects.toBe(abortReason);
+  });
+
+  it('counts and bounds a non-abort delegate failure because upstream would still IDENTIFY', async () => {
+    const throttleError = Object.assign(new Error('delegate failed'), { code: 'THROTTLE_DRIFT' });
+    function RejectingIdentifyThrottler() {
+      return { waitForIdentify: jest.fn().mockRejectedValue(throttleError) };
     }
-    expect(thrown).toBeDefined();
-    expect(thrown.code).toBe('GATEWAY_IDENTIFY_BUDGET');
-    expect(thrown.message).toMatch(/cap 1/);
+    const {
+      shim, logger, managerInstances, onFatal,
+    } = makeShim({
+      IdentifyThrottlerCtor: RejectingIdentifyThrottler,
+    });
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: identify throttle delegate failed; counting attempted grant',
+      { errorName: 'Error', errorCode: 'THROTTLE_DRIFT' },
+    );
+
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(2);
+    expect(onFatal).toHaveBeenCalledTimes(1);
+
+    controller.abort(throttleError);
+    await expect(blocked).rejects.toBe(throttleError);
+  });
+
+  it('does not burn an attempt when the shard aborts as the delegate releases', async () => {
+    let releaseDelegate;
+    function DeferredIdentifyThrottler() {
+      return {
+        waitForIdentify: jest.fn(() => new Promise((resolve) => {
+          releaseDelegate = resolve;
+        })),
+      };
+    }
+    const { shim, managerInstances, onFatal } = makeShim({
+      IdentifyThrottlerCtor: DeferredIdentifyThrottler,
+    });
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    const controller = new AbortController();
+    const aborted = throttler.waitForIdentify(0, controller.signal);
+    const reason = new Error('shard closed at throttle boundary');
+
+    controller.abort(reason);
+    releaseDelegate();
+
+    await expect(aborted).rejects.toBe(reason);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+
+  it('installs the budget guard when gateway information cannot be fetched', async () => {
+    const {
+      shim, logger, managerInstances, identifyThrottlerInstances, onFatal,
+    } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockRejectedValueOnce(Object.assign(
+      new Error('gateway unavailable'),
+      { code: 'HTTP_503', status: 503 },
+    ));
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    expect(identifyThrottlerInstances.at(-1).maxConcurrency).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: gateway info fetch failed; defaulting max_concurrency to 1',
+      { errorName: 'Error', errorCode: 'HTTP_503', status: 503 },
+    );
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+
+  it('keeps the budget guard when the identify throttler constructor throws', async () => {
+    function ThrowingIdentifyThrottler() {
+      throw Object.assign(new Error('constructor changed'), { code: 'BAD_EXPORT' });
+    }
+    const {
+      shim, logger, managerInstances, onFatal,
+    } = makeShim({ IdentifyThrottlerCtor: ThrowingIdentifyThrottler });
+    await shim.start();
+    const mgr = managerInstances[0];
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: identify throttler construction failed; using budget-only fallback',
+      { errorName: 'Error', errorCode: 'BAD_EXPORT' },
+    );
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+  });
+
+  it.each([
+    [{}, null],
+    [{ session_start_limit: { max_concurrency: 0 } }, 0],
+    [{ session_start_limit: { max_concurrency: '1' } }, '1'],
+  ])('defaults invalid gateway max_concurrency to 1 and warns (%#)', async (info, observed) => {
+    const {
+      shim, logger, managerInstances, identifyThrottlerInstances,
+    } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockResolvedValueOnce(info);
+
+    await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    expect(identifyThrottlerInstances.at(-1).maxConcurrency).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-ws-shim: gateway info has invalid max_concurrency; defaulting to 1',
+      { observedMaxConcurrency: observed },
+    );
+  });
+
+  it('reports a Discord shard recommendation above the process-global single-shard ceiling', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockResolvedValue({
+      shards: 2,
+      session_start_limit: { max_concurrency: 1 },
+    });
+    logger.error.mockImplementation((message) => {
+      if (message === 'gateway-ws-shim: Discord recommends more than one shard') {
+        throw new Error('logger-failure');
+      }
+    });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: Discord recommends more than one shard',
+      { recommendedShards: 2, configuredShards: 1 },
+    );
+  });
+
+  it('retains the guard when gateway-fetch fallback logging throws', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockRejectedValueOnce(new Error('gateway-down'));
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('retains the guard when invalid-gateway-info logging throws', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockResolvedValueOnce({
+      session_start_limit: { max_concurrency: 0 },
+    });
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('retains the fallback guard when constructor-failure logging throws', async () => {
+    function ThrowingIdentifyThrottler() {
+      throw new Error('constructor-failure');
+    }
+    const {
+      shim, logger, managerInstances,
+    } = makeShim({ IdentifyThrottlerCtor: ThrowingIdentifyThrottler });
+    await shim.start();
+    const mgr = managerInstances[0];
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('grants an in-budget IDENTIFY when pending logging throws', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    logger.info.mockImplementation(() => { throw new Error('logger-failure'); });
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('still starts fatal shutdown and blocks the grant when fatal logging throws', async () => {
+    const { shim, logger, managerInstances, onFatal } = makeShim();
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    const controller = new AbortController();
+
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(shim.isReady()).toBe(false);
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+  });
+
+  it.each([
+    ['throws synchronously', () => { throw new Error('sync shutdown failure'); }, 'threw'],
+    ['rejects asynchronously', async () => { throw new Error('async shutdown failure'); }, 'rejected'],
+  ])('keeps the process unhealthy when onFatal %s', async (_label, onFatal, logSuffix) => {
+    const { shim, logger, managerInstances } = makeShim({ onFatal });
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(shim.isReady()).toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      `gateway-ws-shim: fatal shutdown handler ${logSuffix}`,
+      { error: expect.stringContaining('shutdown failure') },
+    );
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+  });
+
+  it('does not burn budget when a grant receives an already-aborted signal', async () => {
+    const { shim, managerInstances, onFatal } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    const controller = new AbortController();
+    const reason = new Error('already closed');
+    controller.abort(reason);
+
+    await expect(throttler.waitForIdentify(0, controller.signal)).rejects.toBe(reason);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+
+  it('uses an AbortError fallback when a malformed aborted signal omits its reason', async () => {
+    const { shim, managerInstances, onFatal } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    await expect(throttler.waitForIdentify(0, {
+      aborted: true,
+      reason: undefined,
+    })).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'gateway-ws-shim: shard aborted during identify throttle',
+    });
+    expect(shim._getIdentifyAttemptsForTest()).toBe(0);
+    expect(onFatal).not.toHaveBeenCalled();
+  });
+
+  it('stop still flushes and detaches listeners after the budget trips', async () => {
+    const {
+      shim, store, logger, managerInstances, onFatal,
+    } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const handler = jest.fn();
+    shim.onDispatch(handler);
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onFatal).toHaveBeenCalledTimes(1);
+
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'late-app' } } },
+      shardId: 0,
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(shim.isReady()).toBe(false);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(2);
+    mgr.emit(WebSocketShardEvents.Closed, { code: 1000, reason: 'shutdown', shardId: 0 });
+    expect(logger.info).toHaveBeenCalledWith(
+      'gateway-ws-shim: shard closed during terminal teardown',
+      { shardId: 0, code: 1000, reason: 'shutdown' },
+    );
+
+    await shim.stop();
+    expect(store.flushFinal).toHaveBeenCalledTimes(1);
+    expect(mgr.listenerCount(WebSocketShardEvents.Dispatch)).toBe(0);
+    expect(mgr.listenerCount(WebSocketShardEvents.Error)).toBe(0);
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+  });
+
+  it('contains logger failure when a shard closes during terminal teardown', async () => {
+    const {
+      shim, logger, managerInstances,
+    } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    const controller = new AbortController();
+    const blocked = throttler.waitForIdentify(0, controller.signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    logger.info.mockImplementation((message) => {
+      if (message === 'gateway-ws-shim: shard closed during terminal teardown') {
+        throw new Error('logger-failure');
+      }
+    });
+
+    expect(() => mgr.emit(WebSocketShardEvents.Closed, {
+      code: 1000, reason: 'shutdown', shardId: 0,
+    })).not.toThrow();
+
+    controller.abort(new Error('closed'));
+    await expect(blocked).rejects.toThrow('closed');
+    await shim.stop();
+  });
+
+  it('keeps an over-budget grant pending and logs once if upstream omits the abort signal', async () => {
+    const { shim, logger, managerInstances, onFatal } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    const blocked = throttler.waitForIdentify(0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(await Promise.race([blocked.then(() => 'released'), Promise.resolve('pending')]))
+      .toBe('pending');
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
+    );
+
+    const alsoBlocked = throttler.waitForIdentify(1);
+    await Promise.resolve();
+    expect(await Promise.race([alsoBlocked.then(() => 'released'), Promise.resolve('pending')]))
+      .toBe('pending');
+    expect(logger.error.mock.calls.filter(([message]) => (
+      message === 'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever'
+    ))).toHaveLength(1);
+  });
+
+  it.each([
+    ['has no listener API', { aborted: false }, 'TypeError'],
+    ['throws while registering', {
+      aborted: false,
+      addEventListener: () => { throw new Error('listener-registration-failure'); },
+    }, 'Error'],
+  ])('keeps an over-budget grant pending if its abort signal %s', async (
+    _label,
+    unusableSignal,
+    errorName,
+  ) => {
+    const { shim, logger, managerInstances, onFatal } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    const blocked = throttler.waitForIdentify(0, unusableSignal);
+    let blockedState = 'pending';
+    blocked.then(
+      () => { blockedState = 'fulfilled'; },
+      () => { blockedState = 'rejected'; },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(blockedState).toBe('pending');
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
+      { errorName },
+    );
+  });
+
+  it('notifies the fatal handler only once across repeated over-budget grants', async () => {
+    const { shim, onFatal, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    await throttler.waitForIdentify(0, new AbortController().signal);
+    const controllers = [new AbortController(), new AbortController()];
+    const blocked = controllers.map(controller => (
+      throttler.waitForIdentify(0, controller.signal)
+    ));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(shim._getIdentifyAttemptsForTest()).toBe(2);
+    controllers.forEach(controller => controller.abort(new Error('closed')));
+    await Promise.allSettled(blocked);
   });
 
   it('exposes MAX_IDENTIFY_ATTEMPTS = 1 as a pinned constant', () => {
@@ -527,10 +1072,10 @@ describe('IDENTIFY budget guard', () => {
     const { shim, managerInstances } = makeShim();
     await shim.start();
     const mgr = managerInstances[0];
-    const { retrieveSessionInfo } = mgr._constructorArgs;
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
 
-    // Cold start: retrieve → null → IDENTIFY pending (count=1).
-    expect(retrieveSessionInfo('0:1')).toBeNull();
+    // Cold start: the first actual IDENTIFY grant consumes one.
+    await throttler.waitForIdentify(0, new AbortController().signal);
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
 
     // READY arrives — counter resets.
@@ -540,16 +1085,10 @@ describe('IDENTIFY budget guard', () => {
     });
     expect(shim._getIdentifyAttemptsForTest()).toBe(0);
 
-    // Later, Discord drops the session past its resume buffer.
-    // Library calls retrieve → mirror is null → another IDENTIFY
-    // is permitted (count=1, still under cap).
-    expect(retrieveSessionInfo('0:1')).toBeNull();
+    // Later, Discord drops the session past its resume buffer. A
+    // new actual IDENTIFY grant is permitted after READY reset.
+    await throttler.waitForIdentify(0, new AbortController().signal);
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
-
-    // A second consecutive null-mirror retrieve (no READY between)
-    // does trip the cap — the loop-without-READY hazard the cap
-    // exists to catch.
-    expect(() => retrieveSessionInfo('0:1')).toThrow(/IDENTIFY budget exhausted/);
   });
 });
 
@@ -639,11 +1178,11 @@ describe('READY detection', () => {
     const { shim, managerInstances } = makeShim();
     await shim.start();
     const mgr = managerInstances[0];
-    const { retrieveSessionInfo } = mgr._constructorArgs;
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
 
     // Synthesize a non-zero counter as if a prior reconnect
     // attempt had landed.
-    retrieveSessionInfo('0:1'); // mirror is null → count=1
+    await throttler.waitForIdentify(0, new AbortController().signal);
     expect(shim._getIdentifyAttemptsForTest()).toBe(1);
 
     mgr.emit(WebSocketShardEvents.Dispatch, {
@@ -900,13 +1439,11 @@ describe('constants are pinned', () => {
     expect(DEFAULT_CONNECT_TIMEOUT_MS).toBe(30_000);
   });
 
-  it('VERIFIED_DJS_WS_MAJOR_MINOR matches the installed @discordjs/ws major.minor', () => {
-    // The wsConnected mirror depends on @discordjs/ws's
-    // WebSocketShard.onMessage emitting Ready/Resumed BEFORE the
-    // Dispatch fan-out — verified against the version captured by
-    // VERIFIED_DJS_WS_MAJOR_MINOR. A node_modules bump past that
-    // range fails this test, forcing whoever bumps the dep to
-    // re-read the upstream dispatch handler before merging.
+  it('VERIFIED_DJS_WS_VERSION matches the exact installed @discordjs/ws version', () => {
+    // The wsConnected mirror depends on WebSocketShard.onMessage emitting
+    // Ready/Resumed before Dispatch. The identify guard also depends on the
+    // v1.2.3 custom-throttler catch falling through to IDENTIFY, so any upgrade
+    // must re-read both upstream paths before changing the pinned version.
     // @discordjs/ws's exports field blocks require('.../package.json'),
     // so locate the install via require.resolve (works regardless of
     // whether the dep landed in apps/discord/node_modules or got
@@ -924,7 +1461,133 @@ describe('constants are pinned', () => {
     }
     const wsRoot = wsEntry.slice(0, markerIdx) + marker.slice(0, -1);
     const djsWsVersion = JSON.parse(fs.readFileSync(path.join(wsRoot, 'package.json'), 'utf8')).version;
-    const installedMajorMinor = djsWsVersion.split('.').slice(0, 2).join('.');
-    expect(installedMajorMinor).toBe(VERIFIED_DJS_WS_MAJOR_MINOR);
+    expect(djsWsVersion).toBe(VERIFIED_DJS_WS_VERSION);
+    expect(require('../package.json').dependencies['@discordjs/ws']).toBe(VERIFIED_DJS_WS_VERSION);
   });
+
+  it('pins the upstream rejection behavior that requires a blocking budget guard', async () => {
+    const strategy = {
+      waitForIdentify: jest.fn().mockRejectedValue(new Error('custom throttle rejected')),
+      options: {
+        token: 'shape-contract-only',
+        identifyProperties: {},
+        intents: 0,
+        shardCount: 1,
+        readyTimeout: 1,
+      },
+    };
+    const shard = new WebSocketShard(strategy, 0);
+    shard.destroy = jest.fn().mockResolvedValue(undefined);
+    shard.send = jest.fn().mockResolvedValue(undefined);
+    shard.waitForEvent = jest.fn().mockResolvedValue(undefined);
+
+    expect(typeof shard.identify).toBe('function');
+    // These mocks pin upstream control flow only: a rejected throttle reaches
+    // destroy and then the op-2 send branch. They do not claim a destroyed
+    // real transport could successfully transmit that frame.
+    await shard.identify();
+
+    expect(shard.destroy).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'Identify throttling logic failed',
+    }));
+    expect(shard.send).toHaveBeenCalledWith(expect.objectContaining({ op: 2 }));
+    expect(shard.destroy.mock.invocationCallOrder[0])
+      .toBeLessThan(shard.send.mock.invocationCallOrder[0]);
+  });
+
+  it('pins that an aborted throttle wait suppresses the upstream IDENTIFY send', async () => {
+    let shard;
+    const strategy = {
+      waitForIdentify: jest.fn(async (_shardId, signal) => {
+        shard.emit(WebSocketShardEvents.Closed, { code: 1000, shardId: 0 });
+        throw signal.reason;
+      }),
+      options: {
+        token: 'shape-contract-only',
+        identifyProperties: {},
+        intents: 0,
+        shardCount: 1,
+        readyTimeout: 1,
+      },
+    };
+    shard = new WebSocketShard(strategy, 0);
+    shard.destroy = jest.fn().mockResolvedValue(undefined);
+    shard.send = jest.fn().mockResolvedValue(undefined);
+    shard.waitForEvent = jest.fn().mockResolvedValue(undefined);
+
+    await shard.identify();
+
+    expect(strategy.waitForIdentify).toHaveBeenCalledWith(0, expect.any(AbortSignal));
+    expect(shard.destroy).not.toHaveBeenCalled();
+    expect(shard.send).not.toHaveBeenCalled();
+  });
+
+  it('real @discordjs/ws exposes and honors the configured identify throttler', async () => {
+    expect(typeof SimpleIdentifyThrottler).toBe('function');
+    const realThrottler = new SimpleIdentifyThrottler(1);
+    expect(typeof realThrottler.waitForIdentify).toBe('function');
+
+    const delegate = { waitForIdentify: jest.fn().mockResolvedValue(undefined) };
+    const buildIdentifyThrottler = jest.fn().mockResolvedValue(delegate);
+    const manager = new WebSocketManager({
+      token: 'shape-contract-only',
+      intents: 0,
+      rest: { get: jest.fn() },
+      buildIdentifyThrottler,
+      retrieveSessionInfo: jest.fn(),
+      updateSessionInfo: jest.fn(),
+    });
+    expect(manager.options.buildIdentifyThrottler).toBe(buildIdentifyThrottler);
+
+    const strategy = new SimpleContextFetchingStrategy(manager, {});
+    const signal = new AbortController().signal;
+    await strategy.waitForIdentify(0, signal);
+    expect(buildIdentifyThrottler).toHaveBeenCalledWith(manager);
+    expect(delegate.waitForIdentify).toHaveBeenCalledWith(0, signal);
+  });
+
+  it('real @discordjs/ws RESUMEs a fully hydrated cross-process session', async () => {
+    class FakeWebSocket {}
+    let FreshWebSocketShard;
+    jest.doMock('ws', () => ({ WebSocket: FakeWebSocket }));
+    try {
+      jest.isolateModules(() => {
+        ({ WebSocketShard: FreshWebSocketShard } = require('@discordjs/ws'));
+      });
+    } finally {
+      jest.dontMock('ws');
+    }
+
+    const store = makeFakeStore();
+    const hydrated = {
+      sessionId: 'persisted-session',
+      resumeURL: 'wss://resume.discord.test',
+      sequence: 42,
+      shardId: 0,
+      shardCount: 1,
+    };
+    store._setMirror(hydrated);
+    const strategy = {
+      retrieveSessionInfo: store.retrieveSessionInfo,
+      options: {
+        token: 'shape-contract-only',
+        version: 10,
+        encoding: 'json',
+        compression: null,
+        shardCount: 1,
+        gatewayInformation: { url: 'wss://gateway.discord.test' },
+        helloTimeout: 1,
+      },
+    };
+    const shard = new FreshWebSocketShard(strategy, 0);
+    shard.waitForEvent = jest.fn().mockResolvedValue({ ok: true });
+    shard.resume = jest.fn().mockResolvedValue(undefined);
+    shard.identify = jest.fn().mockResolvedValue(undefined);
+
+    await shard.internalConnect();
+
+    expect(shard.resume).toHaveBeenCalledWith(hydrated);
+    expect(shard.identify).not.toHaveBeenCalled();
+  });
+
 });
