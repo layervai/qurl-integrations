@@ -506,7 +506,7 @@ describe('reclaim', () => {
   it('revokes the rest when one resource fails', async () => {
     const ledger = tempLedger(['r_1', 'r_2', 'r_3', 'r_4', 'r_5'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      if (id === 'r_2') throw new Error('qURL API DELETE /qurls/r_2 failed (500)');
+      if (id === 'r_2') throw new Error('qURL API DELETE /resources/r_2 failed (500)');
     });
 
     const result = await reclaim(ledger);
@@ -524,20 +524,20 @@ describe('reclaim', () => {
     // thousands of ids would print thousands of "1x" lines instead of one.
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
-      throw new Error(`qURL API DELETE /qurls/${id} failed (401)`);
+      throw new Error(`qURL API DELETE /resources/${id} failed (401)`);
     });
 
     const result = await reclaim(ledger);
 
     expect(result).toMatchObject({ revoked: 0, failed: 3 });
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('3x qURL API DELETE /qurls/<id> failed (401)'),
+      expect.stringContaining('3x qURL API DELETE /resources/<id> failed (401)'),
     );
   });
 
   it('counts an already-gone resource as revoked, not failed', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(new Error('qURL API DELETE /qurls/r_1 failed (404)'));
+    deleteLink.mockRejectedValue(new Error('qURL API DELETE /resources/r_1 failed (404)'));
 
     const result = await reclaim(ledger);
 
@@ -627,7 +627,7 @@ describe('reclaim', () => {
 
   it('counts a 410 as already-gone, the same as a 404', async () => {
     const ledger = tempLedger(line('r_1'));
-    deleteLink.mockRejectedValue(new Error('qURL API DELETE /qurls/r_1 failed (410)'));
+    deleteLink.mockRejectedValue(new Error('qURL API DELETE /resources/r_1 failed (410)'));
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ revoked: 1, failed: 0 });
   });

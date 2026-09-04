@@ -1211,7 +1211,7 @@ async function reclaim(ledgerPath) {
           // uniform 401 across 5,000 ids would print 5,000 lines of "1x"
           // instead of "5000x", defeating the tally and flooding the very
           // scrollback the heartbeat is trying to keep readable.
-          const cause = e.message.replace(/\/qurls\/\S+/, '/qurls/<id>');
+          const cause = e.message.replace(/\/resources\/\S+/, '/resources/<id>');
           causes.set(cause, (causes.get(cause) || 0) + 1);
         }
       }

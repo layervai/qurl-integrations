@@ -219,12 +219,13 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   return result;
 }
 
-// Bot-side charset guard on the resource ID, independent of the SDK client (in
-// the same defense-in-depth spirit as the SSRF guards): rejects malformed IDs
-// with a stable bot-side message before any network work. qurl-service resource
-// IDs are opaque public identifiers (an unpadded base64url public key, or a
-// CRID) — never derive their shape from the `r_…` routing labels that can still
-// appear in qurl.site hostnames.
+// Bot-side charset guard, independent of the SDK client: reject characters
+// outside the current public-ID alphabets with a stable message before any
+// network work. Canonical public keys use unpadded base64url and CRIDs use
+// lowercase unpadded base32, both subsets of [\w-]; qurl-service owns their
+// lengths and semantics.
+// TODO(upstream-contract): Keep this alphabet superset aligned with the
+// ResourceId schema in qurl-service's api/openapi.yaml.
 function validateResourceId(resourceId) {
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -234,13 +235,11 @@ function validateResourceId(resourceId) {
 async function deleteLink(resourceId, apiKey) {
   validateResourceId(resourceId);
   const client = makeClient(apiKey);
-  // Revoke at the resource level (DELETE /v1/resources/{id}). It runs the same
-  // revocation as DELETE /v1/qurls/{id} — every link minted on the resource
-  // stops resolving, and a repeat call is an idempotent 204 — but the SDK's
-  // delete() still enforces the retired `r_` resource-ID prefix client-side,
-  // so it rejects every ID qurl-service has issued since resource IDs became
-  // public keys and no DELETE ever reaches the wire. deleteResource() applies
-  // only the non-empty guard and leaves ID grammar to the service.
+  // Revoke at the resource level: every link minted on the resource stops
+  // resolving, and repeats are idempotent. SDK 0.3.0's delete() rejects current
+  // public IDs using a retired `r_` prefix check before any request is sent.
+  // qurl-typescript#244 fixes that older SDK method for other consumers; keep
+  // deleteResource() here because it directly names this whole-resource action.
   await callQurl('DELETE', `/resources/${resourceId}`, () => client.deleteResource(resourceId));
   logger.info('Revoked qURL', { resource_id: resourceId });
 }

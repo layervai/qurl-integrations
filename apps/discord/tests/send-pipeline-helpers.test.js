@@ -6,6 +6,11 @@
  * (which exercises the qurl_sends + qurl_send_configs DDB tables).
  */
 
+const {
+  PUBLIC_RESOURCE_ID,
+  TEST_RESOURCE_CRID,
+} = require('./helpers/qurl-fixtures');
+
 // ---------------------------------------------------------------------------
 // Mocks — set up BEFORE requiring modules under test
 // ---------------------------------------------------------------------------
@@ -622,34 +627,47 @@ describe('qURL client', () => {
   });
 
   describe('deleteLink', () => {
-    // Shape of a current qurl-service resource ID: an unpadded base64url
-    // P-256 SPKI public key (no `r_` prefix). The SDK's delete() rejects it
-    // client-side, so revoke must go through the resource endpoint.
-    const PUBLIC_KEY_RESOURCE_ID = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEh6JV2atn5OcJec4fe9lgxMNjQyDUEmyeXohUIRsTfjnvKqoe1424TDNd0vvSfA82WLciGOvQ5S43mB3bA15e5Q';
-
-    it('revokes a public-key resource ID through DELETE /v1/resources/{id}', async () => {
+    it.each([
+      ['public-key resource ID', PUBLIC_RESOURCE_ID],
+      ['CRID', TEST_RESOURCE_CRID],
+    ])('revokes a %s through DELETE /v1/resources/{id}', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: true,
         status: 204,
       });
 
-      await qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID);
+      await qurl.deleteLink(resourceId);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe(`https://api.test.local/v1/resources/${PUBLIC_KEY_RESOURCE_ID}`);
+      expect(url).toBe(`https://api.test.local/v1/resources/${resourceId}`);
       expect(opts.method).toBe('DELETE');
     });
 
-    it('does not route revokes through the SDK delete() prefix check', async () => {
-      // Regression pin: the SDK's delete() throws a client_validation error
-      // for any ID without the retired `r_` prefix before fetching. A revoke
-      // that reaches fetch proves deleteLink no longer depends on it.
-      globalThis.fetch = jest.fn().mockResolvedValue({ ok: true, status: 204 });
+    it('reports the resource path in an auth-failure audit event', async () => {
+      const logger = require('../src/logger');
+      const { AUDIT_EVENTS } = require('../src/constants');
+      logger.audit.mockClear();
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        headers: { get: () => null },
+        json: async () => ({
+          error: { status: 401, code: 'unauthorized', title: 'Unauthorized' },
+        }),
+      });
 
-      await expect(qurl.deleteLink('ahCRID-shaped_identifier')).resolves.toBeUndefined();
+      await expect(qurl.deleteLink(TEST_RESOURCE_CRID)).rejects.toThrow(/401/);
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-      expect(globalThis.fetch.mock.calls[0][0]).toBe('https://api.test.local/v1/resources/ahCRID-shaped_identifier');
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+        expect.objectContaining({
+          dependency: 'qurl_service',
+          status: 401,
+          method: 'DELETE',
+          path: `/resources/${TEST_RESOURCE_CRID}`,
+        }),
+      );
     });
 
     it('throws on API error', async () => {
