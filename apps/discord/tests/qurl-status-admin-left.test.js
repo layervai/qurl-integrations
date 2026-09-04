@@ -49,8 +49,11 @@ const STORED_KEY = 'lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 // the surface the status handler actually reads is mocked.
 function makeStatusInteraction({ memberFetchBehavior }) {
   const reply = jest.fn();
+  const editReply = jest.fn();
   return {
     reply: reply.mockImplementation(() => Promise.resolve()),
+    deferReply: jest.fn().mockResolvedValue(undefined),
+    editReply: editReply.mockImplementation(() => Promise.resolve()),
     isAutocomplete: () => false,
     isChatInputCommand: () => true,
     commandName: 'qurl',
@@ -61,7 +64,8 @@ function makeStatusInteraction({ memberFetchBehavior }) {
       members: { fetch: jest.fn().mockImplementation(memberFetchBehavior) },
     },
     user: { id: 'admin-current' },
-    _reply: reply,
+    _initialReply: reply,
+    _reply: editReply,
   };
 }
 
@@ -88,6 +92,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
       memberFetchBehavior: async () => ({ id: 'admin-original' }), // present
     });
     await handleCommand(interaction);
+    expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(interaction._initialReply).not.toHaveBeenCalled();
     expect(interaction._reply).toHaveBeenCalledTimes(1);
     const replyContent = interaction._reply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
@@ -137,6 +143,25 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toMatch(/check could not be completed/i);
     expect(replyContent).not.toMatch(/revoked|invalid/i);
     expect(replyContent).not.toContain(STORED_KEY);
+  });
+
+  it('asks the admin to rerun setup when the config row has no stored key', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    db.getGuildApiKey.mockResolvedValueOnce(null);
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._reply.mock.calls[0][0].content;
+    expect(replyContent).toContain('`/qurl setup`');
+    expect(replyContent).not.toContain('try `/qurl status` again later');
+    expect(mockGetIdentity).not.toHaveBeenCalled();
   });
 
   it('shows the passive nudge when members.fetch throws DiscordAPIError 10007 (Unknown Member)', async () => {

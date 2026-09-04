@@ -51,6 +51,8 @@ describe('qURL client — getIdentity', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    // Distinct from the guild key below to pin that getIdentity never falls
+    // back to the bot's own key.
     jest.mock('../src/config', () => ({
       QURL_API_KEY: 'fallback-api-key',
       QURL_ENDPOINT: 'https://api.test.local',

@@ -8737,27 +8737,32 @@ const commands = [
             ephemeral: true,
           });
         }
+        await interaction.deferReply({ ephemeral: true });
         const guildConfig = await db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
           // getGuildConfig no longer returns the decrypted key (it would
           // leak via any row dump); go through the explicit accessor and use
           // the plaintext only to authenticate the service-side identity check.
           const plaintextKey = await db.getGuildApiKey(interaction.guildId);
+          if (!plaintextKey) {
+            return interaction.editReply({
+              content: '❌ **The stored qURL key is unavailable.**\n\n'
+                + 'Re-run `/qurl setup` to connect a valid key.',
+            });
+          }
           let identity;
           try {
             identity = await getIdentity(plaintextKey);
           } catch (err) {
             if (err?.status === 401 || err?.status === 403) {
-              return interaction.reply({
+              return interaction.editReply({
                 content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
                   + 'Re-run `/qurl setup` to connect a valid key.',
-                ephemeral: true,
               });
             }
-            return interaction.reply({
+            return interaction.editReply({
               content: '⚠️ **The qURL key check could not be completed.**\n\n'
                 + 'Please try `/qurl status` again later.',
-              ephemeral: true,
             });
           }
 
@@ -8786,14 +8791,13 @@ const commands = [
             }
           }
 
-          return interaction.reply({
+          return interaction.editReply({
             content: `✅ **qURL is configured**\n` +
               `Key prefix: \`${identity.api_key.key_prefix}\`\n` +
               `Scopes: ${identity.api_key.scopes.map(scope => `\`${scope}\``).join(', ')}\n` +
               `Configured by: <@${guildConfig.configured_by}>\n` +
               `Last updated: ${guildConfig.updated_at}` +
               originalAdminLeftNotice,
-            ephemeral: true,
           });
         }
         // Branch the not-configured copy on the active setup flow so
@@ -8810,9 +8814,8 @@ const commands = [
             + '1. Sign up at **https://layerv.ai** to get your API key\n'
             + '2. Run `/qurl setup` and paste the key into the modal\n\n'
             + 'Only server administrators can run setup.';
-        return interaction.reply({
+        return interaction.editReply({
           content: notConfiguredCopy,
-          ephemeral: true,
         });
       }
 

@@ -3,7 +3,6 @@ const {
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
   ERROR_CODE_CLIENT_VALIDATION,
-  ERROR_CODE_UNEXPECTED_RESPONSE,
 } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
@@ -67,10 +66,11 @@ function makeClient(apiKey) {
 }
 
 /**
- * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
+ * Run a qURL call, layering on the bot-specific behaviors the SDK doesn't own.
  * `method`/`path` are labels for the audit/log/error payload (the same
- * dependency/method/path shape the pre-SDK client emitted) — the SDK owns the
- * actual wire path.
+ * dependency/method/path shape the pre-SDK client emitted) — the callee owns
+ * the actual wire path. The raw-fetch identity call sets the same `.status`
+ * error field as the SDK so it receives the same audit and redaction behavior.
  *
  *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
  *     alarm fires independently of any caller's catch path.
@@ -156,17 +156,14 @@ async function getIdentity(apiKey) {
     try {
       body = await response.json();
     } catch {
-      const error = new Error('qURL identity response was not valid JSON');
-      error.code = ERROR_CODE_UNEXPECTED_RESPONSE;
-      throw error;
+      throw new Error('qURL identity response was not valid JSON');
     }
+    // TODO(upstream-contract): mirrors qurl-service's GET /v1/me envelope.
     const identity = body?.data;
     const key = identity?.api_key;
-    if (typeof key?.key_id !== 'string' || typeof key.key_prefix !== 'string' ||
-        !Array.isArray(key.scopes) || key.scopes.some(scope => typeof scope !== 'string')) {
-      const error = new Error('qURL identity response had an unexpected shape');
-      error.code = ERROR_CODE_UNEXPECTED_RESPONSE;
-      throw error;
+    if (typeof key?.key_prefix !== 'string' || !Array.isArray(key.scopes) ||
+        key.scopes.some(scope => typeof scope !== 'string')) {
+      throw new Error('qURL identity response had an unexpected shape');
     }
     return identity;
   });
