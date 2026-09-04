@@ -252,8 +252,10 @@ function normalizeAuth0EmailConnection(raw) {
   return value;
 }
 
-const auth0EmailConnection = normalizeAuth0EmailConnection(
-  process.env.AUTH0_EMAIL_CONNECTION,
+const rawAuth0EmailConnection = process.env.AUTH0_EMAIL_CONNECTION;
+const auth0EmailConnection = normalizeAuth0EmailConnection(rawAuth0EmailConnection);
+const isAuth0EmailConnectionRejected = Boolean(
+  (rawAuth0EmailConnection || '').trim() && !auth0EmailConnection,
 );
 
 // True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
@@ -431,8 +433,14 @@ module.exports = {
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
   // Optional Auth0 connection pinned on every Discord setup authorize
   // redirect. Validated at config load; unlike Slack, empty or unset means no
-  // pin (#1365).
+  // pin (#1365). The shared env-var name is an operator-facing cross-service
+  // contract, not permission to share one task env bundle: Discord and Slack
+  // deliberately read independently provisioned values during the staged
+  // rollout because Discord cannot pin until its Auth0 app enables email.
   AUTH0_EMAIL_CONNECTION: auth0EmailConnection,
+  // Preserve the difference between intentionally unset and rejected input so
+  // structured boot telemetry cannot misreport a fail-open pin as "unset".
+  isAuth0EmailConnectionRejected,
 
   // Flow-dedicated HMAC secret for the qURL OAuth state token
   // (utils/qurl-oauth-state.js) — the preferred key, so ops can rotate

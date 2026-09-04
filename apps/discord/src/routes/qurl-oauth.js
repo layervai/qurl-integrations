@@ -475,6 +475,9 @@ router.get('/callback', rateLimit, async (req, res) => {
   logger.audit(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
     guild_id: guildId,
     configured_by: discordUserId,
+    // Prefix is already shown in the success page and info log; including it
+    // makes this forensic event self-contained without exposing the API key.
+    key_prefix: keyPrefix || null,
     qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint,
     qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
   });

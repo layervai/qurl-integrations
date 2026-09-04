@@ -217,20 +217,34 @@ function noStoreHeaders(req, res, next) {
 // OAuth on — no code change or env-flag re-flip required.
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
+const auth0ConnectionState = auth0Connection
+  ? 'pinned'
+  : config.isAuth0EmailConnectionRejected ? 'rejected' : 'unset';
 const auth0ConnectionPolicyMetadata = {
   event: LOG_EVENTS.QURL_OAUTH_AUTH0_CONNECTION_POLICY,
   connection: auth0Connection,
+  state: auth0ConnectionState,
 };
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
-  const inactiveConnectionMessage = auth0Connection
-    ? `AUTH0_EMAIL_CONNECTION="${auth0Connection}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`
-    : 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
+  let inactiveConnectionMessage;
+  if (auth0Connection) {
+    inactiveConnectionMessage = `AUTH0_EMAIL_CONNECTION="${auth0Connection}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`;
+  } else if (config.isAuth0EmailConnectionRejected) {
+    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth AUTH0_* settings are incomplete.';
+  } else {
+    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
+  }
   logger.info(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
 } else {
-  const auth0ConnectionMessage = auth0Connection
-    ? `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`
-    : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
+  let auth0ConnectionMessage;
+  if (auth0Connection) {
+    auth0ConnectionMessage = `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`;
+  } else if (config.isAuth0EmailConnectionRejected) {
+    auth0ConnectionMessage = 'qURL OAuth authorize redirects send no connection pin because AUTH0_EMAIL_CONNECTION was rejected; correct the deployment value before enabling the pin.';
+  } else {
+    auth0ConnectionMessage = 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
+  }
   // Stable event metadata supports exact grep/filter matching while the
   // human-readable message remains self-sufficient if metadata is flattened.
   // OAuth-live + unpinned warns once per process because the risk is reachable;

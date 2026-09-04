@@ -511,6 +511,7 @@ describe('qurl-oauth routes', () => {
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
+        key_prefix: 'lv_live_abc1',
         qurl_account_subject_fingerprint: AUTH0_ABC_FINGERPRINT,
         qurl_account_fingerprint_key_epoch: SUBJECT_FINGERPRINT_KEY_EPOCH,
       });
