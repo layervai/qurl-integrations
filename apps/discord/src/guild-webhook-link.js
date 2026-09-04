@@ -1,8 +1,9 @@
-// Per-guild qurl-service webhook subscription provisioning.
+// Per-guild qurl-service webhook linking. Default-owner guilds reuse the
+// Lambda-managed subscription; different owners get a BYOK subscription.
 // Called from the two setGuildApiKey call sites + the backfill script.
 // Never re-throws to the caller: the OAuth callback / /qurl setup
 // should succeed for key linking even when view-counter wiring fails
-// (the polling fallback covers it until backfill catches up).
+// (the polling fallback covers it until the link is retried or remediated).
 
 const config = require('./config');
 const db = require('./store');
@@ -11,6 +12,7 @@ const { AUDIT_EVENTS } = require('./constants');
 const {
   ensureWebhookSubscription,
   deleteSubscription,
+  WEBHOOK_ACTIONS,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
   isTruthyEnvFlag,
 } = require('./qurl-webhook-registrar');
@@ -88,7 +90,8 @@ function auditLinkFailure(guildId, reason, extra) {
   });
 }
 
-// Provision (idempotent) a per-guild webhook subscription.
+// Link a guild to a webhook owner. The default owner gets an owner-only
+// mapping; a different owner gets an idempotently provisioned subscription.
 // `action` mirrors ensureWebhookSubscription: 'created' | 'rotated' | 'reused'.
 //
 // `descriptionContext` is interpolated into a qurl-service UI string
@@ -109,6 +112,64 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook link skipped: BASE_URL or QURL_ENDPOINT unset', { guildId });
     auditLinkFailure(guildId, LINK_RESULTS.CONFIG_MISSING);
     return { ok: false, reason: LINK_RESULTS.CONFIG_MISSING };
+  }
+
+  // The default-key subscription belongs to the Lambda lifecycle: its secret
+  // is QURL_WEBHOOK_SECRET, not guild-owned state. Resolve the candidate key's
+  // owner before invoking the per-guild registrar so an alias key for that
+  // same owner cannot rotate the shared default secret. Resolution is lazy so
+  // this also works on gateway-only processes and in the backfill script,
+  // neither of which starts the HTTP registry scan.
+  let matchedDefaultOwnerId;
+  try {
+    matchedDefaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey);
+  } catch (err) {
+    logger.warn('Per-guild webhook owner resolution failed', {
+      error: err?.message, guildId,
+    });
+    auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED, {
+      stage: 'owner-resolution',
+      error_code: err?.code || err?.name || 'unknown',
+    });
+    return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
+  }
+
+  if (matchedDefaultOwnerId) {
+    try {
+      // Store the ownership relationship only. Copying the environment
+      // secret into this row would make the DDB-backed cache entry shadow
+      // QURL_WEBHOOK_SECRET on the next registry scan.
+      await db.setGuildDefaultWebhookOwner(guildId, {
+        webhookOwnerId: matchedDefaultOwnerId,
+        expectedDefaultWebhookSecret: config.QURL_WEBHOOK_SECRET,
+        expectedApiKey: apiKey,
+      });
+    } catch (err) {
+      logger.warn('Default webhook owner mapping persist failed', {
+        error: err?.message, guildId,
+      });
+      auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED, {
+        stage: 'default-owner-persist',
+        error_code: err?.code || err?.name || 'unknown',
+      });
+      return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
+    }
+
+    // The CAS does not return a prior owner, so this replica may retain a stale
+    // old-owner guildIds membership until the next scan. guildIds is not used
+    // for authorization or routing; the authoritative owner secret stays safe.
+    try {
+      subs.ensureDefaultOwnerCacheEntry(matchedDefaultOwnerId);
+    } catch (err) {
+      logger.warn('subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)', {
+        error: err?.message, guildId,
+      });
+    }
+
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
+      guild_id: guildId, action: WEBHOOK_ACTIONS.REUSED, default_owner: true,
+    });
+    return { ok: true, action: WEBHOOK_ACTIONS.REUSED };
   }
 
   let registered = null;
@@ -200,6 +261,11 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     const propagateResult = await db.propagateGuildWebhookSubscription(webhookOwnerId, {
       webhookId, webhookSecret: secret, excludeGuildId: guildId,
     });
+    if (propagateResult.skipped > 0) {
+      logger.info('Per-guild webhook secret propagation skipped concurrently changed siblings', {
+        guildId, webhookOwnerId, webhookId, ...propagateResult,
+      });
+    }
     if (propagateResult.failed > 0) {
       // Partial success: some sibling rows were updated, others
       // threw. Their cache entries will pick up the stale secret on
@@ -218,6 +284,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
         webhook_owner_id: webhookOwnerId,
         updated: propagateResult.updated,
         failed: propagateResult.failed,
+        skipped: propagateResult.skipped,
       });
     }
   } catch (err) {
@@ -238,8 +305,8 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
 // in sync — a future audit-log shape change should touch one place.
 //
 // KNOWN QUIRK (tracked in issue #487): SIGTERM mid-link drops the
-// in-flight work; the operator runs /qurl setup again or the
-// backfill script catches it. Polling fallback covers correctness.
+// in-flight work. The operator runs /qurl setup again; the backfill script
+// also catches first-time API-key-only rows. Polling fallback covers correctness.
 function fireAndForgetLinkGuildWebhookSubscription({ guildId, apiKey, via, configuredBy }) {
   linkGuildWebhookSubscription({
     guildId,

@@ -109,6 +109,8 @@ setup) means required to use that feature.
 | `DISCORD_CLIENT_SECRET` | Customer install | Discord OAuth2 client secret for the one-click Add to Discord flow |
 | `QURL_API_KEY` | No | Optional fallback qURL API key. Each server normally connects its own key via `/qurl setup`. |
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
+| `QURL_WEBHOOK_SECRET` | Default webhook | Shared HMAC secret written by the registrar Lambda; required in every process that links guild webhooks when a default subscription exists. |
+| `QURL_WEBHOOK_PURE_BYOK` | No | Set to `true` only when the deployment intentionally has no default webhook subscription. |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete OAuth setup (defaults to `http://localhost:3000`). Local customer-install testing must use `localhost` or HTTPS because its `__Host-` session cookie is always `Secure`. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |

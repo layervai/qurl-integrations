@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// One-shot backfill: register a qurl.accessed webhook subscription
-// for every linked guild that doesn't have one yet.
+// One-shot backfill for guild webhook linkage: record an owner-only mapping
+// when the key belongs to the default owner; register a BYOK qurl.accessed
+// subscription otherwise.
 //
 // Run AFTER deploying the BYOK view-counter change (the migration
 // that introduced setGuildApiKey-time subscription registration).
-// Already-linked guilds wouldn't otherwise pick up a subscription
-// until they manually re-link via `/qurl setup`; this script catches
-// them in one pass.
+// Already-linked guilds wouldn't otherwise pick up that linkage until they
+// manually re-link via `/qurl setup`; this script catches them in one pass.
 //
-// Idempotent: rows that already have a `webhook_id` are skipped.
+// Idempotent: rows that already have a `webhook_id` or any
+// `webhook_owner_id` are skipped. The latter normally means an owner-only
+// default mapping; partial/manual owner rows require operator repair and are
+// intentionally outside this provisioning backfill.
 // Safe to re-run on partial failures (e.g. transient qurl-service
 // 5xx mid-batch) — only the rows that didn't complete on the first
 // pass will be touched on the second.
@@ -23,22 +26,26 @@
 //   3  MAX_PAGES hit — cursor likely not advancing, investigate
 //      before re-running
 //
-// Required env: BASE_URL, QURL_ENDPOINT, AWS credentials with read +
-// UpdateItem on the guild_configs table, KEY_ENCRYPTION_KEY (for
-// decrypting stored qurl_api_keys), and any other env the bot's
-// config.js validates at boot. Easiest invocation is `npm run
+// Required env: BASE_URL, QURL_ENDPOINT, QURL_WEBHOOK_SECRET and QURL_API_KEY
+// (unless the deployment explicitly sets QURL_WEBHOOK_PURE_BYOK=true), AWS credentials
+// with read + UpdateItem on the guild_configs table, KEY_ENCRYPTION_KEY (for
+// decrypting stored qurl_api_keys), and any other env the bot's config.js
+// validates at boot. Easiest invocation is `npm run
 // provision-guild-subscriptions` after sourcing the bot's task-def
 // env (e.g. via ECS Exec or a sandbox shell with the same envs).
 //
 // SCOPE: only operates on the qurl_api_key + webhook_* attributes of
 // the `guild_configs` DDB table. Does not touch any other table.
 //
-// PERFORMANCE NOTE: each linkGuildWebhookSubscription call transitively
-// invokes propagateGuildWebhookSubscription, which today does a full-
-// table ConsistentRead scan of guild_configs. The backfill is
-// therefore O(rows²) RCU. Acceptable at current scale (≤10 BYOK
-// guilds in prod); a re-run after the #486 GSI migration on
-// webhook_owner_id reduces this to O(rows × ownersScanned), and is
+// PERFORMANCE NOTE: each different-owner link revalidates the default owner,
+// resolves the candidate owner, then lets the registrar perform its own bounded
+// subscription listing before propagateGuildWebhookSubscription does a
+// full-table ConsistentRead scan of guild_configs. Default-owner aliases return
+// after two discovery listings (the exact default key after one). Keeping the
+// registrar request separate avoids coupling it to default-owner policy;
+// worst-case backfill remains O(rows²) RCU. Acceptable at current scale
+// (≤10 BYOK guilds in prod). After the #486 GSI migration on
+// webhook_owner_id, a re-run drops to O(rows × ownersScanned) and is
 // effectively free thereafter.
 
 'use strict';
@@ -51,14 +58,36 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 
 const DRY_RUN = process.argv.includes('--dry-run');
+const SCAN_FILTER_EXPRESSION = 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)';
+
+function buildGuildScanInput(tableName, exclusiveStartKey) {
+  return {
+    TableName: tableName,
+    ExclusiveStartKey: exclusiveStartKey,
+    FilterExpression: SCAN_FILTER_EXPRESSION,
+  };
+}
+
+function getProvisioningConfigError(runtimeConfig) {
+  if (!runtimeConfig.QURL_ENDPOINT || !runtimeConfig.BASE_URL) {
+    return 'QURL_ENDPOINT and BASE_URL must be set';
+  }
+  if (!runtimeConfig.QURL_WEBHOOK_SECRET && !runtimeConfig.QURL_WEBHOOK_PURE_BYOK) {
+    return 'QURL_WEBHOOK_SECRET must be set (or set QURL_WEBHOOK_PURE_BYOK=true for a deployment with no default subscription)';
+  }
+  if (runtimeConfig.QURL_WEBHOOK_SECRET && !runtimeConfig.QURL_API_KEY) {
+    return 'QURL_API_KEY must be set when QURL_WEBHOOK_SECRET is configured';
+  }
+  if (!runtimeConfig.DDB_TABLE_PREFIX || !runtimeConfig.DDB_TABLE_PREFIX.endsWith('-')) {
+    return `DDB_TABLE_PREFIX must be set and end with "-" (got ${JSON.stringify(runtimeConfig.DDB_TABLE_PREFIX)})`;
+  }
+  return null;
+}
 
 async function main() {
-  if (!config.QURL_ENDPOINT || !config.BASE_URL) {
-    console.error('FATAL: QURL_ENDPOINT and BASE_URL must be set');
-    process.exit(1);
-  }
-  if (!config.DDB_TABLE_PREFIX || !config.DDB_TABLE_PREFIX.endsWith('-')) {
-    console.error(`FATAL: DDB_TABLE_PREFIX must be set and end with "-" (got ${JSON.stringify(config.DDB_TABLE_PREFIX)})`);
+  const configError = getProvisioningConfigError(config);
+  if (configError) {
+    console.error(`FATAL: ${configError}`);
     process.exit(1);
   }
 
@@ -72,6 +101,7 @@ async function main() {
   const TABLE = `${config.DDB_TABLE_PREFIX}guild-configs`;
 
   let scanned = 0;
+  let matched = 0;
   let candidates = 0;
   let skipped = 0;
   let provisioned = 0;
@@ -103,19 +133,13 @@ async function main() {
     // FilterExpression is server-side post-read (DDB charges RCU on
     // unfiltered rows), so it doesn't save cost — but it does shrink
     // client-side memory pressure and suppresses noise from rows
-    // that obviously have nothing to provision (no qurl_api_key OR
-    // already-provisioned webhook_id).
-    const res = await ddb.send(new ScanCommand({
-      TableName: TABLE,
-      ExclusiveStartKey,
-      FilterExpression: 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id)',
-    }));
+    // that obviously have nothing to provision (no qurl_api_key or any
+    // persisted webhook_id / webhook_owner_id, including partial/manual rows).
+    const res = await ddb.send(new ScanCommand(buildGuildScanInput(TABLE, ExclusiveStartKey)));
     const rows = res.Items || [];
+    scanned += Number.isInteger(res.ScannedCount) ? res.ScannedCount : rows.length;
+    matched += rows.length;
     for (const row of rows) {
-      scanned += 1;
-      if (!row.qurl_api_key) { skipped += 1; continue; }
-      if (row.webhook_id) { skipped += 1; continue; }
-      candidates += 1;
       const guildId = row.guild_id;
       // Decrypt step isolated so a failure increments failedDecrypt
       // (vs the link step's failedLink). The decrypt runs even in
@@ -134,12 +158,12 @@ async function main() {
         skipped += 1;
         continue;
       }
+      candidates += 1;
       console.log(`[backfill] candidate guild_id=${guildId}`);
       if (DRY_RUN) continue;
-      // linkGuildWebhookSubscription also calls subs.upsertGuild
-      // on success — that's a no-op in this script context (the
-      // registry isn't .start()'d) but DDB is the source of truth,
-      // so running bots pick the new row up on their next 30s tick.
+      // linkGuildWebhookSubscription also calls a process-local cache upsert
+      // on success. That state is unused by this one-shot process; DDB is the
+      // source of truth, so running bots pick the row up on their next tick.
       try {
         const result = await linkGuildWebhookSubscription({
           guildId, apiKey, descriptionContext: 'via=backfill-script',
@@ -164,6 +188,7 @@ async function main() {
   console.log(`Table:        ${TABLE}`);
   console.log(`Dry run:      ${DRY_RUN}`);
   console.log(`Scanned:      ${scanned}`);
+  console.log(`Matched:      ${matched}`);
   console.log(`Candidates:   ${candidates}`);
   console.log(`Skipped:      ${skipped}`);
   if (!DRY_RUN) {
@@ -184,8 +209,12 @@ async function main() {
   process.exit(failedTotal > 0 ? 2 : 0);
 }
 
-main().catch((err) => {
-  logger.error('provision-guild-subscriptions crashed', { error: err.message, stack: err.stack });
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    logger.error('provision-guild-subscriptions crashed', { error: err.message, stack: err.stack });
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { buildGuildScanInput, getProvisioningConfigError };

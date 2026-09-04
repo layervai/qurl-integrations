@@ -80,16 +80,17 @@ const STORE_METHODS = Object.freeze([
   'getGuildApiKey',
   'setGuildApiKey',
   // Raw delete — see ddb-store.js's defensive comment. No production
-  // caller today. A future /qurl unlink admin command MUST tear down
-  // the qurl-service subscription BEFORE invoking this, otherwise it
-  // leaks an orphan webhook on qurl-service. See the link-side
-  // pattern in guild-webhook-link.js::linkGuildWebhookSubscription.
+  // caller today. A future /qurl unlink admin command MUST perform
+  // reference-aware qurl-service cleanup BEFORE invoking this, or explicitly
+  // record the orphan for later reconciliation. Subscriptions can be shared by
+  // sibling guilds, so unconditional inline deletion is unsafe; see #1380.
   '_removeGuildApiKeyRaw',
   'getGuildConfig',
   'getGuildConfigWithApiKey',
 
-  // Per-guild qurl-service webhook subscriptions (BYOK view counter)
+  // Guild webhook linkage (default-owner mapping + BYOK subscriptions)
   'setGuildWebhookSubscription',
+  'setGuildDefaultWebhookOwner',
   'clearGuildWebhookSubscription',
   'listGuildSubscriptionsByOwner',
   'scanGuildSubscriptions',

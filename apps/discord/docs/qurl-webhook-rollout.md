@@ -22,8 +22,10 @@ Three pieces:
    [`apps/discord/lambda/webhook-registrar/`](../lambda/webhook-registrar/).
    Single-instance, race-free by construction. Runs once per deploy via
    Terraform `aws_lambda_invocation`. Creates / rotates / reuses the
-   `qurl.accessed` subscription against qurl-service, writes the secret
-   to SSM. Bot never registers itself.
+   bot's default `qurl.accessed` subscription against qurl-service, writes
+   the secret to SSM. The bot never registers that default subscription on
+   boot; `/qurl setup` still provisions guild BYOK subscriptions and records
+   an owner-only mapping when a guild key resolves to the default owner.
 
 ## Why a Lambda (not on-boot self-registration)
 
@@ -66,6 +68,12 @@ Terraform-side ordering (config lives in `qurl-integrations-infra`):
    Rolling deploy replaces tasks; new tasks read the current secret;
    receiver verifies inbound webhooks.
 
+Every process that can call the guild webhook linker must receive
+`QURL_WEBHOOK_SECRET` in a default-subscription deployment, including gateway
+tasks that serve `/qurl setup`. The one-shot backfill enforces this at startup;
+`QURL_WEBHOOK_PURE_BYOK=true` is the explicit opt-out for deployments with no
+default subscription.
+
 ## Rotation
 
 Re-invoke the Lambda (manual `aws lambda invoke`, scheduled EventBridge
@@ -106,6 +114,36 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
   ran successfully OR ran but SSM `PutParameter` failed (IAM, network).
   Receiver returns 503 (qurl-service retries). Recover by running the
   Lambda manually and verifying CloudWatch logs for the persist call.
+- **Guild links fail at `stage=owner-resolution`.** The default owner cannot
+  be established safely, so all guild links fail closed rather than risk
+  rotating the shared default secret. `error_code=DEFAULT_WEBHOOK_OWNER_UNDISCOVERED`
+  means the bot key's owner has no listable subscriptions; invoke the registrar
+  Lambda and verify the default subscription first. For qurl-service transport or
+  contract failures, inspect the accompanying application warning in
+  CloudWatch. `DEFAULT_WEBHOOK_OWNER_CONFIG` means the shared secret is missing
+  without the explicit pure-BYOK flag, or the secret exists but the default API
+  key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT`
+  means at least one response row was malformed (strictly, even if a sibling
+  row has an owner); `DEFAULT_WEBHOOK_OWNER_CONFLICT` means one key listed
+  multiple owners. `DEFAULT_WEBHOOK_OWNER_KEY_INVALID` means the saved guild
+  key ciphertext cannot be decrypted; `DEFAULT_WEBHOOK_OWNER_KEY_CHANGED`
+  means a concurrent re-key won. HTTP failures commonly use
+  `error_code=Error`; network and timeout failures use their runtime error name.
+- **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`.** A
+  complete legacy DDB row may contain the only secret that still matches the
+  default subscription after the old guild-link path rotated it. Do not clear
+  that row before recovery. During a maintenance window: remove the
+  default-secret SSM parameter; invoke the registrar Lambda so it deliberately
+  rotates the subscription and recreates the parameter; then convert every
+  complete DDB row for that default owner to owner-only state by retaining
+  `webhook_owner_id` and conditionally removing its old `webhook_id` and
+  `webhook_secret`. Complete DDB rows take precedence over the environment
+  secret, so all of them must be converted before force-redeploying the bot
+  service. After redeploy, verify signed webhook delivery and re-link the guild.
+- **Guild links fail with `error_code=DEFAULT_WEBHOOK_OWNER_MISSING`.** The row
+  has a secret without its owner and is not eligible for receiver caching.
+  Inspect the row for partial/manual writes, remove the stale webhook fields,
+  and re-run `/qurl setup`; do not copy the default environment secret into it.
 - **`qurl-views` table missing.** Bot's monitor `BatchGet` throws
   `ResourceNotFoundException`; the setInterval's try/catch logs
   `Link monitor poll failed` and the counter sticks at
@@ -134,11 +172,21 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.
+- **Guild re-key can strand an old BYOK subscription**: inline deletion is
+  unsafe because sibling guilds can share the prior owner, and the new key
+  cannot authorize deletion for that owner. Reference-aware reconciliation is
+  tracked in [#1380](https://github.com/layervai/qurl-integrations/issues/1380).
 - **Higher-severity log signal** (alarm on this): `webhook-registrar
-  Lambda` CloudWatch error logs. The Lambda is the sole webhook-
-  registration code path; failures cascade to "bot can't verify any
-  inbound webhook." The bot's `Webhook receiver not configured`
-  503-response log is the downstream symptom.
+  Lambda` CloudWatch error logs. The Lambda is the sole registration path for
+  the default subscription; persistent failures can leave the bot unable to
+  verify default-owner webhooks. The bot's `Webhook receiver not configured`
+  503-response log is the downstream symptom when the shared default secret is
+  absent. Complete DDB-backed BYOK subscriptions remain independently routable.
+  Also alarm on bursts of `qurl_webhook_subscription_register_failed`
+  (`QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED` in code) with
+  `stage=owner-resolution`: that is the signal when the shared secret is
+  configured but the default owner has no listable subscriptions, and every
+  guild link is blocked.
 
 ## Appendix — manual operator recovery
 
