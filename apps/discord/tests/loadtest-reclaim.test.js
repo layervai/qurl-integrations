@@ -266,7 +266,7 @@ describe('recordResource', () => {
     ['empty', ''],
     ['non-string', 12345],
     ['malformed', 'not a valid id!'],
-    ['overlong', 'a'.repeat(257)],
+    ['overlong', 'a'.repeat(1025)],
   ])('warns and records nothing for a %s resource_id', (_label, value) => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');

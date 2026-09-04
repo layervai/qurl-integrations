@@ -2,7 +2,7 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId } = require('./resource-id');
+const { validateResourceId } = require('./utils/resource-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that

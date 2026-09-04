@@ -163,7 +163,7 @@ if (require.main === module && fs.existsSync(envFile)) {
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
-const { hasSafeResourceIdShape } = require('../src/resource-id');
+const { hasSafeResourceIdShape } = require('../src/utils/resource-id');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently

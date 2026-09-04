@@ -686,12 +686,25 @@ describe('qURL client', () => {
 
     it.each([
       ['path separators', '../qurls/x'],
-      ['an overlong value', 'a'.repeat(257)],
+      ['an overlong value', 'a'.repeat(1025)],
     ])('rejects %s before network work', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn();
 
       await expect(qurl.deleteLink(resourceId)).rejects.toThrow(/Invalid resource ID format/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports a 404 from the resource endpoint', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        headers: { get: () => null },
+        json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404' } }),
+      });
+
+      await expect(qurl.deleteLink(CRID_RESOURCE_ID))
+        .rejects.toThrow(/qURL API DELETE.*failed.*404/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -816,7 +829,7 @@ describe('Connector client', () => {
     it('rejects an overlong resource ID before minting', async () => {
       globalThis.fetch = jest.fn();
 
-      await expect(connector.mintLinks('a'.repeat(257), { expiresAt: 'date', n: 1 }))
+      await expect(connector.mintLinks('a'.repeat(1025), { expiresAt: 'date', n: 1 }))
         .rejects.toThrow(/Invalid resource ID format/);
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });

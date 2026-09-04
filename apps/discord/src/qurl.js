@@ -7,7 +7,7 @@ const {
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
-const { validateResourceId } = require('./resource-id');
+const { validateResourceId } = require('./utils/resource-id');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -236,6 +236,8 @@ async function deleteLink(resourceId, apiKey) {
 async function getResourceStatus(resourceId, apiKey) {
   validateResourceId(resourceId);
   const client = makeClient(apiKey);
+  // SDK 0.3.0's get() applies only its non-empty-ID guard; unlike delete(), it
+  // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
   return callQurl('GET', `/qurls/${resourceId}`, () => client.get(resourceId));
