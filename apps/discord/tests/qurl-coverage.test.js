@@ -46,6 +46,74 @@ function apiError(status, { code = 'error', detail } = {}) {
   };
 }
 
+describe('qURL client — getIdentity', () => {
+  let qurl;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.mock('../src/config', () => ({
+      QURL_API_KEY: 'fallback-api-key',
+      QURL_ENDPOINT: 'https://api.test.local',
+    }));
+    jest.mock('../src/logger', () => ({
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+    }));
+    qurl = require('../src/qurl');
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('gets the identity for the provided guild key', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      apiOk(200, {
+        owner_id: 'owner-123',
+        auth_type: 'api_key',
+        api_key: {
+          key_id: 'key-123',
+          key_prefix: 'lv_live_abc',
+          scopes: ['qurl:read', 'qurl:write'],
+        },
+      }),
+    );
+
+    const result = await qurl.getIdentity('stored-guild-key');
+
+    const [url, opts] = globalThis.fetch.mock.calls[0];
+    expect(url).toBe('https://api.test.local/v1/me');
+    expect(opts.method).toBe('GET');
+    expect(opts.headers.Authorization).toBe('Bearer stored-guild-key');
+    expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
+    expect(result.api_key).toEqual({
+      key_id: 'key-123',
+      key_prefix: 'lv_live_abc',
+      scopes: ['qurl:read', 'qurl:write'],
+    });
+  });
+
+  it.each([401, 403])('preserves a redacted %i status for callers', async (status) => {
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const secretBody = 'sensitive-body-marker-do-not-log';
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      apiError(status, { code: 'auth_error', detail: secretBody }),
+    );
+
+    const error = await qurl.getIdentity('stored-guild-key').then(
+      () => { throw new Error('expected rejection'); },
+      (err) => err,
+    );
+
+    expect(error.status).toBe(status);
+    expect(error.message).not.toContain(secretBody);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+      expect.objectContaining({ status, method: 'GET', path: '/me' }),
+    );
+  });
+});
+
 describe('qURL client — getResourceStatus', () => {
   let qurl;
 

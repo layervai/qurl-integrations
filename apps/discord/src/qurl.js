@@ -3,6 +3,7 @@ const {
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
   ERROR_CODE_CLIENT_VALIDATION,
+  ERROR_CODE_UNEXPECTED_RESPONSE,
 } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
@@ -13,9 +14,9 @@ const { isPrivateHost } = require('./utils/private-host');
 
 /**
  * qURL API client for the bot's link create / status / revoke calls, backed by
- * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
- * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
- * uses the same SDK. This module adds only the concerns the SDK doesn't own:
+ * the @layervai/qurl SDK where it exposes the required route. The small
+ * GET /v1/me call below uses fetch because SDK 0.3.0 has no identity method.
+ * This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
@@ -112,7 +113,9 @@ async function callQurl(method, path, fn) {
     // a status-only error so that body can't leak through a caller that logs
     // `err.message`.
     if (status > 0) {
-      throw new Error(`qURL API ${method} ${path} failed (${status})`);
+      const sanitizedError = new Error(`qURL API ${method} ${path} failed (${status})`);
+      sanitizedError.status = status;
+      throw sanitizedError;
     }
     // status 0: re-wrap ONLY a coded SDK error outside the body-free SAFE set —
     // i.e. one whose synthesized message could embed a body snippet (e.g.
@@ -126,6 +129,47 @@ async function callQurl(method, path, fn) {
     }
     throw err;
   }
+}
+
+async function getIdentity(apiKey) {
+  if (!apiKey) {
+    throw new Error('Guild qURL API key is not configured');
+  }
+
+  return callQurl('GET', '/me', async () => {
+    const response = await globalThis.fetch(`${config.QURL_ENDPOINT}/v1/me`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const error = new Error('qURL identity request failed');
+      error.status = response.status;
+      throw error;
+    }
+
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      const error = new Error('qURL identity response was not valid JSON');
+      error.code = ERROR_CODE_UNEXPECTED_RESPONSE;
+      throw error;
+    }
+    const identity = body?.data;
+    const key = identity?.api_key;
+    if (typeof key?.key_id !== 'string' || typeof key.key_prefix !== 'string' ||
+        !Array.isArray(key.scopes) || key.scopes.some(scope => typeof scope !== 'string')) {
+      const error = new Error('qURL identity response had an unexpected shape');
+      error.code = ERROR_CODE_UNEXPECTED_RESPONSE;
+      throw error;
+    }
+    return identity;
+  });
 }
 
 // The syntactic private/loopback/link-local screen lives in utils/private-host.js
@@ -246,4 +290,4 @@ async function getResourceStatus(resourceId, apiKey) {
   return callQurl('GET', `/qurls/${resourceId}`, () => client.get(resourceId));
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
+module.exports = { createOneTimeLink, deleteLink, getResourceStatus, getIdentity, isPrivateHost };

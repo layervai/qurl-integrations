@@ -1,4 +1,5 @@
-// Tests for the /qurl status admin-offboarding nudge (#185).
+// Tests for /qurl status service verification and the admin-offboarding nudge
+// (#185).
 //
 // The status reply for a configured guild surfaces a passive notice
 // when the admin who originally ran setup has left the server —
@@ -31,9 +32,17 @@ jest.mock('../src/store', () => ({
   consumePendingLink: jest.fn(),
 }));
 
+const mockGetIdentity = jest.fn();
+jest.mock('../src/qurl', () => ({
+  deleteLink: jest.fn(),
+  getIdentity: mockGetIdentity,
+}));
+
 const db = require('../src/store');
 const { handleCommand } = require('../src/commands');
 const { PermissionFlagsBits } = require('discord.js');
+
+const STORED_KEY = 'lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 // Minimal interaction stub for the /qurl status path. The real
 // discord.js Interaction has dozens of fields we don't need; only
@@ -58,7 +67,14 @@ function makeStatusInteraction({ memberFetchBehavior }) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  db.getGuildApiKey.mockResolvedValue('lv_live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  db.getGuildApiKey.mockResolvedValue(STORED_KEY);
+  mockGetIdentity.mockResolvedValue({
+    api_key: {
+      key_id: 'key-123',
+      key_prefix: 'lv_live_aaa',
+      scopes: ['qurl:read', 'qurl:write'],
+    },
+  });
 });
 
 describe('/qurl status — admin-offboarding nudge (#185)', () => {
@@ -75,7 +91,52 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(interaction._reply).toHaveBeenCalledTimes(1);
     const replyContent = interaction._reply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
+    expect(replyContent).toContain('Key prefix: `lv_live_aaa`');
+    expect(replyContent).toContain('Scopes: `qurl:read`, `qurl:write`');
+    expect(replyContent).not.toContain(STORED_KEY);
+    expect(mockGetIdentity).toHaveBeenCalledWith(STORED_KEY);
     expect(replyContent).not.toContain('has left this server');
+  });
+
+  it.each([401, 403])('reports a %i response as a revoked or invalid key', async (status) => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockRejectedValueOnce(Object.assign(new Error('redacted'), { status }));
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._reply.mock.calls[0][0].content;
+    expect(replyContent).toMatch(/revoked or invalid/i);
+    expect(replyContent).toContain('`/qurl setup`');
+    expect(replyContent).not.toContain(STORED_KEY);
+  });
+
+  it.each([
+    ['transport error', new Error('connect ECONNREFUSED 10.0.0.5:8080')],
+    ['service error', Object.assign(new Error('redacted'), { status: 503 })],
+  ])('does not report a %s as revoked', async (_case, error) => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockRejectedValueOnce(error);
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._reply.mock.calls[0][0].content;
+    expect(replyContent).toMatch(/check could not be completed/i);
+    expect(replyContent).not.toMatch(/revoked|invalid/i);
+    expect(replyContent).not.toContain(STORED_KEY);
   });
 
   it('shows the passive nudge when members.fetch throws DiscordAPIError 10007 (Unknown Member)', async () => {

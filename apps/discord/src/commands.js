@@ -48,7 +48,7 @@ const {
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
-const { deleteLink } = require('./qurl');
+const { deleteLink, getIdentity } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -8728,9 +8728,8 @@ const commands = [
         });
       }
 
-      // /qurl status — check if configured. Gate behind ManageGuild: the
-      // response echoes the last 4 chars of the API key (billing-sensitive)
-      // and any guild member could previously run this and snoop them.
+      // /qurl status — verify the stored key. Gate behind ManageGuild because
+      // the response includes the key's non-secret prefix and granted scopes.
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
@@ -8740,18 +8739,27 @@ const commands = [
         }
         const guildConfig = await db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
-          // Show a short sha256 fingerprint instead of any key substring — a
-          // 4-char suffix narrows brute-force space and a prefix leaks tenant
-          // hints. An 8-char hex fingerprint is enough for an admin to confirm
-          // they re-ran setup with the same key, without exposing bytes.
           // getGuildConfig no longer returns the decrypted key (it would
-          // leak via any row dump); go through the explicit accessor and
-          // let the plaintext fall out of scope immediately after hashing.
-          const plaintextKey = await db.getGuildApiKey(interaction.guildId) || '';
-          const keyFingerprint = crypto.createHash('sha256')
-            .update(plaintextKey)
-            .digest('hex')
-            .slice(0, 8);
+          // leak via any row dump); go through the explicit accessor and use
+          // the plaintext only to authenticate the service-side identity check.
+          const plaintextKey = await db.getGuildApiKey(interaction.guildId);
+          let identity;
+          try {
+            identity = await getIdentity(plaintextKey);
+          } catch (err) {
+            if (err?.status === 401 || err?.status === 403) {
+              return interaction.reply({
+                content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
+                  + 'Re-run `/qurl setup` to connect a valid key.',
+                ephemeral: true,
+              });
+            }
+            return interaction.reply({
+              content: '⚠️ **The qURL key check could not be completed.**\n\n'
+                + 'Please try `/qurl status` again later.',
+              ephemeral: true,
+            });
+          }
 
           // #185 admin-offboarding nudge: the qURL key is owned by the
           // admin who ran setup (Auth0 sub claim); usage bills to their
@@ -8780,7 +8788,8 @@ const commands = [
 
           return interaction.reply({
             content: `✅ **qURL is configured**\n` +
-              `Key fingerprint: \`${keyFingerprint}\`\n` +
+              `Key prefix: \`${identity.api_key.key_prefix}\`\n` +
+              `Scopes: ${identity.api_key.scopes.map(scope => `\`${scope}\``).join(', ')}\n` +
               `Configured by: <@${guildConfig.configured_by}>\n` +
               `Last updated: ${guildConfig.updated_at}` +
               originalAdminLeftNotice,
