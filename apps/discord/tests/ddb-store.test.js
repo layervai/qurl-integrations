@@ -143,13 +143,11 @@ describe('guild configs', () => {
     expect(result).toMatchObject({ guild_id: 'g-1', configured_by: 'admin' });
   });
 
-  test('propagateGuildWebhookSubscription: swallows ConditionalCheckFailedException as benign', async () => {
+  test('propagateGuildWebhookSubscription: counts an owner-only conversion race as skipped', async () => {
     // Scenario: between listGuildSubscriptionsByOwner returning the
-    // sibling row and the UpdateCommand executing, another path
-    // cleared the sibling's webhook_owner_id (mid-rollback of an
-    // earlier link). The ConditionExpression rejects with CCFE.
-    // That's the documented "row no longer qualifies" signal — it
-    // MUST NOT bubble up as a failure (would mask real failures).
+    // sibling row and the UpdateCommand executing, another path converted the
+    // sibling to an owner-only default mapping. DDB evaluates the full CAS
+    // against that live state and rejects with CCFE, so the conversion survives.
     ddbMock.on(ScanCommand).resolves({ Items: [
       { guild_id: 'g_sibling', webhook_id: 'wh_x', webhook_owner_id: 'usr_o' },
     ] });
@@ -159,7 +157,7 @@ describe('guild configs', () => {
     const result = await store.propagateGuildWebhookSubscription('usr_o', {
       webhookId: 'wh_new', webhookSecret: 'sec_new',
     });
-    expect(result).toEqual({ updated: 0, failed: 0 });
+    expect(result).toEqual({ updated: 0, failed: 0, skipped: 1 });
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.ConditionExpression).toBe(
       'webhook_owner_id = :expectedOwner AND webhook_id = :expectedWebhookId',
@@ -181,7 +179,7 @@ describe('guild configs', () => {
     const result = await store.propagateGuildWebhookSubscription('usr_o', {
       webhookId: 'wh_new', webhookSecret: 'sec_new',
     });
-    expect(result).toEqual({ updated: 0, failed: 1 });
+    expect(result).toEqual({ updated: 0, failed: 1, skipped: 0 });
   });
 
   test('setGuildWebhookSubscription: rejects with CCFE when qurl_api_key row does not exist (orphan guard)', async () => {
@@ -482,7 +480,7 @@ describe('guild configs', () => {
     const result = await store.propagateGuildWebhookSubscription('usr_admin', {
       webhookId: 'wh_p', webhookSecret: 'sec_p', excludeGuildId: 'g_primary',
     });
-    expect(result).toEqual({ updated: 0, failed: 0 });
+    expect(result).toEqual({ updated: 0, failed: 0, skipped: 0 });
     // Short-circuit: no UpdateCommand fired for an "only excluded"
     // result set.
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);

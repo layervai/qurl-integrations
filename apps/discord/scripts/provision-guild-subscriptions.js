@@ -8,8 +8,10 @@
 // Already-linked guilds wouldn't otherwise pick up that linkage until they
 // manually re-link via `/qurl setup`; this script catches them in one pass.
 //
-// Idempotent: rows that already have a `webhook_id` or an owner-only default
-// mapping (`webhook_owner_id` without a copied secret) are skipped.
+// Idempotent: rows that already have a `webhook_id` or any
+// `webhook_owner_id` are skipped. The latter normally means an owner-only
+// default mapping; partial/manual owner rows require operator repair and are
+// intentionally outside this provisioning backfill.
 // Safe to re-run on partial failures (e.g. transient qurl-service
 // 5xx mid-batch) — only the rows that didn't complete on the first
 // pass will be touched on the second.
@@ -34,15 +36,16 @@
 // SCOPE: only operates on the qurl_api_key + webhook_* attributes of
 // the `guild_configs` DDB table. Does not touch any other table.
 //
-// PERFORMANCE NOTE: each different-owner link resolves the candidate owner
-// before the registrar performs its own bounded subscription listing, then
-// invokes propagateGuildWebhookSubscription, which today does a full-table
-// ConsistentRead scan of guild_configs. Default-owner links return after the
-// first listing. The duplicate request on the different-owner path avoids
-// coupling the registrar to default-owner policy; worst-case backfill remains
-// O(rows²) RCU. Acceptable at current scale (≤10 BYOK guilds in prod); a re-run
-// after the #486 GSI migration on webhook_owner_id reduces this to
-// O(rows × ownersScanned), and is effectively free thereafter.
+// PERFORMANCE NOTE: each different-owner link revalidates the default owner,
+// resolves the candidate owner, then lets the registrar perform its own bounded
+// subscription listing before propagateGuildWebhookSubscription does a
+// full-table ConsistentRead scan of guild_configs. Default-owner aliases return
+// after two discovery listings (the exact default key after one). Keeping the
+// registrar request separate avoids coupling it to default-owner policy;
+// worst-case backfill remains O(rows²) RCU. Acceptable at current scale
+// (≤10 BYOK guilds in prod). After the #486 GSI migration on
+// webhook_owner_id, a re-run drops to O(rows × ownersScanned) and is
+// effectively free thereafter.
 
 'use strict';
 
@@ -55,13 +58,6 @@ const { DynamoDBDocumentClient, ScanCommand } = require('@aws-sdk/lib-dynamodb')
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const SCAN_FILTER_EXPRESSION = 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)';
-
-function isProvisioningCandidate(row) {
-  return Boolean(row
-    && Object.hasOwn(row, 'qurl_api_key')
-    && !Object.hasOwn(row, 'webhook_id')
-    && !Object.hasOwn(row, 'webhook_owner_id'));
-}
 
 function buildGuildScanInput(tableName, exclusiveStartKey) {
   return {
@@ -91,6 +87,7 @@ async function main() {
   const TABLE = `${config.DDB_TABLE_PREFIX}guild-configs`;
 
   let scanned = 0;
+  let matched = 0;
   let candidates = 0;
   let skipped = 0;
   let provisioned = 0;
@@ -122,14 +119,13 @@ async function main() {
     // FilterExpression is server-side post-read (DDB charges RCU on
     // unfiltered rows), so it doesn't save cost — but it does shrink
     // client-side memory pressure and suppresses noise from rows
-    // that obviously have nothing to provision (no qurl_api_key,
-    // already-provisioned webhook_id, or an owner-only default mapping).
+    // that obviously have nothing to provision (no qurl_api_key or any
+    // persisted webhook_id / webhook_owner_id, including partial/manual rows).
     const res = await ddb.send(new ScanCommand(buildGuildScanInput(TABLE, ExclusiveStartKey)));
     const rows = res.Items || [];
+    scanned += Number.isInteger(res.ScannedCount) ? res.ScannedCount : rows.length;
+    matched += rows.length;
     for (const row of rows) {
-      scanned += 1;
-      if (!isProvisioningCandidate(row)) { skipped += 1; continue; }
-      candidates += 1;
       const guildId = row.guild_id;
       // Decrypt step isolated so a failure increments failedDecrypt
       // (vs the link step's failedLink). The decrypt runs even in
@@ -148,6 +144,7 @@ async function main() {
         skipped += 1;
         continue;
       }
+      candidates += 1;
       console.log(`[backfill] candidate guild_id=${guildId}`);
       if (DRY_RUN) continue;
       // linkGuildWebhookSubscription also calls a process-local cache upsert
@@ -177,6 +174,7 @@ async function main() {
   console.log(`Table:        ${TABLE}`);
   console.log(`Dry run:      ${DRY_RUN}`);
   console.log(`Scanned:      ${scanned}`);
+  console.log(`Matched:      ${matched}`);
   console.log(`Candidates:   ${candidates}`);
   console.log(`Skipped:      ${skipped}`);
   if (!DRY_RUN) {
@@ -205,4 +203,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildGuildScanInput, isProvisioningCandidate };
+module.exports = { buildGuildScanInput };

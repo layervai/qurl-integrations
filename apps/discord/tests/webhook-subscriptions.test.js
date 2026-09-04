@@ -482,14 +482,27 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
-  test.each(['QURL_WEBHOOK_SECRET', 'QURL_API_KEY', 'QURL_ENDPOINT'])(
-    'skips discovery when %s is unset',
+  it('skips discovery when no shared default secret is configured', async () => {
+    const config = require('../src/config');
+    const original = config.QURL_WEBHOOK_SECRET;
+    config.QURL_WEBHOOK_SECRET = undefined;
+    try {
+      await expect(subs.resolveDefaultOwnerForApiKey('lv_byok')).resolves.toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      config.QURL_WEBHOOK_SECRET = original;
+    }
+  });
+
+  test.each(['QURL_API_KEY', 'QURL_ENDPOINT'])(
+    'fails closed when the shared secret is configured but %s is unset',
     async (configKey) => {
       const config = require('../src/config');
       const original = config[configKey];
       config[configKey] = undefined;
       try {
-        await expect(subs.resolveDefaultOwnerForApiKey('lv_byok')).resolves.toBeNull();
+        await expect(subs.resolveDefaultOwnerForApiKey('lv_byok'))
+          .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_CONFIG' });
         expect(global.fetch).not.toHaveBeenCalled();
       } finally {
         config[configKey] = original;
@@ -497,7 +510,7 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     },
   );
 
-  it('reuses the cached default owner while still resolving an alias key', async () => {
+  it('revalidates the default subscription while resolving an alias key', async () => {
     global.fetch = jest.fn(async () => ({
       ok: true,
       status: 200,
@@ -508,19 +521,47 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
       .resolves.toBe('usr_default');
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
       .resolves.toBe('usr_default');
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(global.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer lv_alias');
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(global.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer lv_test_abc');
+    expect(global.fetch.mock.calls[2][1].headers.Authorization).toBe('Bearer lv_alias');
   });
 
-  it('fails closed when a non-empty webhook list omits owner_id', async () => {
+  it('fails closed when the cached default owner has no remaining subscriptions', async () => {
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc'))
+      .resolves.toBe('usr_default');
     global.fetch = jest.fn(async () => ({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({ data: [{ webhook_id: 'wh_malformed' }] }),
+      ok: true, status: 200, text: async () => JSON.stringify({ data: [] }),
     }));
 
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
-      .rejects.toThrow(/non-empty qurl-service response omitted owner_id/);
+      .rejects.toMatchObject({ code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    [
+      'a non-empty list omits owner_id',
+      [{ webhook_id: 'wh_malformed' }],
+      /non-empty qurl-service response omitted owner_id/,
+    ],
+    [
+      'any webhook in a mixed list omits owner_id',
+      [{ webhook_id: 'wh_malformed' }, { owner_id: 'usr_default' }],
+      /non-empty qurl-service response omitted owner_id/,
+    ],
+    ['the response data is not an array', {}, /response data must be an array/],
+  ])('codes an owner contract failure when %s', async (_case, data, message) => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_CONTRACT',
+        message: expect.stringMatching(message),
+      });
   });
 
   it('fails closed when a webhook list contains conflicting owner IDs', async () => {
@@ -533,7 +574,10 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     }));
 
     await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
-      .rejects.toThrow(/conflicting owner_id values/);
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_CONFLICT',
+        message: expect.stringMatching(/conflicting owner_id values/),
+      });
   });
 
   // When GET /v1/webhooks returns an empty list (Lambda hasn't run

@@ -487,8 +487,8 @@ router.get('/callback', rateLimit, async (req, res) => {
     qurl_account_fingerprint_key_epoch: qurlAccountFingerprintEpoch,
   });
 
-  // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK
-  //     view counter). Fire-and-forget via the centralized helper.
+  // 3a. Link webhook view counting: reuse the default owner or provision
+  //     a BYOK subscription. Fire-and-forget via the centralized helper.
   fireAndForgetLinkGuildWebhookSubscription({
     guildId, apiKey, via: 'oauth', configuredBy: discordUserId,
   });

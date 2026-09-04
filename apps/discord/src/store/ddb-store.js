@@ -1437,10 +1437,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   }));
 }
 
-// Raw delete. No qurl-service subscription teardown. Today there is
-// no production caller; a future /qurl unlink admin command MUST
-// add an orchestrator that issues DELETE /v1/webhooks/{id} BEFORE
-// calling this, or it'll orphan the subscription on qurl-service.
+// Raw delete. No qurl-service subscription teardown. Today there is no
+// production caller; a future /qurl unlink orchestrator must perform
+// reference-aware cleanup before calling this, or explicitly record the orphan
+// for later reconciliation. Unconditional deletion can break sibling guilds
+// that share the subscription; see #1380.
 async function _removeGuildApiKeyRaw(guildId) {
   const res = await ddb.send(new DeleteCommand({
     TableName: TABLES.guild_configs,
@@ -1476,7 +1477,7 @@ async function getGuildConfigWithApiKey(guildId) {
   return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
 }
 
-// ── Per-guild qurl-service webhook subscriptions (BYOK view counter) ──
+// ── Guild webhook linkage (default-owner mapping + BYOK subscriptions) ──
 
 // webhook_secret stored encrypted (same envelope as qurl_api_key).
 // webhook_id + webhook_owner_id stored plain — neither is a credential
@@ -1560,6 +1561,10 @@ async function setGuildDefaultWebhookOwner(
     }
   }
 
+  // A different-owner subscription is not deleted here: the new key cannot
+  // authorize deletion for the prior owner, and sibling guilds may still share
+  // it. A reference-aware reconciler is tracked in #1380.
+
   const conditions = ['qurl_api_key = :storedApiKey'];
   const values = {
     ':woid': webhookOwnerId,
@@ -1615,9 +1620,8 @@ async function setGuildDefaultWebhookOwner(
 }
 
 // REMOVE the three webhook_* attributes; leaves the API key row intact.
-// Used when a guild rotates to a key whose owner_id differs from the
-// previous one and the caller has already DELETE'd the old subscription
-// (or accepted the orphan).
+// A future caller must first prove no sibling references the old subscription
+// before deleting it, or explicitly record/accept the orphan; see #1380.
 async function clearGuildWebhookSubscription(guildId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
@@ -1627,11 +1631,9 @@ async function clearGuildWebhookSubscription(guildId) {
   }));
 }
 
-// Reference-counting helper for the unlink path. Returns all guild_ids
-// (including the caller's guild_id, if any) currently associated with
-// the given webhook_owner_id. The caller decides whether to issue
-// DELETE on qurl-service based on the count (don't kill sibling guilds
-// that share the same auth0 admin's API key).
+// Returns complete DDB-backed subscription rows for one webhook owner.
+// Owner-only default mappings are excluded because they have no subscription
+// state to propagate; this is not a reference-counting API for unlink cleanup.
 //
 // ConsistentRead because the link-time caller (propagateGuildWebhookSubscription)
 // runs IMMEDIATELY after a setGuildWebhookSubscription write — an
@@ -1647,8 +1649,6 @@ async function clearGuildWebhookSubscription(guildId) {
 async function listGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows
-    // Owner-only default mappings deliberately have no webhook_id and must
-    // never enter the propagation fan-out.
     .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
     .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));
 }
@@ -1660,8 +1660,8 @@ async function listGuildSubscriptionsByOwner(webhookOwnerId) {
 // deterministically pick on Scan-order tiebreak.
 //
 // `excludeGuildId` (optional): skip this guild — the caller has
-// already persisted it. Returns counts of rows updated/failed (the
-// excluded guild is not counted).
+// already persisted it. Returns counts of rows updated/failed/skipped (the
+// excluded guild is not counted; CAS races are skipped).
 async function propagateGuildWebhookSubscription(
   webhookOwnerId,
   { webhookId, webhookSecret, excludeGuildId },
@@ -1673,12 +1673,12 @@ async function propagateGuildWebhookSubscription(
   // Common case for a first-time admin: only the just-written primary
   // row matches the owner. Short-circuit before the scan-filter pass.
   if (excludeGuildId && allMatches.length === 1 && allMatches[0].guildId === excludeGuildId) {
-    return { updated: 0, failed: 0 };
+    return { updated: 0, failed: 0, skipped: 0 };
   }
   const siblings = excludeGuildId
     ? allMatches.filter(s => s.guildId !== excludeGuildId)
     : allMatches;
-  if (siblings.length === 0) return { updated: 0, failed: 0 };
+  if (siblings.length === 0) return { updated: 0, failed: 0, skipped: 0 };
 
   const updatedAt = nowIso();
   const encryptedSecret = encrypt(webhookSecret);
@@ -1701,14 +1701,16 @@ async function propagateGuildWebhookSubscription(
 
   let updated = 0;
   let failed = 0;
+  let skipped = 0;
   for (const r of results) {
     if (r.status === 'fulfilled') { updated += 1; continue; }
-    // ConditionalCheckFailedException = sibling cleared between
-    // list and write; benign, not a failure.
-    if (r.reason?.name === 'ConditionalCheckFailedException') continue;
+    // ConditionalCheckFailedException = sibling cleared, converted to an
+    // owner-only mapping, or re-linked between list and write. The winning
+    // concurrent state is authoritative; count it separately from failures.
+    if (r.reason?.name === 'ConditionalCheckFailedException') { skipped += 1; continue; }
     failed += 1;
   }
-  return { updated, failed };
+  return { updated, failed, skipped };
 }
 
 // Returns every guild_configs row with a provisioned webhook

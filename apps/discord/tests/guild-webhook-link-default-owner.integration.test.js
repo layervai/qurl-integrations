@@ -51,7 +51,7 @@ beforeEach(() => {
   mockScanGuildSubscriptions.mockResolvedValue([]);
   mockSetGuildDefaultWebhookOwner.mockResolvedValue();
   mockSetGuildWebhookSubscription.mockResolvedValue();
-  mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0 });
+  mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0, skipped: 0 });
 
   global.fetch = jest.fn(async (url, opts) => {
     const method = opts?.method || 'GET';
@@ -60,6 +60,14 @@ beforeEach(() => {
     requests.push({ method, pathname, authorization });
 
     if (method === 'GET' && pathname === '/v1/webhooks') {
+      if (authorization === 'Bearer lv_other') {
+        return jsonResponse({ data: [{
+          webhook_id: 'wh_other',
+          owner_id: 'usr_other',
+          url: 'https://discord.example/webhooks/qurl',
+          events: ['qurl.accessed', 'qurl.expired'],
+        }] });
+      }
       if (!['Bearer lv_default', 'Bearer lv_alias_for_default_owner'].includes(authorization)) {
         return jsonResponse({ data: [] });
       }
@@ -75,6 +83,15 @@ beforeEach(() => {
         webhook_id: 'wh_default',
         owner_id: 'usr_default',
         secret: 'whsec_rotated',
+      } });
+    }
+    if (method === 'POST'
+        && pathname === '/v1/webhooks/wh_other/secret'
+        && authorization === 'Bearer lv_other') {
+      return jsonResponse({ data: {
+        webhook_id: 'wh_other',
+        owner_id: 'usr_other',
+        secret: 'whsec_other',
       } });
     }
     throw new Error(`Unexpected qURL request: ${method} ${pathname}`);
@@ -114,7 +131,7 @@ it('reuses the discovered default owner without rotating or shadowing its enviro
 
   expect(requests.filter(({ method, authorization }) => (
     method === 'GET' && authorization === 'Bearer lv_default'
-  ))).toHaveLength(0);
+  ))).toHaveLength(1);
   expect(requests.filter(({ method, authorization }) => (
     method === 'GET' && authorization === 'Bearer lv_alias_for_default_owner'
   ))).toHaveLength(1);
@@ -124,6 +141,35 @@ it('reuses the discovered default owner without rotating or shadowing its enviro
   // QURL_WEBHOOK_SECRET rather than resurrecting a guild-owned shadow.
   await subscriptions.scanOnce();
   expect(subscriptions.getSecretForOwner('usr_default')).toBe('whsec_default');
+});
+
+it('keeps a different owner on the existing per-guild rotate path', async () => {
+  const result = await linkGuildWebhookSubscription({
+    guildId: 'g_other',
+    apiKey: 'lv_other',
+  });
+
+  expect(result).toEqual({ ok: true, action: 'rotated' });
+  expect(requests.filter(({ method, pathname, authorization }) => (
+    method === 'POST'
+    && pathname === '/v1/webhooks/wh_other/secret'
+    && authorization === 'Bearer lv_other'
+  ))).toHaveLength(1);
+  expect(requests.filter(({ method, pathname }) => (
+    method === 'POST' && pathname === '/v1/webhooks/wh_default/secret'
+  ))).toHaveLength(0);
+  expect(mockSetGuildWebhookSubscription).toHaveBeenCalledWith('g_other', {
+    webhookId: 'wh_other',
+    webhookSecret: 'whsec_other',
+    webhookOwnerId: 'usr_other',
+  });
+  expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+  expect(mockPropagateGuildWebhookSubscription).toHaveBeenCalledWith('usr_other', {
+    webhookId: 'wh_other',
+    webhookSecret: 'whsec_other',
+    excludeGuildId: 'g_other',
+  });
+  expect(subscriptions.getSecretForOwner('usr_other')).toBe('whsec_other');
 });
 
 it('does not publish the environment secret when owner-only persistence rejects', async () => {

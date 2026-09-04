@@ -258,6 +258,11 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     const propagateResult = await db.propagateGuildWebhookSubscription(webhookOwnerId, {
       webhookId, webhookSecret: secret, excludeGuildId: guildId,
     });
+    if (propagateResult.skipped > 0) {
+      logger.info('Per-guild webhook secret propagation skipped concurrently changed siblings', {
+        guildId, webhookOwnerId, webhookId, ...propagateResult,
+      });
+    }
     if (propagateResult.failed > 0) {
       // Partial success: some sibling rows were updated, others
       // threw. Their cache entries will pick up the stale secret on
@@ -276,6 +281,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
         webhook_owner_id: webhookOwnerId,
         updated: propagateResult.updated,
         failed: propagateResult.failed,
+        skipped: propagateResult.skipped,
       });
     }
   } catch (err) {

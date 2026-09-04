@@ -111,11 +111,14 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
 - **Guild links fail at `stage=owner-resolution`.** The default owner cannot
   be established safely, so all guild links fail closed rather than risk
   rotating the shared default secret. `error_code=DEFAULT_WEBHOOK_OWNER_UNDISCOVERED`
-  means the bot key has no listable default subscription; invoke the registrar
-  Lambda and verify its subscription first. For qurl-service transport or
+  means the bot key's owner has no listable subscriptions; invoke the registrar
+  Lambda and verify the default subscription first. For qurl-service transport or
   contract failures, inspect the accompanying application warning in
-  CloudWatch. HTTP/contract failures commonly use `error_code=Error`; network
-  and timeout failures use their runtime error name.
+  CloudWatch. `DEFAULT_WEBHOOK_OWNER_CONFIG` means the shared secret exists but
+  the default API key or endpoint is missing; `DEFAULT_WEBHOOK_OWNER_CONTRACT`
+  means the response shape was malformed; `DEFAULT_WEBHOOK_OWNER_CONFLICT`
+  means one key listed multiple owners. HTTP failures commonly use
+  `error_code=Error`; network and timeout failures use their runtime error name.
 - **Guild links fail with `error_code=DEFAULT_WEBHOOK_SECRET_CONFLICT`.** A
   complete legacy DDB row may contain the only secret that still matches the
   default subscription after the old guild-link path rotated it. Do not clear
@@ -159,12 +162,21 @@ finds the existing sub, sees the SSM secret matches, returns `reused`).
 - **API-key blast radius**: the Lambda's `QURL_API_KEY` can list /
   create / PATCH / rotate-secret / DELETE webhook subscriptions in
   addition to minting qURLs. Factor into rotation drills.
+- **Guild re-key can strand an old BYOK subscription**: inline deletion is
+  unsafe because sibling guilds can share the prior owner, and the new key
+  cannot authorize deletion for that owner. Reference-aware reconciliation is
+  tracked in [#1380](https://github.com/layervai/qurl-integrations/issues/1380).
 - **Higher-severity log signal** (alarm on this): `webhook-registrar
   Lambda` CloudWatch error logs. The Lambda is the sole registration path for
   the default subscription; persistent failures can leave the bot unable to
   verify default-owner webhooks. The bot's `Webhook receiver not configured`
   503-response log is the downstream symptom when the shared default secret is
   absent. Complete DDB-backed BYOK subscriptions remain independently routable.
+  Also alarm on bursts of `qurl_webhook_subscription_register_failed`
+  (`QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED` in code) with
+  `stage=owner-resolution`: that is the signal when the shared secret is
+  configured but the default owner has no listable subscriptions, and every
+  guild link is blocked.
 
 ## Appendix — manual operator recovery
 

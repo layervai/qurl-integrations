@@ -39,8 +39,9 @@ jest.mock('../src/webhook-subscriptions', () => ({
 
 const mockAudit = jest.fn();
 const mockWarn = jest.fn();
+const mockInfo = jest.fn();
 jest.mock('../src/logger', () => ({
-  info: jest.fn(),
+  info: mockInfo,
   warn: mockWarn,
   error: jest.fn(),
   debug: jest.fn(),
@@ -69,7 +70,7 @@ beforeEach(() => {
   });
   mockSetGuildWebhookSubscription.mockResolvedValue();
   mockSetGuildDefaultWebhookOwner.mockResolvedValue();
-  mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0 });
+  mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0, skipped: 0 });
   mockDeleteSubscription.mockResolvedValue();
   mockResolveDefaultOwnerForApiKey.mockResolvedValue(null);
 });
@@ -323,7 +324,7 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
   // an audit. Without this, the sibling cache entry holds the stale
   // secret for up to 30s and 401s every webhook silently.
   it('emits PROPAGATE_PARTIAL audit (NOT REGISTER_FAILED) when propagate.failed > 0', async () => {
-    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 1, failed: 2 });
+    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 1, failed: 2, skipped: 3 });
     const result = await linkGuildWebhookSubscription({
       guildId: 'g_partial', apiKey: 'lv_x',
     });
@@ -335,7 +336,7 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_PROPAGATE_PARTIAL,
       expect.objectContaining({
-        guild_id: 'g_partial', failed: 2, updated: 1,
+        guild_id: 'g_partial', failed: 2, updated: 1, skipped: 3,
       }),
     );
     // And REGISTER_FAILED must NOT be fired on this path.
@@ -343,6 +344,26 @@ describe('linkGuildWebhookSubscription — propagation parameter', () => {
       ([event]) => event === AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
     );
     expect(registerFailedCalls).toHaveLength(0);
+  });
+
+  it('logs CAS-skipped siblings without emitting a partial-failure audit', async () => {
+    mockPropagateGuildWebhookSubscription.mockResolvedValueOnce({ updated: 0, failed: 0, skipped: 1 });
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_raced', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: true, action: 'created' });
+    expect(mockInfo).toHaveBeenCalledWith(
+      'Per-guild webhook secret propagation skipped concurrently changed siblings',
+      expect.objectContaining({ guildId: 'g_raced', skipped: 1 }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_PROPAGATE_PARTIAL,
+      expect.anything(),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.anything(),
+    );
   });
 });
 

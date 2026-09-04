@@ -226,7 +226,9 @@ async function discoverOwnerId(apiKey) {
     apiKey,
   });
   if (!Array.isArray(body?.data)) {
-    throw new Error('discoverOwnerId: qurl-service response data must be an array');
+    const err = new Error('discoverOwnerId: qurl-service response data must be an array');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+    throw err;
   }
   // Local name `webhooks` (not `subs`) so it doesn't shadow the
   // module convention everyone else uses for the registry import.
@@ -234,14 +236,19 @@ async function discoverOwnerId(apiKey) {
   if (webhooks.length === 0) return null;
   let ownerId = null;
   for (const w of webhooks) {
-    if (typeof w?.owner_id !== 'string' || !w.owner_id.length) continue;
+    if (typeof w?.owner_id !== 'string' || !w.owner_id.length) {
+      const err = new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
+      err.code = 'DEFAULT_WEBHOOK_OWNER_CONTRACT';
+      throw err;
+    }
     if (ownerId && w.owner_id !== ownerId) {
-      throw new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
+      const err = new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
+      err.code = 'DEFAULT_WEBHOOK_OWNER_CONFLICT';
+      throw err;
     }
     ownerId = w.owner_id;
   }
-  if (ownerId) return ownerId;
-  throw new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
+  return ownerId;
 }
 
 async function discoverDefaultOwnerId() {
@@ -253,23 +260,36 @@ async function discoverDefaultOwnerId() {
 // the HTTP receiver's registry scan. When a default subscription is expected
 // but cannot be discovered, throw rather than falling through to the
 // per-guild registrar and risking a rotation of the shared default secret.
-// This deliberately trades link availability for secret integrity during the
-// fresh-deploy gap or a persistent registrar/configuration failure: without the
-// default owner, an unrelated key cannot be distinguished safely from an alias
-// of the default key.
+// This deliberately blocks every guild link during the fresh-deploy gap or a
+// persistent registrar/configuration failure: without the default owner, an
+// unrelated key cannot be distinguished safely from an alias of the default
+// key. Owner identity is disclosed only by existing subscriptions, so an empty
+// candidate list cannot prove whether it shares an owner whose default
+// subscription disappeared. Creating in that state could move the
+// environment-managed account onto a guild-secret path and break Lambda
+// recovery.
 async function resolveDefaultOwnerForApiKey(apiKey) {
-  if (!config.QURL_WEBHOOK_SECRET || !config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
-
-  let ownerId = defaultOwnerId;
-  if (!ownerId) {
-    ownerId = await discoverDefaultOwnerId();
-    if (!ownerId) {
-      const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
-      err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';
-      throw err;
-    }
-    defaultOwnerId = ownerId;
+  // No configured secret declares that this is a pure-BYOK deployment with no
+  // Lambda-managed default subscription. A deployment that has such a
+  // subscription but omits its secret violates that configuration contract.
+  if (!config.QURL_WEBHOOK_SECRET) return null;
+  if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) {
+    const err = new Error('resolveDefaultOwnerForApiKey: default subscription discovery config is incomplete');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_CONFIG';
+    throw err;
   }
+
+  // Re-list on every link even when the registry cached the owner. The owner is
+  // stable, but its last subscription can be deleted out of band; accepting a
+  // stale cache would let the per-guild registrar recreate the default path
+  // with a guild-owned secret.
+  const ownerId = await discoverDefaultOwnerId();
+  if (!ownerId) {
+    const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
+    err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';
+    throw err;
+  }
+  defaultOwnerId = ownerId;
 
   const candidateOwnerId = apiKey === config.QURL_API_KEY
     ? ownerId
