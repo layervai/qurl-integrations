@@ -30,12 +30,13 @@ function buildAuth0AuthorizeUrl({ state, codeChallenge }) {
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('code_challenge', codeChallenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-  // `login` requests fresh Auth0 authentication instead of ambient-session
-  // reuse. The client does not independently attest that freshness; #1366 owns
-  // nonce-bound identity and any future max_age/auth_time check. Until #1365
-  // pins the passwordless connection, a live upstream social/enterprise IdP
-  // session can still select an account. `consent` lets a setup re-run mint a
-  // new key instead of silently reusing an earlier grant.
+  // `login` is a best-effort policy hint requesting fresh Auth0
+  // authentication instead of ambient-session reuse. The client does not
+  // independently attest that freshness; #1366 owns the verifiable,
+  // nonce-bound max_age/auth_time guarantee. Until #1365 pins the passwordless
+  // connection, a live upstream social/enterprise IdP session can still select
+  // an account. `consent` lets a setup re-run mint a new key instead of
+  // silently reusing an earlier grant.
   authorizeUrl.searchParams.set('prompt', 'login consent');
 
   // Discord is deliberately unpinned until #1365 enables passwordless on each

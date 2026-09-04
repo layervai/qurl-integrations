@@ -255,6 +255,7 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
       expect(loc.searchParams.get('prompt')).toBe('login consent');
+      expect(loc.searchParams.get('connection')).toBeNull();
       expect(db.getGuildConfig).not.toHaveBeenCalled();
     });
   });

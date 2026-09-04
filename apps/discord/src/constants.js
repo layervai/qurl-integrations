@@ -149,6 +149,12 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
+// Stable structured-log event names that are queryable operational signals,
+// but are not audit events or CloudWatch metrics.
+const LOG_EVENTS = Object.freeze({
+  QURL_OAUTH_AUTH0_CONNECTION_POLICY: 'qurl_oauth_auth0_connection_policy',
+});
+
 // Canonical event names emitted via logger.audit(). The CloudWatch metric
 // filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // pattern-match these strings, so a typo at a call site silently disables
@@ -687,6 +693,7 @@ module.exports = {
   UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  LOG_EVENTS,
   AUDIT_EVENTS,
   QURL_WEBHOOK_EVENTS,
   TRUST,
