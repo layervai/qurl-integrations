@@ -232,8 +232,8 @@ if (!config.isDiscordInstallConfigured) {
 if (config.isQurlOAuthConfigured) {
   const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
   const auth0ConnectionMessage = auth0Connection
-    ? 'qURL OAuth authorize redirects pin an Auth0 connection; the Auth0 application must enable it.'
-    : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); using the tenant default login page until #1365.';
+    ? `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`
+    : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
   logger.info(auth0ConnectionMessage, { connection: auth0Connection });
 }
 

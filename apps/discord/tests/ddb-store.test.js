@@ -69,6 +69,7 @@ process.env.DDB_TABLE_PREFIX = 'test-prefix-';
 process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
+const logger = require('../src/logger');
 
 beforeEach(() => {
   ddbMock.reset();
@@ -111,6 +112,32 @@ describe('guild configs', () => {
     // wrapper above.
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
+  });
+
+  test('setGuildApiKey: warns when a different Discord admin replaces the guild key without an extra read', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'admin-before' } });
+
+    await store.setGuildApiKey('g-1', 'replacement-key', 'admin-after');
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ReturnValues).toBe('UPDATED_OLD');
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Guild qURL key replaced by a different Discord admin; verify the qURL owner binding.',
+      { guildId: 'g-1', previousConfiguredBy: 'admin-before', configuredBy: 'admin-after' },
+    );
+  });
+
+  test('setGuildApiKey: does not warn on first setup or a same-admin replacement', async () => {
+    for (const response of [{}, { Attributes: { configured_by: 'admin-same' } }]) {
+      ddbMock.reset();
+      logger.warn.mockClear();
+      ddbMock.on(UpdateCommand).resolves(response);
+
+      await store.setGuildApiKey('g-1', 'replacement-key', 'admin-same');
+
+      expect(logger.warn).not.toHaveBeenCalled();
+    }
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {

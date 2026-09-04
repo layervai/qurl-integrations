@@ -221,6 +221,19 @@ function isValidAuth0DomainShape(d) {
   return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
 }
 
+function normalizeAuth0EmailConnection(raw) {
+  const value = (raw || '').trim();
+  if (!value) return '';
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error(`AUTH0_EMAIL_CONNECTION=${JSON.stringify(raw)} is invalid; use only letters, digits, underscores, and hyphens.`);
+  }
+  return value;
+}
+
+const auth0EmailConnection = normalizeAuth0EmailConnection(
+  process.env.AUTH0_EMAIL_CONNECTION,
+);
+
 // True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
 // well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
 // flow. False = degrade to the legacy modal-paste flow (kept until
@@ -355,8 +368,9 @@ module.exports = {
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
   // Optional Auth0 connection pinned on every Discord setup authorize
-  // redirect. Trimmed; unlike Slack, empty or unset means no pin (#1365).
-  AUTH0_EMAIL_CONNECTION: (process.env.AUTH0_EMAIL_CONNECTION || '').trim(),
+  // redirect. Validated at config load; unlike Slack, empty or unset means no
+  // pin (#1365).
+  AUTH0_EMAIL_CONNECTION: auth0EmailConnection,
 
   // Flow-dedicated HMAC secret for the qURL OAuth state token
   // (utils/qurl-oauth-state.js) — the preferred key, so ops can rotate

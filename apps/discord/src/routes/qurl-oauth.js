@@ -14,7 +14,10 @@ const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie } = require('../utils/cookies');
 const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
-const { buildAuth0AuthorizeUrl } = require('../utils/auth0-authorize-url');
+const {
+  buildAuth0AuthorizeUrl,
+  QURL_OAUTH_CALLBACK_URL,
+} = require('../utils/auth0-authorize-url');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-link');
@@ -255,7 +258,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         // Guaranteed valid by the cookie gate above; Auth0 matches it against
         // the S256 challenge stored for this authorization code.
         code_verifier: codeVerifier,
-        redirect_uri: `${config.BASE_URL}/oauth/qurl/callback`,
+        redirect_uri: QURL_OAUTH_CALLBACK_URL,
       }),
       signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
     });
