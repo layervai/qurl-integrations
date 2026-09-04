@@ -22,12 +22,14 @@ const { isPrivateHost } = require('./utils/private-host');
  *     assertNotPrivateAfterResolve), which are client-independent.
  */
 
-// Per-attempt timeout + retry budget. Pins the SDK's resilience to the budget
+// Per-attempt timeout + SDK retry budget. Pins the SDK's resilience to the budget
 // the hand-rolled client documented before this consolidation: "3 attempts
 // total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
 // attempts; `timeout` is the per-attempt deadline (matching the old
 // AbortSignal.timeout(30000)). We pin both rather than inherit SDK defaults so
-// a future default drift can't silently change this path's behavior.
+// a future default drift can't silently change this path's behavior. getIdentity
+// makes one attempt because SDK 0.3.0 exposes no supported generic request path;
+// its interactive caller reports retryable failures as temporarily unavailable.
 // (connector.js's resolve path pins maxRetries:3 — a separate call site we
 // deliberately leave untouched here.)
 const REQUEST_TIMEOUT_MS = 30000;
@@ -137,7 +139,8 @@ async function getIdentity(apiKey) {
   }
 
   return callQurl('GET', '/me', async () => {
-    const response = await globalThis.fetch(`${config.QURL_ENDPOINT}/v1/me`, {
+    const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
+    const response = await globalThis.fetch(`${endpoint}/v1/me`, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${apiKey}`,

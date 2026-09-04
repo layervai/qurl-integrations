@@ -8745,25 +8745,29 @@ const commands = [
           // the plaintext only to authenticate the service-side identity check.
           const plaintextKey = await db.getGuildApiKey(interaction.guildId);
           if (!plaintextKey) {
+            logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
             return interaction.editReply({
               content: '❌ **The stored qURL key is unavailable.**\n\n'
                 + 'Re-run `/qurl setup` to connect a valid key.',
             });
           }
           let identity;
+          let identityUnavailable = false;
           try {
             identity = await getIdentity(plaintextKey);
           } catch (err) {
+            const status = Number.isInteger(err?.status) ? err.status : null;
+            logger.warn('qURL status identity check failed', {
+              guild_id: interaction.guildId,
+              status,
+            });
             if (err?.status === 401 || err?.status === 403) {
               return interaction.editReply({
                 content: '❌ **The stored qURL key is revoked or invalid.**\n\n'
                   + 'Re-run `/qurl setup` to connect a valid key.',
               });
             }
-            return interaction.editReply({
-              content: '⚠️ **The qURL key check could not be completed.**\n\n'
-                + 'Please try `/qurl status` again later.',
-            });
+            identityUnavailable = true;
           }
 
           // #185 admin-offboarding nudge: the qURL key is owned by the
@@ -8791,10 +8795,14 @@ const commands = [
             }
           }
 
-          return interaction.editReply({
-            content: `✅ **qURL is configured**\n` +
+          const identitySummary = identityUnavailable
+            ? '⚠️ **The qURL key check could not be completed.**\n'
+              + 'Please try `/qurl status` again later.\n'
+            : `✅ **qURL is configured**\n` +
               `Key prefix: \`${identity.api_key.key_prefix}\`\n` +
-              `Scopes: ${identity.api_key.scopes.map(scope => `\`${scope}\``).join(', ')}\n` +
+              `Scopes: ${identity.api_key.scopes.map(scope => `\`${scope}\``).join(', ') || '_none_'}\n`;
+          return interaction.editReply({
+            content: identitySummary +
               `Configured by: <@${guildConfig.configured_by}>\n` +
               `Last updated: ${guildConfig.updated_at}` +
               originalAdminLeftNotice,

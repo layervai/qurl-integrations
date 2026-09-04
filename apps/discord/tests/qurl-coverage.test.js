@@ -55,7 +55,7 @@ describe('qURL client — getIdentity', () => {
     // back to the bot's own key.
     jest.mock('../src/config', () => ({
       QURL_API_KEY: 'fallback-api-key',
-      QURL_ENDPOINT: 'https://api.test.local',
+      QURL_ENDPOINT: 'https://api.test.local/',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
@@ -113,6 +113,42 @@ describe('qURL client — getIdentity', () => {
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       expect.objectContaining({ status, method: 'GET', path: '/me' }),
     );
+  });
+
+  it('rejects a non-JSON identity response without exposing its body', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('secret response fragment'); },
+    });
+
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL identity response was not valid JSON');
+  });
+
+  it('rejects an identity response missing display fields', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: 'owner-123',
+      auth_type: 'api_key',
+      api_key: { key_id: 'key-123' },
+    }));
+
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL identity response had an unexpected shape');
+  });
+
+  it('rejects a missing guild key without falling back to the bot key', async () => {
+    globalThis.fetch = jest.fn();
+
+    await expect(qurl.getIdentity(null)).rejects.toThrow('Guild qURL API key is not configured');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('makes one attempt when qurl-service returns 503', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
+
+    await expect(qurl.getIdentity('stored-guild-key')).rejects.toMatchObject({ status: 503 });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 });
 

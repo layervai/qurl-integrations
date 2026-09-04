@@ -24,6 +24,14 @@ jest.mock('../src/discord', () => ({
   notifyBadgeEarned: jest.fn(),
 }));
 
+jest.mock('../src/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  audit: jest.fn(),
+}));
+
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
@@ -36,9 +44,11 @@ const mockGetIdentity = jest.fn();
 jest.mock('../src/qurl', () => ({
   deleteLink: jest.fn(),
   getIdentity: mockGetIdentity,
+  isPrivateHost: jest.fn(),
 }));
 
 const db = require('../src/store');
+const logger = require('../src/logger');
 const { handleCommand } = require('../src/commands');
 const { PermissionFlagsBits } = require('discord.js');
 
@@ -124,9 +134,10 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
   });
 
   it.each([
-    ['transport error', new Error('connect ECONNREFUSED 10.0.0.5:8080')],
-    ['service error', Object.assign(new Error('redacted'), { status: 503 })],
-  ])('does not report a %s as revoked', async (_case, error) => {
+    ['transport error', new Error('connect ECONNREFUSED 10.0.0.5:8080'), null],
+    ['timeout', new DOMException('operation timed out', 'TimeoutError'), null],
+    ['service error', Object.assign(new Error('redacted'), { status: 503 }), 503],
+  ])('does not report a %s as revoked', async (_case, error, expectedStatus) => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
       configured_by: 'admin-original',
@@ -143,6 +154,52 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toMatch(/check could not be completed/i);
     expect(replyContent).not.toMatch(/revoked|invalid/i);
     expect(replyContent).not.toContain(STORED_KEY);
+    expect(replyContent).toContain('Configured by: <@admin-original>');
+    expect(replyContent).toContain('Last updated: 2026-01-01T00:00:00Z');
+    expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
+      guild_id: 'guild-1',
+      status: expectedStatus,
+    });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
+  });
+
+  it('keeps the admin-left notice when the identity check cannot be completed', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-departed',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockRejectedValueOnce(new Error('network unavailable'));
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => {
+        throw Object.assign(new Error('Unknown Member'), { code: 10007 });
+      },
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._reply.mock.calls[0][0].content;
+    expect(replyContent).toMatch(/check could not be completed/i);
+    expect(replyContent).toContain('has left this server');
+    expect(replyContent).toContain('<@admin-departed>');
+  });
+
+  it('renders an empty service-reported scope list explicitly', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockResolvedValueOnce({
+      api_key: { key_id: 'key-123', key_prefix: 'lv_live_aaa', scopes: [] },
+    });
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction._reply.mock.calls[0][0].content).toContain('Scopes: _none_');
   });
 
   it('asks the admin to rerun setup when the config row has no stored key', async () => {
@@ -162,6 +219,9 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('`/qurl setup`');
     expect(replyContent).not.toContain('try `/qurl status` again later');
     expect(mockGetIdentity).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith('qURL status key unavailable', {
+      guild_id: 'guild-1',
+    });
   });
 
   it('shows the passive nudge when members.fetch throws DiscordAPIError 10007 (Unknown Member)', async () => {
