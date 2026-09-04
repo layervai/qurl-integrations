@@ -1,10 +1,7 @@
 const {
   hasSafeResourceIdShape,
-  isGoneQurlApiError,
   maskResourceIdPath,
   qurlPath,
-  qurlApiError,
-  qurlApiErrorMessage,
   resourcePath,
   validateResourceId,
 } = require('../src/utils/resource-id');
@@ -58,22 +55,6 @@ describe('resource ID transport guard', () => {
     ['qurlPath', qurlPath],
   ])('%s validates structurally', (_name, buildPath) => {
     expect(() => buildPath('../qurls/x')).toThrow(/Invalid resource ID format/);
-  });
-
-  it('formats and classifies terminal qURL API failures from one contract', () => {
-    const gone = qurlApiErrorMessage('DELETE', resourcePath(CRID_RESOURCE_ID), 404);
-
-    // Load-bearing literal: this pins the wire-error family independently of
-    // the shared formatter used by reclaim's mock fixtures and expectations.
-    expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (404)`);
-    expect(isGoneQurlApiError(new Error(gone))).toBe(true);
-    expect(isGoneQurlApiError(`${gone} request-id=123`)).toBe(false);
-    const wrapped = qurlApiError('DELETE', resourcePath(CRID_RESOURCE_ID), 410);
-    wrapped.message += ' request-id=123';
-    expect(isGoneQurlApiError(wrapped)).toBe(true);
-    expect(isGoneQurlApiError('unrelated operation failed (404)')).toBe(false);
-    expect(isGoneQurlApiError(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)))
-      .toBe(false);
   });
 
   it('masks every resource-ID route and handles unusual causes', () => {

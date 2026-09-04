@@ -10,15 +10,12 @@ const MAX_RESOURCE_ID_LENGTH = 1024;
 const ERROR_PREVIEW_LENGTH = 64;
 const RESOURCE_ID_CHARACTER_CLASS = '[\\w-]';
 const RESOURCE_ID_CHARACTERS = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+$`);
-const RESOURCE_ID_PREFIX = new RegExp(`^${RESOURCE_ID_CHARACTER_CLASS}+`);
+const RESOURCE_ID_SCAN = new RegExp(`${RESOURCE_ID_CHARACTER_CLASS}+`, 'y');
 const RESOURCE_PATH_PREFIX = '/resources/';
 const RESOURCE_ID_MASK = '<id>';
 // Status returns the qURL aggregate response shape; whole-resource revoke uses
 // the resource action. Keeping both names here makes that split deliberate.
 const QURL_PATH_PREFIX = '/qurls/';
-// String-rejection fallback must match qurlApiErrorMessage output exactly:
-// loosening it changes which reclaim failures are classified as terminal.
-const GONE_QURL_API_ERROR = /^qURL API [A-Z]+ \S+ failed \((404|410)\)$/;
 
 function hasSafeResourceIdShape(resourceId) {
   return typeof resourceId === 'string'
@@ -60,22 +57,6 @@ function qurlPath(resourceId) {
   return `${QURL_PATH_PREFIX}${resourceId}`;
 }
 
-function qurlApiErrorMessage(method, path, statusOrCode) {
-  return `qURL API ${method} ${path} failed (${statusOrCode})`;
-}
-
-function qurlApiError(method, path, statusOrCode) {
-  const error = new Error(qurlApiErrorMessage(method, path, statusOrCode));
-  if (Number.isInteger(statusOrCode) && statusOrCode > 0) error.status = statusOrCode;
-  return error;
-}
-
-function isGoneQurlApiError(error) {
-  if (error?.status === 404 || error?.status === 410) return true;
-  const message = typeof error === 'string' ? error : error?.message;
-  return typeof message === 'string' && GONE_QURL_API_ERROR.test(message);
-}
-
 function maskResourceIdPath(message) {
   let masked = typeof message === 'string'
     ? message
@@ -89,7 +70,8 @@ function maskResourceIdPath(message) {
       if (start === -1) break;
 
       const idStart = start + prefix.length;
-      const resourceId = masked.slice(idStart).match(RESOURCE_ID_PREFIX)?.[0];
+      RESOURCE_ID_SCAN.lastIndex = idStart;
+      const resourceId = RESOURCE_ID_SCAN.exec(masked)?.[0];
       if (!resourceId) {
         searchFrom = idStart;
         continue;
@@ -103,11 +85,8 @@ function maskResourceIdPath(message) {
 
 module.exports = {
   hasSafeResourceIdShape,
-  isGoneQurlApiError,
   maskResourceIdPath,
   qurlPath,
-  qurlApiError,
-  qurlApiErrorMessage,
   resourcePath,
   validateResourceId,
 };

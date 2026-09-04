@@ -32,7 +32,8 @@ jest.mock('../src/connector', () => ({
 }));
 
 const { deleteLink } = require('../src/qurl');
-const { qurlApiErrorMessage, resourcePath } = require('../src/utils/resource-id');
+const { resourcePath } = require('../src/utils/resource-id');
+const { qurlApiErrorMessage } = require('../src/utils/qurl-errors');
 const config = require('../src/config');
 const {
   LEDGER_PATH,
@@ -563,6 +564,9 @@ describe('reclaim', () => {
 
     expect(result).toMatchObject({ revoked: 0, failed: 1 });
     expect(readLedger(ledger)).toEqual(['r_legacy42']);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('1 legacy resource ID(s) were rejected with 400'),
+    );
   });
 
   it('does not read a 404 inside the resource ID as already gone', async () => {

@@ -165,9 +165,9 @@ const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink, deleteLink } = require('../src/qurl');
 const {
   hasSafeResourceIdShape,
-  isGoneQurlApiError,
   maskResourceIdPath,
 } = require('../src/utils/resource-id');
+const { isGoneQurlApiError, qurlApiErrorStatus } = require('../src/utils/qurl-errors');
 
 // The same pool depth the send pipeline batches against — imported, not
 // copied, so a change to the cap reaches this script instead of silently
@@ -1139,6 +1139,7 @@ async function reclaim(ledgerPath) {
   const outstanding = new Set();
   const causes = new Map();
   let revoked = 0;
+  let legacyRejected = 0;
 
   // Drain rather than sweep once. An in-flight round can append after the
   // snapshot is taken, so keep passing until a pass finds nothing new.
@@ -1176,8 +1177,8 @@ async function reclaim(ledgerPath) {
         outstanding.delete(id);
       } catch (e) {
         // An already-gone resource is the successful end state for a reclaim.
-        // callQurl collapses API errors to a status-only string, so matching
-        // the status is all that is available.
+        // callQurl preserves the HTTP status structurally; an exact formatted
+        // message fallback covers serialized/rethrown errors that lost it.
         //
         // TODO(upstream-contract): 404 and 410 are the statuses qurl-service
         // uses for a resource that no longer exists. If it adopts another,
@@ -1188,6 +1189,10 @@ async function reclaim(ledgerPath) {
           outstanding.delete(id);
         } else {
           outstanding.add(id);
+          // TODO(upstream-contract): qurl-service public routes reject the
+          // retired private r_ identifier cohort with 400. Those rows cannot
+          // drain automatically, so distinguish them from transient failures.
+          if (id.startsWith('r_') && qurlApiErrorStatus(e) === 400) legacyRejected++;
           // Keyed on the cause, not the raw message. callQurl embeds the
           // request path — and therefore the resource id — in every message,
           // so keying on it verbatim gives one bucket per failing id: a
@@ -1224,6 +1229,9 @@ async function reclaim(ledgerPath) {
   // only identifies the cause if the run failed uniformly.
   for (const [message, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) {
     console.error(`  ${n}x ${message}`);
+  }
+  if (legacyRejected > 0) {
+    console.error(`Reclaim: ${legacyRejected} legacy resource ID(s) were rejected with 400 and cannot be reclaimed automatically; remove them only after confirming their links expired.`);
   }
   if (failed > 0) {
     console.error(`Reclaim: ${failed} resource(s) still on the tenancy — re-run with --reclaim ${ledgerPath}`);

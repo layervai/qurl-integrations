@@ -9,9 +9,9 @@ const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 const {
   qurlPath,
-  qurlApiError,
   resourcePath,
 } = require('./utils/resource-id');
+const { qurlApiError } = require('./utils/qurl-errors');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
