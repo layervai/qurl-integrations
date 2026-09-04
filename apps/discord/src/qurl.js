@@ -7,6 +7,11 @@ const {
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
+const {
+  qurlPath,
+  resourcePath,
+} = require('./utils/resource-id');
+const { qurlApiError } = require('./utils/qurl-errors');
 const dns = require('dns').promises;
 
 const { isPrivateHost } = require('./utils/private-host');
@@ -15,7 +20,8 @@ const { isPrivateHost } = require('./utils/private-host');
  * qURL API client for the bot's link create / status / revoke calls, backed by
  * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
  * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
- * uses the same SDK. This module adds only the concerns the SDK doesn't own:
+ * uses the same SDK. Create and status use `/qurls`; whole-resource revoke
+ * uses `/resources`. This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
@@ -112,7 +118,7 @@ async function callQurl(method, path, fn) {
     // a status-only error so that body can't leak through a caller that logs
     // `err.message`.
     if (status > 0) {
-      throw new Error(`qURL API ${method} ${path} failed (${status})`);
+      throw qurlApiError(method, path, status);
     }
     // status 0: re-wrap ONLY a coded SDK error outside the body-free SAFE set —
     // i.e. one whose synthesized message could embed a body snippet (e.g.
@@ -122,7 +128,7 @@ async function callQurl(method, path, fn) {
     // error like a TypeError, which carries no server body) propagates verbatim,
     // so its message and stack survive for debugging.
     if (typeof err?.code === 'string' && !SAFE_STATUS0_CODES.has(err.code)) {
-      throw new Error(`qURL API ${method} ${path} failed (${err.code})`);
+      throw qurlApiError(method, path, err.code);
     }
     throw err;
   }
@@ -203,6 +209,8 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   }
 
   const client = makeClient(apiKey);
+  // The collection label has no resource ID, so unlike item routes it needs no
+  // validated path builder; keep this literal deliberately aligned to SDK create().
   const result = await callQurl('POST', '/qurls', () =>
     client.create({
       target_url: targetUrl,
@@ -219,31 +227,28 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   return result;
 }
 
-// Bot-side charset guard on the resource ID, independent of the SDK client (in
-// the same defense-in-depth spirit as the SSRF guards): rejects malformed IDs
-// with a stable bot-side message before any network work. The SDK's delete()
-// adds the semantic `r_` resource-ID check on top.
-function validateResourceId(resourceId) {
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
-}
-
 async function deleteLink(resourceId, apiKey) {
-  validateResourceId(resourceId);
+  const path = resourcePath(resourceId);
   const client = makeClient(apiKey);
-  // delete() requires a qurl-service resource ID (r_ prefix); the bot's send
-  // rows store exactly that, so the revoke path satisfies it.
-  await callQurl('DELETE', `/qurls/${resourceId}`, () => client.delete(resourceId));
-  logger.info('Revoked qURL', { resource_id: resourceId });
+  // Revoke at the resource level: every link minted on the resource stops
+  // resolving. Repeats against an existing revoked row are idempotent 204;
+  // a never-existent public ID remains 404, so a corrupt send-row ID cannot
+  // report false success. SDK 0.3.x's delete() rejects current public IDs using
+  // a retired `r_` prefix check before any request is sent.
+  // qurl-typescript#244 fixes that older SDK method for other consumers; keep
+  // deleteResource() here because it directly names this whole-resource action.
+  await callQurl('DELETE', path, () => client.deleteResource(resourceId));
+  logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {
-  validateResourceId(resourceId);
+  const path = qurlPath(resourceId);
   const client = makeClient(apiKey);
+  // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
+  // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
-  return callQurl('GET', `/qurls/${resourceId}`, () => client.get(resourceId));
+  return callQurl('GET', path, () => client.get(resourceId));
 }
 
 module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };

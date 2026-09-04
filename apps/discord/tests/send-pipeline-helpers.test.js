@@ -146,6 +146,10 @@ Readable.fromWeb = jest.fn(() => new Readable({ read() { this.push(null); } }));
 
 // Global fetch mock (node 18+ built-in)
 const originalFetch = globalThis.fetch;
+const {
+  PUBLIC_KEY_RESOURCE_ID,
+  CRID_RESOURCE_ID,
+} = require('./helpers/qurl-fixtures');
 
 // ---------------------------------------------------------------------------
 // Now require modules under test
@@ -622,30 +626,103 @@ describe('qURL client', () => {
   });
 
   describe('deleteLink', () => {
-    it('sends DELETE request with correct path', async () => {
+    it.each([
+      ['public-key resource ID', PUBLIC_KEY_RESOURCE_ID],
+      ['CRID', CRID_RESOURCE_ID],
+    ])('revokes a %s through DELETE /v1/resources/{id}', async (_kind, resourceId) => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: true,
         status: 204,
       });
 
-      // delete() requires a qurl-service resource ID (r_ prefix).
-      await qurl.deleteLink('r_resource42abc');
+      await qurl.deleteLink(resourceId);
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe('https://api.test.local/v1/qurls/r_resource42abc');
+      expect(url).toBe(`https://api.test.local/v1/resources/${resourceId}`);
+      expect(opts.method).toBe('DELETE');
+      const logger = require('../src/logger');
+      expect(logger.info).toHaveBeenCalledWith('Revoked qURL resource', {
+        resource_id: resourceId,
+      });
+    });
+
+    it('reports the resource path in an auth-failure audit event', async () => {
+      const logger = require('../src/logger');
+      const { AUDIT_EVENTS } = require('../src/constants');
+      logger.audit.mockClear();
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        headers: { get: () => null },
+        json: async () => ({
+          error: { status: 401, code: 'unauthorized', title: 'Unauthorized' },
+        }),
+      });
+
+      await expect(qurl.deleteLink(CRID_RESOURCE_ID)).rejects.toThrow(/401/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+        expect.objectContaining({
+          dependency: 'qurl_service',
+          status: 401,
+          method: 'DELETE',
+          path: `/resources/${CRID_RESOURCE_ID}`,
+        }),
+      );
+    });
+
+    it('sends a legacy private ID to the service for its 400 rejection', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: { get: () => null },
+        json: async () => ({ error: { status: 400, code: 'invalid_resource_id', title: 'HTTP 400' } }),
+      });
+
+      await expect(qurl.deleteLink('r_legacy42')).rejects.toThrow(/qURL API DELETE.*failed.*400/);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = globalThis.fetch.mock.calls[0];
+      expect(url).toBe('https://api.test.local/v1/resources/r_legacy42');
       expect(opts.method).toBe('DELETE');
     });
 
-    it('throws on API error', async () => {
+    it.each([
+      ['path separators', '../qurls/x'],
+      ['an overlong value', 'a'.repeat(1025)],
+    ])('rejects %s before network work', async (_kind, resourceId) => {
+      globalThis.fetch = jest.fn();
+
+      await expect(qurl.deleteLink(resourceId)).rejects.toThrow(/Invalid resource ID format/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports a 404 from the resource endpoint', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
         status: 404,
         headers: { get: () => null },
-        json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404', detail: 'qURL not found' } }),
+        json: async () => ({
+          error: {
+            status: 404,
+            code: 'not_found',
+            title: 'HTTP 404',
+            detail: 'sensitive response detail',
+          },
+        }),
       });
 
-      await expect(qurl.deleteLink('r_badid1234567')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
+      const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+        () => null,
+        (error) => error,
+      );
+
+      expect(thrown).toEqual(expect.any(Error));
+      expect(thrown.status).toBe(404);
+      expect(thrown.message).toMatch(/qURL API DELETE.*failed.*404/);
+      expect(thrown.message).not.toContain('sensitive response detail');
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -767,6 +844,17 @@ describe('Connector client', () => {
   });
 
   describe('mintLinks', () => {
+    it.each([
+      ['a non-string resource ID', 12345],
+      ['an overlong resource ID', 'a'.repeat(1025)],
+    ])('rejects %s before minting', async (_kind, resourceId) => {
+      globalThis.fetch = jest.fn();
+
+      await expect(connector.mintLinks(resourceId, { expiresAt: 'date', n: 1 }))
+        .rejects.toThrow(/Invalid resource ID format/);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it('sends POST with correct body and returns links', async () => {
       const mockLinks = [
         { qurl_link: 'https://q.test/1' },
