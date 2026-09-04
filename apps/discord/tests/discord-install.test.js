@@ -748,10 +748,10 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/Secure/);
     });
 
-    it('still sets prompt=consent when Discord omits the advisory guild hint', async () => {
+    it('still forces fresh login and consent when Discord omits the advisory guild hint', async () => {
       // Re-installs may omit the callback hint. Stage 2 must still use the
-      // authoritative token-response guild and keep the explicit Auth0
-      // consent screen.
+      // authoritative token-response guild and keep the shared fresh-login
+      // plus consent policy.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -766,7 +766,7 @@ describe('Discord install callback', () => {
       const res = await discordCallback('/oauth/discord/callback?code=ok-code');
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
-      expect(loc.searchParams.get('prompt')).toBe('consent');
+      expect(loc.searchParams.get('prompt')).toBe('login consent');
     });
 
     it('cookie set at /oauth/discord/callback rides through to /oauth/qurl/callback (round-trip pin per round-9 #8)', async () => {
