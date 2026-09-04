@@ -152,7 +152,7 @@ describe('qURL client — getResourceStatus', () => {
     );
 
     expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(thrown.message).toMatch(/Invalid resource ID format/);
+    expect(thrown.message).toBe('Invalid resource ID format');
     expect(thrown.message).not.toContain(accessToken);
     const allLogs = JSON.stringify([
       logger.debug.mock.calls,
@@ -163,6 +163,13 @@ describe('qURL client — getResourceStatus', () => {
     ]);
     expect(allLogs).not.toContain(accessToken);
   });
+
+  it.each([undefined, null, 123, {}, ['r_resource']])(
+    'rejects a non-string resource ID without coercing it (%p)',
+    (resourceId) => {
+      expect(() => qurl.validateResourceId(resourceId)).toThrow('Invalid resource ID format');
+    },
+  );
 
   it('rejects a malformed resource ID with a generic, non-echoing error', async () => {
     const logger = require('../src/logger');
@@ -192,6 +199,29 @@ describe('qURL client — getResourceStatus', () => {
 
     await expect(qurl.getResourceStatus(publicId)).resolves.toBeDefined();
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-wraps SDK client-validation errors without echoing the rejected identifier', async () => {
+    const logger = require('../src/logger');
+    const { QURLClient, ERROR_CODE_CLIENT_VALIDATION } = require('@layervai/qurl');
+    const unknownCredential = 'ak_sensitive-future-credential';
+    const clientError = Object.assign(
+      new Error(`delete rejected ${unknownCredential}`),
+      { status: 0, code: ERROR_CODE_CLIENT_VALIDATION },
+    );
+    const deleteSpy = jest.spyOn(QURLClient.prototype, 'delete').mockRejectedValueOnce(clientError);
+
+    try {
+      const thrown = await qurl.deleteLink(unknownCredential).catch(error => error);
+
+      expect(thrown.message).toBe(
+        'qURL API DELETE /qurls/:resourceId failed (client_validation)',
+      );
+      expect(thrown.message).not.toContain(unknownCredential);
+      expect(JSON.stringify(logger.debug.mock.calls)).not.toContain(unknownCredential);
+    } finally {
+      deleteSpy.mockRestore();
+    }
   });
 });
 

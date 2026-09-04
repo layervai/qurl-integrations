@@ -2,7 +2,6 @@ const {
   QURLClient,
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
-  ERROR_CODE_CLIENT_VALIDATION,
 } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
@@ -26,7 +25,8 @@ const { isPrivateHost } = require('./utils/private-host');
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
- *     assertNotPrivateAfterResolve), which are client-independent.
+ *     assertNotPrivateAfterResolve), which are client-independent;
+ *   - a non-echoing resource-ID guard and low-cardinality telemetry labels.
  */
 
 // Per-attempt timeout + retry budget. Pins the SDK's resilience to the budget
@@ -55,7 +55,6 @@ const RESOURCE_ID_LOG_PATH = '/resources/:resourceId';
 const SAFE_STATUS0_CODES = new Set([
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
-  ERROR_CODE_CLIENT_VALIDATION,
 ]);
 
 // Construct a per-call SDK client. Per-call (not cached) because each call
@@ -99,9 +98,10 @@ function makeClient(apiKey) {
  *     — e.g. an unexpected-response shape error that could embed a body snippet
  *     — is re-wrapped to a code-only message, so the invariant holds structurally
  *     rather than by trusting SDK internals. Body-free SDK errors (network /
- *     timeout / client-validation) and non-SDK throws (programming errors, which
- *     carry no server body) propagate verbatim so their stack survives. Pinned
- *     by tests/qurl-coverage.test.js.
+ *     timeout) and non-SDK throws (programming errors, which carry no server
+ *     body) propagate verbatim so their stack survives. Client-validation
+ *     messages are re-wrapped because a future SDK validator could echo the
+ *     rejected identifier. Pinned by tests/qurl-coverage.test.js.
  */
 async function callQurl(method, path, fn) {
   try {
@@ -130,9 +130,10 @@ async function callQurl(method, path, fn) {
     // i.e. one whose synthesized message could embed a body snippet (e.g.
     // `unexpected_response`). Defense-in-depth: the SDK doesn't embed bodies in
     // status-0 messages today, but we don't rely on it. A body-free SDK error
-    // (network / timeout / client-validation) or a non-SDK throw (a programming
-    // error like a TypeError, which carries no server body) propagates verbatim,
-    // so its message and stack survive for debugging.
+    // (network / timeout) or a non-SDK throw (a programming error like a
+    // TypeError, which carries no server body) propagates verbatim, so its
+    // message and stack survive for debugging. Client-validation is deliberately
+    // excluded: a future SDK validator may echo the rejected identifier.
     if (typeof err?.code === 'string' && !SAFE_STATUS0_CODES.has(err.code)) {
       throw qurlApiError(method, path, err.code);
     }
