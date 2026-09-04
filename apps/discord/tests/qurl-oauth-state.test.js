@@ -27,7 +27,14 @@ describe('qurl-oauth-state', () => {
   describe('qURL account subject fingerprint', () => {
     it('returns a stable, domain-separated HMAC rather than the raw Auth0 subject', () => {
       const secret = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
-      const expected = crypto.createHmac('sha256', secret)
+      const fingerprintKey = crypto.hkdfSync(
+        'sha256',
+        secret,
+        Buffer.alloc(0),
+        'qurl-account-fingerprint:v1',
+        32,
+      );
+      const expected = crypto.createHmac('sha256', fingerprintKey)
         .update('qurl-account-subject:auth0|abc')
         .digest('hex');
       expect(fingerprintQurlAccountSubject('auth0|abc')).toBe(
@@ -36,8 +43,8 @@ describe('qurl-oauth-state', () => {
       expect(fingerprintQurlAccountSubject('auth0|different'))
         .not.toBe(fingerprintQurlAccountSubject('auth0|abc'));
       expect(qurlAccountFingerprintKeyEpoch()).toBe(
-        crypto.createHmac('sha256', secret)
-          .update('qurl-account-fingerprint-key-epoch')
+        crypto.createHmac('sha256', fingerprintKey)
+          .update('qurl-account-fingerprint-key-epoch:v1')
           .digest('hex')
           .slice(0, 12),
       );

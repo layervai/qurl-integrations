@@ -24,7 +24,10 @@ function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
     try {
       const logger = require('../src/logger');
       ({ stopIntervals } = require('../src/server'));
-      calls = [...logger.info.mock.calls];
+      calls = {
+        info: [...logger.info.mock.calls],
+        warn: [...logger.warn.mock.calls],
+      };
     } finally {
       stopIntervals?.();
     }
@@ -34,14 +37,14 @@ function captureServerLogs(connection, auth0Env = AUTH0_ENV) {
 
 describe('server Auth0 connection policy log', () => {
   it('names the pinned connection in the message and metadata', () => {
-    expect(captureServerLogs('email')).toContainEqual([
+    expect(captureServerLogs('email').info).toContainEqual([
       'qURL OAuth authorize redirects pin Auth0 connection "email"; the Auth0 application must enable it.',
       { event: 'qurl_oauth_auth0_connection_policy', connection: 'email' },
     ]);
   });
 
   it('makes the unpinned deployment state explicit', () => {
-    expect(captureServerLogs(undefined)).toContainEqual([
+    expect(captureServerLogs(undefined).warn).toContainEqual([
       'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.',
       { event: 'qurl_oauth_auth0_connection_policy', connection: null },
     ]);
@@ -53,9 +56,21 @@ describe('server Auth0 connection policy log', () => {
       AUTH0_CLIENT_ID: undefined,
       AUTH0_CLIENT_SECRET: undefined,
       AUTH0_AUDIENCE: undefined,
-    })).toContainEqual([
+    }).info).toContainEqual([
       'AUTH0_EMAIL_CONNECTION="email" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.',
       { event: 'qurl_oauth_auth0_connection_policy', connection: 'email' },
+    ]);
+  });
+
+  it('emits a policy event when both OAuth and the connection are unconfigured', () => {
+    expect(captureServerLogs(undefined, {
+      AUTH0_DOMAIN: undefined,
+      AUTH0_CLIENT_ID: undefined,
+      AUTH0_CLIENT_SECRET: undefined,
+      AUTH0_AUDIENCE: undefined,
+    }).info).toContainEqual([
+      'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.',
+      { event: 'qurl_oauth_auth0_connection_policy', connection: null },
     ]);
   });
 });

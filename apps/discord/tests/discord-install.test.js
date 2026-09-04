@@ -618,8 +618,8 @@ describe('Discord install callback', () => {
       // stored/used; dropped per PR #177 review item 5).
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
       // Both halves are load-bearing on every Auth0 entry path: `login`
-      // prevents an ambient Auth0 session from choosing the account, and
-      // `consent` lets a setup re-run mint a new key.
+      // asks Auth0 not to reuse its ambient session, and `consent` lets a
+      // setup re-run mint a new key.
       expect(loc.searchParams.get('prompt')).toBe('login consent');
       expect(loc.searchParams.get('connection')).toBe('email');
 

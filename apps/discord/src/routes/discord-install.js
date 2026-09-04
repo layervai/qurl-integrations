@@ -192,8 +192,8 @@ router.get('/callback', rateLimit, async (req, res) => {
     }
   }
 
-  // The shared Auth0 builder forces fresh login + consent on this path and
-  // /qurl setup alike. Neither decision depends on prior guild config, so no
+  // The shared Auth0 builder requests fresh login + consent on this path and
+  // /qurl setup alike. Neither parameter depends on prior guild config, so no
   // DDB read is needed before exchanging the Discord code.
 
   // 1. Exchange code at Discord for an access_token and authoritative

@@ -30,6 +30,7 @@ const { createStateSigner } = require('./oauth-state');
 
 const STATE_KIND = 'qurl-oauth';
 const STATE_TTL_SECONDS = 5 * 60;
+const ACCOUNT_FINGERPRINT_CONTEXT = 'qurl-account-fingerprint:v1';
 
 // Secret precedence (highest first): QURL_OAUTH_STATE_SECRET — the
 // flow-dedicated key, preferred going forward so ops can rotate this
@@ -45,25 +46,29 @@ const qurlOAuthStateSigner = createStateSigner({
   secretConfigKeys: ['QURL_OAUTH_STATE_SECRET', 'OAUTH_STATE_SECRET'],
 });
 
-// Domain-separate the audit fingerprint from signed OAuth-state payloads even
-// though both use the same flow-dedicated HMAC key. This is pseudonymous (not
-// anonymous): it supports equality queries within one key-rotation epoch, but
-// intentionally changes when the OAuth state secret rotates. Comparisons
-// across that boundary are invalid and must not be interpreted as owner
-// changes. The ':' separator also makes this preimage disjoint from the
-// base64url-only state payloads accepted by verifyQurlOAuthState.
+// Derive a purpose-specific HMAC subkey so published audit values never expose
+// known-plaintext pairs for the live OAuth-state signing key. The fingerprint
+// remains pseudonymous (not anonymous) and changes when the parent secret
+// rotates. Compare values only within one reported key epoch. ':' also keeps
+// these preimages outside verifyQurlOAuthState's base64url-only payload space.
 function fingerprintQurlAccountSubject(subject) {
   if (typeof subject !== 'string' || !subject) {
     throw new TypeError('fingerprintQurlAccountSubject: subject must be a non-empty string');
   }
-  return qurlOAuthStateSigner.sign(`qurl-account-subject:${subject}`);
+  return qurlOAuthStateSigner.signDerived(
+    ACCOUNT_FINGERPRINT_CONTEXT,
+    `qurl-account-subject:${subject}`,
+  );
 }
 
 // Short, non-secret tag shared by every fingerprint produced under the same
 // HMAC key. Audit queries group by this before comparing subjects, so a key
 // rotation is visible rather than misclassified as an owner change.
 function qurlAccountFingerprintKeyEpoch() {
-  return qurlOAuthStateSigner.sign('qurl-account-fingerprint-key-epoch')
+  return qurlOAuthStateSigner.signDerived(
+    ACCOUNT_FINGERPRINT_CONTEXT,
+    'qurl-account-fingerprint-key-epoch:v1',
+  )
     .slice(0, 12);
 }
 
