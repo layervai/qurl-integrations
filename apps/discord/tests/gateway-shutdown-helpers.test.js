@@ -83,6 +83,28 @@ describe('runGracefulShutdown', () => {
     expect(exit).toHaveBeenCalledTimes(1);
   });
 
+  it('still forces exit when timeout logging throws', async () => {
+    let forceExit;
+    let finishTeardown;
+    const logger = makeFakeLogger();
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+    const exit = jest.fn();
+    const shutdown = runGracefulShutdown({
+      claimShutdown: () => true,
+      teardown: () => new Promise(resolve => { finishTeardown = resolve; }),
+      logger,
+      scheduleHardExit: (callback) => { forceExit = callback; return { unref() {} }; },
+      clearHardExit: jest.fn(),
+      exit,
+    });
+
+    expect(() => forceExit()).toThrow('logger-failure');
+    expect(exit).toHaveBeenCalledWith(1);
+    finishTeardown();
+    await shutdown;
+    expect(exit).toHaveBeenCalledTimes(1);
+  });
+
   it('does nothing when another shutdown path already owns the gate', async () => {
     const teardown = jest.fn();
     const scheduleHardExit = jest.fn();
@@ -149,7 +171,7 @@ describe('stopGatewayHotStandby', () => {
     expect(order).toEqual(['control', 'watchdog', 'leader']);
   });
 
-  it('does not await or repeat watchdog stop on IDENTIFY-fatal teardown', async () => {
+  it('stops but does not await the watchdog on IDENTIFY-fatal teardown', async () => {
     const connectionWatchdog = { stop: jest.fn(() => new Promise(() => {})) };
     const gatewayLeader = { stop: jest.fn().mockResolvedValue(undefined) };
 
@@ -161,7 +183,7 @@ describe('stopGatewayHotStandby', () => {
       logger: makeFakeLogger(),
     })).resolves.toBeUndefined();
 
-    expect(connectionWatchdog.stop).not.toHaveBeenCalled();
+    expect(connectionWatchdog.stop).toHaveBeenCalledTimes(1);
     expect(gatewayLeader.stop).toHaveBeenCalledTimes(1);
   });
 });
@@ -234,6 +256,8 @@ describe('runGatewayFatalShutdown', () => {
       gracefulShutdown,
       getConnectionWatchdog: () => null,
       logger: makeFakeLogger(),
+      scheduleHardExit: () => ({ unref() {} }),
+      exit: jest.fn(),
     })).resolves.toBeUndefined();
 
     expect(gracefulShutdown).toHaveBeenCalledWith(1);
@@ -249,6 +273,8 @@ describe('runGatewayFatalShutdown', () => {
       gracefulShutdown: jest.fn().mockResolvedValue(undefined),
       getConnectionWatchdog: () => watchdog,
       logger,
+      scheduleHardExit: () => ({ unref() {} }),
+      exit: jest.fn(),
     })).resolves.toBeUndefined();
     await Promise.resolve();
 

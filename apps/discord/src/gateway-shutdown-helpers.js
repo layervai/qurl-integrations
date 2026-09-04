@@ -115,9 +115,9 @@ async function tryClose(name, server, logger) {
 }
 
 // Stops the hot-standby control plane in dependency order. The IDENTIFY-fatal
-// path has already called connectionWatchdog.stop() to set its synchronous
-// stopping guard; it must skip awaiting that deliberately blocked in-flight
-// connect so the session-store final flush retains the shutdown budget.
+// path calls connectionWatchdog.stop() to set its synchronous stopping guard,
+// but must skip awaiting that deliberately blocked in-flight connect so the
+// session-store final flush retains the shutdown budget.
 async function stopGatewayHotStandby({
   controlChannelServer,
   connectionWatchdog,
@@ -126,9 +126,8 @@ async function stopGatewayHotStandby({
   logger,
 }) {
   await tryClose('control-channel server', controlChannelServer, logger);
-  if (awaitConnectionWatchdog) {
-    await tryStop('connection-watchdog', connectionWatchdog, logger);
-  }
+  const watchdogStopped = tryStop('connection-watchdog', connectionWatchdog, logger);
+  if (awaitConnectionWatchdog) await watchdogStopped;
   await tryStop('gateway-leader', gatewayLeader, logger);
 }
 
@@ -156,8 +155,11 @@ async function runGracefulShutdown({
     exit(exitCode);
   };
   const hardExit = scheduleHardExit(() => {
-    logger.error('Shutdown timed out, forcing exit');
-    exitOnce(1);
+    try {
+      logger.error('Shutdown timed out, forcing exit');
+    } finally {
+      exitOnce(1);
+    }
   }, ceilingMs);
   if (hardExit && typeof hardExit.unref === 'function') hardExit.unref();
 
