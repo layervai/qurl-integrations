@@ -44,6 +44,8 @@ until the route is serving, prints the CRID, and exits. The daemon resumes
 desired-on shares after login, sleep, wake, and network changes. Running the
 same command later reuses the same resource and CRID.
 Use --id only when you want to choose the Connector ID yourself.
+After "qurl delete", you can reuse that ID to create a new resource with a new CRID.
+Old links remain invalid.
 
 For a remote URL, qURL registers it, prints the CRID, and exits:
 
@@ -304,12 +306,15 @@ func (e *localEnrollment) resolveID(ctx context.Context, stateDir, agentID strin
 		return "", err
 	}
 	defer func() { retErr = errors.Join(retErr, resourceStore.Close()) }()
-	id, advanced, err := resourceStore.ResolveDefaultConnectorID(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	if advanced > 0 && e.requestedID != "" {
-		return "", exitcode.UsageError(fmt.Errorf("connector ID %q was deleted; choose a new value with --id", e.requestedID))
+	if e.requestedID != "" {
+		if err := resourceStore.PrepareConnectorResourceReuse(ctx, id); err != nil {
+			return "", err
+		}
+	} else {
+		id, _, err = resourceStore.ResolveDefaultConnectorID(ctx, id)
+		if err != nil {
+			return "", err
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()

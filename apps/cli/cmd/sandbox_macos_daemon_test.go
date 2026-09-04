@@ -237,6 +237,41 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 		}
 	}
 	assertExternalSandboxDeleted(t, binary, cliEnv, cridValue)
+
+	// Reusing the friendly name must create a new identity while the old
+	// access grant is still valid. The cleanup registered by slug above also
+	// covers a replacement created before a later command fails.
+	republished := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
+		"--id", connectorID)
+	replacementCRID := strings.TrimSpace(republished.stdout)
+	if republished.err != nil || replacementCRID == "" || replacementCRID == cridValue || strings.Contains(replacementCRID, "\n") {
+		t.Fatalf("same-name publish = stdout %q, stderr %q, error %v", republished.stdout, republished.stderr, republished.err)
+	}
+	replacement := waitExternalSandboxShare(t, stateDir, replacementCRID, 2*time.Minute)
+	if err := requireTestResourceIdentity(replacement.CRID, replacement.ResourceID); err != nil {
+		t.Fatalf("same-name publish minted a non-test CRID: %v", err)
+	}
+	if replacement.ConnectorID != connectorID || replacement.ResourceID == local.ResourceID || replacement.ConnectorRoutingID == local.ConnectorRoutingID {
+		t.Fatalf("same-name replacement retained old identity or changed name: old=%+v new=%+v", local, replacement)
+	}
+	assertExternalSandboxRoute(t, binary, cliEnv, replacementCRID, marker, 2*time.Minute)
+	assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
+	repeated := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
+		"--id", connectorID)
+	if repeated.err != nil || repeated.stdout != replacementCRID+"\n" {
+		t.Fatalf("repeat same-name publish = stdout %q, stderr %q, error %v", repeated.stdout, repeated.stderr, repeated.err)
+	}
+	redeleted := runExternalSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
+	if redeleted.err != nil {
+		t.Fatalf("re-delete old CRID: %v; stderr %q", redeleted.err, redeleted.stderr)
+	}
+	assertExternalSandboxDeleted(t, binary, cliEnv, cridValue)
+	assertExternalSandboxRoute(t, binary, cliEnv, replacementCRID, marker, 2*time.Minute)
+	removedReplacement := runExternalSandboxCLI(t, binary, cliEnv, "delete", replacementCRID, "--yes")
+	if removedReplacement.err != nil {
+		t.Fatalf("delete replacement CRID: %v; stderr %q", removedReplacement.err, removedReplacement.stderr)
+	}
+	assertExternalSandboxDeleted(t, binary, cliEnv, replacementCRID)
 }
 
 // TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild drives the exact

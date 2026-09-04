@@ -69,6 +69,7 @@ process.env.DDB_TABLE_PREFIX = 'test-prefix-';
 process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
+const logger = require('../src/logger');
 
 beforeEach(() => {
   ddbMock.reset();
@@ -368,7 +369,7 @@ describe('qurl sends', () => {
     expect(items[0].ConditionCheck).toEqual({
       TableName: 'test-prefix-qurl-send-configs',
       Key: { send_id: 's1' },
-      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoked_at)',
+      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoking_at) AND attribute_not_exists(revoked_at)',
       ExpressionAttributeValues: { ':sender': 'sender' },
     });
     expect(items[1].Put.TableName).toBe('test-prefix-qurl-sends');
@@ -559,6 +560,16 @@ describe('qurl sends', () => {
     expect(sB.delivered_count).toBe(5);
   });
 
+  test.each([0, -1, 1.5, Number.NaN])(
+    'getRecentSends: rejects an invalid limit (%p) without reading DDB',
+    async (limit) => {
+      await expect(store.getRecentSends('sender', limit))
+        .rejects.toThrow('getRecentSends: limit must be a positive integer');
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    },
+  );
+
   test('getRecentSends: per-send recipient Query paginates (LEK threading) so a >1MB fanout doesn\'t silently undercount', async () => {
     // Regression guard: a single send fanning out to thousands of
     // recipients can exceed the 1MB Query response cap. Without
@@ -609,13 +620,14 @@ describe('qurl sends', () => {
     expect(gsiCall.args[0].input.Limit).toBe(100);
   });
 
-  test('getRecentSends: filters out revoked sends', async () => {
+  test('getRecentSends: filters out fully revoked sends but keeps failed revocations retryable', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       if (input.IndexName) {
         return Promise.resolve({
           Items: [
             { send_id: 'sA', recipient_discord_id: 'r1', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' },
             { send_id: 'sB', recipient_discord_id: 'r1', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' },
+            { send_id: 'sC', recipient_discord_id: 'r1', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' },
           ],
         });
       }
@@ -626,11 +638,245 @@ describe('qurl sends', () => {
       if (input.Key.send_id === 'sA') {
         return Promise.resolve({ Item: { send_id: 'sA', revoked_at: 'now' } });
       }
+      if (input.Key.send_id === 'sC') {
+        return Promise.resolve({ Item: { send_id: 'sC', revoking_at: 'now' } });
+      }
       return Promise.resolve({});
     });
     const result = await store.getRecentSends('sender', 10);
+    expect(result.map(row => row.send_id).sort()).toEqual(['sB', 'sC']);
+    expect(result.find(row => row.send_id === 'sB')).toMatchObject({
+      revocation_pending: false,
+    });
+    expect(result.find(row => row.send_id === 'sC')).toMatchObject({
+      revocation_pending: true,
+    });
+  });
+
+  test('getRecentSends: keeps a pending retry visible in the production five-slot menu', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({
+          Items: [
+            { send_id: 'live-1', sender_discord_id: 'sender', created_at: '2026-09-03T15:00:00Z' },
+            { send_id: 'live-2', sender_discord_id: 'sender', created_at: '2026-09-03T14:00:00Z' },
+            { send_id: 'live-3', sender_discord_id: 'sender', created_at: '2026-09-03T13:00:00Z' },
+            { send_id: 'live-4', sender_discord_id: 'sender', created_at: '2026-09-03T12:00:00Z' },
+            { send_id: 'live-5', sender_discord_id: 'sender', created_at: '2026-09-03T11:00:00Z' },
+            { send_id: 'pending', sender_discord_id: 'sender', created_at: '2026-09-03T10:00:00Z' },
+          ],
+        });
+      }
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+      Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
+    }));
+
+    const result = await store.getRecentSends('sender', 5);
+
+    expect(result).toHaveLength(5);
+    expect(result.map(row => row.send_id)).toEqual([
+      'pending', 'live-1', 'live-2', 'live-3', 'live-4',
+    ]);
+  });
+
+  test('getRecentSends: pending retries cannot occupy every slot when a live send is available', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({
+          Items: [
+            ...Array.from({ length: 5 }, (_, i) => ({
+              send_id: `pending-${i + 1}`,
+              sender_discord_id: 'sender',
+              created_at: `2026-09-03T1${5 - i}:00:00Z`,
+            })),
+            { send_id: 'live-1', sender_discord_id: 'sender', created_at: '2026-09-03T09:00:00Z' },
+          ],
+        });
+      }
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+      Item: input.Key.send_id.startsWith('pending-') ? { revoking_at: 'now' } : {},
+    }));
+
+    const result = await store.getRecentSends('sender', 5);
+
+    expect(result).toHaveLength(5);
+    expect(result.filter(row => row.revocation_pending)).toHaveLength(4);
+    expect(result.filter(row => !row.revocation_pending)).toHaveLength(1);
+    expect(result.map(row => row.send_id)).toEqual([
+      'pending-1', 'pending-2', 'live-1', 'pending-3', 'pending-4',
+    ]);
+  });
+
+  test('getRecentSends: a one-slot menu keeps the retryable pending send visible', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({ Items: [
+          { send_id: 'pending', sender_discord_id: 'sender', created_at: '2026-09-03T15:00:00Z' },
+          { send_id: 'live', sender_discord_id: 'sender', created_at: '2026-09-03T14:00:00Z' },
+        ] });
+      }
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+      Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
+    }));
+
+    const result = await store.getRecentSends('sender', 1);
+
     expect(result).toHaveLength(1);
-    expect(result[0].send_id).toBe('sB');
+    expect(result[0]).toMatchObject({ send_id: 'pending', revocation_pending: true });
+  });
+
+  test('markSendRevoking: records an idempotent owner-scoped intent without setting revoked_at', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' },
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(true);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toMatch(/revoking_at/);
+    expect(input.UpdateExpression).toContain('if_not_exists(revoking_at, :t)');
+    expect(input.UpdateExpression).not.toMatch(/revoked_at\s*=/);
+    expect(input.ConditionExpression).toMatch(/sender_discord_id = :s/);
+    expect(input.ConditionExpression).toMatch(/attribute_not_exists\(revoked_at\)/);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test.each([
+    ['already revoking', { sender_discord_id: 'sender', revoking_at: 'already' }, 'sender'],
+    ['already revoked', { sender_discord_id: 'sender', revoked_at: 'already' }, 'sender'],
+    ['owned by another sender', { sender_discord_id: 'owner' }, 'attacker'],
+  ])('markSendRevoking: reports whether retry is allowed when the row is %s', async (_case, state, caller) => {
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', ...state } });
+
+    const allowed = await store.markSendRevoking('s1', caller);
+
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(allowed).toBe(_case === 'already revoking');
+  });
+
+  test('markSendRevoking: logs a malformed config row with no sender identity', async () => {
+    logger.warn.mockClear();
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', resource_type: 'file' } });
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'markSendRevoking rejected config without sender identity',
+      { sendId: 's1' },
+    );
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoking: rejects a missing caller identity before reading or writing state', async () => {
+    await expect(store.markSendRevoking('s1', undefined)).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoking: rejects an unknown or foreign legacy send without creating a barrier', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await expect(store.markSendRevoking('unknown', 'sender')).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoking: inserts a minimal retryable intent row for legacy sends', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '30m',
+        attachment_name: 'incident.txt', location_name: 'HQ', personal_message: 'review this',
+        created_at: '2026-09-01T12:00:00Z',
+      }],
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(true);
+
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.Item).toMatchObject({
+      send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '30m',
+      attachment_name: 'incident.txt', location_name: 'HQ', personal_message: 'review this',
+      created_at: '2026-09-01T12:00:00Z',
+    });
+    expect(input.Item.revoking_at).toBeDefined();
+    expect(input.Item.revoked_at).toBeUndefined();
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('markSendRevoking: reads every legacy page before deciding no owned send exists', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(QueryCommand)
+      .resolvesOnce({ Items: [], LastEvaluatedKey: { send_id: 's1', recipient_discord_id: 'other' } })
+      .resolvesOnce({
+        Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' }],
+      });
+    ddbMock.on(PutCommand).resolves({});
+
+    await store.markSendRevoking('s1', 'sender');
+
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(2);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test('markSendRevoking: recovers a legacy insert race without overwriting a finalized revoke', async () => {
+    const conflict = new Error('exists');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' }],
+    });
+    ddbMock.on(PutCommand).rejects(conflict);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await store.markSendRevoking('s1', 'sender');
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toMatch(/revoking_at/);
+    expect(input.ConditionExpression).toMatch(/attribute_not_exists\(revoked_at\)/);
+  });
+
+  test('markSendRevoking: verifies a raced conditional failure did not create a foreign barrier', async () => {
+    const conflict = new Error('exists');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({})
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'other', revoking_at: 'now' } });
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' }],
+    });
+    ddbMock.on(PutCommand).rejects(conflict);
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('markSendRevoking: a CCFE re-read with no row does not assume the barrier exists', async () => {
+    const conflict = new Error('exists');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender' } })
+      .resolvesOnce({});
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
   });
 
   test('markSendRevoked: primary path includes :s in ExpressionAttributeValues (regression guard)', async () => {
@@ -638,29 +884,72 @@ describe('qurl sends', () => {
       Item: { send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' },
     });
     ddbMock.on(UpdateCommand).resolves({});
-    await store.markSendRevoked('s1', 'sender');
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     // BOTH :t and :s must be populated — if :s is missing, DDB throws
     // ValidationException and every non-legacy revoke fails.
     expect(input.ExpressionAttributeValues[':t']).toBeDefined();
     expect(input.ExpressionAttributeValues[':s']).toBe('sender');
     expect(input.ConditionExpression).toMatch(/sender_discord_id = :s/);
+    expect(input.UpdateExpression).toMatch(/REMOVE revoking_at/);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input.ConsistentRead).toBe(true);
   });
 
   test('markSendRevoked: idempotent — no-op if already revoked', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: 'already' },
     });
-    await store.markSendRevoked('s1', 'sender');
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: confirms an idempotent same-owner revoke after an update race', async () => {
+    const conflict = new Error('already finalized');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender' } })
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: 'now' } });
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('markSendRevoked: reports an update race that did not finalize the owned row', async () => {
+    const conflict = new Error('condition rejected');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender' } })
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'other', revoked_at: 'now' } });
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(false);
   });
 
   test('markSendRevoked: ownership check — rejects different sender', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'owner', resource_type: 'file' },
     });
-    await store.markSendRevoked('s1', 'attacker');
+    await expect(store.markSendRevoked('s1', 'attacker')).resolves.toBe(false);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: rejects a missing caller identity before reading or writing state', async () => {
+    await expect(store.markSendRevoked('s1', undefined)).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: rejects a config row without a stored sender identity', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', resource_type: 'file' } });
+
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
   test('markSendRevoked: legacy branch — inserts minimal config when no config row exists', async () => {
@@ -669,7 +958,7 @@ describe('qurl sends', () => {
       Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '24h' }],
     });
     ddbMock.on(PutCommand).resolves({});
-    await store.markSendRevoked('s1', 'sender');
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     const putCall = ddbMock.commandCalls(PutCommand)[0].args[0].input;
     expect(putCall.Item.revoked_at).toBeDefined();
     expect(putCall.Item.resource_type).toBe('file');
@@ -683,7 +972,23 @@ describe('qurl sends', () => {
     // could break the invariant.
     const queryCall = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(queryCall.Limit).toBeUndefined();
+    expect(queryCall.ConsistentRead).toBe(true);
     expect(queryCall.FilterExpression).toMatch(/sender_discord_id = :s/);
+  });
+
+  test('markSendRevoked: reads every legacy page before deciding no owned send exists', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(QueryCommand)
+      .resolvesOnce({ Items: [], LastEvaluatedKey: { send_id: 's1', recipient_discord_id: 'other' } })
+      .resolvesOnce({
+        Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' }],
+      });
+    ddbMock.on(PutCommand).resolves({});
+
+    await store.markSendRevoked('s1', 'sender');
+
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(2);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
   });
 
   test('markSendRevoked: legacy CCFE recovers via Update (race vs non-revoke writer no longer loses revoke intent)', async () => {
@@ -870,12 +1175,15 @@ describe('qurl sends', () => {
     expect(state.viewedCount).toBe(4);
   });
 
-  test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; qurlIds passthrough', async () => {
+  test.each([
+    ['revoked_at', true, { revoked_at: 'when' }],
+    ['revoking_at', false, { revoking_at: 'when' }],
+  ])('getSendRenderState: %s yields terminal=%s', async (_field, terminal, revocationState) => {
     ddbMock.on(GetCommand).resolves({
-      Item: { send_id: 's1', revoked_at: 'when', confirm_qurl_ids: ['q_a', 'q_b'] },
+      Item: { send_id: 's1', ...revocationState, confirm_qurl_ids: ['q_a', 'q_b'] },
     });
     const viaRevoke = await store.getSendRenderState('s1');
-    expect(viaRevoke.terminal).toBe(true);
+    expect(viaRevoke.terminal).toBe(terminal);
     expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
     // defaults when fields absent
     expect(viaRevoke.expectedCount).toBe(0);
@@ -1263,10 +1571,20 @@ describe('qurl sends', () => {
         dm_channel_id: 'c1', dm_message_id: 'm1', dm_status: 'sent',
       }],
     });
-    const items = await store.getSendItems('s1', 'owner');
+    const items = await store.getSendItems('s1', 'owner', { consistentRead: true });
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query.ConsistentRead).toBe(true);
     expect(items).toEqual([expect.objectContaining({
       resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
     })]);
+  });
+
+  test('getSendItems: defaults to eventual consistency outside the revoke barrier path', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await store.getSendItems('s1', 'owner');
+
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.ConsistentRead).toBe(false);
   });
 
   test('findSendsByQurlId: tolerates DDB returning Count>1 (consumer handles defensively)', async () => {
@@ -1369,14 +1687,20 @@ describe('qurl sends', () => {
     await expect(store.clearConsumedDMEdited('s1', 'rcpt')).rejects.toThrow();
   });
 
-  test('isSendRevoked: returns true when qurl_send_configs.revoked_at is set', async () => {
+  test('isSendRevoked: returns true only after revocation is finalized', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: '2026-05-19T12:00:00Z' },
     });
     expect(await store.isSendRevoked('s1')).toBe(true);
   });
 
-  test('isSendRevoked: returns false when revoked_at is absent or row is missing', async () => {
+  test('isSendRevoked: returns false while revocation is pending, when state is absent, or when the row is missing', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender', revoking_at: '2026-05-19T12:00:00Z' },
+    });
+    expect(await store.isSendRevoked('s1')).toBe(false);
+
+    ddbMock.reset();
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender' },
     });

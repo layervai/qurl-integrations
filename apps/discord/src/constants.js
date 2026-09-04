@@ -262,7 +262,8 @@ const AUDIT_EVENTS = {
   // return or this comment is updated. `success: true|false`,
   // `handler_duration_ms` (handler entry → metric emit; not edge-to-ACK
   // — see commands.js comment), and `failure_type` ('ack_timeout' |
-  // 'handler_error' | 'unknown_command' | 'reply_failed' | null)
+  // 'handler_error' | 'unknown_command' | 'reply_failed' |
+  // 'unsupported_context' | null)
   // carry every dimension Phase 1 alarms need. Low-cardinality only —
   // command_name is bounded by registered slash commands.
   //

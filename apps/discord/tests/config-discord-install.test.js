@@ -8,6 +8,8 @@ describe('Discord install readiness derivation', () => {
         AUTH0_CLIENT_ID: 'client-id',
         AUTH0_CLIENT_SECRET: 'client-secret',
         AUTH0_AUDIENCE: 'https://api.example.test',
+        BASE_URL: 'https://discord.example.test',
+        DISCORD_CLIENT_ID: '123456789012345678',
         DISCORD_CLIENT_SECRET: undefined,
       },
       (config) => {

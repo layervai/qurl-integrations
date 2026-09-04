@@ -169,7 +169,8 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
-  markSendRevoked: jest.fn(),
+  markSendRevoking: jest.fn().mockResolvedValue(true),
+  markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
@@ -326,6 +327,8 @@ function makeInteraction(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDb.markSendRevoked.mockReset();
+  mockDb.markSendRevoked.mockResolvedValue(true);
   embedInstances.length = 0;
   sendCooldowns.clear();
 });
@@ -523,6 +526,15 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it('emits failure_type=unsupported_context when rejecting a DM invocation', async () => {
+    const interaction = makeInteraction({ guildId: null });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: 'unsupported_context' }),
+    );
+  });
+
   it('emits failure_type=reply_failed when stale-registration reply throws non-ack error', async () => {
     // Stale-registration path tries to reply "no longer available" but
     // the reply itself fails for a non-timeout reason (e.g. permission
@@ -550,6 +562,23 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
       expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'ack_timeout' }),
+    );
+  });
+
+  it.each([
+    ['reply_failed', new Error('Missing Permissions')],
+    ['ack_timeout', Object.assign(new Error('Unknown interaction'), { code: 10062 })],
+  ])('emits failure_type=%s when the unsupported-context reply fails', async (failureType, error) => {
+    const interaction = makeInteraction({
+      guildId: null,
+      reply: jest.fn().mockRejectedValue(error),
+    });
+
+    await handleCommand(interaction);
+
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: failureType }),
     );
   });
 
@@ -834,6 +863,65 @@ describe('/qurl revoke subcommand', () => {
     expect(menuCall[0].content).toMatch(/Select a send to revoke/);
   });
 
+  it('labels an incomplete prior revoke as retryable in the menu', async () => {
+    mockDb.getRecentSends.mockReturnValue([{
+      send_id: 'send-pending',
+      resource_type: 'file',
+      target_type: 'user',
+      recipient_count: 2,
+      delivered_count: 2,
+      expires_in: '24h',
+      created_at: new Date().toISOString(),
+      revocation_pending: true,
+    }]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const menuCall = interaction.editReply.mock.calls.find(
+      c => c[0]?.components?.length > 0,
+    );
+    const option = menuCall[0].components[0].components[0].addOptions.mock.calls[0][0][0];
+    expect(option.description).toMatch(/^Retry ·/);
+    expect(option.description.length).toBeLessThanOrEqual(100);
+  });
+
+  it('caps a retry description at Discord\'s 100-character option limit', async () => {
+    mockDb.getRecentSends.mockReturnValue([{
+      send_id: 'send-pending-long',
+      resource_type: 'file',
+      target_type: 'user',
+      recipient_count: Number.MAX_SAFE_INTEGER,
+      delivered_count: Number.MAX_SAFE_INTEGER,
+      expires_in: 'x'.repeat(300),
+      created_at: new Date().toISOString(),
+      personal_message: 'y'.repeat(300),
+      revocation_pending: true,
+    }]);
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const menuCall = interaction.editReply.mock.calls.find(c => c[0]?.components?.length > 0);
+    const option = menuCall[0].components[0].components[0].addOptions.mock.calls[0][0][0];
+    expect(option.description).toHaveLength(100);
+  });
+
   it('renders the menu when supersedeOrCreate claims the slot from a stale predecessor', async () => {
     // supersedeOrCreate encapsulates the create → load → delete →
     // retry orchestration. From the caller's view, a successful
@@ -1106,7 +1194,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     }
   });
 
-  it('reports a partial revoke (some links already opened)', async () => {
+  it('reports a partial revoke as an unconfirmed failure', async () => {
     mockDb.getSendItems.mockReturnValue([
       { resource_id: 'res-1', recipient_discord_id: 'u-1' },
       { resource_id: 'res-2', recipient_discord_id: 'u-2' },
@@ -1121,6 +1209,66 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     expect(interaction.update).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('1/2') }),
     );
+  });
+
+  it('reports successful DELETEs truthfully when the final revoked state write fails', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
+
+    const interaction = makeSelectInteraction({ values: ['send-finalize-fail'] });
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+      components: [],
+    });
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: expect.stringContaining('could not save the final revocation state'),
+      components: [],
+    });
+  });
+
+  it('does not claim 0/0 success when the durable revoke barrier rejects the send', async () => {
+    mockDb.markSendRevoking.mockResolvedValueOnce(false);
+    const interaction = makeSelectInteraction({ values: ['foreign-or-finalized'] });
+
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+  });
+
+  it('retries a temporary DELETE failure and finalizes after the next selection', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+    ]);
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('temporary qURL 503'))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    const first = makeSelectInteraction({ values: ['send-retry'] });
+    await handleRevokeSelect(first, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(first.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Could not confirm revocation for 1 user'),
+    }));
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+
+    const second = makeSelectInteraction({ values: ['send-retry'] });
+    await handleRevokeSelect(second, { flow_id: '0:1#guild-1#ch-1#user-1' });
+    expect(second.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 2/2 users.'),
+    }));
+    expect(mockDeleteLink).toHaveBeenCalledTimes(4);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-retry', 'user-1');
   });
 });
 
