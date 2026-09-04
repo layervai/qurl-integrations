@@ -125,7 +125,9 @@ async function tryClose(name, server, logger) {
 // Stops the hot-standby control plane in dependency order. The IDENTIFY-fatal
 // path calls both stop methods to set their synchronous guards, but must skip
 // awaiting tasks that may be parked behind manager.connect() so the
-// session-store final flush retains the shutdown budget.
+// session-store final flush retains the shutdown budget. gatewayLeader.stop()
+// only halts its loop; it does not release the DDB lease, so skipping its await
+// cannot truncate a release write. Lease TTL remains the fatal-takeover path.
 async function stopGatewayHotStandby({
   controlChannelServer,
   connectionWatchdog,

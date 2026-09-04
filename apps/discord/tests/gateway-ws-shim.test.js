@@ -185,6 +185,10 @@ describe('start — wiring + connect', () => {
     const args = managerInstances[0]._constructorArgs;
     expect(args.token).toBe('test-token');
     expect(args.intents).toBe(1);
+    // The process-global IDENTIFY cap is valid only for one shard. Pin the
+    // manager so a future Discord-recommended shard-count increase cannot
+    // silently turn shard 1's first IDENTIFY into a fatal attempt 2.
+    expect(args.shardCount).toBe(1);
     // REST was lazy-constructed since `rest` wasn't injected.
     expect(restInstances).toHaveLength(1);
     expect(restInstances[0].setToken).toHaveBeenCalledWith('test-token');
@@ -840,6 +844,40 @@ describe('IDENTIFY budget guard', () => {
     expect(logger.error.mock.calls.filter(([message]) => (
       message === 'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever'
     ))).toHaveLength(1);
+  });
+
+  it.each([
+    ['has no listener API', { aborted: false }, 'TypeError'],
+    ['throws while registering', {
+      aborted: false,
+      addEventListener: () => { throw new Error('listener-registration-failure'); },
+    }, 'Error'],
+  ])('keeps an over-budget grant pending if its abort signal %s', async (
+    _label,
+    unusableSignal,
+    errorName,
+  ) => {
+    const { shim, logger, managerInstances, onFatal } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await throttler.waitForIdentify(0, new AbortController().signal);
+
+    const blocked = throttler.waitForIdentify(0, unusableSignal);
+    let blockedState = 'pending';
+    blocked.then(
+      () => { blockedState = 'fulfilled'; },
+      () => { blockedState = 'rejected'; },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onFatal).toHaveBeenCalledTimes(1);
+    expect(blockedState).toBe('pending');
+    expect(logger.error).toHaveBeenCalledWith(
+      'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
+      { errorName },
+    );
   });
 
   it('notifies the fatal handler only once across repeated over-budget grants', async () => {

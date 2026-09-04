@@ -188,6 +188,7 @@ function createGatewayWsShim({
   let identifyAttempts = 0;
   let identifyBudgetFatalSignaled = false;
   let missingAbortSignalLogged = false;
+  let unusableAbortSignalLogged = false;
   // Two distinct flags:
   //
   //   `stopped`       — "drop late dispatches." Set by start()'s
@@ -240,7 +241,27 @@ function createGatewayWsShim({
         reject(signal.reason);
         return;
       }
-      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      if (typeof signal.addEventListener !== 'function') {
+        if (!unusableAbortSignalLogged) {
+          unusableAbortSignalLogged = true;
+          logger.error(
+            'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
+            { errorName: 'TypeError' },
+          );
+        }
+        return;
+      }
+      try {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      } catch (error) {
+        if (!unusableAbortSignalLogged) {
+          unusableAbortSignalLogged = true;
+          logger.error(
+            'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
+            { errorName: error?.name ?? typeof error },
+          );
+        }
+      }
     });
   }
 
@@ -421,6 +442,10 @@ function createGatewayWsShim({
         token,
         intents,
         rest: restInstance,
+        // The IDENTIFY budget/readiness state is process-global today. Pin the
+        // deployment to one shard so Discord's recommended count cannot change
+        // that invariant silently; multi-shard support must make state per-shard.
+        shardCount: 1,
         retrieveSessionInfo: buildRetrieveCallback(),
         updateSessionInfo: buildUpdateCallback(),
         buildIdentifyThrottler,
