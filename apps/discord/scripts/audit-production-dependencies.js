@@ -5,10 +5,11 @@ const path = require('node:path');
 const { setTimeout: wait } = require('node:timers/promises');
 
 const APP_ROOT = path.resolve(__dirname, '..');
-const AUDIT_ARGS = [
+const AUDIT_ARGS = Object.freeze([
   'audit',
   // TODO(upstream-contract): npm 10.9.4 applies --omit=dev to the
-  // --package-lock-only audit graph. Reverify whenever the pinned npm moves.
+  // --package-lock-only audit graph. Reverify whenever apps/discord/.nvmrc
+  // moves the pinned npm version.
   '--package-lock-only',
   '--audit-level=high',
   '--omit=dev',
@@ -16,7 +17,10 @@ const AUDIT_ARGS = [
   // npm 10.9.4's inner registry retry can outlive this wrapper's per-attempt
   // timeout. Disable it so the structured, bounded outer retry owns timing.
   '--fetch-retries=0',
-];
+  // End npm's own socket wait before the wrapper's 45 s process ceiling so
+  // npm has a chance to emit its structured transport diagnostic.
+  '--fetch-timeout=40000',
+]);
 const ATTEMPT_TIMEOUT_MS = 45_000;
 const RETRY_DELAYS_MS = Object.freeze([5_000, 10_000]);
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -48,10 +52,18 @@ function parseJsonPayload(value) {
     // warning lines. Search only column-zero object boundaries so braces in a
     // warning cannot consume the actual envelope.
     const lines = trimmed.split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.startsWith('{')) continue;
+      try {
+        return JSON.parse(line);
+      } catch {
+        // Continue to the pretty-printed multi-line envelope scan.
+      }
+    }
     for (let start = 0; start < lines.length; start += 1) {
       if (!lines[start].startsWith('{')) continue;
       for (let end = lines.length - 1; end >= start; end -= 1) {
-        if (!lines[end].trimEnd().endsWith('}')) continue;
+        if (lines[end] !== '}') continue;
         try {
           return JSON.parse(lines.slice(start, end + 1).join('\n'));
         } catch {
@@ -80,9 +92,7 @@ function auditTransportCode(result, body = auditBody(result)) {
   }
 
   const directCode = body?.error?.code ?? body?.code;
-  if (typeof directCode === 'string' && isRetryableTransportCode(directCode.toUpperCase())) {
-    return directCode.toUpperCase();
-  }
+  if (typeof directCode === 'string') return directCode.toUpperCase();
 
   const message = [
     body?.message,
@@ -99,15 +109,21 @@ function auditTransportCode(result, body = auditBody(result)) {
   if (networkCode) return networkCode[1];
   if (/\bnetwork timeout\b/i.test(message)) return 'ETIMEDOUT';
 
+  // npm 10.9.4 can emit an empty JSON error object on stdout while retaining
+  // the authoritative audit-endpoint timeout on stderr. Match only npm's
+  // audit-specific warning and endpoint path; arbitrary free-text failures
+  // remain non-retryable and fail closed.
+  if (typeof result?.stderr === 'string' && result.stderr.split(/\r?\n/).some(line => (
+    /^npm warn audit network timeout at: https?:\/\/\S+\/-\/npm\/v1\/security\/audits\/(?:quick|bulk)$/.test(line)
+  ))) {
+    return 'ETIMEDOUT';
+  }
+
   return null;
 }
 
 function isRetryableTransportCode(code) {
   return RETRYABLE_NETWORK_CODES.has(code) || /^E(?:408|429|5\d\d)$/.test(code || '');
-}
-
-function writeOutput(stream, value) {
-  if (value) stream.write(value);
 }
 
 function oneLine(value, maxLength = 500) {
@@ -116,18 +132,33 @@ function oneLine(value, maxLength = 500) {
   return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
 }
 
-function writeSuccess(body, stdout) {
+function resultDiagnostic(result) {
+  return oneLine([result?.stdout, result?.stderr].filter(Boolean).join('\n'), 2000);
+}
+
+function writeSuccess(result, body, stdout, stderr) {
   const counts = body?.metadata?.vulnerabilities;
   if (!counts || typeof counts !== 'object') {
-    stdout.write('npm audit passed.\n');
-    return;
+    stderr.write('npm audit failed closed: successful command output is missing metadata.vulnerabilities.\n');
+    const detail = resultDiagnostic(result);
+    if (detail) stderr.write(`npm audit output: ${detail}\n`);
+    return false;
   }
   const count = severity => Number.isSafeInteger(counts[severity]) ? counts[severity] : 0;
+  const high = count('high');
+  const critical = count('critical');
+  if (high > 0 || critical > 0) {
+    stderr.write(
+      `npm audit failed closed: successful command reported ${high} high and ${critical} critical vulnerabilities.\n`,
+    );
+    return false;
+  }
   const lowerSeverity = count('info') + count('low') + count('moderate');
   stdout.write(
-    `npm audit passed: ${count('high')} high, ${count('critical')} critical; `
+    `npm audit passed: ${high} high, ${critical} critical; `
     + `${lowerSeverity} lower-severity production vulnerabilities.\n`,
   );
+  return true;
 }
 
 function writeNonRetryableFailure(result, body, stdout, stderr) {
@@ -171,8 +202,10 @@ function writeNonRetryableFailure(result, body, stdout, stderr) {
     const detail = oneLine(
       structuredError.summary ?? structuredError.message ?? structuredError.detail,
     );
-    stderr.write(`npm audit failed${code ? ` (${code})` : ''}${detail ? `: ${detail}` : ''}.\n`);
-    return;
+    if (code || detail) {
+      stderr.write(`npm audit failed${code ? ` (${code})` : ''}${detail ? `: ${detail}` : ''}.\n`);
+      return;
+    }
   }
 
   if (result?.error) {
@@ -182,10 +215,10 @@ function writeNonRetryableFailure(result, body, stdout, stderr) {
     return;
   }
 
-  // Unknown/non-JSON output cannot be classified safely. Preserve it for
-  // diagnosis, but never retry it.
-  writeOutput(stdout, result?.stdout);
-  writeOutput(stderr, result?.stderr);
+  // Unknown/non-JSON output cannot be classified safely. Preserve a bounded,
+  // single-line diagnostic, but never retry it.
+  const detail = resultDiagnostic(result);
+  stderr.write(`npm audit failed with unclassified output${detail ? `: ${detail}` : ''}.\n`);
 }
 
 async function runAudit({
@@ -205,12 +238,13 @@ async function runAudit({
 
     if (result.status === 0) {
       if (attempt > 1) stderr.write(`npm audit passed on attempt ${attempt}/${MAX_ATTEMPTS}.\n`);
-      writeSuccess(auditBody(result), stdout);
-      return 0;
+      return writeSuccess(result, auditBody(result), stdout, stderr) ? 0 : 1;
     }
 
     const exitCode = Number.isInteger(result.status) && result.status > 0 ? result.status : 1;
-    const body = auditBody(result);
+    // Spawn-level errors already carry the authoritative transport code.
+    // Avoid parsing a potentially truncated ENOBUFS payload on this path.
+    const body = result.error ? null : auditBody(result);
     const errorCode = auditTransportCode(result, body);
     if (!isRetryableTransportCode(errorCode)) {
       writeNonRetryableFailure(result, body, stdout, stderr);
@@ -232,7 +266,10 @@ async function runAudit({
     );
     await sleep(delay);
   }
-
+  // Defensive fail-closed backstop if the bounded loop is ever refactored so
+  // a branch can fall through without returning.
+  stderr.write('npm audit failed closed after exhausting the retry loop.\n');
+  return 1;
 }
 
 if (require.main === module) {

@@ -32,7 +32,9 @@ describe('production dependency audit', () => {
       '--omit=dev',
       '--json',
       '--fetch-retries=0',
+      '--fetch-timeout=40000',
     ]);
+    expect(Object.isFrozen(AUDIT_ARGS)).toBe(true);
   });
 
   test('retries npm\'s nested E503 envelope and preserves the audit command', async () => {
@@ -99,6 +101,44 @@ describe('production dependency audit', () => {
         status: 1,
         stdout: '',
         stderr: 'npm warn ignoring config {legacy}\n{\n  "error": {\n    "code": "E503",\n    "summary": "Service unavailable"\n  }\n}\nnpm warn done\n',
+      })
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+
+    await expect(runAudit({
+      spawn,
+      sleep: jest.fn().mockResolvedValue(undefined),
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(0);
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  test('retries a compact transport envelope surrounded by warning text', async () => {
+    const spawn = jest.fn()
+      .mockReturnValueOnce({
+        status: 1,
+        stdout: '',
+        stderr: 'npm warn ignoring config\n{"error":{"code":"E503","summary":"Service unavailable"}}\nnpm warn done\n',
+      })
+      .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
+
+    await expect(runAudit({
+      spawn,
+      sleep: jest.fn().mockResolvedValue(undefined),
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(0);
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  test('retries npm audit endpoint timeout text when its JSON error fields are blank', async () => {
+    const spawn = jest.fn()
+      .mockReturnValueOnce({
+        status: 1,
+        stdout: '{"error":{"summary":"","detail":""}}\n',
+        stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/audits/quick\n',
       })
       .mockReturnValueOnce(auditResult(0, { metadata: { vulnerabilities: { high: 0 } } }));
 
@@ -227,6 +267,37 @@ describe('production dependency audit', () => {
     );
   });
 
+  test('fails closed if npm exits zero while reporting a high vulnerability', async () => {
+    const stderr = captureStream();
+
+    await expect(runAudit({
+      spawn: jest.fn().mockReturnValue(auditResult(0, {
+        metadata: { vulnerabilities: { high: 1, critical: 0 } },
+      })),
+      sleep: jest.fn(),
+      stdout: captureStream().stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(1);
+
+    expect(stderr.value()).toContain('reported 1 high and 0 critical vulnerabilities');
+  });
+
+  test('fails closed when npm exits zero without the audit metadata envelope', async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    await expect(runAudit({
+      spawn: jest.fn().mockReturnValue({ status: 0, stdout: 'not an audit report\n', stderr: '' }),
+      sleep: jest.fn(),
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(1);
+
+    expect(stdout.value()).toBe('');
+    expect(stderr.value()).toContain('missing metadata.vulnerabilities');
+    expect(stderr.value()).toContain('not an audit report');
+  });
+
   test.each([
     ['a non-retryable registry response', auditResult(1, { error: { code: 'E400' } })],
     ['malformed output', { status: 1, stdout: 'not json', stderr: 'npm failed' }],
@@ -243,6 +314,44 @@ describe('production dependency audit', () => {
 
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
+  });
+
+  test('preserves a bounded diagnostic for an empty structured error', async () => {
+    const stderr = captureStream();
+    const raw = `${JSON.stringify({ error: { summary: '', detail: '' } })}\n`;
+
+    await expect(runAudit({
+      spawn: jest.fn().mockReturnValue({ status: 1, stdout: raw, stderr: 'npm error audit endpoint returned an error\n' }),
+      sleep: jest.fn(),
+      stdout: captureStream().stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(1);
+
+    expect(stderr.value()).toContain('npm audit failed with unclassified output:');
+    expect(stderr.value()).toContain('audit endpoint returned an error');
+    expect(stderr.value().length).toBeLessThanOrEqual(2200);
+  });
+
+  test('does not retry a missing npm binary and prints the spawn diagnostic', async () => {
+    const spawn = jest.fn().mockReturnValue({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: { code: 'ENOENT', message: 'spawnSync npm ENOENT' },
+    });
+    const sleep = jest.fn();
+    const stderr = captureStream();
+
+    await expect(runAudit({
+      spawn,
+      sleep,
+      stdout: captureStream().stream,
+      stderr: stderr.stream,
+    })).resolves.toBe(1);
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(stderr.value()).toContain('npm audit could not run (ENOENT): spawnSync npm ENOENT.');
   });
 
   test('retries a locally enforced audit timeout and stops at the attempt cap', async () => {
