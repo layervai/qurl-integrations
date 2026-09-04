@@ -17,6 +17,7 @@ process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
+process.env.MAP_COMMAND_ENABLED = 'false';
 // KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
 // review round 2; matches the legacy modal-paste path's existing check.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
@@ -495,8 +496,14 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
+      expect(res.text).toContain('/qurl send is ready');
+      expect(res.text).not.toContain('/qurl map');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
-      expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
+      expect(discord.sendDM).toHaveBeenCalledTimes(1);
+      expect(discord.sendDM.mock.calls[0][0]).toBe('admin-2');
+      expect(discord.sendDM.mock.calls[0][1]).toContain('qURL is connected');
+      expect(discord.sendDM.mock.calls[0][1]).toContain('`/qurl send`');
+      expect(discord.sendDM.mock.calls[0][1]).not.toContain('/qurl map');
 
       // Guild-key mint must send `kind: api_key` — qurl-service's
       // POST /v1/api-keys requires `kind` and 400s without it. Durable
@@ -727,6 +734,69 @@ describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
     } finally {
       // Restore env so subsequent tests run against the configured router.
       Object.assign(process.env, saved);
+    }
+  });
+});
+
+describe('qurl-oauth — MAP_COMMAND_ENABLED=true', () => {
+  it('advertises both enabled commands on the success page and in the admin DM', async () => {
+    const savedMapCommandEnabled = process.env.MAP_COMMAND_ENABLED;
+    process.env.MAP_COMMAND_ENABLED = 'true';
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+          getGuildApiKey: jest.fn(),
+          getGuildConfig: jest.fn().mockResolvedValue({ guild_id: 'guild-1', configured_by: 'admin-2' }),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+        // eslint-disable-next-line global-require
+        const freshDiscord = require('../src/discord');
+        // eslint-disable-next-line global-require
+        const { signQurlOAuthState: sign } = require('../src/utils/qurl-oauth-state');
+        const state = sign('guild-1', 'admin-2');
+        globalThis.fetch = jest.fn()
+          .mockResolvedValueOnce({
+            ok: true, status: 200,
+            json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+          })
+          .mockResolvedValueOnce({
+            ok: true, status: 201,
+            json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+          });
+
+        const res = await supertest(freshApp)
+          .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+          .set('Cookie', cookieFor(state));
+
+        expect(res.status).toBe(200);
+        expect(res.text).toContain('/qurl send and /qurl map are ready');
+        expect(freshDiscord.sendDM).toHaveBeenCalledTimes(1);
+        expect(freshDiscord.sendDM.mock.calls[0][0]).toBe('admin-2');
+        expect(freshDiscord.sendDM.mock.calls[0][1])
+          .toContain('`/qurl send` and `/qurl map`');
+      });
+    } finally {
+      process.env.MAP_COMMAND_ENABLED = savedMapCommandEnabled;
+      globalThis.fetch = originalFetch;
     }
   });
 });

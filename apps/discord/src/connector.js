@@ -2,6 +2,7 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
+const { validateResourceId } = require('./utils/resource-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -406,9 +407,11 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  */
 async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null, guildId } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
+  // Same public-resource boundary as status/revoke: mintLinks receives a
+  // connector-returned public ID, never a qURL bearer token. Reuse the shared
+  // generic-error guard so the duplicate validation cannot drift or echo a
+  // cross-wired token into a caller's logs.
+  validateResourceId(resourceId);
   // Bound `n` defensively — callers in this codebase already cap at 10
   // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
   // so validate at the API boundary. Negative or non-integer values would
@@ -668,18 +671,17 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-function allowedDetectTunnelHost(hostname, expectedResourceId) {
-  const host = hostname.toLowerCase();
-  const expectedLabel = String(expectedResourceId || '').toLowerCase();
-  return DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => {
-    if (!host.endsWith(suffix)) return false;
-    const tunnelLabel = host.slice(0, -suffix.length);
-    // TODO(upstream-contract): keep the host label in lockstep with
-    // qurl-service's resourceIDPattern (`^r_[a-z0-9_-]{11}$`).
-    // The suffix list only scopes known qURL tunnel domains; the exact
-    // resource-id equality is the Bearer-carrying POST guard.
-    return /^r_[a-z0-9_-]{11}$/.test(tunnelLabel) && tunnelLabel === expectedLabel;
-  });
+// Safe host-only context for the qurl_site rejection breadcrumb. The guards
+// intentionally throw constant URL-free messages, so this hostname is the
+// operator signal that distinguishes an infra suffix drift from an SSRF probe.
+// `hostname` excludes credentials, port, path, query, and fragment; undefined
+// on malformed input lets JSON logging omit the field instead of echoing a URL.
+function detectTargetHostname(qurlSite) {
+  try {
+    return new URL(qurlSite).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 class DetectQurlSiteError extends Error {}
@@ -696,18 +698,21 @@ class DetectQurlSiteError extends Error {}
 // from a TRUSTED authenticated mint (not user input) and resolve-per-call keeps
 // the knock window tight, so a DNS round-trip per detect isn't warranted. A
 // future reader should NOT assume this carries the link guard's DNS guarantee.
-function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
+function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHost) {
   let parsed;
   try {
     parsed = new URL(targetUrl);
   } catch {
-    // buildDetectTargetUrl passes a serialized URL today; keep this as
+    // buildDetectTargetUrl passes the serialized target URL today; keep this as
     // defense-in-depth if a future caller validates a raw target directly.
     throw new Error('Detect tunnel qurl_site target is unparseable');
   }
   if (parsed.protocol !== 'https:') {
     throw new Error('Detect tunnel qurl_site target must be an https: URL');
   }
+  // buildDetectTargetUrl deliberately retains any credentials in its candidate
+  // URL so this final-target guard can reject them before returning the
+  // credential-free target, issuing the NHP knock, or posting image bytes.
   if (parsed.username || parsed.password) {
     throw new Error('Detect tunnel qurl_site target must not contain userinfo');
   }
@@ -715,15 +720,36 @@ function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
     throw new Error('Detect tunnel qurl_site target points to a private/internal address');
   }
   // Host-pin (defense-in-depth on this Bearer-carrying oracle leg): the POST
-  // target MUST be an `r_...` qURL reverse-tunnel resource-id host. Production
-  // currently uses `*.qurl.site`; sandbox has been observed as
+  // target host MUST exactly match the authenticated mint's qurl_site host and
+  // be under an allowed qURL reverse-tunnel suffix. Production currently uses
+  // `*.qurl.site`; sandbox has been observed as
   // `*.qurl.site.layerv.xyz`; staging may use `*.qurl.site.layerv.ai`.
   // Non-prod suffixes are accepted only for an explicit non-prod QURL_ENDPOINT
   // host; unknown endpoint shapes fail closed to prod-only tunnel hosts.
   // A malformed mint returning a public NON-qURL host then can't receive the
   // image bytes + our API-key Bearer. (NOT qurl.link — that's the short-link /
   // ALB domain, not the tunnel.)
-  if (!allowedDetectTunnelHost(parsed.hostname, expectedResourceId)) {
+  // The target is derived from qurl_site today, so equality is a construction
+  // invariant rather than a second identity source. Keep it explicit so a
+  // future caller using a different target source fails closed. resolve()'s
+  // resource_id check below independently binds the fresh access token to the
+  // slug-resolved opaque public key. A missing identity fails closed before the
+  // Bearer-carrying image POST; the suffix is a namespace, not tenant identity.
+  // buildDetectTargetUrl obtains the expected value from the same WHATWG URL
+  // parser, which canonicalizes ASCII DNS hostname case on both values.
+  const targetHost = parsed.hostname;
+  if (targetHost !== expectedQurlSiteHost) {
+    throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site');
+  }
+  // TODO(upstream-contract): qurl_site is an authenticated, host-only tunnel
+  // origin whose routing labels are opaque. If qurl-service changes its tunnel
+  // hostname shapes, update this namespace pin and its deployment allowlists.
+  const hasAllowedSuffix = DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => {
+    if (!targetHost.endsWith(suffix)) return false;
+    const prefix = targetHost.slice(0, -suffix.length);
+    return prefix.split('.').every(Boolean);
+  });
+  if (!hasAllowedSuffix) {
     throw new Error('Detect tunnel qurl_site host is not under an expected qURL tunnel domain');
   }
 }
@@ -734,7 +760,7 @@ function assertPublicHttpsTarget(targetUrl, expectedResourceId) {
 // CreateQurlForResourceRequest) and resolve's `target_url` is deliberately
 // ignored (it is "" for tunnels). Keep it that way: dropping the join would
 // silently POST image bytes to the tunnel root.
-function buildDetectTargetUrl(qurlSite, expectedResourceId) {
+function buildDetectTargetUrl(qurlSite) {
   let parsed;
   try {
     parsed = new URL(qurlSite);
@@ -747,7 +773,10 @@ function buildDetectTargetUrl(qurlSite, expectedResourceId) {
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  assertPublicHttpsTarget(parsed.toString(), expectedResourceId);
+  const candidateUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
+  assertPublicHttpsTarget(candidateUrl, parsed.hostname);
+  // Rebuild from the validated origin so the value returned to fetch is also
+  // structurally credential-free, independent of later guard refactors.
   return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
 }
 
@@ -762,27 +791,6 @@ function buildDetectTargetUrl(qurlSite, expectedResourceId) {
 // + consistent (the `String(... ?? '')` guard).
 function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
-}
-
-// Host for the qurl_site rejection breadcrumb below. Every guard behind that
-// breadcrumb throws a CONSTANT message — assertPublicHttpsTarget's four, plus
-// buildDetectTargetUrl's own DetectQurlSiteError branches — so without this it
-// says THAT a target was rejected but not WHICH host tripped it: an IPv4-mapped
-// literal, a 10.x, and a public `fd…` name misclassified by isPrivateHost's ULA
-// prefix check all read identically. Re-parsing here (error path only) beats
-// threading the host back out of buildDetectTargetUrl, and yields the same value
-// the guards judged. Both DetectQurlSiteError branches land correctly: an
-// unparseable qurl_site yields undefined (key dropped), a host-only violation
-// parses and yields the bare host.
-//
-// `hostname`, never the full URL: it excludes userinfo, port, path, query and
-// fragment by construction, so the `at_…` token — which rides in the qurl_link
-// fragment — cannot reach the log through it. undefined on an unparseable
-// qurl_site, which JSON.stringify drops, keeping that line free of a null.
-// (Same shape as the safe-host helpers in commands.js / qurl-webhook-registrar.js;
-// they differ only in fallback, and undefined is the one that omits the key.)
-function detectTargetHostname(qurlSite) {
-  try { return new URL(qurlSite).hostname; } catch { return undefined; }
 }
 
 /**
@@ -921,9 +929,9 @@ async function resolveDetectTarget() {
     throw err;
   }
   try {
-    targetUrl = buildDetectTargetUrl(minted?.qurl_site, resourceId);
+    targetUrl = buildDetectTargetUrl(minted?.qurl_site);
   } catch (err) {
-    // qurl_site/resource-id host-pin failures happen after a successful slug
+    // qurl_site hostname-pin failures happen after a successful slug
     // lookup and mint, so keep the cached resource id and retry the mint after
     // the short failure window instead of re-walking slug history. The mint
     // created an unredeemed 5m qURL, but failing before resolve() is the safe
@@ -954,11 +962,25 @@ async function resolveDetectTarget() {
     logger.warn('Detect tunnel resolve failed (knock/transport)', { error: redactAccessToken(err.message) });
     throw err;
   }
-  // The live response includes resource_id. Treat it as an integrity check when
-  // present, but do not make the tunnel POST depend on optional resolve metadata
-  // from older/variant API shapes; qurl_site came from the authenticated mint.
+  // Bind the fresh access token to the slug-resolved resource before sending
+  // image bytes + API-key Bearer to the minted tunnel host. qurl-service's
+  // public resolve handler validates and always serializes resource_id; a
+  // response that omits it is therefore malformed, not a compatibility shape.
+  // TODO(upstream-contract): resource IDs are unpadded base64url public keys;
+  // preserve exact serialization on list and resolve responses.
   const resolvedResourceId = resolved?.resource_id;
-  if (resolvedResourceId && String(resolvedResourceId).toLowerCase() !== resourceId.toLowerCase()) {
+  if (!resolvedResourceId) {
+    const err = new Error('Detect tunnel resolve omitted resource_id');
+    // The knock already happened, but no image/API key has left the bot. This
+    // is a deterministic response-contract failure, so retain the known slug
+    // resource and back off immediately instead of minting another token.
+    rememberDetectResourceFailure(err, { clearResourceCache: false, immediateBackoff: true });
+    logger.warn('Detect tunnel resolve rejected missing resource_id', {
+      expected_resource_id: resourceId,
+    });
+    throw err;
+  }
+  if (String(resolvedResourceId) !== resourceId) {
     const err = new Error('Detect tunnel resolve returned a mismatched resource_id');
     // The knock already happened, but the Bearer-carrying image POST must not.
     // The minted qURL is unused and expires quickly; clear the cache so the
@@ -1105,3 +1127,9 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 }
 
 module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+// Keep the future-caller exact-host invariant directly testable without
+// extending production's connector API. Jest sets NODE_ENV=test, matching the
+// precedent in logger.js.
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = { assertPublicHttpsTarget };
+}
