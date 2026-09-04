@@ -1795,6 +1795,26 @@ function truncForLog(v) {
   return s;
 }
 
+// Best-effort scrub for persistence diagnostics: every HTTP(S) URL is removed,
+// and scheme-less access tokens using qurl-service's current prefix are removed.
+// TODO(upstream-contract): qurl-service owns the `at_` access-token prefix.
+// Other scheme-less credential formats are intentionally outside this narrow
+// helper; callers must still omit raw bearer fields, while the structured
+// logger redacts metadata whose key is shaped like a qURL access link.
+function scrubQurlCredentialForLog(message) {
+  if (typeof message !== 'string') return undefined;
+  return truncForLog(message
+    .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
+    .replace(/(?<![A-Za-z_])at(?:_|%5f)[A-Za-z0-9_%-]+/gi, 'at_[REDACTED]'));
+}
+
+function persistenceErrorMessageForLog(err) {
+  if (typeof err?.message === 'string') return scrubQurlCredentialForLog(err.message);
+  if (err?.message != null) return scrubQurlCredentialForLog(String(err.message));
+  if (typeof err !== 'object' || err == null) return scrubQurlCredentialForLog(String(err));
+  return undefined;
+}
+
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
@@ -2172,11 +2192,24 @@ async function executeSendPipeline(interaction, {
       guildId: interaction.guildId,
     })));
   } catch (err) {
-    // Log the orphaned QURL resources at error level so an operator can
-    // manually revoke them — they exist on the QURL side with no local row.
+    // Log only non-secret identifiers so an operator can manually revoke the
+    // orphaned qURLs. qurlLink carries its live access token in the fragment
+    // and must never reach logs. resourceId drives the same whole-resource
+    // cleanup used by this bot (DELETE /v1/qurls/{resourceId}); qurlId lets an
+    // operator correlate each orphaned token in that resource.
+    // TODO(upstream-contract): qurl-service owns the whole-resource DELETE.
+    // Scrub err.message even for AWS service exceptions: validation messages
+    // can echo offending request values, but contain useful failure details.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
-      sendId, error: err.message, linkCount: qurlLinks.length,
-      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlLink: l.qurlLink })),
+      sendId,
+      errorName: err?.name,
+      errorCode: err?.code,
+      errorFault: err?.$fault,
+      httpStatusCode: err?.$metadata?.httpStatusCode,
+      requestId: err?.$metadata?.requestId,
+      errorMessage: persistenceErrorMessageForLog(err),
+      linkCount: qurlLinks.length,
+      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({
