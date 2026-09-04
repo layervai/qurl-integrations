@@ -8,7 +8,8 @@
 // until they manually re-link via `/qurl setup`; this script catches
 // them in one pass.
 //
-// Idempotent: rows that already have a `webhook_id` are skipped.
+// Idempotent: rows that already have a `webhook_id` or an owner-only default
+// mapping (`webhook_owner_id` without a copied secret) are skipped.
 // Safe to re-run on partial failures (e.g. transient qurl-service
 // 5xx mid-batch) — only the rows that didn't complete on the first
 // pass will be touched on the second.
@@ -103,18 +104,18 @@ async function main() {
     // FilterExpression is server-side post-read (DDB charges RCU on
     // unfiltered rows), so it doesn't save cost — but it does shrink
     // client-side memory pressure and suppresses noise from rows
-    // that obviously have nothing to provision (no qurl_api_key OR
-    // already-provisioned webhook_id).
+    // that obviously have nothing to provision (no qurl_api_key,
+    // already-provisioned webhook_id, or an owner-only default mapping).
     const res = await ddb.send(new ScanCommand({
       TableName: TABLE,
       ExclusiveStartKey,
-      FilterExpression: 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id)',
+      FilterExpression: 'attribute_exists(qurl_api_key) AND attribute_not_exists(webhook_id) AND attribute_not_exists(webhook_owner_id)',
     }));
     const rows = res.Items || [];
     for (const row of rows) {
       scanned += 1;
       if (!row.qurl_api_key) { skipped += 1; continue; }
-      if (row.webhook_id) { skipped += 1; continue; }
+      if (row.webhook_id || row.webhook_owner_id) { skipped += 1; continue; }
       candidates += 1;
       const guildId = row.guild_id;
       // Decrypt step isolated so a failure increments failedDecrypt
@@ -136,10 +137,9 @@ async function main() {
       }
       console.log(`[backfill] candidate guild_id=${guildId}`);
       if (DRY_RUN) continue;
-      // linkGuildWebhookSubscription also calls subs.upsertGuild
-      // on success — that's a no-op in this script context (the
-      // registry isn't .start()'d) but DDB is the source of truth,
-      // so running bots pick the new row up on their next 30s tick.
+      // linkGuildWebhookSubscription also calls a process-local cache upsert
+      // on success. That state is unused by this one-shot process; DDB is the
+      // source of truth, so running bots pick the row up on their next tick.
       try {
         const result = await linkGuildWebhookSubscription({
           guildId, apiKey, descriptionContext: 'via=backfill-script',

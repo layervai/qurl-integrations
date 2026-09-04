@@ -224,6 +224,42 @@ describe('webhook-subscriptions registry — concurrent upsert during scan', () 
     // 401 every inbound webhook for this owner.
     expect(subs.getSecretForOwner('usr_rot')).toBe('sec_post_rotate');
   });
+
+  it('keeps a legacy default-owner secret authoritative during the initial scan', async () => {
+    let resolveScan;
+    mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
+    const scanPromise = subs.scanOnce();
+
+    const ownerId = await subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+    subs.ensureDefaultOwnerCacheEntry(ownerId);
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+
+    resolveScan([{
+      guildId: 'g_legacy', webhookId: 'wh_default',
+      webhookSecret: 'whsec_active_rotation', webhookOwnerId: 'usr_default',
+    }]);
+    await scanPromise;
+
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_active_rotation');
+  });
+
+  it('keeps a complete legacy row authoritative during a later default-owner upsert', async () => {
+    mockScan.mockResolvedValueOnce([]);
+    await subs.scanOnce();
+    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
+
+    let resolveScan;
+    mockScan.mockImplementationOnce(() => new Promise((resolve) => { resolveScan = resolve; }));
+    const scanPromise = subs.scanOnce();
+    subs.ensureDefaultOwnerCacheEntry('usr_default');
+    resolveScan([{
+      guildId: 'g_legacy', webhookId: 'wh_default',
+      webhookSecret: 'whsec_active_rotation', webhookOwnerId: 'usr_default',
+    }]);
+    await scanPromise;
+
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_active_rotation');
+  });
 });
 
 describe('webhook-subscriptions registry — synchronous local update API', () => {
@@ -375,9 +411,117 @@ describe('webhook-subscriptions registry — default-key + BYOK owner collision'
     // BYOK row wins, NOT the env QURL_WEBHOOK_SECRET ('default-key-secret').
     expect(subs.getSecretForOwner('usr_default')).toBe('sec_byok_only');
   });
+
+  it('refuses to replace a mismatched legacy cache secret during owner-only linking', async () => {
+    mockScan.mockResolvedValueOnce([{
+      guildId: 'g_legacy', webhookId: 'wh_legacy',
+      webhookSecret: 'whsec_active_rotation', webhookOwnerId: 'usr_default',
+    }]);
+    await subs.scanOnce();
+
+    expect(() => subs.ensureDefaultOwnerCacheEntry('usr_default'))
+      .toThrow(/does not match QURL_WEBHOOK_SECRET/);
+    expect(subs.getSecretForOwner('usr_default')).toBe('whsec_active_rotation');
+  });
 });
 
 describe('webhook-subscriptions registry — default-key discovery', () => {
+  it('uses the discovered owner directly for the exact default API key', async () => {
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc'))
+      .resolves.toBe('usr_default');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer lv_test_abc');
+  });
+
+  it('does not seed a secret while resolving a different owner before the first scan', async () => {
+    global.fetch = jest.fn(async (_url, opts) => {
+      const ownerId = opts.headers.Authorization === 'Bearer lv_test_abc'
+        ? 'usr_default'
+        : 'usr_other';
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ data: [{ owner_id: ownerId }] }),
+      };
+    });
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_other')).resolves.toBeNull();
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+  });
+
+  it('returns null when the candidate key has no existing subscription', async () => {
+    global.fetch = jest.fn(async (_url, opts) => {
+      const data = opts.headers.Authorization === 'Bearer lv_test_abc'
+        ? [{ owner_id: 'usr_default' }]
+        : [];
+      return { ok: true, status: 200, text: async () => JSON.stringify({ data }) };
+    });
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_empty')).resolves.toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects when the default key has no discoverable subscription', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200, text: async () => JSON.stringify({ data: [] }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_candidate'))
+      .rejects.toThrow(/default subscription owner could not be discovered/);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips discovery in a pure-BYOK configuration', async () => {
+    const config = require('../src/config');
+    const originalSecret = config.QURL_WEBHOOK_SECRET;
+    config.QURL_WEBHOOK_SECRET = undefined;
+    try {
+      await expect(subs.resolveDefaultOwnerForApiKey('lv_byok')).resolves.toBeNull();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      config.QURL_WEBHOOK_SECRET = originalSecret;
+    }
+  });
+
+  it('reuses the cached default owner while still resolving an alias key', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ owner_id: 'usr_default' }] }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_test_abc'))
+      .resolves.toBe('usr_default');
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .resolves.toBe('usr_default');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls[1][1].headers.Authorization).toBe('Bearer lv_alias');
+  });
+
+  it('fails closed when a non-empty webhook list omits owner_id', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ webhook_id: 'wh_malformed' }] }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .rejects.toThrow(/non-empty qurl-service response omitted owner_id/);
+  });
+
+  it('fails closed when a webhook list contains conflicting owner IDs', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [{ owner_id: 'usr_default' }, { owner_id: 'usr_other' }],
+      }),
+    }));
+
+    await expect(subs.resolveDefaultOwnerForApiKey('lv_alias'))
+      .rejects.toThrow(/conflicting owner_id values/);
+  });
+
   // When GET /v1/webhooks returns an empty list (Lambda hasn't run
   // on a fresh deploy, or QURL_API_KEY/QURL_ENDPOINT are unset),
   // discoverDefaultOwnerId returns null. scanOnce must still flip
@@ -433,6 +577,26 @@ describe('webhook-subscriptions registry — first-scan-failure semantics', () =
     expect(subs.isPrimed()).toBe(true);
     expect(subs.getSecretForOwner('usr_byok')).toBe('sec_byok');
     expect(subs.getSecretForOwner('usr_default')).toBeNull();
+  });
+
+  it('seeds the environment secret after lazy discovery recovers on a primed registry', async () => {
+    mockScan.mockResolvedValueOnce([]);
+    global.fetch = jest.fn(async () => ({
+      ok: false, status: 503, text: async () => '',
+    }));
+    await subs.scanOnce();
+    expect(subs.isPrimed()).toBe(true);
+    expect(subs.getSecretForOwner('usr_default')).toBeNull();
+
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ owner_id: 'usr_default' }] }),
+    }));
+    const ownerId = await subs.resolveDefaultOwnerForApiKey('lv_test_abc');
+    subs.ensureDefaultOwnerCacheEntry(ownerId);
+
+    expect(subs.getSecretForOwner('usr_default')).toBe('default-key-secret');
   });
 
   it('consecutiveFailures survives a "skipped" scan (long-running outage must still escalate)', async () => {

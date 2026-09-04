@@ -90,6 +90,14 @@ const SIBLING_LAG_GRACE_MS = 5_000;
 // here since the receiver never compares webhookId for equality.
 const DEFAULT_KEY_SENTINEL = '__default-key__';
 
+function defaultOwnerEntry() {
+  return {
+    guildIds: new Set([DEFAULT_KEY_SENTINEL]),
+    webhookSecret: config.QURL_WEBHOOK_SECRET,
+    webhookId: DEFAULT_KEY_SENTINEL,
+  };
+}
+
 function getSecretForOwner(ownerId) {
   if (!ownerId) return null;
   const entry = subscriptions.get(ownerId);
@@ -132,6 +140,33 @@ function upsertGuild({ guildId, ownerId, webhookId, webhookSecret }) {
   upsertsDuringScan.add(ownerId);
 }
 
+// Ensure the already-discovered default owner has a safe cache entry. Before
+// the first scan this intentionally leaves the cache untouched so DDB can
+// establish legacy-secret precedence. Unlike upsertGuild, it never overrides
+// an in-flight scan: no rotation occurred, so a complete DDB row may still
+// contain the only secret that matches qurl-service.
+function ensureDefaultOwnerCacheEntry(ownerId) {
+  if (typeof ownerId !== 'string' || ownerId !== defaultOwnerId
+      || typeof config.QURL_WEBHOOK_SECRET !== 'string' || !config.QURL_WEBHOOK_SECRET.length) {
+    throw new Error('ensureDefaultOwnerCacheEntry: the discovered default owner is required');
+  }
+
+  const entry = subscriptions.get(ownerId);
+  if (!entry) {
+    if (!isPrimed()) return;
+    subscriptions.set(ownerId, defaultOwnerEntry());
+    return;
+  }
+
+  // A legacy row may contain the active post-rotation secret while the
+  // environment still has the pre-rotation value. The store performs the
+  // same guard against persisted state; keep this local check so linking
+  // another guild cannot switch the receiver to a stale environment secret.
+  if (entry.webhookSecret !== config.QURL_WEBHOOK_SECRET) {
+    throw new Error('ensureDefaultOwnerCacheEntry: cached webhook secret does not match QURL_WEBHOOK_SECRET');
+  }
+}
+
 // Removes guildId from its owner's entry; if the entry is now empty
 // (no sibling guilds + not the default-key owner), drops it. Default-
 // key entry is never dropped from removeGuild — it's owned by the
@@ -161,29 +196,25 @@ function removeGuild({ guildId, ownerId }) {
   }
 }
 
-// Fetches the default key's owner_id by listing its own webhooks.
-// Returns null if the list is empty (Lambda hasn't run yet on a
-// fresh deploy) — the tick will retry next cycle, and inbound events
-// in the gap are 503'd via the unprimed-cache code path. Network /
-// HTTP errors are surfaced to the caller (scanOnce) so the tick's
-// failure counter increments correctly.
+// Fetches an API key's owner_id by listing its own webhooks.
+// Returns null if the list is empty. For default-key discovery (Lambda
+// hasn't run yet on a fresh deploy), the tick retries next cycle and
+// inbound events in the gap are 503'd via the unprimed-cache code path.
+// For a guild key, null means no subscription exists yet and the caller
+// proceeds through the registrar's create path. Network / HTTP errors are
+// surfaced so each caller can apply its existing failure policy.
 //
 // ASSUMPTION: owner_id is identical across every webhook owned by a
 // single API key in qurl-service. True today by qurl-service's auth0
 // owner-binding contract. If qurl-service ever multi-tenants a key
-// (rare but plausible for partner-shared identities), this loop
-// returns whichever owner_id came first — the bot's default-key
-// subscription is then a coin flip. The same assumption underlies
-// BYOK row population via setGuildApiKey, so any change there needs
-// a coordinated rework here.
-async function discoverDefaultOwnerId() {
-  if (!config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
-  // limit=100 (was limit=10): owner_id is identical across all subs
-  // this key owns, so we only need one valid row. Bumped to 100 so
-  // a contract drift that drops owner_id from rows 1..N silently
-  // doesn't fail discovery — a bot key with 50+ subs is plausible
-  // at scale; 100 stays under the typical page-size cap with no
-  // pagination needed for the read-side.
+// (rare but plausible for partner-shared identities), discovery fails
+// closed rather than choosing an owner based on response order. The same
+// assumption underlies BYOK row population via setGuildApiKey, so any change
+// there needs a coordinated rework here.
+async function discoverOwnerId(apiKey) {
+  if (!apiKey || !config.QURL_ENDPOINT) return null;
+  // Inspect one bounded page: one valid owner is enough under the binding
+  // contract below, while conflicting owners fail closed.
   // Go through callQurlService for consistency with the rest of the
   // registrar surface — same QurlServiceError shape, same op-tagged
   // network-error handling, same 10s timeout default. The receiver
@@ -192,15 +223,55 @@ async function discoverDefaultOwnerId() {
     method: 'GET',
     path: '/v1/webhooks?limit=100',
     apiEndpoint: config.QURL_ENDPOINT,
-    apiKey: config.QURL_API_KEY,
+    apiKey,
   });
   // Local name `webhooks` (not `subs`) so it doesn't shadow the
   // module convention everyone else uses for the registry import.
-  const webhooks = Array.isArray(body?.data) ? body.data : [];
-  for (const w of webhooks) {
-    if (typeof w?.owner_id === 'string' && w.owner_id.length > 0) return w.owner_id;
+  if (!Array.isArray(body?.data)) {
+    throw new Error('discoverOwnerId: qurl-service response data must be an array');
   }
-  return null;
+  const webhooks = body.data;
+  if (webhooks.length === 0) return null;
+  let ownerId = null;
+  for (const w of webhooks) {
+    if (typeof w?.owner_id !== 'string' || !w.owner_id.length) continue;
+    if (ownerId && w.owner_id !== ownerId) {
+      throw new Error('discoverOwnerId: qurl-service response contained conflicting owner_id values');
+    }
+    ownerId = w.owner_id;
+  }
+  if (ownerId) return ownerId;
+  throw new Error('discoverOwnerId: non-empty qurl-service response omitted owner_id');
+}
+
+async function discoverDefaultOwnerId() {
+  return discoverOwnerId(config.QURL_API_KEY);
+}
+
+// Resolve whether a guild API key belongs to the bot's default owner. This is
+// lazy because gateway-only processes and the one-shot backfill never start
+// the HTTP receiver's registry scan. When a default subscription is expected
+// but cannot be discovered, throw rather than falling through to the
+// per-guild registrar and risking a rotation of the shared default secret.
+// This deliberately trades link availability for secret integrity during the
+// short fresh-deploy gap: without the default owner, an unrelated key cannot
+// be distinguished safely from an alias of the default key.
+async function resolveDefaultOwnerForApiKey(apiKey) {
+  if (!config.QURL_WEBHOOK_SECRET || !config.QURL_API_KEY || !config.QURL_ENDPOINT) return null;
+
+  let ownerId = defaultOwnerId;
+  if (!ownerId) {
+    ownerId = await discoverDefaultOwnerId();
+    if (!ownerId) {
+      throw new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
+    }
+    defaultOwnerId = ownerId;
+  }
+
+  const candidateOwnerId = apiKey === config.QURL_API_KEY
+    ? ownerId
+    : await discoverOwnerId(apiKey);
+  return candidateOwnerId === ownerId ? ownerId : null;
 }
 
 // One refresh pass. Rebuilds the per-owner map from `guild_configs`
@@ -316,20 +387,15 @@ async function scanOnce() {
       // Collision case: a BYOK guild that linked using the bot's OWN
       // default API key has webhook_owner_id === discoveredOwner. The
       // BYOK row already populated `next`; don't clobber its guildIds
-      // / webhookId with the synthetic default-key shape. The
-      // secret is identical in this case (both came from the same
-      // qurl-service subscription), so leaving the BYOK entry in
-      // place is observationally correct.
+      // / webhookId with the synthetic default-key shape. A legacy row's
+      // secret may be the only value matching qurl-service after the old
+      // link path rotated it, so the complete DDB entry remains authoritative.
       if (config.QURL_WEBHOOK_SECRET && !next.has(discoveredOwner)) {
         // String sentinel — receiver only reads webhookSecret, never
         // compares webhookId. Bracketed underscores can't collide
         // with `wh_...` qurl-service IDs or decimal Discord
         // snowflakes (the only legal guildIds values).
-        next.set(discoveredOwner, {
-          guildIds: new Set([DEFAULT_KEY_SENTINEL]),
-          webhookSecret: config.QURL_WEBHOOK_SECRET,
-          webhookId: DEFAULT_KEY_SENTINEL,
-        });
+        next.set(discoveredOwner, defaultOwnerEntry());
       }
     } else if (config.QURL_WEBHOOK_SECRET) {
       // Only warn when we WANTED a default entry (secret is set) but
@@ -484,9 +550,11 @@ module.exports = {
   start,
   stop,
   getSecretForOwner,
+  resolveDefaultOwnerForApiKey,
   isPrimed,
   isWithinSiblingLagWindow,
   upsertGuild,
+  ensureDefaultOwnerCacheEntry,
   removeGuild,
   // Test-only: production callers should let the 30s ticker drive
   // refresh. Exposed because the test suite needs to drive scans

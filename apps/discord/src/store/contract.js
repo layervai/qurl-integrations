@@ -90,6 +90,7 @@ const STORE_METHODS = Object.freeze([
 
   // Per-guild qurl-service webhook subscriptions (BYOK view counter)
   'setGuildWebhookSubscription',
+  'setGuildDefaultWebhookOwner',
   'clearGuildWebhookSubscription',
   'listGuildSubscriptionsByOwner',
   'scanGuildSubscriptions',

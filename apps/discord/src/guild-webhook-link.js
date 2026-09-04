@@ -11,6 +11,7 @@ const { AUDIT_EVENTS } = require('./constants');
 const {
   ensureWebhookSubscription,
   deleteSubscription,
+  WEBHOOK_ACTIONS,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
   isTruthyEnvFlag,
 } = require('./qurl-webhook-registrar');
@@ -109,6 +110,55 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook link skipped: BASE_URL or QURL_ENDPOINT unset', { guildId });
     auditLinkFailure(guildId, LINK_RESULTS.CONFIG_MISSING);
     return { ok: false, reason: LINK_RESULTS.CONFIG_MISSING };
+  }
+
+  // The default-key subscription belongs to the Lambda lifecycle: its secret
+  // is QURL_WEBHOOK_SECRET, not guild-owned state. Resolve the candidate key's
+  // owner before invoking the per-guild registrar so an alias key for that
+  // same owner cannot rotate the shared default secret. Resolution is lazy so
+  // this also works on gateway-only processes and in the backfill script,
+  // neither of which starts the HTTP registry scan.
+  let defaultOwnerId;
+  try {
+    defaultOwnerId = await subs.resolveDefaultOwnerForApiKey(apiKey);
+  } catch (err) {
+    logger.warn('Per-guild webhook owner resolution failed', {
+      error: err?.message, guildId,
+    });
+    auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED);
+    return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
+  }
+
+  if (defaultOwnerId) {
+    try {
+      // Store the ownership relationship only. Copying the environment
+      // secret into this row would make the DDB-backed cache entry shadow
+      // QURL_WEBHOOK_SECRET on the next registry scan.
+      await db.setGuildDefaultWebhookOwner(guildId, {
+        webhookOwnerId: defaultOwnerId,
+        expectedDefaultWebhookSecret: config.QURL_WEBHOOK_SECRET,
+        expectedApiKey: apiKey,
+      });
+    } catch (err) {
+      logger.warn('Default webhook owner mapping persist failed', {
+        error: err?.message, guildId,
+      });
+      auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED);
+      return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
+    }
+
+    try {
+      subs.ensureDefaultOwnerCacheEntry(defaultOwnerId);
+    } catch (err) {
+      logger.warn('subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)', {
+        error: err?.message, guildId,
+      });
+    }
+
+    logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
+      guild_id: guildId, action: WEBHOOK_ACTIONS.REUSED,
+    });
+    return { ok: true, action: WEBHOOK_ACTIONS.REUSED };
   }
 
   let registered = null;

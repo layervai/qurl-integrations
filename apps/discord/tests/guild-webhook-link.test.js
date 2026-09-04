@@ -7,6 +7,7 @@ const mockDeleteSubscription = jest.fn();
 jest.mock('../src/qurl-webhook-registrar', () => ({
   ensureWebhookSubscription: mockEnsureWebhookSubscription,
   deleteSubscription: mockDeleteSubscription,
+  WEBHOOK_ACTIONS: { CREATED: 'created', ROTATED: 'rotated', REUSED: 'reused' },
   // Expose the real constant so guild-webhook-link's description
   // interpolation produces a wire-correct string in tests too. Keep
   // in sync with the real module — a future rename would break the
@@ -23,18 +24,24 @@ jest.mock('../src/qurl-webhook-registrar', () => ({
 }));
 
 const mockSetGuildWebhookSubscription = jest.fn();
+const mockSetGuildDefaultWebhookOwner = jest.fn();
 const mockPropagateGuildWebhookSubscription = jest.fn();
 jest.mock('../src/store', () => ({
   setGuildWebhookSubscription: mockSetGuildWebhookSubscription,
+  setGuildDefaultWebhookOwner: mockSetGuildDefaultWebhookOwner,
   propagateGuildWebhookSubscription: mockPropagateGuildWebhookSubscription,
   healthCheck: jest.fn(),
 }));
 
 const mockUpsertGuild = jest.fn();
+const mockEnsureDefaultOwnerCacheEntry = jest.fn();
 const mockRemoveGuild = jest.fn();
+const mockResolveDefaultOwnerForApiKey = jest.fn();
 jest.mock('../src/webhook-subscriptions', () => ({
   upsertGuild: mockUpsertGuild,
+  ensureDefaultOwnerCacheEntry: mockEnsureDefaultOwnerCacheEntry,
   removeGuild: mockRemoveGuild,
+  resolveDefaultOwnerForApiKey: mockResolveDefaultOwnerForApiKey,
   isPrimed: () => true,
   getSecretForOwner: () => null,
   start: jest.fn(),
@@ -44,9 +51,10 @@ jest.mock('../src/webhook-subscriptions', () => ({
 }));
 
 const mockAudit = jest.fn();
+const mockWarn = jest.fn();
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
-  warn: jest.fn(),
+  warn: mockWarn,
   error: jest.fn(),
   debug: jest.fn(),
   audit: mockAudit,
@@ -73,8 +81,10 @@ beforeEach(() => {
     ownerId: 'usr_ok',
   });
   mockSetGuildWebhookSubscription.mockResolvedValue();
+  mockSetGuildDefaultWebhookOwner.mockResolvedValue();
   mockPropagateGuildWebhookSubscription.mockResolvedValue({ updated: 0, failed: 0 });
   mockDeleteSubscription.mockResolvedValue();
+  mockResolveDefaultOwnerForApiKey.mockResolvedValue(null);
 });
 
 describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
@@ -137,6 +147,110 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
       expect.objectContaining({ guild_id: 'g_happy', action: 'created' }),
+    );
+  });
+
+  it('keeps a different resolved owner on the existing per-guild subscription path', async () => {
+    mockResolveDefaultOwnerForApiKey.mockResolvedValue(null);
+    mockEnsureWebhookSubscription.mockResolvedValueOnce({
+      webhookId: 'wh_other', secret: 'sec_other', action: 'created', ownerId: 'usr_other',
+    });
+
+    const result = await linkGuildWebhookSubscription({
+      guildId: 'g_other', apiKey: 'lv_other',
+    });
+
+    expect(result).toEqual({ ok: true, action: 'created' });
+    expect(mockResolveDefaultOwnerForApiKey).toHaveBeenCalledWith('lv_other');
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledTimes(1);
+    expect(mockEnsureWebhookSubscription).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'lv_other' }),
+    );
+    expect(mockSetGuildWebhookSubscription).toHaveBeenCalledWith('g_other', {
+      webhookId: 'wh_other', webhookSecret: 'sec_other', webhookOwnerId: 'usr_other',
+    });
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+    expect(mockUpsertGuild).toHaveBeenCalledWith({
+      guildId: 'g_other', ownerId: 'usr_other', webhookId: 'wh_other', webhookSecret: 'sec_other',
+    });
+    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
+  });
+});
+
+describe('linkGuildWebhookSubscription — default-owner failures', () => {
+  it('fails closed when owner resolution throws', async () => {
+    mockResolveDefaultOwnerForApiKey.mockRejectedValueOnce(new Error('qurl-service 502'));
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_resolve', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.REGISTER_FAILED });
+    expect(mockEnsureWebhookSubscription).not.toHaveBeenCalled();
+    expect(mockSetGuildDefaultWebhookOwner).not.toHaveBeenCalled();
+    expect(mockSetGuildWebhookSubscription).not.toHaveBeenCalled();
+    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
+    expect(mockUpsertGuild).not.toHaveBeenCalled();
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({ guild_id: 'g_resolve', reason: LINK_RESULTS.REGISTER_FAILED }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
+      expect.anything(),
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Per-guild webhook owner resolution failed',
+      { error: 'qurl-service 502', guildId: 'g_resolve' },
+    );
+  });
+
+  it('reports persistence failure without applying the guild cache association', async () => {
+    mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
+    mockSetGuildDefaultWebhookOwner.mockRejectedValueOnce(new Error('DDB throttled'));
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_persist', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: false, reason: LINK_RESULTS.PERSIST_FAILED });
+    expect(mockEnsureWebhookSubscription).not.toHaveBeenCalled();
+    expect(mockEnsureDefaultOwnerCacheEntry).not.toHaveBeenCalled();
+    expect(mockSetGuildDefaultWebhookOwner).toHaveBeenCalledWith(
+      'g_persist', {
+        webhookOwnerId: 'usr_default',
+        expectedDefaultWebhookSecret: 'wsec_test',
+        expectedApiKey: 'lv_x',
+      },
+    );
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.objectContaining({ guild_id: 'g_persist', reason: LINK_RESULTS.PERSIST_FAILED }),
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
+      expect.anything(),
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Default webhook owner mapping persist failed',
+      { error: 'DDB throttled', guildId: 'g_persist' },
+    );
+  });
+
+  it('keeps a successful owner-only write when the local cache update rejects', async () => {
+    mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
+    mockEnsureDefaultOwnerCacheEntry.mockImplementationOnce(() => { throw new Error('cache rejected'); });
+
+    const result = await linkGuildWebhookSubscription({ guildId: 'g_cache', apiKey: 'lv_x' });
+
+    expect(result).toEqual({ ok: true, action: 'reused' });
+    expect(mockWarn).toHaveBeenCalledWith(
+      'subs.ensureDefaultOwnerCacheEntry rejected (existing cache retained; registry scan remains authoritative)',
+      expect.objectContaining({ guildId: 'g_cache', error: 'cache rejected' }),
+    );
+    expect(mockAudit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
+      { guild_id: 'g_cache', action: 'reused' },
+    );
+    expect(mockAudit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
+      expect.anything(),
     );
   });
 });
