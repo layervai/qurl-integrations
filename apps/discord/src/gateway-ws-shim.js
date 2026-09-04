@@ -213,9 +213,9 @@ function createGatewayWsShim({
   // event-publisher + noteGatewayActivity).
   const dispatchHandlers = new Set();
 
-  function logFatalErrorBestEffort(...args) {
+  function logBestEffort(level, ...args) {
     try {
-      logger.error(...args);
+      logger[level](...args);
     } catch {
       // A diagnostic must never turn the fail-closed throttle into an upstream
       // rejection; @discordjs/ws would continue to the IDENTIFY send.
@@ -247,7 +247,8 @@ function createGatewayWsShim({
       if (!signal) {
         if (!missingAbortSignalLogged) {
           missingAbortSignalLogged = true;
-          logFatalErrorBestEffort(
+          logBestEffort(
+            'error',
             'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
           );
         }
@@ -260,7 +261,8 @@ function createGatewayWsShim({
       if (typeof signal.addEventListener !== 'function') {
         if (!unusableAbortSignalLogged) {
           unusableAbortSignalLogged = true;
-          logFatalErrorBestEffort(
+          logBestEffort(
+            'error',
             'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
             { errorName: 'TypeError' },
           );
@@ -272,7 +274,8 @@ function createGatewayWsShim({
       } catch (error) {
         if (!unusableAbortSignalLogged) {
           unusableAbortSignalLogged = true;
-          logFatalErrorBestEffort(
+          logBestEffort(
+            'error',
             'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
             { errorName: error?.name ?? typeof error },
           );
@@ -294,18 +297,18 @@ function createGatewayWsShim({
     isReady = false;
     wsConnected = false;
     stopped = true;
-    logFatalErrorBestEffort('gateway-ws-shim: IDENTIFY budget exhausted; shutting down', {
+    logBestEffort('error', 'gateway-ws-shim: IDENTIFY budget exhausted; shutting down', {
       attempt: identifyAttempts,
       cap: MAX_IDENTIFY_ATTEMPTS,
     });
     try {
       Promise.resolve(onFatal(error)).catch((fatalError) => {
-        logFatalErrorBestEffort('gateway-ws-shim: fatal shutdown handler rejected', {
+        logBestEffort('error', 'gateway-ws-shim: fatal shutdown handler rejected', {
           error: fatalError?.message ?? String(fatalError),
         });
       });
     } catch (fatalError) {
-      logFatalErrorBestEffort('gateway-ws-shim: fatal shutdown handler threw', {
+      logBestEffort('error', 'gateway-ws-shim: fatal shutdown handler threw', {
         error: fatalError?.message ?? String(fatalError),
       });
     }
@@ -322,7 +325,8 @@ function createGatewayWsShim({
       // This callback is awaited inside @discordjs/ws's swallow-and-send
       // identify path. It must always return our guard: propagating the fetch
       // failure would let upstream send IDENTIFY without budget enforcement.
-      logger.warn(
+      logBestEffort(
+        'warn',
         'gateway-ws-shim: gateway info fetch failed; defaulting max_concurrency to 1',
         {
           errorName: error?.name,
@@ -335,7 +339,8 @@ function createGatewayWsShim({
       ? rawMaxConcurrency
       : 1;
     if (gatewayInfoFetched && maxConcurrency !== rawMaxConcurrency) {
-      logger.warn(
+      logBestEffort(
+        'warn',
         'gateway-ws-shim: gateway info has invalid max_concurrency; defaulting to 1',
         { observedMaxConcurrency: rawMaxConcurrency ?? null },
       );
@@ -352,7 +357,8 @@ function createGatewayWsShim({
       // guard. Today's deployment is exactly one shard; a budget-only delegate
       // safely gives up cross-shard pacing while retaining the hard cap. The
       // real export/manager-option contract test makes this fallback loud in CI.
-      logger.error(
+      logBestEffort(
+        'error',
         'gateway-ws-shim: identify throttler construction failed; using budget-only fallback',
         { errorName: error?.name, errorCode: error?.code },
       );
@@ -394,7 +400,7 @@ function createGatewayWsShim({
         }
         identifyAttempts += 1;
         if (identifyAttempts <= MAX_IDENTIFY_ATTEMPTS) {
-          logger.info('gateway-ws-shim: IDENTIFY pending', {
+          logBestEffort('info', 'gateway-ws-shim: IDENTIFY pending', {
             attempt: identifyAttempts,
             cap: MAX_IDENTIFY_ATTEMPTS,
           });

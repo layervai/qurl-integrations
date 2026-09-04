@@ -743,6 +743,63 @@ describe('IDENTIFY budget guard', () => {
     );
   });
 
+  it('retains the guard when gateway-fetch fallback logging throws', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockRejectedValueOnce(new Error('gateway-down'));
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('retains the guard when invalid-gateway-info logging throws', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    mgr.fetchGatewayInformation.mockResolvedValueOnce({
+      session_start_limit: { max_concurrency: 0 },
+    });
+    logger.warn.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('retains the fallback guard when constructor-failure logging throws', async () => {
+    function ThrowingIdentifyThrottler() {
+      throw new Error('constructor-failure');
+    }
+    const {
+      shim, logger, managerInstances,
+    } = makeShim({ IdentifyThrottlerCtor: ThrowingIdentifyThrottler });
+    await shim.start();
+    const mgr = managerInstances[0];
+    logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
+
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
+  it('grants an in-budget IDENTIFY when pending logging throws', async () => {
+    const { shim, logger, managerInstances } = makeShim();
+    await shim.start();
+    const mgr = managerInstances[0];
+    logger.info.mockImplementation(() => { throw new Error('logger-failure'); });
+    const throttler = await mgr._constructorArgs.buildIdentifyThrottler(mgr);
+
+    await expect(throttler.waitForIdentify(0, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(shim._getIdentifyAttemptsForTest()).toBe(1);
+  });
+
   it('still starts fatal shutdown and blocks the grant when fatal logging throws', async () => {
     const { shim, logger, managerInstances, onFatal } = makeShim();
     logger.error.mockImplementation(() => { throw new Error('logger-failure'); });
