@@ -153,8 +153,11 @@ async function getIdentity(apiKey, guildId) {
   // path dimension lets alerting distinguish this interactive validation.
   return callQurl('GET', '/me', async () => {
     const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
+    // TODO(upstream-contract): keep the explicit /v1 prefix aligned with
+    // qurl-service until #1377 removes this SDK-gap shim.
     const response = await globalThis.fetch(`${endpoint}/v1/me`, {
       method: 'GET',
+      redirect: 'error',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: 'application/json',

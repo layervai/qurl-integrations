@@ -391,7 +391,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
   it('escapes markdown in stored status metadata', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
-      configured_by: 'admin-original',
+      configured_by: 'admin](https://evil.example)',
       updated_at: '[click here](https://evil.example)',
     });
     const interaction = makeStatusInteraction({
@@ -402,7 +402,11 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).not.toContain('[click here](https://evil.example)');
+    expect(replyContent).not.toContain('admin](https://evil.example)');
     expect(replyContent).toContain('\\[click here\\]\\(https://evil.example\\)');
+    expect(interaction._editReply).toHaveBeenCalledWith(expect.objectContaining({
+      allowedMentions: { parse: [] },
+    }));
   });
 
   it('sanitizes service-reported prefix and scopes before rendering them', async () => {
@@ -459,6 +463,8 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('Configured by: <@admin-departed>');
     expect(replyContent).toContain('Last updated:');
     expect(replyContent).toContain('again to take over billing.');
+    expect(replyContent).not.toContain('…(truncated)');
+    expect((replyContent.match(/`/g) || []).length % 2).toBe(0);
   });
 
   it('replies to the deferred interaction when the guild is not configured', async () => {
@@ -512,13 +518,13 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(identityStartedBeforeMemberFinished).toBe(1);
   });
 
-  it('asks the admin to rerun setup when the config row has no stored key', async () => {
+  it.each([null, ''])('asks the admin to rerun setup when the stored key is %p', async (storedKey) => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
       configured_by: 'admin-original',
       updated_at: '2026-01-01T00:00:00Z',
     });
-    db.getGuildApiKey.mockResolvedValueOnce(null);
+    db.getGuildApiKey.mockResolvedValueOnce(storedKey);
     const interaction = makeStatusInteraction({
       memberFetchBehavior: async () => ({ id: 'admin-original' }),
     });

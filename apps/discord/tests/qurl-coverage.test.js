@@ -85,6 +85,8 @@ describe('qURL client — getIdentity', () => {
     const [url, opts] = globalThis.fetch.mock.calls[0];
     expect(url).toBe('https://api.test.local/v1/me');
     expect(opts.method).toBe('GET');
+    expect(opts.redirect).toBe('error');
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
     expect(opts.headers.Authorization).toBe('Bearer stored-guild-key');
     expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
     expect(result.api_key).toEqual({
@@ -172,10 +174,10 @@ describe('qURL client — getIdentity', () => {
       .rejects.toThrow('qURL identity response had an unexpected shape');
   });
 
-  it('rejects a missing guild key before making a request', async () => {
+  it.each([null, ''])('rejects a missing guild key before making a request', async (apiKey) => {
     globalThis.fetch = jest.fn();
 
-    await expect(qurl.getIdentity(null)).rejects.toThrow('Guild qURL API key is not configured');
+    await expect(qurl.getIdentity(apiKey)).rejects.toThrow('Guild qURL API key is not configured');
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
