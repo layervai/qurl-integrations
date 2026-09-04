@@ -981,17 +981,17 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('host-pin compares the complete target and returned qurl_site hostnames case-insensitively', () => {
-      expect(connector.__testExports.allowedDetectTunnelHost(
-        'R_ABC12345678.QURL.SITE',
-        'r_abc12345678.qurl.site',
-      )).toBe(true);
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        'https://R_ABC12345678.QURL.SITE/api/detect',
+        TUNNEL_SITE,
+      )).not.toThrow();
     });
 
     it('host-pin fails closed when the detect target hostname differs from the returned qurl_site', () => {
-      expect(connector.__testExports.allowedDetectTunnelHost(
-        'r_other123456.qurl.site',
-        'r_abc12345678.qurl.site',
-      )).toBe(false);
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        'https://r_other123456.qurl.site/api/detect',
+        TUNNEL_SITE,
+      )).toThrow(/does not match the returned qurl_site/);
     });
 
     it('ignores a non-empty resolve target_url and still POSTs to qurl_site', async () => {
@@ -1022,6 +1022,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('finds the active detect resource after many revoked rows via the SDK auto-paginator', async () => {
+      // These rows only exercise pagination; keep them distinct and
+      // public-key-shaped without manufacturing 150 throwaway keypairs.
       const revokedRows = Array.from({ length: 150 }, (_, i) => ({
         resource_id: `${REVOKED_RESOURCE_ID.slice(0, -4)}${String(i).padStart(4, '0')}`,
         slug: 'detect-sandbox',

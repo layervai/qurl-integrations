@@ -668,12 +668,17 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-// The qurl_site label may be an `r_` Traefik routing label, but it carries no
-// resource identity: resource IDs are opaque public keys. Bind the target to
-// the complete hostname returned by the authenticated mint instead.
-function allowedDetectTunnelHost(hostname, expectedQurlSiteHostname) {
+// TODO(upstream-contract): qurl_site may use an `r_` Traefik routing label, but
+// that label carries no resource identity: resource IDs are opaque public keys.
+// Bind the target to the complete hostname returned by the authenticated mint.
+function allowedDetectTunnelHost(hostname, expectedQurlSite) {
   const host = String(hostname || '').toLowerCase();
-  const expectedHost = String(expectedQurlSiteHostname || '').toLowerCase();
+  let expectedHost = '';
+  try {
+    expectedHost = new URL(expectedQurlSite).hostname.toLowerCase();
+  } catch {
+    // A missing or malformed authenticated qurl_site cannot authorize a target.
+  }
   return host === expectedHost
     && DETECT_TUNNEL_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
@@ -692,7 +697,7 @@ class DetectQurlSiteError extends Error {}
 // from a TRUSTED authenticated mint (not user input) and resolve-per-call keeps
 // the knock window tight, so a DNS round-trip per detect isn't warranted. A
 // future reader should NOT assume this carries the link guard's DNS guarantee.
-function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHostname) {
+function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   let parsed;
   try {
     parsed = new URL(targetUrl);
@@ -720,7 +725,11 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSiteHostname) {
   // A malformed mint returning a public NON-qURL host then can't receive the
   // image bytes + our API-key Bearer. (NOT qurl.link — that's the short-link /
   // ALB domain, not the tunnel.)
-  if (!allowedDetectTunnelHost(parsed.hostname, expectedQurlSiteHostname)) {
+  // The authenticated mint is the authority for this host; the equality check
+  // protects the target-construction boundary, while resolve()'s resource_id
+  // check below independently binds the fresh access token to the slug-resolved
+  // opaque public key when that response field is present.
+  if (!allowedDetectTunnelHost(parsed.hostname, expectedQurlSite)) {
     throw new Error('Detect tunnel qurl_site host does not match the returned qurl_site or an expected qURL tunnel domain');
   }
 }
@@ -744,9 +753,7 @@ function buildDetectTargetUrl(qurlSite) {
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
     throw new DetectQurlSiteError('detect mint qurl_site must be host-only');
   }
-  const targetUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
-  assertPublicHttpsTarget(targetUrl, parsed.hostname);
-  return targetUrl;
+  return new URL(DETECT_TARGET_PATH, parsed).toString();
 }
 
 // Scrub any `at_…` access token from a free-text error message before logging.
@@ -920,6 +927,7 @@ async function resolveDetectTarget() {
   }
   try {
     targetUrl = buildDetectTargetUrl(minted?.qurl_site);
+    assertPublicHttpsTarget(targetUrl, minted?.qurl_site);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
     // lookup and mint, so keep the cached resource id and retry the mint after
@@ -1103,6 +1111,8 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 }
 
 module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+// Keep the security-pin helper directly testable without extending production's
+// connector API. Jest sets NODE_ENV=test, matching the precedent in logger.js.
 if (process.env.NODE_ENV === 'test') {
-  module.exports.__testExports = { allowedDetectTunnelHost };
+  module.exports.__testExports = { assertPublicHttpsTarget };
 }

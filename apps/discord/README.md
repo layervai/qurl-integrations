@@ -110,6 +110,7 @@ mint value case-insensitively and sit under a supported qURL tunnel suffix. A
 qURL site may use an `r_<11 chars>` Traefik routing label, but that label carries
 no resource identity and is not compared with the resource's opaque public-key
 ID.
+
 Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
 tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
 (`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`,
