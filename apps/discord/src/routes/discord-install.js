@@ -82,10 +82,12 @@ function renderError(res, statusCode, headline, detail) {
   }));
 }
 
-function installStateMatches(req, state) {
+function inspectInstallState(req, state) {
   const cookieState = readCookie(req, DISCORD_INSTALL_SESSION_COOKIE);
-  if (!cookieState || !state) return false;
-  return timingSafeStringEqual(cookieState, state);
+  return {
+    hasCookie: Boolean(cookieState),
+    matches: Boolean(cookieState && state && timingSafeStringEqual(cookieState, state)),
+  };
 }
 
 router.get('/install', installRateLimit, (req, res) => {
@@ -123,11 +125,11 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderNotConfiguredPage(res, 'discord-install', config.discordInstallNotConfiguredReason);
   }
   const installState = singleStringParam(req.query.state);
-  const stateMatches = installStateMatches(req, installState);
-  if (!stateMatches) {
+  const stateInspection = inspectInstallState(req, installState);
+  if (!stateInspection.matches) {
     logger.warn('Discord install callback rejected invalid session state', {
       ip: req.ip,
-      hasCookie: Boolean(readCookie(req, DISCORD_INSTALL_SESSION_COOKIE)),
+      hasCookie: stateInspection.hasCookie,
     });
     return renderError(res, 400, 'Invalid install link', 'this install session is invalid or expired.');
   }
@@ -142,6 +144,10 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderNotConfiguredPage(res, 'discord-install', 'KEY_ENCRYPTION_KEY unset');
   }
+  // State must authenticate the browser before we trust even the error
+  // parameters. This deliberately means an expired/malformed decline returns
+  // "Invalid install link" instead of reflecting an unauthenticated provider
+  // status as "Authorization declined".
   // Round-9 item #5: funnel through singleStringParam for symmetry.
   const errorParam = singleStringParam(req.query.error);
   if (errorParam) {

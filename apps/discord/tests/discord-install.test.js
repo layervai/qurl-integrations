@@ -959,6 +959,49 @@ describe('discord-install — not configured', () => {
     }
   });
 
+  it('returns 503 when a non-local HTTP BASE_URL cannot retain the Secure install cookie', async () => {
+    const saved = process.env.BASE_URL;
+    process.env.BASE_URL = 'http://staging.example.com';
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn(),
+          getGuildApiKey: jest.fn(),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+        // eslint-disable-next-line global-require
+        const freshConfig = require('../src/config');
+        expect(freshConfig.discordInstallNotConfiguredReason)
+          .toBe('BASE_URL cannot retain the Secure install cookie');
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+
+        const res = await supertest(freshApp).get('/oauth/discord/install');
+
+        expect(res.status).toBe(503);
+        expect(cookieValue(res.headers['set-cookie'], DISCORD_INSTALL_SESSION_COOKIE)).toBeNull();
+        expect(res.text).not.toContain('BASE_URL');
+      });
+    } finally {
+      process.env.BASE_URL = saved;
+    }
+  });
+
   it.each([
     ['PLACEHOLDER', 'DISCORD_CLIENT_ID is the SSM placeholder'],
     [' PLACEHOLDER ', 'DISCORD_CLIENT_ID is the SSM placeholder'],
@@ -993,6 +1036,7 @@ describe('discord-install — not configured', () => {
           const freshConfig = require('../src/config');
           expect(freshConfig.discordInstallNotConfiguredReason)
             .toBe(expectedReason);
+          expect(freshConfig.DISCORD_CLIENT_ID).toBeNull();
           // eslint-disable-next-line global-require
           const supertest = require('supertest');
           // eslint-disable-next-line global-require

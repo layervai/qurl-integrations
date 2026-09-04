@@ -21,39 +21,48 @@
 const config = require('../config');
 const logger = require('../logger');
 
-const installOnlyIps = new Set();
+const INSTALL_ENTRY_BUCKET = 'discord-install-entry';
+const MAX_RATE_LIMIT_STORE_SIZE = 20000;
+
 class IndexedRateLimitStore extends Map {
+  #installOnlyIps = new Set();
+
   set(ip, buckets) {
     super.set(ip, buckets);
-    installOnlyIps.delete(ip);
+    this.#installOnlyIps.delete(ip);
     // Set iteration order is the eviction order. Re-adding a still
     // install-only IP moves it to the back, giving O(1) least-recently-active
     // eviction without resetting that IP's accumulated request timestamps.
-    if (buckets['discord-install-entry'] && !buckets.callback) installOnlyIps.add(ip);
+    if (buckets[INSTALL_ENTRY_BUCKET] && !buckets.callback) this.#installOnlyIps.add(ip);
     return this;
   }
 
   delete(ip) {
-    installOnlyIps.delete(ip);
+    this.#installOnlyIps.delete(ip);
     return super.delete(ip);
   }
 
   clear() {
-    installOnlyIps.clear();
+    this.#installOnlyIps.clear();
     super.clear();
   }
 
   replaceAfterSweep(ip, buckets) {
     const previous = super.get(ip);
-    const wasInstallOnly = Boolean(previous?.['discord-install-entry'] && !previous.callback);
-    const isInstallOnly = Boolean(buckets['discord-install-entry'] && !buckets.callback);
+    const wasInstallOnly = Boolean(previous?.[INSTALL_ENTRY_BUCKET] && !previous.callback);
+    const isInstallOnly = Boolean(buckets[INSTALL_ENTRY_BUCKET] && !buckets.callback);
     // Sweeping timestamps is not activity. Preserve an existing install-only
     // entry's eviction position, but index a real callback -> install-only
     // transition at the time it becomes eligible for eviction.
     super.set(ip, buckets);
     if (wasInstallOnly === isInstallOnly) return;
-    if (isInstallOnly) installOnlyIps.add(ip);
-    else installOnlyIps.delete(ip);
+    if (isInstallOnly) this.#installOnlyIps.add(ip);
+    else this.#installOnlyIps.delete(ip);
+  }
+
+  evictInstallOnlyEntry() {
+    const ip = this.#installOnlyIps.values().next().value;
+    return ip === undefined ? false : this.delete(ip);
   }
 }
 const rateLimitStore = new IndexedRateLimitStore();
@@ -81,13 +90,6 @@ sweepHandle.unref();
 // Hard ceiling on total Map size. Under a distributed attack from many
 // unique IPs, new-IP requests get 429 once the store reaches this size
 // until the next sweep reclaims space — better to shed load than OOM.
-const MAX_STORE_SIZE = 20000;
-
-function evictInstallOnlyEntry() {
-  const ip = installOnlyIps.values().next().value;
-  return ip === undefined ? false : rateLimitStore.delete(ip);
-}
-
 function rateLimitForBucket(bucket, req, res, next) {
   const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
   const now = Date.now();
@@ -97,9 +99,9 @@ function rateLimitForBucket(bucket, req, res, next) {
   // This preserves the bound while ensuring traffic to the public /install
   // page cannot globally starve an in-flight callback from a new IP. If the
   // store contains only callback traffic, the normal overload shed remains.
-  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
-    if (bucket === 'callback') evictInstallOnlyEntry();
-    if (rateLimitStore.size >= MAX_STORE_SIZE) {
+  if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE && !rateLimitStore.has(ip)) {
+    if (bucket === 'callback') rateLimitStore.evictInstallOnlyEntry();
+    if (rateLimitStore.size >= MAX_RATE_LIMIT_STORE_SIZE) {
       // This warning is the operational signal for shared OAuth saturation;
       // alert on it because every unseen callback IP is shed until a sweep.
       logger.warn('Rate limit store at hard cap, rejecting new IP', {
@@ -139,11 +141,11 @@ function rateLimit(req, res, next) {
 }
 
 function installRateLimit(req, res, next) {
-  return rateLimitForBucket('discord-install-entry', req, res, next);
+  return rateLimitForBucket(INSTALL_ENTRY_BUCKET, req, res, next);
 }
 
 module.exports = {
-  MAX_RATE_LIMIT_STORE_SIZE: MAX_STORE_SIZE,
+  MAX_RATE_LIMIT_STORE_SIZE,
   installRateLimit,
   rateLimit,
   rateLimitStore,

@@ -241,6 +241,23 @@ const isQurlOAuthConfigured = Boolean(
   && process.env.AUTH0_AUDIENCE,
 );
 
+const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
+
+function canRetainSecureInstallCookie(baseUrl) {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol === 'https:') return true;
+    // Browsers treat localhost as a trustworthy development origin even over
+    // HTTP. Keep the documented local smoke-test path while rejecting staging
+    // and preview HTTP origins that silently discard the __Host- cookie.
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    return parsed.protocol === 'http:'
+      && (hostname === 'localhost' || hostname.endsWith('.localhost'));
+  } catch {
+    return false;
+  }
+}
+
 // True when the Stage-2 "Add to Discord, select server" install flow can
 // run end-to-end: needs the bot's Discord OAuth2 client secret (separate
 // from the bot token used for normal operations) on top of qURL OAuth.
@@ -264,6 +281,8 @@ if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET unset';
 } else if (normalizedDiscordClientSecret === SSM_PLACEHOLDER_SENTINEL) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_SECRET is the SSM placeholder';
+} else if (!canRetainSecureInstallCookie(normalizedBaseUrl)) {
+  discordInstallNotConfiguredReason = 'BASE_URL cannot retain the Secure install cookie';
 }
 const isDiscordInstallConfigured = discordInstallNotConfiguredReason === null;
 
@@ -337,7 +356,11 @@ for (const suffix of detectExtraNonProdHostSuffixes) {
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  DISCORD_CLIENT_ID: normalizedDiscordClientId,
+  // Invalid values normalize to null so command registration cannot attempt
+  // an application route for a placeholder/non-snowflake ID.
+  DISCORD_CLIENT_ID: isDiscordSnowflake(normalizedDiscordClientId)
+    ? normalizedDiscordClientId
+    : null,
   // Required for the Stage-2 "Add to Discord, select server" install
   // callback (src/routes/discord-install.js). Not used by normal bot
   // operations — only by the OAuth2 token exchange when an admin
@@ -387,7 +410,7 @@ module.exports = {
 
   // Server
   PORT: intEnv('PORT', 3000),
-  BASE_URL: normalizeBaseUrl(process.env.BASE_URL),
+  BASE_URL: normalizedBaseUrl,
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute

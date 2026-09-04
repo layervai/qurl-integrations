@@ -32,8 +32,8 @@ const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 const { SSM_PLACEHOLDER_SENTINEL } = require('../src/utils/ssm-placeholder');
 
 describe('bootRequired', () => {
-  it('demands only DISCORD_TOKEN (GUILD_ID and BASE_URL are enforced upstream)', () => {
-    expect(bootRequired()).toEqual(['DISCORD_TOKEN']);
+  it('demands the bot token and a validated Discord application ID', () => {
+    expect(bootRequired()).toEqual(['DISCORD_TOKEN', 'DISCORD_CLIENT_ID']);
   });
 });
 
@@ -47,21 +47,22 @@ describe('prodRequired', () => {
 
 describe('missingBootKeys', () => {
   it('returns empty when every boot key is present', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: 't', GUILD_ID: '123', BASE_URL: 'https://h' })).toEqual([]);
+    expect(missingBootKeys({ DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: '123' })).toEqual([]);
   });
 
   it('surfaces the exact missing key (not just a count)', () => {
-    expect(missingBootKeys({})).toEqual(['DISCORD_TOKEN']);
+    expect(missingBootKeys({})).toEqual(['DISCORD_TOKEN', 'DISCORD_CLIENT_ID']);
   });
 
   it('does not flag GUILD_ID or BASE_URL as missing — both are optional here', () => {
     // Multi-tenant: GUILD_ID unset, BASE_URL unset — boot should not
     // fail as long as DISCORD_TOKEN is there.
-    expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
+    expect(missingBootKeys({ DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: '123' })).toEqual([]);
   });
 
   it('treats empty strings as missing (not just undefined)', () => {
-    expect(missingBootKeys({ DISCORD_TOKEN: '' })).toEqual(['DISCORD_TOKEN']);
+    expect(missingBootKeys({ DISCORD_TOKEN: '', DISCORD_CLIENT_ID: '' }))
+      .toEqual(['DISCORD_TOKEN', 'DISCORD_CLIENT_ID']);
   });
 });
 

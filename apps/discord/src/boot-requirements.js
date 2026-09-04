@@ -28,7 +28,7 @@ const {
 // authority. Keeping this list to the keys whose absence is actually a
 // boot blocker.
 function bootRequired() {
-  return ['DISCORD_TOKEN'];
+  return ['DISCORD_TOKEN', 'DISCORD_CLIENT_ID'];
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
