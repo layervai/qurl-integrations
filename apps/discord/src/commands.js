@@ -3625,6 +3625,17 @@ const SETUP_STAGE_AWAITING_MODAL = 'awaiting_setup_modal';
 const SETUP_BUTTON_CUSTOM_ID = 'qurl_setup_button';
 const SETUP_MODAL_CUSTOM_ID = 'qurl_setup_modal';
 const SETUP_MODAL_FIELD_API_KEY = 'api_key';
+const SETUP_AUTH_POLICY_UNAVAILABLE_MSG =
+  '❌ **qURL setup is temporarily unavailable.**\n\n'
+  + 'The bot operator must correct an invalid authentication setting in the deployment.';
+
+function rejectSetupForInvalidAuthPolicy(interaction) {
+  logger.error('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
+  return interaction.reply({
+    content: SETUP_AUTH_POLICY_UNAVAILABLE_MSG,
+    ephemeral: true,
+  });
+}
 
 // Two-stage TTL budget. The button-stage window covers "click the
 // button" — short enough that an abandoned button is naturally
@@ -3682,6 +3693,10 @@ const SETUP_SUCCESS_MSG =
 // flag on the FLOW_TRANSITION event — correct: the deadline really
 // was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
+  if (config.isAuth0EmailConnectionRejected) {
+    return rejectSetupForInvalidAuthPolicy(interaction);
+  }
+
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
@@ -3814,6 +3829,10 @@ async function handleSetupButton(interaction, { flow_id, row }) {
 // without burning a qURL API key validation call. Same ordering
 // rationale as handleRevokeSelect.
 async function handleSetupModal(interaction, { flow_id }) {
+  if (config.isAuth0EmailConnectionRejected) {
+    return rejectSetupForInvalidAuthPolicy(interaction);
+  }
+
   // Modal-stage flow_state delete is terminal — the user committed
   // the form, the flow has lifecycled out.
   const { deleted } = await deleteFlow(flow_id, {
@@ -8626,12 +8645,7 @@ const commands = [
         // gateway/send operations available, but make setup fail closed until
         // the operator corrects the deployment value.
         if (config.isAuth0EmailConnectionRejected) {
-          logger.error('Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot');
-          return interaction.reply({
-            content: '❌ **qURL setup is temporarily unavailable.**\n\n'
-              + 'The bot operator must correct an invalid authentication setting in the deployment.',
-            ephemeral: true,
-          });
+          return rejectSetupForInvalidAuthPolicy(interaction);
         }
 
         // OAuth path — preferred when configured.

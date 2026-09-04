@@ -1347,6 +1347,29 @@ describe('handleSetupButton (dispatcher path)', () => {
     };
   }
 
+  it('blocks a pre-restart setup button after the auth policy becomes rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const interaction = makeButtonInteraction();
+
+      await handleSetupButton(interaction, {
+        flow_id: '0:1#guild-1#ch-1#user-1',
+        row: { stage: 'awaiting_setup_button', version: 1 },
+      });
+
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+      expect(interaction.showModal).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
+  });
+
   it('transitions flow to awaiting_setup_modal + shows modal on success', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
     const interaction = makeButtonInteraction();
@@ -1570,6 +1593,29 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
   afterAll(() => {
     global.fetch = originalFetch;
+  });
+
+  it('blocks a pre-restart modal before validation or persistence when policy is rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const interaction = makeModalInteraction();
+
+      await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+      expect(mockDeleteFlow).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('AUTH0_EMAIL_CONNECTION');
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
   });
 
   it('validates key + persists + replies success', async () => {

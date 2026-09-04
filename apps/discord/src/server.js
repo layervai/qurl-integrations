@@ -249,8 +249,11 @@ if (!config.isQurlOAuthConfigured) {
   } else {
     auth0ConnectionMessage = 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
   }
-  // Stable event metadata supports exact grep/filter matching while the
+  // Stable event metadata supports exact text/term filtering while the
   // human-readable message remains self-sufficient if metadata is flattened.
+  // This is an operational logger line with a timestamp/level prefix, not a
+  // bare logger.audit JSON record, so CloudWatch JSON field filters do not
+  // apply to it.
   // OAuth-live + unpinned warns once per process because the risk is reachable;
   // an inactive pin stays info-level because incomplete OAuth disables the
   // affected flow entirely.
