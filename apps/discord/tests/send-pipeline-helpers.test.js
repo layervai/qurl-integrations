@@ -703,11 +703,25 @@ describe('qURL client', () => {
         ok: false,
         status: 404,
         headers: { get: () => null },
-        json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404' } }),
+        json: async () => ({
+          error: {
+            status: 404,
+            code: 'not_found',
+            title: 'HTTP 404',
+            detail: 'sensitive response detail',
+          },
+        }),
       });
 
-      await expect(qurl.deleteLink(CRID_RESOURCE_ID))
-        .rejects.toThrow(/qURL API DELETE.*failed.*404/);
+      const thrown = await qurl.deleteLink(CRID_RESOURCE_ID).then(
+        () => null,
+        (error) => error,
+      );
+
+      expect(thrown).toEqual(expect.any(Error));
+      expect(thrown.status).toBe(404);
+      expect(thrown.message).toMatch(/qURL API DELETE.*failed.*404/);
+      expect(thrown.message).not.toContain('sensitive response detail');
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
   });

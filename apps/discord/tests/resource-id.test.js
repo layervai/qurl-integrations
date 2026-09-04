@@ -3,6 +3,7 @@ const {
   isGoneQurlApiError,
   maskResourceIdPath,
   qurlPath,
+  qurlApiError,
   qurlApiErrorMessage,
   resourcePath,
   validateResourceId,
@@ -52,7 +53,10 @@ describe('resource ID transport guard', () => {
     expect(qurlPath(CRID_RESOURCE_ID)).toBe(`/qurls/${CRID_RESOURCE_ID}`);
   });
 
-  it.each([resourcePath, qurlPath])('makes route-builder validation structural', (buildPath) => {
+  it.each([
+    ['resourcePath', resourcePath],
+    ['qurlPath', qurlPath],
+  ])('%s validates structurally', (_name, buildPath) => {
     expect(() => buildPath('../qurls/x')).toThrow(/Invalid resource ID format/);
   });
 
@@ -64,6 +68,9 @@ describe('resource ID transport guard', () => {
     expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (404)`);
     expect(isGoneQurlApiError(new Error(gone))).toBe(true);
     expect(isGoneQurlApiError(`${gone} request-id=123`)).toBe(false);
+    const wrapped = qurlApiError('DELETE', resourcePath(CRID_RESOURCE_ID), 410);
+    wrapped.message += ' request-id=123';
+    expect(isGoneQurlApiError(wrapped)).toBe(true);
     expect(isGoneQurlApiError('unrelated operation failed (404)')).toBe(false);
     expect(isGoneQurlApiError(qurlApiErrorMessage('DELETE', resourcePath('abc404def'), 500)))
       .toBe(false);

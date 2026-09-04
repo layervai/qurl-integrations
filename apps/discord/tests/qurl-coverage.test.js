@@ -95,9 +95,22 @@ describe('qURL client — getResourceStatus', () => {
     // The bot's User-Agent is preserved across the SDK migration (literal wire
     // identifier per CLAUDE.md).
     expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
+    // CRID is an address alias; the service response keeps the canonical
+    // public-key resource_id for both request shapes.
     expect(result.resource_id).toBe(PUBLIC_KEY_RESOURCE_ID);
     // The SDK renames the API's wire-format `qurls` field to `access_tokens`.
     expect(result.access_tokens).toHaveLength(1);
+  });
+
+  it.each([
+    ['path separators', '../resources/x'],
+    ['an overlong value', 'a'.repeat(1025)],
+  ])('rejects %s before status network work', async (_kind, resourceId) => {
+    globalThis.fetch = jest.fn();
+
+    await expect(qurl.getResourceStatus(resourceId)).rejects
+      .toThrow(/Invalid resource ID format/);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('throws on 404 API error (status-only message, body redacted)', async () => {
