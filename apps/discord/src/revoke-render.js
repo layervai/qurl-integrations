@@ -20,7 +20,7 @@ const REVOKE_FOR_PREFIX = '\nRevoked for: ';
 // unconfirmed-failure guidance, and already-opened-session caveat. Used by
 // both the inline-button path (via renderRevokeContent) and the slash-command
 // /qurl revoke handler so a future wording change lands in one place.
-function buildRevokeHeader(success, total) {
+function buildRevokeHeader(success, total, { finalizationFailed = false } = {}) {
   if (
     !Number.isSafeInteger(success)
     || !Number.isSafeInteger(total)
@@ -37,7 +37,10 @@ function buildRevokeHeader(success, total) {
   const note = success > 0
     ? ' Revocation blocks new link access; sessions already opened may remain active.'
     : '';
-  return `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.${failure}${note}`;
+  const finalization = finalizationFailed
+    ? ' qURL could not save the final revocation state. Retry with `/qurl revoke` to finish.'
+    : '';
+  return `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.${failure}${finalization}${note}`;
 }
 
 // Builds the post-revoke confirmation message body. User-centric:
@@ -52,8 +55,8 @@ function buildRevokeHeader(success, total) {
 // `success` is required and authoritative; it may exceed the names the caller
 // could resolve. The header reflects that count while the names list reflects
 // only what's renderable.
-function renderRevokeContent({ names, total, showAll, success }) {
-  let content = buildRevokeHeader(success, total);
+function renderRevokeContent({ names, total, showAll, success, finalizationFailed = false }) {
+  let content = buildRevokeHeader(success, total, { finalizationFailed });
 
   if (names.length === 0) {
     return { content, needsExpand: false, attachmentText: null };

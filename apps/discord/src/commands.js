@@ -2497,6 +2497,7 @@ async function executeSendPipeline(interaction, {
     // if a successful recipient_id can't be name-resolved against
     // `recipients[]`.
     let revokeResultSuccess = 0;
+    let revokeResultFinalizationFailed = false;
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
@@ -2532,7 +2533,14 @@ async function executeSendPipeline(interaction, {
         // Toggle Show Recipients / Hide Recipients on the post-revoke list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+        const updated = renderRevokeMsg(
+          sendId,
+          revokeResultUserNames,
+          revokeResultTotal,
+          revokeShowAll,
+          revokeResultSuccess,
+          revokeResultFinalizationFailed,
+        );
         await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
@@ -2572,6 +2580,7 @@ async function executeSendPipeline(interaction, {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
             revokeResultSuccess = 0;
+            revokeResultFinalizationFailed = false;
             revokeShowAll = false;
             revokeResultKnown = false;
             // Keep revokeInFlight true after success as the collector-local
@@ -2587,6 +2596,7 @@ async function executeSendPipeline(interaction, {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
             revokeResultSuccess = 0;
+            revokeResultFinalizationFailed = false;
             revokeShowAll = false;
             revokeResultKnown = false;
             // Terminal for this collector even though the exact reason is
@@ -2609,9 +2619,17 @@ async function executeSendPipeline(interaction, {
             .map(r => resolveRecipientAlias(r, interaction));
           revokeResultTotal = revoked.total;
           revokeResultSuccess = revoked.success;
+          revokeResultFinalizationFailed = revoked.finalizationFailed;
           revokeShowAll = false;
           revokeResultKnown = true;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
+          const initial = renderRevokeMsg(
+            sendId,
+            revokeResultUserNames,
+            revokeResultTotal,
+            false,
+            revokeResultSuccess,
+            revokeResultFinalizationFailed,
+          );
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           // Keep revokeInFlight true after success as the collector-local
           // terminal gate for duplicate Revoke clicks; revokingSendLocks only
@@ -2663,6 +2681,8 @@ async function executeSendPipeline(interaction, {
           if (revokeSucceeded) {
             if (!revokeResultKnown) {
               content = 'This send is no longer revocable. Add Recipients is disabled.';
+            } else if (revokeResultFinalizationFailed) {
+              content = 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.';
             } else if (revokeResultTotal === 0) {
               content = 'No live links remain for this send.';
             } else if (revokeResultSuccess < revokeResultTotal) {
@@ -2821,7 +2841,14 @@ async function executeSendPipeline(interaction, {
           // toggled), strip components. Omit `files`/`attachments`
           // so Discord keeps the existing revoked-users.txt without
           // re-uploading the same blob 15min later.
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+          const final = renderRevokeMsg(
+            sendId,
+            revokeResultUserNames,
+            revokeResultTotal,
+            revokeShowAll,
+            revokeResultSuccess,
+            revokeResultFinalizationFailed,
+          );
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
@@ -3634,7 +3661,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
   await interaction.update({
-    content: safeRevokeHeader(sendId, revoked.success, revoked.total),
+    content: safeRevokeHeader(sendId, revoked.success, revoked.total, revoked.finalizationFailed),
     components: [],
   });
 }
@@ -8200,10 +8227,10 @@ function revokeReplyPayload(rendered) {
 // Recipients toggle on the post-revoke "Revoked for: ..." list.
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
-function renderRevokeMsg(sendId, names, total, showAll, success) {
+function renderRevokeMsg(sendId, names, total, showAll, success, finalizationFailed = false) {
   let data;
   try {
-    data = renderRevokeContent({ names, total, showAll, success });
+    data = renderRevokeContent({ names, total, showAll, success, finalizationFailed });
   } catch (err) {
     data = {
       content: revokeRenderFallback(sendId, success, total, err),
@@ -8234,9 +8261,9 @@ function revokeRenderFallback(sendId, success, total, err) {
   return 'qURL could not display the revocation result. If this send still appears in `/qurl revoke`, retry it there.';
 }
 
-function safeRevokeHeader(sendId, success, total) {
+function safeRevokeHeader(sendId, success, total, finalizationFailed = false) {
   try {
-    return buildRevokeHeader(success, total);
+    return buildRevokeHeader(success, total, { finalizationFailed });
   } catch (err) {
     return revokeRenderFallback(sendId, success, total, err);
   }
@@ -8309,6 +8336,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   if (!barrierEstablished) {
     return {
       barrierEstablished: false,
+      finalizationFailed: false,
       success: 0,
       total: 0,
       successUserIds: [],
@@ -8378,27 +8406,34 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const success = successUserIds.length;
   const total = totalUsers;
-  // Audit metric is per resource identity requiring confirmation, not per
-  // recipient. Missing identity is one synthetic failed group: it contributes
-  // to the total without calling deleteLink with an unusable value, and keeps
-  // the send retryable for operator remediation.
-  const auditTotal = byResource.size + (invalidResourceRecipientIds.size > 0 ? 1 : 0);
+  // Audit success/total describe actual DELETE confirmations. Malformed rows
+  // never fabricate a DELETE denominator; report their affected recipients in
+  // a separate field while keeping finalization fail-closed.
+  const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
+  const unresolvableRecipients = invalidResourceRecipientIds.size;
+  const fullyConfirmed = auditSuccess === auditTotal && unresolvableRecipients === 0;
 
   // Emit audit after DELETE attempts so the tally reflects actual qURL API
   // outcomes. The revocation-intent write happened above, before any
   // destructive side effect.
   if (total > 0) {
-    const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
-    logger.audit(event, { send_id: sendId, success: auditSuccess, total: auditTotal });
+    const event = fullyConfirmed ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
+    logger.audit(event, {
+      send_id: sendId,
+      success: auditSuccess,
+      total: auditTotal,
+      unresolvable_recipients: unresolvableRecipients,
+    });
   }
 
-  // Top-level `success/total` are per-resource (matches the audit
-  // event); per-recipient counts surface in nested `users`.
+  // Operator-facing `success/total` are per-recipient; the audit event is
+  // per resource identity so it reflects the number of DELETE confirmations.
   logger.info('Revoked send', {
     sendId,
     success: auditSuccess,
     total: auditTotal,
+    unresolvable_recipients: unresolvableRecipients,
     users: { success, total },
   });
 
@@ -8446,6 +8481,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Errors are swallowed (logged inside editDM at info/warn) — a 404 /
   // 403 / unknown-message is operational, not a bug, and must not
   // skew the revoke success counts the caller reports to the operator.
+  // A retry deliberately re-PATCHes recipients whose DELETE succeeded on a
+  // prior attempt. PATCH replaces the message with the same terminal payload,
+  // so the operation is idempotent; persisting a second per-DM marker would
+  // introduce a write/edit race that could permanently suppress the rewrite.
   if (success > 0) {
     const successSet = new Set(successUserIds);
     const editTargets = new Map(); // recipient_id → {channelId, messageId}
@@ -8527,8 +8566,17 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // could hide a still-live link after a key/account mismatch. 401/403 may also
   // recover after `/qurl setup`. Fail closed, keep the send selectable, and let
   // the truthful UI direct the operator to retry or reconnect.
-  if (auditSuccess === auditTotal) {
-    await db.markSendRevoked(sendId, senderDiscordId);
+  let finalizationFailed = false;
+  if (fullyConfirmed) {
+    try {
+      await db.markSendRevoked(sendId, senderDiscordId);
+    } catch (err) {
+      finalizationFailed = true;
+      logger.error('Failed to finalize revoked send state', {
+        sendId,
+        error: err?.message ?? String(err),
+      });
+    }
   }
 
   // failureUserIds is computed but not yet rendered by name. The shared
@@ -8537,6 +8585,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // detail without inferring that DELETE failure means the link was opened.
   return {
     barrierEstablished: true,
+    finalizationFailed,
     success,
     total,
     successUserIds,

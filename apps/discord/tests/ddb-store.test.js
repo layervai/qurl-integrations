@@ -560,6 +560,16 @@ describe('qurl sends', () => {
     expect(sB.delivered_count).toBe(5);
   });
 
+  test.each([0, -1, 1.5, Number.NaN])(
+    'getRecentSends: rejects an invalid limit (%p) without reading DDB',
+    async (limit) => {
+      await expect(store.getRecentSends('sender', limit))
+        .rejects.toThrow('getRecentSends: limit must be a positive integer');
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    },
+  );
+
   test('getRecentSends: per-send recipient Query paginates (LEK threading) so a >1MB fanout doesn\'t silently undercount', async () => {
     // Regression guard: a single send fanning out to thousands of
     // recipients can exceed the 1MB Query response cap. Without
@@ -693,9 +703,12 @@ describe('qurl sends', () => {
 
     const result = await store.getRecentSends('sender', 5);
 
-    expect(result).toHaveLength(3);
-    expect(result.filter(row => row.revocation_pending)).toHaveLength(2);
+    expect(result).toHaveLength(5);
+    expect(result.filter(row => row.revocation_pending)).toHaveLength(4);
     expect(result.filter(row => !row.revocation_pending)).toHaveLength(1);
+    expect(result.map(row => row.send_id)).toEqual([
+      'pending-1', 'pending-2', 'live-1', 'pending-3', 'pending-4',
+    ]);
   });
 
   test('getRecentSends: a one-slot menu keeps the retryable pending send visible', async () => {
@@ -759,6 +772,15 @@ describe('qurl sends', () => {
       'markSendRevoking rejected config without sender identity',
       { sendId: 's1' },
     );
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoking: rejects a missing caller identity before reading or writing state', async () => {
+    await expect(store.markSendRevoking('s1', undefined)).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
@@ -845,15 +867,16 @@ describe('qurl sends', () => {
     expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
   });
 
-  test('markSendRevoking: a CCFE re-read with no row returns false even for a missing caller id', async () => {
+  test('markSendRevoking: a CCFE re-read with no row does not assume the barrier exists', async () => {
     const conflict = new Error('exists');
     conflict.name = 'ConditionalCheckFailedException';
     ddbMock.on(GetCommand)
-      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: undefined } })
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender' } })
       .resolvesOnce({});
     ddbMock.on(UpdateCommand).rejects(conflict);
 
-    await expect(store.markSendRevoking('s1', undefined)).resolves.toBe(false);
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
   });
 
   test('markSendRevoked: primary path includes :s in ExpressionAttributeValues (regression guard)', async () => {
@@ -886,6 +909,24 @@ describe('qurl sends', () => {
     });
     await store.markSendRevoked('s1', 'attacker');
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: rejects a missing caller identity before reading or writing state', async () => {
+    await expect(store.markSendRevoked('s1', undefined)).resolves.toBeUndefined();
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: rejects a config row without a stored sender identity', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', resource_type: 'file' } });
+
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBeUndefined();
+
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
   test('markSendRevoked: legacy branch — inserts minimal config when no config row exists', async () => {

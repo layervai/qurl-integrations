@@ -1132,6 +1132,26 @@ describe('handleRevokeSelect (dispatcher path)', () => {
     );
   });
 
+  it('reports successful DELETEs truthfully when the final revoked state write fails', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
+
+    const interaction = makeSelectInteraction({ values: ['send-finalize-fail'] });
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+      components: [],
+    });
+    expect(interaction.update).toHaveBeenCalledWith({
+      content: expect.stringContaining('could not save the final revocation state'),
+      components: [],
+    });
+  });
+
   it('does not claim 0/0 success when the durable revoke barrier rejects the send', async () => {
     mockDb.markSendRevoking.mockResolvedValueOnce(false);
     const interaction = makeSelectInteraction({ values: ['foreign-or-finalized'] });

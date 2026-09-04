@@ -735,6 +735,12 @@ async function isSendRevoked(sendId) {
 }
 
 async function getRecentSends(senderDiscordId, limit = 10) {
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new TypeError('getRecentSends: limit must be a positive integer');
+  }
+  // This is the revoke-menu query (handleRevoke is its only production
+  // caller). Its result deliberately prioritizes retryable revocations over
+  // global newest-first ordering, including when a one-slot caller is used.
   // SQL did a LEFT JOIN on qurl_send_configs + GROUP BY send_id to
   // produce one row per send with per-send metadata. DDB: query the
   // sender's recent send_ids via the GSI to build the UNIQUE set of
@@ -870,10 +876,17 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   if (limit === 1) return pending.slice(0, 1);
   const pendingLimit = Math.max(1, Math.floor(limit / 2));
   const selectedPending = pending.slice(0, pendingLimit);
+  const selectedLive = live.slice(0, limit - selectedPending.length);
+  const backfillCount = limit - selectedPending.length - selectedLive.length;
   return [
     ...selectedPending,
-    ...live.slice(0, limit - selectedPending.length),
+    ...selectedLive,
+    ...pending.slice(selectedPending.length, selectedPending.length + backfillCount),
   ];
+}
+
+function hasSenderIdentity(value) {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 async function flipRevokedAt(sendId, senderDiscordId) {
@@ -932,19 +945,18 @@ async function flipRevokingAt(sendId, senderDiscordId) {
 }
 
 async function markSendRevoking(sendId, senderDiscordId) {
+  if (!hasSenderIdentity(senderDiscordId)) return false;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
   }));
   if (cfgRes.Item) {
-    if (cfgRes.Item.sender_discord_id !== senderDiscordId) {
-      if (typeof cfgRes.Item.sender_discord_id !== 'string'
-          || cfgRes.Item.sender_discord_id.length === 0) {
-        logger.warn('markSendRevoking rejected config without sender identity', { sendId });
-      }
+    if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
+      logger.warn('markSendRevoking rejected config without sender identity', { sendId });
       return false;
     }
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
     if (cfgRes.Item.revoked_at) return false;
     if (cfgRes.Item.revoking_at) return true;
     return flipRevokingAt(sendId, senderDiscordId);
@@ -989,12 +1001,17 @@ async function markSendRevoked(sendId, senderDiscordId) {
   // revokeAllLinks establishes markSendRevoking first, but keep this branch for
   // direct store callers during mixed-version rollout/backward compatibility.
   // Scoped to senderDiscordId for defense-in-depth.
+  if (!hasSenderIdentity(senderDiscordId)) return;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     ConsistentRead: true,
   }));
   if (cfgRes.Item) {
+    if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
+      logger.warn('markSendRevoked rejected config without sender identity', { sendId });
+      return;
+    }
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
     if (cfgRes.Item.revoked_at) return; // idempotent
     await flipRevokedAt(sendId, senderDiscordId);
