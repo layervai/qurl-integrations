@@ -32,6 +32,7 @@ jest.mock('../src/config', () => ({
 }));
 
 const { loadFlow } = require('../src/flow-state');
+const logger = require('../src/logger');
 const {
   registerFlow,
   siblingMessageForStage,
@@ -195,6 +196,10 @@ describe('handleFlowInteraction', () => {
 
     expect(loadFlow).not.toHaveBeenCalled();
     expect(handler).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'flow-dispatch: unsupported interaction context, rejecting',
+      { customId: 'route_dm_component', has_guild: false },
+    );
     expect(interaction.update).toHaveBeenCalledWith({
       content: UNSUPPORTED_CONTEXT_MSG,
       components: [],

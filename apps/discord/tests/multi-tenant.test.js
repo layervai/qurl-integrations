@@ -379,7 +379,7 @@ describe('handleCommand dispatch-time filter', () => {
     await handleCommand(interaction);
 
     expect(reply).toHaveBeenCalledWith({
-      content: 'qURL only works when installed in this server, not from DMs or a user install.',
+      content: 'qURL only works inside a server where it is installed, not in DMs or from a user install.',
       ephemeral: true,
     });
     expect(interaction.options.getSubcommand).not.toHaveBeenCalled();

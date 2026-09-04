@@ -174,6 +174,10 @@ async function handleFlowInteraction(interaction) {
   // created them. Apply the same guild-install boundary here before touching
   // flow state so a stale DM/user-install flow cannot resume after rollout.
   if (isUnsupportedQurlContext(interaction)) {
+    logger.debug('flow-dispatch: unsupported interaction context, rejecting', {
+      customId,
+      has_guild: Boolean(interaction.guildId),
+    });
     await supersededRoutingFailureReply(interaction, UNSUPPORTED_CONTEXT_MSG);
     return;
   }

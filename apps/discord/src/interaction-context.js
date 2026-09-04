@@ -3,7 +3,7 @@
 // credentials, so a DM or user-only install cannot safely execute them.
 const { ApplicationIntegrationType } = require('discord-api-types/v10');
 
-const UNSUPPORTED_CONTEXT_MSG = 'qURL only works when installed in this server, not from DMs or a user install.';
+const UNSUPPORTED_CONTEXT_MSG = 'qURL only works inside a server where it is installed, not in DMs or from a user install.';
 
 function isUserInstallOnlyInteraction(interaction) {
   const owners = interaction.authorizingIntegrationOwners;
@@ -13,7 +13,7 @@ function isUserInstallOnlyInteraction(interaction) {
   // payloads; a dual install remains supported when the guild authorized it.
   return Boolean(
     owners?.[ApplicationIntegrationType.UserInstall]
-    && !owners?.[ApplicationIntegrationType.GuildInstall]
+    && !Object.hasOwn(owners, ApplicationIntegrationType.GuildInstall)
   );
 }
 
