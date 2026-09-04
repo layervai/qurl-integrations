@@ -5,22 +5,9 @@
 const mockEnsureWebhookSubscription = jest.fn();
 const mockDeleteSubscription = jest.fn();
 jest.mock('../src/qurl-webhook-registrar', () => ({
+  ...jest.requireActual('../src/qurl-webhook-registrar'),
   ensureWebhookSubscription: mockEnsureWebhookSubscription,
   deleteSubscription: mockDeleteSubscription,
-  WEBHOOK_ACTIONS: { CREATED: 'created', ROTATED: 'rotated', REUSED: 'reused' },
-  // Expose the real constant so guild-webhook-link's description
-  // interpolation produces a wire-correct string in tests too. Keep
-  // in sync with the real module — a future rename would break the
-  // description-prefix invariant if the mock drifted.
-  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX: 'Discord bot view counter',
-  // Mirror the real isTruthyEnvFlag semantics so the kill-switch
-  // tests below exercise the same normalization the production code
-  // does (=0/=false → false, =1/=true → true).
-  isTruthyEnvFlag: (v) => {
-    if (typeof v !== 'string' || v.length === 0) return false;
-    const n = v.trim().toLowerCase();
-    return n === '1' || n === 'true' || n === 'yes' || n === 'on';
-  },
 }));
 
 const mockSetGuildWebhookSubscription = jest.fn();
@@ -179,7 +166,10 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
 
 describe('linkGuildWebhookSubscription — default-owner failures', () => {
   it('fails closed when owner resolution throws', async () => {
-    mockResolveDefaultOwnerForApiKey.mockRejectedValueOnce(new Error('qurl-service 502'));
+    const resolutionError = Object.assign(new Error('qurl-service 502'), {
+      code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED',
+    });
+    mockResolveDefaultOwnerForApiKey.mockRejectedValueOnce(resolutionError);
 
     const result = await linkGuildWebhookSubscription({ guildId: 'g_resolve', apiKey: 'lv_x' });
 
@@ -191,7 +181,12 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     expect(mockUpsertGuild).not.toHaveBeenCalled();
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
-      expect.objectContaining({ guild_id: 'g_resolve', reason: LINK_RESULTS.REGISTER_FAILED }),
+      expect.objectContaining({
+        guild_id: 'g_resolve',
+        reason: LINK_RESULTS.REGISTER_FAILED,
+        stage: 'owner-resolution',
+        error_code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED',
+      }),
     );
     expect(mockAudit).not.toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
@@ -205,7 +200,10 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
 
   it('reports persistence failure without applying the guild cache association', async () => {
     mockResolveDefaultOwnerForApiKey.mockResolvedValueOnce('usr_default');
-    mockSetGuildDefaultWebhookOwner.mockRejectedValueOnce(new Error('DDB throttled'));
+    const persistenceError = Object.assign(new Error('default secret conflict'), {
+      code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+    });
+    mockSetGuildDefaultWebhookOwner.mockRejectedValueOnce(persistenceError);
 
     const result = await linkGuildWebhookSubscription({ guildId: 'g_persist', apiKey: 'lv_x' });
 
@@ -221,7 +219,12 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     );
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,
-      expect.objectContaining({ guild_id: 'g_persist', reason: LINK_RESULTS.PERSIST_FAILED }),
+      expect.objectContaining({
+        guild_id: 'g_persist',
+        reason: LINK_RESULTS.PERSIST_FAILED,
+        stage: 'default-owner-persist',
+        error_code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+      }),
     );
     expect(mockAudit).not.toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
@@ -229,7 +232,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     );
     expect(mockWarn).toHaveBeenCalledWith(
       'Default webhook owner mapping persist failed',
-      { error: 'DDB throttled', guildId: 'g_persist' },
+      { error: 'default secret conflict', guildId: 'g_persist' },
     );
   });
 
@@ -246,7 +249,7 @@ describe('linkGuildWebhookSubscription — default-owner failures', () => {
     );
     expect(mockAudit).toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
-      { guild_id: 'g_cache', action: 'reused' },
+      { guild_id: 'g_cache', action: 'reused', default_owner: true },
     );
     expect(mockAudit).not.toHaveBeenCalledWith(
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTER_FAILED,

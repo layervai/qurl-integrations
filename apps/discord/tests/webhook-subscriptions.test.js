@@ -467,7 +467,10 @@ describe('webhook-subscriptions registry — default-key discovery', () => {
     }));
 
     await expect(subs.resolveDefaultOwnerForApiKey('lv_candidate'))
-      .rejects.toThrow(/default subscription owner could not be discovered/);
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED',
+        message: expect.stringMatching(/default subscription owner could not be discovered/),
+      });
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 

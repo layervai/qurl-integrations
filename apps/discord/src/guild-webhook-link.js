@@ -125,7 +125,10 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     logger.warn('Per-guild webhook owner resolution failed', {
       error: err?.message, guildId,
     });
-    auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED);
+    auditLinkFailure(guildId, LINK_RESULTS.REGISTER_FAILED, {
+      stage: 'owner-resolution',
+      error_code: err?.code || err?.name || 'unknown',
+    });
     return { ok: false, reason: LINK_RESULTS.REGISTER_FAILED };
   }
 
@@ -143,7 +146,10 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       logger.warn('Default webhook owner mapping persist failed', {
         error: err?.message, guildId,
       });
-      auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED);
+      auditLinkFailure(guildId, LINK_RESULTS.PERSIST_FAILED, {
+        stage: 'default-owner-persist',
+        error_code: err?.code || err?.name || 'unknown',
+      });
       return { ok: false, reason: LINK_RESULTS.PERSIST_FAILED };
     }
 
@@ -156,7 +162,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
     }
 
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED, {
-      guild_id: guildId, action: WEBHOOK_ACTIONS.REUSED,
+      guild_id: guildId, action: WEBHOOK_ACTIONS.REUSED, default_owner: true,
     });
     return { ok: true, action: WEBHOOK_ACTIONS.REUSED };
   }

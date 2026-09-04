@@ -263,7 +263,9 @@ async function resolveDefaultOwnerForApiKey(apiKey) {
   if (!ownerId) {
     ownerId = await discoverDefaultOwnerId();
     if (!ownerId) {
-      throw new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
+      const err = new Error('resolveDefaultOwnerForApiKey: default subscription owner could not be discovered');
+      err.code = 'DEFAULT_WEBHOOK_OWNER_UNDISCOVERED';
+      throw err;
     }
     defaultOwnerId = ownerId;
   }

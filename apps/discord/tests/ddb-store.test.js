@@ -259,7 +259,10 @@ describe('guild configs', () => {
     });
 
     await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
-      .rejects.toThrow(/does not match QURL_WEBHOOK_SECRET/);
+      .rejects.toMatchObject({
+        code: 'DEFAULT_WEBHOOK_SECRET_CONFLICT',
+        message: expect.stringMatching(/does not match QURL_WEBHOOK_SECRET/),
+      });
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
@@ -407,6 +410,33 @@ describe('guild configs', () => {
     await expect(store.setGuildDefaultWebhookOwner('g_default', defaultOwnerArgs()))
       .rejects.toBe(throttled);
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+  });
+
+  test('subscription readers exclude owner-only default mappings', async () => {
+    const ownerOnly = {
+      guild_id: 'g_default',
+      qurl_api_key: mockCiphertext('lv_default_alias'),
+      webhook_owner_id: 'usr_default',
+    };
+    const complete = {
+      guild_id: 'g_complete',
+      webhook_id: 'wh_complete',
+      webhook_secret: mockCiphertext('whsec_complete'),
+      webhook_owner_id: 'usr_default',
+      updated_at: '2026-09-04T00:00:00.000Z',
+    };
+    ddbMock.on(ScanCommand).resolves({ Items: [ownerOnly, complete] });
+
+    await expect(store.scanGuildSubscriptions()).resolves.toEqual([{
+      guildId: 'g_complete',
+      webhookId: 'wh_complete',
+      webhookSecret: 'whsec_complete',
+      webhookOwnerId: 'usr_default',
+      updatedAt: '2026-09-04T00:00:00.000Z',
+    }]);
+    await expect(store.listGuildSubscriptionsByOwner('usr_default')).resolves.toEqual([{
+      guildId: 'g_complete', webhookId: 'wh_complete',
+    }]);
   });
 
   test('propagateGuildWebhookSubscription: excludes the just-written primary guild', async () => {

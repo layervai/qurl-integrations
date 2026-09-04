@@ -1545,7 +1545,9 @@ async function setGuildDefaultWebhookOwner(
   if (hasStoredSecret && row.webhook_owner_id === webhookOwnerId) {
     const storedSecret = decrypt(row.webhook_secret);
     if (storedSecret !== expectedDefaultWebhookSecret) {
-      throw new Error('setGuildDefaultWebhookOwner: stored webhook secret does not match QURL_WEBHOOK_SECRET');
+      const err = new Error('setGuildDefaultWebhookOwner: stored webhook secret does not match QURL_WEBHOOK_SECRET');
+      err.code = 'DEFAULT_WEBHOOK_SECRET_CONFLICT';
+      throw err;
     }
   }
 
@@ -1636,6 +1638,8 @@ async function clearGuildWebhookSubscription(guildId) {
 async function listGuildSubscriptionsByOwner(webhookOwnerId) {
   const rows = await scanAll(TABLES.guild_configs, { consistentRead: true });
   return rows
+    // Owner-only default mappings deliberately have no webhook_id and must
+    // never enter the propagation fan-out.
     .filter(r => r.webhook_owner_id === webhookOwnerId && r.webhook_id)
     .map(r => ({ guildId: r.guild_id, webhookId: r.webhook_id }));
 }
@@ -1723,6 +1727,9 @@ async function scanGuildSubscriptions() {
   let provisionedCount = 0;
   let decryptFailCount = 0;
   for (const r of rows) {
+    // Owner-only default mappings are relationship records, not secret-bearing
+    // cache entries. Omitting them lets scanOnce synthesize the default entry
+    // from QURL_WEBHOOK_SECRET.
     if (!r.webhook_id || !r.webhook_secret || !r.webhook_owner_id) continue;
     provisionedCount += 1;
     let webhookSecret;
