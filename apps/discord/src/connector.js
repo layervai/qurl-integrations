@@ -668,14 +668,14 @@ function extractAccessToken(qurlLink) {
   return token;
 }
 
-// qurl_site may use an `r_` Traefik routing label, but that label carries no
-// resource identity: resource IDs are opaque public keys. The authenticated
-// mint is the authority for the complete target hostname.
-function detectQurlSiteHostname(qurlSite) {
+// Hostname parser shared by the host pin and its rejection breadcrumb.
+// `hostname` excludes credentials, port, path, query, and fragment; undefined
+// on malformed input lets JSON logging omit the field instead of echoing a URL.
+function detectTargetHostname(qurlSite) {
   try {
     return new URL(qurlSite).hostname;
   } catch {
-    return '';
+    return undefined;
   }
 }
 
@@ -731,7 +731,7 @@ function assertPublicHttpsTarget(targetUrl, expectedQurlSite) {
   // slug-resolved opaque public key when that response field is present.
   // WHATWG URL parsing canonicalizes ASCII DNS hostname case on both values.
   const targetHost = parsed.hostname;
-  const expectedHost = detectQurlSiteHostname(expectedQurlSite);
+  const expectedHost = detectTargetHostname(expectedQurlSite);
   if (!expectedHost) {
     throw new Error('Detect tunnel returned qurl_site is unparseable');
   }
@@ -772,6 +772,8 @@ function buildDetectTargetUrl(qurlSite) {
   }
   const candidateUrl = new URL(DETECT_TARGET_PATH, parsed).toString();
   assertPublicHttpsTarget(candidateUrl, qurlSite);
+  // Rebuild from the validated origin so the value returned to fetch is also
+  // structurally credential-free, independent of later guard refactors.
   return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
 }
 
@@ -786,27 +788,6 @@ function buildDetectTargetUrl(qurlSite) {
 // + consistent (the `String(... ?? '')` guard).
 function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
-}
-
-// Host for the qurl_site rejection breadcrumb below. Every guard behind that
-// breadcrumb throws a CONSTANT message — assertPublicHttpsTarget's guards, plus
-// buildDetectTargetUrl's own DetectQurlSiteError branches — so without this it
-// says THAT a target was rejected but not WHICH host tripped it: an IPv4-mapped
-// literal, a 10.x, and a public `fd…` name misclassified by isPrivateHost's ULA
-// prefix check all read identically. Re-parsing here (error path only) beats
-// threading the host back out of buildDetectTargetUrl, and yields the same value
-// the guards judged. Both DetectQurlSiteError branches land correctly: an
-// unparseable qurl_site yields undefined (key dropped), a host-only violation
-// parses and yields the bare host.
-//
-// `hostname`, never the full URL: it excludes userinfo, port, path, query and
-// fragment by construction, so the `at_…` token — which rides in the qurl_link
-// fragment — cannot reach the log through it. undefined on an unparseable
-// qurl_site, which JSON.stringify drops, keeping that line free of a null.
-// (Same shape as the safe-host helpers in commands.js / qurl-webhook-registrar.js;
-// they differ only in fallback, and undefined is the one that omits the key.)
-function detectTargetHostname(qurlSite) {
-  try { return new URL(qurlSite).hostname; } catch { return undefined; }
 }
 
 /**
@@ -983,7 +964,7 @@ async function resolveDetectTarget() {
   // from older/variant API shapes; qurl_site came from the authenticated mint.
   const resolvedResourceId = resolved?.resource_id;
   if (!resolvedResourceId) {
-    logger.warn('Detect tunnel resolve omitted resource_id; integrity check skipped', {
+    logger.debug('Detect tunnel resolve omitted resource_id; integrity check skipped', {
       expected_resource_id: resourceId,
     });
   }

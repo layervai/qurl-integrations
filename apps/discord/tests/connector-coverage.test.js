@@ -981,6 +981,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('host-pin compares complete target and returned qurl_site hosts after URL case normalization', () => {
+      // Defense-in-depth for a future caller that does not construct its target
+      // directly from the same qurl_site value as the production path does.
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         'https://R_ABC12345678.QURL.SITE/api/detect',
         TUNNEL_SITE,
@@ -988,6 +990,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('host-pin fails closed when the detect target hostname differs from the returned qurl_site', () => {
+      // This mismatch cannot arise through buildDetectTargetUrl today; pin the
+      // helper contract so a future independent target source still fails shut.
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         'https://r_other123456.qurl.site/api/detect',
         TUNNEL_SITE,
@@ -995,10 +999,28 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('host-pin reports an unparseable returned qurl_site separately from a host mismatch', () => {
+      // As above, this is a future-caller guard; the production builder parses
+      // qurl_site before invoking the helper.
       expect(() => connector.__testExports.assertPublicHttpsTarget(
         TUNNEL_TARGET,
         'https://[',
       )).toThrow(/returned qurl_site is unparseable/);
+    });
+
+    it('host-pin accepts multiple non-empty routing labels under an allowed suffix', () => {
+      const multiLabelSite = 'https://edge.r_abc12345678.qurl.site';
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        `${multiLabelSite}/api/detect`,
+        multiLabelSite,
+      )).not.toThrow();
+    });
+
+    it('host-pin rejects a trailing-dot FQDN outside the exact suffix boundary', () => {
+      const trailingDotSite = 'https://r_abc12345678.qurl.site.';
+      expect(() => connector.__testExports.assertPublicHttpsTarget(
+        `${trailingDotSite}/api/detect`,
+        trailingDotSite,
+      )).toThrow(/expected qURL tunnel domain/);
     });
 
     it.each([
@@ -1741,7 +1763,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
-    it('allows a resolve response that omits resource_id and still POSTs to qurl_site', async () => {
+    it('allows a resolve response that omits resource_id and records a debug diagnostic', async () => {
       const get = captureDetect(
         { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
         { resolveResult: { target_url: '' } },
@@ -1749,7 +1771,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
       expect(mockClient.resolve).toHaveBeenCalledTimes(1);
       expect(get().url).toBe(TUNNEL_TARGET);
-      expect(logger.warn).toHaveBeenCalledWith(
+      expect(logger.debug).toHaveBeenCalledWith(
         'Detect tunnel resolve omitted resource_id; integrity check skipped',
         { expected_resource_id: RESOURCE_ID },
       );
