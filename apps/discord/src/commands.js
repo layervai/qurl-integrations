@@ -8729,7 +8729,7 @@ const commands = [
       }
 
       // /qurl status — verify the stored key. Gate behind ManageGuild because
-      // the response discloses the key's granted scopes and setup provenance,
+      // the response discloses the key's prefix, granted scopes and provenance,
       // and each run spends an upstream qURL API call. This on-demand admin
       // check relies on Discord's interaction rate limit rather than sharing
       // the mutation-oriented send/detect cooldowns.
@@ -8806,6 +8806,12 @@ const commands = [
               : '⚠️ **Stored qURL configuration found, but the key check could not be completed.**\n'
                 + 'Please try `/qurl status` again later.\n\n';
           } else {
+            // `key_prefix` replaces the old locally-computed sha256 finger-
+            // print: it is qurl-service's own display prefix and identifies
+            // the key the service actually accepted rather than only the bytes
+            // we stored. It can hint at the tenant, reinforcing the existing
+            // ManageGuild gate above.
+            //
             // Inline-code content renders backslashes literally, so strip
             // backticks instead of applying general Markdown escaping. The
             // plain display-name sanitizer also strips controls and codepoint-

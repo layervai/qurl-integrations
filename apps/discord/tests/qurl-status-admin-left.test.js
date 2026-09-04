@@ -74,8 +74,8 @@ function makeStatusInteraction({ memberFetchBehavior }) {
       members: { fetch: jest.fn().mockImplementation(memberFetchBehavior) },
     },
     user: { id: 'admin-current' },
-    _initialReply: reply,
-    _reply: editReply,
+    _reply: reply,
+    _editReply: editReply,
   };
   interaction.deferReply = jest.fn().mockImplementation(async () => {
     interaction.deferred = true;
@@ -108,9 +108,9 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
     expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
     expect(interaction.deferred).toBe(true);
-    expect(interaction._initialReply).not.toHaveBeenCalled();
-    expect(interaction._reply).toHaveBeenCalledTimes(1);
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    expect(interaction._reply).not.toHaveBeenCalled();
+    expect(interaction._editReply).toHaveBeenCalledTimes(1);
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
     expect(replyContent).toContain('Key prefix: `lv_live_aaa`');
     expect(replyContent).toContain('Scopes: `qurl:read`, `qurl:write`');
@@ -132,7 +132,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toMatch(/revoked or invalid/i);
     expect(replyContent).toContain('`/qurl setup`');
     expect(replyContent).not.toContain(STORED_KEY);
@@ -155,7 +155,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toMatch(/revoked or invalid/i);
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
@@ -178,7 +178,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toMatch(/check could not be completed/i);
     expect(replyContent).toMatch(/stored qURL configuration found/i);
     expect(replyContent).not.toMatch(/revoked|invalid/i);
@@ -208,7 +208,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toMatch(/check could not be completed/i);
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
@@ -229,7 +229,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    expect(interaction._reply.mock.calls[0][0].content).toContain('Scopes: _none_');
+    expect(interaction._editReply.mock.calls[0][0].content).toContain('Scopes: _none_');
   });
 
   it('sanitizes service-reported prefix and scopes before rendering them', async () => {
@@ -251,7 +251,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('Key prefix: `lv_live_prefix`');
     expect(replyContent).toContain('Scopes: `qurl:read @everyone`');
   });
@@ -280,7 +280,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    expect(interaction._reply.mock.calls[0][0].content.length).toBeLessThanOrEqual(2000);
+    expect(interaction._editReply.mock.calls[0][0].content.length).toBeLessThanOrEqual(2000);
   });
 
   it('replies to the deferred interaction when the guild is not configured', async () => {
@@ -292,9 +292,9 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
 
     expect(interaction.deferReply).toHaveBeenCalledWith({ ephemeral: true });
-    expect(interaction._initialReply).not.toHaveBeenCalled();
-    expect(interaction._reply).toHaveBeenCalledTimes(1);
-    expect(interaction._reply.mock.calls[0][0].content).toContain('not configured for this server');
+    expect(interaction._reply).not.toHaveBeenCalled();
+    expect(interaction._editReply).toHaveBeenCalledTimes(1);
+    expect(interaction._editReply.mock.calls[0][0].content).toContain('not configured for this server');
     expect(mockGetIdentity).not.toHaveBeenCalled();
   });
 
@@ -337,7 +337,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
 
     await handleCommand(interaction);
 
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('`/qurl setup`');
     expect(replyContent).not.toContain('try `/qurl status` again later');
     expect(mockGetIdentity).not.toHaveBeenCalled();
@@ -360,7 +360,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
       },
     });
     await handleCommand(interaction);
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
@@ -383,7 +383,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
       },
     });
     await handleCommand(interaction);
-    const replyContent = interaction._reply.mock.calls[0][0].content;
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
     // Critical: a rate-limit spike must NOT silently tell an admin
     // their colleague is gone. Only the specific 10007 fires the

@@ -15,7 +15,8 @@ const { isPrivateHost } = require('./utils/private-host');
  * qURL API client for the bot's link create / status / revoke calls, backed by
  * the @layervai/qurl SDK where it exposes the required route. This remains the
  * command-side client consolidated in #830; the small GET /v1/me shim below
- * uses fetch because SDK 0.3.x has no identity method.
+ * uses fetch because SDK 0.3.x has no identity method — replace it when the
+ * SDK exposes that route.
  *
  * This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
@@ -141,7 +142,7 @@ async function getIdentity(apiKey) {
 
   // One attempt only: an interactive check surfaces a transient failure to the
   // admin rather than spending the 3-attempt budget MAX_RETRIES pins for the
-  // SDK paths. Replace this shim when the SDK exposes GET /v1/me.
+  // SDK paths.
   //
   // Unlike makeClient, there is deliberately NO `apiKey || config.QURL_API_KEY`
   // fallback: a guild status check must validate the guild's own stored key,
