@@ -17,6 +17,9 @@ process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
+// Keep the subject-fingerprint HMAC deterministic; setup-env.js pins the
+// fallback OAUTH_STATE_SECRET to `0`.repeat(64).
+delete process.env.QURL_OAUTH_STATE_SECRET;
 // KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
 // review round 2; matches the legacy modal-paste path's existing check.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
@@ -487,7 +490,7 @@ describe('qurl-oauth routes', () => {
       expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
-        qurl_account_subject_hash: 'c5d09a77163332e87cd67f4fdec08160705a9a73940b9a4591b4b6f1cb53a61d',
+        qurl_account_subject_fingerprint: '6a65c71a4b220e0d743fae6a0d6f2131ce58caf808d6828bad2c62df258a9364',
       });
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
 
@@ -547,6 +550,10 @@ describe('qurl-oauth routes', () => {
       const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
       expect(deleteCall).toBeDefined();
       expect(deleteCall[0]).toContain('/v1/api-keys/key-orphan-1');
+      expect(logger.audit).not.toHaveBeenCalledWith(
+        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        expect.anything(),
+      );
     });
 
     it('renders success without qURL-account-email line when id_token verification fails', async () => {
@@ -580,6 +587,10 @@ describe('qurl-oauth routes', () => {
       // future template change that re-labels the email field would
       // still surface the regression.
       expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        expect.objectContaining({ qurl_account_subject_fingerprint: null }),
+      );
     });
 
     it('renders success without qURL-account-email line when id_token field is absent from the Auth0 response', async () => {
@@ -602,6 +613,10 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
       expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED,
+        expect.objectContaining({ qurl_account_subject_fingerprint: null }),
+      );
     });
 
     it('502s when qurl-service mint response has api_key but missing key_id (orphan-cleanup contract)', async () => {
