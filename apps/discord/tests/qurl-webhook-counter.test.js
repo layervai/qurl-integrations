@@ -271,7 +271,7 @@ describe('sender view-counter fast-path — happy path', () => {
     // senderCounterRenderStateCacheTtlMs() deliberately caps the render-state
     // cache at 50ms. Hold the clock fixed so CI scheduling latency between
     // these two requests cannot turn this same-burst assertion into a flake.
-    const now = Date.now();
+    const now = realDateNow();
     const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
     try {
       await signedRequest();
@@ -296,6 +296,17 @@ describe('sender view-counter fast-path — happy path', () => {
         'qURL webhook sender-counter: coalesced — scheduled trailing flush',
         expect.objectContaining({ send_id: SEND_ID, qurl_id: 'q_cache_2' }),
       );
+
+      clock.mockReturnValue(now + 51);
+      logger.debug.mockClear();
+      await signedRequest({
+        ...VALID_PAYLOAD,
+        id: 'evt-counter-cache-3',
+        data: { ...VALID_PAYLOAD.data, qurl_id: 'q_cache_3' },
+      });
+      await flushCounter();
+
+      expect(mockGetSendRenderState).toHaveBeenCalledTimes(2);
     } finally {
       clock.mockRestore();
     }
@@ -726,10 +737,12 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   });
 
   it('repair-floor replacement preserves an already-pending source fallback flush', async () => {
+    const now = realDateNow();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
     mockGetSendRenderState
       .mockResolvedValueOnce(armedState({
         lastRenderedCount: 1,
-        lastRenderedAt: Date.now(),
+        lastRenderedAt: now,
         viewedCount: 1,
         qurlIds: ['q_a', 'q_b'],
       }))
@@ -741,7 +754,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
       }))
       .mockResolvedValueOnce(armedState({
         lastRenderedCount: 2,
-        lastRenderedAt: Date.now(),
+        lastRenderedAt: now + 51,
         viewedCount: 2,
         qurlIds: ['q_a', 'q_b'],
       }));
@@ -755,34 +768,37 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     ]));
     mockTryAdvanceRenderedCount.mockResolvedValue(false);
 
-    // First event: aggregate increment fails while the row is inside the
-    // coalesce window. It must only arm a pending source-of-truth flush; it
-    // must not edit or read either count source yet.
-    await signedRequest({ ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, qurl_id: 'q_a' } });
-    await flushCounter();
-    expect(mockEditInteractionReply).not.toHaveBeenCalled();
-    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
-    expect(mockGetQurlViews).not.toHaveBeenCalled();
-    expect(logger.debug).toHaveBeenCalledWith(
-      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
-      expect.objectContaining({ send_id: SEND_ID, force_source: true }),
-    );
+    try {
+      // First event: aggregate increment fails while the row is inside the
+      // coalesce window. It must only arm a pending source-of-truth flush; it
+      // must not edit or read either count source yet.
+      await signedRequest({ ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, qurl_id: 'q_a' } });
+      await flushCounter();
+      expect(mockEditInteractionReply).not.toHaveBeenCalled();
+      expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+      expect(mockGetQurlViews).not.toHaveBeenCalled();
+      expect(logger.debug).toHaveBeenCalledWith(
+        'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+        expect.objectContaining({ send_id: SEND_ID, force_source: true }),
+      );
 
-    logger.debug.mockClear();
-    // Render-state cache TTL is capped at 50ms; wait beyond it but below the
-    // coalesce window so the second event refreshes state and replaces the
-    // still-pending trailing source flush.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await signedRequest({ ...VALID_PAYLOAD, id: 'evt-repair-source', data: { ...VALID_PAYLOAD.data, qurl_id: 'q_b' } });
-    await waitForCounterFlush(() => mockGetQurlViews.mock.calls.length === 1);
+      logger.debug.mockClear();
+      // Cross the 50ms render-state TTL deterministically while remaining
+      // inside the wider coalesce window. No scheduler timing is involved.
+      clock.mockReturnValue(now + 51);
+      await signedRequest({ ...VALID_PAYLOAD, id: 'evt-repair-source', data: { ...VALID_PAYLOAD.data, qurl_id: 'q_b' } });
+      await waitForCounterFlush(() => mockGetQurlViews.mock.calls.length === 1);
 
-    // The second event's CAS-lost repair replaces the pending timer but keeps
-    // force_source=true, so the repair render reads source qurl_views instead
-    // of trusting the aggregate counter.
-    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
-    expect(mockGetQurlViews).toHaveBeenCalledTimes(1);
-    expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
-    expect(mockEditInteractionReply).toHaveBeenCalledTimes(2);
+      // The second event's CAS-lost repair replaces the pending timer but keeps
+      // force_source=true, so the repair render reads source qurl_views instead
+      // of trusting the aggregate counter.
+      expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+      expect(mockGetQurlViews).toHaveBeenCalledTimes(1);
+      expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
+      expect(mockEditInteractionReply).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('CAS-lost lower edit schedules exactly one repair-floor re-render', async () => {
@@ -805,8 +821,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     mockTryAdvanceRenderedCount.mockResolvedValue(false);
 
     await signedRequest();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await flushCounter();
+    await waitForCounterFlush(() => mockEditInteractionReply.mock.calls.length === 2);
 
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(2);
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledTimes(2);
@@ -898,8 +913,9 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     // SETTLED final count after the burst. Let the real in-memory timer
     // fire here; it re-enters the fast-path with force=true, so the
     // repeat-access skip does not suppress the repair render.
-    await new Promise((resolve) => setTimeout(resolve, 950));
-    await flushCounter();
+    await waitForCounterFlush(() => (
+      mockEditInteractionReply.mock.calls.at(-1)?.[2]?.content.includes(`👀 ${TRACKED.length} viewed`)
+    ));
     const lastPayload = mockEditInteractionReply.mock.calls.at(-1)[2];
     expect(lastPayload.content).toContain(`👀 ${TRACKED.length} viewed`);
     // And the persisted count converged to the true total.
