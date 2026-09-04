@@ -50,25 +50,37 @@ function parseJsonPayload(value) {
     return JSON.parse(trimmed);
   } catch {
     // TODO(upstream-contract): npm can surround its --json envelope with
-    // warning lines. Search only column-zero object boundaries so braces in a
-    // warning cannot consume the actual envelope.
-    const lines = trimmed.split(/\r?\n/);
-    for (const line of lines) {
-      if (!line.startsWith('{')) continue;
-      try {
-        return JSON.parse(line);
-      } catch {
-        // Continue to the pretty-printed multi-line envelope scan.
+    // notice/warning text, sometimes on the same line. Extract complete JSON
+    // objects with a bounded linear scan; braces inside JSON strings do not
+    // affect the boundary.
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < trimmed.length; index += 1) {
+      const char = trimmed[index];
+      if (start < 0) {
+        if (char === '{') {
+          start = index;
+          depth = 1;
+        }
+        continue;
       }
-    }
-    for (let start = 0; start < lines.length; start += 1) {
-      if (!lines[start].startsWith('{')) continue;
-      for (let end = lines.length - 1; end >= start; end -= 1) {
-        if (lines[end] !== '}') continue;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth !== 0) continue;
         try {
-          return JSON.parse(lines.slice(start, end + 1).join('\n'));
+          return JSON.parse(trimmed.slice(start, index + 1));
         } catch {
-          // Try the next complete column-zero object boundary.
+          start = -1;
         }
       }
     }
@@ -78,6 +90,17 @@ function parseJsonPayload(value) {
 
 function auditBody(result) {
   return parseJsonPayload(result?.stdout) ?? parseJsonPayload(result?.stderr);
+}
+
+function auditBodies(result) {
+  return [parseJsonPayload(result?.stdout), parseJsonPayload(result?.stderr)]
+    .filter(body => body && typeof body === 'object');
+}
+
+function isAuditReport(body) {
+  return body?.auditReportVersion !== undefined
+    || (body?.vulnerabilities && typeof body.vulnerabilities === 'object')
+    || (body?.metadata?.vulnerabilities && typeof body.metadata.vulnerabilities === 'object');
 }
 
 function isRetiredQuickAuditFallback(body) {
@@ -111,7 +134,10 @@ function auditTransportCode(result, body = auditBody(result)) {
   // TODO(upstream-contract): npm 10.9.4 reports audit transport failures in
   // these structured fields. Unknown shapes fail closed without a retry.
   if (typeof result?.error?.code === 'string') return result.error.code.toUpperCase();
-  if (isRetiredQuickAuditFallback(body)) return 'EAUDITQUICKRETIRED';
+  const candidateBodies = auditBodies(result);
+  // Never let a secondary error envelope reclassify a real audit report.
+  if (candidateBodies.some(isAuditReport)) return null;
+  if (candidateBodies.some(isRetiredQuickAuditFallback)) return 'EAUDITQUICKRETIRED';
 
   const statusCode = Number(
     body?.error?.statusCode ?? body?.error?.status ?? body?.statusCode ?? body?.status,

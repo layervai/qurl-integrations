@@ -27,6 +27,26 @@ function passingAuditBody(vulnerabilities = { high: 0, critical: 0 }, prod = 2) 
   return { metadata: { vulnerabilities, dependencies: { prod } } };
 }
 
+function retiredQuickFallbackBody() {
+  return {
+    message: '400 Bad Request - POST https://registry.npmjs.org/-/npm/v1/security/audits/quick - Bad Request',
+    method: 'POST',
+    uri: 'https://registry.npmjs.org/-/npm/v1/security/audits/quick',
+    headers: {
+      'npm-notice': [
+        'This endpoint is being retired. Use the bulk advisory endpoint instead. See the following docs for more info: https://api-docs.npmjs.com/#tag/Audit',
+      ],
+    },
+    statusCode: 400,
+    body: {
+      statusCode: 400,
+      error: 'Bad Request',
+      message: 'Invalid package tree, run npm install to rebuild your package-lock.json',
+    },
+    error: { summary: '', detail: '' },
+  };
+}
+
 describe('production dependency audit', () => {
   test('pins the production lockfile audit flags literally', () => {
     expect(AUDIT_ARGS).toEqual([
@@ -198,25 +218,8 @@ describe('production dependency audit', () => {
   });
 
   test('retries npm 10.9.4 when its retired quick fallback rejects a timed-out bulk audit', async () => {
-    const retiredQuickFallback = {
-      message: '400 Bad Request - POST https://registry.npmjs.org/-/npm/v1/security/audits/quick - Bad Request',
-      method: 'POST',
-      uri: 'https://registry.npmjs.org/-/npm/v1/security/audits/quick',
-      headers: {
-        'npm-notice': [
-          'This endpoint is being retired. Use the bulk advisory endpoint instead. See the following docs for more info: https://api-docs.npmjs.com/#tag/Audit',
-        ],
-      },
-      statusCode: 400,
-      body: {
-        statusCode: 400,
-        error: 'Bad Request',
-        message: 'Invalid package tree, run npm install to rebuild your package-lock.json',
-      },
-      error: { summary: '', detail: '' },
-    };
     const spawn = jest.fn()
-      .mockReturnValueOnce(auditResult(1, retiredQuickFallback))
+      .mockReturnValueOnce(auditResult(1, retiredQuickFallbackBody()))
       .mockReturnValueOnce(auditResult(0, passingAuditBody()));
     const sleep = jest.fn().mockResolvedValue(undefined);
     const stderr = captureStream();
@@ -231,6 +234,30 @@ describe('production dependency audit', () => {
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledTimes(1);
     expect(stderr.value()).toContain('EAUDITQUICKRETIRED');
+  });
+
+  test('finds the exact retired fallback envelope behind a shallow stdout error', async () => {
+    const decoratedFallback = [
+      'npm notice audit endpoint response follows',
+      JSON.stringify(retiredQuickFallbackBody(), null, 2),
+      'npm warn audit 400 Bad Request',
+    ].join(' ');
+    const spawn = jest.fn()
+      .mockReturnValueOnce({
+        status: 1,
+        stdout: '{"error":{"summary":"","detail":""}}\n',
+        stderr: decoratedFallback,
+      })
+      .mockReturnValueOnce(auditResult(0, passingAuditBody()));
+
+    await expect(runAudit({
+      spawn,
+      sleep: jest.fn().mockResolvedValue(undefined),
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(0);
+
+    expect(spawn).toHaveBeenCalledTimes(2);
   });
 
   test('does not retry a vulnerability report decorated like the retired quick fallback', async () => {
@@ -249,6 +276,31 @@ describe('production dependency audit', () => {
         undici: { severity: 'high', via: [], nodes: ['node_modules/undici'] },
       },
     }));
+    const sleep = jest.fn();
+
+    await expect(runAudit({
+      spawn,
+      sleep,
+      stdout: captureStream().stream,
+      stderr: captureStream().stream,
+    })).resolves.toBe(1);
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  test('does not retry a retired-fallback candidate beside a real vulnerability report', async () => {
+    const vulnerabilityReport = {
+      auditReportVersion: 2,
+      vulnerabilities: {
+        undici: { severity: 'high', via: [], nodes: ['node_modules/undici'] },
+      },
+    };
+    const spawn = jest.fn().mockReturnValue({
+      status: 1,
+      stdout: JSON.stringify(vulnerabilityReport),
+      stderr: JSON.stringify(retiredQuickFallbackBody()),
+    });
     const sleep = jest.fn();
 
     await expect(runAudit({
