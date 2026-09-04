@@ -149,13 +149,20 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
+// Stable structured-log event names that are queryable operational signals,
+// but are not audit events or CloudWatch metrics.
+const LOG_EVENTS = Object.freeze({
+  QURL_OAUTH_AUTH0_CONNECTION_POLICY: 'qurl_oauth_auth0_connection_policy',
+});
+
 // Canonical event names emitted via logger.audit(). The CloudWatch metric
 // filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // pattern-match these strings, so a typo at a call site silently disables
 // the metric. Always import from here rather than passing literal strings.
-// Adding a new event: add the constant here, the call site, AND the
+// Adding a new metric event: add the constant here, the call site, AND the
 // terraform filter (in the same merge train, since the filter is a no-op
-// without the emission and vice versa).
+// without the emission and vice versa). A query-only forensic event may omit
+// the filter when its entry documents that exception explicitly.
 //
 // Scope: this set covers events the qURL service cannot see — transport-
 // layer (DM dispatch), bulk-revoke outcomes (per-link API calls happen
@@ -221,6 +228,17 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+
+  // Emitted after an OAuth-minted guild key is persisted. This is a forensic
+  // Logs Insights trail while #1366 is outstanding, not a metric; no Terraform
+  // filter is paired intentionally. The Auth0 subject is represented by a
+  // keyed, pseudonymous fingerprint that changes when its HMAC key rotates.
+  // The low-cardinality key-epoch tag makes that boundary observable; compare
+  // fingerprints only within one epoch. #1366 owns durable identity and
+  // rotation semantics. The other payload fields (guild_id, configured_by,
+  // and the fingerprint) are high cardinality and MUST NOT be promoted to
+  // CloudWatch metric dimensions.
+  QURL_GUILD_KEY_CONFIGURED: 'qurl_guild_key_configured',
 
   // Emitted by gateway-health.js on every /health response that
   // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
@@ -676,6 +694,7 @@ module.exports = {
   UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  LOG_EVENTS,
   AUDIT_EVENTS,
   QURL_WEBHOOK_EVENTS,
   TRUST,

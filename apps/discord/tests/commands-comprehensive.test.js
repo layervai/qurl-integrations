@@ -29,6 +29,8 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
+  isQurlSetupAvailable: false,
+  isAuth0EmailConnectionRejected: false,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -691,9 +693,9 @@ describe('/qurl help subcommand', () => {
   // accepts both values so the rendering branches stay isolated unit tests.
   async function renderHelp({ qurlOAuth, discordInstall }) {
     const config = require('../src/config');
-    const originalQurlOAuth = config.isQurlOAuthConfigured;
+    const originalQurlSetup = config.isQurlSetupAvailable;
     const originalDiscordInstall = config.isDiscordInstallConfigured;
-    config.isQurlOAuthConfigured = qurlOAuth;
+    config.isQurlSetupAvailable = qurlOAuth;
     config.isDiscordInstallConfigured = discordInstall;
 
     try {
@@ -708,7 +710,7 @@ describe('/qurl help subcommand', () => {
       await cmd.execute(interaction);
       return interaction.reply.mock.calls[0][0].content;
     } finally {
-      config.isQurlOAuthConfigured = originalQurlOAuth;
+      config.isQurlSetupAvailable = originalQurlSetup;
       config.isDiscordInstallConfigured = originalDiscordInstall;
     }
   }
@@ -1282,7 +1284,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     process.env.KEY_ENCRYPTION_KEY = '0'.repeat(64);
     // Force the legacy path by clearing any Auth0 hints. The config
     // mock at the top of this file doesn't define AUTH0_* and we
-    // rely on `config.isQurlOAuthConfigured` being falsy.
+    // rely on `config.isQurlSetupAvailable` being falsy.
     delete process.env.AUTH0_DOMAIN;
   });
   afterAll(() => {
@@ -1342,6 +1344,31 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       );
     } finally {
       process.env.KEY_ENCRYPTION_KEY = savedKEK;
+    }
+  });
+
+  it('blocks setup instead of falling back to API-key paste for a rejected connection', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeSetupInteraction();
+
+      await cmd.execute(interaction);
+
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('AUTH0_EMAIL_CONNECTION');
+      expect(require('../src/logger').error).toHaveBeenCalledWith(
+        'Refusing /qurl setup: AUTH0_EMAIL_CONNECTION was rejected at boot',
+      );
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
     }
   });
 
@@ -1517,6 +1544,29 @@ describe('handleSetupButton (dispatcher path)', () => {
       ...overrides,
     };
   }
+
+  it('blocks a pre-restart setup button after the auth policy becomes rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const interaction = makeButtonInteraction();
+
+      await handleSetupButton(interaction, {
+        flow_id: '0:1#guild-1#ch-1#user-1',
+        row: { stage: 'awaiting_setup_button', version: 1 },
+      });
+
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+      expect(interaction.showModal).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
+  });
 
   it('transitions flow to awaiting_setup_modal + shows modal on success', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
@@ -1741,6 +1791,29 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
   afterAll(() => {
     global.fetch = originalFetch;
+  });
+
+  it('blocks a pre-restart modal before validation or persistence when policy is rejected', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const interaction = makeModalInteraction();
+
+      await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+      expect(mockDeleteFlow).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringContaining('qURL setup is temporarily unavailable'),
+        ephemeral: true,
+      });
+      expect(interaction.reply.mock.calls[0][0].content)
+        .not.toContain('AUTH0_EMAIL_CONNECTION');
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
+    }
   });
 
   it('validates key + persists + replies success', async () => {

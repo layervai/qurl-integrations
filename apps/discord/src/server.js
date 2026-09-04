@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
+const { LOG_EVENTS } = require('./constants');
 const { renderPage } = require('./templates/page');
 const { isPositiveFinite } = require('./utils/time');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
@@ -210,13 +211,56 @@ function noStoreHeaders(req, res, next) {
 // always mount because /qurl setup is the canonical path for any guild
 // (multi-tenant or single-guild) to configure a qURL API key, and the
 // route gates internally on
-// config.isQurlOAuthConfigured (returns 503 with a "not configured yet"
+// config.isQurlSetupAvailable (returns 503 with a "not configured yet"
 // page when AUTH0_* env vars are unset, rather than a hard 404). That way
-// flipping the AUTH0_* secrets in SSM is the only step needed to turn
-// OAuth on — no code change or env-flag re-flip required.
+// setting valid AUTH0_* secrets and an accepted optional connection policy in
+// SSM is all that is needed to turn OAuth on — no code change or feature-flag
+// re-flip required.
 app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
-if (!config.isQurlOAuthConfigured) {
-  logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
+const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
+const auth0ConnectionPolicyMetadata = {
+  event: LOG_EVENTS.QURL_OAUTH_AUTH0_CONNECTION_POLICY,
+  connection: auth0Connection,
+  state: config.auth0EmailConnectionState,
+  oauth_configured: config.isQurlOAuthConfigured,
+};
+if (!config.isQurlSetupAvailable) {
+  logger.info(config.isAuth0EmailConnectionRejected
+    ? 'qURL OAuth routes mounted in not-configured mode because AUTH0_EMAIL_CONNECTION was rejected. /qurl setup is blocked until the deployment value is corrected; other bot operations remain available.'
+    : 'qURL OAuth routes mounted in not-configured mode because AUTH0_* settings are incomplete/invalid. /qurl setup will fall back to the legacy modal-paste path.');
+  let inactiveConnectionMessage;
+  if (config.isAuth0EmailConnectionRejected) {
+    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.';
+  } else if (auth0Connection) {
+    inactiveConnectionMessage = `AUTH0_EMAIL_CONNECTION="${auth0Connection}" is set but inactive because qURL OAuth AUTH0_* settings are incomplete.`;
+  } else {
+    inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION is unset and inactive because qURL OAuth AUTH0_* settings are incomplete.';
+  }
+  if (config.isAuth0EmailConnectionRejected) {
+    logger.error(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
+  } else {
+    logger.info(inactiveConnectionMessage, auth0ConnectionPolicyMetadata);
+  }
+} else {
+  let auth0ConnectionMessage;
+  if (auth0Connection) {
+    auth0ConnectionMessage = `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`;
+  } else {
+    auth0ConnectionMessage = 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
+  }
+  // Stable event metadata supports exact text/term filtering while the
+  // human-readable message remains self-sufficient if metadata is flattened.
+  // This is an operational logger line with a timestamp/level prefix, not a
+  // bare logger.audit JSON record, so CloudWatch JSON field filters do not
+  // apply to it.
+  // OAuth-live + unpinned warns once per process because the risk is reachable;
+  // an inactive pin stays info-level because incomplete OAuth disables the
+  // affected flow entirely.
+  if (auth0Connection) {
+    logger.info(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
+  } else {
+    logger.warn(auth0ConnectionMessage, auth0ConnectionPolicyMetadata);
+  }
 }
 
 // Stage-2 Discord install flow. /oauth/discord/install creates the

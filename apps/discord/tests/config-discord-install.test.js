@@ -26,9 +26,10 @@ describe('Discord install readiness derivation', () => {
         AUTH0_CLIENT_ID: 'client-id',
         AUTH0_CLIENT_SECRET: 'client-secret',
         AUTH0_AUDIENCE: 'https://api.example.test',
-        BASE_URL: 'https://discord.example.test',
         DISCORD_CLIENT_ID: '123456789012345678',
         DISCORD_CLIENT_SECRET: 'discord-secret-present',
+        BASE_URL: 'https://bot.example.test',
+        AUTH0_EMAIL_CONNECTION: undefined,
       },
       (config) => {
         expect(config.isQurlOAuthConfigured).toBe(true);
@@ -44,9 +45,10 @@ describe('Discord install readiness derivation', () => {
         AUTH0_CLIENT_ID: undefined,
         AUTH0_CLIENT_SECRET: undefined,
         AUTH0_AUDIENCE: undefined,
-        BASE_URL: 'https://discord.example.test',
         DISCORD_CLIENT_ID: '123456789012345678',
         DISCORD_CLIENT_SECRET: 'discord-secret-present',
+        BASE_URL: 'https://bot.example.test',
+        AUTH0_EMAIL_CONNECTION: undefined,
       },
       (config) => {
         expect(config.isQurlOAuthConfigured).toBe(false);

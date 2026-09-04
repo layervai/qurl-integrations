@@ -228,18 +228,55 @@ function isValidAuth0DomainShape(d) {
   return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
 }
 
-// True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
-// well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
-// flow. False = degrade to the legacy modal-paste flow (kept until
-// Justin registers the Auth0 app + sets prod SSM secrets). Single
-// derivation point so commands.js + routes/qurl-oauth.js + server.js
-// agree on what "configured" means.
+function parseAuth0EmailConnection(raw) {
+  const value = (raw || '').trim();
+  if (!value) return { value: '', state: 'unset' };
+  const isPlaceholder = value === SSM_PLACEHOLDER_SENTINEL;
+  if (isPlaceholder) {
+    // Infra seeds optional SSM values before their consumers are enabled.
+    // Treat that rollout state exactly like unset so adding the task-env
+    // plumbing cannot take customer install offline between deploys.
+    console.warn('[config] AUTH0_EMAIL_CONNECTION matches the reserved SSM placeholder; treating the connection pin as unset.');
+    return { value: '', state: 'unset' };
+  }
+  let rejectionReason = null;
+  if (value.length > 128) {
+    rejectionReason = `received ${value.length} trimmed characters, which exceeds the 128-character limit`;
+  } else if (!/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
+    rejectionReason = 'contains characters outside the required [A-Za-z0-9_-] shape or does not begin and end with a letter or digit';
+  }
+  if (rejectionReason) {
+    // Keep the rest of the bot available while failing only OAuth setup
+    // closed. A malformed optional setting must not weaken account selection,
+    // but it also must not take down /qurl send, webhooks, or the gateway.
+    console.warn(`[config] AUTH0_EMAIL_CONNECTION rejected (${rejectionReason}); disabling OAuth setup until corrected while other bot operations remain available.`);
+    return { value: '', state: 'rejected' };
+  }
+  return { value, state: 'pinned' };
+}
+
+const rawAuth0EmailConnection = process.env.AUTH0_EMAIL_CONNECTION;
+const {
+  value: auth0EmailConnection,
+  state: auth0EmailConnectionState,
+} = parseAuth0EmailConnection(rawAuth0EmailConnection);
+const isAuth0EmailConnectionRejected = auth0EmailConnectionState === 'rejected';
+
+// True when all four required Auth0 env vars are present and AUTH0_DOMAIN is
+// a well-shaped hostname. Keep this independent from the optional connection
+// pin: production boot checks still need to validate BASE_URL, encryption,
+// and state signing when the pin itself is malformed.
 const isQurlOAuthConfigured = Boolean(
   isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
   && process.env.AUTH0_CLIENT_ID
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,
 );
+// The user-facing setup routes require both the core Auth0 configuration and
+// an accepted optional connection policy. A rejected policy blocks setup
+// without suppressing independent boot diagnostics or normal bot operation.
+const isQurlSetupAvailable = isQurlOAuthConfigured
+  && !isAuth0EmailConnectionRejected;
 
 const normalizedBaseUrl = normalizeBaseUrl(process.env.BASE_URL);
 
@@ -269,7 +306,9 @@ const discordClientSecret = process.env.DISCORD_CLIENT_SECRET;
 const normalizedDiscordClientId = discordClientId?.trim();
 const normalizedDiscordClientSecret = discordClientSecret?.trim();
 let discordInstallNotConfiguredReason = null;
-if (!isQurlOAuthConfigured) {
+if (isAuth0EmailConnectionRejected) {
+  discordInstallNotConfiguredReason = 'AUTH0_EMAIL_CONNECTION rejected';
+} else if (!isQurlOAuthConfigured) {
   discordInstallNotConfiguredReason = 'AUTH0_* unset';
 } else if (!normalizedDiscordClientId) {
   discordInstallNotConfiguredReason = 'DISCORD_CLIENT_ID unset';
@@ -371,6 +410,7 @@ module.exports = {
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   isQurlOAuthConfigured,
+  isQurlSetupAvailable,
   isDiscordInstallConfigured,
   discordInstallNotConfiguredReason,
 
@@ -400,6 +440,19 @@ module.exports = {
   AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+  // Optional Auth0 connection pinned on every Discord setup authorize
+  // redirect. Validated at config load; unlike Slack, empty or unset means no
+  // pin (#1365). The shared env-var name is an operator-facing cross-service
+  // contract, not permission to share one task env bundle: Discord and Slack
+  // deliberately read independently provisioned values during the staged
+  // rollout because Discord cannot pin until its Auth0 app enables email.
+  AUTH0_EMAIL_CONNECTION: auth0EmailConnection,
+  // Parser-owned state keeps logs and route policy aligned without
+  // reconstructing whether an empty normalized value was unset or rejected.
+  auth0EmailConnectionState,
+  // Preserve the difference between intentionally unset and rejected input so
+  // structured boot telemetry cannot misreport a fail-open pin as "unset".
+  isAuth0EmailConnectionRejected,
 
   // Flow-dedicated HMAC secret for the qURL OAuth state token
   // (utils/qurl-oauth-state.js) — the preferred key, so ops can rotate

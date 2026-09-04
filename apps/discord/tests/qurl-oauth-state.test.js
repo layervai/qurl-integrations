@@ -15,9 +15,46 @@
 // below when hand-signing forged states.
 
 const crypto = require('crypto');
-const { signQurlOAuthState, verifyQurlOAuthState, STATE_TTL_SECONDS } = require('../src/utils/qurl-oauth-state');
+const {
+  signQurlOAuthState,
+  verifyQurlOAuthState,
+  fingerprintQurlAccountSubject,
+  qurlAccountFingerprintKeyEpoch,
+  STATE_TTL_SECONDS,
+} = require('../src/utils/qurl-oauth-state');
 
 describe('qurl-oauth-state', () => {
+  describe('qURL account subject fingerprint', () => {
+    it('returns a stable, domain-separated HMAC rather than the raw Auth0 subject', () => {
+      const secret = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
+      const fingerprintKey = crypto.hkdfSync(
+        'sha256',
+        secret,
+        Buffer.alloc(0),
+        'qurl-account-fingerprint:v1',
+        32,
+      );
+      const expected = crypto.createHmac('sha256', fingerprintKey)
+        .update('qurl-account-subject:auth0|abc')
+        .digest('hex');
+      expect(fingerprintQurlAccountSubject('auth0|abc')).toBe(
+        expected,
+      );
+      expect(fingerprintQurlAccountSubject('auth0|different'))
+        .not.toBe(fingerprintQurlAccountSubject('auth0|abc'));
+      expect(qurlAccountFingerprintKeyEpoch()).toBe(
+        crypto.createHmac('sha256', fingerprintKey)
+          .update('qurl-account-fingerprint-key-epoch:v1')
+          .digest('hex')
+          .slice(0, 12),
+      );
+    });
+
+    it('rejects a missing Auth0 subject', () => {
+      expect(() => fingerprintQurlAccountSubject('')).toThrow(TypeError);
+    });
+  });
+
   describe('round-trip', () => {
     it('signs and verifies a valid state', () => {
       const state = signQurlOAuthState('guild-1', 'user-2');

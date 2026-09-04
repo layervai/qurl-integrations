@@ -7,7 +7,8 @@
 //      rejected under 32 chars.
 //   3. sign/verify — round-trip, tamper rejection, and no-throw on
 //      malformed signature input
-//   4. test-harness gating — outside jest/CI the resolver throws
+//   4. derived-key signing — auxiliary HMACs are isolated from state signatures
+//   5. test-harness gating — outside jest/CI the resolver throws
 //      instead of silently minting with the random fallback
 //
 // The signer reads secrets from the config snapshot lazily on every
@@ -142,6 +143,32 @@ describe('oauth-state createStateSigner', () => {
       expect(signer.verify('data', 'abc')).toBe(false); // truncated
       expect(signer.verify('data', '')).toBe(false);
     });
+
+    it('signs auxiliary data under an HKDF-derived key', () => {
+      const signer = makeSigner();
+      const derivedKey = crypto.hkdfSync(
+        'sha256',
+        config.OAUTH_STATE_SECRET,
+        Buffer.alloc(0),
+        'audit:v1',
+        32,
+      );
+
+      expect(signer.signDerived('audit:v1', 'known-data'))
+        .toBe(hmacHex(derivedKey, 'known-data'));
+      expect(signer.signDerived('audit:v1', 'known-data'))
+        .not.toBe(signer.sign('known-data'));
+      expect(signer.signDerived('audit:v2', 'known-data'))
+        .not.toBe(signer.signDerived('audit:v1', 'known-data'));
+    });
+
+    it.each([undefined, '', 42])(
+      'rejects an empty or non-string derivation context: %p',
+      (info) => {
+        expect(() => makeSigner().signDerived(info, 'known-data'))
+          .toThrow(TypeError);
+      },
+    );
   });
 
   describe('test-harness fallback', () => {

@@ -15,6 +15,7 @@ process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-auth0-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-auth0-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
+process.env.AUTH0_EMAIL_CONNECTION = ' email ';
 process.env.DISCORD_CLIENT_ID = '234567890123456789';
 // Real SSM writes can accidentally carry surrounding whitespace. Config must
 // normalize it once so the Discord token exchange receives the actual secret.
@@ -37,10 +38,6 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
-  // Default: no prior config — Stage 2 is normally a first install.
-  // Re-install path (prior `configured_by` present → prompt=consent set
-  // on the chained Auth0 redirect) gets its own test below.
-  getGuildConfig: jest.fn().mockResolvedValue(undefined),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
 }));
@@ -55,7 +52,10 @@ jest.mock('../src/commands', () => ({
 const request = require('supertest');
 const { app } = require('../src/server');
 const config = require('../src/config');
-const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
+const {
+  signQurlOAuthState,
+  verifyQurlOAuthState,
+} = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_PKCE_COOKIE,
@@ -80,6 +80,22 @@ function discordCallback(query, { cookieState = DISCORD_INSTALL_STATE } = {}) {
     test.set('Cookie', `${DISCORD_INSTALL_SESSION_COOKIE}=${cookieState}`);
   }
   return test;
+}
+
+function mockSuccessfulDiscordIdentity() {
+  globalThis.fetch = jest.fn()
+    .mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve({
+        access_token: 'disc-token',
+        token_type: 'Bearer',
+        guild: { id: '123456789012345678' },
+      }),
+    })
+    .mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ id: '987654321098765432', username: 'admin' }),
+    });
 }
 
 function extractStyleNonce(res) {
@@ -586,17 +602,7 @@ describe('Discord install callback', () => {
     });
 
     it('302s to Auth0 on happy path with a valid qURL OAuth state and sets the CSRF cookie', async () => {
-      globalThis.fetch = jest.fn()
-        .mockResolvedValueOnce({
-          ok: true, status: 200,
-          json: () => Promise.resolve({
-            access_token: 'disc-token', token_type: 'Bearer', guild: { id: '123456789012345678' },
-          }),
-        })
-        .mockResolvedValueOnce({
-          ok: true, status: 200,
-          json: () => Promise.resolve({ id: '987654321098765432', username: 'admin' }),
-        });
+      mockSuccessfulDiscordIdentity();
       const res = await discordCallback('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678');
       expect(res.status).toBe(302);
       expect(clearedCookieHeader(
@@ -611,12 +617,11 @@ describe('Discord install callback', () => {
       // Auth0 scope must NOT include offline_access (refresh tokens not
       // stored/used; dropped per PR #177 review item 5).
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
-      // Round-9 item #1: Stage-2 ALWAYS sets prompt=consent (independent
-      // of first-install vs re-install). Stage-2 is the URL-forwarding
-      // attack surface (forwarded /oauth/discord/callback → confused
-      // deputy); the explicit consent screen is one extra defense
-      // gate before the qURL key is bound to the admin's account.
-      expect(loc.searchParams.get('prompt')).toBe('consent');
+      // Both halves are load-bearing on every Auth0 entry path: `login`
+      // asks Auth0 not to reuse its ambient session, and `consent` lets a
+      // setup re-run mint a new key.
+      expect(loc.searchParams.get('prompt')).toBe('login consent');
+      expect(loc.searchParams.get('connection')).toBe('email');
 
       // The state Discord callback minted must round-trip through the
       // qURL OAuth state verifier with the right guild + discord-user
@@ -679,6 +684,47 @@ describe('Discord install callback', () => {
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps every non-ephemeral Auth0 authorize parameter identical across both entry paths', async () => {
+      mockSuccessfulDiscordIdentity();
+      const installRes = await discordCallback(
+        '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678',
+      );
+      const setupState = signQurlOAuthState(
+        '123456789012345678',
+        '987654321098765432',
+      );
+      const setupRes = await request(app)
+        .get(`/oauth/qurl/start?state=${encodeURIComponent(setupState)}`);
+
+      expect(installRes.status).toBe(302);
+      expect(setupRes.status).toBe(302);
+      const stableParams = (location) => [...new URL(location).searchParams.entries()]
+        .filter(([key]) => !['state', 'code_challenge'].includes(key))
+        .sort(([left], [right]) => left.localeCompare(right));
+      expect(stableParams(installRes.headers.location))
+        .toEqual(stableParams(setupRes.headers.location));
+    });
+
+    it('omits the connection pin on Add to Discord when the setting is unset', async () => {
+      // The app and route capture this config module object at load time; the
+      // shared builder reads its current property value on every request.
+      const configuredConnection = config.AUTH0_EMAIL_CONNECTION;
+      config.AUTH0_EMAIL_CONNECTION = '';
+      try {
+        mockSuccessfulDiscordIdentity();
+        const res = await discordCallback(
+          '/oauth/discord/callback?code=ok-code&guild_id=123456789012345678',
+        );
+
+        expect(res.status).toBe(302);
+        const loc = new URL(res.headers.location);
+        expect(loc.searchParams.get('prompt')).toBe('login consent');
+        expect(loc.searchParams.get('connection')).toBeNull();
+      } finally {
+        config.AUTH0_EMAIL_CONNECTION = configuredConnection;
+      }
+    });
+
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
       // Defense vs trust-proxy regression: server.js sets `trust proxy`
       // so req.protocol reflects X-Forwarded-Proto from the ALB. Flipping
@@ -702,10 +748,10 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/Secure/);
     });
 
-    it('still sets prompt=consent when Discord omits the advisory guild hint', async () => {
+    it('still forces fresh login and consent when Discord omits the advisory guild hint', async () => {
       // Re-installs may omit the callback hint. Stage 2 must still use the
-      // authoritative token-response guild and keep the explicit Auth0
-      // consent screen.
+      // authoritative token-response guild and keep the shared fresh-login
+      // plus consent policy.
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -720,7 +766,7 @@ describe('Discord install callback', () => {
       const res = await discordCallback('/oauth/discord/callback?code=ok-code');
       expect(res.status).toBe(302);
       const loc = new URL(res.headers.location);
-      expect(loc.searchParams.get('prompt')).toBe('consent');
+      expect(loc.searchParams.get('prompt')).toBe('login consent');
     });
 
     it('cookie set at /oauth/discord/callback rides through to /oauth/qurl/callback (round-trip pin per round-9 #8)', async () => {
@@ -932,6 +978,55 @@ describe('discord-install — not configured', () => {
       }
     },
   );
+
+  it('returns 503 from both install routes when AUTH0_EMAIL_CONNECTION is rejected', async () => {
+    const saved = process.env.AUTH0_EMAIL_CONNECTION;
+    process.env.AUTH0_EMAIL_CONNECTION = 'email!';
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn(),
+          getGuildApiKey: jest.fn(),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+
+        const responses = await Promise.all([
+          supertest(freshApp).get('/oauth/discord/install'),
+          supertest(freshApp)
+            .get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678'),
+        ]);
+        for (const res of responses) {
+          expect(res.status).toBe(503);
+          expect(res.text).toMatch(/not configured/i);
+          expect(res.text).not.toContain('AUTH0_EMAIL_CONNECTION');
+          expect(cookieValue(
+            res.headers['set-cookie'],
+            DISCORD_INSTALL_SESSION_COOKIE,
+          )).toBeNull();
+        }
+      });
+    } finally {
+      if (saved === undefined) delete process.env.AUTH0_EMAIL_CONNECTION;
+      else process.env.AUTH0_EMAIL_CONNECTION = saved;
+    }
+  });
 
   it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n'])(
     'returns 503 while DISCORD_CLIENT_SECRET is the infrastructure placeholder (%j)',
