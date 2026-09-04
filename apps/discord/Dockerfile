@@ -13,6 +13,7 @@ ENV NODE_ENV=production
 # is needed. Possible now that the last native-compile dep
 # (better-sqlite3) is gone: `--ignore-scripts` is safe because every
 # remaining dependency is pure-JS with no postinstall steps.
+# `--no-audit` avoids duplicating the workflow's explicit dependency audit;
 # `--omit=dev` keeps jest + aws-sdk-client-mock out of the runtime
 # image; `npm cache clean --force` shaves the ~/.npm cache layer
 # (the prior two-stage build dropped this incidentally via the
@@ -20,7 +21,7 @@ ENV NODE_ENV=production
 RUN chown node:node /app
 USER node
 COPY --chown=node:node package*.json ./
-RUN npm ci --omit=dev --ignore-scripts \
+RUN npm ci --omit=dev --ignore-scripts --no-audit \
   && npm cache clean --force
 
 # Copy only what the runtime needs. A bare `COPY . .` invalidates the

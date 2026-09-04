@@ -893,6 +893,66 @@ type requiredWorkflowSpec struct {
 	pullRequestPaths []string
 }
 
+// TestDiscordDependencyInstallsSkipImplicitAudit keeps dependency installation
+// separate from the one explicit, production-only audit gate. npm ci enables
+// its own registry audit by default; leaving that enabled duplicates the
+// network-dependent request and can stall both the test job and image build
+// before the intentional gate reports a useful result.
+func TestDiscordDependencyInstallsSkipImplicitAudit(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, "discord.yml")
+	build, ok := workflow.Jobs["build-and-test"]
+	if !ok {
+		t.Fatal("discord.yml is missing build-and-test job")
+	}
+
+	var install, audit *step
+	for index := range build.Steps {
+		current := &build.Steps[index]
+		switch current.Name {
+		case "Install dependencies":
+			install = current
+		case "Audit dependencies":
+			audit = current
+		}
+	}
+	if install == nil || !slices.Contains(strings.Fields(install.Run), "--no-audit") {
+		t.Errorf("Discord workflow install still runs npm's implicit audit: %#v", install)
+	}
+	const explicitAudit = "node scripts/audit-production-dependencies.js"
+	if audit == nil || strings.TrimSpace(audit.Run) != explicitAudit {
+		t.Errorf("Discord workflow explicit audit = %#v, want %q", audit, explicitAudit)
+	}
+	if timeout, ok := audit.TimeoutMinutes.(int); !ok || timeout != 8 {
+		t.Errorf("Discord workflow explicit audit timeout = %#v, want 8 minutes", audit.TimeoutMinutes)
+	}
+	auditGateCount := 0
+	for _, job := range workflow.Jobs {
+		for index := range job.Steps {
+			if job.Steps[index].Name == "Audit dependencies" {
+				auditGateCount++
+			}
+		}
+	}
+	if auditGateCount != 1 {
+		t.Errorf("Discord workflow explicit audit gates = %d, want exactly one", auditGateCount)
+	}
+
+	dockerfilePath := filepath.Join("..", "..", "apps", "discord", "Dockerfile")
+	dockerfile, err := os.ReadFile(dockerfilePath) //nolint:gosec // Fixed repo-owned path.
+	if err != nil {
+		t.Fatalf("read %s: %v", dockerfilePath, err)
+	}
+	dockerInstalls := regexp.MustCompile(`(?m)^RUN npm ci[^\r\n]*`).FindAllString(string(dockerfile), -1)
+	if len(dockerInstalls) != 1 {
+		t.Fatalf("Discord Dockerfile npm ci commands = %q, want exactly one", dockerInstalls)
+	}
+	if !slices.Contains(strings.Fields(dockerInstalls[0]), "--no-audit") {
+		t.Errorf("Discord Dockerfile install still runs npm's implicit audit: %q", dockerInstalls[0])
+	}
+}
+
 var requiredWorkflowSpecs = []requiredWorkflowSpec{
 	{
 		name:                 "slack",
