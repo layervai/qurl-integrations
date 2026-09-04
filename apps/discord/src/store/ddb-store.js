@@ -905,12 +905,18 @@ async function flipRevokedAt(sendId, senderDiscordId) {
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
     }));
+    return true;
   } catch (err) {
-    // Swallow CCFE — either revoked_at is already set (idempotent
-    // success) or sender_discord_id doesn't match (ownership reject,
-    // matching the SQL `WHERE sender_discord_id = ?` filter). Any
-    // other error propagates.
     if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // Distinguish an idempotent same-owner revoke from a rejected/missing
+    // row. Callers must never report finalization unless the durable state is
+    // positively confirmed.
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      ConsistentRead: true,
+    }));
+    return res.Item?.sender_discord_id === senderDiscordId && Boolean(res.Item.revoked_at);
   }
 }
 
@@ -1001,7 +1007,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
   // revokeAllLinks establishes markSendRevoking first, but keep this branch for
   // direct store callers during mixed-version rollout/backward compatibility.
   // Scoped to senderDiscordId for defense-in-depth.
-  if (!hasSenderIdentity(senderDiscordId)) return;
+  if (!hasSenderIdentity(senderDiscordId)) return false;
   const cfgRes = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
@@ -1010,12 +1016,11 @@ async function markSendRevoked(sendId, senderDiscordId) {
   if (cfgRes.Item) {
     if (!hasSenderIdentity(cfgRes.Item.sender_discord_id)) {
       logger.warn('markSendRevoked rejected config without sender identity', { sendId });
-      return;
+      return false;
     }
-    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
-    if (cfgRes.Item.revoked_at) return; // idempotent
-    await flipRevokedAt(sendId, senderDiscordId);
-    return;
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false; // ownership check
+    if (cfgRes.Item.revoked_at) return true; // idempotent, durable state confirmed
+    return flipRevokedAt(sendId, senderDiscordId);
   }
 
   // Legacy — look up qurl_sends row, insert minimal config with revoked_at.
@@ -1036,7 +1041,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
   });
-  if (legacyItems.length === 0) return;
+  if (legacyItems.length === 0) return false;
   const legacy = legacyItems[0];
   try {
     await ddb.send(new PutCommand({
@@ -1051,6 +1056,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
     }));
+    return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
     // Race: between the GetCommand at the top of this function
@@ -1066,9 +1072,9 @@ async function markSendRevoked(sendId, senderDiscordId) {
     //     same owner-scoped + attribute_not_exists guard the
     //     primary path uses).
     //   - A racing markSendRevoked AND a non-revoke writer
-    //     interleave: flipRevokedAt's CCFE-swallow handles the
+    //     interleave: flipRevokedAt's CCFE re-read confirms the
     //     "already revoked" case idempotently.
-    await flipRevokedAt(sendId, senderDiscordId);
+    return flipRevokedAt(sendId, senderDiscordId);
   }
 }
 

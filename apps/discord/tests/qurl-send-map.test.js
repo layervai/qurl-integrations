@@ -109,7 +109,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
-  markSendRevoked: jest.fn(),
+  markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   getGuildApiKey: jest.fn(),

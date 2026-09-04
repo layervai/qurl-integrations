@@ -168,7 +168,7 @@ const mockDb = {
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
   markSendRevoking: jest.fn().mockResolvedValue(true),
-  markSendRevoked: jest.fn(),
+  markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
@@ -325,6 +325,8 @@ function makeInteraction(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDb.markSendRevoked.mockReset();
+  mockDb.markSendRevoked.mockResolvedValue(true);
   embedInstances.length = 0;
   sendCooldowns.clear();
 });

@@ -349,6 +349,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDb.markSendRevoking.mockReset();
   mockDb.markSendRevoking.mockResolvedValue(true);
+  mockDb.markSendRevoked.mockReset();
+  mockDb.markSendRevoked.mockResolvedValue(true);
   revokingSendLocks.clear();
   // clearAllMocks resets call records but NOT queued one-shot
   // implementations, so a `mockResolvedValueOnce` a test queues but the
@@ -1316,6 +1318,27 @@ describe('revokeAllLinks', () => {
     );
     expect(mockEditDM).toHaveBeenCalledWith(
       'channel-1', 'message-1', expect.any(Object),
+    );
+  });
+
+  it('leaves revocation retryable when the final revoked_at write is rejected without throwing', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-1',
+      recipient_discord_id: 'user-1',
+    }]);
+    mockDb.markSendRevoked.mockResolvedValueOnce(false);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-finalize-rejected', 'sender-1', 'apikey');
+
+    expect(result).toMatchObject({
+      finalizationFailed: true,
+      success: 1,
+      total: 1,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to finalize revoked send state',
+      { sendId: 'send-finalize-rejected', error: 'finalization was not confirmed' },
     );
   });
 
@@ -2659,7 +2682,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     mockDb.getSendItems.mockResolvedValueOnce([
       { recipient_discord_id: 'u1', resource_id: 'res-initial', dm_channel_id: 'dm-c', dm_message_id: 'dm-m' },
     ]);
-    mockDb.markSendRevoked.mockResolvedValue(undefined);
+    mockDb.markSendRevoked.mockResolvedValue(true);
     mockDeleteLink.mockReset();
     mockDeleteLink.mockImplementationOnce(async () => {
       revokeStarted.resolve();

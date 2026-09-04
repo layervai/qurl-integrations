@@ -8427,8 +8427,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     });
   }
 
-  // Operator-facing `success/total` are per-recipient; the audit event is
-  // per resource identity so it reflects the number of DELETE confirmations.
+  // Top-level `success/total` are per-resource DELETE confirmations; the
+  // nested `users` tally is the operator-facing per-recipient result.
   logger.info('Revoked send', {
     sendId,
     success: auditSuccess,
@@ -8569,7 +8569,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   let finalizationFailed = false;
   if (fullyConfirmed) {
     try {
-      await db.markSendRevoked(sendId, senderDiscordId);
+      const finalized = await db.markSendRevoked(sendId, senderDiscordId);
+      if (finalized !== true) throw new Error('finalization was not confirmed');
     } catch (err) {
       finalizationFailed = true;
       logger.error('Failed to finalize revoked send state', {

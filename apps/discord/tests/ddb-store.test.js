@@ -884,7 +884,7 @@ describe('qurl sends', () => {
       Item: { send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' },
     });
     ddbMock.on(UpdateCommand).resolves({});
-    await store.markSendRevoked('s1', 'sender');
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     // BOTH :t and :s must be populated — if :s is missing, DDB throws
     // ValidationException and every non-legacy revoke fails.
@@ -899,20 +899,43 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: 'already' },
     });
-    await store.markSendRevoked('s1', 'sender');
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: confirms an idempotent same-owner revoke after an update race', async () => {
+    const conflict = new Error('already finalized');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender' } })
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: 'now' } });
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('markSendRevoked: reports an update race that did not finalize the owned row', async () => {
+    const conflict = new Error('condition rejected');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'sender' } })
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'other', revoked_at: 'now' } });
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(false);
   });
 
   test('markSendRevoked: ownership check — rejects different sender', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'owner', resource_type: 'file' },
     });
-    await store.markSendRevoked('s1', 'attacker');
+    await expect(store.markSendRevoked('s1', 'attacker')).resolves.toBe(false);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   test('markSendRevoked: rejects a missing caller identity before reading or writing state', async () => {
-    await expect(store.markSendRevoked('s1', undefined)).resolves.toBeUndefined();
+    await expect(store.markSendRevoked('s1', undefined)).resolves.toBe(false);
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
@@ -923,7 +946,7 @@ describe('qurl sends', () => {
   test('markSendRevoked: rejects a config row without a stored sender identity', async () => {
     ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', resource_type: 'file' } });
 
-    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBeUndefined();
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(false);
 
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
@@ -935,7 +958,7 @@ describe('qurl sends', () => {
       Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '24h' }],
     });
     ddbMock.on(PutCommand).resolves({});
-    await store.markSendRevoked('s1', 'sender');
+    await expect(store.markSendRevoked('s1', 'sender')).resolves.toBe(true);
     const putCall = ddbMock.commandCalls(PutCommand)[0].args[0].input;
     expect(putCall.Item.revoked_at).toBeDefined();
     expect(putCall.Item.resource_type).toBe('file');
