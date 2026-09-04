@@ -218,6 +218,18 @@ app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
 }
+if (config.isQurlOAuthConfigured) {
+  const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
+  const auth0ConnectionMessage = auth0Connection
+    ? `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`
+    : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
+  // Stable event metadata supports exact grep/filter matching while the
+  // human-readable message remains self-sufficient if metadata is flattened.
+  logger.info(auth0ConnectionMessage, {
+    event: 'qurl_oauth_auth0_connection_policy',
+    connection: auth0Connection,
+  });
+}
 
 // Stage-2 Discord install callback. Mounts at /oauth/discord/callback —
 // the redirect_uri Discord OAuth2 hits when an admin clicks "Add to
@@ -229,14 +241,6 @@ app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
 }
-if (config.isQurlOAuthConfigured) {
-  const auth0Connection = config.AUTH0_EMAIL_CONNECTION || null;
-  const auth0ConnectionMessage = auth0Connection
-    ? `qURL OAuth authorize redirects pin Auth0 connection "${auth0Connection}"; the Auth0 application must enable it.`
-    : 'qURL OAuth authorize redirects send no connection pin (AUTH0_EMAIL_CONNECTION unset); upstream identity-provider sessions may still select an account until #1365.';
-  logger.info(auth0ConnectionMessage, { connection: auth0Connection });
-}
-
 // Error handler (Express requires the 4-arg signature; `next` unused)
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

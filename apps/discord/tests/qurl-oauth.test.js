@@ -34,6 +34,10 @@ jest.mock('../src/discord', () => ({
   notifyBadgeEarned: jest.fn(),
 }));
 
+jest.mock('../src/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+}));
+
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
@@ -65,6 +69,8 @@ const request = require('supertest');
 const { app } = require('../src/server');
 const db = require('../src/store');
 const discord = require('../src/discord');
+const logger = require('../src/logger');
+const { AUDIT_EVENTS } = require('../src/constants');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 const {
   QURL_OAUTH_SESSION_COOKIE,
@@ -478,6 +484,11 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
+      expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_GUILD_KEY_CONFIGURED, {
+        guild_id: 'guild-1',
+        configured_by: 'admin-2',
+        qurl_account_subject_hash: 'c5d09a77163332e87cd67f4fdec08160705a9a73940b9a4591b4b6f1cb53a61d',
+      });
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
 
       // Guild-key mint must send `kind: api_key` — qurl-service's

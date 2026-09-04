@@ -222,6 +222,11 @@ const AUDIT_EVENTS = {
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
 
+  // Emitted after an OAuth-minted guild key is persisted. The Auth0 subject is
+  // represented only by a stable SHA-256 fingerprint, so operators can audit
+  // owner changes while #1366 is outstanding without logging the subject.
+  QURL_GUILD_KEY_CONFIGURED: 'qurl_guild_key_configured',
+
   // Emitted by gateway-health.js on every /health response that
   // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
   // so the dashboard can split a clean WebSocket disconnect from a
