@@ -750,23 +750,34 @@ describe('qurl-oauth routes', () => {
   });
 });
 
-// Separate describe — exercises the not-configured 503 path. Uses
-// jest.isolateModules with the AUTH0_* env vars temporarily wiped so
-// the route's `config.isQurlOAuthConfigured` evaluates false on this
-// branch only. Without isolateModules, unsetting env after `config.js`
-// has been required wouldn't change the cached `isQurlOAuthConfigured`.
-describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
-  it('returns 503 with a "not configured" page on /start', async () => {
+// Separate describe — exercises both not-configured 503 paths. Uses
+// jest.isolateModules so the route's derived configuration is evaluated
+// against each temporary env shape. Without isolateModules, changing env
+// after `config.js` has been required would leave its cached flags unchanged.
+describe('qurl-oauth — not configured', () => {
+  it.each([
+    ['AUTH0_* is unset', {
+      AUTH0_DOMAIN: undefined,
+      AUTH0_CLIENT_ID: undefined,
+      AUTH0_CLIENT_SECRET: undefined,
+      AUTH0_AUDIENCE: undefined,
+      AUTH0_EMAIL_CONNECTION: undefined,
+    }],
+    ['AUTH0_EMAIL_CONNECTION is rejected', {
+      AUTH0_EMAIL_CONNECTION: 'email!',
+    }],
+  ])('returns 503 from /start and /callback when %s', async (_label, overrides) => {
     const saved = {
       AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
       AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
       AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
       AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+      AUTH0_EMAIL_CONNECTION: process.env.AUTH0_EMAIL_CONNECTION,
     };
-    delete process.env.AUTH0_DOMAIN;
-    delete process.env.AUTH0_CLIENT_ID;
-    delete process.env.AUTH0_CLIENT_SECRET;
-    delete process.env.AUTH0_AUDIENCE;
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     try {
       await jest.isolateModulesAsync(async () => {
         // Re-mock dependencies inside the isolate so the freshly-loaded
@@ -818,7 +829,10 @@ describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
       });
     } finally {
       // Restore env so subsequent tests run against the configured router.
-      Object.assign(process.env, saved);
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 });

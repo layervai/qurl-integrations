@@ -979,6 +979,55 @@ describe('discord-install — not configured', () => {
     },
   );
 
+  it('returns 503 from both install routes when AUTH0_EMAIL_CONNECTION is rejected', async () => {
+    const saved = process.env.AUTH0_EMAIL_CONNECTION;
+    process.env.AUTH0_EMAIL_CONNECTION = 'email!';
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn(),
+          getGuildApiKey: jest.fn(),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+
+        const responses = await Promise.all([
+          supertest(freshApp).get('/oauth/discord/install'),
+          supertest(freshApp)
+            .get('/oauth/discord/callback?code=ok-code&guild_id=123456789012345678'),
+        ]);
+        for (const res of responses) {
+          expect(res.status).toBe(503);
+          expect(res.text).toMatch(/not configured/i);
+          expect(res.text).not.toContain('AUTH0_EMAIL_CONNECTION');
+          expect(cookieValue(
+            res.headers['set-cookie'],
+            DISCORD_INSTALL_SESSION_COOKIE,
+          )).toBeNull();
+        }
+      });
+    } finally {
+      if (saved === undefined) delete process.env.AUTH0_EMAIL_CONNECTION;
+      else process.env.AUTH0_EMAIL_CONNECTION = saved;
+    }
+  });
+
   it.each(['PLACEHOLDER', ' PLACEHOLDER ', 'PLACEHOLDER\n'])(
     'returns 503 while DISCORD_CLIENT_SECRET is the infrastructure placeholder (%j)',
     async (placeholder) => {

@@ -29,6 +29,7 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
+  isAuth0EmailConnectionRejected: false,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -1145,6 +1146,28 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       );
     } finally {
       process.env.KEY_ENCRYPTION_KEY = savedKEK;
+    }
+  });
+
+  it('blocks setup instead of falling back to API-key paste for a rejected connection', async () => {
+    const config = require('../src/config');
+    const originalRejected = config.isAuth0EmailConnectionRejected;
+    config.isAuth0EmailConnectionRejected = true;
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeSetupInteraction();
+
+      await cmd.execute(interaction);
+
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: expect.stringMatching(
+          /setup is temporarily unavailable[\s\S]*AUTH0_EMAIL_CONNECTION/i,
+        ),
+        ephemeral: true,
+      });
+    } finally {
+      config.isAuth0EmailConnectionRejected = originalRejected;
     }
   });
 

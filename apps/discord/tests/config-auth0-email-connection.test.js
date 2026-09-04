@@ -42,7 +42,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
 
   it.each([
     'email connection', 'email!', '.email', '-email', 'email_', '_',
-    'PLACEHOLDER', 'a'.repeat(129),
+    'a'.repeat(129),
   ])(
     'warns and disables the connection pin for invalid value %p',
     (value) => {
@@ -76,6 +76,25 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     });
   });
 
+  it('treats the seeded SSM placeholder as intentionally unset', () => {
+    captureFreshConfig({
+      ...AUTH0_ENV,
+      AUTH0_EMAIL_CONNECTION: ' placeholder ',
+      DISCORD_CLIENT_ID: '234567890123456789',
+      DISCORD_CLIENT_SECRET: 'test-discord-secret',
+      BASE_URL: 'http://localhost:3000',
+    }, (config, warns) => {
+      expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
+      expect(config.isAuth0EmailConnectionRejected).toBe(false);
+      expect(config.isQurlOAuthConfigured).toBe(true);
+      expect(config.isDiscordInstallConfigured).toBe(true);
+      expect(config.discordInstallNotConfiguredReason).toBeNull();
+      expect(warns).toContainEqual(expect.stringContaining(
+        'reserved SSM placeholder; treating the connection pin as unset',
+      ));
+    });
+  });
+
   it('uses the shared SSM placeholder sentinel case-insensitively', () => {
     withFreshEnv({ AUTH0_EMAIL_CONNECTION: 'unset' }, () => {
       jest.doMock('../src/utils/ssm-placeholder', () => ({
@@ -83,6 +102,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
       }));
       try {
         expect(require('../src/config').AUTH0_EMAIL_CONNECTION).toBe('');
+        expect(require('../src/config').isAuth0EmailConnectionRejected).toBe(false);
       } finally {
         jest.dontMock('../src/utils/ssm-placeholder');
       }
@@ -92,7 +112,6 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
   it.each([
     ['email!', 'contains characters outside'],
     ['a'.repeat(129), 'exceeds the 128-character limit'],
-    ['PLACEHOLDER', 'reserved SSM placeholder'],
   ])('reports why invalid value %p was rejected without echoing it', (value, reason) => {
     captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (_config, warns) => {
       expect(warns.join('\n')).toContain(reason);

@@ -227,7 +227,9 @@ const auth0ConnectionPolicyMetadata = {
   oauth_configured: config.isQurlOAuthConfigured,
 };
 if (!config.isQurlOAuthConfigured) {
-  logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* incomplete/invalid or connection rejected). /qurl setup will fall back to the legacy modal-paste path.');
+  logger.info(config.isAuth0EmailConnectionRejected
+    ? 'qURL OAuth routes mounted in not-configured mode because AUTH0_EMAIL_CONNECTION was rejected. /qurl setup is blocked until the deployment value is corrected; other bot operations remain available.'
+    : 'qURL OAuth routes mounted in not-configured mode because AUTH0_* settings are incomplete/invalid. /qurl setup will fall back to the legacy modal-paste path.');
   let inactiveConnectionMessage;
   if (config.isAuth0EmailConnectionRejected) {
     inactiveConnectionMessage = 'AUTH0_EMAIL_CONNECTION was rejected and is inactive because qURL OAuth setup is disabled until the deployment value is corrected.';

@@ -234,11 +234,16 @@ function normalizeAuth0EmailConnection(raw) {
   // Be case-insensitive for hand-entered values while deriving the sentinel
   // itself from the infra-synchronized single source of truth.
   const isPlaceholder = value.toUpperCase() === SSM_PLACEHOLDER_SENTINEL.toUpperCase();
+  if (isPlaceholder) {
+    // Infra seeds optional SSM values before their consumers are enabled.
+    // Treat that rollout state exactly like unset so adding the task-env
+    // plumbing cannot take customer install offline between deploys.
+    console.warn('[config] AUTH0_EMAIL_CONNECTION matches the reserved SSM placeholder; treating the connection pin as unset.');
+    return '';
+  }
   let rejectionReason = null;
   if (value.length > 128) {
     rejectionReason = `received ${value.length} trimmed characters, which exceeds the 128-character limit`;
-  } else if (isPlaceholder) {
-    rejectionReason = 'matches the reserved SSM placeholder sentinel';
   } else if (!/^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$/.test(value)) {
     rejectionReason = 'contains characters outside the required [A-Za-z0-9_-] shape or does not begin and end with a letter or digit';
   }
@@ -254,8 +259,14 @@ function normalizeAuth0EmailConnection(raw) {
 
 const rawAuth0EmailConnection = process.env.AUTH0_EMAIL_CONNECTION;
 const auth0EmailConnection = normalizeAuth0EmailConnection(rawAuth0EmailConnection);
+const isAuth0EmailConnectionPlaceholder = (
+  (rawAuth0EmailConnection || '').trim().toUpperCase()
+  === SSM_PLACEHOLDER_SENTINEL.toUpperCase()
+);
 const isAuth0EmailConnectionRejected = Boolean(
-  (rawAuth0EmailConnection || '').trim() && !auth0EmailConnection,
+  (rawAuth0EmailConnection || '').trim()
+  && !auth0EmailConnection
+  && !isAuth0EmailConnectionPlaceholder,
 );
 
 // True when all four Auth0 env vars are present, AUTH0_DOMAIN is a

@@ -8621,6 +8621,18 @@ const commands = [
           return interaction.reply({ content: 'Only server administrators can configure qURL.', ephemeral: true });
         }
 
+        // A malformed explicit connection policy must not silently downgrade
+        // account binding to the legacy API-key paste flow. Keep unrelated
+        // gateway/send operations available, but make setup fail closed until
+        // the operator corrects the deployment value.
+        if (config.isAuth0EmailConnectionRejected) {
+          return interaction.reply({
+            content: '❌ **qURL setup is temporarily unavailable.**\n\n'
+              + 'The bot operator must correct the invalid `AUTH0_EMAIL_CONNECTION` deployment setting.',
+            ephemeral: true,
+          });
+        }
+
         // OAuth path — preferred when configured.
         if (config.isQurlOAuthConfigured) {
           // Fail-fast on encryption-at-rest BEFORE minting the OAuth
