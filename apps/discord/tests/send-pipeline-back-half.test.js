@@ -1333,6 +1333,33 @@ describe('revokeAllLinks', () => {
     expect(result.failureUserIds.sort()).toEqual(['u-1', 'u-2']);
   });
 
+  it('keeps malformed rows without resource_id retryable without calling deleteLink', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-ok', recipient_discord_id: 'u-ok' },
+      { resource_id: '   ', recipient_discord_id: 'u-missing' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-malformed', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-ok', 'apikey');
+    expect(result).toMatchObject({
+      success: 1,
+      total: 2,
+      successUserIds: ['u-ok'],
+      failureUserIds: ['u-missing'],
+    });
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-malformed', success: 1, total: 2,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot revoke send row with missing resource identity',
+      { sendId: 'send-malformed', affectedRecipients: 1 },
+    );
+  });
+
   // Failure-wins semantics: if a recipient has rows on multiple
   // resources and any DELETE fails, they count as failure (not
   // success) — better to tell the operator "alice is partial" than

@@ -811,7 +811,7 @@ describe('/qurl revoke subcommand', () => {
       c => c[0]?.components?.length > 0,
     );
     const option = menuCall[0].components[0].components[0].addOptions.mock.calls[0][0][0];
-    expect(option.description).toMatch(/^Retry needed ·/);
+    expect(option.description).toMatch(/^Retry ·/);
     expect(option.description.length).toBeLessThanOrEqual(100);
   });
 

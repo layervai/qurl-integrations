@@ -3435,7 +3435,7 @@ function formatRevokeDescription(s) {
   const when = new Date(s.created_at).toLocaleString();
   const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
   const expiry = `expires ${s.expires_in}`;
-  const retry = s.revocation_pending ? 'Retry needed · ' : '';
+  const retry = s.revocation_pending ? 'Retry · ' : '';
   const base = `${retry}${when} · ${delivery} · ${expiry}`;
   // If there's space left, append a truncated message preview so users
   // can disambiguate sends with the same filename but different notes.
@@ -3623,10 +3623,11 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
   if (!revoked.barrierEstablished) {
-    return interaction.update({
+    await interaction.update({
       content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
       components: [],
     });
+    return;
   }
 
   // Slash-command path lacks the in-scope `recipients` array needed
@@ -8226,7 +8227,7 @@ function revokeRenderFallback(sendId, success, total, err) {
     sendId,
     success,
     total,
-    error: err.message,
+    error: err?.message ?? String(err),
   });
   // DELETEs may already have completed. Avoid a dead Discord interaction
   // while making no claim about an outcome whose counts are inconsistent.
@@ -8326,7 +8327,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
   // recipients per resource, so the same resource_id is shared.
   const byResource = new Map();
+  const invalidResourceRecipientIds = new Set();
   for (const item of items) {
+    if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
+      invalidResourceRecipientIds.add(item.recipient_discord_id);
+      continue;
+    }
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
@@ -8348,7 +8354,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // tell the operator "alice is partial" via failure than misleadingly
   // claim full success.
   const seenSuccess = new Set();
-  const seenFailure = new Set();
+  const seenFailure = new Set(invalidResourceRecipientIds);
+  if (invalidResourceRecipientIds.size > 0) {
+    logger.error('Cannot revoke send row with missing resource identity', {
+      sendId,
+      affectedRecipients: invalidResourceRecipientIds.size,
+    });
+  }
   for (let i = 0; i < results.length; i++) {
     const [resourceId, recipientIds] = resourceEntries[i];
     if (results[i].status === 'fulfilled') {
@@ -8366,8 +8378,11 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const success = successUserIds.length;
   const total = totalUsers;
-  // Audit metric is per-resource (DELETE call), not per-recipient.
-  const auditTotal = byResource.size;
+  // Audit metric is per resource identity requiring confirmation, not per
+  // recipient. Missing identity is one synthetic failed group: it contributes
+  // to the total without calling deleteLink with an unusable value, and keeps
+  // the send retryable for operator remediation.
+  const auditTotal = byResource.size + (invalidResourceRecipientIds.size > 0 ? 1 : 0);
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
 
   // Emit audit after DELETE attempts so the tally reflects actual qURL API

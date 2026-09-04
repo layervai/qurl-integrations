@@ -857,15 +857,18 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
-  // Pending revocations are urgent, but a permanently-unconfirmable row must
-  // not displace every live send from the bounded Discord menu. Keep at least
-  // one live slot whenever the fetched candidate set contains one. #1376
-  // tracks an explicit audited dismissal path for old pending rows.
+  // Pending revocations are urgent, but permanently-unconfirmable rows must
+  // not dominate the bounded Discord menu. When both kinds exist, reserve at
+  // least half the slots for live sends. A one-slot caller keeps the pending
+  // send because it is the only path to retry the in-progress destructive
+  // operation. #1376 tracks an explicit audited dismissal path.
   const newestFirst = (a, b) => (b.created_at || '').localeCompare(a.created_at || '');
   const pending = rows.filter(row => row.revocation_pending).sort(newestFirst);
   const live = rows.filter(row => !row.revocation_pending).sort(newestFirst);
+  if (pending.length === 0) return live.slice(0, limit);
   if (live.length === 0) return pending.slice(0, limit);
-  const pendingLimit = Math.max(0, limit - 1);
+  if (limit === 1) return pending.slice(0, 1);
+  const pendingLimit = Math.max(1, Math.floor(limit / 2));
   const selectedPending = pending.slice(0, pendingLimit);
   return [
     ...selectedPending,
@@ -935,7 +938,13 @@ async function markSendRevoking(sendId, senderDiscordId) {
     ConsistentRead: true,
   }));
   if (cfgRes.Item) {
-    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) {
+      if (typeof cfgRes.Item.sender_discord_id !== 'string'
+          || cfgRes.Item.sender_discord_id.length === 0) {
+        logger.warn('markSendRevoking rejected config without sender identity', { sendId });
+      }
+      return false;
+    }
     if (cfgRes.Item.revoked_at) return false;
     if (cfgRes.Item.revoking_at) return true;
     return flipRevokingAt(sendId, senderDiscordId);

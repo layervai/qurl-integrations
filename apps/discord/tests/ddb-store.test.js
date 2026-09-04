@@ -69,6 +69,7 @@ process.env.DDB_TABLE_PREFIX = 'test-prefix-';
 process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
+const logger = require('../src/logger');
 
 beforeEach(() => {
   ddbMock.reset();
@@ -692,9 +693,29 @@ describe('qurl sends', () => {
 
     const result = await store.getRecentSends('sender', 5);
 
-    expect(result).toHaveLength(5);
-    expect(result.filter(row => row.revocation_pending)).toHaveLength(4);
-    expect(result.at(-1).send_id).toBe('live-1');
+    expect(result).toHaveLength(3);
+    expect(result.filter(row => row.revocation_pending)).toHaveLength(2);
+    expect(result.filter(row => !row.revocation_pending)).toHaveLength(1);
+  });
+
+  test('getRecentSends: a one-slot menu keeps the retryable pending send visible', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({ Items: [
+          { send_id: 'pending', sender_discord_id: 'sender', created_at: '2026-09-03T15:00:00Z' },
+          { send_id: 'live', sender_discord_id: 'sender', created_at: '2026-09-03T14:00:00Z' },
+        ] });
+      }
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+      Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
+    }));
+
+    const result = await store.getRecentSends('sender', 1);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ send_id: 'pending', revocation_pending: true });
   });
 
   test('markSendRevoking: records an idempotent owner-scoped intent without setting revoked_at', async () => {
@@ -726,6 +747,19 @@ describe('qurl sends', () => {
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(allowed).toBe(_case === 'already revoking');
+  });
+
+  test('markSendRevoking: logs a malformed config row with no sender identity', async () => {
+    logger.warn.mockClear();
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', resource_type: 'file' } });
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'markSendRevoking rejected config without sender identity',
+      { sendId: 's1' },
+    );
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   test('markSendRevoking: rejects an unknown or foreign legacy send without creating a barrier', async () => {
