@@ -87,6 +87,10 @@ const SUBJECT_FINGERPRINT_SECRET = process.env.QURL_OAUTH_STATE_SECRET
 const AUTH0_ABC_FINGERPRINT = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_SECRET)
   .update('qurl-account-subject:auth0|abc')
   .digest('hex');
+const SUBJECT_FINGERPRINT_KEY_EPOCH = crypto.createHmac('sha256', SUBJECT_FINGERPRINT_SECRET)
+  .update('qurl-account-fingerprint-key-epoch')
+  .digest('hex')
+  .slice(0, 12);
 
 function cookieFor(state, codeVerifier = TEST_PKCE_VERIFIER) {
   return `${QURL_OAUTH_SESSION_COOKIE}=${encodeURIComponent(state)}; `
@@ -494,6 +498,7 @@ describe('qurl-oauth routes', () => {
         guild_id: 'guild-1',
         configured_by: 'admin-2',
         qurl_account_subject_fingerprint: AUTH0_ABC_FINGERPRINT,
+        qurl_account_fingerprint_key_epoch: SUBJECT_FINGERPRINT_KEY_EPOCH,
       });
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
 

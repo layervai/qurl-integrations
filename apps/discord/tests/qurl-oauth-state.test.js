@@ -19,6 +19,7 @@ const {
   signQurlOAuthState,
   verifyQurlOAuthState,
   fingerprintQurlAccountSubject,
+  qurlAccountFingerprintKeyEpoch,
   STATE_TTL_SECONDS,
 } = require('../src/utils/qurl-oauth-state');
 
@@ -34,6 +35,12 @@ describe('qurl-oauth-state', () => {
       );
       expect(fingerprintQurlAccountSubject('auth0|different'))
         .not.toBe(fingerprintQurlAccountSubject('auth0|abc'));
+      expect(qurlAccountFingerprintKeyEpoch()).toBe(
+        crypto.createHmac('sha256', secret)
+          .update('qurl-account-fingerprint-key-epoch')
+          .digest('hex')
+          .slice(0, 12),
+      );
     });
 
     it('rejects a missing Auth0 subject', () => {

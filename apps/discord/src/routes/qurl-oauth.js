@@ -13,6 +13,7 @@ const { sendDM } = require('../discord');
 const {
   verifyQurlOAuthState,
   fingerprintQurlAccountSubject,
+  qurlAccountFingerprintKeyEpoch,
 } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
@@ -461,6 +462,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     guild_id: guildId,
     configured_by: discordUserId,
     qurl_account_subject_fingerprint: qurlAccountSubjectFingerprint || null,
+    qurl_account_fingerprint_key_epoch: qurlAccountFingerprintKeyEpoch(),
   });
 
   // 3a. Register a per-guild qurl.accessed webhook subscription (BYOK

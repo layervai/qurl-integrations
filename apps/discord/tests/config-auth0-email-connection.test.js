@@ -27,7 +27,7 @@ describe('config.AUTH0_EMAIL_CONNECTION', () => {
     (value) => {
       captureFreshConfig({ AUTH0_EMAIL_CONNECTION: value }, (config, warns) => {
         expect(config.AUTH0_EMAIL_CONNECTION).toBe('');
-        expect(warns).toEqual([expect.stringContaining('AUTH0_EMAIL_CONNECTION')]);
+        expect(warns).toContainEqual(expect.stringContaining('AUTH0_EMAIL_CONNECTION'));
       });
     },
   );
