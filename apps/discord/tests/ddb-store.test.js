@@ -642,16 +642,39 @@ describe('qurl sends', () => {
     });
   });
 
+  test('getRecentSends: live sends sort ahead of permanently pending retries', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({
+          Items: [
+            { send_id: 'pending', sender_discord_id: 'sender', created_at: '2026-09-03T12:00:00Z' },
+            { send_id: 'live', sender_discord_id: 'sender', created_at: '2026-09-03T11:00:00Z' },
+          ],
+        });
+      }
+      return Promise.resolve({ Items: [{ recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => Promise.resolve({
+      Item: input.Key.send_id === 'pending' ? { revoking_at: 'now' } : {},
+    }));
+
+    const result = await store.getRecentSends('sender', 1);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].send_id).toBe('live');
+  });
+
   test('markSendRevoking: records an idempotent owner-scoped intent without setting revoked_at', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' },
     });
     ddbMock.on(UpdateCommand).resolves({});
 
-    await store.markSendRevoking('s1', 'sender');
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(true);
 
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.UpdateExpression).toMatch(/revoking_at/);
+    expect(input.UpdateExpression).toContain('if_not_exists(revoking_at, :t)');
     expect(input.UpdateExpression).not.toMatch(/revoked_at\s*=/);
     expect(input.ConditionExpression).toMatch(/sender_discord_id = :s/);
     expect(input.ConditionExpression).toMatch(/attribute_not_exists\(revoked_at\)/);
@@ -662,27 +685,44 @@ describe('qurl sends', () => {
     ['already revoking', { sender_discord_id: 'sender', revoking_at: 'already' }, 'sender'],
     ['already revoked', { sender_discord_id: 'sender', revoked_at: 'already' }, 'sender'],
     ['owned by another sender', { sender_discord_id: 'owner' }, 'attacker'],
-  ])('markSendRevoking: no-ops when the row is %s', async (_case, state, caller) => {
+  ])('markSendRevoking: reports whether retry is allowed when the row is %s', async (_case, state, caller) => {
     ddbMock.on(GetCommand).resolves({ Item: { send_id: 's1', ...state } });
 
-    await store.markSendRevoking('s1', caller);
+    const allowed = await store.markSendRevoking('s1', caller);
 
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(allowed).toBe(_case === 'already revoking');
+  });
+
+  test('markSendRevoking: rejects an unknown or foreign legacy send without creating a barrier', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await expect(store.markSendRevoking('unknown', 'sender')).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   test('markSendRevoking: inserts a minimal retryable intent row for legacy sends', async () => {
     ddbMock.on(GetCommand).resolves({});
     ddbMock.on(QueryCommand).resolves({
-      Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '30m' }],
+      Items: [{
+        send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '30m',
+        attachment_name: 'incident.txt', location_name: 'HQ', personal_message: 'review this',
+        created_at: '2026-09-01T12:00:00Z',
+      }],
     });
     ddbMock.on(PutCommand).resolves({});
 
-    await store.markSendRevoking('s1', 'sender');
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(true);
 
     const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
     expect(input.Item).toMatchObject({
       send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '30m',
+      attachment_name: 'incident.txt', location_name: 'HQ', personal_message: 'review this',
+      created_at: '2026-09-01T12:00:00Z',
     });
     expect(input.Item.revoking_at).toBeDefined();
     expect(input.Item.revoked_at).toBeUndefined();
@@ -719,6 +759,23 @@ describe('qurl sends', () => {
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.UpdateExpression).toMatch(/revoking_at/);
     expect(input.ConditionExpression).toMatch(/attribute_not_exists\(revoked_at\)/);
+  });
+
+  test('markSendRevoking: verifies a raced conditional failure did not create a foreign barrier', async () => {
+    const conflict = new Error('exists');
+    conflict.name = 'ConditionalCheckFailedException';
+    ddbMock.on(GetCommand)
+      .resolvesOnce({})
+      .resolvesOnce({ Item: { send_id: 's1', sender_discord_id: 'other', revoking_at: 'now' } });
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' }],
+    });
+    ddbMock.on(PutCommand).rejects(conflict);
+    ddbMock.on(UpdateCommand).rejects(conflict);
+
+    await expect(store.markSendRevoking('s1', 'sender')).resolves.toBe(false);
+
+    expect(ddbMock.commandCalls(GetCommand)[1].args[0].input.ConsistentRead).toBe(true);
   });
 
   test('markSendRevoked: primary path includes :s in ExpressionAttributeValues (regression guard)', async () => {
@@ -977,14 +1034,14 @@ describe('qurl sends', () => {
   });
 
   test.each([
-    ['revoked_at', { revoked_at: 'when' }],
-    ['revoking_at', { revoking_at: 'when' }],
-  ])('getSendRenderState: terminal=true when %s is set; qurlIds passthrough', async (_field, revocationState) => {
+    ['revoked_at', true, { revoked_at: 'when' }],
+    ['revoking_at', false, { revoking_at: 'when' }],
+  ])('getSendRenderState: %s yields terminal=%s', async (_field, terminal, revocationState) => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', ...revocationState, confirm_qurl_ids: ['q_a', 'q_b'] },
     });
     const viaRevoke = await store.getSendRenderState('s1');
-    expect(viaRevoke.terminal).toBe(true);
+    expect(viaRevoke.terminal).toBe(terminal);
     expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
     // defaults when fields absent
     expect(viaRevoke.expectedCount).toBe(0);

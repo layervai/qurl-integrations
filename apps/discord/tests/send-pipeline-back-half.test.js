@@ -127,7 +127,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
-  markSendRevoking: jest.fn(),
+  markSendRevoking: jest.fn().mockResolvedValue(true),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -226,6 +226,7 @@ const {
   monitorLinkStatus,
   revokeAllLinks,
   renderRevokeMsg,
+  safeRevokeHeader,
   renderSendConfirm,
   renderViewCounter,
   REVOKE_TRUNC_LIMIT,
@@ -1154,6 +1155,17 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
 
+  it('does not read or delete resources when the durable revoke barrier rejects an unknown or foreign send', async () => {
+    mockDb.markSendRevoking.mockResolvedValueOnce(false);
+
+    const result = await revokeAllLinks('foreign-send', 'sender-1', 'apikey');
+
+    expect(result).toEqual({ success: 0, total: 0, successUserIds: [], failureUserIds: [] });
+    expect(mockDb.getSendItems).not.toHaveBeenCalled();
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
   it('emits revoke_success audit event with success/total tally when at least one link revoked', async () => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
     mockDeleteLink.mockResolvedValue(undefined);
@@ -1237,7 +1249,7 @@ describe('revokeAllLinks', () => {
       dm_channel_id: 'channel-1',
       dm_message_id: 'message-1',
     }]);
-    mockDb.markSendRevoking.mockResolvedValueOnce(undefined);
+    mockDb.markSendRevoking.mockResolvedValueOnce(true);
     mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
     mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1927,9 +1939,14 @@ describe('renderRevokeMsg', () => {
     expect(r.content).toContain('Revoked for: alice, bob, carol, dave');
   });
 
-  it('throws instead of rendering an undefined authoritative success count', () => {
-    expect(() => renderRevokeMsg('send-missing', ['alice'], 1, false))
-      .toThrow(/success and total must be/);
+  it('returns a truthful fallback for an undefined authoritative success count', () => {
+    const rendered = renderRevokeMsg('send-missing', ['alice'], 1, false);
+    expect(rendered.content).toMatch(/could not display the revocation result/i);
+    expect(rendered.row).toBeNull();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to render revoke result',
+      expect.objectContaining({ sendId: 'send-missing', total: 1 }),
+    );
   });
 });
 
@@ -1963,6 +1980,14 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
     [0.5, 1],
   ])('rejects invalid success/total pair (%s/%s)', (success, total) => {
     expect(() => buildRevokeHeader(success, total)).toThrow(/success and total must be/);
+  });
+
+  it('keeps the slash-command interaction truthful when result counts are inconsistent', () => {
+    expect(safeRevokeHeader('send-bad-count', 2, 1)).toMatch(/could not display the revocation result/i);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to render revoke result',
+      expect.objectContaining({ sendId: 'send-bad-count', success: 2, total: 1 }),
+    );
   });
 });
 

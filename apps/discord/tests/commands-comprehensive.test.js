@@ -167,7 +167,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
-  markSendRevoking: jest.fn(),
+  markSendRevoking: jest.fn().mockResolvedValue(true),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -812,6 +812,35 @@ describe('/qurl revoke subcommand', () => {
     );
     const option = menuCall[0].components[0].components[0].addOptions.mock.calls[0][0][0];
     expect(option.description).toMatch(/^Retry needed ·/);
+    expect(option.description.length).toBeLessThanOrEqual(100);
+  });
+
+  it('caps a retry description at Discord\'s 100-character option limit', async () => {
+    mockDb.getRecentSends.mockReturnValue([{
+      send_id: 'send-pending-long',
+      resource_type: 'file',
+      target_type: 'user',
+      recipient_count: Number.MAX_SAFE_INTEGER,
+      delivered_count: Number.MAX_SAFE_INTEGER,
+      expires_in: 'x'.repeat(300),
+      created_at: new Date().toISOString(),
+      personal_message: 'y'.repeat(300),
+      revocation_pending: true,
+    }]);
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const menuCall = interaction.editReply.mock.calls.find(c => c[0]?.components?.length > 0);
+    const option = menuCall[0].components[0].components[0].addOptions.mock.calls[0][0][0];
+    expect(option.description).toHaveLength(100);
   });
 
   it('renders the menu when supersedeOrCreate claims the slot from a stale predecessor', async () => {

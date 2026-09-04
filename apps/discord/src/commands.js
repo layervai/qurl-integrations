@@ -3610,7 +3610,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   // to resolve names → no "Revoked for: …" line here. Operators
   // wanting names should use the inline button after a send.
   await interaction.update({
-    content: buildRevokeHeader(revoked.success, revoked.total),
+    content: safeRevokeHeader(sendId, revoked.success, revoked.total),
     components: [],
   });
 }
@@ -8177,7 +8177,16 @@ function revokeReplyPayload(rendered) {
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
 function renderRevokeMsg(sendId, names, total, showAll, success) {
-  const data = renderRevokeContent({ names, total, showAll, success });
+  let data;
+  try {
+    data = renderRevokeContent({ names, total, showAll, success });
+  } catch (err) {
+    data = {
+      content: revokeRenderFallback(sendId, success, total, err),
+      needsExpand: false,
+      attachmentText: null,
+    };
+  }
   const row = data.needsExpand
     ? new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -8187,6 +8196,26 @@ function renderRevokeMsg(sendId, names, total, showAll, success) {
     )
     : null;
   return { ...data, row };
+}
+
+function revokeRenderFallback(sendId, success, total, err) {
+  logger.error('Failed to render revoke result', {
+    sendId,
+    success,
+    total,
+    error: err.message,
+  });
+  // DELETEs may already have completed. Avoid a dead Discord interaction
+  // while making no claim about an outcome whose counts are inconsistent.
+  return 'qURL could not display the revocation result. Run `/qurl revoke` to check and retry any unconfirmed links.';
+}
+
+function safeRevokeHeader(sendId, success, total) {
+  try {
+    return buildRevokeHeader(success, total);
+  } catch (err) {
+    return revokeRenderFallback(sendId, success, total, err);
+  }
 }
 
 // Builds the post-send confirmation body. When the full inline render
@@ -8250,7 +8279,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // rows. getSendItems uses a strongly consistent base-table query, so an Add
   // transaction that committed before this barrier is included; one racing
   // after it fails the revoking_at condition check.
-  await db.markSendRevoking(sendId, senderDiscordId);
+  const barrierEstablished = await db.markSendRevoking(sendId, senderDiscordId);
+  // The durable store returns false for unknown, finalized, or foreign sends.
+  // Never issue a DELETE unless it positively confirms the barrier.
+  if (!barrierEstablished) {
+    return { success: 0, total: 0, successUserIds: [], failureUserIds: [] };
+  }
 
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
   // revoke step can edit each strict-success recipient's DM in place.
@@ -9495,6 +9529,7 @@ module.exports = {
       monitorLinkStatus,
       revokeAllLinks,
       renderRevokeMsg,
+      safeRevokeHeader,
       renderSendConfirm,
       // Pure view-counter render, re-exported (defined in
       // ./view-counter-render) so the wording/floor contract is pinned

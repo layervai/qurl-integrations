@@ -854,7 +854,13 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       revocation_pending: Boolean(cfg?.revoking_at),
     });
   }
-  rows.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  // Keep live sends actionable even when old, permanently-unconfirmable
+  // revocations accumulate. Pending retries fill only remaining menu slots;
+  // #1376 tracks an explicit audited dismissal path for those rows.
+  rows.sort((a, b) => (
+    Number(a.revocation_pending) - Number(b.revocation_pending)
+    || (b.created_at || '').localeCompare(a.created_at || '')
+  ));
   return rows.slice(0, limit);
 }
 
@@ -895,10 +901,20 @@ async function flipRevokingAt(sendId, senderDiscordId) {
       },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
     }));
+    return true;
   } catch (err) {
-    // Already-finalized and wrong-owner rows both fail closed. Repeated
-    // revocation attempts against an existing revoking_at are idempotent.
     if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // A concurrent writer may have finalized the send or inserted a
+    // different owner's config row. Verify the durable barrier instead of
+    // assuming the failed conditional write established it.
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      ConsistentRead: true,
+    }));
+    return res.Item?.sender_discord_id === senderDiscordId
+      && Boolean(res.Item.revoking_at)
+      && !res.Item.revoked_at;
   }
 }
 
@@ -909,10 +925,10 @@ async function markSendRevoking(sendId, senderDiscordId) {
     ConsistentRead: true,
   }));
   if (cfgRes.Item) {
-    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return;
-    if (cfgRes.Item.revoked_at || cfgRes.Item.revoking_at) return;
-    await flipRevokingAt(sendId, senderDiscordId);
-    return;
+    if (cfgRes.Item.sender_discord_id !== senderDiscordId) return false;
+    if (cfgRes.Item.revoked_at) return false;
+    if (cfgRes.Item.revoking_at) return true;
+    return flipRevokingAt(sendId, senderDiscordId);
   }
 
   const legacyItems = await queryAll({
@@ -922,7 +938,7 @@ async function markSendRevoking(sendId, senderDiscordId) {
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
   });
-  if (legacyItems.length === 0) return;
+  if (legacyItems.length === 0) return false;
   const legacy = legacyItems[0];
   try {
     await ddb.send(new PutCommand({
@@ -932,14 +948,18 @@ async function markSendRevoking(sendId, senderDiscordId) {
         sender_discord_id: senderDiscordId,
         resource_type: legacy.resource_type,
         expires_in: legacy.expires_in || '24h',
+        attachment_name: legacy.attachment_name,
+        location_name: legacy.location_name,
+        personal_message: legacy.personal_message,
         revoking_at: nowIso(),
-        created_at: nowIso(),
+        created_at: legacy.created_at || nowIso(),
       },
       ConditionExpression: 'attribute_not_exists(send_id)',
     }));
+    return true;
   } catch (err) {
     if (err.name !== 'ConditionalCheckFailedException') throw err;
-    await flipRevokingAt(sendId, senderDiscordId);
+    return flipRevokingAt(sendId, senderDiscordId);
   }
 }
 
@@ -1143,7 +1163,9 @@ async function getSendRenderState(sendId) {
     lastRenderedAt: row.last_rendered_at ?? 0,
     baseMsg: row.confirm_base_msg ?? undefined,
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
-    terminal: Boolean(row.revoking_at || row.revoked_at) || row.confirm_terminal === true,
+    // revoking_at is intent, not completion: a failed DELETE may leave links
+    // live, so view updates must continue until revoked_at is confirmed.
+    terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
   };
 }
 
