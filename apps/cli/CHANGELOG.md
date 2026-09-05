@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/layervai/qurl-integrations/compare/v2.3.0...v2.3.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **cli:** recover reauthorized headless sharing state ([#1388](https://github.com/layervai/qurl-integrations/issues/1388)) ([100e8ad](https://github.com/layervai/qurl-integrations/commit/100e8adee4b4d3966adc142f878b0b05f0a592ea))
+
 ## [2.3.0](https://github.com/layervai/qurl-integrations/compare/v2.2.0...v2.3.0) (2026-09-05)
 
 
