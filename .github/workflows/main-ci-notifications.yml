@@ -3,7 +3,8 @@ name: Main CI Notifications
 # Deploy workflows already notify once a build reaches qurl-integrations-infra.
 # This source-repo notifier covers the earlier failure mode: post-merge CI fails
 # before `trigger-deploy` can dispatch, leaving sandbox on the previous image
-# with no deploy notification to explain why.
+# with no deploy notification to explain why. It also closes an alert when the
+# same workflow run recovers on a later attempt.
 #
 # GitHub only runs workflow_run handlers from the default branch's copy of this
 # file, so this cannot notify for main-branch CI failures that happen before the
@@ -41,11 +42,22 @@ jobs:
     # so a burst of merges to main routinely cancels intermediate runs by
     # supersession (#1022). Keep cancelled runs in scope: the step below proves
     # whether a newer run carries the commit and renders that benign case grey;
-    # a cancellation without a verified successor remains an amber alert.
+    # a cancellation without a verified successor remains an amber alert. A
+    # successful rerun is admitted only so the step can verify that the directly
+    # preceding attempt was one of the outcomes that this workflow notified.
+    # A cancelled attempt can have produced a grey supersession notice instead
+    # of an amber alert. We accept a rare green follow-up after that grey notice
+    # because the later workflow_run event does not retain the Slack outcome.
     if: >-
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       contains(fromJson('["push","schedule"]'), github.event.workflow_run.event) &&
-      contains(fromJson('["failure","timed_out","cancelled"]'), github.event.workflow_run.conclusion)
+      (
+        contains(fromJson('["failure","timed_out","cancelled"]'), github.event.workflow_run.conclusion) ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.run_attempt > 1
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -60,6 +72,8 @@ jobs:
           EVENT: ${{ github.event.workflow_run.event }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -71,8 +85,40 @@ jobs:
           # Fail red instead of no-oping: if this secret is missing, the main
           # CI notification surface is broken and needs operator attention.
           if [[ -z "${SLACK_WEBHOOK_URL}" ]]; then
-            echo "::error::SLACK_WEBHOOK_URL is required for main CI failure notifications."
+            echo "::error::SLACK_WEBHOOK_URL is required for main CI notifications."
             exit 1
+          fi
+
+          recovered_from=""
+          previous_attempt=""
+          if [[ "$CONCLUSION" == "success" ]]; then
+            if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || (( RUN_ATTEMPT <= 1 )); then
+              echo "::error::successful recovery notification requires run attempt 2 or later"
+              exit 1
+            fi
+            previous_attempt="$((RUN_ATTEMPT - 1))"
+            if ! recovered_from="$(gh api --method GET \
+              "repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/${previous_attempt}" \
+              --jq '.conclusion // empty')"; then
+              # An alert can degrade safely when its lookup fails, but an
+              # all-clear must never be sent without evidence.
+              echo "::error::could not verify the preceding workflow attempt"
+              exit 1
+            fi
+            # TODO(upstream-contract): Keep this exhaustive partition in sync
+            # with GitHub's workflow-run conclusion values and the job gate.
+            case "$recovered_from" in
+              failure|timed_out|cancelled)
+                ;;
+              success|action_required|neutral|skipped|stale|startup_failure)
+                echo "Attempt ${previous_attempt} concluded ${recovered_from}; no recovery notification is required."
+                exit 0
+                ;;
+              *)
+                echo "::error::preceding workflow attempt returned an unknown conclusion"
+                exit 1
+                ;;
+            esac
           fi
 
           short_sha="${HEAD_SHA:0:7}"
@@ -160,10 +206,18 @@ jobs:
               ;;
           esac
 
-          # Match the shared qurl-service/NHP notification vocabulary: red for
-          # an actionable failure, amber when execution stopped without a proven
-          # successor, and neutral grey for a verified supersession.
+          # Match the shared qurl-service/NHP notification vocabulary: green for
+          # a verified recovery, red for an actionable failure, amber when
+          # execution stopped without a proven successor, and neutral grey for
+          # a verified supersession.
           case "$CONCLUSION" in
+            success)
+              color="#28a745"
+              emoji="white_check_mark"
+              result_emoji=":white_check_mark:"
+              status_text="recovered on attempt ${RUN_ATTEMPT}"
+              impact="*Recovered — no action needed.* Attempt ${RUN_ATTEMPT} passed after attempt ${previous_attempt} concluded ${recovered_from}. This workflow is green for this SHA."
+              ;;
             failure)
               color="#dc3545"
               emoji="x"
@@ -196,7 +250,7 @@ jobs:
               fi
               ;;
             *)
-              # The job-level gate admits only the three conclusions above.
+              # The job-level gate admits only the four conclusions above.
               # Keep a loud fallback in case that gate is widened independently.
               color="#ffc107"
               emoji="warning"
