@@ -187,10 +187,7 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 	if r.authorize == nil {
 		return 0, errSandboxGrantedRouteMissingAuthorization
 	}
-	client := consume.NewHTTPClient()
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		transport.DisableKeepAlives = true
-	}
+	client := newSandboxGrantedRouteHTTPClient()
 	defer client.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, http.NoBody)
 	if err != nil {
@@ -245,6 +242,18 @@ func (r *sandboxGrantedRoute) probe(ctx context.Context) (sandboxGrantedRoutePro
 		return sandboxGrantedRouteServed, nil
 	}
 	return 0, errSandboxGrantedRouteUnexpectedSuccess
+}
+
+// newSandboxGrantedRouteHTTPClient matches the hermetic customer process used
+// by the packaged journey. The runner process can carry proxy variables that
+// the customer process does not inherit; using them here would send this
+// test-only retained-grant probe through a different public egress path.
+func newSandboxGrantedRouteHTTPClient() *http.Client {
+	client := consume.NewHTTPClient()
+	transport := client.Transport.(*http.Transport) //nolint:forcetypeassert // consume.NewHTTPClient defines this concrete transport.
+	transport.Proxy = nil
+	transport.DisableKeepAlives = true
+	return client
 }
 
 func classifySandboxGrantedRouteProbe(
@@ -575,6 +584,24 @@ func TestSandboxGrantedRouteProbeRejectsMissingAuthorization(t *testing.T) {
 	state, err = nilRoute.probe(t.Context())
 	if state != 0 || !errors.Is(err, errSandboxGrantedRouteConfiguration) {
 		t.Fatalf("nil-route probe = state %d, error %v", state, err)
+	}
+}
+
+func TestSandboxGrantedRouteProbeHTTPClientUsesDirectEgress(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "https://proxy.example")
+	client := newSandboxGrantedRouteHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("granted-route transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("granted-route probe can split egress through an environment proxy")
+	}
+	if !transport.DisableKeepAlives {
+		t.Fatal("granted-route probe can reuse a connection across readiness samples")
+	}
+	if http.DefaultTransport.(*http.Transport).Proxy == nil { //nolint:forcetypeassert // net/http defines this concrete default.
+		t.Fatal("test did not distinguish the direct transport from net/http's proxy-aware default")
 	}
 }
 
