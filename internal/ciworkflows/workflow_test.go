@@ -1363,6 +1363,10 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 
 	cli := readWorkflow(t, cliWorkflow)
 	result := cli.Jobs["signal-cli-release"]
+	assertJobPermissions(t, "signal-cli-release", result.Permissions, map[string]string{
+		"actions":  "write",
+		"contents": "write",
+	})
 	journeySignal := false
 	for index := range result.Steps {
 		current := &result.Steps[index]
