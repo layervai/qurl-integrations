@@ -11,12 +11,20 @@ on:
   pull_request:
     # Stacked CLI PRs must run the same gates before their base reaches main.
     branches: ["**"]
+  # The long soak owns its current source, packaged CLI, protected credentials,
+  # and cleanup in this repository. Keep the minute offset away from the top of
+  # the hour, where hosted-runner demand is highest.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The long soak must not occupy main CI's concurrency slot. GitHub permits
+  # only one pending run per group, even when cancel-in-progress is false.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'soak' || 'ci' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -33,7 +41,8 @@ jobs:
     outputs:
       # An unresolvable base forces every gate to run. A redundant run costs
       # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
-      cli: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.cli }}
+      cli: ${{ contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'true' || (steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.cli) }}
+      journey_matrix: ${{ steps.journey_matrix.outputs.json }}
     steps:
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
@@ -61,7 +70,7 @@ jobs:
         # every gate true there, and running the filter anyway would let a
         # filter error redden this job instead of honouring the fail-closed
         # intent.
-        if: steps.base.outputs.force != 'true'
+        if: steps.base.outputs.force != 'true' && contains(fromJson('["push","pull_request"]'), github.event_name)
         with:
           # Empty on pull_request, where the push-only step above never ran and
           # paths-filter takes its PR API path instead.
@@ -88,9 +97,28 @@ jobs:
               - 'scripts/remove-sensitive-tree.sh'
               - 'scripts/test-qurl-cli-ci-credentials.py'
               - 'scripts/test-remove-sensitive-tree.sh'
+              - '.github/workflows/qurl-cli-soak-watchdog.yml'
+              - 'scripts/notify-qurl-cli-soak-status.sh'
+              - 'scripts/qurl-cli-soak-watchdog.sh'
+              - 'scripts/test-notify-qurl-cli-soak-status.sh'
+              - 'scripts/test-qurl-cli-soak-watchdog.sh'
               - 'scripts/extract-qurl-image-attestations.sh'
               - 'scripts/check-exact-cli-release-gate.sh'
               - 'scripts/test-check-exact-cli-release-gate.sh'
+
+      - id: journey_matrix
+        name: Select protected customer journeys
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The daily run revalidates the three cross-platform customer paths
+          # with the long soak. This is intentional: the green message means
+          # the whole packaged CLI journey is current, not only one Linux test.
+          matrix='{"include":[{"lane":"linux","lane_id":1,"os":"ubuntu-latest","test_name":"TestSandboxLinuxDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"macos","lane_id":2,"os":"macos-latest","test_name":"TestSandboxMacOSDefaultDaemonLifecycle","timeout_minutes":35,"soak":false},{"lane":"windows","lane_id":3,"os":"windows-latest","test_name":"TestSandboxWindowsDefaultDaemonFullCustomerLifecycle","timeout_minutes":35,"soak":false}]}'
+          if [[ "$GITHUB_EVENT_NAME" == schedule || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            matrix="$(jq -c '.include += [{"lane":"linux","lane_id":4,"os":"ubuntu-latest","test_name":"TestSandboxLocalPublishSoak","timeout_minutes":110,"soak":true}]' <<<"$matrix")"
+          fi
+          echo "json=$matrix" >>"$GITHUB_OUTPUT"
 
   lint:
     name: cli / lint
@@ -369,9 +397,15 @@ jobs:
           shellcheck \
             scripts/build-cli-customer-journey-artifacts.sh \
             scripts/check-exact-cli-release-gate.sh \
+            scripts/notify-qurl-cli-soak-status.sh \
+            scripts/qurl-cli-soak-watchdog.sh \
             scripts/remove-sensitive-tree.sh \
+            scripts/test-notify-qurl-cli-soak-status.sh \
+            scripts/test-qurl-cli-soak-watchdog.sh \
             scripts/test-remove-sensitive-tree.sh \
             scripts/test-check-exact-cli-release-gate.sh
+          bash scripts/test-notify-qurl-cli-soak-status.sh
+          bash scripts/test-qurl-cli-soak-watchdog.sh
           bash scripts/test-check-exact-cli-release-gate.sh
           bash scripts/test-remove-sensitive-tree.sh
           python3 -m py_compile \
@@ -630,25 +664,12 @@ jobs:
     # parallel lane in the run UI.
     name: cli / customer journey
     needs: [changes, customer-artifacts]
-    if: github.event_name == 'push' && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
+    if: github.ref == 'refs/heads/main' && contains(fromJson('["push","schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - lane: linux
-            lane_id: 1
-            os: ubuntu-latest
-            test_name: TestSandboxLinuxDefaultDaemonLifecycle
-          - lane: macos
-            lane_id: 2
-            os: macos-latest
-            test_name: TestSandboxMacOSDefaultDaemonLifecycle
-          - lane: windows
-            lane_id: 3
-            os: windows-latest
-            test_name: TestSandboxWindowsDefaultDaemonFullCustomerLifecycle
+      matrix: ${{ fromJSON(needs.changes.outputs.journey_matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     environment: cli-customer-journey
     permissions:
       contents: read
@@ -706,7 +727,7 @@ jobs:
         env:
           GOFLAGS: -mod=readonly
           GOWORK: off
-        run: go test -c -trimpath -tags=clisandbox -o "$RUNNER_TEMP/qurl-customer-journey.test" ./apps/cli/cmd
+        run: go test -c -trimpath -tags=clisandbox,clisoak -o "$RUNNER_TEMP/qurl-customer-journey.test" ./apps/cli/cmd
 
       - name: Build the trusted journey harness
         if: runner.os == 'Windows'
@@ -907,6 +928,8 @@ jobs:
           QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${{ env.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
           QURL_CLI_SANDBOX_LINUX_DAEMON: ${{ matrix.lane == 'linux' && 'enabled' || '' }}
           QURL_CLI_SANDBOX_MACOS_DAEMON: ${{ matrix.lane == 'macos' && 'enabled' || '' }}
+          QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK: ${{ matrix.soak && 'enabled' || '' }}
+          QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}
         run: |
           set -euo pipefail
           output=$RUNNER_TEMP/qurl-customer-journey.out
@@ -1089,9 +1112,9 @@ jobs:
   journey-cleanup:
     name: cli / customer journey cleanup
     needs: [changes, journey]
-    if: always() && github.event_name == 'push' && needs.changes.outputs.cli == 'true'
+    if: always() && github.ref == 'refs/heads/main' && contains(fromJson('["push","schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment: cli-customer-journey-cleanup
     permissions:
       contents: read
@@ -1119,7 +1142,11 @@ jobs:
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
           reconcile_failed=0
-          for lane_spec in linux:1 macos:2 windows:3; do
+          lane_specs=(linux:1 macos:2 windows:3)
+          if [[ "$GITHUB_EVENT_NAME" == schedule || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            lane_specs+=(linux:4)
+          fi
+          for lane_spec in "${lane_specs[@]}"; do
             IFS=: read -r lane lane_id <<<"$lane_spec"
             if ! python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
               --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
@@ -1270,7 +1297,7 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CLI_CHANGED: ${{ needs.changes.outputs.cli }}
-          LIVE_REQUIRED: ${{ github.event_name == 'push' }}
+          LIVE_REQUIRED: ${{ github.ref == 'refs/heads/main' && contains(fromJson('["push","schedule","workflow_dispatch"]'), github.event_name) }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -1353,6 +1380,77 @@ jobs:
           done <<<"$needs_rows"
 
           exit "$failed"
+
+  notify-soak-success:
+    # main-ci-notifications.yml reports a scheduled failure. This job reports
+    # success only after the exact protected soak matrix and aggregate pass.
+    name: cli / notify soak success
+    needs: [required, journey]
+    if: >-
+      !cancelled() &&
+      github.ref == 'refs/heads/main' &&
+      contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) &&
+      needs.required.result == 'success' &&
+      needs.journey.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: cli-customer-journey
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Post verified soak success to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+          SOAK_STATUS: success
+          SOAK_DURATION: 80m
+        shell: bash
+        run: scripts/notify-qurl-cli-soak-status.sh
+
+  notify-soak-manual-failure:
+    # Scheduled failures use main-ci-notifications.yml. A manual run does not
+    # reach that workflow, so report its failed validation here. An operator
+    # cancellation is intentionally silent because it is not a validation
+    # failure.
+    name: cli / notify manual soak failure
+    needs: [required, journey, notify-soak-success]
+    if: >-
+      !cancelled() &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch' &&
+      (needs.required.result != 'success' ||
+       needs.journey.result != 'success' ||
+       needs.notify-soak-success.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: cli-customer-journey
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Post failed manual soak to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: workflow_dispatch
+          SOAK_STATUS: failure
+          SOAK_DURATION: 80m
+        shell: bash
+        run: scripts/notify-qurl-cli-soak-status.sh
 
   signal-cli-release:
     name: cli / signal exact release

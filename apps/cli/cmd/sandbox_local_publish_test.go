@@ -150,17 +150,18 @@ func TestSandboxFullCustomerLifecyclePhaseContract(t *testing.T) {
 // exercising stop/start/restart, and deleting the live share while its
 // foreground daemon is still running.
 //
-// The private orchestrator runs this tagged test with one exact customer CLI
-// artifact. It creates a native device in a fresh state directory, so the lane
-// must provide a short-lived JWT that can revoke the resulting device
-// credential. The JWT must represent the same owner as QURL_API_KEY: 404 is a
-// cleanup failure, because a wrong-owner JWT also cannot see the new key. The
-// resource and device key are both reclaimed before returning. Run explicitly:
+// The main CLI workflow runs this tagged test with one exact customer CLI
+// artifact. It creates a native device in a fresh state directory and records
+// that device for the workflow's terminal cleanup. The test does not receive
+// M2M authority there; terminal cleanup mints a fresh token after it fences the
+// tested process. A direct operator run can supply a cleanup JWT to revoke the
+// device in the test's own cleanup. That JWT must represent the same owner as
+// QURL_API_KEY. Run explicitly:
 //
 //	QURL_CLI_SANDBOX_LOCAL_PUBLISH=enabled \
 //	QURL_CLI_SANDBOX_BINARY=/absolute/path/to/qurl \
 //	QURL_SHARING_RUN_ID=123 QURL_SHARING_RUN_ATTEMPT=1 QURL_SHARING_RUNTIME=host \
-//	QURL_API_KEY=... QURL_ENDPOINT=... QURL_CLI_SANDBOX_CLEANUP_JWT=... \
+//	QURL_API_KEY=... QURL_ENDPOINT=... \
 //	QURL_CONNECTOR_HUB_HOST=... QURL_CONNECTOR_HUB_PORT=... \
 //	QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=... \
 //	go test -tags=clisandbox -count=1 -run '^TestSandboxFullCustomerLifecycleSmoke$' ./apps/cli/cmd

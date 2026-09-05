@@ -29,10 +29,9 @@ const (
 
 // TestSandboxLocalPublishSoak keeps the customer qURL path serving across
 // multiple native authorization lifetimes, a credential-free warm daemon
-// restart, and an explicit epoch restart. The scheduled private orchestrator
-// runs the default 80-minute duration; a shorter run would not cross the
-// one-hour enrollment/qURL lifetime boundary this validation is intended to
-// catch.
+// restart, and an explicit epoch restart. The scheduled CLI workflow runs the
+// default 80-minute duration; a shorter run would not cross the one-hour
+// enrollment/qURL lifetime boundary this validation is intended to catch.
 func TestSandboxLocalPublishSoak(t *testing.T) {
 	if os.Getenv(localPublishSoakArming) != "enabled" {
 		t.Skipf("SKIPPED LOUDLY: local-publish soak is disarmed — %s != enabled", localPublishSoakArming)

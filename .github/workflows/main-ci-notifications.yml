@@ -26,6 +26,7 @@ on:
       - "Secrets Scan"
       - "Release Please"
       - "Validate issue templates"
+      - "qURL CLI Soak Freshness Watchdog"
     types: [completed]
 
 # The notifier reads only the originating workflow's run history. That is what
@@ -92,6 +93,13 @@ jobs:
           recovered_from=""
           previous_attempt=""
           if [[ "$CONCLUSION" == "success" ]]; then
+            # `required` contains every schedule-reachable job except the
+            # dedicated soak sender. A scheduled re-run can recover only that
+            # sender, which posts its own green result before this event.
+            if [[ "$EVENT" == schedule && "$WORKFLOW_NAME" == "cli: Build and Test" ]]; then
+              echo "The dedicated soak notifier owns the scheduled CLI success message."
+              exit 0
+            fi
             if [[ ! "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || (( RUN_ATTEMPT <= 1 )); then
               echo "::error::successful recovery notification requires run attempt 2 or later"
               exit 1
@@ -177,7 +185,11 @@ jobs:
               impact="Teams app typecheck, lint, tests, or build did not complete successfully. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
               ;;
             "cli: Build and Test")
-              impact="qURL CLI quality gates did not complete successfully on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
+              if [[ "$EVENT" == schedule ]]; then
+                impact="The scheduled qURL CLI workflow failed during or after validation. A required package, journey, cleanup, or Slack result-delivery gate did not pass. Review and repair the run before the next scheduled validation."
+              else
+                impact="qURL CLI quality gates did not complete successfully on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
+              fi
               ;;
             "cli: Nightly")
               impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot, release smoke) did not complete successfully. If the failing job is *release smoke*, the shipped release customers install today may be broken — its log names the broken chain link (tap, cask, quarantine postflight, binary, release machinery, release assets, signature, manifest, archive, tap pin). Otherwise no artifact is affected. Triage whether this is a real regression or harness flake before the next CLI release."
@@ -200,6 +212,9 @@ jobs:
               ;;
             "Validate issue templates")
               impact="Issue-template validation did not complete successfully on main. GitHub issue forms may be broken until the run succeeds."
+              ;;
+            "qURL CLI Soak Freshness Watchdog")
+              impact="The qURL CLI freshness watchdog or its protected Slack alert delivery failed. Open this run to distinguish a GitHub status lookup failure from an alert-delivery failure."
               ;;
             *)
               impact="Main CI did not complete successfully before the repository reached a clean post-merge state. Review the run and repair or re-run it against this SHA."

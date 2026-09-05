@@ -23,7 +23,7 @@ type cliWorkflowJob struct {
 	Env             map[string]any    `yaml:"env"`
 	Outputs         map[string]any    `yaml:"outputs"`
 	Steps           []cliWorkflowStep `yaml:"steps"`
-	TimeoutMinutes  int               `yaml:"timeout-minutes"`
+	TimeoutMinutes  any               `yaml:"timeout-minutes"`
 }
 
 type cliWorkflowStep struct {
@@ -90,6 +90,8 @@ func TestRequiredCLIWorkflowGateRejectsBypassMutations(t *testing.T) {
 
 func TestCLICustomerJourneyTimeoutBudget(t *testing.T) {
 	t.Parallel()
+	// This test pins fixed workflow wiring. Numeric matrix bounds live in
+	// internal/ciworkflows and scripts/test-qurl-cli-ci-credentials.py.
 
 	data, err := os.ReadFile(filepath.Join(cliRepoRoot, ".github", "workflows", "cli.yml"))
 	if err != nil {
@@ -99,16 +101,16 @@ func TestCLICustomerJourneyTimeoutBudget(t *testing.T) {
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse public CLI workflow: %v", err)
 	}
-	for jobName, want := range map[string]int{
-		"journey":         35,
-		"journey-cleanup": 10,
+	for jobName, want := range map[string]any{
+		"journey":         "${{ matrix.timeout_minutes }}",
+		"journey-cleanup": 15,
 	} {
 		job, ok := workflow.Jobs[jobName]
 		if !ok {
 			t.Fatalf("public CLI workflow has no %q job", jobName)
 		}
-		if job.TimeoutMinutes != want {
-			t.Errorf("public CLI workflow %s timeout = %d minutes, want %d", jobName, job.TimeoutMinutes, want)
+		if fmt.Sprint(job.TimeoutMinutes) != fmt.Sprint(want) {
+			t.Errorf("public CLI workflow %s timeout = %v minutes, want %v", jobName, job.TimeoutMinutes, want)
 		}
 	}
 }

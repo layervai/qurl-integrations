@@ -80,6 +80,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: python3 scripts/test-qurl-cli-ci-credentials.py
 
+      - name: Test CLI soak status notification
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-notify-qurl-cli-soak-status.sh
+
+      - name: Test CLI soak freshness watchdog
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-qurl-cli-soak-watchdog.sh
+
       - name: Check Chrome/Edge extension lockstep
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-extension-lockstep.sh
