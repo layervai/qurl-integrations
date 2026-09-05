@@ -66,6 +66,7 @@ const {
 function makeFakeManager() {
   return {
     isConnected: jest.fn(() => true),
+    isRecovering: jest.fn(() => false),
     connect: jest.fn(async () => {}),
   };
 }

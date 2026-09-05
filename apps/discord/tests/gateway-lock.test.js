@@ -545,6 +545,11 @@ describe('releaseLock', () => {
 });
 
 describe('readCurrentHolder', () => {
+  it('exposes the immutable instance identity used in holder rows', () => {
+    const { lock } = makeLock();
+    expect(lock.instanceId).toBe('inst-A');
+  });
+
   it('returns the row for diagnostic / health reads', async () => {
     // Used by /health endpoint output and debug logs. Not in the
     // lock-correctness path.
@@ -559,6 +564,9 @@ describe('readCurrentHolder', () => {
     const result = await lock.readCurrentHolder();
     expect(result.lock_holder).toBe('task-A/inst-A');
     expect(result.version).toBe(3);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input).toEqual(
+      expect.objectContaining({ ConsistentRead: true }),
+    );
   });
 
   it('returns null when the row is absent', async () => {

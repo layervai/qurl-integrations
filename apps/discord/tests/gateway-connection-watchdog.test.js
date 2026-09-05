@@ -5,40 +5,46 @@
 //   1. No-op when not holding the lock. Watchdog runs unconditionally;
 //      a standby waiting for promotion ticks but does nothing.
 //   2. No-op when manager.isConnected(). Steady-state: no work, no log.
-//   3. Tries manager.connect() exactly once per failure tick (at-most-
+//   3. Waits while the manager owns an automatic reconnect. It never
+//      races that reconnect with manager.connect().
+//   4. Tries manager.connect() exactly once per failure tick (at-most-
 //      one outstanding connect — the design depends on this).
-//   4. Attempt counter resets on:
+//   5. Attempt counter resets on:
 //        - successful connect()
 //        - lock-not-held tick (covers give-up-and-reacquire)
 //        - manager-already-connected tick
-//   5. Exponential backoff sleeps after failure: 200 / 400 / 800 / 1600 ms
+//   6. Exponential backoff sleeps after failure: 200 / 400 / 800 / 1600 ms
 //      (capped at 5 s — dead code at maxAttempts=5, see source).
-//   6. At attempts >= maxAttempts (default 5): releaseLock() then exit(1).
+//   7. At attempts >= maxAttempts (default 5): releaseLock() then exit(1).
 //      releaseLock failure is logged and swallowed; exit still fires.
-//   7. start() is idempotent; stop() halts the loop; post-exit, start()
+//   8. start() is idempotent; stop() halts the loop; post-exit, start()
 //      cannot re-enter.
 //
 // Each contract maps to a production failure mode:
-//   - (3) two parallel connect() calls would race @discordjs/ws internal state.
-//   - (4) without reset on lock-give-up, a previous task's failure ladder
+//   - (3)/(4) two parallel connect() calls would race @discordjs/ws internal state.
+//   - (5) without reset on lock-give-up, a previous task's failure ladder
 //     would carry into a re-acquired lock and prematurely exit.
-//   - (5)/(6) without bounded retry + exit, a standby that can't reach
+//   - (6)/(7) without bounded retry + exit, a standby that can't reach
 //     Discord blocks the only failover slot indefinitely.
 
 const {
   createConnectionWatchdog,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_MAX_ATTEMPTS,
+  DEFAULT_MAX_RECOVERY_MS,
   BACKOFF_BASE_MS,
   BACKOFF_CAP_MS,
 } = require('../src/gateway-connection-watchdog');
 
-function makeFakeManager({ initialConnected = false } = {}) {
+function makeFakeManager({ initialConnected = false, initialRecovering = false } = {}) {
   let connected = initialConnected;
+  let recovering = initialRecovering;
   return {
     isConnected: jest.fn(() => connected),
+    isRecovering: jest.fn(() => recovering),
     connect: jest.fn(async () => { connected = true; }),
     _setConnected(v) { connected = v; },
+    _setRecovering(v) { recovering = v; },
   };
 }
 
@@ -46,25 +52,32 @@ function makeWatchdog({
   manager,
   isHoldingLock = () => true,
   isConnecting = () => false,
+  readCurrentHolder = jest.fn(async () => ({ instance_id: 'instance-self' })),
+  selfInstanceId = 'instance-self',
   releaseLock = jest.fn(async () => {}),
   deleteOwnRow,
   pollIntervalMs,
   maxAttempts,
+  maxRecoveryMs,
   releaseLockCeilingMs,
   connectCeilingMs,
   sleep = jest.fn(async () => {}),
   exit = jest.fn(),
+  now,
+  wallClock = () => 0,
 } = {}) {
   const logger = {
     info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
   };
   const watchdog = createConnectionWatchdog({
     manager: manager ?? makeFakeManager(),
-    isHoldingLock, isConnecting, releaseLock, deleteOwnRow, logger,
-    pollIntervalMs, maxAttempts, releaseLockCeilingMs, connectCeilingMs, sleep, exit,
+    isHoldingLock, isConnecting, readCurrentHolder, selfInstanceId,
+    releaseLock, deleteOwnRow, logger,
+    pollIntervalMs, maxAttempts, maxRecoveryMs,
+    releaseLockCeilingMs, connectCeilingMs, sleep, exit, now, wallClock,
   });
   return {
-    watchdog, logger, releaseLock, deleteOwnRow, sleep, exit,
+    watchdog, logger, readCurrentHolder, releaseLock, deleteOwnRow, sleep, exit,
   };
 }
 
@@ -72,6 +85,7 @@ describe('createConnectionWatchdog — factory validation', () => {
   it('exposes default constants', () => {
     expect(DEFAULT_POLL_INTERVAL_MS).toBe(1_000);
     expect(DEFAULT_MAX_ATTEMPTS).toBe(5);
+    expect(DEFAULT_MAX_RECOVERY_MS).toBe(20_000);
     expect(BACKOFF_BASE_MS).toBe(100);
     expect(BACKOFF_CAP_MS).toBe(5_000);
   });
@@ -91,13 +105,16 @@ describe('createConnectionWatchdog — factory validation', () => {
   });
 
   it('throws when manager lacks required methods', () => {
-    expect(() => createConnectionWatchdog()).toThrow(/manager.*connect.*isConnected/);
-    expect(() => createConnectionWatchdog({ manager: {} })).toThrow(/manager.*connect.*isConnected/);
+    expect(() => createConnectionWatchdog()).toThrow(/manager.*connect.*isConnected.*isRecovering/);
+    expect(() => createConnectionWatchdog({ manager: {} })).toThrow(/manager.*connect.*isConnected.*isRecovering/);
     expect(() => createConnectionWatchdog({ manager: { connect: () => {} } }))
-      .toThrow(/manager.*connect.*isConnected/);
+      .toThrow(/manager.*connect.*isConnected.*isRecovering/);
+    expect(() => createConnectionWatchdog({
+      manager: { connect: () => {}, isConnected: () => false },
+    })).toThrow(/isRecovering/);
   });
 
-  it('throws when isHoldingLock / isConnecting / releaseLock / logger are missing', () => {
+  it('throws when ownership, releaseLock, or logger dependencies are missing', () => {
     const manager = makeFakeManager();
     expect(() => createConnectionWatchdog({ manager })).toThrow(/isHoldingLock/);
     expect(() => createConnectionWatchdog({
@@ -105,11 +122,40 @@ describe('createConnectionWatchdog — factory validation', () => {
     })).toThrow(/isConnecting/);
     expect(() => createConnectionWatchdog({
       manager, isHoldingLock: () => true, isConnecting: () => false,
+    })).toThrow(/readCurrentHolder/);
+    expect(() => createConnectionWatchdog({
+      manager, isHoldingLock: () => true, isConnecting: () => false,
+      readCurrentHolder: async () => null,
+    })).toThrow(/selfInstanceId/);
+    expect(() => createConnectionWatchdog({
+      manager, isHoldingLock: () => true, isConnecting: () => false,
+      readCurrentHolder: async () => null, selfInstanceId: 'self',
     })).toThrow(/releaseLock/);
     expect(() => createConnectionWatchdog({
       manager, isHoldingLock: () => true, isConnecting: () => false,
+      readCurrentHolder: async () => null, selfInstanceId: 'self',
       releaseLock: async () => {},
     })).toThrow(/logger is required/);
+  });
+
+  it('throws when maxRecoveryMs is not a positive integer', () => {
+    const base = {
+      manager: makeFakeManager(),
+      isHoldingLock: () => true,
+      isConnecting: () => false,
+      readCurrentHolder: async () => null,
+      selfInstanceId: 'self',
+      releaseLock: async () => {},
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+    };
+    expect(() => createConnectionWatchdog({ ...base, maxRecoveryMs: 0 }))
+      .toThrow(/maxRecoveryMs must be a positive integer/);
+    expect(() => createConnectionWatchdog({ ...base, maxRecoveryMs: 1.5 }))
+      .toThrow(/maxRecoveryMs must be a positive integer/);
+    expect(() => createConnectionWatchdog({ ...base, now: 7 }))
+      .toThrow(/now must be a function/);
+    expect(() => createConnectionWatchdog({ ...base, wallClock: 7 }))
+      .toThrow(/wallClock must be a function/);
   });
 });
 
@@ -121,7 +167,10 @@ describe('step() — no-op paths', () => {
     await watchdog._stepForTest();
 
     expect(manager.connect).not.toHaveBeenCalled();
-    expect(manager.isConnected).not.toHaveBeenCalled();
+    // The watchdog still reads process-level WS state so a stale automatic
+    // recovery remains bounded while this replica is a standby.
+    expect(manager.isConnected).toHaveBeenCalledTimes(1);
+    expect(manager.isRecovering).toHaveBeenCalledTimes(1);
     expect(watchdog._getAttemptsForTest()).toBe(0);
   });
 
@@ -134,6 +183,110 @@ describe('step() — no-op paths', () => {
     expect(manager.connect).not.toHaveBeenCalled();
     expect(sleep).not.toHaveBeenCalled();
     expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('exits without releasing the peer lock when a strong read confirms a different owner', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const releaseLock = jest.fn(async () => {});
+    const deleteOwnRow = jest.fn(async () => {});
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager,
+      isHoldingLock: () => false,
+      readCurrentHolder: jest.fn(async () => ({
+        instance_id: 'instance-peer', expires_at: 100,
+      })),
+      releaseLock,
+      deleteOwnRow,
+      exit,
+    });
+
+    await watchdog._stepForTest();
+
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(deleteOwnRow).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('lock ownership violation'),
+      expect.objectContaining({
+        error: expect.stringContaining('peer owns the leader lock'),
+        peer_instance_id: 'instance-peer',
+      }),
+    );
+  });
+
+  it('does not exit when the lock row is absent so the leader can reacquire it', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const readCurrentHolder = jest.fn(async () => null);
+    const { watchdog, exit, logger } = makeWatchdog({
+      manager, isHoldingLock: () => false, readCurrentHolder,
+    });
+
+    await watchdog._stepForTest();
+
+    expect(readCurrentHolder).toHaveBeenCalledTimes(1);
+    expect(exit).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no peer owner confirmed'),
+      { current_instance_id: null, current_expires_at: null },
+    );
+  });
+
+  it('does not exit when the strong read still shows this instance as owner', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const readCurrentHolder = jest.fn(async () => ({ instance_id: 'instance-self' }));
+    const { watchdog, exit, logger } = makeWatchdog({
+      manager, isHoldingLock: () => false, readCurrentHolder,
+    });
+
+    await watchdog._stepForTest();
+
+    expect(exit).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no peer owner confirmed'),
+      { current_instance_id: 'instance-self', current_expires_at: null },
+    );
+  });
+
+  it('does not exit for an expired peer row so the leader can replace it', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const readCurrentHolder = jest.fn(async () => ({
+      instance_id: 'instance-peer', expires_at: 9,
+    }));
+    const { watchdog, exit, logger } = makeWatchdog({
+      manager,
+      isHoldingLock: () => false,
+      readCurrentHolder,
+      wallClock: () => 10_000,
+    });
+
+    await watchdog._stepForTest();
+
+    expect(exit).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no peer owner confirmed'),
+      { current_instance_id: 'instance-peer', current_expires_at: 9 },
+    );
+  });
+
+  it('does not exit on a holder-read error and retries confirmation on the next tick', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const readCurrentHolder = jest.fn()
+      .mockRejectedValueOnce(new Error('ddb throttled'))
+      .mockResolvedValueOnce({ instance_id: 'instance-peer', expires_at: 100 });
+    const { watchdog, exit, logger } = makeWatchdog({
+      manager, isHoldingLock: () => false, readCurrentHolder,
+    });
+
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('could not confirm lock ownership'),
+      { error: 'ddb throttled' },
+    );
+
+    await watchdog._stepForTest();
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it('resets attempts when transitioning lock-held → lock-not-held mid-ladder', async () => {
@@ -236,6 +389,196 @@ describe('step() — isConnecting backoff (race with leader inbound-handoff)', (
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(0);
     expect(manager.connect).toHaveBeenCalledTimes(3); // not 4
+  });
+});
+
+describe('step() — automatic reconnect ownership', () => {
+  it('does not call manager.connect while @discordjs/ws is recovering', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    const { watchdog, logger } = makeWatchdog({ manager, maxRecoveryMs: 5_000, now: () => 0 });
+
+    await watchdog._stepForTest();
+
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('automatic reconnect in progress'),
+      expect.objectContaining({ max_recovery_ms: 5_000 }),
+    );
+  });
+
+  it('resets the recovery timer when Ready/Resumed makes the manager connected', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    const exit = jest.fn();
+    let nowMs = 0;
+    const { watchdog } = makeWatchdog({
+      manager, maxRecoveryMs: 5_000, now: () => nowMs, exit,
+    });
+    await watchdog._stepForTest();
+    nowMs = 4_000;
+    await watchdog._stepForTest();
+
+    manager._setRecovering(false);
+    manager._setConnected(true);
+    await watchdog._stepForTest();
+
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+    expect(manager.connect).not.toHaveBeenCalled();
+
+    manager._setConnected(false);
+    manager._setRecovering(true);
+    nowMs = 10_000;
+    await watchdog._stepForTest();
+    nowMs = 14_999;
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('does not inherit a partial explicit-connect failure ladder', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('transient'));
+    const { watchdog } = makeWatchdog({
+      manager, maxAttempts: 5, maxRecoveryMs: 3_000, now: () => 0,
+    });
+
+    await watchdog._stepForTest();
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(2);
+
+    manager._setRecovering(true);
+    await watchdog._stepForTest();
+
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('releases the lock and exits when automatic reconnect stays stuck', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    const releaseLock = jest.fn(async () => {});
+    const deleteOwnRow = jest.fn(async () => {});
+    const exit = jest.fn();
+    let nowMs = 0;
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, deleteOwnRow, exit, maxRecoveryMs: 3_000,
+      now: () => nowMs,
+    });
+
+    await watchdog._stepForTest();
+    nowMs = 2_999;
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+    nowMs = 3_000;
+    await watchdog._stepForTest();
+
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    expect(deleteOwnRow).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('automatic reconnect timed out'),
+      expect.objectContaining({ recovery_elapsed_ms: 3_000 }),
+    );
+  });
+
+  it('bounds a stale recovery while this replica does not hold the lock', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    const releaseLock = jest.fn(async () => {});
+    const deleteOwnRow = jest.fn(async () => {});
+    const exit = jest.fn();
+    let nowMs = 0;
+    const { watchdog } = makeWatchdog({
+      manager,
+      isHoldingLock: () => false,
+      releaseLock,
+      deleteOwnRow,
+      exit,
+      maxRecoveryMs: 1_000,
+      now: () => nowMs,
+    });
+
+    await watchdog._stepForTest();
+    nowMs = 1_000;
+    await watchdog._stepForTest();
+
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(deleteOwnRow).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('does not reset the process-wide recovery bound on promotion or later lock flapping', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    let holdingLock = false;
+    let nowMs = 0;
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager,
+      isHoldingLock: () => holdingLock,
+      exit,
+      maxRecoveryMs: 5_000,
+      now: () => nowMs,
+    });
+
+    await watchdog._stepForTest();
+    nowMs = 2_000;
+    holdingLock = true;
+    await watchdog._stepForTest();
+
+    nowMs = 3_000;
+    holdingLock = false;
+    await watchdog._stepForTest();
+    nowMs = 4_000;
+    holdingLock = true;
+    await watchdog._stepForTest();
+
+    nowMs = 4_999;
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+
+    nowMs = 5_000;
+    await watchdog._stepForTest();
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.warn.mock.calls.filter(
+      ([message]) => message.includes('automatic reconnect in progress'),
+    )).toHaveLength(1);
+  });
+
+  it('keeps the recovery timer active while the leader reports connecting', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    const releaseLock = jest.fn(async () => {});
+    const exit = jest.fn();
+    let nowMs = 0;
+    const { watchdog } = makeWatchdog({
+      manager,
+      isConnecting: () => true,
+      releaseLock,
+      exit,
+      maxRecoveryMs: 1_000,
+      now: () => nowMs,
+    });
+
+    await watchdog._stepForTest();
+    nowMs = 1_000;
+    await watchdog._stepForTest();
+
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('uses elapsed time instead of the poll count for recovery exhaustion', async () => {
+    const manager = makeFakeManager({ initialRecovering: true });
+    const exit = jest.fn();
+    let nowMs = 10_000;
+    const { watchdog } = makeWatchdog({
+      manager, exit, maxRecoveryMs: 30_000, pollIntervalMs: 10_000,
+      now: () => nowMs,
+    });
+
+    await watchdog._stepForTest();
+    nowMs += 29_999;
+    await watchdog._stepForTest();
+    expect(exit).not.toHaveBeenCalled();
+    nowMs += 1;
+    await watchdog._stepForTest();
+    expect(exit).toHaveBeenCalledWith(1);
   });
 });
 
@@ -624,6 +967,63 @@ describe('start() / stop() lifecycle', () => {
     await stopPromise;
 
     expect(watchdog._getRunningForTest()).toBe(false);
+  });
+
+  it('stop() fences a tick parked in manager.connect before it can release or exit', async () => {
+    let rejectConnect;
+    const manager = makeFakeManager();
+    manager.connect.mockImplementation(() => new Promise((_, reject) => {
+      rejectConnect = reject;
+    }));
+    const releaseLock = jest.fn(async () => {});
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, exit, maxAttempts: 1, connectCeilingMs: 60_000,
+    });
+
+    const stepPromise = watchdog._stepForTest();
+    await flushMicrotasks();
+    expect(manager.connect).toHaveBeenCalledTimes(1);
+
+    watchdog.stop();
+    rejectConnect(new Error('connect failed after SIGTERM'));
+    await stepPromise;
+
+    expect(watchdog._getStoppingForTest()).toBe(true);
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('connect retries exhausted'),
+      expect.anything(),
+    );
+  });
+
+  it('stop() fences a tick parked in the holder read before it can exit', async () => {
+    let resolveHolder;
+    const manager = makeFakeManager({ initialConnected: true });
+    const readCurrentHolder = jest.fn(() => new Promise((resolve) => {
+      resolveHolder = resolve;
+    }));
+    const deleteOwnRow = jest.fn(async () => {});
+    const exit = jest.fn();
+    const { watchdog } = makeWatchdog({
+      manager,
+      isHoldingLock: () => false,
+      readCurrentHolder,
+      deleteOwnRow,
+      exit,
+    });
+
+    const stepPromise = watchdog._stepForTest();
+    await flushMicrotasks();
+    expect(readCurrentHolder).toHaveBeenCalledTimes(1);
+
+    watchdog.stop();
+    resolveHolder({ instance_id: 'instance-peer', expires_at: 100 });
+    await stepPromise;
+
+    expect(deleteOwnRow).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
   });
 
   it('start() after stop() without awaiting does NOT orphan a second loop', async () => {

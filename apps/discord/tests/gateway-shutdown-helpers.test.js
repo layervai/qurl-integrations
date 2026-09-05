@@ -419,6 +419,62 @@ describe('runPushHandoffShutdown', () => {
     );
   });
 
+  it('stops the connection watchdog synchronously before transferring the lock', async () => {
+    const order = [];
+    const connectionWatchdog = {
+      stop: jest.fn(() => {
+        order.push('watchdog-stop');
+        return Promise.resolve();
+      }),
+    };
+    const deps = makeDeps({
+      connectionWatchdog,
+      gatewayLeader: {
+        pushHandoff: jest.fn(async () => {
+          order.push('push-handoff');
+          return { transferred: true, pushAcked: true };
+        }),
+      },
+    });
+
+    await runPushHandoffShutdown({ code: 0, ...deps });
+
+    expect(connectionWatchdog.stop).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['watchdog-stop', 'push-handoff']);
+  });
+
+  it('logs a synchronous watchdog stop failure and still transfers the lock', async () => {
+    const err = new Error('stop threw');
+    const deps = makeDeps({
+      connectionWatchdog: { stop: jest.fn(() => { throw err; }) },
+    });
+
+    await runPushHandoffShutdown({ code: 0, ...deps });
+
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog stop failed',
+      { error: 'stop threw', stack: err.stack },
+    );
+    expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('observes an asynchronous watchdog stop rejection without blocking handoff', async () => {
+    const err = new Error('stop rejected');
+    const deps = makeDeps({
+      connectionWatchdog: { stop: jest.fn().mockRejectedValue(err) },
+    });
+
+    await runPushHandoffShutdown({ code: 0, ...deps });
+
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog stop failed',
+      { error: 'stop rejected', stack: err.stack },
+    );
+    expect(deps.gatewayLeader.pushHandoff).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(0);
+  });
+
   it('on a thrown pushHandoff, exits with forcedExitCode so deploy metrics distinguish clean transfer from throw', async () => {
     // Three observable outcomes, three exit codes:
     //   * clean transfer       → exit(code)            (typically 0)

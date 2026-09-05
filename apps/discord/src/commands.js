@@ -181,8 +181,50 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
+
 const { sendDM } = require('./discord');
 const { editDM, sendChannelMessage } = require('./discord-rest');
+
+// A component interaction owns its flow mutation only after Discord accepts
+// its acknowledgement. SQS delivery and Gateway reconnects are at-least-once:
+// a duplicate interaction loses the one-shot deferUpdate race with Discord.
+// Continuing after that failure lets the unacknowledged copy mutate DDB, then
+// makes the acknowledged copy lose OCC and replace a valid card with the
+// "superseded" error. Stop at the acknowledgement boundary for every remote
+// or unknown error, not only Discord 10062/40060 responses: a transport failure
+// has an unknown outcome, so continuing could let an unacknowledged copy mutate
+// state. The one exception is discord.js's local InteractionAlreadyReplied
+// error when this same interaction object records that it already acknowledged.
+// If the sole delivery has a transport failure, Discord keeps its retry/toast
+// UX and the user can click again. Preserving state is the safer outcome.
+async function deferUpdateOrStop(interaction, flowId) {
+  try {
+    await interaction.deferUpdate();
+    return true;
+  } catch (err) {
+    // discord.js throws this locally when this interaction object already
+    // completed an acknowledgement. That means this copy still owns the
+    // action. Reconstructed duplicate deliveries use separate objects whose
+    // flags start false, so their rejected REST acknowledgement still stops.
+    if (err?.code === 'InteractionAlreadyReplied'
+        && (interaction.deferred || interaction.replied)) {
+      logger.debug('Interaction was already acknowledged by this handler; continuing', {
+        flow_id: flowId,
+        custom_id: interaction.customId ?? null,
+      });
+      return true;
+    }
+    logger.warn('Interaction acknowledgement failed — stopping before state change', {
+      flow_id: flowId,
+      custom_id: interaction.customId ?? null,
+      error_code: err?.code ?? err?.rawError?.code ?? null,
+      status_code: err?.status ?? null,
+      error: err?.message,
+    });
+    return false;
+  }
+}
+
 // renderViewCounter lives in its own leaf module so the cross-replica
 // webhook fast-path (routes/qurl-webhook.js) can import the SAME pure
 // renderer without pulling commands.js (+ discord.js) into the HTTP
@@ -6604,7 +6646,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // without surfacing as an "interaction failed" toast. Mirrors
   // handleConfirmSendClick / handleConfirmCancelClick. All `update`
   // calls below become `editReply` (the interaction is now deferred).
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   // Validate payload.resourceType BEFORE renderConfirmCardContent
   // would throw on it. A corrupt/stale DDB row (manual mutation,
@@ -6936,7 +6978,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
 // corrupt payload and surface re-run copy, same shape as
 // handleConfirmUserSelect's resourceType guard.
 async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   // resourceType guard mirrors handleConfirmUserSelect — a corrupt /
@@ -7246,7 +7288,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
 // re-render would re-derive picker layout from a payload that still
 // carried the prior mode and snap back.
 async function handleConfirmPickManual(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   // resourceType guard mirrors the other confirm-card handlers — a
@@ -7323,7 +7365,7 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
 // visibility on MENTION_EVERYONE + picker-mode; this defends against
 // a crafted HTTP interaction bypassing the render).
 async function handleConfirmEveryone(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   const payload = row.payload || {};
   const payloadResource = payload.resourceType;
@@ -7685,7 +7727,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   const payload = row.payload || {};
   // No-op re-pick (same value as current state) → skip the DDB write
   // + version bump. A version bump would needlessly fence any
@@ -7752,7 +7794,7 @@ async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
   const payload = row.payload || {};
   // No-op re-pick (same value as current state) → skip the write +
@@ -7851,7 +7893,7 @@ async function handleConfirmNoteModal(interaction, { flow_id, row }) {
   // Discord's 3-second hard deadline, after which `update()` /
   // `reply()` both fail and the user gets an "interaction failed"
   // toast. Mirrors the menu handlers' shape.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   // Defensive read: `getTextInputValue` throws if the customId
   // allowlist ever drifts from SEND_NOTE_MODAL_FIELD_ID. Don't
   // silently clear the existing note — surface an ephemeral error
@@ -7935,16 +7977,15 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // can take more than Discord's 3-second hard ack deadline without
   // surfacing as an "interaction failed" toast to the user. Cold
   // cache + 25 cache-miss `members.fetch` calls in `resolveRecipientUsers`
-  // alone can chew through the budget. The .catch swallows the
-  // (rare) race where Discord's gateway already acked the
-  // interaction; a duplicate defer there throws InteractionAlreadyReplied
-  // and the subsequent editReply still works.
+  // alone can chew through the budget. If Discord already accepted
+  // another copy's acknowledgement, this copy does not own the action;
+  // deferUpdateOrStop prevents any state change or send.
   //
   // All ephemeral error-replies below switch from `interaction.reply`
   // to `interaction.followUp` (the interaction is now in the
   // deferred state and `.reply` would throw); main-message updates
   // switch from `interaction.update` to `interaction.editReply`.
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
 
   // Bot-kicked-between-confirm-and-Send: `interaction.guild` is null.
   // Without this guard the user sees "all recipients left the server"
@@ -8233,7 +8274,7 @@ async function handleConfirmCancelClick(interaction, { flow_id, row }) {
   // is fast in the happy path, but a DDB blip or slow region could
   // still blow the budget. Same pattern handleConfirmSendClick uses
   // (deferUpdate at top, editReply / followUp downstream).
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  if (!await deferUpdateOrStop(interaction, flow_id)) return undefined;
   // Targeted catch around deleteFlow mirrors handleConfirmSendClick's
   // guards on resolveRecipientUsers + getGuildApiKey. Without it, a
   // DDB throw propagates to the dispatcher's outer catch which
