@@ -51,6 +51,149 @@ function apiError(status, { code = 'error', detail } = {}) {
   };
 }
 
+describe('qURL client — getIdentity', () => {
+  let qurl;
+
+  beforeEach(() => {
+    jest.resetModules();
+    // Distinct from the guild key below to pin that getIdentity never falls
+    // back to the bot's own key.
+    jest.mock('../src/config', () => ({
+      QURL_API_KEY: 'fallback-api-key',
+      QURL_ENDPOINT: 'https://api.test.local/',
+    }));
+    jest.mock('../src/logger', () => ({
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+    }));
+    qurl = require('../src/qurl');
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('gets the identity for the provided guild key', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      apiOk(200, {
+        owner_id: 'owner-123',
+        auth_type: 'api_key',
+        api_key: {
+          key_id: 'key-123',
+          key_prefix: 'lv_live_abc',
+          scopes: ['qurl:read', 'qurl:write'],
+        },
+      }),
+    );
+
+    const result = await qurl.getIdentity('stored-guild-key');
+
+    const [url, opts] = globalThis.fetch.mock.calls[0];
+    expect(url).toBe('https://api.test.local/v1/me');
+    expect(opts.method).toBe('GET');
+    expect(opts.redirect).toBe('error');
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+    expect(opts.headers.Authorization).toBe('Bearer stored-guild-key');
+    expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
+    expect(result.api_key).toEqual({
+      key_id: 'key-123',
+      key_prefix: 'lv_live_abc',
+      scopes: ['qurl:read', 'qurl:write'],
+    });
+  });
+
+  it.each([401, 403])('preserves a redacted %i status for callers', async (status) => {
+    const logger = require('../src/logger');
+    const secretBody = 'sensitive-body-marker-do-not-log';
+    const response = apiError(status, { code: 'auth_error', detail: secretBody });
+    response.body = { cancel: jest.fn().mockResolvedValue(undefined) };
+    globalThis.fetch = jest.fn().mockResolvedValue(response);
+
+    const error = await qurl.getIdentity('stored-guild-key', 'guild-1').then(
+      () => { throw new Error('expected rejection'); },
+      (err) => err,
+    );
+
+    expect(error.status).toBe(status);
+    expect(error.message).not.toContain(secretBody);
+    // This is a user-initiated tenant-key result. The infra metric filter pages
+    // on every dependency-auth audit event, so expected rejected keys must not
+    // emit the service-credential outage signal.
+    expect(logger.audit).not.toHaveBeenCalled();
+    expect(response.body.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a non-JSON identity response without exposing its body', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('secret response fragment'); },
+    });
+
+    const error = await qurl.getIdentity('stored-guild-key').then(
+      () => { throw new Error('expected rejection'); },
+      err => err,
+    );
+    expect(error.message).toBe('qURL API GET /me failed (unknown_error)');
+    expect(error.message).not.toContain('secret response fragment');
+  });
+
+  it('redacts a fetch rejection without retrying', async () => {
+    const networkError = new TypeError('fetch failed');
+    globalThis.fetch = jest.fn().mockRejectedValue(networkError);
+
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes missing or malformed identity display fields after a successful check', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: 'owner-123',
+      auth_type: 'api_key',
+      api_key: { key_id: 'key-123', scopes: ['qurl:read', null] },
+    }));
+
+    await expect(qurl.getIdentity('stored-guild-key')).resolves.toMatchObject({
+      api_key: { key_prefix: '', scopes: ['qurl:read'] },
+    });
+  });
+
+  it('rejects an identity response missing the API-key identity block', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: 'owner-123',
+      auth_type: 'api_key',
+    }));
+
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+  });
+
+  it('rejects an array in place of the API-key identity block', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiOk(200, {
+      owner_id: 'owner-123',
+      auth_type: 'api_key',
+      api_key: [],
+    }));
+
+    await expect(qurl.getIdentity('stored-guild-key'))
+      .rejects.toThrow('qURL API GET /me failed (unknown_error)');
+  });
+
+  it.each([null, ''])('rejects a missing guild key before making a request', async (apiKey) => {
+    globalThis.fetch = jest.fn();
+
+    await expect(qurl.getIdentity(apiKey)).rejects.toThrow('Guild qURL API key is not configured');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([429, 503])('makes one attempt when qurl-service returns %i', async (status) => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(status));
+
+    await expect(qurl.getIdentity('stored-guild-key')).rejects.toMatchObject({ status });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('qURL client — getResourceStatus', () => {
   let qurl;
 
@@ -464,6 +607,7 @@ describe('qURL client — retry + audit behavior', () => {
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       expect.objectContaining({ method: 'DELETE', path: '/resources/:resourceId' }),
     );
+    expect(logger.audit.mock.calls[0][1]).not.toHaveProperty('resource_ref');
   });
 });
 
