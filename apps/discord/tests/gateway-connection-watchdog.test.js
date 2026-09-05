@@ -268,6 +268,26 @@ describe('step() — connect retries', () => {
     expect(watchdog._getAttemptsForTest()).toBe(0);
   });
 
+  it('resets attempts when stop lands during a successful connect', async () => {
+    const manager = makeFakeManager();
+    let finishConnect;
+    manager.connect
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockImplementationOnce(() => new Promise(resolve => { finishConnect = resolve; }));
+    const { watchdog, logger } = makeWatchdog({ manager, maxAttempts: 10 });
+
+    await watchdog._stepForTest();
+    expect(watchdog._getAttemptsForTest()).toBe(1);
+
+    const connecting = watchdog._stepForTest();
+    watchdog.stop();
+    finishConnect();
+    await connecting;
+
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+    expect(logger.info).not.toHaveBeenCalledWith('connection-watchdog: connect succeeded');
+  });
+
   it('backs off 200/400/800/1600 ms on attempts 1..4', async () => {
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('fail'));
@@ -565,6 +585,31 @@ describe('loop backstop — survives unexpected throws from step()', () => {
 });
 
 describe('start() / stop() lifecycle', () => {
+  it('does not enter the exhaustion exit after stop lands during an in-flight connect', async () => {
+    let rejectConnect;
+    let releasePoll;
+    const manager = makeFakeManager();
+    manager.connect.mockImplementation(() => new Promise((_, reject) => { rejectConnect = reject; }));
+    const sleep = jest.fn(() => new Promise(resolve => { releasePoll = resolve; }));
+    const releaseLock = jest.fn();
+    const exit = jest.fn();
+    const { watchdog } = makeWatchdog({
+      manager, sleep, releaseLock, exit, maxAttempts: 1, connectCeilingMs: 5_000,
+    });
+
+    watchdog.start();
+    releasePoll();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(manager.connect).toHaveBeenCalledTimes(1);
+
+    const stopped = watchdog.stop();
+    rejectConnect(new Error('connect failed during shutdown'));
+    await stopped;
+
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+  });
   it('start() schedules ticks via the injected sleep + stop() halts the loop', async () => {
     const manager = makeFakeManager({ initialConnected: true });
     const sleepResolvers = [];

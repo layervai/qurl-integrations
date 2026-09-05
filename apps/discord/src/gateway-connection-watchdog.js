@@ -77,6 +77,9 @@ const RELEASE_LOCK_CEILING_MS = 3_000;
 // fail-loud-then-replace posture (the leader caps tighter because
 // it's gated on the SIGTERM ECS deadline). On timeout we throw
 // like a connect rejection; the attempts ladder advances normally.
+// An IDENTIFY-budget fatal calls stop() immediately but deliberately does not
+// await this in-flight ceiling before flushing the gateway session; its own
+// bounded process-exit path owns termination instead.
 const CONNECT_CEILING_MS = 8_000;
 
 // `manager` is conventionally the gateway-ws-shim instance (passed
@@ -175,6 +178,7 @@ function createConnectionWatchdog({
   let loopPromise = null;
   let attempts = 0;
   let closed = false;
+  let stopping = false;
 
   // Run one iteration of the watchdog. Public for tests; production
   // calls it from the `start()` loop. Returns once the iteration
@@ -211,8 +215,17 @@ function createConnectionWatchdog({
       // pin this tick and the failure-exit recovery would never fire.
       await raceWithCeiling(manager.connect(), connectCeilingMs, 'watchdog_connect_ceiling');
       attempts = 0;
+      if (stopping) return;
       logger.info('connection-watchdog: connect succeeded');
     } catch (err) {
+      // stop() may land while manager.connect() is in flight. Do not let the
+      // rejected/ceiling result continue into an independent exhaustion exit
+      // that races the shutdown path which requested the stop.
+      // This applies to ordinary SIGTERM as well as IDENTIFY-fatal teardown:
+      // once stop() owns continuity, the watchdog must not independently
+      // release the lease from a late connect failure. If that shutdown path
+      // does not hand off or release it, the lease expires through its TTL.
+      if (stopping) return;
       if (attempts >= maxAttempts) {
         logger.error('connection-watchdog: connect retries exhausted, releasing lock', {
           error: err.message, attempts,
@@ -293,6 +306,7 @@ function createConnectionWatchdog({
     // not spawn a second concurrent loop. Callers that need to
     // re-start MUST await `stop()` first.
     if (loopPromise || closed) return;
+    stopping = false;
     running = true;
     loopPromise = loop().finally(() => { loopPromise = null; });
   }
@@ -303,6 +317,7 @@ function createConnectionWatchdog({
   // the loop check sees running=false). Idempotent. Callers that
   // want to re-start the watchdog MUST await this.
   function stop() {
+    stopping = true;
     running = false;
     return loopPromise ?? Promise.resolve();
   }

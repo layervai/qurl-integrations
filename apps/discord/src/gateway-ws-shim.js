@@ -33,10 +33,11 @@
 //   - start({ timeoutMs }) — wire callbacks, register dispatch
 //                          listener, call manager.connect(). Resolves
 //                          after the WS is open; rejects on timeout.
-//   - stop({ flushFinal }) — cancel the budget guard, flush the
-//                          session store, do NOT call
+//   - stop({ flushFinal }) — stop dispatch work, flush the session
+//                          store, do NOT call
 //                          manager.destroy() (see SIGTERM contract
-//                          below).
+//                          below). The caller owns watchdog
+//                          cancellation.
 //   - isReady()          — true after the first READY dispatch.
 //   - onDispatch(handler) — register a (payload) => void listener
 //                          for every gateway dispatch. Returns an
@@ -85,31 +86,41 @@
 // same token, a malformed RESUME bouncing fresh sessions) can
 // burn the entire budget in minutes. MAX_IDENTIFY_ATTEMPTS bounds
 // the count of CONSECUTIVE IDENTIFYs without an intervening READY
-// — when a successful READY lands the counter resets to zero.
+// or RESUMED — when either successful session acknowledgement lands
+// the counter resets to zero. The counter is process-global because
+// today's deployment is one shard;
+// multi-shard support must make the cap shard-aware.
 //
-// Reset-on-READY is what makes cap=1 safe for long-lived processes.
+// Reset-on-READY-or-RESUMED is what makes cap=1 safe for long-lived processes.
 // Without it, the only IDENTIFY a task could ever do is its cold-
 // start one — a network blip >60s (resume buffer expires on
 // Discord's side) would burn the budget and ECS would crash-loop
 // the task while Discord refused to accept fresh IDENTIFYs from
-// the replacement. With reset-on-READY, every successful session
+// the replacement. With reset-on-READY-or-RESUMED, every successful session
 // gets a fresh budget for the next reconnect.
 //
 // What the cap still catches: IDENTIFY-without-READY loops. A
 // token-contention scenario (two processes claiming the same
 // identity) produces fast IDENTIFY-reject churn with no READY
 // arriving between attempts — the counter never resets, the cap
-// trips on the second attempt, and the task exits cleanly
-// instead of burning Discord's per-bot quota.
+// trips on the second attempt, and the terminal onFatal contract replaces the
+// task instead of burning Discord's per-bot quota.
 
-const { WebSocketManager, WebSocketShardEvents } = require('@discordjs/ws');
+const {
+  SimpleIdentifyThrottler,
+  WebSocketManager,
+  WebSocketShardEvents,
+} = require('@discordjs/ws');
 const { REST } = require('@discordjs/rest');
 
-// Tightly bounded per the budget rationale above. Assumes
-// @discordjs/ws invokes retrieveSessionInfo exactly once per
-// IDENTIFY decision — a future minor that adds a pre-flight
-// retrieve would make a cold-start throw GATEWAY_IDENTIFY_BUDGET
-// before READY ever lands. Pinned in package.json (~1.2.x).
+// Tightly bounded per the budget rationale above. Enforcement lives
+// at @discordjs/ws's identify-throttler boundary — session retrieval
+// also happens during heartbeats and dispatch processing, so it is
+// not an IDENTIFY signal. TODO(upstream-contract): @discordjs/ws v1.2.3
+// calls buildIdentifyThrottler(manager), awaits waitForIdentify immediately
+// before op 2, supplies a shard-close AbortSignal, and continues to the
+// IDENTIFY send after a custom throttler rejection. Blocking an over-budget
+// grant is therefore required; throwing would still allow the send.
 const MAX_IDENTIFY_ATTEMPTS = 1;
 
 // Default connect-timeout matches the legacy client.login() timeout
@@ -118,13 +129,13 @@ const MAX_IDENTIFY_ATTEMPTS = 1;
 // "Discord API unreachable" as a fast-fail rather than a hang.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 
-// The @discordjs/ws major.minor range whose WebSocketShard.onMessage
+// The exact @discordjs/ws version whose WebSocketShard.onMessage
 // dispatch ordering (shard.emit(Ready) BEFORE shard.emit(Dispatch))
-// the Pillar 3 wsConnected mirror depends on. The version-contract
-// test asserts the installed range starts with this string — a
-// minor bump must re-verify the upstream dispatch handler before
-// updating this constant.
-const VERIFIED_DJS_WS_MAJOR_MINOR = '1.2';
+// the Pillar 3 wsConnected mirror depends on, and whose custom identify-
+// throttler behavior is documented above. The version-contract test asserts
+// the installed version equals this string — any bump must re-verify both
+// upstream paths before updating this constant.
+const VERIFIED_DJS_WS_VERSION = '1.2.3';
 
 function createGatewayWsShim({
   token,
@@ -137,12 +148,20 @@ function createGatewayWsShim({
   // construction args + emit fake dispatch events.
   WebSocketManagerCtor = WebSocketManager,
   RESTCtor = REST,
+  IdentifyThrottlerCtor = SimpleIdentifyThrottler,
   rest, // pre-built REST instance (test seam); production constructs internally
+  // Required terminal-process callback. It MUST initiate a bounded process
+  // exit even when another shutdown path already owns its internal gate; the
+  // shim fails readiness and blocks the over-budget grant but does not call
+  // process.exit itself. Production gatewayFatalShutdown composes the two
+  // bounded shutdown paths that satisfy this contract.
+  onFatal,
 } = {}) {
   if (!token) throw new Error('createGatewayWsShim: token is required');
   if (typeof intents !== 'number') throw new Error('createGatewayWsShim: intents (number) is required');
   if (!store) throw new Error('createGatewayWsShim: store is required');
   if (!logger) throw new Error('createGatewayWsShim: logger is required');
+  if (typeof onFatal !== 'function') throw new Error('createGatewayWsShim: onFatal is required');
 
   // ── Internal state ──
   let manager = null;
@@ -167,10 +186,14 @@ function createGatewayWsShim({
   let wsConnected = false;
   let appId = null;
   let identifyAttempts = 0;
+  let identifyBudgetFatalSignaled = false;
+  let missingAbortSignalLogged = false;
+  let unusableAbortSignalLogged = false;
   // Two distinct flags:
   //
   //   `stopped`       — "drop late dispatches." Set by start()'s
-  //                     catch on connect failure AND by stop(). The
+  //                     catch on connect failure, an IDENTIFY-budget fatal,
+  //                     AND by stop(). The
   //                     Dispatch listener guards on this to ignore
   //                     frames arriving in the boot-teardown race
   //                     or after stop().
@@ -190,34 +213,234 @@ function createGatewayWsShim({
   // event-publisher + noteGatewayActivity).
   const dispatchHandlers = new Set();
 
+  function logBestEffort(level, ...args) {
+    try {
+      logger[level](...args);
+    } catch {
+      // A diagnostic must never turn the fail-closed throttle into an upstream
+      // rejection; @discordjs/ws would continue to the IDENTIFY send.
+    }
+  }
+
+  function abortReason(signal) {
+    if (signal.reason !== undefined) return signal.reason;
+    const error = new Error('gateway-ws-shim: shard aborted during identify throttle');
+    error.name = 'AbortError';
+    return error;
+  }
+
   function buildRetrieveCallback() {
-    // Wraps store.retrieveSessionInfo with the IDENTIFY budget
-    // guard. When the store mirror is non-null, the wrapper is a
-    // pass-through (no budget impact — we're RESUMing). When the
-    // mirror is null, every call is a pending IDENTIFY; throw past
-    // MAX_IDENTIFY_ATTEMPTS so a churn loop fails fast.
-    return (shardId) => {
-      const info = store.retrieveSessionInfo(shardId);
-      if (info !== null) {
-        return info;
+    // Pure pass-through. @discordjs/ws calls this during connect,
+    // heartbeat, dispatch, and invalid-session processing; treating
+    // a null read as an IDENTIFY attempt caused normal cold starts to
+    // exhaust the cap before READY.
+    return shardId => store.retrieveSessionInfo(shardId);
+  }
+
+  function waitForAbort(signal) {
+    return new Promise((_, reject) => {
+      // @discordjs/ws v1.2.3 always supplies the shard-close signal. If that
+      // upstream contract drifts, blocking forever is the safe fail-closed
+      // behavior: resolving or rejecting here could release an over-budget
+      // IDENTIFY. The process is already unhealthy and its shutdown backstop
+      // owns termination. TODO(upstream-contract): see version gate above.
+      if (!signal) {
+        if (!missingAbortSignalLogged) {
+          missingAbortSignalLogged = true;
+          logBestEffort(
+            'error',
+            'gateway-ws-shim: over-budget grant omitted shard abort signal; blocking forever',
+          );
+        }
+        return;
       }
-      identifyAttempts += 1;
-      if (identifyAttempts > MAX_IDENTIFY_ATTEMPTS) {
-        // The thrown error propagates through @discordjs/ws's
-        // identify path and rejects the in-flight connect()
-        // promise; start() surfaces it to the caller, which
-        // routes through gracefulShutdown(1). After ECS task
-        // replacement, the new process's budget counter resets
-        // — a fresh shot at the resume window.
-        const err = new Error(`gateway-ws-shim: IDENTIFY budget exhausted (${identifyAttempts} attempts; cap ${MAX_IDENTIFY_ATTEMPTS})`);
-        err.code = 'GATEWAY_IDENTIFY_BUDGET';
-        throw err;
+      if (signal.aborted) {
+        reject(abortReason(signal));
+        return;
       }
-      logger.info('gateway-ws-shim: IDENTIFY pending', {
-        attempt: identifyAttempts,
-        cap: MAX_IDENTIFY_ATTEMPTS,
+      if (typeof signal.addEventListener !== 'function') {
+        if (!unusableAbortSignalLogged) {
+          unusableAbortSignalLogged = true;
+          logBestEffort(
+            'error',
+            'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
+            { errorName: 'TypeError' },
+          );
+        }
+        return;
+      }
+      try {
+        signal.addEventListener('abort', () => reject(abortReason(signal)), { once: true });
+      } catch (error) {
+        if (!unusableAbortSignalLogged) {
+          unusableAbortSignalLogged = true;
+          logBestEffort(
+            'error',
+            'gateway-ws-shim: over-budget grant supplied unusable shard abort signal; blocking forever',
+            { errorName: error?.name ?? typeof error },
+          );
+        }
+      }
+    });
+  }
+
+  function signalIdentifyBudgetFatal(error) {
+    if (identifyBudgetFatalSignaled) return;
+    identifyBudgetFatalSignaled = true;
+    // This is a terminal process state. Fail health and reject any watchdog
+    // reconnect immediately; production onFatal enters gracefulShutdown(),
+    // which synchronously arms its independent 10-second force-exit backstop.
+    // `stopped` also halts dispatch fan-out intentionally: publisher draining
+    // starts as part of this terminal transition, so accepting new interactions
+    // after that boundary could enqueue work after the drain snapshot. stop()
+    // remains reachable because its idempotency uses stopCompleted.
+    isReady = false;
+    wsConnected = false;
+    stopped = true;
+    logBestEffort('error', 'gateway-ws-shim: IDENTIFY budget exhausted; shutting down', {
+      attempt: identifyAttempts,
+      cap: MAX_IDENTIFY_ATTEMPTS,
+    });
+    try {
+      Promise.resolve(onFatal(error)).catch((fatalError) => {
+        logBestEffort('error', 'gateway-ws-shim: fatal shutdown handler rejected', {
+          error: fatalError?.message ?? String(fatalError),
+        });
       });
-      return null;
+    } catch (fatalError) {
+      logBestEffort('error', 'gateway-ws-shim: fatal shutdown handler threw', {
+        error: fatalError?.message ?? String(fatalError),
+      });
+    }
+  }
+
+  async function buildIdentifyThrottler(managerInstance) {
+    let gatewayInfo;
+    let rawMaxConcurrency;
+    let gatewayInfoFetched = false;
+    try {
+      gatewayInfo = await managerInstance.fetchGatewayInformation();
+      gatewayInfoFetched = true;
+      rawMaxConcurrency = gatewayInfo?.session_start_limit?.max_concurrency;
+    } catch (error) {
+      // This callback is awaited inside @discordjs/ws's swallow-and-send
+      // identify path. It must always return our guard: propagating the fetch
+      // failure would let upstream send IDENTIFY without budget enforcement.
+      logBestEffort(
+        'warn',
+        'gateway-ws-shim: gateway info fetch failed; defaulting max_concurrency to 1',
+        {
+          errorName: error?.name,
+          errorCode: error?.code,
+          status: error?.status,
+        },
+      );
+    }
+    const maxConcurrency = Number.isInteger(rawMaxConcurrency) && rawMaxConcurrency > 0
+      ? rawMaxConcurrency
+      : 1;
+    if (gatewayInfoFetched && maxConcurrency !== rawMaxConcurrency) {
+      logBestEffort(
+        'warn',
+        'gateway-ws-shim: gateway info has invalid max_concurrency; defaulting to 1',
+        { observedMaxConcurrency: rawMaxConcurrency ?? null },
+      );
+    }
+    const recommendedShards = gatewayInfo?.shards;
+    if (gatewayInfoFetched && Number.isInteger(recommendedShards) && recommendedShards > 1) {
+      logBestEffort(
+        'error',
+        'gateway-ws-shim: Discord recommends more than one shard',
+        { recommendedShards, configuredShards: 1 },
+      );
+    }
+    let delegate;
+    try {
+      delegate = new IdentifyThrottlerCtor(maxConcurrency);
+      if (typeof delegate?.waitForIdentify !== 'function') {
+        throw new TypeError('Identify throttler has no waitForIdentify method');
+      }
+    } catch (error) {
+      // The builder is awaited inside @discordjs/ws's swallow-and-send path,
+      // so a constructor/export drift must not escape and remove our budget
+      // guard. Today's deployment is exactly one shard; a budget-only delegate
+      // safely gives up cross-shard pacing while retaining the hard cap. The
+      // real export/manager-option contract test makes this fallback loud in CI.
+      logBestEffort(
+        'error',
+        'gateway-ws-shim: identify throttler construction failed; using budget-only fallback',
+        { errorName: error?.name, errorCode: error?.code },
+      );
+      delegate = {
+        async waitForIdentify(_shardId, signal) {
+          if (signal?.aborted) {
+            throw abortReason(signal);
+          }
+        },
+      };
+    }
+    // Budget state stays in the createGatewayWsShim closure, not on this
+    // returned delegate. If upstream races two builder calls, both guards
+    // therefore share one process-wide allowance.
+    return {
+      async waitForIdentify(shardId, signal) {
+        // Once the budget has tripped, every later grant remains blocked on
+        // the shard-close signal. Do not call the delegate or inflate the
+        // diagnostic attempt count while shutdown is already in progress.
+        if (identifyBudgetFatalSignaled) {
+          return waitForAbort(signal);
+        }
+        // Delegate first for Discord's pacing. An abort suppresses upstream's
+        // IDENTIFY and consumes no attempt. Any other delegate rejection is
+        // swallowed by @discordjs/ws before it still sends IDENTIFY, so count
+        // that attempted grant instead of letting it bypass the hard cap.
+        try {
+          await delegate.waitForIdentify(shardId, signal);
+        } catch (error) {
+          if (signal?.aborted) {
+            throw abortReason(signal);
+          }
+          logBestEffort(
+            'warn',
+            'gateway-ws-shim: identify throttle delegate failed; counting attempted grant',
+            { errorName: error?.name, errorCode: error?.code },
+          );
+        }
+        // Concurrent grants may both enter before the first one trips the
+        // budget. Re-check after the awaited delegate so only the first grant
+        // records and reports the terminal over-budget attempt.
+        if (identifyBudgetFatalSignaled) {
+          return waitForAbort(signal);
+        }
+        // Upstream only suppresses IDENTIFY when an aborted throttle wait
+        // rejects. If the shard closes exactly as the delegate releases,
+        // reject with that reason before incrementing so its catch returns
+        // instead of falling through to op 2.
+        if (signal?.aborted) {
+          throw abortReason(signal);
+        }
+        identifyAttempts += 1;
+        if (identifyAttempts <= MAX_IDENTIFY_ATTEMPTS) {
+          logBestEffort('info', 'gateway-ws-shim: IDENTIFY pending', {
+            attempt: identifyAttempts,
+            cap: MAX_IDENTIFY_ATTEMPTS,
+          });
+          return;
+        }
+
+        const error = new Error(
+          `gateway-ws-shim: IDENTIFY budget exhausted (${identifyAttempts} attempts; cap ${MAX_IDENTIFY_ATTEMPTS})`,
+        );
+        error.code = 'GATEWAY_IDENTIFY_BUDGET';
+        signalIdentifyBudgetFatal(error);
+
+        // Do not throw. @discordjs/ws v1.2.3 catches custom throttler errors,
+        // destroys/reconnects, and then falls through to its IDENTIFY send.
+        // Holding this grant lets onFatal replace the process without leaking
+        // an over-budget IDENTIFY or producing reconnect churn.
+        // TODO(upstream-contract): re-verify on a ws minor bump.
+        return waitForAbort(signal);
+      },
     };
   }
 
@@ -262,8 +485,13 @@ function createGatewayWsShim({
         token,
         intents,
         rest: restInstance,
+        // The IDENTIFY budget/readiness state is process-global today. Pin the
+        // deployment to one shard so Discord's recommended count cannot change
+        // that invariant silently; multi-shard support must make state per-shard.
+        shardCount: 1,
         retrieveSessionInfo: buildRetrieveCallback(),
         updateSessionInfo: buildUpdateCallback(),
+        buildIdentifyThrottler,
       });
 
       // Dispatch listener: pluck the appId from READY, mirror the
@@ -351,7 +579,7 @@ function createGatewayWsShim({
       // already Ready, throwing "Tried to connect a shard that
       // wasn't idle" upstream as an unhandled rejection.
       //
-      // Version contract: see VERIFIED_DJS_WS_MAJOR_MINOR above.
+      // Version contract: see VERIFIED_DJS_WS_VERSION above.
       // `stopped` guard mirrors the Dispatch listener: drops late
       // shard events between a failed-start catch and shim.stop().
       manager.on(WebSocketShardEvents.Ready, () => {
@@ -362,12 +590,17 @@ function createGatewayWsShim({
         if (stopped) return;
         wsConnected = true;
       });
-      // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
+      // Note: @discordjs/ws v1.2.3 Closed payload is `{ code, shardId }`
       // only. We destructure `reason` defensively against a future
       // minor adding it (some Discord 4xxx close frames carry one);
       // today it's always undefined, logged as null.
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
-        if (stopped) return;
+        if (stopped) {
+          logBestEffort('info', 'gateway-ws-shim: shard closed during terminal teardown', {
+            shardId, code, reason: reason ?? null,
+          });
+          return;
+        }
         wsConnected = false;
         logger.info('gateway-ws-shim: shard closed', {
           shardId, code, reason: reason ?? null,
@@ -404,8 +637,9 @@ function createGatewayWsShim({
           }),
         ]);
       } catch (err) {
-        // Connect failed (timeout, identify budget exhaustion, or
-        // a Discord-side rejection). Set `stopped=true` so the
+        // Connect failed (timeout or a Discord-side rejection). IDENTIFY-budget
+        // exhaustion deliberately keeps manager.connect() pending while its
+        // independent onFatal path starts shutdown. Set `stopped=true` so the
         // Dispatch listener's guard drops any frames that arrive
         // in the race window between this throw and the caller's
         // gracefulShutdown → shim.stop() call (the legacy
@@ -514,10 +748,15 @@ function createGatewayWsShim({
     // call it synchronously every tick, so awaiting fetchStatus()
     // there would be wrong.
     connect() {
-      // `stopped` is set by both stop() AND start()'s failed-connect
-      // catch, so the message covers both terminal states. Check it
-      // before `!manager` since stop() nulls manager.
+      // `stopped` covers stop(), a failed start(), and the IDENTIFY-budget
+      // fatal. Check it before `!manager` since stop() nulls manager; keep the
+      // fatal diagnostic distinct so watchdog logs explain task replacement.
       if (stopped) {
+        if (identifyBudgetFatalSignaled) {
+          return Promise.reject(new Error(
+            'gateway-ws-shim: connect() called after an IDENTIFY-budget fatal',
+          ));
+        }
         return Promise.reject(new Error(
           'gateway-ws-shim: connect() called after stop() or a failed start()',
         ));
@@ -563,5 +802,5 @@ module.exports = {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
-  VERIFIED_DJS_WS_MAJOR_MINOR,
+  VERIFIED_DJS_WS_VERSION,
 };
