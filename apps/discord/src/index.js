@@ -1207,14 +1207,15 @@ async function start() {
     if (config.ENABLE_GATEWAY_HOT_STANDBY && !isShuttingDown) {
       await startHotStandby();
     }
-    // No equivalent of startGatewayHeartbeat / startActiveGuildCount
-    // under the shim today — those probe discord.js Client's
-    // WebSocketManager shape (client.ws.shards[*].lastPingTimestamp)
-    // which doesn't exist when the shim owns the WS. Tracked as a
-    // follow-up: port the heartbeat / active-guild observability to
-    // a shim-aware snapshot. The gateway-health server's /health
-    // endpoint (isReady() probe) remains the load-bearing
-    // ECS-replacement signal in the interim.
+    // @discordjs/ws emits HeartbeatComplete directly; gatewayShim mirrors
+    // its ACK timestamp + latency behind the same sampler contract the
+    // legacy client path uses. Start the positive-signal timer on BOTH hot-
+    // standby replicas: only the lock-holding, connected replica can emit a
+    // healthy sample, so the aggregate log metric remains truthful.
+    if (!isShuttingDown) {
+      gatewayHeartbeatTimer = startGatewayHeartbeat(gatewayShim);
+      activeGuildCountTimer = startActiveGuildCount(gatewayShim);
+    }
   } else if (isGateway) {
     await Promise.race([
       client.login(config.DISCORD_TOKEN),

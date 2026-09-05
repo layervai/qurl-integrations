@@ -55,6 +55,11 @@
 //                          (Ready/Resumed → true, Closed → false);
 //                          read every tick by the watchdog and
 //                          once per inbound-handoff by the leader.
+//   - getGatewayHeartbeatState() — latest manager heartbeat ACK
+//                          snapshot for the positive-signal alarm.
+//   - getActiveGuildCount() — exact guild membership count. READY
+//                          seeds it directly; pure RESUME lazily
+//                          seeds it from Discord REST.
 //   - isStarted()        — true after start() resolves and before
 //                          stop() runs; used by the Pillar 3 wiring
 //                          for a boot-ordering belt-and-suspenders.
@@ -104,6 +109,7 @@
 
 const { WebSocketManager, WebSocketShardEvents } = require('@discordjs/ws');
 const { REST } = require('@discordjs/rest');
+const { Routes } = require('discord-api-types/v10');
 
 // Tightly bounded per the budget rationale above. Assumes
 // @discordjs/ws invokes retrieveSessionInfo exactly once per
@@ -117,13 +123,18 @@ const MAX_IDENTIFY_ATTEMPTS = 1;
 // typically under 5 s; 30 s is a generous ceiling that surfaces
 // "Discord API unreachable" as a fast-fail rather than a hang.
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+// TODO(upstream-contract): Discord caps GET /users/@me/guilds at 200 rows.
+const USER_GUILDS_PAGE_LIMIT = 200;
+// One shard supports at most 2,500 guilds; 25 pages leaves 2x headroom while
+// bounding a malformed/non-advancing upstream pagination walk at 5,000 rows.
+const MAX_USER_GUILDS_PAGES = 25;
 
 // The @discordjs/ws major.minor range whose WebSocketShard.onMessage
 // dispatch ordering (shard.emit(Ready) BEFORE shard.emit(Dispatch))
-// the Pillar 3 wsConnected mirror depends on. The version-contract
-// test asserts the installed range starts with this string — a
-// minor bump must re-verify the upstream dispatch handler before
-// updating this constant.
+// the Pillar 3 wsConnected mirror depends on, and whose HeartbeatComplete
+// payload exposes numeric ackAt/latency fields. The version-contract test
+// asserts both the installed range and declaration shape — a minor bump must
+// re-verify the upstream implementation before updating this constant.
 const VERIFIED_DJS_WS_MAJOR_MINOR = '1.2';
 
 function createGatewayWsShim({
@@ -165,6 +176,25 @@ function createGatewayWsShim({
   // on the whole manager — upstream rejects "Tried to connect a
   // shard that wasn't idle" for the still-Ready shards.
   let wsConnected = false;
+  // @discordjs/ws exposes heartbeat ACK telemetry as a manager-level
+  // HeartbeatComplete event rather than discord.js Client.ws shard fields.
+  // Mirror the latest sample so gateway-metrics can keep the same positive-
+  // signal alarm contract on the resume/hot-standby path. Same single-shard
+  // assumption as wsConnected above: with multiple shards this newest ACK
+  // could mask a stale shard, while the legacy sampler deliberately uses the
+  // oldest. Generalize all three mirrors together before enabling sharding.
+  let lastHeartbeatAckAt = null;
+  let lastHeartbeatLatencyMs = -1;
+  let hasConnected = false;
+  // READY carries the complete guild membership list. A pure RESUME does
+  // not, so that path lazily seeds from Discord's paginated user-guilds
+  // endpoint before publishing an exact ActiveGuildCount metric. Also single-
+  // shard: each READY replaces the set wholesale; per-shard sets must be
+  // unioned before deploying more than SHARD_ID=0:1.
+  let activeGuildIds = null;
+  let guildSeedPromise = null;
+  const pendingGuildAdds = new Set();
+  const pendingGuildRemoves = new Set();
   let appId = null;
   let identifyAttempts = 0;
   // Two distinct flags:
@@ -280,6 +310,8 @@ function createGatewayWsShim({
         if (stopped) return;
         const eventType = data?.t;
         if (eventType === 'READY') {
+          // TODO(upstream-contract): Discord READY.d.guilds is the complete
+          // guild-membership snapshot for this shard.
           // application.id is the OAuth2 application snowflake —
           // identical to client.application.id in the legacy path.
           // RegisterCommands needs this to address the global-
@@ -292,6 +324,13 @@ function createGatewayWsShim({
           // restores a fresh allowance for the next reconnect.
           // See module header.
           identifyAttempts = 0;
+          activeGuildIds = new Set(
+            Array.isArray(data?.d?.guilds)
+              ? data.d.guilds.map((guild) => guild?.id).filter((id) => typeof id === 'string')
+              : [],
+          );
+          pendingGuildAdds.clear();
+          pendingGuildRemoves.clear();
           logger.info('gateway-ws-shim: READY received', {
             shardId,
             appIdPrefix: appId ? appId.slice(0, 6) : null,
@@ -314,6 +353,28 @@ function createGatewayWsShim({
           isReady = true;
           identifyAttempts = 0;
           logger.info('gateway-ws-shim: RESUMED received', { shardId });
+        } else if (eventType === 'GUILD_CREATE' && typeof data?.d?.id === 'string') {
+          const guildId = data.d.id;
+          if (activeGuildIds) {
+            activeGuildIds.add(guildId);
+          } else {
+            pendingGuildRemoves.delete(guildId);
+            pendingGuildAdds.add(guildId);
+          }
+        } else if (
+          eventType === 'GUILD_DELETE'
+          // TODO(upstream-contract): Discord marks temporary unavailability
+          // with unavailable=true; other GUILD_DELETE events are real leaves.
+          && data?.d?.unavailable !== true
+          && typeof data?.d?.id === 'string'
+        ) {
+          const guildId = data.d.id;
+          if (activeGuildIds) {
+            activeGuildIds.delete(guildId);
+          } else {
+            pendingGuildAdds.delete(guildId);
+            pendingGuildRemoves.add(guildId);
+          }
         }
         // Fan-out. Each handler runs synchronously; any thrown error
         // is caught and logged so one bad handler doesn't break the
@@ -357,10 +418,12 @@ function createGatewayWsShim({
       manager.on(WebSocketShardEvents.Ready, () => {
         if (stopped) return;
         wsConnected = true;
+        hasConnected = true;
       });
       manager.on(WebSocketShardEvents.Resumed, () => {
         if (stopped) return;
         wsConnected = true;
+        hasConnected = true;
       });
       // Note: @discordjs/ws v1.2.x Closed payload is `{ code, shardId }`
       // only. We destructure `reason` defensively against a future
@@ -369,9 +432,25 @@ function createGatewayWsShim({
       manager.on(WebSocketShardEvents.Closed, ({ code, reason, shardId }) => {
         if (stopped) return;
         wsConnected = false;
+        // A new WS session must earn a fresh positive signal. Retaining the
+        // previous session's ACK would briefly report healthy after RESUMED
+        // even if the replacement connection never completes a heartbeat.
+        lastHeartbeatAckAt = null;
+        lastHeartbeatLatencyMs = -1;
         logger.info('gateway-ws-shim: shard closed', {
           shardId, code, reason: reason ?? null,
         });
+      });
+      // TODO(upstream-contract): VERIFIED_DJS_WS_MAJOR_MINOR and its package
+      // declaration test pin @discordjs/ws's { ackAt, latency } payload.
+      manager.on(WebSocketShardEvents.HeartbeatComplete, ({ ackAt, latency } = {}) => {
+        if (stopped) return;
+        if (typeof ackAt === 'number' && ackAt > 0) {
+          lastHeartbeatAckAt = ackAt;
+        }
+        if (typeof latency === 'number' && latency >= 0) {
+          lastHeartbeatLatencyMs = latency;
+        }
       });
 
       if (!connect) {
@@ -470,6 +549,7 @@ function createGatewayWsShim({
         manager.removeAllListeners(WebSocketShardEvents.Closed);
         manager.removeAllListeners(WebSocketShardEvents.Ready);
         manager.removeAllListeners(WebSocketShardEvents.Resumed);
+        manager.removeAllListeners(WebSocketShardEvents.HeartbeatComplete);
       }
       manager = null;
     },
@@ -534,6 +614,85 @@ function createGatewayWsShim({
       return wsConnected;
     },
 
+    getGatewayHeartbeatState() {
+      // A never-connected standby, a stopped process, and a disconnected
+      // former leader have no gateway-health opinion. The positive-signal
+      // missing-data alarm still catches the absence of a connected replica;
+      // suppressing the companion unhealthy event prevents an idle standby
+      // from emitting an unbounded false-unhealthy stream after demotion.
+      if (!hasConnected || stopped || !wsConnected) return null;
+      return {
+        // isReady intentionally stays true through transient reconnects for
+        // the ECS /health probe. The positive heartbeat must be stricter:
+        // no connected shard means no healthy datapoint.
+        isReady: isReady && wsConnected,
+        pingMs: lastHeartbeatLatencyMs,
+        lastHeartbeatAckAt,
+      };
+    },
+
+    async getActiveGuildCount() {
+      // A hot standby must not publish a fabricated zero while it is not the
+      // lock-holding gateway. The connected replica will provide the gauge.
+      // `stopped`/REST guard also closes the failed-start race where READY can
+      // land immediately before connect() times out and clears restInstance.
+      if (stopped || !restInstance || !isReady || !wsConnected) return null;
+      if (activeGuildIds) return activeGuildIds.size;
+
+      if (!guildSeedPromise) {
+        guildSeedPromise = (async () => {
+          const fetchedGuildIds = new Set();
+          let after = null;
+
+          for (let pageNumber = 1; ; pageNumber += 1) {
+            if (pageNumber > MAX_USER_GUILDS_PAGES) {
+              throw new Error(
+                `gateway-ws-shim: current-user guild pagination exceeded page limit (${MAX_USER_GUILDS_PAGES})`,
+              );
+            }
+            const query = new URLSearchParams({ limit: String(USER_GUILDS_PAGE_LIMIT) });
+            // TODO(upstream-contract): Discord paginates this route in
+            // ascending snowflake order via `after`; a short page is final.
+            if (after) query.set('after', after);
+            // TODO(upstream-contract): Routes.userGuilds() maps to Discord's
+            // GET /users/@me/guilds endpoint.
+            const page = await restInstance.get(Routes.userGuilds(), { query });
+            if (!Array.isArray(page)) {
+              throw new Error('gateway-ws-shim: current-user guilds response was not an array');
+            }
+            for (const guild of page) {
+              if (typeof guild?.id === 'string') fetchedGuildIds.add(guild.id);
+            }
+            if (page.length < USER_GUILDS_PAGE_LIMIT) break;
+
+            const nextAfter = page[page.length - 1]?.id;
+            if (typeof nextAfter !== 'string' || nextAfter === after) {
+              throw new Error('gateway-ws-shim: current-user guild pagination did not advance');
+            }
+            after = nextAfter;
+          }
+
+          // READY may have supplied a newer exact snapshot while the REST
+          // seed was in flight. Only install the seed if state is still
+          // unknown, and fold in any guild lifecycle events observed during
+          // the requests so the final count cannot lose a concurrent change.
+          if (!activeGuildIds) {
+            for (const guildId of pendingGuildRemoves) fetchedGuildIds.delete(guildId);
+            for (const guildId of pendingGuildAdds) fetchedGuildIds.add(guildId);
+            activeGuildIds = fetchedGuildIds;
+            pendingGuildAdds.clear();
+            pendingGuildRemoves.clear();
+          }
+          return activeGuildIds.size;
+        })().finally(() => {
+          // On failure this permits the next 60-second metric tick to retry.
+          // sampleInFlight in gateway-metrics prevents overlapping sweeps.
+          guildSeedPromise = null;
+        });
+      }
+      return guildSeedPromise;
+    },
+
     // True once start() has constructed the underlying manager and
     // before stop() has nulled it. Pillar 3 wiring uses this as a
     // belt-and-suspenders check at startHotStandby boot to surface
@@ -563,5 +722,6 @@ module.exports = {
   createGatewayWsShim,
   MAX_IDENTIFY_ATTEMPTS,
   DEFAULT_CONNECT_TIMEOUT_MS,
+  MAX_USER_GUILDS_PAGES,
   VERIFIED_DJS_WS_MAJOR_MINOR,
 };
