@@ -145,7 +145,7 @@ test('renders a suite execution error as a red failure', async () => {
   const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
   const body = JSON.parse(request.body as string);
   expect(body.embeds[0].color).toBe(0xe74c3c);
-  expect(body.embeds[0].description).toContain('❌ 1 test suite failed to run, ✅ 1 passed');
+  expect(body.embeds[0].description).toContain('❌ 1 test suite had execution errors, ✅ 1 passed');
   expect(body.embeds[0].fields[1]).toEqual({
     name: 'file-revoke.test.ts',
     value: '❌ failed to run',
@@ -186,6 +186,38 @@ test('derives plural suite crashes and failed-test counts from per-file results'
   const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
   const body = JSON.parse(request.body as string);
   expect(body.embeds[0].description).toContain(
-    '❌ 2 test suites failed to run, ❌ 1 failed, ✅ 0 passed',
+    '❌ 2 test suites had execution errors, ❌ 1 failed, ✅ 0 passed',
   );
+});
+
+test('keeps assertion details when a suite also has an execution error', async () => {
+  const reporter = new DiscordReporter({}, {});
+  await reporter.onRunComplete(new Set(), {
+    numPassedTests: 1,
+    numFailedTests: 1,
+    numTotalTests: 2,
+    startTime: Date.now() - 1_000,
+    testResults: [
+      {
+        testFilePath: '/workspace/e2e/tests/after-all-error.test.ts',
+        numPassingTests: 1,
+        numFailingTests: 1,
+        testExecError: new Error('unhandled teardown error'),
+        testResults: [
+          { status: 'passed', title: 'healthy assertion' },
+          { status: 'failed', title: 'failed assertion' },
+        ],
+      },
+    ],
+  });
+
+  const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const body = JSON.parse(request.body as string);
+  expect(body.embeds[0].description).toContain(
+    '❌ 1 test suite had execution errors, ❌ 1 failed, ✅ 1 passed',
+  );
+  expect(body.embeds[0].fields[0]).toEqual({
+    name: 'after-all-error.test.ts',
+    value: '❌ 1/2\n• suite execution error\n• failed assertion',
+  });
 });

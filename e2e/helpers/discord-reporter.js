@@ -82,26 +82,37 @@ function buildField(suite) {
   const total = suite.testResults.length;
   const ran = suite.numPassingTests + suite.numFailingTests;
   const skipped = total - ran;
-  const icon = suite.testExecError || suite.numFailingTests > 0
+  const hasExecError = Boolean(suite.testExecError);
+
+  if (hasExecError && total === 0) {
+    // The workflow URL carries the diagnostic. Do not copy module paths or
+    // dependency error text into Discord; those may contain environment data.
+    return { name: file, value: '❌ failed to run' };
+  }
+
+  const icon = hasExecError || suite.numFailingTests > 0
     ? '❌'
     : suite.numPassingTests > 0 ? '✅' : '⚠️';
   const skippedSuffix = skipped > 0 ? ` ⏭ ${skipped}` : '';
   let value = `${icon} ${suite.numPassingTests}/${total}${skippedSuffix}`;
+  const details = [];
 
-  if (suite.testExecError) {
-    // The workflow URL carries the diagnostic. Do not copy module paths or
-    // dependency error text into Discord; those may contain environment data.
-    value = '❌ failed to run';
-  } else if (suite.numFailingTests > 0) {
+  if (hasExecError) {
+    // Jest can report assertions and an execution error together, for example
+    // when an unhandled error occurs after assertions run. Keep the counts and
+    // failure titles visible without copying the error text into Discord.
+    details.push('• suite execution error');
+  }
+  if (suite.numFailingTests > 0) {
     const failing = suite.testResults
       .filter((t) => t.status === 'failed')
       .slice(0, MAX_FAILING_TESTS_PER_FILE)
-      .map((t) => `• ${t.title}`)
-      .join('\n');
+      .map((t) => `• ${t.title}`);
     const overflow = suite.numFailingTests - MAX_FAILING_TESTS_PER_FILE;
-    const overflowLine = overflow > 0 ? `\n• … and ${overflow} more` : '';
-    value = `${value}\n${failing}${overflowLine}`.slice(0, FIELD_VALUE_MAX);
+    details.push(...failing);
+    if (overflow > 0) details.push(`• … and ${overflow} more`);
   }
+  if (details.length > 0) value = `${value}\n${details.join('\n')}`.slice(0, FIELD_VALUE_MAX);
 
   return { name: file, value };
 }
@@ -113,6 +124,8 @@ function buildEmbed(results) {
   const passed = results.numPassedTests;
   const failed = results.numFailedTests;
   const total = results.numTotalTests;
+  // Derive this from the same per-file signal used by buildField so the
+  // description and fields cannot disagree if Jest's aggregate shape changes.
   const runtimeFailed = results.testResults.filter((suite) => suite.testExecError).length;
   const durationSec = ((Date.now() - results.startTime) / 1000).toFixed(1);
   const label = envLabel();
@@ -131,7 +144,7 @@ function buildEmbed(results) {
     color = COLOR_RED;
     const suiteWord = runtimeFailed === 1 ? 'suite' : 'suites';
     const failedTests = failed > 0 ? `, ❌ ${failed} failed` : '';
-    description = `❌ ${runtimeFailed} test ${suiteWord} failed to run${failedTests}, ✅ ${passed} passed${skippedSuffix} · ${durationSec}s`;
+    description = `❌ ${runtimeFailed} test ${suiteWord} had execution errors${failedTests}, ✅ ${passed} passed${skippedSuffix} · ${durationSec}s`;
   } else if (total === 0) {
     color = COLOR_YELLOW;
     description = `⚠️ No tests ran · ${durationSec}s`;
