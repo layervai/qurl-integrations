@@ -220,13 +220,24 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if sharedBeforeDelete.err != nil || strings.TrimSpace(sharedBeforeDelete.stdout) == "" {
 		t.Fatal("share before Connector delete failed; private details withheld")
 	}
-	grantedBeforeDelete := prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
+	var grantedBeforeDelete *sandboxGrantedRoute
+	if platform != "macOS" {
+		// GitHub-hosted macOS runners use different public egress addresses for
+		// the NHP relay and the content connection. The resulting /32 admission
+		// correctly fences this retained-grant probe before it reaches the local
+		// backend. Linux and Windows keep the exact retained-grant fence proof;
+		// this lane still proves the macOS customer route with fresh qurl get
+		// commands before and after every lifecycle transition below.
+		grantedBeforeDelete = prepareSandboxGrantedRoute(t, cliEnv, sharedBeforeDelete.stdout, marker, backendHits.Load)
+	}
 
 	deleted := runExternalSandboxCLI(t, binary, cliEnv, "delete", cridValue, "--yes")
 	if deleted.err != nil {
 		t.Fatalf("delete while daemon is serving: %v; stderr %q", deleted.err, deleted.stderr)
 	}
-	assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
+	if grantedBeforeDelete != nil {
+		assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
+	}
 	shares, present, err := connectorstate.ReadLocalSharesIfPresent(context.Background(), stateDir)
 	if err != nil || !present {
 		t.Fatalf("read local registry after delete = (present %v, %v)", present, err)
@@ -238,9 +249,10 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	}
 	assertExternalSandboxDeleted(t, binary, cliEnv, cridValue)
 
-	// Reusing the friendly name must create a new identity while the old
-	// access grant is still valid. The cleanup registered by slug above also
-	// covers a replacement created before a later command fails.
+	// Reusing the friendly name must create a new identity. On lanes with a
+	// retained access grant, that old grant remains valid but fenced. The
+	// cleanup registered by slug above also covers a replacement created before
+	// a later command fails.
 	republished := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
 		"--id", connectorID)
 	replacementCRID := strings.TrimSpace(republished.stdout)
@@ -255,7 +267,9 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 		t.Fatalf("same-name replacement retained old identity or changed name: old=%+v new=%+v", local, replacement)
 	}
 	assertExternalSandboxRoute(t, binary, cliEnv, replacementCRID, marker, 2*time.Minute)
-	assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
+	if grantedBeforeDelete != nil {
+		assertSandboxGrantedRouteFenced(t, grantedBeforeDelete)
+	}
 	repeated := runExternalSandboxCLI(t, binary, cliEnv, "--quiet", "publish", backend.URL,
 		"--id", connectorID)
 	if repeated.err != nil || repeated.stdout != replacementCRID+"\n" {
