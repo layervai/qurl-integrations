@@ -50,6 +50,18 @@ var errHeadlessResourceAuthorization = errors.New("headless Connector resource a
 
 var resolveConfiguredHeadlessResource = agent.ResolveConfiguredResourceWithResult
 
+var readHeadlessAuthoritativeSharing = func(ctx context.Context, runtime *connectorshare.NativeRuntime, config *qurlapi.Config, id string) (*qurlapi.Sharing, error) {
+	store, err := runtime.Handoff()
+	if err != nil {
+		return nil, err
+	}
+	client, err := qurlapi.NewRegistered(ctx, config, store)
+	if err != nil {
+		return nil, err
+	}
+	return client.Sharing(ctx, id)
+}
+
 var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool, configured *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
 	if apiConfig == nil {
 		return nil, errors.New("qURL daemon registered-client configuration is missing")
@@ -67,7 +79,7 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 		}
 	}
 	if configured != nil {
-		if err := reauthorizeHeadlessResource(ctx, runtime, cfg.StateDir, configured); err != nil {
+		if err := reauthorizeHeadlessResource(ctx, runtime, apiConfig, cfg.StateDir, configured); err != nil {
 			return nil, errors.Join(err, runtime.Close())
 		}
 	}
@@ -81,7 +93,7 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 	return connectordaemon.NewNativeGroupFactory(admitter, common, apiConfig.Version)
 }
 
-func reauthorizeHeadlessResource(ctx context.Context, runtime *connectorshare.NativeRuntime, stateDir string, configured *connectorstate.LocalShare) (retErr error) {
+func reauthorizeHeadlessResource(ctx context.Context, runtime *connectorshare.NativeRuntime, apiConfig *qurlapi.Config, stateDir string, configured *connectorstate.LocalShare) (retErr error) {
 	if runtime == nil || runtime.Binding == nil || configured == nil {
 		return fmt.Errorf("%w: runtime binding and configured resource are required", errHeadlessResourceAuthorization)
 	}
@@ -103,11 +115,66 @@ func reauthorizeHeadlessResource(ctx context.Context, runtime *connectorshare.Na
 	if err != nil {
 		return fmt.Errorf("reauthorize headless Connector resource: %w", err)
 	}
+	if err := reconcileReauthorizedHeadlessShare(ctx, runtime, apiConfig, stateDir, configured); err != nil {
+		return fmt.Errorf("reconcile reauthorized headless share: %w", err)
+	}
 	foundExisting := false
 	if resolved != nil && resolved.FoundExisting != nil {
 		foundExisting = *resolved.FoundExisting
 	}
 	slog.InfoContext(ctx, "headless Connector resource reauthorized", "connector_id", configured.ConnectorID, "found_existing", foundExisting)
+	return nil
+}
+
+func reconcileReauthorizedHeadlessShare(ctx context.Context, runtime *connectorshare.NativeRuntime, apiConfig *qurlapi.Config, stateDir string, configured *connectorstate.LocalShare) error {
+	registry, err := connectorstate.OpenLocalShareRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	existing, err := registry.Get(ctx, configured.ResourceID)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sameTarget := existing.TargetURL == configured.TargetURL && existing.LocalIP == configured.LocalIP && existing.LocalPort == configured.LocalPort
+	if !sameTarget {
+		return nil
+	}
+	if existing.ServingEpoch < configured.ServingEpoch {
+		return nil
+	}
+	if existing.DesiredState == configured.DesiredState {
+		*configured = *existing
+		return nil
+	}
+	if existing.DesiredState != string(qurlapi.DesiredStateOff) || configured.DesiredState != string(qurlapi.DesiredStateOn) {
+		return nil
+	}
+	sharing, err := readHeadlessAuthoritativeSharing(ctx, runtime, apiConfig, configured.CRID)
+	if err != nil {
+		return fmt.Errorf("read authoritative sharing state: %w", err)
+	}
+	if err := validateLocalSharing(existing, sharing); err != nil {
+		return err
+	}
+	if sharing.ServingEpoch < existing.ServingEpoch {
+		return fmt.Errorf("qURL sharing state regressed to serving epoch %d below %d", sharing.ServingEpoch, existing.ServingEpoch)
+	}
+	var updated *connectorstate.LocalShare
+	switch {
+	case sharing.ServingEpoch == existing.ServingEpoch && sharing.DesiredState == qurlapi.DesiredStateOn:
+		updated, err = registry.EnableAtCurrentEpoch(ctx, existing.ResourceID, sharing.ServingEpoch)
+	case sharing.ServingEpoch == existing.ServingEpoch:
+		updated = existing
+	default:
+		updated, err = registry.SetDesired(ctx, existing.ResourceID, string(sharing.DesiredState), sharing.ServingEpoch)
+	}
+	if err != nil {
+		return err
+	}
+	*configured = *updated
 	return nil
 }
 
