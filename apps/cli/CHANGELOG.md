@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2](https://github.com/layervai/qurl-integrations/compare/v2.3.1...v2.3.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** keep macOS grant probe on direct egress ([#1307](https://github.com/layervai/qurl-integrations/issues/1307)) ([e730dbf](https://github.com/layervai/qurl-integrations/commit/e730dbf6c66f2168d813999709a7c4a6a4db8dbd))
+
 ## [2.3.1](https://github.com/layervai/qurl-integrations/compare/v2.3.0...v2.3.1) (2026-09-05)
 
 
