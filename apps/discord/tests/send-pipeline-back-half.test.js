@@ -127,6 +127,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
+  markSendRevoking: jest.fn().mockResolvedValue(true),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -147,6 +148,7 @@ const mockDb = {
   // floor-advance try/catch, and the assertions below go vacuous.
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
   getSendRenderedCount: jest.fn().mockResolvedValue(0),
+  markConfirmTerminal: jest.fn().mockResolvedValue(undefined),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -221,10 +223,12 @@ const mockTime = require('../src/utils/time');
 
 const { _test } = require('../src/commands');
 const logger = require('../src/logger');
+const { resourceIdLogRef } = require('../src/utils/resource-id');
 const {
   monitorLinkStatus,
   revokeAllLinks,
   renderRevokeMsg,
+  safeRevokeHeader,
   renderSendConfirm,
   renderViewCounter,
   REVOKE_TRUNC_LIMIT,
@@ -344,6 +348,10 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDb.markSendRevoking.mockReset();
+  mockDb.markSendRevoking.mockResolvedValue(true);
+  mockDb.markSendRevoked.mockReset();
+  mockDb.markSendRevoked.mockResolvedValue(true);
   revokingSendLocks.clear();
   // clearAllMocks resets call records but NOT queued one-shot
   // implementations, so a `mockResolvedValueOnce` a test queues but the
@@ -1077,15 +1085,24 @@ describe('revokeAllLinks', () => {
     recipient_discord_id: `user-${i + 1}`,
   }));
 
-  it('calls deleteLink for each resource and markSendRevoked, returns success/total + per-recipient ids', async () => {
+  it('records revocation intent before DELETEs and marks the send revoked only after every DELETE succeeds', async () => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(3));
     mockDeleteLink.mockResolvedValue(undefined);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockDeleteLink).toHaveBeenCalledTimes(3);
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoking.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDb.getSendItems.mock.invocationCallOrder[0]);
+    expect(mockDb.getSendItems.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
+    expect(mockDeleteLink.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(mockDb.markSendRevoked.mock.invocationCallOrder[0]);
     expect(result).toEqual({
+      barrierEstablished: true,
+      finalizationFailed: false,
       success: 3,
       total: 3,
       successUserIds: ['user-1', 'user-2', 'user-3'],
@@ -1093,11 +1110,19 @@ describe('revokeAllLinks', () => {
     });
   });
 
-  it('counts partial failures as success/total mismatch and logs each failure', async () => {
-    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
+  it.each([
+    ['SDK validation', new Error('delete: only public resource IDs are accepted')],
+    ['network', new Error('Network request failed')],
+    ['qURL 5xx', new Error('qURL API DELETE /qurls/id failed (503)')],
+  ])('keeps a partial %s failure fail-closed and available for repair/retry', async (_failureKind, failure) => {
+    const sensitiveResourceId = 'at_sensitive-revoke-token';
+    mockDb.getSendItems.mockResolvedValueOnce([
+      makeItems(2)[0],
+      { resource_id: sensitiveResourceId, recipient_discord_id: 'user-2' },
+    ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('429 rate limited'));
+      .mockRejectedValueOnce(failure);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
@@ -1105,10 +1130,55 @@ describe('revokeAllLinks', () => {
     expect(result.total).toBe(2);
     expect(result.successUserIds).toEqual(['user-1']);
     expect(result.failureUserIds).toEqual(['user-2']);
-    expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', expect.any(Object));
-    // markSendRevoked still fires — partial failures don't block the local
-    // record update, since re-picking from /qurl revoke wouldn't help.
-    expect(mockDb.markSendRevoked).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', {
+      resource_ref: resourceIdLogRef(sensitiveResourceId),
+      error: failure.message,
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-1', success: 1, total: 2, unresolvable_recipients: 0,
+    });
+    // The durable revoking_at intent keeps Add disabled, while withholding
+    // revoked_at keeps this send visible in /qurl revoke for retry.
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
+  it('re-drives the full resource set after a partial failure and finalizes on a successful retry', async () => {
+    mockDb.getSendItems.mockResolvedValue([
+      {
+        resource_id: 'res-1', recipient_discord_id: 'user-1', dm_status: 'sent',
+        dm_channel_id: 'channel-1', dm_message_id: 'message-1',
+      },
+      {
+        resource_id: 'res-2', recipient_discord_id: 'user-2', dm_status: 'sent',
+        dm_channel_id: 'channel-2', dm_message_id: 'message-2',
+      },
+    ]);
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Network request failed'))
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    const first = await revokeAllLinks('send-retry', 'sender-1', 'apikey');
+    expect(first).toMatchObject({ success: 1, total: 2 });
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+
+    const second = await revokeAllLinks('send-retry', 'sender-1', 'apikey');
+    expect(second).toMatchObject({ success: 2, total: 2 });
+    expect(mockDeleteLink).toHaveBeenCalledTimes(4);
+    expect(mockDb.markSendRevoking).toHaveBeenCalledTimes(2);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledTimes(1);
+    // The retry repeats the already-successful recipient's identical PATCH
+    // and adds the newly-successful one. PATCHing the same terminal payload
+    // is idempotent and avoids a second durable marker/race in this recovery
+    // path.
+    expect(mockEditDM.mock.calls.map(call => call.slice(0, 2))).toEqual([
+      ['channel-1', 'message-1'],
+      ['channel-1', 'message-1'],
+      ['channel-2', 'message-2'],
+    ]);
   });
 
   it('returns 0/0 when send has no items (already-revoked or unknown sendId)', async () => {
@@ -1116,25 +1186,55 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(result).toEqual({ success: 0, total: 0, successUserIds: [], failureUserIds: [] });
+    expect(result).toEqual({
+      barrierEstablished: true,
+      finalizationFailed: false,
+      success: 0,
+      total: 0,
+      successUserIds: [],
+      failureUserIds: [],
+    });
     expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoking).toHaveBeenCalled();
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
 
-  it('emits revoke_success audit event with success/total tally when at least one link revoked', async () => {
+  it('does not read or delete resources when the durable revoke barrier rejects an unknown or foreign send', async () => {
+    mockDb.markSendRevoking.mockResolvedValueOnce(false);
+
+    const result = await revokeAllLinks('foreign-send', 'sender-1', 'apikey');
+
+    expect(result).toEqual({
+      barrierEstablished: false,
+      finalizationFailed: false,
+      success: 0,
+      total: 0,
+      successUserIds: [],
+      failureUserIds: [],
+    });
+    expect(mockDb.getSendItems).not.toHaveBeenCalled();
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
+  it('emits revoke_success audit event only when every link is confirmed revoked', async () => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
     mockDeleteLink.mockResolvedValue(undefined);
 
     await revokeAllLinks('send-42', 'sender-1', 'apikey');
 
     expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
-      send_id: 'send-42', success: 2, total: 2,
+      send_id: 'send-42', success: 2, total: 2, unresolvable_recipients: 0,
     });
   });
 
-  it('emits revoke_failed (not revoke_success) when every per-link delete throws', async () => {
+  it.each([
+    ['SDK validation', new Error('delete: only public resource IDs are accepted')],
+    ['network', new Error('Network request failed')],
+    ['qURL 5xx', new Error('qURL API DELETE /qurls/id failed (503)')],
+  ])('keeps a full %s failure fail-closed and emits revoke_failed', async (_failureKind, failure) => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
-    mockDeleteLink.mockRejectedValue(new Error('429 rate limited'));
+    mockDeleteLink.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
 
     await revokeAllLinks('send-43', 'sender-1', 'apikey');
 
@@ -1142,8 +1242,10 @@ describe('revokeAllLinks', () => {
     expect(events).toContain('revoke_failed');
     expect(events).not.toContain('revoke_success');
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
-      send_id: 'send-43', success: 0, total: 2,
+      send_id: 'send-43', success: 0, total: 2, unresolvable_recipients: 0,
     });
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-43', 'sender-1');
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
   it('emits no audit event when there are no resources to revoke (avoids 0/0 noise)', async () => {
@@ -1169,31 +1271,89 @@ describe('revokeAllLinks', () => {
     ).rejects.toThrow('DDB throttled');
 
     expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     const events = logger.audit.mock.calls.map(c => c[0]);
     expect(events).not.toContain('revoke_success');
     expect(events).not.toContain('revoke_failed');
   });
 
   it('does not delete links when recording the revoked state fails', async () => {
-    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
-    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB write failed'));
+    mockDb.markSendRevoking.mockRejectedValueOnce(new Error('DDB write failed'));
     mockDeleteLink.mockResolvedValue(undefined);
 
     await expect(
       revokeAllLinks('send-mark-fail', 'sender-1', 'apikey'),
     ).rejects.toThrow('DDB write failed');
 
+    expect(mockDb.getSendItems).not.toHaveBeenCalled();
     expect(mockDeleteLink).not.toHaveBeenCalled();
     const events = logger.audit.mock.calls.map(c => c[0]);
     expect(events).not.toContain('revoke_success');
     expect(events).not.toContain('revoke_failed');
   });
 
+  it('leaves revocation retryable when the final revoked_at write fails after successful DELETEs', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-1',
+      recipient_discord_id: 'user-1',
+      dm_status: 'sent',
+      dm_channel_id: 'channel-1',
+      dm_message_id: 'message-1',
+    }]);
+    mockDb.markSendRevoking.mockResolvedValueOnce(true);
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-finalize-fail', 'sender-1', 'apikey');
+
+    expect(result).toEqual({
+      barrierEstablished: true,
+      finalizationFailed: true,
+      success: 1,
+      total: 1,
+      successUserIds: ['user-1'],
+      failureUserIds: [],
+    });
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-finalize-fail', 'sender-1');
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-finalize-fail', success: 1, total: 1, unresolvable_recipients: 0,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to finalize revoked send state',
+      { sendId: 'send-finalize-fail', error: 'DDB finalize failed' },
+    );
+    expect(mockEditDM).toHaveBeenCalledWith(
+      'channel-1', 'message-1', expect.any(Object),
+    );
+  });
+
+  it('leaves revocation retryable when the final revoked_at write is rejected without throwing', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([{
+      resource_id: 'res-1',
+      recipient_discord_id: 'user-1',
+    }]);
+    mockDb.markSendRevoked.mockResolvedValueOnce(false);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-finalize-rejected', 'sender-1', 'apikey');
+
+    expect(result).toMatchObject({
+      finalizationFailed: true,
+      success: 1,
+      total: 1,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to finalize revoked send state',
+      { sendId: 'send-finalize-rejected', error: 'finalization was not confirmed' },
+    );
+  });
+
   // mintLinksInBatches packs up to TOKENS_PER_RESOURCE recipients onto
-  // a single resource_id. Without grouping, the 2nd…Nth DELETE for a
-  // shared resource throws 404 and would mis-classify N-1 recipients
-  // as failures even though all their tokens were invalidated by the
-  // 1st DELETE.
+  // a single resource_id. Grouping avoids redundant DELETEs and keeps the
+  // result user-centric even though one resource invalidates every token.
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
@@ -1213,6 +1373,27 @@ describe('revokeAllLinks', () => {
     expect(result.failureUserIds).toEqual([]);
   });
 
+  it('counts one recipient once when all of their links across resources are revoked', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-a', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-b', recipient_discord_id: 'u-1' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-duplicate-recipient', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      success: 1,
+      total: 1,
+      successUserIds: ['u-1'],
+      failureUserIds: [],
+    });
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(
+      'send-duplicate-recipient', 'sender-1',
+    );
+  });
+
   it('groups items by resource_id — shared-resource failure fans out to all sharing recipients', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
@@ -1230,6 +1411,54 @@ describe('revokeAllLinks', () => {
     expect(result.total).toBe(3);
     expect(result.successUserIds).toEqual(['u-3']);
     expect(result.failureUserIds.sort()).toEqual(['u-1', 'u-2']);
+  });
+
+  it('keeps malformed rows without resource_id retryable without calling deleteLink', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-ok', recipient_discord_id: 'u-ok' },
+      { resource_id: '   ', recipient_discord_id: 'u-missing' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-malformed', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-ok', 'apikey');
+    expect(result).toMatchObject({
+      success: 1,
+      total: 2,
+      successUserIds: ['u-ok'],
+      failureUserIds: ['u-missing'],
+    });
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-malformed', success: 1, total: 1, unresolvable_recipients: 1,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot revoke send row with missing resource identity',
+      { sendId: 'send-malformed', affectedRecipients: 1 },
+    );
+  });
+
+  it('audits an all-missing-resource send as a failed retryable revoke', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { recipient_discord_id: 'u-missing' },
+      { resource_id: '   ', recipient_discord_id: 'u-missing-2' },
+    ]);
+
+    const result = await revokeAllLinks('send-all-malformed', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: 0,
+      total: 2,
+      successUserIds: [],
+      failureUserIds: ['u-missing', 'u-missing-2'],
+    });
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-all-malformed', success: 0, total: 0, unresolvable_recipients: 2,
+    });
   });
 
   // Failure-wins semantics: if a recipient has rows on multiple
@@ -1252,6 +1481,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(1); // only bob (alice has a failure)
     expect(result.successUserIds).toEqual(['bob']);
     expect(result.failureUserIds).toEqual(['alice']);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
   describe('post-revoke DM edit', () => {
@@ -1767,7 +1997,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
 
 describe('renderRevokeMsg', () => {
   it('lists all names + no expand button when count <= TRUNC_LIMIT', () => {
-    const r = renderRevokeMsg('send-1', ['alice', 'bob'], 2, false);
+    const r = renderRevokeMsg('send-1', ['alice', 'bob'], 2, false, 2);
     expect(r.content).toContain('Revoked 2/2 users');
     expect(r.content).toContain('Revoked for: alice, bob');
     expect(r.needsExpand).toBe(false);
@@ -1776,7 +2006,7 @@ describe('renderRevokeMsg', () => {
 
   it('truncates with "+N more" + adds Show Recipients button when count > TRUNC_LIMIT', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 3 }, (_, i) => `u${i}`);
-    const r = renderRevokeMsg('send-2', names, names.length, false);
+    const r = renderRevokeMsg('send-2', names, names.length, false, names.length);
     expect(r.content).toContain(`+${3} more`);
     expect(r.content).not.toContain(names.at(-1)); // last name truncated off
     expect(r.needsExpand).toBe(true);
@@ -1789,35 +2019,35 @@ describe('renderRevokeMsg', () => {
 
   it('shows full list + Hide Recipients button when showAll=true', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
-    const r = renderRevokeMsg('send-3', names, names.length, true);
+    const r = renderRevokeMsg('send-3', names, names.length, true, names.length);
     expect(r.content).toContain(names.at(-1));
     expect(r.content).not.toMatch(/\+\d+ more/);
     expect(r.needsExpand).toBe(true);
     expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Hide Recipients');
   });
 
-  it('omits the names line when no successful revokes (e.g. all already-opened)', () => {
-    const r = renderRevokeMsg('send-4', [], 5, false);
+  it('omits the names line when no revocation succeeded', () => {
+    const r = renderRevokeMsg('send-4', [], 5, false, 0);
     expect(r.content).toContain('Revoked 0/5 users');
     expect(r.content).not.toContain('Revoked for:');
     expect(r.row).toBeNull();
   });
 
   it('singularizes "user" when total === 1', () => {
-    const r = renderRevokeMsg('send-5', ['alice'], 1, false);
+    const r = renderRevokeMsg('send-5', ['alice'], 1, false, 1);
     expect(r.content).toContain('Revoked 1/1 user.');
     expect(r.content).not.toContain('1/1 users');
   });
 
-  it('omits the already-opened note when total === 0 (nothing was attempted)', () => {
-    const r = renderRevokeMsg('send-empty', [], 0, false);
-    expect(r.content).not.toContain('already-opened');
+  it('omits the existing-session caveat when total === 0 (nothing was attempted)', () => {
+    const r = renderRevokeMsg('send-empty', [], 0, false, 0);
+    expect(r.content).not.toContain('sessions already opened');
   });
 
   it('emits attachmentText + suppresses Show Recipients when full list would exceed Discord 2000-char cap', () => {
     // 200 long usernames (~30 chars each) → ~6000 chars uncapped.
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
-    const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true);
+    const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true, names.length);
     expect(r.content.length).toBeLessThanOrEqual(2000);
     expect(r.content).toContain('(see attached)');
     expect(r.attachmentText).not.toBeNull();
@@ -1830,7 +2060,7 @@ describe('renderRevokeMsg', () => {
   });
 
   it('does NOT emit attachmentText when full list fits inline', () => {
-    const r = renderRevokeMsg('send-fits', ['alice', 'bob', 'carol'], 3, false);
+    const r = renderRevokeMsg('send-fits', ['alice', 'bob', 'carol'], 3, false, 3);
     expect(r.attachmentText).toBeNull();
   });
 
@@ -1840,13 +2070,13 @@ describe('renderRevokeMsg', () => {
     const names = ['*alice*', 'normal', '[bob](evil)'];
     // Force attachment by repeating to overflow REVOKE_CONTENT_SAFE_MAX.
     const many = Array.from({ length: 200 }, () => '*alice*');
-    const r = renderRevokeMsg('send-md', many, many.length, true);
+    const r = renderRevokeMsg('send-md', many, many.length, true, many.length);
     expect(r.attachmentText).toContain('*alice*');
     expect(r.attachmentText).not.toContain('\\*alice\\*');
     expect(r.content).toContain('\\*alice\\*'); // preview line is escaped
 
     // Inline (small list) path also escapes.
-    const inline = renderRevokeMsg('send-md2', names, names.length, false);
+    const inline = renderRevokeMsg('send-md2', names, names.length, false, names.length);
     expect(inline.content).toContain('\\*alice\\*');
     expect(inline.content).toContain('\\[bob\\]\\(evil\\)');
   });
@@ -1861,6 +2091,24 @@ describe('renderRevokeMsg', () => {
     expect(r.content).toMatch(/^Revoked 5\/5 users\./);
     expect(r.content).toContain('Revoked for: alice, bob, carol, dave');
   });
+
+  it('returns a truthful fallback for an undefined authoritative success count', () => {
+    const rendered = renderRevokeMsg('send-missing', ['alice'], 1, false);
+    expect(rendered.content).toMatch(/could not display the revocation result/i);
+    expect(rendered.content).toContain('If this send still appears in `/qurl revoke`, retry it there.');
+    expect(rendered.row).toBeNull();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to render revoke result',
+      expect.objectContaining({ sendId: 'send-missing', total: 1 }),
+    );
+  });
+
+  it('keeps successful DELETEs truthful when final revoked state could not be saved', () => {
+    const rendered = renderRevokeMsg('send-finalize-fail', ['alice'], 1, false, 1, true);
+    expect(rendered.content).toContain('Revoked 1/1 user.');
+    expect(rendered.content).toContain('could not save the final revocation state');
+    expect(rendered.content).toContain('Retry with `/qurl revoke` to finish.');
+  });
 });
 
 // Slash-command /qurl revoke uses buildRevokeHeader directly (no
@@ -1873,12 +2121,34 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
     expect(buildRevokeHeader(0, 0)).toBe('Revoked 0/0 users.');
   });
 
-  it('singular: "Revoked 1/1 user." (singular noun + already-opened note)', () => {
-    expect(buildRevokeHeader(1, 1)).toBe('Revoked 1/1 user. Note: already-opened links cannot be revoked.');
+  it('singular: "Revoked 1/1 user." (singular noun + existing-session caveat)', () => {
+    expect(buildRevokeHeader(1, 1)).toBe('Revoked 1/1 user. Revocation blocks new link access; sessions already opened may remain active.');
   });
 
-  it('plural: "Revoked 3/5 users." includes already-opened note when total > 0', () => {
-    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Note: already-opened links cannot be revoked.');
+  it('plural: "Revoked 3/5 users." distinguishes failures from the existing-session caveat', () => {
+    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect. Revocation blocks new link access; sessions already opened may remain active.');
+  });
+
+  it('full failure reports unconfirmed revocation without claiming any existing sessions', () => {
+    expect(buildRevokeHeader(0, 2)).toBe('Revoked 0/2 users. Could not confirm revocation for 2 users. Retry with `/qurl revoke`; if this continues, run `/qurl setup` and reconnect.');
+  });
+
+  it.each([
+    [undefined, 1],
+    [1, undefined],
+    [-1, 1],
+    [2, 1],
+    [0.5, 1],
+  ])('rejects invalid success/total pair (%s/%s)', (success, total) => {
+    expect(() => buildRevokeHeader(success, total)).toThrow(/success and total must be/);
+  });
+
+  it('keeps the slash-command interaction truthful when result counts are inconsistent', () => {
+    expect(safeRevokeHeader('send-bad-count', 2, 1)).toMatch(/could not display the revocation result/i);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to render revoke result',
+      expect.objectContaining({ sendId: 'send-bad-count', success: 2, total: 1 }),
+    );
   });
 });
 
@@ -1947,12 +2217,15 @@ describe('handleAddRecipients — pre-flight guards', () => {
     expect(result.msg).toMatch(/incomplete/i);
   });
 
-  it('refuses before minting when the send was revoked while Add Recipients was pending', async () => {
+  it.each([
+    ['revoked', { revoked_at: '2026-06-17T20:00:00Z' }, 'Cannot add recipients — this send has already been revoked.'],
+    ['being revoked', { revoking_at: '2026-06-17T20:00:00Z' }, 'Cannot add recipients — revocation is pending; retry `/qurl revoke`.'],
+  ])('refuses before minting when the send was %s while Add Recipients was pending', async (_stateName, revocationState, expectedMessage) => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
-      revoked_at: '2026-06-17T20:00:00Z',
+      ...revocationState,
     });
 
     const result = await handleAddRecipients(
@@ -1960,7 +2233,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
+    expect(result.msg).toBe(expectedMessage);
     expect(mockDownloadAndUpload).not.toHaveBeenCalled();
     expect(mockMintLinks).not.toHaveBeenCalled();
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
@@ -2391,6 +2664,155 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
   });
 });
 
+describe('executeSendPipeline — orphaned qURL log safety', () => {
+  it('logs cleanup identifiers without the live access link when DDB persistence fails', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      {
+        qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+        resource_id: 'resource-public-id',
+        qurl_id: 'q_orphaned_link_one',
+      },
+      {
+        qurl_link: 'https://qurl.site/#at_secret_bearer_two',
+        resource_id: 'resource-public-id',
+        qurl_id: 'q_orphaned_link_two',
+      },
+    ]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(Object.assign(
+      new Error('DDB rejected https://qurl.link/#at_secret_bearer_one'),
+      {
+        name: 'ValidationException',
+        code: 'ValidationException',
+        $fault: 'client',
+        $metadata: { httpStatusCode: 400, requestId: 'ddb-request-123' },
+      },
+    ));
+
+    await executeSendPipeline(interaction, makePipelineParams({
+      recipients: [
+        { id: 'u1', username: 'u1' },
+        { id: 'u2', username: 'u2' },
+      ],
+    }));
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog).toBeDefined();
+    expect(failureLog[1].orphanedResources).toEqual([
+      { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_one' },
+      { resourceId: 'resource-public-id', qurlId: 'q_orphaned_link_two' },
+    ]);
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorName: 'ValidationException',
+      errorCode: 'ValidationException',
+      errorFault: 'client',
+      httpStatusCode: 400,
+      requestId: 'ddb-request-123',
+      errorMessage: 'DDB rejected [REDACTED_URL]',
+    }));
+    const everythingLogged = JSON.stringify([
+      logger.error.mock.calls,
+      logger.warn.mock.calls,
+      logger.info.mock.calls,
+      logger.debug.mock.calls,
+      logger.audit.mock.calls,
+    ]);
+    expect(everythingLogged).not.toContain('https://qurl.link/#at_secret_bearer_one');
+    expect(everythingLogged).not.toContain('https://qurl.site/#at_secret_bearer_two');
+    expect(everythingLogged).not.toContain('at_secret_bearer_one');
+    expect(everythingLogged).not.toContain('at_secret_bearer_two');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('keeps a scrubbed message for non-AWS persistence failures', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(
+      new TypeError('Persistence format_specifier failed for https://qurl.link/#at_secret_bearer_one at_secret_bearer_two https%3A%2F%2Fqurl.link%2F%23at_secret_bearer_three'),
+    );
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorName: 'TypeError',
+      errorMessage: expect.stringContaining('Persistence format_specifier failed for [REDACTED_URL]'),
+    }));
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_three');
+    expect(JSON.stringify(failureLog)).toContain('format_specifier');
+  });
+
+  it('keeps a scrubbed diagnostic when persistence rejects with a non-Error value', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(
+      'persistence rejected at_secret_bearer_two',
+    );
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog).toBeDefined();
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorMessage: 'persistence rejected at_[REDACTED]',
+    }));
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_one');
+    expect(JSON.stringify(failureLog)).not.toContain('at_secret_bearer_two');
+  });
+
+  it('keeps a scalar diagnostic when a rejection object has a non-string message', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce({ name: 'WeirdFailure', message: 42 });
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    const failureLog = logger.error.mock.calls.find(
+      ([message]) => message === 'recordQURLSendBatch failed; aborting send to keep state consistent',
+    );
+    expect(failureLog[1]).toEqual(expect.objectContaining({
+      errorName: 'WeirdFailure',
+      errorMessage: '42',
+    }));
+  });
+});
+
 describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
   async function setupRevocableSend() {
     const collectHandlers = {};
@@ -2418,7 +2840,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     mockDb.getSendItems.mockResolvedValueOnce([
       { recipient_discord_id: 'u1', resource_id: 'res-initial', dm_channel_id: 'dm-c', dm_message_id: 'dm-m' },
     ]);
-    mockDb.markSendRevoked.mockResolvedValue(undefined);
+    mockDb.markSendRevoked.mockResolvedValue(true);
     mockDeleteLink.mockReset();
     mockDeleteLink.mockImplementationOnce(async () => {
       revokeStarted.resolve();
@@ -2534,7 +2956,27 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
 
     expect(addClick.reply).toHaveBeenCalledWith({
-      content: 'This send has already been revoked. Add Recipients is disabled.',
+      content: 'This send is no longer revocable. Add Recipients is disabled.',
+      ephemeral: true,
+    });
+  });
+
+  it('does not claim success when the durable revoke barrier rejects the send', async () => {
+    const { collect, interaction, makeClick } = await setupRevocableSend();
+    mockDb.markSendRevoking.mockResolvedValueOnce(false);
+
+    await collect(makeClick('revoke'));
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: 'Could not verify this send for revocation. It may already be revoked or unavailable; run `/qurl revoke` to refresh.',
+      components: [],
+    });
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'This send is no longer revocable. Add Recipients is disabled.',
       ephemeral: true,
     });
   });
@@ -2559,6 +3001,35 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Revoked 1/1 user.'),
     }));
+  });
+
+  it('reports successful DELETEs truthfully when the final revoked state write fails', async () => {
+    const {
+      collect, finishRevoke, interaction, makeClick, revokeStarted,
+    } = await setupRevocableSend();
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
+
+    const revokePromise = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await revokePromise;
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+    }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('could not save the final revocation state'),
+    }));
+    expect(interaction.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: 'Failed to revoke links. Try `/qurl revoke` instead.',
+    }));
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Links were revoked, but qURL could not save the final state. Add Recipients is disabled; retry `/qurl revoke`.',
+      ephemeral: true,
+    });
   });
 
   it('rejects Add Recipients after Revoke succeeds so stale clicks cannot mint new links', async () => {
@@ -2619,7 +3090,7 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     await collect(addClick);
 
     expect(addClick.reply).toHaveBeenCalledWith({
-      content: 'Revoke already ran for this send. Add Recipients is disabled.',
+      content: 'Revocation is incomplete for this send. Add Recipients is disabled; retry `/qurl revoke`.',
       ephemeral: true,
     });
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
@@ -2818,13 +3289,14 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
   });
 
   it('logs cleanup failures but still reports revoked when the guarded write loses the race', async () => {
+    const sensitiveResourceId = 'at_sensitive-cleanup-token';
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: sensitiveResourceId, fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: sensitiveResourceId }]);
     const err = new Error('revoked');
     err.code = 'SEND_CONFIG_REVOKED';
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
@@ -2844,9 +3316,10 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [expect.objectContaining({ resourceId: 'res-new', error: 'delete failed' })],
+        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
       }),
     );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
@@ -2969,6 +3442,32 @@ describe('handleAddRecipients — happy path (location)', () => {
     // owns those contracts. This test only pins the packing structure
     // — that the bulk path produces a [Step Through, What is qURL?]
     // row, not a separate trust row, in the 1-link case.
+  });
+
+  it('delivers an over-512-character qv2 link without invalid Discord components', async () => {
+    const qv2Link = `https://qurl.link/#qv2t1.${'A'.repeat(600)}`;
+    expect(qv2Link.length).toBeGreaterThan(512);
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-qv2' });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: qv2Link, resource_id: 'res-loc-qv2' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-qv2', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const [, payload] = mockSendDM.mock.calls[0];
+    expect(payload.components).toEqual([]);
+    const description = payload.embeds[0].setDescription.mock.calls[0][0];
+    expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
+    expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
   });
 
   // The bulk-path shared-embed optimization: at N>1, the EmbedBuilder

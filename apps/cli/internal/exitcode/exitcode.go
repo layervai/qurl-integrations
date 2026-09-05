@@ -420,8 +420,8 @@ func connectorResourceSentinelCode(err error) (int, bool) {
 		// this owner's durable state: valid identities in conflicting state.
 		return Conflict, true
 	case errors.Is(err, state.ErrConnectorResourceRetired):
-		// A deleted Connector ID is valid but cannot be reused. The caller must
-		// select a successor instead of retrying or changing credentials.
+		// A deleted Connector ID needs an explicit publish to authorize reuse;
+		// an implicit native resource request cannot reclaim it.
 		return Conflict, true
 	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceRequest),
 		errors.Is(err, qurl.ErrConnectorResourceRequestRejected):
@@ -439,6 +439,10 @@ func connectorResourceSentinelCode(err error) (int, bool) {
 		return Unavailable, true
 	case errors.Is(err, qurl.ErrInvalidNativeConnectorResourceResponse):
 		return ServerError, true
+	case errors.Is(err, state.ErrConnectorResourceState):
+		// The local journal is corrupt or violates its security contract. Every
+		// specific joined resource outcome takes priority above this fallback.
+		return General, true
 	default:
 		return 0, false
 	}

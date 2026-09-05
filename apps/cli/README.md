@@ -306,6 +306,14 @@ recover automatically without a customer approval step.
 
 Restarting the same app on the same machine reuses its resource and CRID. Use
 `--id` only when you want to choose the Connector ID yourself.
+After `qurl delete`, you can reuse that ID to create a new resource with a new CRID.
+Old links remain invalid. This also applies to IDs set through `QURL_CONNECTOR_ID`
+or the profile's `connector_id`.
+
+If publishing reports an identity conflict after deletion, repeat
+`qurl delete <CRID> --yes` with the deleted resource's CRID, then publish again.
+This retries the service's name release.
+If you no longer have the deleted resource's CRID, publish with a different `--id`.
 
 Local publishing accepts `http://localhost:<port>` and IPv4 or IPv6 loopback
 addresses. It intentionally rejects HTTPS, paths, queries, fragments,

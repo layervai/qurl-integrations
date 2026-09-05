@@ -104,6 +104,71 @@ describe('logger', () => {
     expect(consoleSpy.log.mock.calls[0][0]).toContain('{"foo":"bar"}');
   });
 
+  it.each(['qurlLink', 'qurl_link', 'qurlLinkUrl', 'qurl_link_url'])(
+    'redacts a live qURL access link stored under %s',
+    (key) => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.info('minted', { [key]: 'https://qurl.link/#at_live_bearer' });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).toContain(`"${key}":"[REDACTED]"`);
+      expect(line).not.toContain('https://qurl.link/#at_live_bearer');
+      expect(line).not.toContain('at_live_bearer');
+    },
+  );
+
+  it.each(['qurlLinks', 'qurl_links'])(
+    'redacts a matched %s array of bare access-link strings on every log channel',
+    (key) => {
+      process.env.LOG_LEVEL = 'debug';
+      logger = require('../src/logger');
+      const secret = 'https://qurl.link/#at_live_bearer';
+
+      for (const method of ['error', 'warn', 'info', 'debug']) {
+        logger[method]('minted', { [key]: [secret] });
+      }
+      logger.audit('qurl_minted', { [key]: [secret] });
+
+      const allOutput = JSON.stringify([
+        consoleSpy.error.mock.calls,
+        consoleSpy.warn.mock.calls,
+        consoleSpy.log.mock.calls,
+      ]);
+      expect(allOutput).not.toContain(secret);
+      expect(allOutput).not.toContain('at_live_bearer');
+      expect(allOutput).toContain('[REDACTED]');
+    },
+  );
+
+  it('redacts nested qURL link arrays while preserving adjacent numeric dimensions', () => {
+    process.env.LOG_LEVEL = 'debug';
+    logger = require('../src/logger');
+
+    logger.info('minted', {
+      payload: {
+        orphaned_qurl_links: ['https://qurl.link/#at_live_bearer'],
+        qurl_link_count: 3,
+      },
+    });
+
+    const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0].slice(consoleSpy.log.mock.calls[0][0].indexOf('{')));
+    expect(parsed.payload.orphaned_qurl_links).toBe('[REDACTED]');
+    expect(parsed.payload.qurl_link_count).toBe(3);
+  });
+
+  it('preserves empty qURL link containers because they cannot carry a credential', () => {
+    process.env.LOG_LEVEL = 'info';
+    logger = require('../src/logger');
+
+    logger.info('minted', { qurl_links: [], qurl_link_map: {} });
+
+    const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0].slice(consoleSpy.log.mock.calls[0][0].indexOf('{')));
+    expect(parsed.qurl_links).toEqual([]);
+    expect(parsed.qurl_link_map).toEqual({});
+  });
+
   it('omits meta string when no meta keys', () => {
     process.env.LOG_LEVEL = 'info';
     logger = require('../src/logger');
@@ -208,6 +273,55 @@ describe('logger', () => {
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.auth_token).toBe('[REDACTED]');
       expect(parsed.audit.send_id).toBe('s1');
+    });
+
+    it.each(['qurlLink', 'qurl_link', 'qurlLinkUrl', 'qurl_link_url', 'qurlLinks', 'qurl_links'])(
+      'redacts a live qURL access link stored under audit key %s',
+      (key) => {
+        process.env.LOG_LEVEL = 'info';
+        logger = require('../src/logger');
+
+        logger.audit('qurl_minted', { [key]: 'https://qurl.link/#at_live_bearer' });
+
+        const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+        expect(parsed.audit[key]).toBe('[REDACTED]');
+        expect(consoleSpy.error.mock.calls[0][0]).toContain(key);
+        const allOutput = JSON.stringify([
+          consoleSpy.log.mock.calls,
+          consoleSpy.error.mock.calls,
+        ]);
+        expect(allOutput).not.toContain('https://qurl.link/#at_live_bearer');
+        expect(allOutput).not.toContain('at_live_bearer');
+      },
+    );
+
+    it('redacts decorated qURL link containers without flagging numeric dimensions', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('qurl_minted', {
+        orphaned_qurl_links: ['https://qurl.link/#at_live_bearer'],
+        qurl_link_count: 3,
+      });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.orphaned_qurl_links).toBe('[REDACTED]');
+      expect(parsed.audit.qurl_link_count).toBe(3);
+      const warnings = consoleSpy.error.mock.calls.map(c => c[0]).join('\n');
+      expect(warnings).toContain('orphaned_qurl_links');
+      expect(warnings).not.toContain('qurl_link_count');
+    });
+
+    it('preserves empty qURL link containers without a secret-shaped warning', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('qurl_minted', { orphaned_qurl_links: [], qurl_link_map: {} });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.orphaned_qurl_links).toEqual([]);
+      expect(parsed.audit.qurl_link_map).toEqual({});
+      expect(consoleSpy.error).not.toHaveBeenCalled();
     });
 
     it('redacts interaction_token (the PR-B view-counter bearer cred) in the audit path', () => {

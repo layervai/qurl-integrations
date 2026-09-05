@@ -109,7 +109,7 @@ const mockDb = {
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
-  markSendRevoked: jest.fn(),
+  markSendRevoked: jest.fn().mockResolvedValue(true),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   getGuildApiKey: jest.fn(),
@@ -1400,11 +1400,13 @@ describe('handleAutocomplete', () => {
     subcommand = 'map',
     focused = { name: 'location', value: 'whitehouse' },
     guildId = 'guild-1',
+    authorizingIntegrationOwners,
   } = {}) {
     const respond = jest.fn().mockResolvedValue(undefined);
     return {
       commandName: 'qurl',
       guildId,
+      authorizingIntegrationOwners,
       respond,
       options: {
         getSubcommand: () => subcommand,
@@ -1437,6 +1439,15 @@ describe('handleAutocomplete', () => {
     // global GOOGLE_MAPS_API_KEY quota for a send that's about to
     // be rejected anyway.
     const int = makeAutocompleteInteraction({ guildId: null });
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('responds empty for user-install autocomplete invoked inside a guild', async () => {
+    const int = makeAutocompleteInteraction({
+      authorizingIntegrationOwners: { 1: 'user-1' },
+    });
     await handleAutocomplete(int);
     expect(int.respond).toHaveBeenCalledWith([]);
     expect(mockSearchPlaces).not.toHaveBeenCalled();

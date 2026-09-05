@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"strings"
 	"time"
@@ -44,8 +46,11 @@ func readNativeRegisteredIdentity(ctx context.Context, runtime *connectorshare.N
 const connectorRefreshModeAuto = "auto"
 
 var errNativeSessionOwnerVerification = errors.New("registered Connector owner verification failed")
+var errHeadlessResourceAuthorization = errors.New("headless Connector resource authorization failed")
 
-var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool) (connectordaemon.GroupFactory, error) {
+var resolveConfiguredHeadlessResource = agent.ResolveConfiguredResourceWithResult
+
+var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.NativeRuntimeConfig, common *v1.ClientCommonConfig, apiConfig *qurlapi.Config, verifyOwner bool, configured *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
 	if apiConfig == nil {
 		return nil, errors.New("qURL daemon registered-client configuration is missing")
 	}
@@ -61,6 +66,11 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 			return nil, errors.Join(err, runtime.Close())
 		}
 	}
+	if configured != nil {
+		if err := reauthorizeHeadlessResource(ctx, runtime, cfg.StateDir, configured); err != nil {
+			return nil, errors.Join(err, runtime.Close())
+		}
+	}
 	admitter, err := connectorshare.NewNativeAdmitter(ctx, runtime)
 	if err != nil {
 		return nil, errors.Join(err, runtime.Close())
@@ -69,6 +79,36 @@ var buildNativeSessionFactory = func(ctx context.Context, cfg connectorshare.Nat
 		return nil, errors.Join(errors.New("qURL daemon FRP configuration is invalid"), admitter.Close())
 	}
 	return connectordaemon.NewNativeGroupFactory(admitter, common, apiConfig.Version)
+}
+
+func reauthorizeHeadlessResource(ctx context.Context, runtime *connectorshare.NativeRuntime, stateDir string, configured *connectorstate.LocalShare) (retErr error) {
+	if runtime == nil || runtime.Binding == nil || configured == nil {
+		return fmt.Errorf("%w: runtime binding and configured resource are required", errHeadlessResourceAuthorization)
+	}
+	// TODO(upstream-contract): qurl-go must permit this second state store while
+	// the runtime's independently opened store is live. The interactive publish
+	// path in resolveLocalPublishResource relies on the same contract. Closing
+	// this handle cannot release the runtime's handle.
+	store, err := connectorstate.Open(stateDir)
+	if err != nil {
+		return fmt.Errorf("open headless Connector resource state: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, store.Close()) }()
+	// Exact matching makes it safe to keep the immutable headless config as
+	// the serving route after the assigned cell reauthorizes its binding.
+	resolved, err := resolveConfiguredHeadlessResource(ctx, runtime.Binding, store, &connectorstate.ConnectorResourceBinding{
+		ConnectorID: configured.ConnectorID, ResourceID: configured.ResourceID, CRID: configured.CRID,
+		ConnectorRoutingID: configured.ConnectorRoutingID, KnockResourceID: configured.KnockResourceID,
+	})
+	if err != nil {
+		return fmt.Errorf("reauthorize headless Connector resource: %w", err)
+	}
+	foundExisting := false
+	if resolved != nil && resolved.FoundExisting != nil {
+		foundExisting = *resolved.FoundExisting
+	}
+	slog.InfoContext(ctx, "headless Connector resource reauthorized", "connector_id", configured.ConnectorID, "found_existing", foundExisting)
+	return nil
 }
 
 func verifyNativeSessionOwner(ctx context.Context, runtime *connectorshare.NativeRuntime, apiConfig *qurlapi.Config, expectedOwner string, readIdentity nativeRegisteredIdentityReader) error {
@@ -101,6 +141,19 @@ var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) err
 	case <-timer.C:
 		return nil
 	}
+}
+
+var headlessNativeRetryJitter = func(window time.Duration) time.Duration {
+	if window <= 0 {
+		return 0
+	}
+	offset, err := rand.Int(rand.Reader, big.NewInt(int64(window)+1))
+	if err != nil {
+		// Jitter is load distribution, not a startup requirement. Preserve the
+		// full bounded backoff if the host cannot supply randomness.
+		return window
+	}
+	return time.Duration(offset.Int64())
 }
 
 // daemonCmd exposes the long-running engine for headless deployments and
@@ -260,6 +313,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	if err != nil {
 		return err
 	}
+	configured := configuredHeadlessShare(headless)
 	openFactory := func(initCtx context.Context) (connectordaemon.GroupFactory, error) {
 		apiConfig := &qurlapi.Config{
 			BaseURL: origin, Version: opts.version, Verbose: opts.verboseLogger(),
@@ -270,7 +324,7 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 			Hostname: hostname, Version: opts.version, ClientBaseURL: origin,
 			EnrollmentCredential: enrollmentCredential, RefreshMode: connectorRefreshModeAuto,
 			SessionOperations: sessionOperations,
-		}, common, apiConfig, verifyOwner)
+		}, common, apiConfig, verifyOwner, configured)
 	}
 	var factory connectordaemon.GroupFactory
 	var closeFactory func() error
@@ -316,6 +370,13 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 		Manager:    manager, JobVersion: jobVersion,
 	}
 	return server.Run(ctx)
+}
+
+func configuredHeadlessShare(headless *connectorstate.HeadlessConfig) *connectorstate.LocalShare {
+	if headless == nil {
+		return nil
+	}
+	return &headless.Shares[0]
 }
 
 func daemonOwner(ctx context.Context, registry *connectorstate.LocalShareRegistry, headless *connectorstate.HeadlessConfig) (ownerID string, bound bool, err error) {
@@ -425,21 +486,28 @@ func openHeadlessSessionFactory(ctx context.Context, open func(context.Context) 
 }
 
 func isPermanentHeadlessNativeOpenError(err error) bool {
-	return errors.Is(err, errNativeSessionOwnerVerification) || connectorshare.IsPermanentNativeOpenError(err)
+	return errors.Is(err, errNativeSessionOwnerVerification) ||
+		errors.Is(err, errHeadlessResourceAuthorization) ||
+		agent.IsPermanentResourceResolveError(err) ||
+		connectorshare.IsPermanentNativeOpenError(err)
 }
 
 func headlessNativeRetryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	delay := 250 * time.Millisecond
-	for step := 1; step < attempt && delay < 30*time.Second; step++ {
-		delay *= 2
+	base := 250 * time.Millisecond
+	for step := 1; step < attempt && base < 30*time.Second; step++ {
+		base *= 2
 	}
-	if delay > 30*time.Second {
-		return 30 * time.Second
+	if base > 30*time.Second {
+		base = 30 * time.Second
 	}
-	return delay
+	// Equal jitter preserves half of the exponential backoff and randomizes the
+	// other half. This prevents synchronized headless fleets from retrying the
+	// assigned cell on the same fixed schedule.
+	half := base / 2
+	return half + headlessNativeRetryJitter(half)
 }
 
 func loadHeadlessBootstrap(ctx context.Context, stateDir, configPath, tokenPath string) (*connectorstate.HeadlessConfig, string, error) {
