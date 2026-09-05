@@ -19,10 +19,13 @@ const { isPrivateHost } = require('./utils/private-host');
 
 /**
  * qURL API client for the bot's link create / status / revoke calls, backed by
- * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
- * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
- * uses the same SDK. Create and status use `/qurls`; whole-resource revoke
- * uses `/resources`. This module adds only the concerns the SDK doesn't own:
+ * the @layervai/qurl SDK where it exposes the required route. This is the bot's
+ * single command-side client (issue #830); the detect path in connector.js uses
+ * the same SDK. Create and status use `/qurls`; whole-resource revoke uses
+ * `/resources`. The small GET /v1/me shim below uses fetch because SDK 0.3.x
+ * has no identity method — replace it when the SDK exposes that route.
+ *
+ * This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
  *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
@@ -30,11 +33,12 @@ const { isPrivateHost } = require('./utils/private-host');
  *   - a non-echoing resource-ID guard and low-cardinality telemetry labels.
  */
 
-// Per-attempt timeout + retry budget. Pins the SDK's resilience to the budget
+// Request timeout + SDK retry budget. Pins the SDK's resilience to the budget
 // the hand-rolled client documented before this consolidation: "3 attempts
 // total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
 // attempts; `timeout` is the per-attempt deadline (matching the old
-// AbortSignal.timeout(30000)). We pin both rather than inherit SDK defaults so
+// AbortSignal.timeout(30000)), and the whole-request deadline for the no-retry
+// getIdentity shim below. We pin both rather than inherit SDK defaults so
 // a future default drift can't silently change this path's behavior.
 // (connector.js's resolve path pins maxRetries:3 — a separate call site we
 // deliberately leave untouched here.)
@@ -79,13 +83,17 @@ function makeClient(apiKey) {
 }
 
 /**
- * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
+ * Run a qURL call, layering on the bot-specific behaviors the SDK doesn't own.
  * `method`/`path` are low-cardinality labels for audit/log/error payloads; the
- * SDK owns the actual wire path. Identifier-bearing routes use a static path
+ * callee owns the actual wire path. Identifier-bearing routes use a static path
  * template so credentials accidentally passed as IDs cannot reach telemetry.
+ * The raw-fetch identity call sets the same `.status` error field as the SDK so
+ * it receives the same audit and redaction behavior.
  *
  *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
- *     alarm fires independently of any caller's catch path.
+ *     alarm fires independently of any caller's catch path. User-initiated
+ *     credential checks can disable this because an expected rejected tenant
+ *     key is not a service credential outage.
  *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403 (its retryable set is
  *     {429, 502, 503, 504}), so this fires once per request, not once per
  *     attempt. If that ever changes, the audit count would multiply on a single
@@ -105,7 +113,11 @@ function makeClient(apiKey) {
  *     credential, while create validation may echo a secret-bearing target
  *     URL. Pinned by tests/qurl-coverage.test.js.
  */
-async function callQurl(method, path, fn, logContext = {}) {
+async function callQurl(method, path, fn, options = {}) {
+  const {
+    logContext = {},
+    emitDependencyAuthAudit = true,
+  } = options;
   try {
     return await fn();
   } catch (err) {
@@ -116,7 +128,7 @@ async function callQurl(method, path, fn, logContext = {}) {
     logger.debug('qURL API error', {
       method, path, status, code: err?.code, ...logContext,
     });
-    if (status === 401 || status === 403) {
+    if (emitDependencyAuthAudit && (status === 401 || status === 403)) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
         dependency: 'qurl_service',
         status,
@@ -139,6 +151,77 @@ async function callQurl(method, path, fn, logContext = {}) {
     }
     throw err;
   }
+}
+
+async function getIdentity(apiKey, guildId) {
+  if (!apiKey) {
+    throw new Error('Guild qURL API key is not configured');
+  }
+
+  // One attempt only: an interactive check surfaces a transient failure to the
+  // admin rather than spending the 3-attempt budget MAX_RETRIES pins for the
+  // SDK paths.
+  //
+  // Unlike makeClient, there is deliberately NO `apiKey || config.QURL_API_KEY`
+  // fallback: a guild status check must validate the guild's own stored key,
+  // never the bot's, or a guild with no key would read as configured.
+  // TODO(upstream-contract): qurl-integrations-infra's Discord dependency-auth
+  // metric filter pages on every event and does not filter by path. Do not emit
+  // that service-outage signal for this user-initiated validation: a rejected
+  // tenant key is an expected status result. The command handler records a
+  // redacted warning with guild_id and status for operator diagnosis instead.
+  return callQurl('GET', '/me', async () => {
+    const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
+    // TODO(upstream-contract): keep the explicit /v1 prefix aligned with
+    // qurl-service until #1377 removes this SDK-gap shim.
+    const response = await globalThis.fetch(`${endpoint}/v1/me`, {
+      method: 'GET',
+      redirect: 'error',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      try {
+        await response.body?.cancel();
+      } catch {}
+      const error = new Error('qURL identity request failed');
+      error.status = response.status;
+      throw error;
+    }
+
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error('qURL identity response was not valid JSON');
+    }
+    // TODO(upstream-contract): mirrors qurl-service's GET /v1/me envelope.
+    const identity = body?.data;
+    const key = identity?.api_key;
+    if (!key || typeof key !== 'object' || Array.isArray(key)) {
+      throw new Error('qURL identity response had an unexpected shape');
+    }
+    // A 200 already proves the service accepted the key. Display fields are
+    // optional in the shared /v1/me consumer contract, so degrade them rather
+    // than turning a valid key into an unavailable verdict.
+    return {
+      ...identity,
+      api_key: {
+        ...key,
+        key_prefix: typeof key.key_prefix === 'string' ? key.key_prefix : '',
+        scopes: Array.isArray(key.scopes)
+          ? key.scopes.filter(scope => typeof scope === 'string')
+          : [],
+      },
+    };
+  }, {
+    logContext: guildId ? { guild_id: guildId } : {},
+    emitDependencyAuthAudit: false,
+  });
 }
 
 // The syntactic private/loopback/link-local screen lives in utils/private-host.js
@@ -248,7 +331,7 @@ async function deleteLink(resourceId, apiKey) {
     'DELETE',
     RESOURCE_ID_LOG_PATH,
     () => client.deleteResource(resourceId),
-    { resource_ref: resourceIdLogRef(resourceId) },
+    { logContext: { resource_ref: resourceIdLogRef(resourceId) } },
   );
   logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
@@ -264,13 +347,14 @@ async function getResourceStatus(resourceId, apiKey) {
     'GET',
     QURL_ID_LOG_PATH,
     () => client.get(resourceId),
-    { resource_ref: resourceIdLogRef(resourceId) },
+    { logContext: { resource_ref: resourceIdLogRef(resourceId) } },
   );
 }
 
 module.exports = {
   createOneTimeLink,
   deleteLink,
+  getIdentity,
   getResourceStatus,
   isPrivateHost,
   validateResourceId,
