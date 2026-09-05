@@ -91,7 +91,9 @@ function makeClient(apiKey) {
  * it receives the same audit and redaction behavior.
  *
  *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
- *     alarm fires independently of any caller's catch path.
+ *     alarm fires independently of any caller's catch path. User-initiated
+ *     credential checks can disable this because an expected rejected tenant
+ *     key is not a service credential outage.
  *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403 (its retryable set is
  *     {429, 502, 503, 504}), so this fires once per request, not once per
  *     attempt. If that ever changes, the audit count would multiply on a single
@@ -111,7 +113,7 @@ function makeClient(apiKey) {
  *     credential, while create validation may echo a secret-bearing target
  *     URL. Pinned by tests/qurl-coverage.test.js.
  */
-async function callQurl(method, path, fn, context = {}) {
+async function callQurl(method, path, fn, context = {}, emitDependencyAuthAudit = true) {
   try {
     return await fn();
   } catch (err) {
@@ -122,7 +124,7 @@ async function callQurl(method, path, fn, context = {}) {
     logger.debug('qURL API error', {
       method, path, status, code: err?.code, ...context,
     });
-    if (status === 401 || status === 403) {
+    if (emitDependencyAuthAudit && (status === 401 || status === 403)) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
         ...context,
         dependency: 'qurl_service',
@@ -160,9 +162,11 @@ async function getIdentity(apiKey, guildId) {
   // Unlike makeClient, there is deliberately NO `apiKey || config.QURL_API_KEY`
   // fallback: a guild status check must validate the guild's own stored key,
   // never the bot's, or a guild with no key would read as configured.
-  // A rejected tenant key intentionally retains callQurl's dependency-auth
-  // audit breadcrumb, matching existing create/delete failures; its `/me`
-  // path dimension lets alerting distinguish this interactive validation.
+  // TODO(upstream-contract): qurl-integrations-infra's Discord dependency-auth
+  // metric filter pages on every event and does not filter by path. Do not emit
+  // that service-outage signal for this user-initiated validation: a rejected
+  // tenant key is an expected status result. The command handler records a
+  // redacted warning with guild_id and status for operator diagnosis instead.
   return callQurl('GET', '/me', async () => {
     const endpoint = config.QURL_ENDPOINT.replace(/\/+$/, '');
     // TODO(upstream-contract): keep the explicit /v1 prefix aligned with
@@ -211,7 +215,7 @@ async function getIdentity(apiKey, guildId) {
           : [],
       },
     };
-  }, guildId ? { guild_id: guildId } : {});
+  }, guildId ? { guild_id: guildId } : {}, false);
 }
 
 // The syntactic private/loopback/link-local screen lives in utils/private-host.js

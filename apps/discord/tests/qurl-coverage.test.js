@@ -103,7 +103,6 @@ describe('qURL client — getIdentity', () => {
 
   it.each([401, 403])('preserves a redacted %i status for callers', async (status) => {
     const logger = require('../src/logger');
-    const { AUDIT_EVENTS } = require('../src/constants');
     const secretBody = 'sensitive-body-marker-do-not-log';
     const response = apiError(status, { code: 'auth_error', detail: secretBody });
     response.body = { cancel: jest.fn().mockResolvedValue(undefined) };
@@ -116,10 +115,10 @@ describe('qURL client — getIdentity', () => {
 
     expect(error.status).toBe(status);
     expect(error.message).not.toContain(secretBody);
-    expect(logger.audit).toHaveBeenCalledWith(
-      AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
-      expect.objectContaining({ status, method: 'GET', path: '/me', guild_id: 'guild-1' }),
-    );
+    // This is a user-initiated tenant-key result. The infra metric filter pages
+    // on every dependency-auth audit event, so expected rejected keys must not
+    // emit the service-credential outage signal.
+    expect(logger.audit).not.toHaveBeenCalled();
     expect(response.body.cancel).toHaveBeenCalledTimes(1);
   });
 

@@ -439,7 +439,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
   it('bounds service-reported identity fields to Discord reply limits', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
-      configured_by: 'admin-departed',
+      configured_by: '🧪'.repeat(64),
       updated_at: '2026-01-01T00:00:00Z'.repeat(100),
     });
     mockGetIdentity.mockResolvedValueOnce({
@@ -460,11 +460,12 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     const replyContent = interaction._editReply.mock.calls[0][0].content;
     expect(replyContent.length).toBeLessThanOrEqual(2000);
     expect(replyContent).toContain('qURL is configured');
-    expect(replyContent).toContain('Configured by: <@admin-departed>');
+    expect(replyContent).toContain(`Configured by: <@${'🧪'.repeat(64)}>`);
     expect(replyContent).toContain('Last updated:');
     expect(replyContent).toContain('again to take over billing.');
-    expect(replyContent).not.toContain('…(truncated)');
+    expect(replyContent).toMatch(/_(?:\+\d+ more|\d+ scopes omitted)_/);
     expect((replyContent.match(/`/g) || []).length % 2).toBe(0);
+    expect(replyContent).not.toContain('\uFFFD');
   });
 
   it('replies to the deferred interaction when the guild is not configured', async () => {

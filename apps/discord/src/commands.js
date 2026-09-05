@@ -9053,7 +9053,9 @@ const commands = [
           const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
           // Every outcome renders as `<verdict copy> + configurationDetails`;
           // only the verdict differs, so build it here and share one exit.
+          const STATUS_SCOPE_DISPLAY_MAX = 10;
           let verdict;
+          let renderHealthyVerdict = null;
           if (keyUnavailable) {
             logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
             verdict = '❌ **The stored qURL key is unavailable.**\n\n' + reconnectCopy;
@@ -9080,33 +9082,41 @@ const commands = [
             // backticks instead of applying general Markdown escaping. The
             // plain display-name sanitizer also strips controls and codepoint-
             // caps each value; the slice below bounds how many scopes render.
-            const STATUS_SCOPE_DISPLAY_MAX = 10;
             const sanitizeIdentityValue = (value) =>
               sanitizeDisplayNamePlain(value, { fallback: '' }).replace(/`/g, '');
             const { key_prefix: rawKeyPrefix, scopes: allScopes } = identity.api_key;
             const keyPrefix = sanitizeIdentityValue(rawKeyPrefix) || 'unknown';
             const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
               .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
-            const omittedScopeCount = allScopes.length - shownScopes.length;
-            const scopes = (shownScopes.join(', ') || '_none_') +
-              (omittedScopeCount > 0 ? `, _+${omittedScopeCount} more_` : '');
-            verdict = `✅ **qURL is configured**\n` +
-              `Key prefix: \`${keyPrefix}\`\n` +
-              `Scopes: ${scopes}\n`;
+            renderHealthyVerdict = (shownScopeCount) => {
+              const renderedScopes = shownScopes.slice(0, shownScopeCount);
+              const omittedScopeCount = allScopes.length - renderedScopes.length;
+              let scopes = renderedScopes.join(', ');
+              if (omittedScopeCount > 0) {
+                scopes += scopes
+                  ? `, _+${omittedScopeCount} more_`
+                  : `_${omittedScopeCount} scopes omitted_`;
+              }
+              if (!scopes) scopes = '_none_';
+              return `✅ **qURL is configured**\n` +
+                `Key prefix: \`${keyPrefix}\`\n` +
+                `Scopes: ${scopes}\n`;
+            };
+            verdict = renderHealthyVerdict(shownScopes.length);
           }
           // Keep Discord's 2,000-UTF-16-unit content limit an invariant of the
           // code rather than of a copy budget spread across the fields above.
+          // Drop whole scope entries instead of slicing Markdown in the middle
+          // of an inline-code span or UTF-16 surrogate pair.
           const STATUS_CONTENT_MAX = 2000;
-          const truncationIndicator = '…(truncated)';
           let content = verdict + configurationDetails;
-          if (content.length > STATUS_CONTENT_MAX) {
-            const verdictLimit = Math.max(
-              0,
-              STATUS_CONTENT_MAX - configurationDetails.length - truncationIndicator.length,
-            );
-            content = capUtf16Units(verdict, verdictLimit) + truncationIndicator + configurationDetails;
+          if (content.length > STATUS_CONTENT_MAX && renderHealthyVerdict) {
+            let shownScopeCount = STATUS_SCOPE_DISPLAY_MAX;
+            while (content.length > STATUS_CONTENT_MAX && shownScopeCount > 0) {
+              shownScopeCount -= 1;
+              content = renderHealthyVerdict(shownScopeCount) + configurationDetails;
+            }
           }
-          content = capUtf16Units(content, STATUS_CONTENT_MAX);
           return interaction.editReply({
             content,
             allowedMentions: { parse: [] },
