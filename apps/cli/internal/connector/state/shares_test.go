@@ -261,6 +261,19 @@ func TestLocalShareRegistryDisableAtCurrentEpochIsFailClosedAndExact(t *testing.
 	if !storedAgain.UpdatedAt.Equal(transitionTime) {
 		t.Fatalf("idempotent local disable persisted transition time %s, want %s", storedAgain.UpdatedAt, transitionTime)
 	}
+	if enabled, err := registry.EnableAtCurrentEpoch(context.Background(), share.ResourceID, 6); err == nil || enabled != nil {
+		t.Fatalf("older local enable result = %+v, %v; want nil row and an error", enabled, err)
+	}
+	if enabled, err := registry.EnableAtCurrentEpoch(context.Background(), share.ResourceID, 8); err == nil || enabled != nil {
+		t.Fatalf("newer local enable result = %+v, %v; want nil row and an error", enabled, err)
+	}
+	enabled, err := registry.EnableAtCurrentEpoch(context.Background(), share.ResourceID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabled.DesiredState != "on" || enabled.ServingEpoch != 7 || enabled.TargetURL != share.TargetURL || enabled.ConnectorRoutingID != share.ConnectorRoutingID {
+		t.Fatalf("local enable changed more than local intent: %+v", enabled)
+	}
 }
 
 func TestLocalShareRegistryRejectsOutOfOrderAndIdentityChanges(t *testing.T) {

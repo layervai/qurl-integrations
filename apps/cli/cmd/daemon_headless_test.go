@@ -140,11 +140,113 @@ func TestReauthorizeHeadlessResourcePinsEveryConfiguredIdentity(t *testing.T) {
 		}
 		return &agent.ResolvedResource{}, nil
 	}
-	if err := reauthorizeHeadlessResource(context.Background(), runtime, stateDir, &config.Shares[0]); err != nil {
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
 		t.Fatal("headless resource authorization was not called")
+	}
+}
+
+func TestReauthorizeHeadlessResourceRestoresAuthoritativeDesiredOnAtSameEpoch(t *testing.T) {
+	config, err := connectorstate.LoadHeadlessConfig(writeHeadlessConfigFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Put(context.Background(), &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), config.Shares[0].ResourceID, config.Shares[0].ServingEpoch); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
+	authoritativeEpoch := config.Shares[0].ServingEpoch
+	originalResolve := resolveConfiguredHeadlessResource
+	originalRead := readHeadlessAuthoritativeSharing
+	t.Cleanup(func() {
+		resolveConfiguredHeadlessResource = originalResolve
+		readHeadlessAuthoritativeSharing = originalRead
+	})
+	resolveConfiguredHeadlessResource = func(context.Context, *qurl.AgentRuntimeBinding, *connectorstate.Store, *connectorstate.ConnectorResourceBinding, ...qurl.AgentRuntimeUDPOption) (*agent.ResolvedResource, error) {
+		return &agent.ResolvedResource{}, nil
+	}
+	readHeadlessAuthoritativeSharing = func(_ context.Context, gotRuntime *connectorshare.NativeRuntime, _ *qurlapi.Config, id string) (*qurlapi.Sharing, error) {
+		if gotRuntime != runtime || id != config.Shares[0].CRID {
+			t.Fatalf("sharing read = runtime %p id %q", gotRuntime, id)
+		}
+		return &qurlapi.Sharing{
+			ResourceID: config.Shares[0].ResourceID, CRID: config.Shares[0].CRID,
+			DesiredState: qurlapi.DesiredStateOn, ServingEpoch: authoritativeEpoch,
+			ConnectionState: qurlapi.ConnectionConnecting,
+		}, nil
+	}
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := registry.Get(context.Background(), config.Shares[0].ResourceID)
+	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != config.Shares[0].ServingEpoch {
+		t.Fatalf("reconciled local share = %+v, %v", stored, err)
+	}
+	authoritativeEpoch++
+	if _, err := registry.SetDesired(context.Background(), stored.ResourceID, "on", authoritativeEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), stored.ResourceID, authoritativeEpoch); err != nil {
+		t.Fatal(err)
+	}
+	config.Shares[0].ServingEpoch = authoritativeEpoch - 1
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = registry.Get(context.Background(), config.Shares[0].ResourceID)
+	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != authoritativeEpoch || config.Shares[0].ServingEpoch != authoritativeEpoch {
+		t.Fatalf("reconciled newer local epoch = %+v config=%+v, %v", stored, config.Shares[0], err)
+	}
+}
+
+func TestReauthorizeHeadlessResourcePreservesAuthoritativeDesiredOff(t *testing.T) {
+	config, err := connectorstate.LoadHeadlessConfig(writeHeadlessConfigFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := connectorStateTestDir(t)
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Put(context.Background(), &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.DisableAtCurrentEpoch(context.Background(), config.Shares[0].ResourceID, config.Shares[0].ServingEpoch); err != nil {
+		t.Fatal(err)
+	}
+	originalResolve := resolveConfiguredHeadlessResource
+	originalRead := readHeadlessAuthoritativeSharing
+	t.Cleanup(func() {
+		resolveConfiguredHeadlessResource = originalResolve
+		readHeadlessAuthoritativeSharing = originalRead
+	})
+	resolveConfiguredHeadlessResource = func(context.Context, *qurl.AgentRuntimeBinding, *connectorstate.Store, *connectorstate.ConnectorResourceBinding, ...qurl.AgentRuntimeUDPOption) (*agent.ResolvedResource, error) {
+		return &agent.ResolvedResource{}, nil
+	}
+	readHeadlessAuthoritativeSharing = func(context.Context, *connectorshare.NativeRuntime, *qurlapi.Config, string) (*qurlapi.Sharing, error) {
+		return &qurlapi.Sharing{
+			ResourceID: config.Shares[0].ResourceID, CRID: config.Shares[0].CRID,
+			DesiredState: qurlapi.DesiredStateOff, ServingEpoch: config.Shares[0].ServingEpoch,
+			ConnectionState: qurlapi.ConnectionStopped,
+		}, nil
+	}
+	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
+	if err := reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0]); err != nil {
+		t.Fatal(err)
+	}
+	if config.Shares[0].DesiredState != "off" {
+		t.Fatalf("headless config desired state = %q, want authoritative off", config.Shares[0].DesiredState)
 	}
 }
 
@@ -428,7 +530,7 @@ func TestHeadlessInvalidResourceJournalIsPermanentAndOpenErrorsRetry(t *testing.
 		t.Fatal(err)
 	}
 	runtime := &connectorshare.NativeRuntime{Binding: &qurl.AgentRuntimeBinding{}}
-	err = reauthorizeHeadlessResource(context.Background(), runtime, stateDir, &config.Shares[0])
+	err = reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, stateDir, &config.Shares[0])
 	if !errors.Is(err, connectorstate.ErrConnectorResourceState) || !isPermanentHeadlessNativeOpenError(err) {
 		t.Fatalf("invalid resource journal = %v, want permanent state error", err)
 	}
@@ -437,7 +539,7 @@ func TestHeadlessInvalidResourceJournalIsPermanentAndOpenErrorsRetry(t *testing.
 	if err := os.WriteFile(nondirectory, []byte("not-a-directory\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = reauthorizeHeadlessResource(context.Background(), runtime, nondirectory, &config.Shares[0])
+	err = reauthorizeHeadlessResource(context.Background(), runtime, &qurlapi.Config{}, nondirectory, &config.Shares[0])
 	if err == nil || errors.Is(err, errHeadlessResourceAuthorization) || isPermanentHeadlessNativeOpenError(err) {
 		t.Fatalf("resource state open failure = %v, want unclassified retryable error", err)
 	}
