@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.4](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.3...discord-v0.2.4) (2026-09-05)
+
+
+### Bug Fixes
+
+* **discord:** correct /qurl detect host pin for public-key resource IDs ([#1369](https://github.com/layervai/qurl-integrations/issues/1369)) ([5aed849](https://github.com/layervai/qurl-integrations/commit/5aed849067f30ebb82abb730776ba44704bbd50d))
+* **discord:** deliver long qv2 links without buttons ([#1386](https://github.com/layervai/qurl-integrations/issues/1386)) ([e8d0b3e](https://github.com/layervai/qurl-integrations/commit/e8d0b3eaa65217dec27c7590a7894805ddd1390c))
+* **discord:** hide unavailable install CTA in help ([#1338](https://github.com/layervai/qurl-integrations/issues/1338)) ([2b27f3a](https://github.com/layervai/qurl-integrations/commit/2b27f3aadf91e0dc3918873eb34787d00a0cd077))
+* **discord:** keep failed revokes retryable ([#1340](https://github.com/layervai/qurl-integrations/issues/1340)) ([9f5b8e0](https://github.com/layervai/qurl-integrations/commit/9f5b8e049564737324bfbc45c1d1bd4de47ef048))
+* **discord:** keep qURL access links out of logs ([#1344](https://github.com/layervai/qurl-integrations/issues/1344)) ([fb7638c](https://github.com/layervai/qurl-integrations/commit/fb7638c6a49f5300e5469d53f24398d8736743b6))
+* **discord:** match OAuth copy to enabled commands ([#1332](https://github.com/layervai/qurl-integrations/issues/1332)) ([b9ffefa](https://github.com/layervai/qurl-integrations/commit/b9ffefa8614912cd1cb20258d33b2b2976feea93))
+* **discord:** redact qURL resource paths ([#1350](https://github.com/layervai/qurl-integrations/issues/1350)) ([4f943a3](https://github.com/layervai/qurl-integrations/commit/4f943a36469cd6976ed93584794dca38b141af2f))
+* **discord:** restrict commands to guild context ([#1339](https://github.com/layervai/qurl-integrations/issues/1339)) ([ef7c6cb](https://github.com/layervai/qurl-integrations/commit/ef7c6cb885fecf7803e0fe419e245a8227cfb40c))
+* **discord:** revoke through the resource endpoint ([#1351](https://github.com/layervai/qurl-integrations/issues/1351)) ([851f680](https://github.com/layervai/qurl-integrations/commit/851f68097c299fe6db8dccbde8b49d613bf6ecb9))
+
 ## [0.2.3](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.2...discord-v0.2.3) (2026-08-20)
 
 
