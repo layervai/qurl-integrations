@@ -254,6 +254,29 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(STORED_KEY);
   });
 
+  it('handles a falsy identity rejection as a failed check', async () => {
+    db.getGuildConfig.mockResolvedValueOnce({
+      guild_id: 'guild-1',
+      configured_by: 'admin-original',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    mockGetIdentity.mockRejectedValueOnce(null);
+    const interaction = makeStatusInteraction({
+      memberFetchBehavior: async () => ({ id: 'admin-original' }),
+    });
+
+    await handleCommand(interaction);
+
+    const replyContent = interaction._editReply.mock.calls[0][0].content;
+    expect(replyContent).toMatch(/check could not be completed/i);
+    expect(replyContent).not.toMatch(/revoked|invalid/i);
+    expect(logger.warn).toHaveBeenCalledWith('qURL status identity check failed', {
+      guild_id: 'guild-1',
+      status: null,
+      failure_stage: 'qurl_service',
+    });
+  });
+
   it('keeps the admin-left notice when the identity check cannot be completed', async () => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
@@ -320,10 +343,10 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(interaction._editReply.mock.calls[0][0].content).toContain('Scopes: _none_');
   });
 
-  it('renders normalized empty identity fields with explicit fallbacks', async () => {
+  it.each([null, '\u200b\u200e'])('renders normalized empty identity fields with explicit fallbacks', async (configuredBy) => {
     db.getGuildConfig.mockResolvedValueOnce({
       guild_id: 'guild-1',
-      configured_by: null,
+      configured_by: configuredBy,
       updated_at: '2026-01-01T00:00:00Z',
     });
     mockGetIdentity.mockResolvedValueOnce({
@@ -340,6 +363,7 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('Scopes: `unnamed`');
     expect(replyContent).toContain('Configured by: unknown');
     expect(replyContent).not.toContain('<@unknown>');
+    expect(interaction.guild.members.fetch).not.toHaveBeenCalled();
   });
 
   it('summarizes service-reported scopes beyond the display limit', async () => {

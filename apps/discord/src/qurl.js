@@ -113,7 +113,11 @@ function makeClient(apiKey) {
  *     credential, while create validation may echo a secret-bearing target
  *     URL. Pinned by tests/qurl-coverage.test.js.
  */
-async function callQurl(method, path, fn, context = {}, emitDependencyAuthAudit = true) {
+async function callQurl(method, path, fn, options = {}) {
+  const {
+    logContext = {},
+    emitDependencyAuthAudit = true,
+  } = options;
   try {
     return await fn();
   } catch (err) {
@@ -122,11 +126,10 @@ async function callQurl(method, path, fn, context = {}, emitDependencyAuthAudit 
     const status = Number.isInteger(err?.status) ? err.status : 0;
     // Redaction: status + error code only — never err.message / err.detail.
     logger.debug('qURL API error', {
-      method, path, status, code: err?.code, ...context,
+      method, path, status, code: err?.code, ...logContext,
     });
     if (emitDependencyAuthAudit && (status === 401 || status === 403)) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
-        ...context,
         dependency: 'qurl_service',
         status,
         method,
@@ -215,7 +218,10 @@ async function getIdentity(apiKey, guildId) {
           : [],
       },
     };
-  }, guildId ? { guild_id: guildId } : {}, false);
+  }, {
+    logContext: guildId ? { guild_id: guildId } : {},
+    emitDependencyAuthAudit: false,
+  });
 }
 
 // The syntactic private/loopback/link-local screen lives in utils/private-host.js
@@ -325,7 +331,7 @@ async function deleteLink(resourceId, apiKey) {
     'DELETE',
     RESOURCE_ID_LOG_PATH,
     () => client.deleteResource(resourceId),
-    { resource_ref: resourceIdLogRef(resourceId) },
+    { logContext: { resource_ref: resourceIdLogRef(resourceId) } },
   );
   logger.info('Revoked qURL resource', { resource_id: resourceId });
 }
@@ -341,7 +347,7 @@ async function getResourceStatus(resourceId, apiKey) {
     'GET',
     QURL_ID_LOG_PATH,
     () => client.get(resourceId),
-    { resource_ref: resourceIdLogRef(resourceId) },
+    { logContext: { resource_ref: resourceIdLogRef(resourceId) } },
   );
 }
 

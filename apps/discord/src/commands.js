@@ -9005,7 +9005,7 @@ const commands = [
               failureStage = 'qurl_service';
               return { identity: await getIdentity(apiKey, interaction.guildId) };
             } catch (error) {
-              return { error, failureStage };
+              return { error, failureStage, identityFailed: true };
             }
           })();
 
@@ -9014,9 +9014,10 @@ const commands = [
           // inject content or crowd out the key verdict/offboarding guidance.
           const sanitizeStoredStatusValue = (value) =>
             sanitizeContentLabel(value, 64) || 'unknown';
-          const configuredByDisplay = sanitizeStoredStatusValue(guildConfig.configured_by);
+          const sanitizedConfiguredBy = sanitizeContentLabel(guildConfig.configured_by, 64);
+          const configuredByDisplay = sanitizedConfiguredBy || 'unknown';
           const updatedAtDisplay = sanitizeStoredStatusValue(guildConfig.updated_at);
-          const configuredByReference = guildConfig.configured_by
+          const configuredByReference = sanitizedConfiguredBy
             ? `<@${configuredByDisplay}>`
             : configuredByDisplay;
 
@@ -9027,7 +9028,7 @@ const commands = [
           // take over billing. Best-effort — a Discord API blip just
           // omits the notice rather than failing the whole status read.
           let originalAdminLeftNotice = '';
-          if (guildConfig.configured_by) {
+          if (sanitizedConfiguredBy) {
             try {
               await interaction.guild.members.fetch(guildConfig.configured_by);
             } catch (err) {
@@ -9049,18 +9050,25 @@ const commands = [
             `Last updated: ${updatedAtDisplay}` +
             originalAdminLeftNotice;
 
-          const { identity, error, keyUnavailable, failureStage } = await identityResultPromise;
+          const {
+            identity,
+            error,
+            keyUnavailable,
+            failureStage,
+            identityFailed,
+          } = await identityResultPromise;
           const reconnectCopy = 'Re-run `/qurl setup` to connect a valid key.\n\n';
           // Every outcome renders as `<verdict copy> + configurationDetails`;
           // only the verdict differs, so build it here and share one exit.
           const STATUS_SCOPE_DISPLAY_MAX = 10;
           let verdict;
           let renderHealthyVerdict = null;
+          let healthyScopeCount = 0;
           if (keyUnavailable) {
             logger.warn('qURL status key unavailable', { guild_id: interaction.guildId });
             verdict = '❌ **The stored qURL key is unavailable.**\n\n' + reconnectCopy;
-          } else if (error) {
-            const status = Number.isInteger(error.status) ? error.status : null;
+          } else if (identityFailed) {
+            const status = Number.isInteger(error?.status) ? error.status : null;
             logger.warn('qURL status identity check failed', {
               guild_id: interaction.guildId,
               status,
@@ -9088,6 +9096,7 @@ const commands = [
             const keyPrefix = sanitizeIdentityValue(rawKeyPrefix) || 'unknown';
             const shownScopes = allScopes.slice(0, STATUS_SCOPE_DISPLAY_MAX)
               .map(scope => `\`${sanitizeIdentityValue(scope) || 'unnamed'}\``);
+            healthyScopeCount = shownScopes.length;
             renderHealthyVerdict = (shownScopeCount) => {
               const renderedScopes = shownScopes.slice(0, shownScopeCount);
               const omittedScopeCount = allScopes.length - renderedScopes.length;
@@ -9111,11 +9120,21 @@ const commands = [
           const STATUS_CONTENT_MAX = 2000;
           let content = verdict + configurationDetails;
           if (content.length > STATUS_CONTENT_MAX && renderHealthyVerdict) {
-            let shownScopeCount = STATUS_SCOPE_DISPLAY_MAX;
+            let shownScopeCount = healthyScopeCount;
             while (content.length > STATUS_CONTENT_MAX && shownScopeCount > 0) {
               shownScopeCount -= 1;
               content = renderHealthyVerdict(shownScopeCount) + configurationDetails;
             }
+          }
+          if (content.length > STATUS_CONTENT_MAX) {
+            // Defensive backstop for future copy or sanitizer-cap growth. The
+            // current field bounds keep this path unreachable after whole-scope
+            // reduction. Reserve room for a closing backtick and ellipsis so a
+            // future regression still produces valid UTF-16 and balanced inline
+            // Markdown instead of making editReply fail.
+            content = capUtf16Units(content, STATUS_CONTENT_MAX - 2);
+            if ((content.match(/`/g) || []).length % 2 !== 0) content += '`';
+            content += '…';
           }
           return interaction.editReply({
             content,

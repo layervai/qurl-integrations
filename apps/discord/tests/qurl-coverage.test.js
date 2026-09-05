@@ -607,6 +607,7 @@ describe('qURL client — retry + audit behavior', () => {
       AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
       expect.objectContaining({ method: 'DELETE', path: '/resources/:resourceId' }),
     );
+    expect(logger.audit.mock.calls[0][1]).not.toHaveProperty('resource_ref');
   });
 });
 
