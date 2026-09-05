@@ -3444,6 +3444,32 @@ describe('handleAddRecipients — happy path (location)', () => {
     // row, not a separate trust row, in the 1-link case.
   });
 
+  it('delivers an over-512-character qv2 link without invalid Discord components', async () => {
+    const qv2Link = `https://qurl.link/#qv2t1.${'A'.repeat(600)}`;
+    expect(qv2Link.length).toBeGreaterThan(512);
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-qv2' });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: qv2Link, resource_id: 'res-loc-qv2' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-qv2', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const [, payload] = mockSendDM.mock.calls[0];
+    expect(payload.components).toEqual([]);
+    const description = payload.embeds[0].setDescription.mock.calls[0][0];
+    expect(description).toContain(`[🚪 Step Through](${qv2Link})`);
+    expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
+  });
+
   // The bulk-path shared-embed optimization: at N>1, the EmbedBuilder
   // is built once and the same reference repeated via Array(N).fill.
   // discord.js' .toJSON() is a pure read of internal state, so the

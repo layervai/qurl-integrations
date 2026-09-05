@@ -728,9 +728,10 @@ function resolveRoleNames(guild, ids) {
 // embed copy is intentionally evocative ("opened a door", "Closes")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
-// The qURL link is rendered as a `🚪 Step Through` Link button rather
-// than a bare URL field; recipients click the button to open the link
-// in their default browser.
+// Links within Discord's 512-character component limit render as the
+// original `🚪 Step Through` and trust buttons. Longer qv2 links render
+// both actions as equal-weight Markdown links inside the embed so
+// Discord accepts the DM without changing the qURL itself.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
 // > globalName > username) sourced from resolveSenderAlias.
@@ -738,10 +739,8 @@ function resolveRoleNames(guild, ids) {
 // renders as an italicized blockquote between the sender line and the
 // expiry line.
 //
-// Returns the full Discord message options object (`embeds` + `components`)
-// rather than just the embed, since the button is not part of the embed
-// — it lives in a top-level component row alongside it. Callers pass the
-// returned payload directly to `sendDM`.
+// Returns the full Discord message options object (`embeds` + `components`).
+// Callers pass the returned payload directly to `sendDM`.
 //
 // Rendered output (blank rows = Discord's natural section spacing,
 // NOT literal `\n` separators — descLines.join('\n') is single-newline):
@@ -762,7 +761,7 @@ function resolveRoleNames(guild, ids) {
 // Discord's Link-style buttons are always grey/blurple; the green color
 // in the design mockup would require a Success-style button + custom_id
 // + interaction handler that redirects, which adds a click round-trip
-// for marginal aesthetic gain. Sticking with Link button for this pivot.
+// for marginal aesthetic gain.
 // Single source of truth for the SlashCommandBuilder `addChoices(...)` —
 // `EXPIRY_CHOICES` is derived from this map so dropdown labels and values
 // cannot drift. The DM embed renders expiry as a Discord native relative
@@ -928,6 +927,16 @@ function buildTrustButton() {
     .setURL(TRUST.LANDING_URL);
 }
 
+// Discord rejects an entire message when any Link button URL exceeds
+// 512 characters. Current qv2 links can exceed that component-specific
+// limit while remaining well within the embed-description limit.
+// TODO(upstream-contract): Discord API Link Button URL maximum.
+const DISCORD_LINK_BUTTON_URL_MAX = 512;
+
+function requiresMarkdownDeliveryActions(qurlLink) {
+  return qurlLink.length > DISCORD_LINK_BUTTON_URL_MAX;
+}
+
 // The Step Through Link button is the primary action on every DM.
 // Extracted as a factory so the bulk-path call site can compose
 // per-link buttons without round-tripping through buildDeliveryPayload
@@ -1003,12 +1012,13 @@ function capUtf16Units(s, maxUtf16Units) {
   return truncated;
 }
 
-// Composes the embed only (no button row). Split out so the bulk-path
-// dispatch in handleAddRecipients can build N embeds + N step-through
-// buttons + 1 trust button without round-tripping through
-// buildDeliveryPayload (which always allocates a trust button per
-// call). The single-path call sites use buildDeliveryPayload below.
-function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage }) {
+// Composes the embed only (no button row). The optional Markdown actions
+// are used when a qv2 link exceeds Discord's Link-button URL limit. The
+// single-path call sites use buildDeliveryPayload below.
+function buildDeliveryEmbed({
+  senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
+  renderActionsAsMarkdown = false,
+}) {
   // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
   // value; anything else renders a misleading recipient surface (e.g.
   // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
@@ -1108,6 +1118,9 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   }
   const expiryVerb = expiresAt <= Math.floor(Date.now() / 1000) ? 'Closed' : 'Closes';
   descLines.push(`🕐 ${expiryVerb} <t:${expiresAt}:R>`);
+  if (renderActionsAsMarkdown) {
+    descLines.push(`[🚪 Step Through](${qurlLink}) · [🛡️ What is qURL?](${TRUST.LANDING_URL})`);
+  }
 
   // Author row is the embed's "address bar" — anchored top, visually
   // distinct from the description, the closest analog Discord offers
@@ -1128,13 +1141,18 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
     .setFooter({ text: `opens ${TRUST.DESTINATION_DOMAIN}` });
 }
 
-// Convenience wrapper composing the embed + one ActionRow holding
-// [Step Through, What is qURL?]. Used by the single-path call site
-// (executeSendPipeline); the bulk path composes from the primitives
-// directly so it can pack N step-throughs with one shared trust button.
+// Convenience wrapper used by executeSendPipeline. Short links preserve
+// the original [Step Through, What is qURL?] ActionRow; long qv2 links
+// place both actions in the embed and return no components.
 function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage }) {
-  const embed = buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage });
-  const components = [new ActionRowBuilder().addComponents(buildStepThroughButton(qurlLink), buildTrustButton())];
+  const renderActionsAsMarkdown = requiresMarkdownDeliveryActions(qurlLink);
+  const embed = buildDeliveryEmbed({
+    senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage,
+    renderActionsAsMarkdown,
+  });
+  const components = renderActionsAsMarkdown
+    ? []
+    : [new ActionRowBuilder().addComponents(buildStepThroughButton(qurlLink), buildTrustButton())];
   return { embeds: [embed], components };
 }
 
@@ -3407,12 +3425,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     let result = { ok: false };
     try {
       // links.slice(0, 10) caps at Discord's 10-embed-per-message
-      // limit. The embed body is identical per-link (sender + guild +
-      // expiry don't vary), so build the EmbedBuilder once and repeat
-      // the reference N times. discord.js serializes each embeds[]
-      // entry via .toJSON() — a pure read of internal state — so
-      // reference sharing is safe. Saves N-1 EmbedBuilder allocations
-      // + N-1 sanitize-chain runs on the senderAlias/guildName halves.
+      // limit. Short links share one identical EmbedBuilder and keep
+      // the original packed buttons. Long qv2 links need their own
+      // Markdown action in each embed and send no components.
       // packBulkDeliveryComponents enforces 1 <= len <= 10 with
       // fail-loud throws; the upstream guard at line 2372 above
       // (`if (!links || links.length === 0)`) is what keeps us out
@@ -3421,15 +3436,26 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       // here at the helper boundary — see packBulkDeliveryComponents
       // docstring for the contract.
       const cappedLinks = links.slice(0, 10);
-      const sharedEmbed = buildDeliveryEmbed({
+      const renderActionsAsMarkdown = cappedLinks.some(
+        link => requiresMarkdownDeliveryActions(link.qurlLink),
+      );
+      const embedArgs = {
         senderAlias,
         guildName,
         guildIconUrl,
         expiresAt,
         personalMessage: sendConfig.personal_message,
-      });
-      const allEmbeds = Array(cappedLinks.length).fill(sharedEmbed);
-      const allComponents = packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
+      };
+      const allEmbeds = renderActionsAsMarkdown
+        ? cappedLinks.map(link => buildDeliveryEmbed({
+          ...embedArgs,
+          qurlLink: link.qurlLink,
+          renderActionsAsMarkdown: true,
+        }))
+        : Array(cappedLinks.length).fill(buildDeliveryEmbed(embedArgs));
+      const allComponents = renderActionsAsMarkdown
+        ? []
+        : packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
