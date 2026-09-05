@@ -3,5 +3,5 @@
   "apps/discord": "0.2.4",
   "apps/chrome-extension": "1.1.0",
   "apps/edge-extension": "1.1.0",
-  "apps/cli": "2.3.0"
+  "apps/cli": "2.3.1"
 }
