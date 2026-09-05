@@ -34,6 +34,7 @@ jobs:
     outputs:
       required: ${{ steps.source.outputs.required }}
       source_runs: ${{ steps.source.outputs.source_runs }}
+      include_soak: ${{ steps.source.outputs.include_soak }}
     steps:
       - id: source
         name: Require an exact main journey run
@@ -50,9 +51,10 @@ jobs:
           WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
         run: |
           set -euo pipefail
+          include_soak=false
           case "$GITHUB_EVENT_NAME" in
             workflow_run)
-              [[ "$SOURCE_BRANCH" == main && "$SOURCE_EVENT" == push && \
+              [[ "$SOURCE_BRANCH" == main && \
                 "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$SOURCE_WORKFLOW_NAME" == "cli: Build and Test" && \
@@ -60,6 +62,14 @@ jobs:
                 echo "::error::cleanup accepts only the exact same-repository main CLI workflow" >&2
                 exit 1
               }
+              case "$SOURCE_EVENT" in
+                push) ;;
+                schedule|workflow_dispatch) include_soak=true ;;
+                *)
+                  echo "::error::cleanup source event is not an approved CLI trigger" >&2
+                  exit 1
+                  ;;
+              esac
               [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]{0,18}$ ]] || {
                 echo "::error::cleanup source run id is not a positive integer" >&2
                 exit 1
@@ -95,7 +105,9 @@ jobs:
             if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
               jq -e --arg repository "$GITHUB_REPOSITORY" '
-                .status == "completed" and .event == "push" and .head_branch == "main" and
+                .status == "completed" and
+                (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
+                .head_branch == "main" and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml"
@@ -103,6 +115,12 @@ jobs:
                 echo "::error::cleanup source is not one exact same-repository main CLI workflow" >&2
                 exit 1
               }
+              # This flag is request-wide. One scheduled or manual source adds
+              # lane 4 to every selected run; extra reconciliation is a safe
+              # no-op and is included in the 12-operation timeout budget.
+              if [[ "$(jq -r '.event' <<<"$run")" != push ]]; then
+                include_soak=true
+              fi
             fi
             jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")
             # A completed workflow event can briefly precede its final job
@@ -130,6 +148,7 @@ jobs:
           {
             echo "required=true"
             echo "source_runs=$source_runs"
+            echo "include_soak=$include_soak"
           } >>"$GITHUB_OUTPUT"
 
   cleanup:
@@ -137,7 +156,11 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.required == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Manual recovery accepts at most three source runs. A scheduled/manual
+    # source adds the fourth lane, for at most 12 reconciliations. Their
+    # two-minute inventory budgets consume at most 24 minutes; the remaining
+    # 21 minutes cover token minting, bounded cleanup writes, and runner setup.
+    timeout-minutes: 45
     environment: cli-customer-journey-cleanup
     permissions:
       contents: read
@@ -157,6 +180,7 @@ jobs:
         env:
           AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
           AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          INCLUDE_SOAK: ${{ needs.resolve.outputs.include_soak }}
           SOURCE_RUNS: ${{ needs.resolve.outputs.source_runs }}
         run: |
           set -euo pipefail
@@ -172,7 +196,11 @@ jobs:
           IFS=, read -ra run_specs <<<"$SOURCE_RUNS"
           for run_spec in "${run_specs[@]}"; do
             IFS=: read -r source_run_id source_run_attempt <<<"$run_spec"
-            for lane_spec in linux:1 macos:2 windows:3; do
+            lane_specs=(linux:1 macos:2 windows:3)
+            if [[ "$INCLUDE_SOAK" == true ]]; then
+              lane_specs+=(linux:4)
+            fi
+            for lane_spec in "${lane_specs[@]}"; do
               IFS=: read -r lane lane_id <<<"$lane_spec"
               if ! python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
                 --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \

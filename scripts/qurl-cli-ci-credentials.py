@@ -23,14 +23,15 @@ REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
 # TODO(upstream-contract): the CI Auth0 tenant issues one-hour M2M tokens.
 AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
 AUTH0_ISSUANCE_SKEW_SECONDS = 60
-# The journey token must cover its 35-minute lane plus a 10-minute cleanup
-# margin. Each fallback reconcile invocation mints a fresh token; the fallback
-# job timeout must fit inside this minimum remaining lifetime but need not equal
-# the in-workflow cleanup timeout.
-JOURNEY_LANE_TIMEOUT_SECONDS = 35 * 60
-JOURNEY_CLEANUP_MARGIN_SECONDS = 10 * 60
+# An M2M token is consumed only by one trusted setup or reconciliation command.
+# The setup command removes it before the customer journey starts, and every
+# post-journey or fallback reconciliation mints a fresh token. This headroom is
+# therefore independent of the 110-minute soak lane. It leaves 30 minutes for
+# one bounded management command plus the terminal cleanup job's 15 minutes.
+M2M_MANAGEMENT_HEADROOM_SECONDS = 30 * 60
+JOURNEY_CLEANUP_MARGIN_SECONDS = 15 * 60
 MIN_M2M_TOKEN_REMAINING_SECONDS = (
-    JOURNEY_LANE_TIMEOUT_SECONDS + JOURNEY_CLEANUP_MARGIN_SECONDS
+    M2M_MANAGEMENT_HEADROOM_SECONDS + JOURNEY_CLEANUP_MARGIN_SECONDS
 )
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
@@ -248,7 +249,7 @@ def auth0_token(args: argparse.Namespace) -> tuple[str, str]:
         or expires - now < MIN_M2M_TOKEN_REMAINING_SECONDS
         or expires - issued > 2 * AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ):
-        raise CredentialError("Auth0 token cannot cover the journey and cleanup")
+        raise CredentialError("Auth0 token does not have the required CI management lifetime")
     if effective_scopes(claims) != REQUIRED_M2M_SCOPES:
         raise CredentialError("Auth0 token does not have the exact CI scope set")
     return token, claims["sub"]

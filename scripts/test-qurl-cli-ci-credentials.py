@@ -286,14 +286,86 @@ def sticky_clock(*values: float):
     return read
 
 
+def test_scheduled_soak_workflow_contract() -> None:
+    workflow = CLI_WORKFLOW.read_text(encoding="utf-8")
+    assert 'cron: "17 6 * * *"' in workflow
+    assert "contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'true'" in workflow
+
+    base_line = next(
+        line.strip() for line in workflow.splitlines() if line.strip().startswith("matrix='{")
+    )
+    base_matrix = json.loads(base_line.removeprefix("matrix='").removesuffix("'"))
+    assert base_matrix == {
+        "include": [
+            {
+                "lane": "linux",
+                "lane_id": 1,
+                "os": "ubuntu-latest",
+                "test_name": "TestSandboxLinuxDefaultDaemonLifecycle",
+                "timeout_minutes": 35,
+                "soak": False,
+            },
+            {
+                "lane": "macos",
+                "lane_id": 2,
+                "os": "macos-latest",
+                "test_name": "TestSandboxMacOSDefaultDaemonLifecycle",
+                "timeout_minutes": 35,
+                "soak": False,
+            },
+            {
+                "lane": "windows",
+                "lane_id": 3,
+                "os": "windows-latest",
+                "test_name": "TestSandboxWindowsDefaultDaemonFullCustomerLifecycle",
+                "timeout_minutes": 35,
+                "soak": False,
+            },
+        ]
+    }
+    soak_line = next(line for line in workflow.splitlines() if ".include += [" in line)
+    soak_row = json.loads(soak_line.split(".include += [", 1)[1].split("]' <<<", 1)[0])
+    assert soak_row == {
+        "lane": "linux",
+        "lane_id": 4,
+        "os": "ubuntu-latest",
+        "test_name": "TestSandboxLocalPublishSoak",
+        "timeout_minutes": 110,
+        "soak": True,
+    }
+    assert "matrix: ${{ fromJSON(needs.changes.outputs.journey_matrix) }}" in workflow
+    assert "timeout-minutes: ${{ matrix.timeout_minutes }}" in workflow
+    assert "-tags=clisandbox,clisoak" in workflow
+    assert "QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK: ${{ matrix.soak && 'enabled' || '' }}" in workflow
+    assert "QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}" in workflow
+    assert "lane_specs+=(linux:4)" in workflow
+    assert "needs: [required, journey]" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
+    assert "github.event_name != 'pull_request'" not in workflow
+    assert workflow.count(
+        "contains(fromJson('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name)"
+    ) >= 3
+    assert "needs.required.result == 'success'" in workflow
+    assert "needs.journey.result == 'success'" in workflow
+    assert "notify-soak-manual-failure:" in workflow
+    assert "SOAK_STATUS: failure" in workflow
+    assert "SOAK_DURATION: 80m" in workflow
+    assert "run: scripts/notify-qurl-cli-soak-status.sh" in workflow
+
+    cleanup = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
+    assert "schedule|workflow_dispatch) include_soak=true" in cleanup
+    assert '(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")' in cleanup
+    assert "lane_specs+=(linux:4)" in cleanup
+
+
 def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     fixed_now = 2_000_000_000
-    journey_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey")
     cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
     fallback_cleanup_minutes = workflow_timeout_minutes(
         CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
     )
-    assert credentials.JOURNEY_LANE_TIMEOUT_SECONDS == journey_minutes * 60
+    assert fallback_cleanup_minutes == 45
+    assert credentials.M2M_MANAGEMENT_HEADROOM_SECONDS == 30 * 60
     assert credentials.JOURNEY_CLEANUP_MARGIN_SECONDS == cleanup_minutes * 60
     assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 2700, (
         "journey credential budget changed; confirm the M2M lifetime still covers it"
@@ -306,12 +378,13 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
     assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
         "fallback cleanup timeout no longer fits inside each freshly minted token"
     )
-    # cli.yml runs three lane reconciliations. The fallback workflow accepts at
-    # most three source runs and runs the same three lanes, for nine total.
-    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 3 < cleanup_minutes * 60, (
+    # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
+    # most three source runs, for twelve total reconciliations in the largest
+    # mixed recovery request.
+    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60, (
         "primary inventory budgets no longer leave room for cleanup writes"
     )
-    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 9 < fallback_cleanup_minutes * 60, (
+    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12 < fallback_cleanup_minutes * 60, (
         "fallback inventory budgets no longer leave room for cleanup writes"
     )
     assert 0 < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS < (
@@ -349,7 +422,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
             try:
                 credentials.auth0_token(args)
             except credentials.CredentialError as exc:
-                assert str(exc) == "Auth0 token cannot cover the journey and cleanup"
+                assert str(exc) == (
+                    "Auth0 token does not have the required CI management lifetime"
+                )
             else:
                 raise AssertionError("2699-second Auth0 token was accepted")
 
@@ -911,6 +986,7 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 
 def main() -> None:
+    test_scheduled_soak_workflow_contract()
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()

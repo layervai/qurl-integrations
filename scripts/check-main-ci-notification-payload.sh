@@ -72,8 +72,8 @@ DEFAULT_BRANCH = "main"
 
 # Workflows that reach main (or run on a schedule) yet deliberately do not
 # notify #build-notifications. Keyed by workflow `name:`, valued by the reason
-# -- an entry here is a decision, so make it read like one in review. Empty
-# today: every workflow that can trigger the notifier is wired into it.
+# -- an entry here is a decision, so make it read like one in review.
+# Empty today: every workflow that can trigger the notifier is wired into it.
 NOTIFY_EXEMPT = {}
 
 # Stand-in for the workflow_run context the step reads from its env: block.
@@ -503,6 +503,7 @@ try:
     # relabels the actor, and a missing actor must fall back rather than render
     # an empty field.
     cases.append((triggers[0], {"EVENT": "schedule"}))
+    cases.append(("cli: Build and Test", {"EVENT": "schedule"}))
     cases.append((triggers[0], {"ACTOR": ""}))
 
     for workflow, extra in cases:
@@ -588,6 +589,9 @@ try:
                 "case statement drifted)" % workflow)
         if not listed and not generic:
             die("unlisted %r did not hit the fallback arm" % workflow)
+        if workflow == "cli: Build and Test" and extra.get("EVENT") == "schedule" and \
+                "Slack result-delivery gate" not in impact:
+            die("scheduled CLI failure impact does not cover result delivery")
 
     # Every admitted conclusion gets its own visual/operational classification.
     outcome_cases = [
@@ -654,6 +658,31 @@ try:
         if proc.returncode != 0 or payload is not None:
             die("successful rerun after %s must exit cleanly without posting"
                 % preceding)
+
+    # The dedicated soak job already posts the scheduled CLI success. A rerun
+    # must not add a second green message from this general notifier.
+    proc, payload = run({
+        "WORKFLOW_NAME": "cli: Build and Test", "EVENT": "schedule",
+        "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+        "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": "failure",
+    })
+    if proc.returncode != 0 or payload is not None or \
+            "dedicated soak notifier owns" not in proc.stdout + proc.stderr:
+        die("scheduled CLI recovery emitted a duplicate general green message")
+
+    # A healthy watchdog has no dedicated green sender. Its successful rerun
+    # must close the failure alert emitted for the prior attempt.
+    proc, payload = run({
+        "WORKFLOW_NAME": "qURL CLI Soak Freshness Watchdog",
+        "EVENT": "schedule", "CONCLUSION": "success", "RUN_ATTEMPT": "2",
+        "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": "failure",
+    })
+    watchdog_recovery = json.loads(payload) if payload is not None else None
+    watchdog_impact = (watchdog_recovery["attachments"][0]["blocks"][-2]
+                       ["text"]["text"] if watchdog_recovery else "")
+    if proc.returncode != 0 or watchdog_recovery is None or \
+            "Recovered" not in watchdog_impact:
+        die("successful watchdog rerun did not close its prior failure alert")
 
     # A recovery must be verified against the exact previous attempt. If that
     # read fails, do not emit an unverified green notification.

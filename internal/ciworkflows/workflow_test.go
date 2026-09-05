@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	t.Parallel()
 
 	workflow := readWorkflow(t, cliWorkflow)
-	for _, name := range []string{cliCustomerArtifactsJobID, "journey", "journey-cleanup", requiredJobID, "signal-cli-release"} {
+	for _, name := range []string{cliCustomerArtifactsJobID, "journey", "journey-cleanup", requiredJobID, "notify-soak-success", "notify-soak-manual-failure", "signal-cli-release"} {
 		if workflow.Jobs[name] == nil {
 			t.Fatalf("%s is missing %q", cliWorkflow, name)
 		}
@@ -112,6 +113,19 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	raw := readWorkflowBytes(t, cliWorkflow)
+	var cliConcurrency struct {
+		Concurrency struct {
+			Group string `yaml:"group"`
+		} `yaml:"concurrency"`
+	}
+	if err := yaml.Unmarshal(raw, &cliConcurrency); err != nil {
+		t.Fatalf("decode CLI concurrency: %v", err)
+	}
+	wantConcurrency := "${{ github.workflow }}-${{ github.ref }}-${{ contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'soak' || 'ci' }}"
+	if cliConcurrency.Concurrency.Group != wantConcurrency {
+		t.Errorf("CLI concurrency group = %q, want separate main-CI and soak groups %q",
+			cliConcurrency.Concurrency.Group, wantConcurrency)
+	}
 	for _, forbidden := range []string{
 		"QURL_PROD_NHP_SESSION_RELAY_URL",
 		"QURL_RELEASE_SESSION_RELAY_URL",
@@ -132,13 +146,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			RunsOn      string `yaml:"runs-on"`
 			Strategy    struct {
 				FailFast *bool `yaml:"fail-fast"`
-				Matrix   struct {
-					Include []struct {
-						Lane   string `yaml:"lane"`
-						LaneID int    `yaml:"lane_id"`
-						OS     string `yaml:"os"`
-					} `yaml:"include"`
-				} `yaml:"matrix"`
+				Matrix   any   `yaml:"matrix"`
 			} `yaml:"strategy"`
 		} `yaml:"jobs"`
 	}
@@ -146,15 +154,62 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		t.Fatal(err)
 	}
 	journeyContract := contract.Jobs["journey"]
-	if journeyContract.If != "github.event_name == 'push' && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
+	if journeyContract.If != "github.ref == 'refs/heads/main' && contains(fromJson('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
 		journeyContract.Environment != "cli-customer-journey" || journeyContract.RunsOn != "${{ matrix.os }}" ||
+		fmt.Sprint(journeyContract.Strategy.Matrix) != "${{ fromJSON(needs.changes.outputs.journey_matrix) }}" ||
 		journeyContract.Strategy.FailFast == nil || *journeyContract.Strategy.FailFast {
-		t.Errorf("journey is not a protected, parallel main-only matrix: %#v", journeyContract)
+		t.Errorf("journey is not a protected, parallel trusted-event matrix: %#v", journeyContract)
+	}
+	type journeyLane struct {
+		Lane           string `json:"lane"`
+		LaneID         int    `json:"lane_id"`
+		OS             string `json:"os"`
+		TestName       string `json:"test_name"`
+		TimeoutMinutes int    `json:"timeout_minutes"`
+		Soak           bool   `json:"soak"`
+	}
+	type journeyMatrix struct {
+		Include []journeyLane `json:"include"`
+	}
+	changes := workflow.Jobs[changesJobID]
+	var selector *step
+	for index := range changes.Steps {
+		if changes.Steps[index].Name == "Select protected customer journeys" {
+			selector = &changes.Steps[index]
+			break
+		}
+	}
+	if selector == nil {
+		t.Fatal("change detector has no protected customer-journey selector")
+	}
+	var baseLine, soakLine string
+	for line := range strings.SplitSeq(selector.Run, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "matrix='{") {
+			baseLine = line
+		}
+		if strings.Contains(line, ".include += [") {
+			soakLine = line
+		}
+	}
+	if baseLine == "" || soakLine == "" {
+		t.Fatalf("journey selector has no exact base and soak matrices: %q", selector.Run)
+	}
+	var baseMatrix journeyMatrix
+	baseJSON := strings.TrimSuffix(strings.TrimPrefix(baseLine, "matrix='"), "'")
+	if err := json.Unmarshal([]byte(baseJSON), &baseMatrix); err != nil {
+		t.Fatalf("parse base journey matrix: %v", err)
 	}
 	wantOS := map[string]string{"linux": "ubuntu-latest", "macos": "macos-latest", "windows": "windows-latest"}
+	wantTests := map[string]string{
+		"linux":   "TestSandboxLinuxDefaultDaemonLifecycle",
+		"macos":   "TestSandboxMacOSDefaultDaemonLifecycle",
+		"windows": "TestSandboxWindowsDefaultDaemonFullCustomerLifecycle",
+	}
 	seenIDs := map[int]bool{}
-	for _, lane := range journeyContract.Strategy.Matrix.Include {
-		if wantOS[lane.Lane] != lane.OS || lane.LaneID < 1 || seenIDs[lane.LaneID] {
+	for _, lane := range baseMatrix.Include {
+		if wantOS[lane.Lane] != lane.OS || wantTests[lane.Lane] != lane.TestName ||
+			lane.LaneID < 1 || seenIDs[lane.LaneID] || lane.TimeoutMinutes != 35 || lane.Soak {
 			t.Errorf("journey lane is not isolated: %#v", lane)
 		}
 		seenIDs[lane.LaneID] = true
@@ -162,6 +217,29 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if len(wantOS) != 0 || len(seenIDs) != 3 {
 		t.Errorf("journey matrix is incomplete: missing=%v ids=%v", wantOS, seenIDs)
+	}
+	const soakPrefix = `matrix="$(jq -c '.include += [`
+	const soakSuffix = `]' <<<"$matrix")"`
+	soakJSON := strings.TrimSuffix(strings.TrimPrefix(soakLine, soakPrefix), soakSuffix)
+	var soak journeyLane
+	if err := json.Unmarshal([]byte(soakJSON), &soak); err != nil {
+		t.Fatalf("parse scheduled soak lane: %v", err)
+	}
+	if soak != (journeyLane{
+		Lane: "linux", LaneID: 4, OS: "ubuntu-latest", TestName: "TestSandboxLocalPublishSoak",
+		TimeoutMinutes: 110, Soak: true,
+	}) {
+		t.Errorf("scheduled soak lane is not exact and isolated: %#v", soak)
+	}
+	watchdogRaw := string(readWorkflowBytes(t, "qurl-cli-soak-watchdog.yml"))
+	watchdogCountMatch := regexp.MustCompile(`"\$expected_after" \d+ (\d+)`).FindStringSubmatch(watchdogRaw)
+	watchdogCount := 0
+	var watchdogCountErr error
+	if len(watchdogCountMatch) == 2 {
+		watchdogCount, watchdogCountErr = strconv.Atoi(watchdogCountMatch[1])
+	}
+	if len(watchdogCountMatch) != 2 || watchdogCountErr != nil || watchdogCount != len(baseMatrix.Include)+1 {
+		t.Errorf("watchdog journey count = %v, want scheduled matrix size %d: %v", watchdogCountMatch, len(baseMatrix.Include)+1, watchdogCountErr)
 	}
 
 	journey := workflow.Jobs["journey"]
@@ -316,9 +394,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	cleanup := workflow.Jobs["journey-cleanup"]
-	if cleanup.If != "always() && github.event_name == 'push' && needs.changes.outputs.cli == 'true'" ||
+	if cleanup.If != "always() && github.ref == 'refs/heads/main' && contains(fromJson('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true'" ||
 		contract.Jobs["journey-cleanup"].Environment != "cli-customer-journey-cleanup" {
-		t.Errorf("terminal cleanup is not an exact protected main gate: if=%q", cleanup.If)
+		t.Errorf("terminal cleanup is not an exact protected trusted-event gate: if=%q", cleanup.If)
 	}
 	if fmt.Sprint(cleanup.Env["AUTH_TOKEN_ENDPOINT"]) != "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}" {
 		t.Errorf("terminal cleanup exposes its token endpoint through a non-secret source: %#v", cleanup.Env)
@@ -328,6 +406,86 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		if !slices.Contains(parseWorkflowNeeds(t, requiredJobID, required.Needs), needed) {
 			t.Errorf("cli / required can pass without %s", needed)
 		}
+	}
+	var verifyRequired *step
+	for index := range required.Steps {
+		if required.Steps[index].Name == "Verify CLI CI result" {
+			verifyRequired = &required.Steps[index]
+			break
+		}
+	}
+	if verifyRequired == nil || fmt.Sprint(verifyRequired.Env["LIVE_REQUIRED"]) !=
+		"${{ github.ref == 'refs/heads/main' && contains(fromJson('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name) }}" {
+		t.Errorf("required aggregate can demand or waive live jobs outside the protected main ref: %#v", verifyRequired)
+	}
+
+	notify := workflow.Jobs["notify-soak-success"]
+	wantNotifyIf := "!cancelled() && github.ref == 'refs/heads/main' && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.required.result == 'success' && needs.journey.result == 'success'" //nolint:misspell // GitHub expression function spelling.
+	if got := strings.Join(strings.Fields(notify.If), " "); got != wantNotifyIf {
+		t.Errorf("soak success notification if = %q, want %q", got, wantNotifyIf)
+	}
+	if needs := parseWorkflowNeeds(t, "notify-soak-success", notify.Needs); !slices.Equal(needs, []string{requiredJobID, "journey"}) {
+		t.Errorf("soak success notification needs = %v, want required and journey", needs)
+	}
+	if contract.Jobs["notify-soak-success"].Environment != "cli-customer-journey" {
+		t.Errorf("soak success notification is not protected by the main-only journey environment")
+	}
+	assertJobPermissions(t, "notify-soak-success", notify.Permissions, map[string]string{"contents": "read"})
+	var notifyCheckout, notifyPost *step
+	for index := range notify.Steps {
+		current := &notify.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			notifyCheckout = current
+		case current.Name == "Post verified soak success to Slack":
+			notifyPost = current
+		}
+	}
+	if notifyCheckout == nil || notifyCheckout.With["ref"] != "${{ github.sha }}" ||
+		notifyCheckout.With["persist-credentials"] != false {
+		t.Errorf("soak notifier checkout is not exact and credential-free: %#v", notifyCheckout)
+	}
+	if notifyPost == nil || strings.TrimSpace(notifyPost.Run) != "scripts/notify-qurl-cli-soak-status.sh" ||
+		fmt.Sprint(notifyPost.Env["SLACK_WEBHOOK_URL"]) != "${{ secrets.SLACK_WEBHOOK_URL }}" {
+		t.Errorf("soak notifier does not run the checked-in sender with the protected webhook: %#v", notifyPost)
+	}
+	if notifyPost == nil || fmt.Sprint(notifyPost.Env["SOAK_STATUS"]) != "success" ||
+		fmt.Sprint(notifyPost.Env["SOAK_DURATION"]) != "80m" {
+		t.Errorf("soak notifier does not bind the status and duration it reports: %#v", notifyPost)
+	}
+
+	manualFailure := workflow.Jobs["notify-soak-manual-failure"]
+	wantManualFailureIf := "!cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (needs.required.result != 'success' || needs.journey.result != 'success' || needs.notify-soak-success.result != 'success')" //nolint:misspell // GitHub expression function spelling.
+	if got := strings.Join(strings.Fields(manualFailure.If), " "); got != wantManualFailureIf {
+		t.Errorf("manual soak failure notification if = %q, want %q", got, wantManualFailureIf)
+	}
+	if needs := parseWorkflowNeeds(t, "notify-soak-manual-failure", manualFailure.Needs); !slices.Equal(needs, []string{requiredJobID, "journey", "notify-soak-success"}) {
+		t.Errorf("manual soak failure notification needs = %v, want required, journey, and success notifier", needs)
+	}
+	if contract.Jobs["notify-soak-manual-failure"].Environment != "cli-customer-journey" {
+		t.Error("manual soak failure notification is not protected by the main-only journey environment")
+	}
+	assertJobPermissions(t, "notify-soak-manual-failure", manualFailure.Permissions, map[string]string{"contents": "read"})
+	var manualFailureCheckout, manualFailurePost *step
+	for index := range manualFailure.Steps {
+		current := &manualFailure.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			manualFailureCheckout = current
+		case current.Name == "Post failed manual soak to Slack":
+			manualFailurePost = current
+		}
+	}
+	if manualFailureCheckout == nil || manualFailureCheckout.With["ref"] != "${{ github.sha }}" ||
+		manualFailureCheckout.With["persist-credentials"] != false {
+		t.Errorf("manual soak failure checkout is not exact and credential-free: %#v", manualFailureCheckout)
+	}
+	if manualFailurePost == nil || strings.TrimSpace(manualFailurePost.Run) != "scripts/notify-qurl-cli-soak-status.sh" ||
+		fmt.Sprint(manualFailurePost.Env["SLACK_WEBHOOK_URL"]) != "${{ secrets.SLACK_WEBHOOK_URL }}" ||
+		fmt.Sprint(manualFailurePost.Env["SOAK_STATUS"]) != "failure" ||
+		fmt.Sprint(manualFailurePost.Env["TRIGGER"]) != "workflow_dispatch" ||
+		fmt.Sprint(manualFailurePost.Env["SOAK_DURATION"]) != "80m" {
+		t.Errorf("manual soak failure notifier is not exact: %#v", manualFailurePost)
 	}
 
 	fallback := readWorkflow(t, "qurl-cli-customer-cleanup.yml")
@@ -384,6 +542,142 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	assertExecutableRepoScript(t, "scripts/build-cli-customer-journey-artifacts.sh")
 }
 
+func TestCLISoakWatchdogOwnsScheduledFreshness(t *testing.T) {
+	t.Parallel()
+
+	const watchdogWorkflow = "qurl-cli-soak-watchdog.yml"
+	workflow := readWorkflow(t, watchdogWorkflow)
+	if len(workflow.Jobs) != 2 || workflow.Jobs["freshness"] == nil || workflow.Jobs["notify-stale"] == nil {
+		t.Fatalf("CLI soak watchdog jobs = %v, want freshness and notify-stale", slices.Sorted(maps.Keys(workflow.Jobs)))
+	}
+	raw := string(readWorkflowBytes(t, watchdogWorkflow))
+	if strings.Contains(raw, "workflow_dispatch:") {
+		t.Errorf("CLI soak watchdog is not one schedule-only daily check")
+	}
+	cliRaw := string(readWorkflowBytes(t, cliWorkflow))
+	cronPattern := regexp.MustCompile(`(?m)^[ \t]+- cron: "(\d+) (\d+) \* \* \*"[ \t]*$`)
+	cliCronMatches := cronPattern.FindAllStringSubmatch(cliRaw, -1)
+	watchdogCronMatches := cronPattern.FindAllStringSubmatch(raw, -1)
+	boundaryMatch := regexp.MustCompile(`expected_after=\$\(\(day_start \+ (\d+)\)\)`).FindStringSubmatch(raw)
+	graceMatch := regexp.MustCompile(`"\$expected_after" (\d+) \d+`).FindStringSubmatch(raw)
+	if len(cliCronMatches) != 1 || len(cliCronMatches[0]) != 3 || len(watchdogCronMatches) != 1 || len(watchdogCronMatches[0]) != 3 ||
+		len(boundaryMatch) != 2 || len(graceMatch) != 2 {
+		t.Fatalf("cannot bind CLI soak cron, watchdog cron, boundary, and grace: cli=%v watchdog=%v boundary=%v grace=%v",
+			cliCronMatches, watchdogCronMatches, boundaryMatch, graceMatch)
+	}
+	cronMatch := cliCronMatches[0]
+	minute, minuteErr := strconv.Atoi(cronMatch[1])
+	hour, hourErr := strconv.Atoi(cronMatch[2])
+	watchdogMinute, watchdogMinuteErr := strconv.Atoi(watchdogCronMatches[0][1])
+	watchdogHour, watchdogHourErr := strconv.Atoi(watchdogCronMatches[0][2])
+	boundary, boundaryErr := strconv.Atoi(boundaryMatch[1])
+	activeGrace, activeGraceErr := strconv.Atoi(graceMatch[1])
+	if minuteErr != nil || hourErr != nil || watchdogMinuteErr != nil || watchdogHourErr != nil ||
+		boundaryErr != nil || activeGraceErr != nil || boundary != hour*3600+minute*60 {
+		t.Errorf("watchdog cohort boundary = %d, want CLI cron %02d:%02d UTC (%d seconds)", boundary, hour, minute, hour*3600+minute*60)
+	}
+	cliStart := hour*3600 + minute*60
+	watchdogStart := watchdogHour*3600 + watchdogMinute*60
+	if watchdogStart-cliStart <= activeGrace {
+		t.Errorf("watchdog cron %02d:%02d UTC must run after CLI cron %02d:%02d UTC plus %d-second active grace",
+			watchdogHour, watchdogMinute, hour, minute, activeGrace)
+	}
+
+	freshness := workflow.Jobs["freshness"]
+	if freshness.If != "github.ref == 'refs/heads/main'" {
+		t.Errorf("watchdog freshness if = %q, want exact main ref", freshness.If)
+	}
+	assertJobPermissions(t, "freshness", freshness.Permissions, map[string]string{"actions": "read", "contents": "read"})
+	var freshnessCheckout, freshnessCheck *step
+	for index := range freshness.Steps {
+		current := &freshness.Steps[index]
+		switch {
+		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
+			freshnessCheckout = current
+		case current.Name == "Require today's successful scheduled soak":
+			freshnessCheck = current
+		}
+	}
+	if freshnessCheckout == nil || freshnessCheckout.With["ref"] != "${{ github.sha }}" ||
+		freshnessCheckout.With["persist-credentials"] != false {
+		t.Errorf("watchdog checkout is not exact and credential-free: %#v", freshnessCheckout)
+	}
+	if freshnessCheck == nil || freshnessCheck.ID != "evaluate" ||
+		freshness.Outputs["stale"] != "${{ steps.evaluate.outputs.stale }}" {
+		t.Errorf("watchdog freshness result is not exposed as a typed stale outcome: step=%#v outputs=%#v", freshnessCheck, freshness.Outputs)
+	}
+	for _, required := range []string{
+		"actions/workflows/cli.yml/runs", "-f event=schedule", "-f per_page=100",
+		"day_start=$((now_epoch - now_epoch % 86400))", "expected_after=$((day_start + 22620))",
+		"if ((now_epoch < expected_after)); then", "expected_after=$((expected_after - 86400))",
+		"actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100", "--paginate --slurp",
+		`{total_count: .[0].total_count, jobs: [.[].jobs[]]}`,
+		`scripts/qurl-cli-soak-watchdog.sh`, `"$RUNNER_TEMP/runs.json" "$jobs_dir" "$expected_after" 14400 4`,
+	} {
+		if freshnessCheck == nil || !strings.Contains(freshnessCheck.Run, required) {
+			t.Errorf("watchdog freshness check is missing %q: %#v", required, freshnessCheck)
+		}
+	}
+	watchdogScriptBytes, err := os.ReadFile(filepath.Join("..", "..", "scripts", "qurl-cli-soak-watchdog.sh"))
+	if err != nil {
+		t.Fatalf("read CLI soak watchdog script: %v", err)
+	}
+	watchdogScript := string(watchdogScriptBytes)
+	cliContract := readWorkflow(t, cliWorkflow)
+	for _, jobID := range []string{requiredJobID, "journey-cleanup"} {
+		jobName := cliContract.Jobs[jobID].Name
+		if jobName == "" || !strings.Contains(watchdogScript, fmt.Sprintf(".name == %q", jobName)) {
+			t.Errorf("watchdog does not bind %s job name %q", jobID, jobName)
+		}
+	}
+	journeyName := cliContract.Jobs["journey"].Name
+	if journeyName == "" || !strings.Contains(watchdogScript, fmt.Sprintf("startswith(%q)", journeyName+" (")) {
+		t.Errorf("watchdog does not bind journey job-name prefix %q", journeyName)
+	}
+
+	notify := workflow.Jobs["notify-stale"]
+	if notify.If != "!cancelled() && github.ref == 'refs/heads/main' && needs.freshness.result == 'success' && needs.freshness.outputs.stale == 'true'" { //nolint:misspell // GitHub expression function spelling.
+		t.Errorf("stale notification if = %q", notify.If)
+	}
+	if needs := parseWorkflowNeeds(t, "notify-stale", notify.Needs); !slices.Equal(needs, []string{"freshness"}) {
+		t.Errorf("stale notification needs = %v, want freshness", needs)
+	}
+	assertJobPermissions(t, "notify-stale", notify.Permissions, map[string]string{"contents": "read"})
+	var contract struct {
+		Jobs map[string]struct {
+			Environment string `yaml:"environment"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract.Jobs["notify-stale"].Environment != "cli-customer-journey" {
+		t.Errorf("stale notification is not protected by the main-only journey environment")
+	}
+	var notifyPost *step
+	for index := range notify.Steps {
+		if notify.Steps[index].Name == "Post stale soak alert to Slack" {
+			notifyPost = &notify.Steps[index]
+			break
+		}
+	}
+	if notifyPost == nil || strings.TrimSpace(notifyPost.Run) != "scripts/notify-qurl-cli-soak-status.sh" ||
+		fmt.Sprint(notifyPost.Env["SOAK_STATUS"]) != "stale" ||
+		fmt.Sprint(notifyPost.Env["SOAK_DURATION"]) != "80m" ||
+		fmt.Sprint(notifyPost.Env["SLACK_WEBHOOK_URL"]) != "${{ secrets.SLACK_WEBHOOK_URL }}" {
+		t.Errorf("stale notification does not bind the checked-in sender and protected webhook: %#v", notifyPost)
+	}
+
+	for _, script := range []string{
+		"scripts/notify-qurl-cli-soak-status.sh",
+		"scripts/qurl-cli-soak-watchdog.sh",
+		"scripts/test-notify-qurl-cli-soak-status.sh",
+		"scripts/test-qurl-cli-soak-watchdog.sh",
+	} {
+		assertExecutableRepoScript(t, script)
+	}
+}
+
 func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 	t.Parallel()
 
@@ -394,6 +688,8 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 		sourceRuns      string
 		wantLanes       string
 		wantInvocations string
+		wantSoakLanes   string
+		wantSoakCalls   string
 	}{
 		{
 			name:            cliWorkflow,
@@ -402,6 +698,8 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 			sourceRuns:      "700:2",
 			wantLanes:       "linux\nmacos\nwindows\n",
 			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n",
+			wantSoakLanes:   "linux\nmacos\nwindows\nlinux\n",
+			wantSoakCalls:   "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n",
 		},
 		{
 			name:            "qurl-cli-customer-cleanup.yml",
@@ -410,6 +708,8 @@ func TestCLITerminalCleanupAttemptsEveryLaneBeforeFailing(t *testing.T) {
 			sourceRuns:      "700:2,701:3",
 			wantLanes:       "linux\nmacos\nwindows\nlinux\nmacos\nwindows\n",
 			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n7011:3:linux\n7012:3:macos\n7013:3:windows\n",
+			wantSoakLanes:   "linux\nmacos\nwindows\nlinux\nlinux\nmacos\nwindows\nlinux\n",
+			wantSoakCalls:   "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n7011:3:linux\n7012:3:macos\n7013:3:windows\n7014:3:linux\n",
 		},
 	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -458,12 +758,14 @@ fi
 			}
 
 			for _, test := range []struct {
-				name     string
-				failLane string
-				wantFail bool
+				name        string
+				failLane    string
+				includeSoak bool
+				wantFail    bool
 			}{
 				{name: "all lanes succeed"},
 				{name: "first lane fails", failLane: "linux", wantFail: true},
+				{name: "soak lane succeeds", includeSoak: true},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					t.Parallel()
@@ -477,6 +779,16 @@ fi
 					invocationCapture := filepath.Join(runnerTemp, "invocations")
 					command := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", cleanup.Run) //nolint:gosec // Executes the checked-in workflow step with a test-owned python3.
 					command.Dir = repoRoot
+					eventName := "push"
+					includeSoak := "false"
+					wantLanes := subject.wantLanes
+					wantInvocations := subject.wantInvocations
+					if test.includeSoak {
+						eventName = "schedule"
+						includeSoak = "true"
+						wantLanes = subject.wantSoakLanes
+						wantInvocations = subject.wantSoakCalls
+					}
 					command.Env = []string{
 						"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
 						"RUNNER_TEMP=" + runnerTemp,
@@ -489,6 +801,8 @@ fi
 						"QURL_ENDPOINT=https://sandbox.example",
 						"GITHUB_RUN_ID=700",
 						"GITHUB_RUN_ATTEMPT=2",
+						"GITHUB_EVENT_NAME=" + eventName,
+						"INCLUDE_SOAK=" + includeSoak,
 						"SOURCE_RUN_ID=700",
 						"SOURCE_RUN_ATTEMPT=2",
 						"SOURCE_RUNS=" + subject.sourceRuns,
@@ -501,14 +815,14 @@ fi
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if got, want := string(lanes), subject.wantLanes; got != want {
+					if got, want := string(lanes), wantLanes; got != want {
 						t.Errorf("attempted lanes = %q, want %q", got, want)
 					}
 					invocations, readErr := os.ReadFile(invocationCapture) //nolint:gosec // Test-owned path under t.TempDir.
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if got, want := string(invocations), subject.wantInvocations; got != want {
+					if got, want := string(invocations), wantInvocations; got != want {
 						t.Errorf("cleanup invocations = %q, want %q", got, want)
 					}
 					text := string(output)
@@ -651,7 +965,7 @@ fi
 			"SOURCE_WORKFLOW_NAME":  "cli: Build and Test",
 			"SOURCE_WORKFLOW_PATH":  ".github/workflows/cli.yml",
 			"WORKFLOW_REPOSITORY":   "layervai/qurl-integrations",
-			"MOCK_JOB_NAME":         "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle)",
+			"MOCK_JOB_NAME":         "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle, 35, false)",
 			"MOCK_JOB_CONCLUSION":   "success",
 			"MOCK_RUN_STATUS":       "completed",
 			"MOCK_RUN_EVENT":        "push",
@@ -679,11 +993,15 @@ fi
 	if err != nil {
 		t.Fatalf("execute attempt-bound cleanup resolver: %v: %s", err, output)
 	}
-	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
 		t.Fatalf("attempt-bound cleanup result = %q, want required=true and exact source_runs", workflowOutput)
 	}
 	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") {
 		t.Errorf("cleanup queried a different run attempt: %s", ghArguments)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_EVENT": "schedule"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
+		t.Fatalf("scheduled cleanup source omitted soak lane: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_NAME": "cli / lint"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
@@ -694,7 +1012,7 @@ fi
 		t.Fatalf("automatic skipped journey did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "__NULL__"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
 		t.Fatalf("automatic unsettled journey did not bias toward cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	_, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "0"})
@@ -703,19 +1021,20 @@ fi
 	}
 
 	for _, test := range []struct {
-		name      string
-		overrides map[string]string
+		name        string
+		overrides   map[string]string
+		wantMessage string
 	}{
-		{name: "wrong automatic branch", overrides: map[string]string{"SOURCE_BRANCH": "feature"}},
-		{name: "wrong automatic event", overrides: map[string]string{"SOURCE_EVENT": "pull_request"}},
-		{name: "wrong automatic source repository", overrides: map[string]string{"SOURCE_REPOSITORY": "other/repo"}},
-		{name: "wrong automatic workflow repository", overrides: map[string]string{"WORKFLOW_REPOSITORY": "other/repo"}},
-		{name: "wrong automatic workflow name", overrides: map[string]string{"SOURCE_WORKFLOW_NAME": "other"}},
-		{name: "wrong automatic workflow path", overrides: map[string]string{"SOURCE_WORKFLOW_PATH": ".github/workflows/other.yml"}},
+		{name: "wrong automatic branch", overrides: map[string]string{"SOURCE_BRANCH": "feature"}, wantMessage: "exact same-repository main CLI workflow"},
+		{name: "wrong automatic event", overrides: map[string]string{"SOURCE_EVENT": "pull_request"}, wantMessage: "source event is not an approved CLI trigger"},
+		{name: "wrong automatic source repository", overrides: map[string]string{"SOURCE_REPOSITORY": "other/repo"}, wantMessage: "exact same-repository main CLI workflow"},
+		{name: "wrong automatic workflow repository", overrides: map[string]string{"WORKFLOW_REPOSITORY": "other/repo"}, wantMessage: "exact same-repository main CLI workflow"},
+		{name: "wrong automatic workflow name", overrides: map[string]string{"SOURCE_WORKFLOW_NAME": "other"}, wantMessage: "exact same-repository main CLI workflow"},
+		{name: "wrong automatic workflow path", overrides: map[string]string{"SOURCE_WORKFLOW_PATH": ".github/workflows/other.yml"}, wantMessage: "exact same-repository main CLI workflow"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, output, _, err := runResolver(test.overrides)
-			if err == nil || !strings.Contains(output, "exact same-repository main CLI workflow") {
+			if err == nil || !strings.Contains(output, test.wantMessage) {
 				t.Fatalf("resolver accepted an invalid automatic source: err=%v output=%s", err, output)
 			}
 		})
@@ -726,8 +1045,16 @@ fi
 		"REQUESTED_SOURCE_RUNS": "700:2",
 	}
 	workflowOutput, output, ghArguments, err = runResolver(manualSuccess)
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
 		t.Fatalf("exact manual cleanup source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"GITHUB_EVENT_NAME":     "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS": "700:2",
+		"MOCK_RUN_EVENT":        "schedule",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
+		t.Fatalf("manual scheduled cleanup source omitted soak lane: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	for _, want := range []string{
 		"/actions/runs/700\n",
@@ -742,7 +1069,7 @@ fi
 		"REQUESTED_SOURCE_RUNS": "700:2,701:2,702:2",
 	}
 	workflowOutput, output, _, err = runResolver(exactCap)
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2,701:2,702:2" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2,701:2,702:2\ninclude_soak=false" {
 		t.Fatalf("three-source manual cleanup was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 
@@ -783,7 +1110,7 @@ fi
 		},
 		{
 			name:        "wrong run event",
-			overrides:   map[string]string{"MOCK_RUN_EVENT": "workflow_dispatch"},
+			overrides:   map[string]string{"MOCK_RUN_EVENT": "pull_request"},
 			wantMessage: "exact same-repository main CLI workflow",
 		},
 		{
@@ -849,8 +1176,8 @@ fi
 		strings.Contains(cleanupStep.Run, "${{ needs.resolve.outputs.source_runs }}") {
 		t.Errorf("cleanup source runs are not passed through a sanitized step environment value: %#v", cleanupStep)
 	}
-	if timeout, ok := cleanup.TimeoutMinutes.(int); !ok || timeout != 30 {
-		t.Errorf("cancellation cleanup timeout = %#v, want 30 minutes for the bounded 3-run workload", cleanup.TimeoutMinutes)
+	if timeout, ok := cleanup.TimeoutMinutes.(int); !ok || timeout != 45 {
+		t.Errorf("cancellation cleanup timeout = %#v, want 45 minutes for the bounded 12-reconciliation workload", cleanup.TimeoutMinutes)
 	}
 }
 
