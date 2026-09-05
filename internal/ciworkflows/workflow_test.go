@@ -261,10 +261,12 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		}
 	}
 	mint, run, download := 0, 0, 0
-	var posixMint, windowsMint, windowsSelect, windowsRun, windowsKeyRemoval, windowsInstallCleanup *step
+	var posixMint, posixFence, windowsMint, windowsSelect, windowsRun, windowsKeyRemoval, windowsInstallCleanup *step
 	for index := range journey.Steps {
 		current := &journey.Steps[index]
 		switch current.Name {
+		case "Fence the POSIX background service":
+			posixFence = current
 		case "Select this runner's packaged artifact":
 			if current.Shell == "pwsh" {
 				windowsSelect = current
@@ -316,6 +318,14 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if posixMint == nil || windowsMint == nil {
 		t.Fatalf("journey does not have exact POSIX and Windows mint steps: posix=%#v windows=%#v", posixMint, windowsMint)
+	}
+	if posixFence == nil ||
+		!strings.Contains(posixFence.Run, "deadline=$((SECONDS + 15))") ||
+		!strings.Contains(posixFence.Run, `while launchctl print "$service"`) ||
+		!strings.Contains(posixFence.Run, "((SECONDS < deadline))") ||
+		!strings.Contains(posixFence.Run, "qURL launchd service did not unload") ||
+		!strings.Contains(posixFence.Run, "sleep 0.2") {
+		t.Errorf("POSIX service fence does not wait for bounded launchd unload completion: %#v", posixFence)
 	}
 	for _, requiredText := range []string{
 		"for purpose in primary failure",
