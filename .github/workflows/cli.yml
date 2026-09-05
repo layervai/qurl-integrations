@@ -988,7 +988,14 @@ jobs:
               service="gui/$(id -u)/ai.layerv.qurl.share-daemon"
               launchctl bootout "$service" >/dev/null 2>&1 || true
               rm -f -- "$HOME/Library/LaunchAgents/ai.layerv.qurl.share-daemon.plist"
-              ! launchctl print "$service" >/dev/null 2>&1
+              deadline=$((SECONDS + 15))
+              while launchctl print "$service" >/dev/null 2>&1; do
+                ((SECONDS < deadline)) || {
+                  echo "::error::qURL launchd service did not unload" >&2
+                  exit 1
+                }
+                sleep 0.2
+              done
               ;;
             *) exit 1 ;;
           esac
