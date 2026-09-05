@@ -20,7 +20,7 @@
 // clearing `currentVersion=null` even though the lock is still held.
 // The leader-coordinator in PR 13b.2 must serialize all mutator
 // calls (one outstanding renew at a time; transfer/release run only
-// from the SIGTERM path which has the loop stopped). The diagnostic
+// from the SIGTERM path which has the loop stopped). The read-only
 // `readCurrentHolder` is the only safe overlap.
 //
 // ── Release semantics ──
@@ -342,18 +342,25 @@ function createGatewayLock({
     });
   }
 
-  // Read the current holder row for diagnostics (/health, debug logs).
-  // NOT a correctness primitive — the conditional writes above are
-  // the lock contract. Returns the row or null if absent.
+  // Strongly read the current holder row. Conditional writes remain the
+  // ownership primitive; the watchdog uses this read only to distinguish a
+  // confirmed live peer owner from an absent/expired row after a local renew
+  // CAS miss.
+  // Strong consistency prevents a stale self-owned row from delaying the
+  // split-brain exit. Returns the row or null if absent.
   async function readCurrentHolder() {
     const result = await ddbClient.send(new GetCommand({
       TableName: tableName,
       Key: { shard_id: shardId },
+      ConsistentRead: true,
     }));
     return result.Item ?? null;
   }
 
   return {
+    // Public immutable identity so consumers that compare holder rows derive
+    // from the same value this lock writes. Do not wire a second config copy.
+    instanceId,
     acquireLock,
     renewLock,
     transferLock,

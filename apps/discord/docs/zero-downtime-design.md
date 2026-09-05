@@ -525,12 +525,14 @@ existing operational shape.
 4. Read peer-heartbeat row from DDB (excluding self, filtered by
    updated_at > now - 6s) → get standby instance_id + IP + port
 5. If no peer: skip the push path; fall through to cold-start (step 9)
-6. POST /control/yours to peer with body {active_instance_id, expected_version}
-   signed with HMAC. Standby's handler runs transferLock atomically
-   (active → standby), then WebSocketManager.connect(); standby ACKs.
-7. Wait for ACK or 200 ms timeout. ACK means standby has IDENTIFY'd
-   or RESUMEd successfully (standby's handler doesn't ACK until
-   @discordjs/ws's connect() resolves).
+6. Run transferLock atomically (active → standby), then POST
+   /control/yours to the peer with body {active_instance_id,
+   expected_version} signed with HMAC. The standby adopts the new
+   lock version and starts or accepts the one active WebSocket lifecycle.
+7. Wait for ACK or 200 ms timeout. ACK means the standby accepted the
+   lock and owns the connection path. Usually connect() has resolved.
+   If @discordjs/ws was already recovering, the ACK means that recovery
+   remains authoritative and the watchdog is enforcing its time limit.
 8. (No releaseLock — transferLock did it atomically in step 6.)
 9. Exit. TCP drops; Discord sees a network disconnect; if step 7 ACK'd
    on time, standby's WS is already open and Discord's events flow there.
@@ -566,11 +568,13 @@ path, but predictable.
    not-seen)
 2. Verify body.active_instance_id matches a known peer (avoids accidental
    takeovers from a stale stopped task)
-3. transferLock(body.active_instance_id → self_instance_id)
-   ← atomic single-DDB-op; no acquireLock race
-4. WebSocketManager.connect()
-   ← @discordjs/ws calls retrieveSessionInfo, finds the row, sends RESUME
-5. ACK control request (only after connect() resolves; ACK = "I'm live")
+3. adoptLockFromHandoff(body.expected_version)
+   ← initializes the local version cursor for the lock already transferred
+4. If @discordjs/ws is recovering, keep that single recovery path.
+   Otherwise call WebSocketManager.connect(); it retrieves the saved
+   session and sends RESUME.
+5. ACK the control request after connect() resolves, or after the existing
+   automatic recovery is accepted as the authoritative connection path.
 ```
 
 **What if step 3 succeeds but step 4 fails** (Discord rate limit,
@@ -584,22 +588,45 @@ The standby runs a **connection-watchdog** loop separately from the
 POST handler that closes this gap:
 
 ```
-every 1 s, if heldLock && !manager.isConnected:
-  attempts += 1
-  try { await manager.connect() }
-  catch (err) {
-    if (attempts >= 5):                   ← bounded retry
-      releaseLock()                       ← give it back; ECS may replace us
-      log.error('connect retries exhausted, releasing lock')
-      process.exit(1)
-    // Exponential backoff: 200 ms, 400 ms, 800 ms, 1.6 s.
-    // (Max attempt count = 5 → max attempts before exhaustion = 4
-    // backoffs, so the 5 s ceiling is unreachable at this attempt
-    // cap — kept as dead code in case someone bumps MAX_ATTEMPTS
-    // and forgets to revisit the cap.)
-    backoff: sleep(min(2^attempts * 100ms, 5s))
-  }
+every 1 s:
+  if manager.isConnected():
+    if !heldLock:
+      holder = stronglyReadCurrentHolder()
+      if holder belongs to a peer and its lease is not expired:
+        deleteOwnHeartbeatRow(); process.exit(1)   ← confirmed split brain
+      return                                        ← leader can reacquire absent row
+    return                                          ← healthy active steady state
+  if manager.isRecovering():                      ← checked on both replicas
+    wait without calling connect()                ← avoid duplicate shard
+    if recovery elapsed time >= 20 s:
+      if heldLock: releaseLock()
+      deleteOwnHeartbeatRow(); process.exit(1)     ← replace stuck process
+    return
+  else if heldLock:
+    attempts += 1
+    try { await manager.connect() }
+    catch (err) {
+      if (attempts >= 5):                 ← bounded retry
+        releaseLock()                     ← give it back; ECS may replace us
+        log.error('connect retries exhausted, releasing lock')
+        process.exit(1)
+      // Exponential backoff: 200 ms, 400 ms, 800 ms, 1.6 s.
+      // (Max attempt count = 5 → max attempts before exhaustion = 4
+      // backoffs, so the 5 s ceiling is unreachable at this attempt
+      // cap — kept as dead code in case someone bumps MAX_ATTEMPTS
+      // and forgets to revisit the cap.)
+      backoff: sleep(min(2^attempts * 100ms, 5s))
+    }
 ```
+
+An expired peer-owned row is not proof of a live owner. The leader can replace
+it under the lock CAS contract. If that peer is still connected, its watchdog
+then sees the new live lease and exits that losing replica. The 20 s automatic-
+recovery stand-down also means the normal ~7 s cold-fallback floor does not
+apply to a shard that stays inside the library recovery state. This bounded
+dark window is intentional: racing the library would recreate the duplicate-
+delivery incident. Promotion and lock reacquisition do not reset the timer, so
+20 s is the process-wide bound for one continuous recovery episode.
 
 The watchdog runs unconditionally — it covers both the "succeeded
 transferLock but failed connect" path here *and* the cold-start

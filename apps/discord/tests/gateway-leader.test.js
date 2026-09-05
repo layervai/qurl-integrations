@@ -59,6 +59,7 @@ function makeMocks({
   const manager = {
     connect: jest.fn(async () => {}),
     isConnected: jest.fn(() => false),
+    isRecovering: jest.fn(() => false),
     ...overrides.manager,
   };
   const logger = {
@@ -100,13 +101,16 @@ describe('createGatewayLeader — factory validation', () => {
     })).toThrow(/manager/);
     expect(() => createGatewayLeader({
       lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
+    })).toThrow(/isRecovering/);
+    expect(() => createGatewayLeader({
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {}, isRecovering() {} },
     })).toThrow(/selfInstanceId/);
     expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {}, isRecovering() {} },
       selfInstanceId: 'a',
     })).toThrow(/shardId/);
     expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {}, isRecovering() {} },
       selfInstanceId: 'a', shardId: 's',
     })).toThrow(/logger/);
   });
@@ -259,9 +263,41 @@ describe('handleInboundHandoff', () => {
 
     await expect(leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 99,
-    })).rejects.toThrow(/already_holding_lock_and_connected/);
+    })).rejects.toThrow(/already_holding_lock_and_active_ws_lifecycle/);
 
     // Critical: must NOT have called adopt or connect on the stray.
+    expect(mocks.lock.adoptLockFromHandoff).not.toHaveBeenCalled();
+    expect(mocks.manager.connect).not.toHaveBeenCalled();
+  });
+
+  it('adopts without calling connect when @discordjs/ws is already recovering', async () => {
+    const mocks = makeMocks();
+    mocks.manager.isRecovering = jest.fn(() => true);
+    const { leader, logger } = makeLeader({ mocks });
+
+    await leader.handleInboundHandoff({
+      activeInstanceId: 'inst-A', expectedVersion: 7,
+    });
+
+    expect(mocks.lock.adoptLockFromHandoff).toHaveBeenCalledWith(7);
+    expect(leader.isHoldingLock()).toBe(true);
+    expect(mocks.manager.connect).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('automatic recovery already in progress'),
+      expect.objectContaining({ activeInstanceId: 'inst-A', expectedVersion: 7 }),
+    );
+  });
+
+  it('rejects a duplicate inbound handoff while already holding lock + recovering', async () => {
+    const mocks = makeMocks();
+    const { leader } = makeLeader({ mocks });
+    await leader._stepForTest();
+    mocks.manager.isRecovering.mockReturnValue(true);
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 99,
+    })).rejects.toThrow(/already_holding_lock_and_active_ws_lifecycle/);
+
     expect(mocks.lock.adoptLockFromHandoff).not.toHaveBeenCalled();
     expect(mocks.manager.connect).not.toHaveBeenCalled();
   });

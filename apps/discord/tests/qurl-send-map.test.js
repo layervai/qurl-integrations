@@ -172,6 +172,8 @@ jest.mock('../src/flow-state', () => ({
 const commands = require('../src/commands');
 const { _test } = commands;
 const logger = require('../src/logger');
+const { sendDM: mockSendDM } = require('../src/discord');
+const { mintLinks: mockMintLinks } = require('../src/connector');
 const {
   handleQurlSend,
   handleQurlMap,
@@ -4443,6 +4445,34 @@ describe('handleConfirmSendClick', () => {
     sendNonce: 'nonce-1',
   };
 
+  test.each([
+    [10062, 'Unknown interaction'],
+    ['ECONNRESET', 'socket reset'],
+  ])('failed acknowledgement (%s) stops before flow or send work', async (code, message) => {
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    int.customId = CONFIRM_SEND_CUSTOM_ID;
+    const err = new Error(message);
+    err.code = code;
+    int.deferUpdate.mockRejectedValueOnce(err);
+
+    await handleConfirmSendClick(int, {
+      flow_id: 'fid', row: { payload: validPayload, version: 1 },
+    });
+
+    expect(mockDb.getGuildApiKey).not.toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('stopping before state change'),
+      expect.objectContaining({
+        flow_id: 'fid', custom_id: CONFIRM_SEND_CUSTOM_ID, error_code: code,
+      }),
+    );
+  });
+
   test('happy path → deferUpdate + deleteFlow + editReply "Preparing"', async () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
@@ -4817,6 +4847,19 @@ describe('handleConfirmSendClick', () => {
 // ──────────────────────────────────────────────────────────────
 
 describe('handleConfirmCancelClick', () => {
+  test('failed acknowledgement stops before delete or cooldown mutation', async () => {
+    const int = makeInteraction();
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+    const cooldownAt = Date.now();
+    sendCooldowns.set(SENDER_ID, cooldownAt);
+
+    await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
+
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+    expect(sendCooldowns.get(SENDER_ID)).toBe(cooldownAt);
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
+
   test('happy path → version-gated deleteFlow + cooldown CLEARED + update', async () => {
     // A user who cancels a send and immediately retries should not see
     // "Please wait before sending again." — the cooldown is meant to
@@ -4981,6 +5024,97 @@ describe('handleConfirmUserSelect', () => {
     });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(deferAckedBeforeTransition).toBe(true);
+  });
+
+  test('duplicate whose deferUpdate is rejected cannot mutate flow state', async () => {
+    const duplicate = makeSelectInteraction();
+    duplicate.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmUserSelect(duplicate, {
+      flow_id: 'fid', row: { payload: initialPayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(duplicate.editReply).not.toHaveBeenCalled();
+    expect(duplicate.followUp).not.toHaveBeenCalled();
+  });
+
+  test('client-side already-replied error continues when this object owns the acknowledgement', async () => {
+    const int = makeSelectInteraction();
+    int.deferred = true;
+    const err = new Error('The reply to this interaction has already been sent or deferred.');
+    err.code = 'InteractionAlreadyReplied';
+    int.deferUpdate.mockRejectedValueOnce(err);
+
+    await handleConfirmUserSelect(int, {
+      flow_id: 'fid', row: { payload: initialPayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).toHaveBeenCalledTimes(1);
+    expect(int.editReply).toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('already acknowledged by this handler'),
+      expect.objectContaining({ flow_id: 'fid' }),
+    );
+  });
+
+  test('client-side already-replied error stops when this object does not own the acknowledgement', async () => {
+    const duplicate = makeSelectInteraction();
+    const err = new Error('The reply to this interaction has already been sent or deferred.');
+    err.code = 'InteractionAlreadyReplied';
+    duplicate.deferUpdate.mockRejectedValueOnce(err);
+
+    await handleConfirmUserSelect(duplicate, {
+      flow_id: 'fid', row: { payload: initialPayload, version: 1 },
+    });
+
+    expect(duplicate.deferred).toBe(false);
+    expect(duplicate.replied).toBe(false);
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(duplicate.editReply).not.toHaveBeenCalled();
+  });
+
+  test('two delivered copies produce one successful pick and no superseded card', async () => {
+    // Sandbox regression: one Discord interaction arrived through two live
+    // Gateway connections. Discord accepted one deferUpdate and rejected the
+    // duplicate. Before the acknowledgement gate, the rejected copy could win
+    // DDB OCC and make the accepted copy replace the card with "superseded".
+    const accepted = makeSelectInteraction();
+    const duplicate = makeSelectInteraction();
+    let rejectDuplicateAck;
+    duplicate.deferUpdate.mockImplementationOnce(() => new Promise((_, reject) => {
+      rejectDuplicateAck = reject;
+    }));
+    let transitionEntered;
+    const transitionStarted = new Promise((resolve) => { transitionEntered = resolve; });
+    let finishTransition;
+    mockTransitionFlow.mockImplementationOnce(() => new Promise((resolve) => {
+      finishTransition = resolve;
+      transitionEntered();
+    }));
+
+    const deliveries = Promise.all([
+      handleConfirmUserSelect(accepted, {
+        flow_id: 'fid', row: { payload: initialPayload, version: 1 },
+      }),
+      handleConfirmUserSelect(duplicate, {
+        flow_id: 'fid', row: { payload: initialPayload, version: 1 },
+      }),
+    ]);
+    await transitionStarted;
+    rejectDuplicateAck(new Error('Unknown interaction'));
+    finishTransition({ result: 'ok', version: 2 });
+    await deliveries;
+
+    expect(mockTransitionFlow).toHaveBeenCalledTimes(1);
+    expect(accepted.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Sending file/),
+    }));
+    const allEdits = [accepted, duplicate]
+      .flatMap((int) => int.editReply.mock.calls.map(([payload]) => payload.content));
+    expect(allEdits).not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/superseded/i),
+    ]));
   });
 
   test('pick combining a bot AND sender → sender survives, bot is dropped, flow advances', async () => {
@@ -5668,6 +5802,18 @@ describe('handleConfirmVoiceEveryone', () => {
     voiceChannelId: VOICE_CH,
   };
 
+  test('failed acknowledgement stops before voice resolution or flow mutation', async () => {
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmVoiceEveryone(int, {
+      flow_id: 'fid', row: { payload: basePayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
+
   test('happy path: voice-connected non-bot members populate recipientIds and advance the flow', async () => {
     const int = makeVoiceInteraction({ members: [u1, u2] });
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
@@ -6059,6 +6205,18 @@ describe('handleConfirmPickManual', () => {
     warningsBlock: '',
   };
 
+  test('failed acknowledgement stops before manual-picker flow mutation', async () => {
+    const int = makeInteraction();
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmPickManual(int, {
+      flow_id: 'fid', row: { payload: voicePayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
+
   test('clears recipientIds + recipientAliases and flips recipientMode → "picker"', async () => {
     const int = makeInteraction();
     await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
@@ -6185,6 +6343,18 @@ describe('handleConfirmEveryone', () => {
   };
 
   const { handleConfirmEveryone } = require('../src/commands');
+
+  test('failed acknowledgement stops before everyone expansion or flow mutation', async () => {
+    const int = makeEveryoneInteraction();
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmEveryone(int, {
+      flow_id: 'fid', row: { payload: initialPayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
 
   test('happy path → expands to all non-bot members, transitions flow', async () => {
     const int = makeEveryoneInteraction();
@@ -6556,6 +6726,18 @@ describe('handleConfirmExpirySelect', () => {
     return int;
   }
 
+  test('failed acknowledgement stops before expiry flow mutation', async () => {
+    const int = makeSelectInteraction({ value: '7d' });
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmExpirySelect(int, {
+      flow_id: 'fid', row: { payload: basePayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
+
   test('happy path persists new expiresIn + re-renders', async () => {
     const int = makeSelectInteraction({ value: '7d' });
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
@@ -6713,6 +6895,18 @@ describe('handleConfirmSelfDestructSelect', () => {
     int.values = [value];
     return int;
   }
+
+  test('failed acknowledgement stops before self-destruct flow mutation', async () => {
+    const int = makeSelectInteraction({ value: '30' });
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmSelfDestructSelect(int, {
+      flow_id: 'fid', row: { payload: basePayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
 
   test('happy path persists new selfDestructSeconds + re-renders', async () => {
     // Use 30 — SELF_DESTRUCT_PRESETS only contains [0.5, 1, 5, 30, 300, 1800, 3600].
@@ -6976,6 +7170,18 @@ describe('handleConfirmNoteModal', () => {
     int.fields = { getTextInputValue: jest.fn(() => inputValue) };
     return int;
   }
+
+  test('failed acknowledgement stops before note flow mutation', async () => {
+    const int = makeModalInteraction({ inputValue: 'hello' });
+    int.deferUpdate.mockRejectedValueOnce(new Error('Unknown interaction'));
+
+    await handleConfirmNoteModal(int, {
+      flow_id: 'fid', row: { payload: basePayload, version: 1 },
+    });
+
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
 
   test('happy path: defers, trims/sanitizes, persists, editReply re-renders', async () => {
     const int = makeModalInteraction({ inputValue: '  **bold** message  ' });

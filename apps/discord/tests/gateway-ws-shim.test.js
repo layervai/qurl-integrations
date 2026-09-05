@@ -25,6 +25,7 @@ const {
   VERIFIED_DJS_WS_MAJOR_MINOR,
 } = require('../src/gateway-ws-shim');
 const { WebSocketShardEvents } = require('@discordjs/ws');
+const { GatewayCloseCodes } = require('discord-api-types/v10');
 
 // Fake WebSocketManager built on EventEmitter. Captures construction
 // args so tests can interrogate the callback wiring and emit fake
@@ -257,7 +258,7 @@ describe('_getManagerForTest — test introspection seam', () => {
   });
 });
 
-describe('Pillar 3 manager contract — connect() + isConnected()', () => {
+describe('Pillar 3 manager contract — connect() + connection state', () => {
   // The leader (gateway-leader.js) and watchdog
   // (gateway-connection-watchdog.js) require a manager handle whose
   // typeof connect === 'function' && typeof isConnected === 'function'.
@@ -267,10 +268,11 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
   // shape so a future refactor that drops either method fails CI
   // instead of crash-looping the gateway task on next deploy.
 
-  it('exposes connect() and isConnected() on the returned shim', () => {
+  it('exposes connect(), isConnected(), and isRecovering() on the returned shim', () => {
     const { shim } = makeShim();
     expect(typeof shim.connect).toBe('function');
     expect(typeof shim.isConnected).toBe('function');
+    expect(typeof shim.isRecovering).toBe('function');
   });
 
   it('connect() throws before start() (no manager yet)', async () => {
@@ -285,6 +287,15 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     // start({connect:false}) skips the internal connect, so the
     // count reflects ONLY the shim.connect() call we just made.
     expect(managerInstances[0].connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('connect() rejects while @discordjs/ws owns automatic recovery', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 4200, shardId: 0 });
+
+    await expect(shim.connect()).rejects.toThrow(/automatic recovery is in progress/);
+    expect(managerInstances[0].connect).not.toHaveBeenCalled();
   });
 
   it('isConnected() is false before any READY/RESUMED', async () => {
@@ -332,6 +343,39 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     // against a future minor adding it; the fallback logs null.
     managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 1006, shardId: 0 });
     expect(shim.isConnected()).toBe(false);
+    expect(shim.isRecovering()).toBe(true);
+  });
+
+  it('isRecovering() stays true from Closed until Ready/Resumed', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    expect(shim.isRecovering()).toBe(false);
+
+    managerInstances[0].emit(WebSocketShardEvents.Closed, { code: 4200, shardId: 0 });
+    expect(shim.isRecovering()).toBe(true);
+
+    managerInstances[0].emit(WebSocketShardEvents.Resumed, 0);
+    expect(shim.isRecovering()).toBe(false);
+  });
+
+  it.each([
+    GatewayCloseCodes.AuthenticationFailed,
+    GatewayCloseCodes.InvalidShard,
+    GatewayCloseCodes.ShardingRequired,
+    GatewayCloseCodes.InvalidAPIVersion,
+    GatewayCloseCodes.InvalidIntents,
+    GatewayCloseCodes.DisallowedIntents,
+  ])('does not claim automatic recovery for terminal close code %i', async (code) => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const rawManager = managerInstances[0];
+
+    rawManager.emit(WebSocketShardEvents.Closed, { code, shardId: 0 });
+
+    expect(shim.isConnected()).toBe(false);
+    expect(shim.isRecovering()).toBe(false);
+    await shim.connect();
+    expect(rawManager.connect).toHaveBeenCalledTimes(1);
   });
 
   it('isConnected() is false after stop() regardless of prior Ready', async () => {
@@ -343,6 +387,7 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
     });
     await shim.stop({ flushFinal: false });
     expect(shim.isConnected()).toBe(false);
+    expect(shim.isRecovering()).toBe(false);
   });
 
   it('connect() rejects after stop()', async () => {
@@ -436,10 +481,9 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
   it('satisfies the leader/watchdog factory contracts (no TypeError on construction)', () => {
     // Regression guard: the prior wiring passed `shim.getManager()` —
     // the raw @discordjs/ws WebSocketManager — to createGatewayLeader,
-    // which throws "manager with connect() and isConnected() is
-    // required" because WebSocketManager has no isConnected(). The
-    // production fix passes `gatewayShim` itself; this test asserts
-    // both factories accept it without throwing.
+    // which throws because WebSocketManager has no synchronous connection
+    // state. The production fix passes `gatewayShim` itself; this test
+    // asserts both factories accept it without throwing.
     const { shim } = makeShim();
     const { createGatewayLeader } = require('../src/gateway-leader');
     const { createConnectionWatchdog } = require('../src/gateway-connection-watchdog');
@@ -468,10 +512,115 @@ describe('Pillar 3 manager contract — connect() + isConnected()', () => {
       manager: shim,
       isHoldingLock: () => false,
       isConnecting: () => false,
+      readCurrentHolder: async () => null,
+      selfInstanceId: 'i-test',
       releaseLock: async () => {},
       deleteOwnRow: async () => {},
       logger: minimalDeps.logger,
     })).not.toThrow();
+  });
+
+  it('lets the upstream reconnect finish without a watchdog connect race', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const rawManager = managerInstances[0];
+    rawManager.emit(WebSocketShardEvents.Ready, {
+      data: { application: { id: 'app-1' } },
+      shardId: 0,
+    });
+
+    const { createConnectionWatchdog } = require('../src/gateway-connection-watchdog');
+    const watchdog = createConnectionWatchdog({
+      manager: shim,
+      isHoldingLock: () => true,
+      isConnecting: () => false,
+      readCurrentHolder: async () => null,
+      selfInstanceId: 'i-test',
+      releaseLock: async () => {},
+      logger: makeFakeLogger(),
+    });
+
+    // @discordjs/ws handles Closed by scheduling its own reconnect. The
+    // watchdog can observe the shim during that window, but it must not
+    // start a second connection against the same raw manager.
+    rawManager.emit(WebSocketShardEvents.Closed, { code: 4200, shardId: 0 });
+    await watchdog._stepForTest();
+    expect(rawManager.connect).not.toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+
+    rawManager.emit(WebSocketShardEvents.Resumed, 0);
+    await watchdog._stepForTest();
+    expect(rawManager.connect).not.toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
+  it('bounds a real shim recovery even while the replica is a standby', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const rawManager = managerInstances[0];
+    const releaseLock = jest.fn(async () => {});
+    const deleteOwnRow = jest.fn(async () => {});
+    const exit = jest.fn();
+    let nowMs = 0;
+    const { createConnectionWatchdog } = require('../src/gateway-connection-watchdog');
+    const watchdog = createConnectionWatchdog({
+      manager: shim,
+      isHoldingLock: () => false,
+      isConnecting: () => false,
+      readCurrentHolder: async () => null,
+      selfInstanceId: 'i-test',
+      releaseLock,
+      deleteOwnRow,
+      logger: makeFakeLogger(),
+      maxRecoveryMs: 1_000,
+      now: () => nowMs,
+      exit,
+    });
+
+    rawManager.emit(WebSocketShardEvents.Closed, { code: 4200, shardId: 0 });
+    await watchdog._stepForTest();
+    nowMs = 1_000;
+    await watchdog._stepForTest();
+
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(deleteOwnRow).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('lets a leader adopt a handoff without racing a real recovering shim', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const rawManager = managerInstances[0];
+    rawManager.emit(WebSocketShardEvents.Closed, { code: 4200, shardId: 0 });
+
+    const { createGatewayLeader } = require('../src/gateway-leader');
+    const lock = {
+      acquireLock: jest.fn(async () => ({ acquired: false })),
+      renewLock: jest.fn(async () => ({ renewed: true })),
+      transferLock: jest.fn(async () => ({ transferred: false })),
+      adoptLockFromHandoff: jest.fn(),
+      releaseLock: jest.fn(async () => ({ released: true })),
+    };
+    const leader = createGatewayLeader({
+      lock,
+      peerHeartbeat: {
+        writeHeartbeat: jest.fn(async () => {}),
+        listFreshPeers: jest.fn(async () => []),
+      },
+      controlClient: { pushHandoff: jest.fn(async () => ({ ok: true })) },
+      manager: shim,
+      selfInstanceId: 'inst-B',
+      shardId: '0:1',
+      logger: makeFakeLogger(),
+    });
+
+    await leader.handleInboundHandoff({
+      activeInstanceId: 'inst-A', expectedVersion: 8,
+    });
+
+    expect(lock.adoptLockFromHandoff).toHaveBeenCalledWith(8);
+    expect(leader.isHoldingLock()).toBe(true);
+    expect(rawManager.connect).not.toHaveBeenCalled();
   });
 });
 

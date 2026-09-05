@@ -804,7 +804,9 @@ async function gracefulShutdown(code = 0) {
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  await runPushHandoffShutdown({ code, gatewayLeader, eventPublisher, logger });
+  await runPushHandoffShutdown({
+    code, gatewayLeader, connectionWatchdog, eventPublisher, logger,
+  });
 }
 
 // SIGTERM during boot (gatewayLeader still null) falls through to
@@ -846,15 +848,15 @@ process.on('SIGINT', () => {
 //   1. Construct lock + peer-heartbeat (DDB-backed, no manager dep).
 //   2. Load + validate the HMAC secret (JSON shape + hex format).
 //   3. Construct hmac, controlClient, leader (leader is wired against
-//      `gatewayShim` itself — the shim provides the connect() +
-//      isConnected() contract that @discordjs/ws's WebSocketManager
-//      lacks isConnected() for).
+//      `gatewayShim` itself — the shim provides connect(), isConnected(),
+//      and isRecovering(). The raw manager lacks the synchronous state
+//      methods).
 //   4. Start the control-channel HTTP server. AWAIT `listening` event
 //      before continuing — if we start the leader first, the peer could
 //      acquire the lock and pushHandoff to us before our listener is
 //      up, dropping the connection.
-//   5. Start the leader tick loop. The watchdog wakes inside the tick
-//      flow on the active path; standby just heartbeats and waits.
+//   5. Start the leader and watchdog loops. The watchdog connects only
+//      for the lock holder; the standby only heartbeats and waits.
 //
 // Errors propagate to start().catch() → gracefulShutdown(1). Constructing
 // inside a single function (vs. spreading across start()) keeps the
@@ -920,7 +922,7 @@ async function startHotStandby() {
   }
 
   // The shim itself satisfies the leader/watchdog `manager` contract
-  // (connect() + isConnected()). Passing the raw @discordjs/ws
+  // (connect() + isConnected() + isRecovering()). Passing the raw @discordjs/ws
   // WebSocketManager would fail the factory's typeof check because
   // upstream exposes only fetchStatus() (async) — see gateway-ws-shim
   // module header "Pillar 3 manager contract".
@@ -1003,6 +1005,8 @@ async function startHotStandby() {
     manager: gatewayShim,
     isHoldingLock: gatewayLeader.isHoldingLock,
     isConnecting: gatewayLeader.isConnecting,
+    readCurrentHolder: lock.readCurrentHolder,
+    selfInstanceId: lock.instanceId,
     releaseLock: gatewayLeader.releaseLockForImmediateExit,
     deleteOwnRow: peerHeartbeat.deleteOwnRow,
     logger,

@@ -89,6 +89,7 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
     // a region-wide DNS outage). isConnected stays false throughout.
     const manager = {
       isConnected: jest.fn(() => false),
+      isRecovering: jest.fn(() => false),
       connect: jest.fn().mockRejectedValue(new Error('econnrefused')),
     };
 
@@ -98,6 +99,8 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
       manager,
       isHoldingLock: () => true,
       isConnecting: () => false,
+      readCurrentHolder: () => lock.readCurrentHolder(),
+      selfInstanceId: INSTANCE_A,
       releaseLock: () => lock.releaseLock(),
       deleteOwnRow: () => heartbeat.deleteOwnRow(),
       logger,
@@ -193,6 +196,7 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
 
     const manager = {
       isConnected: jest.fn(() => false),
+      isRecovering: jest.fn(() => false),
       connect: jest.fn().mockRejectedValue(new Error('econnrefused')),
     };
     const exit = jest.fn();
@@ -201,6 +205,8 @@ describe('Pillar 3 chaos — RESUME-fail (watchdog exhausts retries)', () => {
       manager,
       isHoldingLock: () => true,
       isConnecting: () => false,
+      readCurrentHolder: () => lock.readCurrentHolder(),
+      selfInstanceId: INSTANCE_A,
       releaseLock: () => lock.releaseLock(),
       deleteOwnRow: () => heartbeat.deleteOwnRow(),
       // maxAttempts=3 (vs 5 in test #1) because this test pins the
