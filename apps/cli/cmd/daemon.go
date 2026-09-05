@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"strings"
 	"time"
@@ -139,6 +141,19 @@ var waitHeadlessNativeRetry = func(ctx context.Context, delay time.Duration) err
 	case <-timer.C:
 		return nil
 	}
+}
+
+var headlessNativeRetryJitter = func(window time.Duration) time.Duration {
+	if window <= 0 {
+		return 0
+	}
+	offset, err := rand.Int(rand.Reader, big.NewInt(int64(window)+1))
+	if err != nil {
+		// Jitter is load distribution, not a startup requirement. Preserve the
+		// full bounded backoff if the host cannot supply randomness.
+		return window
+	}
+	return time.Duration(offset.Int64())
 }
 
 // daemonCmd exposes the long-running engine for headless deployments and
@@ -481,14 +496,18 @@ func headlessNativeRetryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	delay := 250 * time.Millisecond
-	for step := 1; step < attempt && delay < 30*time.Second; step++ {
-		delay *= 2
+	base := 250 * time.Millisecond
+	for step := 1; step < attempt && base < 30*time.Second; step++ {
+		base *= 2
 	}
-	if delay > 30*time.Second {
-		return 30 * time.Second
+	if base > 30*time.Second {
+		base = 30 * time.Second
 	}
-	return delay
+	// Equal jitter preserves half of the exponential backoff and randomizes the
+	// other half. This prevents synchronized headless fleets from retrying the
+	// assigned cell on the same fixed schedule.
+	half := base / 2
+	return half + headlessNativeRetryJitter(half)
 }
 
 func loadHeadlessBootstrap(ctx context.Context, stateDir, configPath, tokenPath string) (*connectorstate.HeadlessConfig, string, error) {

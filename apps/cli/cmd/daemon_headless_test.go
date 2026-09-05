@@ -327,8 +327,13 @@ func TestHeadlessDaemonRetriesTransientBootstrapInProcessThenServes(t *testing.T
 
 func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
 	originalWait := waitHeadlessNativeRetry
-	t.Cleanup(func() { waitHeadlessNativeRetry = originalWait })
+	originalJitter := headlessNativeRetryJitter
+	t.Cleanup(func() {
+		waitHeadlessNativeRetry = originalWait
+		headlessNativeRetryJitter = originalJitter
+	})
 	waitHeadlessNativeRetry = func(context.Context, time.Duration) error { return nil }
+	headlessNativeRetryJitter = func(window time.Duration) time.Duration { return window }
 
 	var logs bytes.Buffer
 	originalLogger := slog.Default()
@@ -355,6 +360,43 @@ func TestHeadlessNativeOpenRetryIsVisibleAndRedacted(t *testing.T) {
 	}
 	if strings.Contains(text, secret) || !strings.Contains(text, "lv_***") {
 		t.Fatalf("retry log did not redact credential: %q", text)
+	}
+}
+
+func TestHeadlessNativeRetryDelayUsesBoundedEqualJitter(t *testing.T) {
+	originalJitter := headlessNativeRetryJitter
+	t.Cleanup(func() { headlessNativeRetryJitter = originalJitter })
+
+	tests := []struct {
+		attempt int
+		base    time.Duration
+	}{
+		{attempt: 0, base: 250 * time.Millisecond},
+		{attempt: 1, base: 250 * time.Millisecond},
+		{attempt: 2, base: 500 * time.Millisecond},
+		{attempt: 7, base: 16 * time.Second},
+		{attempt: 8, base: 30 * time.Second},
+		{attempt: 20, base: 30 * time.Second},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("attempt-%d", test.attempt), func(t *testing.T) {
+			var gotWindow time.Duration
+			headlessNativeRetryJitter = func(window time.Duration) time.Duration {
+				gotWindow = window
+				return 0
+			}
+			if got := headlessNativeRetryDelay(test.attempt); got != test.base/2 {
+				t.Fatalf("minimum jittered delay = %v, want %v", got, test.base/2)
+			}
+			if gotWindow != test.base/2 {
+				t.Fatalf("jitter window = %v, want %v", gotWindow, test.base/2)
+			}
+
+			headlessNativeRetryJitter = func(window time.Duration) time.Duration { return window }
+			if got := headlessNativeRetryDelay(test.attempt); got != test.base {
+				t.Fatalf("maximum jittered delay = %v, want %v", got, test.base)
+			}
+		})
 	}
 }
 
