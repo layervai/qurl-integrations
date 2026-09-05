@@ -46,25 +46,33 @@ const BASE_OPTS = {
 
 describe('ensureWebhookSubscription — cold bootstrap (no existing sub + no real initialSecret) → creates', () => {
   // The first-deploy-of-a-fresh-environment path. `initialSecret` is
-  // either unset (env never had QURL_WEBHOOK_SECRET) or an empty
-  // string (SSM parameter not yet populated). Either way, action='created'.
+  // unset, empty, or terraform's seed sentinel. With no matching
+  // subscription, none of those values need an unrecognized-format
+  // warning and the registrar creates a fresh subscription.
   it.each([
     ['initialSecret undefined', undefined],
     ['initialSecret empty string', ''],
+    ['terraform seed sentinel', 'PLACEHOLDER'],
   ])('creates a fresh subscription when no existing matches the bridge URL — %s', async (_label, initialSecret) => {
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [] } }),
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_cold_bootstrap',
-        secret: 'whsec_fresh',
-        url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed', 'qurl.expired'],
-      } } }),
-    });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret });
-    expect(result.action).toBe('created');
-    expect(result.webhookId).toBe('wh_cold_bootstrap');
-    expect(result.secret).toBe('whsec_fresh');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+          webhook_id: 'wh_cold_bootstrap',
+          secret: 'whsec_fresh_bootstrap_secret',
+          url: BASE_OPTS.bridgeUrl,
+          events: ['qurl.accessed', 'qurl.expired'],
+        } } }),
+      });
+      const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret });
+      expect(result.action).toBe('created');
+      expect(result.webhookId).toBe('wh_cold_bootstrap');
+      expect(result.secret).toBe('whsec_fresh_bootstrap_secret');
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
@@ -77,7 +85,7 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
         createBody = JSON.parse(opts.body);
         return { status: 201, body: { data: {
           webhook_id: 'wh_test_new',
-          secret: 'whsec_fresh_secret',
+          secret: 'whsec_fresh_secret_server_generated',
           url: BASE_OPTS.bridgeUrl,
           events: ['qurl.accessed', 'qurl.expired'],
         } } };
@@ -90,7 +98,7 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
       description: BASE_OPTS.description,
     });
     expect(result).toEqual({
-      secret: 'whsec_fresh_secret',
+      secret: 'whsec_fresh_secret_server_generated',
       webhookId: 'wh_test_new',
       action: 'created',
     });
@@ -98,40 +106,65 @@ describe('ensureWebhookSubscription — no existing subscription → creates fre
 });
 
 describe('ensureWebhookSubscription — existing sub, bootstrap (no real initialSecret) → rotates', () => {
-  it('finds the sub, calls POST /v1/webhooks/{id}/secret, returns the rotated secret', async () => {
-    let rotatedFor = null;
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing',
-        url: BASE_OPTS.bridgeUrl,
-        events: ['qurl.accessed', 'qurl.expired'],
-      }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => {
-        rotatedFor = 'wh_existing';
-        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated' } } };
-      },
-    });
-    const result = await ensureWebhookSubscription(BASE_OPTS);
-    expect(rotatedFor).toBe('wh_existing');
-    expect(result).toEqual({
-      secret: 'whsec_rotated',
-      webhookId: 'wh_existing',
-      action: 'rotated',
-    });
-  });
+  it.each([
+    ['undefined', undefined, null, null],
+    ['an empty string', '', null, null],
+    ['the terraform seed sentinel', 'PLACEHOLDER', 'info', '<22'],
+    ['an arbitrary non-prefixed value', 'legacy-do-not-log-value', 'warn', '22-63'],
+    ['the bare server prefix', 'whsec_', 'warn', '<22'],
+    ['a prefixed value below the minimum body length', `whsec_${'x'.repeat(15)}`, 'warn', '<22'],
+  ])('rotates when initialSecret is %s', async (_label, initialSecret, expectedLogLevel, expectedLengthBucket) => {
+    // terraform seeds /qurl-bot-discord/QURL_WEBHOOK_SECRET with a sentinel
+    // so the parameter exists before the first registrar run. A sub that
+    // predates the parameter must not reuse the sentinel or any other value
+    // outside qurl-service's contract. The designed sentinel path logs at
+    // info; other non-empty unexpected values warn without disclosing their
+    // contents; unset/empty is normal bootstrap and emits neither.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const infoSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      let rotatedFor = null;
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [{
+          webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
+        }] } }),
+        'POST /v1/webhooks/wh_existing/secret': () => {
+          rotatedFor = 'wh_existing';
+          return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap_server_generated' } } };
+        },
+      });
 
-  it('also rotates when initialSecret is the empty string (SSM param not yet populated)', async () => {
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
-      }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => ({
-        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_bootstrap' } },
-      }),
-    });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: '' });
-    expect(result.action).toBe('rotated');
-    expect(result.secret).toBe('whsec_post_bootstrap');
+      const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret });
+
+      expect(rotatedFor).toBe('wh_existing');
+      expect(result).toEqual({
+        secret: 'whsec_post_bootstrap_server_generated',
+        webhookId: 'wh_existing',
+        action: 'rotated',
+      });
+      if (expectedLogLevel) {
+        const expectedMessage = expectedLogLevel === 'info'
+          ? 'infra seed sentinel — rotating as designed'
+          : 'initial secret has unrecognized format';
+        const spy = expectedLogLevel === 'info' ? infoSpy : warnSpy;
+        const logLine = spy.mock.calls
+          .map(([message]) => message)
+          .find(message => message.includes(expectedMessage));
+        expect(logLine).toBeDefined();
+        expect(logLine).toContain(`"seedSentinel":${initialSecret === 'PLACEHOLDER'}`);
+        expect(logLine).toContain(`"valueLengthBucket":"${expectedLengthBucket}"`);
+        if (initialSecret.includes('do-not-log')) expect(logLine).not.toContain('do-not-log');
+        if (expectedLogLevel === 'info') {
+          expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+        }
+      } else {
+        expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+        expect(infoSpy).not.toHaveBeenCalledWith(expect.stringContaining('infra seed sentinel — rotating as designed'));
+      }
+    } finally {
+      warnSpy.mockRestore();
+      infoSpy.mockRestore();
+    }
   });
 
   it('patches events to the target set if the existing list is missing any target event', async () => {
@@ -147,12 +180,12 @@ describe('ensureWebhookSubscription — existing sub, bootstrap (no real initial
         return { body: { data: { webhook_id: 'wh_existing' } } };
       },
       'POST /v1/webhooks/wh_existing/secret': () => ({
-        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_patch' } },
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_post_patch_server_generated' } },
       }),
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
     expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
-    expect(result.secret).toBe('whsec_post_patch');
+    expect(result.secret).toBe('whsec_post_patch_server_generated');
   });
 });
 
@@ -162,26 +195,32 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
     // HTTP replica rotated → server-side last-write-wins → (N-1)
     // replicas held stale secrets → ALB-routed events 401'd on
     // ~(N-1)/N of replicas until a follow-up restart.
-    let secretEndpointHit = false;
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [{
-        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
-      }] } }),
-      'POST /v1/webhooks/wh_existing/secret': () => {
-        secretEndpointHit = true;
-        return { body: { data: {} } };
-      },
-    });
-    const result = await ensureWebhookSubscription({
-      ...BASE_OPTS,
-      initialSecret: 'whsec_already_known',
-    });
-    expect(secretEndpointHit).toBe(false); // critical: no rotation
-    expect(result).toEqual({
-      secret: 'whsec_already_known',
-      webhookId: 'wh_existing',
-      action: 'reused',
-    });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let secretEndpointHit = false;
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [{
+          webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
+        }] } }),
+        'POST /v1/webhooks/wh_existing/secret': () => {
+          secretEndpointHit = true;
+          return { body: { data: {} } };
+        },
+      });
+      const result = await ensureWebhookSubscription({
+        ...BASE_OPTS,
+        initialSecret: 'whsec_1234567890abcdef',
+      });
+      expect(secretEndpointHit).toBe(false); // critical: no rotation
+      expect(result).toEqual({
+        secret: 'whsec_1234567890abcdef',
+        webhookId: 'wh_existing',
+        action: 'reused',
+      });
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('initial secret has unrecognized format'));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('still PATCHes events on drift even in the reuse path (PATCH is idempotent)', async () => {
@@ -192,7 +231,7 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
       }] } }),
       'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patched).toBe(true);
   });
 
@@ -207,8 +246,8 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
       }] } }),
       'PATCH /v1/webhooks/wh_existing': () => ({ status: 500, body: { error: 'transient' } }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
-    expect(result.secret).toBe('whsec_known');
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
+    expect(result.secret).toBe('whsec_known_server_generated');
     expect(result.action).toBe('reused');
     expect(result.webhookId).toBe('wh_existing');
   });
@@ -221,7 +260,7 @@ describe('ensureWebhookSubscription — existing sub + real initialSecret → RE
       }] } }),
       'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patched).toBe(false);
   });
 });
@@ -237,7 +276,7 @@ describe('ensureWebhookSubscription — URL canonicalization', () => {
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => {
         rotated = true;
-        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_x' } } };
+        return { body: { data: { webhook_id: 'wh_existing', secret: 'whsec_x_server_generated' } } };
       },
     });
     // bridgeUrl has NO trailing slash; strict equality would miss
@@ -267,7 +306,7 @@ describe('ensureWebhookSubscription — pagination', () => {
         meta: { next_cursor: '', has_more: false },
       } }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(result.webhookId).toBe('wh_match');
     expect(result.action).toBe('reused');
   });
@@ -281,7 +320,7 @@ describe('ensureWebhookSubscription — pagination', () => {
       } }),
       'POST /v1/webhooks': () => {
         createCalled = true;
-        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } };
       },
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
@@ -307,7 +346,7 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
         return { body: { data: { webhook_id: 'wh_existing' } } };
       },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
   });
 
@@ -322,7 +361,7 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
         return { body: { data: { webhook_id: 'wh_existing' } } };
       },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
   });
 
@@ -343,7 +382,7 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
         return { body: { data: { webhook_id: 'wh_existing' } } };
       },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
   });
 
@@ -356,7 +395,7 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
       }] } }),
       'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patched).toBe(false);
   });
 
@@ -376,7 +415,7 @@ describe('ensureWebhookSubscription — set-based reconcileEvents (latent bug fi
         return { body: { data: { webhook_id: 'wh_existing' } } };
       },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patchedEvents).toEqual(['qurl.accessed', 'qurl.expired']);
   });
 });
@@ -415,7 +454,8 @@ describe('ensureWebhookSubscription — error paths', () => {
         // No secret field — contract drift
       } } }),
     });
-    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
+    await expect(ensureWebhookSubscription(BASE_OPTS))
+      .rejects.toThrow(/createSubscription.*response secret is missing.*expected whsec_.*at least 16/);
   });
 
   it('throws if create response has no data envelope (contract drift)', async () => {
@@ -426,6 +466,55 @@ describe('ensureWebhookSubscription — error paths', () => {
     await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/contract drift/);
   });
 
+  it('persists a non-empty create secret after warning on server format drift', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_new', secret: 'legacy-secret',
+      } } }),
+    });
+    const persistSecret = jest.fn(async () => {});
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+        .resolves.toMatchObject({ action: 'created', secret: 'legacy-secret' });
+      expect(persistSecret).toHaveBeenCalledWith('legacy-secret');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'createSubscription response secret has an unexpected server format',
+      ));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('legacy-secret');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('reports the observed type when create returns a non-string secret', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_new', secret: 42,
+      } } }),
+    });
+
+    await expect(ensureWebhookSubscription(BASE_OPTS))
+      .rejects.toThrow(/createSubscription.*wrong type number.*expected a string matching whsec_/);
+  });
+
+  it('rejects the public infrastructure seed if create returns it', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: {
+        webhook_id: 'wh_new', secret: 'PLACEHOLDER',
+      } } }),
+    });
+    const persistSecret = jest.fn(async () => {});
+
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+      .rejects.toThrow(/createSubscription.*public infrastructure seed sentinel/);
+    expect(persistSecret).not.toHaveBeenCalled();
+  });
+
   it('throws if rotate response has no secret (contract drift)', async () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [{
@@ -433,7 +522,33 @@ describe('ensureWebhookSubscription — error paths', () => {
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({ body: { data: { webhook_id: 'wh_existing' /* no secret */ } } }),
     });
-    await expect(ensureWebhookSubscription(BASE_OPTS)).rejects.toThrow(/rotateSecret.*contract drift/);
+    await expect(ensureWebhookSubscription(BASE_OPTS))
+      .rejects.toThrow(/rotateSecret.*response secret is missing.*expected whsec_.*at least 16/);
+  });
+
+  it('persists a non-empty rotated secret before warning on server format drift', async () => {
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [{
+        webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'],
+      }] } }),
+      'POST /v1/webhooks/wh_existing/secret': () => ({
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_' } },
+      }),
+    });
+    const persistSecret = jest.fn(async () => {});
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(ensureWebhookSubscription({ ...BASE_OPTS, persistSecret }))
+        .resolves.toMatchObject({ action: 'rotated', secret: 'whsec_' });
+      expect(persistSecret).toHaveBeenCalledWith('whsec_');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'rotateSecret response secret has an unexpected server format',
+      ));
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('"whsec_"');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('throws on missing required option', async () => {
@@ -446,7 +561,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_persisted', secret: 'whsec_to_persist',
+        webhook_id: 'wh_persisted', secret: 'whsec_to_persist_server_generated',
       } } }),
     });
     const persistSecret = jest.fn(async () => {});
@@ -454,8 +569,8 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
       ...BASE_OPTS,
       persistSecret,
     });
-    expect(persistSecret).toHaveBeenCalledWith('whsec_to_persist');
-    expect(result.secret).toBe('whsec_to_persist');
+    expect(persistSecret).toHaveBeenCalledWith('whsec_to_persist_server_generated');
+    expect(result.secret).toBe('whsec_to_persist_server_generated');
   });
 
   it('returns the secret EVEN IF persistSecret throws (best-effort)', async () => {
@@ -467,7 +582,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_denied', secret: 'whsec_in_memory_only',
+        webhook_id: 'wh_denied', secret: 'whsec_in_memory_only_server_generated',
       } } }),
     });
     const accessDenied = new Error('User is not authorized to perform: ssm:PutParameter');
@@ -477,7 +592,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
       ...BASE_OPTS,
       persistSecret,
     });
-    expect(result.secret).toBe('whsec_in_memory_only');
+    expect(result.secret).toBe('whsec_in_memory_only_server_generated');
     expect(persistSecret).toHaveBeenCalled();
   });
 
@@ -485,11 +600,11 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_no_persist', secret: 'whsec_in_memory_only',
+        webhook_id: 'wh_no_persist', secret: 'whsec_in_memory_only_server_generated',
       } } }),
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
-    expect(result.secret).toBe('whsec_in_memory_only');
+    expect(result.secret).toBe('whsec_in_memory_only_server_generated');
   });
 
   it('logs at WARN when persistSecret throws AccessDeniedException (expected IAM-missing path)', async () => {
@@ -499,7 +614,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [] } }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-          webhook_id: 'wh', secret: 'whsec_',
+          webhook_id: 'wh', secret: 'whsec_x_server_generated',
         } } }),
       });
       const accessDenied = new Error('User is not authorized to perform: ssm:PutParameter');
@@ -525,7 +640,7 @@ describe('ensureWebhookSubscription — best-effort secret persistence', () => {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [] } }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-          webhook_id: 'wh', secret: 'whsec_',
+          webhook_id: 'wh', secret: 'whsec_x_server_generated',
         } } }),
       });
       const throttle = new Error('Rate exceeded');
@@ -555,7 +670,7 @@ describe('ensureWebhookSubscription — description length defense', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         sentDescription = JSON.parse(opts.body).description;
-        return { status: 201, body: { data: { webhook_id: 'wh_clipped', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh_clipped', secret: 'whsec_x_server_generated' } } };
       },
     });
     await ensureWebhookSubscription({ ...BASE_OPTS, description: longDescription });
@@ -569,7 +684,7 @@ describe('ensureWebhookSubscription — description length defense', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         sentDescription = JSON.parse(opts.body).description;
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x_server_generated' } } };
       },
     });
     await ensureWebhookSubscription({ ...BASE_OPTS, description: undefined });
@@ -588,7 +703,7 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
       },
       'POST /v1/webhooks': (opts) => {
         postOpts = opts;
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x_server_generated' } } };
       },
     });
     await ensureWebhookSubscription(BASE_OPTS);
@@ -607,7 +722,7 @@ describe('ensureWebhookSubscription — wire-contract pins', () => {
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': (opts) => {
         body = JSON.parse(opts.body);
-        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh', secret: 'whsec_x_server_generated' } } };
       },
     });
     await ensureWebhookSubscription(BASE_OPTS);
@@ -629,9 +744,9 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => { deletedIds.push('wh_b'); return { status: 204, body: '' }; },
       'DELETE /v1/webhooks/wh_c': () => { deletedIds.push('wh_c'); return { status: 204, body: '' }; },
-      'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot' } } }),
+      'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot_server_generated' } } }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(result.webhookId).toBe('wh_a');
     expect(result.action).toBe('rotated'); // dedupe always force-rotates
     expect(deletedIds.sort()).toEqual(['wh_b', 'wh_c']);
@@ -645,9 +760,9 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
         { webhook_id: 'wh_aaa', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] }, // lex-first — survivor
       ] } }),
       'DELETE /v1/webhooks/wh_zzz': () => { deletedIds.push('wh_zzz'); return { status: 204, body: '' }; },
-      'POST /v1/webhooks/wh_aaa/secret': () => ({ body: { data: { webhook_id: 'wh_aaa', secret: 'whsec_rot' } } }),
+      'POST /v1/webhooks/wh_aaa/secret': () => ({ body: { data: { webhook_id: 'wh_aaa', secret: 'whsec_rot_server_generated' } } }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(result.webhookId).toBe('wh_aaa');
     expect(deletedIds).toEqual(['wh_zzz']);
   });
@@ -662,9 +777,9 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
         { webhook_id: 'wh_b', url: BASE_OPTS.bridgeUrl, events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 404, body: { error: 'not found' } }),
-      'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot' } } }),
+      'POST /v1/webhooks/wh_a/secret': () => ({ body: { data: { webhook_id: 'wh_a', secret: 'whsec_rot_server_generated' } } }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(result.webhookId).toBe('wh_a');
     expect(result.action).toBe('rotated');
   });
@@ -685,7 +800,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
       'DELETE /v1/webhooks/wh_b': () => ({ status: 204, body: '' }),
       'POST /v1/webhooks/wh_a/secret': () => {
         rotated = true;
-        return { body: { data: { webhook_id: 'wh_a', secret: 'whsec_post_dedupe' } } };
+        return { body: { data: { webhook_id: 'wh_a', secret: 'whsec_post_dedupe_server_generated' } } };
       },
     });
     const result = await ensureWebhookSubscription({
@@ -695,7 +810,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
     expect(rotated).toBe(true);
     expect(result.webhookId).toBe('wh_a');
     expect(result.action).toBe('rotated'); // NOT 'reused' — dedupe forces rotate
-    expect(result.secret).toBe('whsec_post_dedupe');
+    expect(result.secret).toBe('whsec_post_dedupe_server_generated');
     expect(result.secret).not.toBe('whsec_was_in_ssm_but_for_wh_b');
   });
 
@@ -707,7 +822,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
       ] } }),
       'DELETE /v1/webhooks/wh_b': () => ({ status: 500, body: { error: 'oops' } }),
     });
-    await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' })).rejects.toThrow(/500/);
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' })).rejects.toThrow(/500/);
   });
 
   it('rotation does NOT fire when a non-404 DELETE rejects (Promise.all sequencing)', async () => {
@@ -727,7 +842,7 @@ describe('ensureWebhookSubscription — duplicate-subscription recovery', () => 
         return { body: { data: { webhook_id: 'wh_a', secret: 'whsec_should_not_happen' } } };
       },
     });
-    await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' })).rejects.toThrow(/500/);
+    await expect(ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' })).rejects.toThrow(/500/);
     expect(rotateHit).toBe(false);
   });
 });
@@ -746,7 +861,7 @@ describe('ensureWebhookSubscription — multi-subscription scan', () => {
         { webhook_id: 'wh_other_2', url: 'https://elsewhere.example/hook2', events: ['qurl.accessed', 'qurl.expired'] },
       ] } }),
     });
-    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    const result = await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(result.webhookId).toBe('wh_match');
     expect(result.action).toBe('reused');
   });
@@ -766,12 +881,12 @@ describe('ensureWebhookSubscription — rotation survives PATCH failure', () => 
         webhook_id: 'wh_existing', url: BASE_OPTS.bridgeUrl, events: ['qurl.created'], // drift
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({
-        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated_ok' } },
+        body: { data: { webhook_id: 'wh_existing', secret: 'whsec_rotated_ok_server_generated' } },
       }),
       'PATCH /v1/webhooks/wh_existing': () => ({ status: 500, body: { error: 'transient' } }),
     });
     const result = await ensureWebhookSubscription(BASE_OPTS);
-    expect(result.secret).toBe('whsec_rotated_ok');
+    expect(result.secret).toBe('whsec_rotated_ok_server_generated');
     expect(result.action).toBe('rotated');
   });
 });
@@ -785,7 +900,7 @@ describe('ensureWebhookSubscription — events drift edge cases', () => {
       }] } }),
       'PATCH /v1/webhooks/wh_existing': () => { patched = true; return { body: { data: {} } }; },
     });
-    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known' });
+    await ensureWebhookSubscription({ ...BASE_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(patched).toBe(true);
   });
 });
@@ -953,7 +1068,7 @@ describe('ensureWebhookSubscription — return-shape pin (Lambda persists then b
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_seam', secret: 'whsec_new_active',
+        webhook_id: 'wh_seam', secret: 'whsec_new_active_server_generated',
       } } }),
     });
     const persisted = [];
@@ -961,8 +1076,8 @@ describe('ensureWebhookSubscription — return-shape pin (Lambda persists then b
       ...BASE_OPTS,
       persistSecret: async (s) => { persisted.push(s); },
     });
-    expect(result.secret).toBe('whsec_new_active');
-    expect(persisted).toEqual(['whsec_new_active']);
+    expect(result.secret).toBe('whsec_new_active_server_generated');
+    expect(persisted).toEqual(['whsec_new_active_server_generated']);
   });
 });
 
@@ -976,7 +1091,7 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_new', secret: 'whsec_x', owner_id: 'auth0|created',
+        webhook_id: 'wh_new', secret: 'whsec_x_server_generated', owner_id: 'auth0|created',
       } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS });
@@ -993,7 +1108,7 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
         owner_id: 'auth0|existing',
       }] } }),
       'POST /v1/webhooks/wh_existing/secret': () => ({ status: 200, body: { data: {
-        webhook_id: 'wh_existing', secret: 'whsec_rotated',
+        webhook_id: 'wh_existing', secret: 'whsec_rotated_server_generated',
       } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS });
@@ -1011,7 +1126,7 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
       }] } }),
     });
     const result = await ensureWebhookSubscription({
-      ...BASE_OPTS, initialSecret: 'whsec_already_known',
+      ...BASE_OPTS, initialSecret: 'whsec_already_known_server_generated',
     });
     expect(result.action).toBe('reused');
     expect(result.ownerId).toBe('auth0|reused');
@@ -1023,12 +1138,12 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [] } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: {
-        webhook_id: 'wh_no_owner', secret: 'whsec_y', // no owner_id
+        webhook_id: 'wh_no_owner', secret: 'whsec_y_server_generated', // no owner_id
       } } }),
     });
     const result = await ensureWebhookSubscription({ ...BASE_OPTS });
     expect(result.ownerId).toBeUndefined();
-    expect(result.secret).toBe('whsec_y');
+    expect(result.secret).toBe('whsec_y_server_generated');
     expect(result.webhookId).toBe('wh_no_owner');
   });
 });
@@ -1078,7 +1193,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'DELETE /v1/webhooks/wh_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
       'POST /v1/webhooks': () => {
         createCalled = true;
-        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } };
       },
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
@@ -1110,7 +1225,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'DELETE /v1/webhooks/wh_connector': () => { connectorDeleted = true; return { status: 204, body: '' }; },
       'POST /v1/webhooks': () => {
         createCalled = true;
-        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } };
       },
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
@@ -1143,7 +1258,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'DELETE /v1/webhooks/wh_stale_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
       'POST /v1/webhooks/wh_current/secret': () => {
         secretEndpointHit = true;
-        return { body: { data: { webhook_id: 'wh_current', secret: 'whsec_rot' } } };
+        return { body: { data: { webhook_id: 'wh_current', secret: 'whsec_rot_server_generated' } } };
       },
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
@@ -1173,7 +1288,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_other_region': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false); // critical: healthy active-active sibling untouched
@@ -1200,7 +1315,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [sub] } }),
       'DELETE /v1/webhooks/wh_no_deliveries_yet': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1224,7 +1339,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_overmatch': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1246,7 +1361,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         'DELETE /v1/webhooks/wh_orphan_5xx': () => ({ status: 503, body: { error: 'transient' } }),
         'POST /v1/webhooks': () => {
           createCalled = true;
-          return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+          return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } };
         },
       });
       const result = await ensureWebhookSubscription(BOT_OPTS);
@@ -1277,7 +1392,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       // secret rotate, but events PATCH might run if drift, which it
       // doesn't here.
     });
-    const result = await ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_known' });
+    const result = await ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_known_server_generated' });
     expect(orphanDeletedOnBoot2).toBe(true);
     expect(result.action).toBe('reused');
   });
@@ -1294,7 +1409,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           deadOrphan({ webhook_id: 'wh_already_gone' }),
         ] } }),
         'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       const result = await ensureWebhookSubscription(BOT_OPTS);
       expect(result.action).toBe('created');
@@ -1331,7 +1446,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           deleteAttempts += 1;
           return { status: 403, body: { error: 'forbidden' } };
         },
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       // Invoke twice. First attempt should log at WARN; second should
       // suppress the log but still ATTEMPT the DELETE.
@@ -1364,7 +1479,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           deadOrphan({ webhook_id: 'wh_persistent_429' }),
         ] } }),
         'DELETE /v1/webhooks/wh_persistent_429': () => ({ status: 429, body: { error: 'rate-limited' } }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS);
       await ensureWebhookSubscription(BOT_OPTS);
@@ -1393,7 +1508,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           deadOrphan({ webhook_id: 'wh_persistent_503' }),
         ] } }),
         'DELETE /v1/webhooks/wh_persistent_503': () => ({ status: 503, body: { error: 'transient' } }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS);
       await ensureWebhookSubscription(BOT_OPTS);
@@ -1432,7 +1547,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_same_host_diff_port': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1455,7 +1570,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_other_path': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1474,7 +1589,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           deadOrphan({ webhook_id: 'wh_orphan_log', failure_count: 99 }),
         ] } }),
         'DELETE /v1/webhooks/wh_orphan_log': () => ({ status: 204, body: '' }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS);
       const orphanLine = logSpy.mock.calls
@@ -1511,7 +1626,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         meta: { next_cursor: '', has_more: false },
       } }),
       'DELETE /v1/webhooks/wh_orphan_paged': () => { deletedIds.push('wh_orphan_paged'); return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
     expect(deletedIds).toEqual(['wh_orphan_paged']);
@@ -1529,7 +1644,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       ] } }),
       'DELETE /v1/webhooks/wh_orphan_a': () => { deletedIds.push('wh_orphan_a'); return { status: 204, body: '' }; },
       'DELETE /v1/webhooks/wh_orphan_b': () => { deletedIds.push('wh_orphan_b'); return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
     expect(deletedIds.sort()).toEqual(['wh_orphan_a', 'wh_orphan_b']);
@@ -1549,7 +1664,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         ] } }),
         'DELETE /v1/webhooks/wh_5xx': () => ({ status: 503, body: { error: 'transient' } }),
         'DELETE /v1/webhooks/wh_ok':  () => { deletedIds.push('wh_ok');  return { status: 204, body: '' }; },
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       const result = await ensureWebhookSubscription(BOT_OPTS);
       expect(deletedIds).toEqual(['wh_ok']);
@@ -1579,7 +1694,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_transient': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1606,7 +1721,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_negative': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1626,7 +1741,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         },
       ] } }),
       'DELETE /v1/webhooks/wh_no_count': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(deleted).toBe(false);
@@ -1660,7 +1775,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
             last_delivery_success: false,
           },
         ] } }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS);
       const nearMissLine = logSpy.mock.calls
@@ -1699,7 +1814,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
             last_delivery_success: true,
           },
         ] } }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS);
       await ensureWebhookSubscription(BOT_OPTS);
@@ -1746,7 +1861,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           }
           return { body: { data: subs } };
         },
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS); // count=1, fires
       await ensureWebhookSubscription(BOT_OPTS); // count=1, suppressed
@@ -1772,7 +1887,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           // not a near-miss either.
           { webhook_id: 'wh_connector', url: 'https://s3-connector.example/webhooks/qurl', description: 'qurl-s3-connector ...', events: [], failure_count: 0, last_delivery_success: true },
         ] } }),
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       await ensureWebhookSubscription(BOT_OPTS);
       const nearMissLine = logSpy.mock.calls
@@ -1793,7 +1908,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       'GET /v1/webhooks': () => ({ body: { data: [
         { webhook_id: 'wh_junk_url', url: 'not://a valid url with spaces', description: BOT_DESC, events: [], failure_count: 999, last_delivery_success: false },
       ] } }),
-      'POST /v1/webhooks': () => { createCalled = true; return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }; },
+      'POST /v1/webhooks': () => { createCalled = true; return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }; },
     });
     await ensureWebhookSubscription(BOT_OPTS);
     expect(createCalled).toBe(true);
@@ -1819,7 +1934,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: BOT_DESC, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
         ] } }),
         'DELETE /v1/webhooks/wh_would_orphan': () => { deleted = true; return { status: 204, body: '' }; },
-        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
       });
       const result = await ensureWebhookSubscription({ ...BOT_OPTS, urlMigrationSweepEnabled: false });
       expect(deleted).toBe(false); // hard-guard wins
@@ -1837,7 +1952,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [deadOrphan()] } }),
       'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription(BOT_OPTS); // no urlMigrationSweepEnabled key
     expect(deleted).toBe(true);
@@ -1853,7 +1968,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         { webhook_id: 'wh_anything', url: OLD_URL, description: 'literally anything', events: [], failure_count: 1, last_delivery_success: false },
       ] } }),
       'DELETE /v1/webhooks/wh_anything': () => { deleted = true; return { status: 204, body: '' }; },
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new_server_generated' } } }),
     });
     await ensureWebhookSubscription({ ...BOT_OPTS, description: '' });
     expect(deleted).toBe(false);
