@@ -100,7 +100,6 @@ func TestSandboxWindowsDefaultDaemonFullCustomerLifecycle(t *testing.T) {
 		device.PrivateKeyB64 == "" || device.PublicKeyB64 == "" {
 		t.Fatal("one-time Windows customer login did not persist a complete device identity")
 	}
-	recordSandboxCleanupDeviceKey(t, device.DeviceAPIKeyID)
 	if cleanupJWT != "" {
 		registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
 	}
@@ -283,7 +282,6 @@ func TestSandboxWindowsControlledFailureCleanupChild(t *testing.T) {
 	}
 	markSandboxFailurePhase(sandboxFailurePhaseIdentity)
 	device := loadWindowsSandboxAgentState(t, stateDir)
-	recordSandboxCleanupDeviceKey(t, device.DeviceAPIKeyID)
 	if cleanupJWT != "" {
 		registerWindowsSandboxDeviceCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
 	}
