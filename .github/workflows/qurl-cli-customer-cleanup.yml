@@ -94,9 +94,8 @@ jobs:
               }
               if [[ ! "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
                 (( 10#$SOURCE_RUN_ATTEMPT > 30 )); then
-                echo "::warning::cleanup skipped because the source run attempt is outside the 1-30 recovery bound" >&2
-                echo "required=false" >>"$GITHUB_OUTPUT"
-                exit 0
+                echo "::error::cleanup source run attempt is outside the 1-30 recovery bound" >&2
+                exit 1
               fi
               source_runs="$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT"
               ;;
@@ -115,6 +114,7 @@ jobs:
           }
           IFS=, read -ra run_specs <<<"$source_runs"
           declare -A seen=()
+          declare -A seen_resolved=()
           resolved_runs=()
           for run_spec in "${run_specs[@]}"; do
             [[ -z "${seen[$run_spec]:-}" ]] || {
@@ -131,9 +131,12 @@ jobs:
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
               jq -e --arg repository "$GITHUB_REPOSITORY" --arg run_attempt "$run_attempt" '
                 .status == "completed" and
-                (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
-                (.head_branch == "main" or
-                  .display_title == ("CLI release gate " + .head_sha)) and
+                (((.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
+                    .head_branch == "main") or
+                  (.event == "workflow_dispatch" and
+                    (.head_branch | test("^v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$")) and
+                    (.head_sha | test("^[0-9a-f]{40}$")) and
+                    .display_title == ("CLI release gate " + .head_sha))) and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml" and
@@ -216,7 +219,11 @@ jobs:
                 exit 0
               fi
             fi
-            resolved_runs+=("$run_id:$identity_attempt")
+            resolved_spec="$run_id:$identity_attempt"
+            if [[ -z "${seen_resolved[$resolved_spec]:-}" ]]; then
+              seen_resolved[$resolved_spec]=1
+              resolved_runs+=("$resolved_spec")
+            fi
           done
           source_runs=$(IFS=,; echo "${resolved_runs[*]}")
           {
@@ -262,9 +269,8 @@ jobs:
           cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
           trap cleanup EXIT
           mkdir -m 0700 "$client_dir"
-          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
-          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
-          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          (umask 077; printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id")
+          (umask 077; printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret")
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
           batch_args=()
           IFS=, read -ra run_specs <<<"$SOURCE_RUNS"

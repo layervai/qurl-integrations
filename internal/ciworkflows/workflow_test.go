@@ -1126,8 +1126,8 @@ fi
 		t.Fatalf("automatic source with successful primary cleanup did not skip fallback: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "31"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" || !strings.Contains(output, "source run attempt is outside the 1-30 recovery bound") {
-		t.Fatalf("automatic over-bound attempt did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	if err == nil || strings.TrimSpace(workflowOutput) != "" || !strings.Contains(output, "source run attempt is outside the 1-30 recovery bound") {
+		t.Fatalf("automatic over-bound attempt did not fail loudly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 
 	for _, test := range []struct {
@@ -1167,6 +1167,16 @@ fi
 	})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("manual scheduled cleanup source omitted soak lane: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"GITHUB_EVENT_NAME":      "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS":  "700:2",
+		"MOCK_RUN_EVENT":         "workflow_dispatch",
+		"MOCK_RUN_BRANCH":        "v1.2.3",
+		"MOCK_RUN_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
+		t.Fatalf("manual release-tag cleanup source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	for _, want := range []string{
 		"/actions/runs/700\n",
@@ -1233,6 +1243,15 @@ fi
 		{
 			name:        "wrong run branch",
 			overrides:   map[string]string{"MOCK_RUN_BRANCH": "feature"},
+			wantMessage: "exact trusted same-repository CLI workflow",
+		},
+		{
+			name: "schedule with release-looking ref",
+			overrides: map[string]string{
+				"MOCK_RUN_EVENT":         "schedule",
+				"MOCK_RUN_BRANCH":        "v1.2.3",
+				"MOCK_RUN_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567",
+			},
 			wantMessage: "exact trusted same-repository CLI workflow",
 		},
 		{

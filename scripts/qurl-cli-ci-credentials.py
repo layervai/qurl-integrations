@@ -38,18 +38,18 @@ MIN_M2M_TOKEN_REMAINING_SECONDS = (
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
-POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,19}\Z")
+POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,18}\Z")
 LANE = re.compile(r"(?:linux|macos|windows)\Z")
 RUN_NAME = re.compile(
-    r"qurl CLI journey v2 [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/"
+    r"qurl CLI journey v2 [1-9][0-9]{0,18}/[1-9][0-9]{0,18}/"
     r"(?:linux|macos|windows)/(?:primary|failure)\Z"
 )
 RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 RUN_AGENT_ID = re.compile(
-    r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sfk]\Z"
+    r"qurl-journey-v2-r[1-9][0-9]{0,18}-a[1-9][0-9]{0,18}-[hc][sfk]\Z"
 )
 RUN_SPEC = re.compile(
-    r"([1-9][0-9]{0,19}):([1-9][0-9]{0,19}):"
+    r"([1-9][0-9]{0,18}):([1-9][0-9]{0,18}):"
     r"(linux|macos|windows):(host|hardened_container):(full|soak)\Z"
 )
 MAX_RECONCILE_RUNS = 12
@@ -352,13 +352,14 @@ def retry_revoke(endpoint: str, jwt: str, key_id: str) -> None:
                 "DELETE",
                 "/v1/api-keys/" + urllib.parse.quote(key_id, safe=""),
             )
+        except CredentialError as exc:
+            last_error = exc
+        else:
             if status in {200, 204, 404}:
                 return
             if status != 429 and status < 500:
                 raise CredentialError("qURL API-key revoke was rejected")
             last_error = CredentialError("qURL API-key revoke was temporarily rejected")
-        except CredentialError as exc:
-            last_error = exc
         if attempt + 1 < MAX_ATTEMPTS:
             time.sleep(attempt + 1)
     raise CredentialError(
@@ -413,6 +414,9 @@ def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
                 "DELETE",
                 "/v1/resources/" + urllib.parse.quote(resource_id, safe=""),
             )
+        except CredentialError as exc:
+            last_error = exc
+        else:
             if status in {204, 404}:
                 return
             if status != 429 and status < 500:
@@ -420,8 +424,6 @@ def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
             last_error = CredentialError(
                 "qURL resource cleanup was temporarily rejected"
             )
-        except CredentialError as exc:
-            last_error = exc
         if attempt + 1 < MAX_ATTEMPTS:
             time.sleep(attempt + 1)
     raise CredentialError(
@@ -438,38 +440,40 @@ def retry_connector_resource_delete(endpoint: str, jwt: str, connector_id: str) 
         try:
             query = urllib.parse.urlencode({"slug": connector_id})
             status, response = qurl_json(endpoint, jwt, "GET", "/v1/resources?" + query)
+        except CredentialError as exc:
+            last_error = exc
+        else:
             if status != 200:
                 if status != 429 and status < 500:
                     raise CredentialError("qURL Connector cleanup lookup was rejected")
-                raise CredentialError(
+                last_error = CredentialError(
                     "qURL Connector cleanup lookup was temporarily rejected"
                 )
-            rows = response.get("data")
-            if not isinstance(rows, list) or any(
-                not isinstance(row, dict) for row in rows
-            ):
-                raise CredentialError("qURL Connector cleanup lookup is malformed")
-            if not rows:
-                return False
-            if len(rows) != 1:
-                raise CredentialError("qURL Connector cleanup lookup is ambiguous")
-            row = rows[0]
-            resource_id = row.get("resource_id", "")
-            if (
-                not isinstance(resource_id, str)
-                or not resource_id
-                or resource_id != resource_id.strip()
-                or len(resource_id) > 512
-                or row.get("slug") != connector_id
-                or row.get("type") != "tunnel"
-                or row.get("status") != "active"
-            ):
-                raise CredentialError(
-                    "qURL Connector cleanup row has an unexpected shape"
-                )
-            break
-        except CredentialError as exc:
-            last_error = exc
+            else:
+                rows = response.get("data")
+                if not isinstance(rows, list) or any(
+                    not isinstance(row, dict) for row in rows
+                ):
+                    raise CredentialError("qURL Connector cleanup lookup is malformed")
+                if not rows:
+                    return False
+                if len(rows) != 1:
+                    raise CredentialError("qURL Connector cleanup lookup is ambiguous")
+                row = rows[0]
+                resource_id = row.get("resource_id", "")
+                if (
+                    not isinstance(resource_id, str)
+                    or not resource_id
+                    or resource_id != resource_id.strip()
+                    or len(resource_id) > 512
+                    or row.get("slug") != connector_id
+                    or row.get("type") != "tunnel"
+                    or row.get("status") != "active"
+                ):
+                    raise CredentialError(
+                        "qURL Connector cleanup row has an unexpected shape"
+                    )
+                break
         if attempt + 1 < MAX_ATTEMPTS:
             time.sleep(attempt + 1)
     else:
@@ -943,12 +947,6 @@ def revoke_recorded_credential(
     retry_revoke(endpoint, jwt, key_id)
 
 
-def revoke_persisted(endpoint: str, directory: pathlib.Path) -> None:
-    jwt = private_value(directory / "cleanup-jwt", "cleanup JWT")
-    name = private_value(directory / "run-name", "run-scoped API-key name")
-    revoke_named_credential(endpoint, jwt, name, directory / "api-key-id")
-
-
 def validate_create_args(args: argparse.Namespace) -> None:
     if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(
         args.run_attempt
@@ -969,7 +967,6 @@ def create_with_auth(
     validate_create_args(args)
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
-    write_private(args.output_dir / "cleanup-jwt", jwt)
     write_private(args.output_dir / "run-name", name)
     write_private(args.output_dir / "owner-id", expected_owner)
     try:
@@ -989,7 +986,7 @@ def create_with_auth(
         write_private(args.output_dir / "api-key", api_key)
     except (OSError, CredentialError) as exc:
         try:
-            revoke_persisted(endpoint, args.output_dir)
+            revoke_named_credential(endpoint, jwt, name, args.output_dir / "api-key-id")
         except (OSError, CredentialError) as cleanup_exc:
             raise CleanupConvergenceError(
                 "credential creation failed and bounded revoke did not converge"
@@ -1079,24 +1076,6 @@ def create_pair(args: argparse.Namespace) -> None:
     print("created two isolated run-scoped customer API keys with one management token")
 
 
-def revoke(args: argparse.Namespace) -> None:
-    endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
-    if not args.credential_dir.exists():
-        return
-    jwt_path = args.credential_dir / "cleanup-jwt"
-    name_path = args.credential_dir / "run-name"
-    if not jwt_path.exists() and not name_path.exists():
-        return
-    if not jwt_path.exists() or not name_path.exists():
-        raise CredentialError("credential cleanup state is incomplete")
-    revoke_persisted(endpoint, args.credential_dir)
-    for path in args.credential_dir.iterdir():
-        if path.is_file() and not path.is_symlink():
-            path.unlink()
-    args.credential_dir.rmdir()
-    print("revoked the run-scoped customer API key")
-
-
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
@@ -1137,10 +1116,6 @@ def parser() -> argparse.ArgumentParser:
     create_pair_parser.set_defaults(handler=create_pair)
     reconcile_batch_parser.add_argument("--run-spec", action="append", required=True)
     reconcile_batch_parser.set_defaults(handler=reconcile_batch)
-    revoke_parser = commands.add_parser("revoke")
-    revoke_parser.add_argument("--qurl-endpoint", required=True)
-    revoke_parser.add_argument("--credential-dir", type=pathlib.Path, required=True)
-    revoke_parser.set_defaults(handler=revoke)
     return result
 
 
@@ -1149,7 +1124,7 @@ def main() -> int:
         args = parser().parse_args()
         args.handler(args)
     except (CredentialError, OSError, UnicodeError) as exc:
-        print(f"credential operation failed: {exc}", file=os.sys.stderr)
+        print(f"credential operation failed: {exc}", file=sys.stderr)
         return 1
     return 0
 

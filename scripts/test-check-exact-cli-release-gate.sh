@@ -75,7 +75,14 @@ jq -n --arg required_status "$required_status" --arg journey_status "$journey_st
       }] +
       [{name:"cli / customer journey cleanup",status:$cleanup_status,conclusion:$cleanup_conclusion}]
     )
-  } | .total_count = (.jobs | length)
+  } |
+  if $scenario == "missing_cleanup" then
+    .jobs |= map(select(.name != "cli / customer journey cleanup"))
+  elif $scenario == "duplicate" then
+    .jobs += [{name:"cli / required",status:$required_status,conclusion:$required_conclusion}]
+  else . end |
+  .total_count = (.jobs | length) |
+  if $scenario == "malformed" then .total_count += 1 else . end
 '
 GH
 chmod +x "$fixture/gh"
@@ -98,6 +105,9 @@ run_case failed 1 'Exact CLI customer-journey gate failed'
 run_case required_failed 1 'cli / required=failure'
 run_case cleanup_failed 1 'cli / customer journey cleanup=failure'
 run_case missing 1 'gate set is missing or ambiguous'
+run_case missing_cleanup 1 'gate set is missing or ambiguous'
+run_case duplicate 5 'gate job names are ambiguous within one attempt'
+run_case malformed 5 'job data is malformed or truncated'
 run_case mismatch 1 'run does not match the exact handoff'
 run_case operator 1 'run does not match the exact handoff'
 run_case wrong_tag 1 'run does not match the exact handoff'

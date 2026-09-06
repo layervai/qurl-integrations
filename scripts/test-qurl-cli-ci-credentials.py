@@ -414,6 +414,7 @@ def test_scheduled_soak_workflow_contract() -> None:
     )
     assert workflow.count("qurl-cli-ci-credentials.py create-pair") == 2
     assert "qurl-cli-ci-credentials.py create " not in workflow
+    assert "cleanup-jwt" not in SCRIPT.read_text(encoding="utf-8")
     assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
     assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
     assert "--require-device-keys" not in workflow
@@ -472,6 +473,8 @@ def test_pair_and_batch_each_request_one_auth0_token() -> None:
         assert (primary / "api-key").read_text(encoding="utf-8") != (
             failure / "api-key"
         ).read_text(encoding="utf-8")
+        assert not (primary / "cleanup-jwt").exists()
+        assert not (failure / "cleanup-jwt").exists()
 
         fake.auth_token_requests = 0
         credentials.reconcile_batch(
@@ -1100,7 +1103,7 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
                 raise AssertionError(
                     f"malformed Connector lookup succeeded: {response}"
                 )
-        assert methods == ["GET"] * credentials.MAX_ATTEMPTS
+        assert methods == ["GET"]
 
     def empty_request(
         url: str,
@@ -1118,6 +1121,38 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
         assert not credentials.retry_connector_resource_delete(
             "https://sandbox.example", "jwt", connector_id
         )
+
+
+def test_cleanup_hard_rejections_are_not_retried() -> None:
+    connector_id = "connector-cli-journey-v2-415907f85f12d5ffd69c6a62"
+    operations = (
+        lambda: credentials.retry_revoke(
+            "https://sandbox.example", "jwt", "key_AbCdEf123456"
+        ),
+        lambda: credentials.retry_resource_delete(
+            "https://sandbox.example", "jwt", "r_customer_ci"
+        ),
+        lambda: credentials.retry_connector_resource_delete(
+            "https://sandbox.example", "jwt", connector_id
+        ),
+    )
+    for operation in operations:
+        calls = 0
+
+        def reject_request(*args: object, **kwargs: object) -> tuple[int, bytes]:
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            return 400, b"{}"
+
+        with mock.patch.object(credentials, "request", reject_request):
+            try:
+                operation()
+            except credentials.CredentialError as exc:
+                assert str(exc).endswith("was rejected")
+            else:
+                raise AssertionError("durable cleanup rejection was accepted")
+        assert calls == 1
 
 
 def test_resource_failure_still_revokes_every_target_credential() -> None:
@@ -1420,6 +1455,7 @@ def main() -> None:
     test_pagination_safety_limits_fail_closed()
     test_reconciliation_reserves_time_for_resource_inventory()
     test_connector_cleanup_lookup_fails_closed()
+    test_cleanup_hard_rejections_are_not_retried()
     test_resource_failure_still_revokes_every_target_credential()
     test_credential_failure_still_attempts_every_target_and_resources()
     test_assignment_failure_still_attempts_every_target_and_resources()
@@ -1503,7 +1539,6 @@ def main() -> None:
         assert {path.name for path in output.iterdir()} == {
             "api-key",
             "api-key-id",
-            "cleanup-jwt",
             "owner-id",
             "run-name",
         }
@@ -1511,24 +1546,6 @@ def main() -> None:
         assert (output / "run-name").read_text(
             encoding="utf-8"
         ) == "qurl CLI journey v2 1231/2/linux/primary"
-        fake.transient_key_delete = 1
-        credentials.revoke(
-            argparse.Namespace(qurl_endpoint=args.qurl_endpoint, credential_dir=output)
-        )
-        assert not output.exists()
-        assert fake.deleted_keys.count(fake.key_id) == 1
-
-        recovery = root / "recovery"
-        recovery.mkdir(mode=0o700)
-        credentials.write_private(recovery / "cleanup-jwt", fake.jwt)
-        credentials.write_private(
-            recovery / "run-name", "qurl CLI journey v2 1232/2/macos/failure"
-        )
-        credentials.revoke_persisted(args.qurl_endpoint, recovery)
-        recovered_key_id = (recovery / "api-key-id").read_text(encoding="utf-8")
-        assert credentials.KEY_ID.fullmatch(recovered_key_id)
-        assert recovered_key_id in fake.deleted_keys
-
         run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = (
             add_run_credentials(fake)
         )

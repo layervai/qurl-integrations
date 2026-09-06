@@ -18,7 +18,7 @@ repository=${GITHUB_REPOSITORY:-}
 }
 if [[ -z "${GH_TOKEN:-}" || ! "$source_sha" =~ ^[0-9a-f]{40}$ ||
   ! "$source_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ||
-  ! "$run_id" =~ ^[1-9][0-9]{0,19}$ || ! "$run_attempt" =~ ^[1-9][0-9]?$ ||
+  ! "$run_id" =~ ^[1-9][0-9]{0,18}$ || ! "$run_attempt" =~ ^[1-9][0-9]?$ ||
   ! "$journey_count" =~ ^[1-9][0-9]?$ ]] ||
   (( 10#$run_attempt > 30 || 10#$journey_count > 20 )); then
   echo "::error::CLI release gate input is incomplete" >&2
@@ -28,7 +28,7 @@ fi
 gh_json() {
   local path=$1 response attempt
   for attempt in 1 2 3; do
-    if response=$(gh api --method GET "$path" 2>/dev/null); then
+    if response=$(gh api --method GET "$path"); then
       printf '%s\n' "$response"
       return 0
     fi
