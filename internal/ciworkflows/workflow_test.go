@@ -825,6 +825,7 @@ exit "$failed"
 						"SOURCE_RUN_ID=700",
 						"SOURCE_RUN_ATTEMPT=2",
 						"SOURCE_RUNS=" + subject.sourceRuns,
+						"REQUIRE_DEVICE_KEYS=false",
 					}
 					output, err := command.CombinedOutput()
 					if gotFail := err != nil; gotFail != test.wantFail {
@@ -1648,6 +1649,8 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	}
 	verify := steps["Check the exact packaged customer-journey gate once"]
 	if !strings.Contains(verify.Run, "scripts/check-exact-cli-release-gate.sh") ||
+		!strings.Contains(verify.Run+fmt.Sprint(verify.Env), "CLI_RUN_ID") ||
+		!strings.Contains(verify.Run+fmt.Sprint(verify.Env), "CLI_RUN_ATTEMPT") ||
 		strings.Contains(verify.Run, "sleep ") || strings.Contains(verify.Run, "while ") {
 		t.Error("cli-release-gate is not one bounded exact check")
 	}
@@ -1734,6 +1737,11 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 			t.Errorf("CLI workflow does not bind a release handoff before Auth0 use: missing %q", required)
 		}
 	}
+	for _, required := range []string{"cli_run_id:", "cli_run_attempt:"} {
+		if !strings.Contains(string(readWorkflowBytes(t, releasePleaseWorkflow)), required) {
+			t.Errorf("release workflow cannot accept exact CLI handoff field %q", required)
+		}
+	}
 	result := cli.Jobs["signal-cli-release"]
 	wantSignalIf := "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release_source_sha != '' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'"
 	if got := strings.Join(strings.Fields(result.If), " "); got != wantSignalIf {
@@ -1749,6 +1757,8 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 		if current.Name == "Continue an exact draft CLI release" {
 			journeySignal = strings.Contains(current.Run, "gh workflow run release-please.yml") &&
 				strings.Contains(current.Run, "source_sha=$GITHUB_SHA") &&
+				strings.Contains(current.Run, "cli_run_id=$GITHUB_RUN_ID") &&
+				strings.Contains(current.Run, "cli_run_attempt=$GITHUB_RUN_ATTEMPT") &&
 				strings.Contains(current.Run, `"${cli_tag}^{commit}"`) &&
 				strings.Contains(current.Run, `gh release view "$cli_tag"`) &&
 				strings.Contains(current.Run, "--json tagName,targetCommitish,isDraft") &&
@@ -1859,17 +1869,21 @@ exit 2
 			draftValue = "true"
 		}
 		overrides := map[string]string{
-			"CLI_TAG":            cliTag,
-			"GITHUB_OUTPUT":      githubOutput,
-			"GITHUB_REPOSITORY":  "layervai/qurl-integrations",
-			"GITHUB_SHA":         sourceSHA,
-			"HANDOFF_SOURCE_SHA": sourceSHA,
-			"PATH":               binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-			"STUB_DRAFT":         draftValue,
-			"STUB_GH_LOG":        ghCalls,
-			"STUB_SHA":           sourceSHA,
-			"STUB_TAG":           cliTag,
-			"STUB_TARGET":        target,
+			"CLI_TAG":             cliTag,
+			"GITHUB_OUTPUT":       githubOutput,
+			"GITHUB_REPOSITORY":   "layervai/qurl-integrations",
+			"GITHUB_SHA":          sourceSHA,
+			"HANDOFF_SOURCE_SHA":  sourceSHA,
+			"HANDOFF_RUN_ID":      "700",
+			"HANDOFF_RUN_ATTEMPT": "2",
+			"GITHUB_RUN_ID":       "700",
+			"GITHUB_RUN_ATTEMPT":  "2",
+			"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"STUB_DRAFT":          draftValue,
+			"STUB_GH_LOG":         ghCalls,
+			"STUB_SHA":            sourceSHA,
+			"STUB_TAG":            cliTag,
+			"STUB_TARGET":         target,
 		}
 		if len(metadataOverrides) > 1 {
 			t.Fatal("runStep accepts at most one metadata override map")
@@ -1911,6 +1925,16 @@ exit 2
 		})
 	}
 
+	t.Run("release_gate_draft_requires_exact_run", func(t *testing.T) {
+		got := runStep(t, releaseGateRun, true, sourceSHA, map[string]string{
+			"HANDOFF_RUN_ID":      "",
+			"HANDOFF_RUN_ATTEMPT": "",
+		})
+		if got.err == nil || !strings.Contains(got.output, "requires one exact tested workflow run") {
+			t.Fatalf("draft release accepted no exact CLI run: err=%v output=%s", got.err, got.output)
+		}
+	})
+
 	cliSignalRun := stepRun(t, cliWorkflow, "signal-cli-release", "Continue an exact draft CLI release")
 	for _, draft := range []bool{true, false} {
 		t.Run(fmt.Sprintf("cli_signal_draft_%t", draft), func(t *testing.T) {
@@ -1923,7 +1947,13 @@ exit 2
 				t.Fatalf("execute CLI signal with draft=%t: %v\n%s", draft, got.err, got.output)
 			}
 			if draft {
-				for _, required := range []string{"workflow run release-please.yml", "cli_tag=" + cliTag, "source_sha=" + sourceSHA} {
+				for _, required := range []string{
+					"workflow run release-please.yml",
+					"cli_tag=" + cliTag,
+					"source_sha=" + sourceSHA,
+					"cli_run_id=700",
+					"cli_run_attempt=2",
+				} {
 					if !strings.Contains(got.ghCalls, required) {
 						t.Errorf("draft dispatch = %q, want %q", got.ghCalls, required)
 					}

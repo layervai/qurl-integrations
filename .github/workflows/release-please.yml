@@ -75,6 +75,14 @@ on:
         description: "Exact source SHA for an automated customer-journey handoff; omit for operator recovery"
         required: false
         type: string
+      cli_run_id:
+        description: "Exact successful CLI workflow run ID; required while the CLI release is a draft"
+        required: false
+        type: string
+      cli_run_attempt:
+        description: "Exact successful CLI workflow run attempt; required while the CLI release is a draft"
+        required: false
+        type: string
 
 # Serialize release maintenance, but keep an exact tag/SHA continuation out of
 # that pending queue. GitHub retains only one pending run per group even when
@@ -201,6 +209,8 @@ jobs:
         env:
           CLI_TAG: ${{ inputs.cli_tag }}
           HANDOFF_SOURCE_SHA: ${{ inputs.source_sha }}
+          HANDOFF_RUN_ID: ${{ inputs.cli_run_id }}
+          HANDOFF_RUN_ATTEMPT: ${{ inputs.cli_run_attempt }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -241,6 +251,13 @@ jobs:
             printf '::error::Draft CLI release target mismatch: observed %q; expected exact tag commit %q\n' "$release_target" "$source_sha" >&2
             exit 1
           fi
+          if [[ "$draft" == true ]]; then
+            [[ "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ &&
+              "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || {
+              echo "::error::A draft CLI release requires one exact tested workflow run and attempt" >&2
+              exit 1
+            }
+          fi
           required=true
           if [[ -n "$HANDOFF_SOURCE_SHA" && "$draft" == false ]]; then
             required=false
@@ -256,9 +273,12 @@ jobs:
         if: steps.source.outputs.required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          CLI_RUN_ATTEMPT: ${{ inputs.cli_run_attempt }}
         run: |
           set -euo pipefail
-          selection=$(scripts/check-exact-cli-release-gate.sh '${{ steps.source.outputs.sha }}')
+          selection=$(scripts/check-exact-cli-release-gate.sh \
+            '${{ steps.source.outputs.sha }}' "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT")
           {
             echo "ready=$(jq -r .ready <<<"$selection")"
             echo "run_id=$(jq -r .run_id <<<"$selection")"

@@ -1,46 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <source-sha>" >&2
+if [[ $# -ne 3 ]]; then
+  echo "usage: $0 <source-sha> <run-id> <run-attempt>" >&2
   exit 2
 fi
 
 source_sha=$1
+run_id=$2
+run_attempt=$3
 repository=${GITHUB_REPOSITORY:-}
 [[ "$repository" == "layervai/qurl-integrations" ]] || {
   echo "::error::CLI release gates require the canonical repository" >&2
   exit 1
 }
-[[ -n "${GH_TOKEN:-}" && "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+[[ -n "${GH_TOKEN:-}" && "$source_sha" =~ ^[0-9a-f]{40}$ &&
+  "$run_id" =~ ^[1-9][0-9]{0,19}$ && "$run_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || {
   echo "::error::CLI release gate input is incomplete" >&2
   exit 1
 }
 
-runs=$(gh api --method GET "repos/$repository/actions/workflows/cli.yml/runs" \
-  -f "head_sha=$source_sha" -f event=workflow_dispatch -f per_page=100)
-run=$(jq -c --arg repository "$repository" --arg sha "$source_sha" '
-  if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
-    (.workflow_runs | type) != "array" or (.workflow_runs | length) != .total_count
-  then error("CLI run data is malformed or truncated")
-  else [.workflow_runs[] | select(
-    .repository.full_name == $repository and
-    .head_repository.full_name == $repository and
-    .head_branch == "main" and .head_sha == $sha and
-    .path == ".github/workflows/cli.yml" and .event == "workflow_dispatch" and
-    (.id | type) == "number" and .id > 0 and
-    (.run_attempt | type) == "number" and .run_attempt > 0
-  )] | sort_by(.id) | last // null
-  end
-' <<<"$runs")
-
-if [[ "$run" == null ]]; then
-  jq -cn '{ready:false,reason:"cli_release_journey_incomplete"}'
-  exit 0
-fi
-
-run_id=$(jq -er '.id' <<<"$run")
-run_attempt=$(jq -er '.run_attempt' <<<"$run")
+run=$(gh api --method GET "repos/$repository/actions/runs/$run_id")
+jq -e --arg repository "$repository" --arg sha "$source_sha" \
+  --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" '
+  .repository.full_name == $repository and
+  .head_repository.full_name == $repository and
+  .head_branch == "main" and .head_sha == $sha and
+  .path == ".github/workflows/cli.yml" and .event == "workflow_dispatch" and
+  .id == $run_id and .run_attempt == $run_attempt
+' <<<"$run" >/dev/null || {
+  echo "::error::CLI release gate run does not match the exact handoff" >&2
+  exit 1
+}
 run_url=$(jq -r '.html_url // ""' <<<"$run")
 jobs=$(gh api --method GET \
   "repos/$repository/actions/runs/$run_id/attempts/$run_attempt/jobs" -f per_page=100)

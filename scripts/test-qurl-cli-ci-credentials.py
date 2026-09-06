@@ -41,17 +41,21 @@ class FakeAPI:
     def __init__(self) -> None:
         now = int(time.time())
         self.owner = "ci-client@clients"
-        self.jwt = "header." + encoded(
-            {
-                "aud": "https://sandbox.example",
-                "exp": now + 4000,
-                "gty": "client-credentials",
-                "iat": now,
-                "iss": "https://auth.example/",
-                "scope": "qurl:agent qurl:read qurl:write",
-                "sub": self.owner,
-            }
-        ) + ".signature"
+        self.jwt = (
+            "header."
+            + encoded(
+                {
+                    "aud": "https://sandbox.example",
+                    "exp": now + 4000,
+                    "gty": "client-credentials",
+                    "iat": now,
+                    "iss": "https://auth.example/",
+                    "scope": "qurl:agent qurl:read qurl:write",
+                    "sub": self.owner,
+                }
+            )
+            + ".signature"
+        )
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_customer-key"
         self.auth_token_requests = 0
@@ -125,7 +129,9 @@ class FakeAPI:
             assert method == "POST"
             assert content_type == "application/x-www-form-urlencoded"
             assert form["scope"] == ["qurl:agent qurl:read qurl:write"]
-            return 200, json.dumps({"access_token": self.jwt, "token_type": "Bearer"}).encode()
+            return 200, json.dumps(
+                {"access_token": self.jwt, "token_type": "Bearer"}
+            ).encode()
         if parsed.path == "/v1/me":
             if bearer == self.jwt:
                 data = {"auth_type": "jwt", "owner_id": self.owner}
@@ -143,7 +149,7 @@ class FakeAPI:
                     "owner_id": self.owner,
                 }
             else:
-                return 401, b'{}'
+                return 401, b"{}"
             return 200, json.dumps({"data": data}).encode()
         if parsed.path == "/v1/api-keys" and method == "POST":
             request = json.loads(body or b"{}")
@@ -152,18 +158,12 @@ class FakeAPI:
                 "name": request["name"],
                 "scopes": credentials.CUSTOMER_SCOPES,
             }
-            assert extra_headers and extra_headers["Idempotency-Key"].startswith("qurl-cli-ci-")
+            assert extra_headers and extra_headers["Idempotency-Key"].startswith(
+                "qurl-cli-ci-"
+            )
             issued = len(self.issued_api_keys)
-            key_id = (
-                self.key_id
-                if issued == 0
-                else f"key_Paired{issued:06d}"
-            )
-            api_key = (
-                self.api_key
-                if issued == 0
-                else f"lv_test_customer-key-{issued}"
-            )
+            key_id = self.key_id if issued == 0 else f"key_Paired{issued:06d}"
+            api_key = self.api_key if issued == 0 else f"lv_test_customer-key-{issued}"
             self.issued_api_keys[api_key] = (key_id, api_key)
             row = {
                 "api_key": api_key,
@@ -176,20 +176,24 @@ class FakeAPI:
             self.keys[self.key_id] = row
             return 201, json.dumps({"data": row}).encode()
         if parsed.path == "/v1/api-keys" and method == "GET":
-            rows = list(self.keys.values()) + self.extra_credentials + [
-                {
-                    "key_id": "key_Device123456",
-                    "kind": "device",
-                    "name": "qURL CLI registered device",
-                    "status": "active",
-                },
-                {
-                    "key_id": "key_Unrelated123",
-                    "kind": "api_key",
-                    "name": "customer key",
-                    "status": "active",
-                },
-            ]
+            rows = (
+                list(self.keys.values())
+                + self.extra_credentials
+                + [
+                    {
+                        "key_id": "key_Device123456",
+                        "kind": "device",
+                        "name": "qURL CLI registered device",
+                        "status": "active",
+                    },
+                    {
+                        "key_id": "key_Unrelated123",
+                        "kind": "api_key",
+                        "name": "customer key",
+                        "status": "active",
+                    },
+                ]
+            )
             status_filter = urllib.parse.parse_qs(parsed.query).get("status", [])
             if status_filter:
                 assert len(status_filter) == 1
@@ -200,9 +204,9 @@ class FakeAPI:
             self.key_delete_attempts.append(key_id)
             if self.transient_key_delete:
                 self.transient_key_delete -= 1
-                return 503, b'{}'
+                return 503, b"{}"
             if key_id in self.failed_key_deletes:
-                return 503, b'{}'
+                return 503, b"{}"
             self.deleted_keys.append(key_id)
             self.operations.append("revoke:" + key_id)
             self.keys.pop(key_id, None)
@@ -220,9 +224,9 @@ class FakeAPI:
             assert credentials.RUN_AGENT_ID.fullmatch(agent_id)
             self.assignment_retire_attempts.append(agent_id)
             if agent_id in self.assignment_retire_statuses:
-                return self.assignment_retire_statuses[agent_id], b'{}'
+                return self.assignment_retire_statuses[agent_id], b"{}"
             if agent_id in self.failed_assignment_retires:
-                return 503, b'{}'
+                return 503, b"{}"
             if agent_id in self.assignments:
                 self.retired_assignments.append(agent_id)
                 self.operations.append("retire:" + agent_id)
@@ -236,13 +240,15 @@ class FakeAPI:
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
             assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
-            return 200, json.dumps({"data": self.resources, "meta": {"has_more": False}}).encode()
+            return 200, json.dumps(
+                {"data": self.resources, "meta": {"has_more": False}}
+            ).encode()
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
             resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
             assert not resource_id.startswith("connector-cli-journey-v2-")
             self.resource_delete_attempts.append(resource_id)
             if resource_id in self.failed_resource_deletes:
-                return 503, b'{}'
+                return 503, b"{}"
             self.deleted_resources.append(resource_id)
             self.operations.append("delete:" + resource_id)
             for connector_id, row in list(self.connector_resources.items()):
@@ -311,10 +317,15 @@ def sticky_clock(*values: float):
 def test_scheduled_soak_workflow_contract() -> None:
     workflow = CLI_WORKFLOW.read_text(encoding="utf-8")
     assert 'cron: "17 6 * * *"' in workflow
-    assert "contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'true'" in workflow
+    assert (
+        "contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'true'"
+        in workflow
+    )
 
     base_line = next(
-        line.strip() for line in workflow.splitlines() if line.strip().startswith("matrix='{")
+        line.strip()
+        for line in workflow.splitlines()
+        if line.strip().startswith("matrix='{")
     )
     base_matrix = json.loads(base_line.removeprefix("matrix='").removesuffix("'"))
     assert base_matrix == {
@@ -358,8 +369,13 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "matrix: ${{ fromJSON(needs.changes.outputs.journey_matrix) }}" in workflow
     assert "timeout-minutes: ${{ matrix.timeout_minutes }}" in workflow
     assert "-tags=clisandbox,clisoak" in workflow
-    assert "QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK: ${{ matrix.soak && 'enabled' || '' }}" in workflow
-    assert "QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}" in workflow
+    assert (
+        "QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK: ${{ matrix.soak && 'enabled' || '' }}"
+        in workflow
+    )
+    assert (
+        "QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}" in workflow
+    )
     lane_count = len(base_matrix["include"]) + 1
     assert "lane_specs=(linux:1 macos:2 windows:3 linux:4)" in workflow
     assert credentials.MAX_RECONCILE_RUNS == lane_count * 3
@@ -370,16 +386,21 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "github.event_name != 'pull_request'" not in workflow
     assert (
-        "contains(fromJson('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name)"
+        'contains(fromJson(\'["push","schedule","workflow_dispatch"]\'), github.event_name)'
         not in workflow
     )
-    assert workflow.count(
-        "contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name)"
-    ) >= 5
+    assert (
+        workflow.count(
+            'contains(fromJson(\'["schedule","workflow_dispatch"]\'), github.event_name)'
+        )
+        >= 5
+    )
     assert workflow.count("qurl-cli-ci-credentials.py create-pair") == 2
     assert "qurl-cli-ci-credentials.py create " not in workflow
     assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
     assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
+    assert "--require-device-keys" in workflow
+    assert "needs.journey.result == 'success'" in workflow
     assert "QURL_CLI_CI_CLEANUP_ID_DIR" not in workflow
     assert 'sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true' in workflow
     assert "inputs.release_source_sha != ''" in workflow
@@ -393,7 +414,10 @@ def test_scheduled_soak_workflow_contract() -> None:
 
     cleanup = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
     assert "schedule|workflow_dispatch) include_soak=true" in cleanup
-    assert '(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")' in cleanup
+    assert (
+        '(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
+        in cleanup
+    )
     assert "lane_specs+=(linux:4)" in cleanup
     assert "qurl-cli-ci-credentials.py reconcile-run" not in cleanup
     assert cleanup.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
@@ -403,8 +427,9 @@ def test_scheduled_soak_workflow_contract() -> None:
 
 def test_pair_and_batch_each_request_one_auth0_token() -> None:
     fake = FakeAPI()
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
@@ -445,12 +470,12 @@ def test_pair_and_batch_each_request_one_auth0_token() -> None:
 
 def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> None:
     fake = FakeAPI()
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
     ):
         args = auth_args(pathlib.Path(raw_root))
         for run_specs in (
-            ("1231:2:linux:host", "1231:2:linux:host"),
             ("malformed",),
             tuple(f"{1000 + index}:1:linux:host" for index in range(13)),
         ):
@@ -472,9 +497,23 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
             if run.run_id == "1231":
                 raise credentials.CredentialError("first run failed")
 
+        with mock.patch.object(credentials, "reconcile_run", reconcile):
+            credentials.reconcile_batch(
+                argparse.Namespace(
+                    **vars(args),
+                    run_spec=("1232:2:macos:host", "1232:2:macos:host"),
+                    require_device_keys=False,
+                )
+            )
+        assert attempted == ["1232"]
+        assert fake.auth_token_requests == 1
+
+        attempted.clear()
+        fake.auth_token_requests = 0
         diagnostics = io.StringIO()
-        with mock.patch.object(credentials, "reconcile_run", reconcile), contextlib.redirect_stderr(
-            diagnostics
+        with (
+            mock.patch.object(credentials, "reconcile_run", reconcile),
+            contextlib.redirect_stderr(diagnostics),
         ):
             try:
                 credentials.reconcile_batch(
@@ -484,6 +523,7 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
                             "1231:2:linux:host",
                             "1232:2:macos:host",
                         ),
+                        require_device_keys=False,
                     )
                 )
             except credentials.CredentialError as exc:
@@ -505,7 +545,9 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
         )
         with mock.patch.object(credentials, "reconcile_run", reconcile):
             credentials.reconcile_batch(
-                argparse.Namespace(**vars(args), run_spec=maximum)
+                argparse.Namespace(
+                    **vars(args), run_spec=maximum, require_device_keys=False
+                )
             )
         assert len(attempted) == credentials.MAX_RECONCILE_RUNS
         assert fake.auth_token_requests == 1
@@ -523,12 +565,14 @@ def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
         extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         if method == "GET" and bearer == "lv_test_customer-key-1":
-            return 401, b'{}'
+            return 401, b"{}"
         return fake(url, method, bearer, body, content_type, extra_headers)
 
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", reject_second_identity
-    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", reject_second_identity),
+        mock.patch.object(credentials.time, "sleep", lambda _: None),
+    ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
         primary = root / "primary"
@@ -559,12 +603,14 @@ def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
 
 def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
     fake = FakeAPI()
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
-    ), mock.patch.object(
-        credentials,
-        "prepare_output_directory",
-        side_effect=credentials.CredentialError("output directory rejected"),
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(
+            credentials,
+            "prepare_output_directory",
+            side_effect=credentials.CredentialError("output directory rejected"),
+        ),
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
@@ -590,12 +636,14 @@ def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
     assert fake.deleted_keys == []
 
     fake = FakeAPI()
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
-    ), mock.patch.object(
-        credentials,
-        "create_with_auth",
-        side_effect=credentials.CleanupConvergenceError("cleanup failed"),
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(
+            credentials,
+            "create_with_auth",
+            side_effect=credentials.CleanupConvergenceError("cleanup failed"),
+        ),
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
@@ -625,9 +673,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
         CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
     )
     assert fallback_cleanup_minutes == 45
-    assert credentials.M2M_MANAGEMENT_HEADROOM_SECONDS == 40 * 60
-    assert credentials.JOURNEY_CLEANUP_MARGIN_SECONDS == cleanup_minutes * 60
-    assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 3300, (
+    assert credentials.FALLBACK_CLEANUP_BUDGET_SECONDS == fallback_cleanup_minutes * 60
+    assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
+    assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 3000, (
         "journey credential budget changed; confirm the M2M lifetime still covers it"
     )
     assert (
@@ -635,50 +683,63 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
         + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
-    assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
-        "fallback cleanup timeout no longer fits inside the shared management token"
-    )
+    assert (
+        fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS
+    ), "fallback cleanup timeout no longer fits inside the shared management token"
     # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
     # most three source runs, for twelve total reconciliations in the largest
     # mixed recovery request.
     assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60, (
         "primary inventory budgets no longer leave room for cleanup writes"
     )
-    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12 < fallback_cleanup_minutes * 60, (
-        "fallback inventory budgets no longer leave room for cleanup writes"
-    )
-    assert 0 < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS < (
-        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS
+    assert (
+        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12
+        < fallback_cleanup_minutes * 60
+    ), "fallback inventory budgets no longer leave room for cleanup writes"
+    assert (
+        0
+        < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS
+        < (credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
     )
 
     def token(remaining_seconds: int, issued_ago: int = 0) -> str:
-        return "header." + encoded(
-            {
-                "aud": "https://sandbox.example",
-                "exp": fixed_now + remaining_seconds,
-                "gty": "client-credentials",
-                "iat": fixed_now - issued_ago,
-                "iss": "https://auth.example/",
-                "scope": "qurl:agent qurl:read qurl:write",
-                "sub": "ci-client@clients",
-            }
-        ) + ".signature"
+        return (
+            "header."
+            + encoded(
+                {
+                    "aud": "https://sandbox.example",
+                    "exp": fixed_now + remaining_seconds,
+                    "gty": "client-credentials",
+                    "iat": fixed_now - issued_ago,
+                    "iss": "https://auth.example/",
+                    "scope": "qurl:agent qurl:read qurl:write",
+                    "sub": "ci-client@clients",
+                }
+            )
+            + ".signature"
+        )
 
     def token_response(value: str) -> tuple[int, bytes]:
         return 200, json.dumps({"access_token": value, "token_type": "Bearer"}).encode()
 
     with tempfile.TemporaryDirectory() as raw_root:
         args = auth_args(pathlib.Path(raw_root))
-        for remaining_seconds, issued_ago in ((3599, 1), (3300, 0)):
+        for remaining_seconds, issued_ago in ((3599, 1), (3000, 0)):
             value = token(remaining_seconds, issued_ago)
-            with mock.patch.object(
-                credentials, "request", return_value=token_response(value)
-            ), mock.patch.object(credentials.time, "time", return_value=fixed_now):
+            with (
+                mock.patch.object(
+                    credentials, "request", return_value=token_response(value)
+                ),
+                mock.patch.object(credentials.time, "time", return_value=fixed_now),
+            ):
                 assert credentials.auth0_token(args) == (value, "ci-client@clients")
 
-        with mock.patch.object(
-            credentials, "request", return_value=token_response(token(3299))
-        ), mock.patch.object(credentials.time, "time", return_value=fixed_now):
+        with (
+            mock.patch.object(
+                credentials, "request", return_value=token_response(token(2999))
+            ),
+            mock.patch.object(credentials.time, "time", return_value=fixed_now),
+        ):
             try:
                 credentials.auth0_token(args)
             except credentials.CredentialError as exc:
@@ -686,7 +747,7 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
                     "Auth0 token does not have the required CI management lifetime"
                 )
             else:
-                raise AssertionError("3299-second Auth0 token was accepted")
+                raise AssertionError("2999-second Auth0 token was accepted")
 
 
 def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
@@ -832,11 +893,14 @@ def test_pagination_safety_limits_fail_closed() -> None:
     def one_page_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
         return 200, b'{"data":[],"meta":{"has_more":false}}'
 
-    with mock.patch.object(credentials, "request", one_page_request), mock.patch.object(
-        credentials.time,
-        "monotonic",
-        side_effect=sticky_clock(
-            0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+    with (
+        mock.patch.object(credentials, "request", one_page_request),
+        mock.patch.object(
+            credentials.time,
+            "monotonic",
+            side_effect=sticky_clock(
+                0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+            ),
         ),
     ):
         try:
@@ -864,11 +928,14 @@ def test_pagination_safety_limits_fail_closed() -> None:
             }
         ).encode()
 
-    with mock.patch.object(credentials, "request", first_page_request), mock.patch.object(
-        credentials.time,
-        "monotonic",
-        side_effect=sticky_clock(
-            0.0, 0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+    with (
+        mock.patch.object(credentials, "request", first_page_request),
+        mock.patch.object(
+            credentials.time,
+            "monotonic",
+            side_effect=sticky_clock(
+                0.0, 0.0, float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+            ),
         ),
     ):
         try:
@@ -899,9 +966,11 @@ def test_reconciliation_reserves_time_for_resource_inventory() -> None:
         deadlines.append((path, deadline))
         return real_paged_rows(*args, **kwargs)  # type: ignore[arg-type]
 
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
-    ), mock.patch.object(credentials, "paged_rows", capture_deadline):
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(credentials, "paged_rows", capture_deadline),
+    ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
         credentials.reconcile_run(
@@ -932,7 +1001,11 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
     for response in (
         {},
         {"data": [valid, valid]},
-        {"data": [{**valid, "slug": "connector-cli-journey-v2-000000000000000000000000"}]},
+        {
+            "data": [
+                {**valid, "slug": "connector-cli-journey-v2-000000000000000000000000"}
+            ]
+        },
         {"data": [{**valid, "type": "url"}]},
         {"data": [{**valid, "status": "revoked"}]},
     ):
@@ -953,15 +1026,20 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
             methods.append(method)
             return 200, json.dumps(response).encode()
 
-        with mock.patch.object(credentials, "request", fake_request), mock.patch.object(
-            credentials.time, "sleep", lambda _: None
+        with (
+            mock.patch.object(credentials, "request", fake_request),
+            mock.patch.object(credentials.time, "sleep", lambda _: None),
         ):
             try:
-                credentials.retry_connector_resource_delete("https://sandbox.example", "jwt", connector_id)
+                credentials.retry_connector_resource_delete(
+                    "https://sandbox.example", "jwt", connector_id
+                )
             except credentials.CredentialError:
                 pass
             else:
-                raise AssertionError(f"malformed Connector lookup succeeded: {response}")
+                raise AssertionError(
+                    f"malformed Connector lookup succeeded: {response}"
+                )
         assert methods == ["GET"] * credentials.MAX_ATTEMPTS
 
     def empty_request(
@@ -986,9 +1064,11 @@ def test_resource_failure_still_revokes_every_target_credential() -> None:
     fake = FakeAPI()
     target_key_ids = set(add_run_credentials(fake))
     fake.failed_resource_deletes.add("r_connector_smoke")
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
-    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(credentials.time, "sleep", lambda _: None),
+    ):
         args = auth_args(pathlib.Path(raw_root))
         try:
             credentials.reconcile_run(
@@ -1005,18 +1085,25 @@ def test_resource_failure_still_revokes_every_target_credential() -> None:
         else:
             raise AssertionError("resource cleanup failure did not fail reconciliation")
     assert target_key_ids.issubset(fake.deleted_keys)
-    assert fake.resource_delete_attempts.count("r_connector_smoke") == credentials.MAX_ATTEMPTS
+    assert (
+        fake.resource_delete_attempts.count("r_connector_smoke")
+        == credentials.MAX_ATTEMPTS
+    )
     assert {"r_connector_failure", "r_customer_ci"}.issubset(fake.deleted_resources)
 
 
 def test_credential_failure_still_attempts_every_target_and_resources() -> None:
     fake = FakeAPI()
-    run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(fake)
+    run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = (
+        add_run_credentials(fake)
+    )
     fake.failed_key_deletes.add(failure_key_id)
     fake.failed_resource_deletes.add("r_connector_smoke")
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
-    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(credentials.time, "sleep", lambda _: None),
+    ):
         args = auth_args(pathlib.Path(raw_root))
         try:
             credentials.reconcile_run(
@@ -1029,12 +1116,22 @@ def test_credential_failure_still_attempts_every_target_and_resources() -> None:
                 )
             )
         except credentials.CredentialError as exc:
-            assert str(exc) == "run cleanup did not converge (connector_resource=1, credential_revoke=1)"
+            assert (
+                str(exc)
+                == "run cleanup did not converge (connector_resource=1, credential_revoke=1)"
+            )
         else:
-            raise AssertionError("credential cleanup failure did not fail reconciliation")
+            raise AssertionError(
+                "credential cleanup failure did not fail reconciliation"
+            )
     assert fake.key_delete_attempts.count(failure_key_id) == credentials.MAX_ATTEMPTS
-    assert {run_key_id, device_key_id, unrecorded_device_key_id}.issubset(fake.deleted_keys)
-    assert fake.resource_delete_attempts.count("r_connector_smoke") == credentials.MAX_ATTEMPTS
+    assert {run_key_id, device_key_id, unrecorded_device_key_id}.issubset(
+        fake.deleted_keys
+    )
+    assert (
+        fake.resource_delete_attempts.count("r_connector_smoke")
+        == credentials.MAX_ATTEMPTS
+    )
     assert {"r_connector_failure", "r_customer_ci"}.issubset(fake.deleted_resources)
 
 
@@ -1044,9 +1141,11 @@ def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
     failed_agent = "qurl-journey-v2-r1231-a2-hs"
     other_agent = "qurl-journey-v2-r1231-a2-hf"
     fake.failed_assignment_retires.add(failed_agent)
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
-    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(credentials.time, "sleep", lambda _: None),
+    ):
         args = auth_args(pathlib.Path(raw_root))
         try:
             credentials.reconcile_run(
@@ -1061,8 +1160,12 @@ def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
         except credentials.CredentialError as exc:
             assert str(exc) == "run cleanup did not converge (assignment_retire=1)"
         else:
-            raise AssertionError("assignment retirement failure did not fail reconciliation")
-    assert fake.assignment_retire_attempts.count(failed_agent) == credentials.MAX_ATTEMPTS
+            raise AssertionError(
+                "assignment retirement failure did not fail reconciliation"
+            )
+    assert (
+        fake.assignment_retire_attempts.count(failed_agent) == credentials.MAX_ATTEMPTS
+    )
     assert other_agent in fake.retired_assignments
     assert {"r_connector_smoke", "r_connector_failure", "r_customer_ci"}.issubset(
         fake.deleted_resources
@@ -1091,7 +1194,9 @@ def test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal() -> 
             except credentials.CredentialError as exc:
                 assert str(exc) == "qURL Connector assignment retirement was rejected"
             else:
-                raise AssertionError(f"permanent assignment retirement status {status} was accepted")
+                raise AssertionError(
+                    f"permanent assignment retirement status {status} was accepted"
+                )
         assert rejected.assignment_retire_attempts == [absent_agent]
 
 
@@ -1100,10 +1205,13 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
     fake.assignments.clear()
     fake.connector_resources.clear()
     fake.resources = [
-        resource for resource in fake.resources if resource.get("description") == "customer data"
+        resource
+        for resource in fake.resources
+        if resource.get("description") == "customer data"
     ]
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", fake
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
     ):
         args = auth_args(pathlib.Path(raw_root))
         credentials.reconcile_run(
@@ -1124,9 +1232,58 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
     assert fake.deleted_resources == []
 
 
+def test_successful_journey_cleanup_requires_device_key_contract() -> None:
+    missing = FakeAPI()
+    missing.assignments.clear()
+    missing.connector_resources.clear()
+    missing.resources.clear()
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", missing),
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        try:
+            credentials.reconcile_run(
+                argparse.Namespace(
+                    **vars(args),
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                    runtime="host",
+                    require_device_keys=True,
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == "run cleanup did not converge (device_key_contract=1)"
+        else:
+            raise AssertionError(
+                "successful journey cleanup accepted missing device keys"
+            )
+
+    present = FakeAPI()
+    add_run_credentials(present)
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", present),
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        credentials.reconcile_run(
+            argparse.Namespace(
+                **vars(args),
+                lane="linux",
+                run_attempt="2",
+                run_id="1231",
+                runtime="host",
+                require_device_keys=True,
+            )
+        )
+
+
 def test_unhashable_inventory_fields_remain_bounded() -> None:
     active_fake = FakeAPI()
-    run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(active_fake)
+    run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = (
+        add_run_credentials(active_fake)
+    )
     active_fake.extra_credentials.extend(
         (
             {
@@ -1145,9 +1302,11 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
             },
         )
     )
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", active_fake
-    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", active_fake),
+        mock.patch.object(credentials.time, "sleep", lambda _: None),
+    ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
         try:
@@ -1163,13 +1322,19 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
         except credentials.CredentialError as exc:
             assert str(exc) == "run cleanup did not converge (credential_shape=2)"
         else:
-            raise AssertionError("malformed active credential inventory did not fail closed")
-    assert {run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id}.issubset(
-        active_fake.deleted_keys
-    )
+            raise AssertionError(
+                "malformed active credential inventory did not fail closed"
+            )
+    assert {
+        run_key_id,
+        failure_key_id,
+        device_key_id,
+        unrecorded_device_key_id,
+    }.issubset(active_fake.deleted_keys)
     assert {"r_connector_smoke", "r_connector_failure", "r_customer_ci"}.issubset(
         active_fake.deleted_resources
     )
+
 
 def main() -> None:
     test_scheduled_soak_workflow_contract()
@@ -1187,6 +1352,7 @@ def main() -> None:
     test_assignment_failure_still_attempts_every_target_and_resources()
     test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
     test_empty_run_reconciliation_is_idempotent()
+    test_successful_journey_cleanup_requires_device_key_contract()
     test_unhashable_inventory_fields_remain_bounded()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
@@ -1204,7 +1370,9 @@ def main() -> None:
         "connector-cli-journey-v2-87e091ca6623843507b5863b",
     }
     lane_identities = [
-        argparse.Namespace(run_id="9001" + str(index), run_attempt="3", runtime="host", lane=lane)
+        argparse.Namespace(
+            run_id="9001" + str(index), run_attempt="3", runtime="host", lane=lane
+        )
         for index, lane in enumerate(("linux", "macos", "windows"), start=1)
     ]
     assert len({credentials.run_description(item) for item in lane_identities}) == 3
@@ -1212,12 +1380,35 @@ def main() -> None:
         "qurl CLI journey v2 90011/3/linux/primary",
         "qurl CLI journey v2 90011/3/linux/failure",
     }
-    assert len(set().union(*(credentials.run_credential_names(item) for item in lane_identities))) == 6
-    assert len(set().union(*(credentials.run_device_key_names(item) for item in lane_identities))) == 6
-    assert len(set().union(*(credentials.run_connector_ids(item) for item in lane_identities))) == 6
+    assert (
+        len(
+            set().union(
+                *(credentials.run_credential_names(item) for item in lane_identities)
+            )
+        )
+        == 6
+    )
+    assert (
+        len(
+            set().union(
+                *(credentials.run_device_key_names(item) for item in lane_identities)
+            )
+        )
+        == 6
+    )
+    assert (
+        len(
+            set().union(
+                *(credentials.run_connector_ids(item) for item in lane_identities)
+            )
+        )
+        == 6
+    )
     fake = FakeAPI()
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(credentials, "request", fake), mock.patch.object(
-        credentials.time, "sleep", lambda _: None
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+        mock.patch.object(credentials.time, "sleep", lambda _: None),
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
@@ -1227,14 +1418,25 @@ def main() -> None:
         output = root / "credential"
         output.mkdir(mode=0o700)
         create_args = argparse.Namespace(
-            **vars(args), output_dir=output, run_id="1231", run_attempt="2", lane="linux", purpose="primary"
+            **vars(args),
+            output_dir=output,
+            run_id="1231",
+            run_attempt="2",
+            lane="linux",
+            purpose="primary",
         )
         credentials.create(create_args)
         assert {path.name for path in output.iterdir()} == {
-            "api-key", "api-key-id", "cleanup-jwt", "owner-id", "run-name"
+            "api-key",
+            "api-key-id",
+            "cleanup-jwt",
+            "owner-id",
+            "run-name",
         }
         assert (output / "owner-id").read_text(encoding="utf-8") == fake.owner
-        assert (output / "run-name").read_text(encoding="utf-8") == "qurl CLI journey v2 1231/2/linux/primary"
+        assert (output / "run-name").read_text(
+            encoding="utf-8"
+        ) == "qurl CLI journey v2 1231/2/linux/primary"
         fake.transient_key_delete = 1
         credentials.revoke(
             argparse.Namespace(qurl_endpoint=args.qurl_endpoint, credential_dir=output)
@@ -1245,13 +1447,17 @@ def main() -> None:
         recovery = root / "recovery"
         recovery.mkdir(mode=0o700)
         credentials.write_private(recovery / "cleanup-jwt", fake.jwt)
-        credentials.write_private(recovery / "run-name", "qurl CLI journey v2 1232/2/macos/failure")
+        credentials.write_private(
+            recovery / "run-name", "qurl CLI journey v2 1232/2/macos/failure"
+        )
         credentials.revoke_persisted(args.qurl_endpoint, recovery)
         recovered_key_id = (recovery / "api-key-id").read_text(encoding="utf-8")
         assert credentials.KEY_ID.fullmatch(recovered_key_id)
         assert recovered_key_id in fake.deleted_keys
 
-        run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(fake)
+        run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = (
+            add_run_credentials(fake)
+        )
         unrelated_key_id = "key_OtherKey1234"
         unrelated_device_key_id = "key_OtherDev1234"
         fake.keys[unrelated_key_id] = {
@@ -1279,7 +1485,9 @@ def main() -> None:
             )
         )
         expected_connector_resource_ids = {"r_connector_smoke", "r_connector_failure"}
-        assert set(fake.deleted_resources) == expected_connector_resource_ids | {"r_customer_ci"}
+        assert set(fake.deleted_resources) == expected_connector_resource_ids | {
+            "r_customer_ci"
+        }
         assert "r_keep" not in fake.deleted_resources
         assert "r_redacted_tunnel" not in fake.deleted_resources
         assert {
@@ -1336,7 +1544,9 @@ def main() -> None:
         except credentials.CredentialError as exc:
             assert str(exc) == "run cleanup did not converge (credential_shape=1)"
         else:
-            raise AssertionError("malformed exact-name device credential was not rejected")
+            raise AssertionError(
+                "malformed exact-name device credential was not rejected"
+            )
         assert malformed_device_key_id not in fake.deleted_keys
 
     print("qurl CLI journey credential tests passed")

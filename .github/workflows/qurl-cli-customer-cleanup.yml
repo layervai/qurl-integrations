@@ -144,6 +144,8 @@ jobs:
               echo "::error::cleanup source did not run the customer journey" >&2
               exit 1
             }
+            # A workflow_run event has exactly one source run. A successful
+            # primary cleanup makes the fallback unnecessary for that source.
             if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
               cleanup_succeeded=$(jq -r '
                 any(.jobs[];

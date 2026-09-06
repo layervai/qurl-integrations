@@ -635,6 +635,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     timeout-minutes: 20
+    # This is also the hermetic packaged-artifact gate for pull requests and
+    # main pushes. The required job consumes its result even when the
+    # credentialed journey is intentionally skipped.
     if: needs.changes.outputs.cli == 'true'
     permissions:
       contents: read
@@ -1110,6 +1113,7 @@ jobs:
         env:
           AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
           AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          REQUIRE_DEVICE_KEYS: ${{ needs.journey.result == 'success' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           client_dir=$RUNNER_TEMP/qurl-journey-auth
@@ -1126,10 +1130,15 @@ jobs:
             IFS=: read -r lane lane_id <<<"$lane_spec"
             run_specs+=(--run-spec "${GITHUB_RUN_ID}${lane_id}:${GITHUB_RUN_ATTEMPT}:${lane}:host")
           done
+          device_key_contract=()
+          if [[ "$REQUIRE_DEVICE_KEYS" == true ]]; then
+            device_key_contract+=(--require-device-keys)
+          fi
           python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
             --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
             --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" "${run_specs[@]}"
+            --client-secret-file "$client_dir/client-secret" \
+            "${device_key_contract[@]}" "${run_specs[@]}"
 
   goreleaser-check:
     name: cli / goreleaser check
@@ -1478,4 +1487,6 @@ jobs:
             exit 1
           }
           gh workflow run release-please.yml --repo "$GITHUB_REPOSITORY" --ref main \
-            --field "cli_tag=$cli_tag" --field "source_sha=$GITHUB_SHA"
+            --field "cli_tag=$cli_tag" --field "source_sha=$GITHUB_SHA" \
+            --field "cli_run_id=$GITHUB_RUN_ID" \
+            --field "cli_run_attempt=$GITHUB_RUN_ATTEMPT"
