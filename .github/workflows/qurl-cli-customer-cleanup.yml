@@ -12,6 +12,7 @@ on:
         required: true
         type: string
   workflow_run:
+    # Source eligibility is checked in the job; skipped PR run rows are expected.
     workflows: ["cli: Build and Test"]
     types: [completed]
 
@@ -94,8 +95,9 @@ jobs:
               }
               if [[ ! "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
                 (( 10#$SOURCE_RUN_ATTEMPT > 30 )); then
-                echo "::error::cleanup source run attempt is outside the 1-30 recovery bound" >&2
-                exit 1
+                echo "::warning::cleanup source run attempt is outside the 1-30 automatic recovery bound" >&2
+                echo "required=false" >>"$GITHUB_OUTPUT"
+                exit 0
               fi
               source_runs="$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT"
               ;;
@@ -183,17 +185,20 @@ jobs:
                   any(.[].jobs[];
                     (.name | type) != "string" or
                     (.run_attempt | type) != "number" or
-                    .run_attempt < 1 or .run_attempt > $source_attempt)
+                    .run_attempt < 1)
                 then error("all-attempt source jobs are malformed or truncated")
                 else .
                 end
               end
             ' <<<"$all_jobs" >/dev/null
+            eligible_jobs=$(jq -c --argjson source_attempt "$run_attempt" '
+              [.[].jobs[] | select(.run_attempt <= $source_attempt)]
+            ' <<<"$all_jobs")
             identity_attempt=$(jq -r '
-              [.[].jobs[] | select(
+              [.[] | select(
                 .name == "cli / customer journey artifacts" and
                 .conclusion != "skipped") | .run_attempt] | max // ""
-            ' <<<"$all_jobs")
+            ' <<<"$eligible_jobs")
             if [[ -z "$identity_attempt" ]]; then
               if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
                 echo "required=false" >>"$GITHUB_OUTPUT"
@@ -203,8 +208,8 @@ jobs:
               exit 1
             fi
             identity_jobs=$(jq -c --argjson identity_attempt "$identity_attempt" '
-              {jobs: [.[].jobs[] | select(.run_attempt == $identity_attempt)]}
-            ' <<<"$all_jobs")
+              {jobs: [.[] | select(.run_attempt == $identity_attempt)]}
+            ' <<<"$eligible_jobs")
             # A completed workflow event can briefly precede its final job
             # conclusion. Only explicit skipped suppresses idempotent cleanup.
             journey_ran=$(jq -r '

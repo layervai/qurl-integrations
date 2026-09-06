@@ -30,11 +30,9 @@ AUTH0_ISSUANCE_SKEW_SECONDS = 60
 # The setup command removes it before the customer journey starts. A cleanup
 # command reuses one token for its bounded batch and never exposes that token to
 # a customer process. The lifetime is independent of the 110-minute soak lane.
-FALLBACK_CLEANUP_BUDGET_SECONDS = 45 * 60
+CREATE_PAIR_BUDGET_SECONDS = 15 * 60
+RECONCILE_BATCH_BUDGET_SECONDS = 45 * 60
 M2M_EXPIRY_MARGIN_SECONDS = 5 * 60
-MIN_M2M_TOKEN_REMAINING_SECONDS = (
-    FALLBACK_CLEANUP_BUDGET_SECONDS + M2M_EXPIRY_MARGIN_SECONDS
-)
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
@@ -252,7 +250,17 @@ def effective_scopes(claims: dict[str, Any]) -> frozenset[str]:
     return frozenset(values)
 
 
-def auth0_token(args: argparse.Namespace) -> tuple[str, str]:
+def auth0_token(
+    args: argparse.Namespace, operation_budget_seconds: int
+) -> tuple[str, str]:
+    if (
+        not isinstance(operation_budget_seconds, int)
+        or isinstance(operation_budget_seconds, bool)
+        or operation_budget_seconds <= 0
+        or operation_budget_seconds + M2M_EXPIRY_MARGIN_SECONDS
+        > AUTH0_M2M_TOKEN_LIFETIME_SECONDS
+    ):
+        raise CredentialError("Auth0 operation budget is invalid")
     client_id = private_value(args.client_id_file, "Auth0 client ID")
     client_secret = private_value(args.client_secret_file, "Auth0 client secret")
     form = urllib.parse.urlencode(
@@ -298,7 +306,7 @@ def auth0_token(args: argparse.Namespace) -> tuple[str, str]:
         or isinstance(expires, bool)
         or issued > now + AUTH0_ISSUANCE_SKEW_SECONDS
         or now - issued > AUTH0_ISSUANCE_SKEW_SECONDS
-        or expires - now < MIN_M2M_TOKEN_REMAINING_SECONDS
+        or expires - now < operation_budget_seconds + M2M_EXPIRY_MARGIN_SECONDS
         or expires - issued > 2 * AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ):
         raise CredentialError(
@@ -451,6 +459,9 @@ def retry_connector_resource_delete(endpoint: str, jwt: str, connector_id: str) 
                 )
             else:
                 rows = response.get("data")
+                # A slug is unique by contract. Malformed or duplicate rows are
+                # invariant breaks, not transient responses that a retry can fix
+                # safely without risking deletion of the wrong resource.
                 if not isinstance(rows, list) or any(
                     not isinstance(row, dict) for row in rows
                 ):
@@ -538,24 +549,16 @@ def paged_rows(
         cursor = next_cursor
 
 
-def authenticated_owner(args: argparse.Namespace) -> tuple[str, str, str]:
+def authenticated_owner(
+    args: argparse.Namespace, operation_budget_seconds: int
+) -> tuple[str, str, str]:
     endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
     args.token_endpoint = https_origin(args.token_endpoint, "Auth0 token endpoint")
-    jwt, expected_owner = auth0_token(args)
+    jwt, expected_owner = auth0_token(args, operation_budget_seconds)
     m2m = identity(endpoint, jwt)
     if m2m.get("auth_type") != "jwt" or m2m.get("owner_id") != expected_owner:
         raise CredentialError("qURL rejected the dedicated CI owner")
     return endpoint, jwt, expected_owner
-
-
-def identify(args: argparse.Namespace) -> None:
-    _, _, expected_owner = authenticated_owner(args)
-    if not args.output_file.is_absolute() or args.output_file == pathlib.Path(
-        args.output_file.anchor
-    ):
-        raise CredentialError("owner output must be an absolute non-root path")
-    write_private(args.output_file, expected_owner)
-    print("verified one dedicated CI owner")
 
 
 def run_description(args: argparse.Namespace) -> str:
@@ -694,7 +697,7 @@ def reconcile_run(
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
     if authenticated is None:
-        endpoint, jwt, _ = authenticated_owner(args)
+        endpoint, jwt, _ = authenticated_owner(args, RECONCILE_BATCH_BUDGET_SECONDS)
     else:
         endpoint, jwt = authenticated
     if inventory is None:
@@ -825,7 +828,7 @@ def reconcile_batch(args: argparse.Namespace) -> None:
             )
         )
 
-    endpoint, jwt, _ = authenticated_owner(args)
+    endpoint, jwt, _ = authenticated_owner(args, RECONCILE_BATCH_BUDGET_SECONDS)
     inventory = reconciliation_inventory(endpoint, jwt)
     failures = 0
     for run in parsed:
@@ -996,13 +999,6 @@ def create_with_auth(
     print("created one run-scoped customer API key")
 
 
-def create(args: argparse.Namespace) -> None:
-    # Reject malformed input before the one metered Auth0 token request.
-    validate_create_args(args)
-    endpoint, jwt, expected_owner = authenticated_owner(args)
-    create_with_auth(args, endpoint, jwt, expected_owner)
-
-
 def create_pair(args: argparse.Namespace) -> None:
     requests = tuple(
         CredentialCreate(
@@ -1032,7 +1028,9 @@ def create_pair(args: argparse.Namespace) -> None:
         or failure_path in primary_path.parents
     ):
         raise CredentialError("customer credential directories must be distinct")
-    endpoint, jwt, expected_owner = authenticated_owner(args)
+    endpoint, jwt, expected_owner = authenticated_owner(
+        args, CREATE_PAIR_BUDGET_SECONDS
+    )
     directories = {request.purpose: request.output_dir for request in requests}
     completed_purposes: list[str] = []
     try:
@@ -1079,14 +1077,10 @@ def create_pair(args: argparse.Namespace) -> None:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
-    create_parser = commands.add_parser("create")
     create_pair_parser = commands.add_parser("create-pair")
-    identify_parser = commands.add_parser("identify")
     reconcile_batch_parser = commands.add_parser("reconcile-batch")
     for current in (
-        create_parser,
         create_pair_parser,
-        identify_parser,
         reconcile_batch_parser,
     ):
         current.add_argument("--token-endpoint", required=True)
@@ -1094,16 +1088,6 @@ def parser() -> argparse.ArgumentParser:
         current.add_argument("--qurl-endpoint", required=True)
         current.add_argument("--client-id-file", type=pathlib.Path, required=True)
         current.add_argument("--client-secret-file", type=pathlib.Path, required=True)
-    identify_parser.add_argument("--output-file", type=pathlib.Path, required=True)
-    identify_parser.set_defaults(handler=identify)
-    create_parser.add_argument("--output-dir", type=pathlib.Path, required=True)
-    create_parser.add_argument("--run-id", required=True)
-    create_parser.add_argument("--run-attempt", required=True)
-    create_parser.add_argument("--lane", required=True)
-    create_parser.add_argument(
-        "--purpose", choices=("primary", "failure"), required=True
-    )
-    create_parser.set_defaults(handler=create)
     create_pair_parser.add_argument(
         "--primary-output-dir", type=pathlib.Path, required=True
     )

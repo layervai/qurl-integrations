@@ -98,7 +98,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		!strings.Contains(identity.Run, `echo "run_attempt=$GITHUB_RUN_ATTEMPT"`) {
 		t.Errorf("artifact producer does not persist the exact journey identity attempt: step=%#v outputs=%#v", identity, artifact.Outputs)
 	}
-	const sourceSHA = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+	const sourceSHA = "${{ needs.changes.outputs.source_sha }}"
 	if checkout == nil || checkout.With["ref"] != sourceSHA || checkout.With["persist-credentials"] != false {
 		t.Errorf("artifact checkout is not exact and credential-free: %#v", checkout)
 	}
@@ -161,7 +161,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		t.Fatal(err)
 	}
 	journeyContract := contract.Jobs["journey"]
-	if journeyContract.If != "(github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
+	if journeyContract.If != "github.ref == 'refs/heads/main' && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
 		journeyContract.Environment != "cli-customer-journey" || journeyContract.RunsOn != "${{ matrix.os }}" ||
 		fmt.Sprint(journeyContract.Strategy.Matrix) != "${{ fromJSON(needs.changes.outputs.journey_matrix) }}" ||
 		journeyContract.Strategy.FailFast == nil || *journeyContract.Strategy.FailFast {
@@ -339,7 +339,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			download++
 			if current.With["run-id"] != nil || current.With["repository"] != nil ||
 				current.With["digest-mismatch"] != "error" ||
-				fmt.Sprint(current.With["name"]) != "qurl-customer-journey-${{ github.sha }}-${{ needs.customer-artifacts.outputs.identity_run_attempt }}" {
+				fmt.Sprint(current.With["name"]) != "qurl-customer-journey-${{ needs.changes.outputs.source_sha }}-${{ needs.customer-artifacts.outputs.identity_run_attempt }}" {
 				t.Errorf("journey artifact crosses a workflow or identity-attempt boundary, or skips digest validation: %#v", current)
 			}
 		}
@@ -443,7 +443,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	cleanup := workflow.Jobs["journey-cleanup"]
-	if cleanup.If != "always() && (github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
+	if cleanup.If != "always() && github.ref == 'refs/heads/main' && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
 		contract.Jobs["journey-cleanup"].Environment != "cli-customer-journey-cleanup" {
 		t.Errorf("terminal cleanup is not an exact protected trusted-event gate: if=%q", cleanup.If)
 	}
@@ -467,7 +467,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		}
 	}
 	if verifyRequired == nil || fmt.Sprint(verifyRequired.Env["LIVE_REQUIRED"]) !=
-		"${{ (github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) }}" {
+		"${{ github.ref == 'refs/heads/main' && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) }}" {
 		t.Errorf("required aggregate can demand or waive live jobs outside a trusted main or release run: %#v", verifyRequired)
 	}
 
@@ -986,12 +986,14 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$GH_CAPTURE"
 if [[ "$*" == *"/jobs?filter=all&per_page=100"* ]]; then
   artifact_attempt=${MOCK_ARTIFACT_ATTEMPT:-$EXPECTED_ATTEMPT}
+  future_attempt=${MOCK_FUTURE_ATTEMPT:-0}
   jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
-    --argjson artifact_attempt "$artifact_attempt" '
-    [{jobs:[
+    --argjson artifact_attempt "$artifact_attempt" --argjson future_attempt "$future_attempt" '
+    [{jobs:([
       {name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$artifact_attempt},
       {name:$name,conclusion:$conclusion,run_attempt:$artifact_attempt}
-    ]} | .total_count = (.jobs | length)]'
+    ] + (if $future_attempt > 0 then [{name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$future_attempt}] else [] end))} |
+    .total_count = (.jobs | length)]'
 elif [[ "$*" == *"/attempts/"*"/jobs?per_page=100" ]]; then
   if [[ -n "${MOCK_CLEANUP_CONCLUSION:-}" ]]; then
     jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
@@ -1122,13 +1124,17 @@ fi
 	if strings.Contains(ghArguments, "/actions/runs/700/attempts/1/jobs?per_page=100") {
 		t.Errorf("rerun cleanup inferred identity by walking prior attempts: %s", ghArguments)
 	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_FUTURE_ATTEMPT": "3"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
+		t.Fatalf("future operator rerun raced automatic cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_CLEANUP_CONCLUSION": "success"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
 		t.Fatalf("automatic source with successful primary cleanup did not skip fallback: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "31"})
-	if err == nil || strings.TrimSpace(workflowOutput) != "" || !strings.Contains(output, "source run attempt is outside the 1-30 recovery bound") {
-		t.Fatalf("automatic over-bound attempt did not fail loudly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" || !strings.Contains(output, "source run attempt is outside the 1-30 automatic recovery bound") {
+		t.Fatalf("automatic over-bound attempt did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 
 	for _, test := range []struct {
@@ -1759,7 +1765,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(exactGate, []byte(`.display_title == ("CLI release gate " + $sha)`)) {
+	if !bytes.Contains(exactGate, []byte(`.display_title == ("CLI release gate " + $sha + " " + $tag)`)) {
 		t.Error("exact release gate accepts an operator soak at the same source SHA")
 	}
 	source := steps["Resolve the exact release source"]
@@ -1801,11 +1807,12 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	releaseSignal := len(signal.Steps) == 1 &&
 		strings.Contains(signal.Steps[0].Run, "gh workflow run cli.yml") &&
 		strings.Contains(signal.Steps[0].Run, `release_source_sha=$SOURCE_SHA`) &&
+		strings.Contains(signal.Steps[0].Run, `release_source_tag=$CLI_TAG`) &&
 		strings.Contains(signal.Steps[0].Run, `"$tag_sha" == "$SOURCE_SHA"`) &&
-		strings.Contains(signal.Steps[0].Run, `--ref "$CLI_TAG"`) &&
+		strings.Contains(signal.Steps[0].Run, `--ref main`) &&
 		strings.Contains(signal.Steps[0].Run, "cli-customer-journey cli-customer-journey-cleanup") &&
 		strings.Contains(signal.Steps[0].Run, `{name:"main",type:"branch"}`) &&
-		strings.Contains(signal.Steps[0].Run, `{name:"v*",type:"tag"}`) &&
+		!strings.Contains(signal.Steps[0].Run, `{name:"v*",type:"tag"}`) &&
 		!strings.Contains(signal.Steps[0].Run, "main_sha=")
 	if !releaseSignal {
 		t.Error("release creator does not start the exact source customer journey")
@@ -1841,10 +1848,11 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	cliRaw := string(readWorkflowBytes(t, cliWorkflow))
 	for _, required := range []string{
 		"release_source_sha:",
-		"Validate the exact release source",
-		`"$GITHUB_REF_TYPE" == tag`,
-		`"$GITHUB_SHA" == "$RELEASE_SOURCE_SHA"`,
-		"before any job can request an Auth0 token",
+		"release_source_tag:",
+		"Select and validate the exact source",
+		`"$GITHUB_REF" == refs/heads/main`,
+		`git merge-base --is-ancestor "$RELEASE_SOURCE_SHA" "$GITHUB_SHA"`,
+		`ref: ${{ needs.changes.outputs.source_sha }}`,
 	} {
 		if !strings.Contains(cliRaw, required) {
 			t.Errorf("CLI workflow does not bind a release handoff before Auth0 use: missing %q", required)
@@ -1869,7 +1877,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 		current := &result.Steps[index]
 		if current.Name == "Continue an exact draft CLI release" {
 			journeySignal = strings.Contains(current.Run, "gh workflow run release-please.yml") &&
-				strings.Contains(current.Run, "source_sha=$GITHUB_SHA") &&
+				strings.Contains(current.Run, "source_sha=$SOURCE_SHA") &&
 				strings.Contains(current.Run, "cli_run_id=$GITHUB_RUN_ID") &&
 				strings.Contains(current.Run, "cli_run_attempt=$GITHUB_RUN_ATTEMPT") &&
 				strings.Contains(current.Run, `"${cli_tag}^{commit}"`) &&
@@ -1878,7 +1886,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 				strings.Contains(current.Run, `(.isDraft | type) == "boolean"`) &&
 				strings.Contains(current.Run, `release_draft=$(jq -r '.isDraft'`) &&
 				strings.Contains(current.Run, `"$release_tag" == "$cli_tag"`) &&
-				strings.Contains(current.Run, `"$release_target" == "$GITHUB_SHA"`) &&
+				strings.Contains(current.Run, `"$release_target" == "$SOURCE_SHA"`) &&
 				strings.Contains(current.Run, `"$release_draft" == true`) &&
 				!strings.Contains(current.Run, "/releases/tags/")
 		}
@@ -1946,7 +1954,8 @@ if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ]; then
   exit 0
 fi
 if [ "$1" = "merge-base" ] && [ "$2" = "--is-ancestor" ]; then
-  exit 0
+  [ "$STUB_ANCESTOR" = true ]
+  exit $?
 fi
 exit 2
 `
@@ -1956,9 +1965,9 @@ if [ "$1" = "api" ]; then
   case "$2" in
     *deployment-branch-policies*)
       if [ "$STUB_ENV_VALID" = true ]; then
-        printf '%s\n' '{"total_count":2,"branch_policies":[{"name":"v*","type":"tag"},{"name":"main","type":"branch"}]}'
-      else
         printf '%s\n' '{"total_count":1,"branch_policies":[{"name":"main","type":"branch"}]}'
+      else
+        printf '%s\n' '{"total_count":2,"branch_policies":[{"name":"v*","type":"tag"},{"name":"main","type":"branch"}]}'
       fi
       ;;
     *environments/*)
@@ -2005,6 +2014,7 @@ exit 2
 			"GITHUB_REPOSITORY":   "layervai/qurl-integrations",
 			"GITHUB_SHA":          sourceSHA,
 			"SOURCE_SHA":          sourceSHA,
+			"SOURCE_TAG":          cliTag,
 			"HANDOFF_SOURCE_SHA":  sourceSHA,
 			"HANDOFF_RUN_ID":      "700",
 			"HANDOFF_RUN_ATTEMPT": "2",
@@ -2012,6 +2022,7 @@ exit 2
 			"GITHUB_RUN_ATTEMPT":  "2",
 			"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"STUB_DRAFT":          draftValue,
+			"STUB_ANCESTOR":       "true",
 			"STUB_ENV_VALID":      "true",
 			"STUB_GH_LOG":         ghCalls,
 			"STUB_SHA":            sourceSHA,
@@ -2040,13 +2051,48 @@ exit 2
 		return result{output: string(output), githubOutput: read(githubOutput), ghCalls: read(ghCalls), err: err}
 	}
 
+	sourceSelectorRun := stepRun(t, cliWorkflow, changesJobID, "Select and validate the exact source")
+	t.Run("release_source_selector_accepts_tagged_main_ancestor", func(t *testing.T) {
+		got := runStep(t, sourceSelectorRun, true, sourceSHA, map[string]string{
+			"GITHUB_EVENT_NAME":  "workflow_dispatch",
+			"GITHUB_REF":         "refs/heads/main",
+			"PR_HEAD_SHA":        "",
+			"RELEASE_SOURCE_SHA": sourceSHA,
+			"RELEASE_SOURCE_TAG": cliTag,
+		})
+		if got.err != nil || got.githubOutput != "sha="+sourceSHA+"\ntag="+cliTag+"\n" {
+			t.Fatalf("release source selector rejected exact ancestor: err=%v output=%s github_output=%q", got.err, got.output, got.githubOutput)
+		}
+	})
+	t.Run("release_source_selector_rejects_untrusted_or_partial_handoff", func(t *testing.T) {
+		for _, overrides := range []map[string]string{
+			{
+				"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/feature",
+				"RELEASE_SOURCE_SHA": sourceSHA, "RELEASE_SOURCE_TAG": cliTag,
+			},
+			{
+				"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+				"RELEASE_SOURCE_SHA": sourceSHA, "RELEASE_SOURCE_TAG": "",
+			},
+			{
+				"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+				"RELEASE_SOURCE_SHA": sourceSHA, "RELEASE_SOURCE_TAG": cliTag,
+				"STUB_ANCESTOR": "false",
+			},
+		} {
+			if got := runStep(t, sourceSelectorRun, true, sourceSHA, overrides); got.err == nil {
+				t.Fatalf("release source selector accepted unsafe handoff: %#v", overrides)
+			}
+		}
+	})
+
 	releaseSignalRun := stepRun(t, releasePleaseWorkflow, "signal-cli-release", "Dispatch the exact CLI customer journey")
 	t.Run("release_signal_accepts_exact_environment_policy", func(t *testing.T) {
 		got := runStep(t, releaseSignalRun, true, sourceSHA)
 		if got.err != nil {
 			t.Fatalf("release signal rejected exact environment policy: %v\n%s", got.err, got.output)
 		}
-		for _, required := range []string{"workflow run cli.yml", "--ref " + cliTag, "release_source_sha=" + sourceSHA} {
+		for _, required := range []string{"workflow run cli.yml", "--ref main", "release_source_sha=" + sourceSHA, "release_source_tag=" + cliTag} {
 			if !strings.Contains(got.ghCalls, required) {
 				t.Errorf("release signal dispatch = %q, want %q", got.ghCalls, required)
 			}
@@ -2054,7 +2100,7 @@ exit 2
 	})
 	t.Run("release_signal_rejects_broad_or_missing_environment_policy", func(t *testing.T) {
 		got := runStep(t, releaseSignalRun, true, sourceSHA, map[string]string{"STUB_ENV_VALID": "false"})
-		if got.err == nil || !strings.Contains(got.output, "must allow only main and v* release tags") {
+		if got.err == nil || !strings.Contains(got.output, "must allow only main") {
 			t.Fatalf("release signal accepted incomplete environment policy: err=%v output=%s", got.err, got.output)
 		}
 		if got.ghCalls != "" {

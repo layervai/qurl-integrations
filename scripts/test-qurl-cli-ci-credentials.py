@@ -422,7 +422,9 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "QURL_CLI_CI_CLEANUP_ID_DIR" not in workflow
     assert 'sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true' in workflow
     assert "inputs.release_source_sha != ''" in workflow
-    assert '"$GITHUB_SHA" == "$RELEASE_SOURCE_SHA"' in workflow
+    assert "release_source_tag:" in workflow
+    assert '"$GITHUB_REF" == refs/heads/main' in workflow
+    assert 'git merge-base --is-ancestor "$RELEASE_SOURCE_SHA" "$GITHUB_SHA"' in workflow
     assert "needs.required.result == 'success'" in workflow
     assert "needs.journey.result == 'success'" in workflow
     assert "notify-soak-manual-failure:" in workflow
@@ -580,7 +582,7 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
         assert fake.resource_inventory_requests == 1
 
 
-def test_create_rejects_invalid_input_before_auth0() -> None:
+def test_pair_rejects_invalid_input_before_auth0() -> None:
     fake = FakeAPI()
     with (
         tempfile.TemporaryDirectory() as raw_root,
@@ -592,19 +594,18 @@ def test_create_rejects_invalid_input_before_auth0() -> None:
             ("run_id", "0"),
             ("run_attempt", "01"),
             ("lane", "solaris"),
-            ("purpose", "admin"),
         ):
             values = {
                 **vars(auth),
-                "output_dir": root / "credential",
+                "primary_output_dir": root / "primary",
+                "failure_output_dir": root / "failure",
                 "run_id": "1231",
                 "run_attempt": "2",
                 "lane": "linux",
-                "purpose": "primary",
             }
             values[field] = value
             try:
-                credentials.create(argparse.Namespace(**values))
+                credentials.create_pair(argparse.Namespace(**values))
             except credentials.CredentialError:
                 pass
             else:
@@ -725,26 +726,25 @@ def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
             raise AssertionError("failed inner cleanup was masked")
 
 
-def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
+def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
     fixed_now = 2_000_000_000
     cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
     fallback_cleanup_minutes = workflow_timeout_minutes(
         CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
     )
     assert fallback_cleanup_minutes == 45
-    assert credentials.FALLBACK_CLEANUP_BUDGET_SECONDS == fallback_cleanup_minutes * 60
-    assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
-    assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 3000, (
-        "journey credential budget changed; confirm the M2M lifetime still covers it"
-    )
+    assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
     assert (
-        credentials.MIN_M2M_TOKEN_REMAINING_SECONDS
+        credentials.RECONCILE_BATCH_BUDGET_SECONDS
+        == fallback_cleanup_minutes * 60
+    )
+    assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
+    assert (
+        credentials.RECONCILE_BATCH_BUDGET_SECONDS
+        + credentials.M2M_EXPIRY_MARGIN_SECONDS
         + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
-    ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
-    assert (
-        fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS
-    ), "fallback cleanup timeout no longer fits inside the shared management token"
+    ), "fallback cleanup no longer fits inside the CI Auth0 M2M token lifetime"
     # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
     # most three source runs, for twelve total reconciliations in the largest
     # mixed recovery request.
@@ -783,7 +783,11 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
 
     with tempfile.TemporaryDirectory() as raw_root:
         args = auth_args(pathlib.Path(raw_root))
-        for remaining_seconds, issued_ago in ((3599, 1), (3000, 0)):
+        for remaining_seconds, issued_ago, budget in (
+            (3599, 1, credentials.CREATE_PAIR_BUDGET_SECONDS),
+            (1200, 0, credentials.CREATE_PAIR_BUDGET_SECONDS),
+            (3000, 0, credentials.RECONCILE_BATCH_BUDGET_SECONDS),
+        ):
             value = token(remaining_seconds, issued_ago)
             with (
                 mock.patch.object(
@@ -791,22 +795,33 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
                 ),
                 mock.patch.object(credentials.time, "time", return_value=fixed_now),
             ):
-                assert credentials.auth0_token(args) == (value, "ci-client@clients")
-
-        with (
-            mock.patch.object(
-                credentials, "request", return_value=token_response(token(2999))
-            ),
-            mock.patch.object(credentials.time, "time", return_value=fixed_now),
-        ):
-            try:
-                credentials.auth0_token(args)
-            except credentials.CredentialError as exc:
-                assert str(exc) == (
-                    "Auth0 token does not have the required CI management lifetime"
+                assert credentials.auth0_token(args, budget) == (
+                    value,
+                    "ci-client@clients",
                 )
-            else:
-                raise AssertionError("2999-second Auth0 token was accepted")
+
+        for remaining_seconds, budget in (
+            (1199, credentials.CREATE_PAIR_BUDGET_SECONDS),
+            (2999, credentials.RECONCILE_BATCH_BUDGET_SECONDS),
+        ):
+            with (
+                mock.patch.object(
+                    credentials,
+                    "request",
+                    return_value=token_response(token(remaining_seconds)),
+                ),
+                mock.patch.object(credentials.time, "time", return_value=fixed_now),
+            ):
+                try:
+                    credentials.auth0_token(args, budget)
+                except credentials.CredentialError as exc:
+                    assert str(exc) == (
+                        "Auth0 token does not have the required CI management lifetime"
+                    )
+                else:
+                    raise AssertionError(
+                        f"{remaining_seconds}-second Auth0 token was accepted"
+                    )
 
 
 def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
@@ -1453,10 +1468,10 @@ def main() -> None:
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_request_one_auth0_token()
     test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run()
-    test_create_rejects_invalid_input_before_auth0()
+    test_pair_rejects_invalid_input_before_auth0()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_pair_first_create_failure_never_mints_a_recovery_key()
-    test_auth0_token_remaining_lifetime_matches_workflow_budget()
+    test_auth0_token_remaining_lifetime_matches_each_command_budget()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()
     test_reconciliation_reserves_time_for_resource_inventory()
@@ -1547,30 +1562,6 @@ def main() -> None:
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
-        owner_output = root / "owner-id"
-        credentials.identify(argparse.Namespace(**vars(args), output_file=owner_output))
-        assert owner_output.read_text(encoding="utf-8") == fake.owner
-        output = root / "credential"
-        output.mkdir(mode=0o700)
-        create_args = argparse.Namespace(
-            **vars(args),
-            output_dir=output,
-            run_id="1231",
-            run_attempt="2",
-            lane="linux",
-            purpose="primary",
-        )
-        credentials.create(create_args)
-        assert {path.name for path in output.iterdir()} == {
-            "api-key",
-            "api-key-id",
-            "owner-id",
-            "run-name",
-        }
-        assert (output / "owner-id").read_text(encoding="utf-8") == fake.owner
-        assert (output / "run-name").read_text(
-            encoding="utf-8"
-        ) == "qurl CLI journey v2 1231/2/linux/primary"
         run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = (
             add_run_credentials(fake)
         )

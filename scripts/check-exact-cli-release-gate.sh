@@ -26,11 +26,20 @@ if [[ -z "${GH_TOKEN:-}" || ! "$source_sha" =~ ^[0-9a-f]{40}$ ||
 fi
 
 gh_json() {
-  local path=$1 response attempt
+  local path=$1 response attempt status
   for attempt in 1 2 3; do
-    if response=$(gh api --method GET "$path"); then
-      printf '%s\n' "$response"
+    if response=$(gh api --include --method GET "$path" 2>&1); then
+      if [[ "$response" == HTTP/* ]]; then
+        printf '%s\n' "$response" | awk 'body { print } /^[[:space:]]*$/ { body=1 }'
+      else
+        printf '%s\n' "$response"
+      fi
       return 0
+    fi
+    status=$(sed -nE 's/^HTTP\/[^ ]+ ([0-9]{3}).*/\1/p' <<<"$response" | tail -1)
+    if [[ "$status" =~ ^4[0-9]{2}$ && "$status" != 408 && "$status" != 429 ]]; then
+      echo "::error::GitHub API rejected $path with HTTP $status" >&2
+      return 2
     fi
     if ((attempt < 3)); then
       sleep "$attempt"
@@ -40,7 +49,7 @@ gh_json() {
 }
 
 if ! run=$(gh_json "repos/$repository/actions/runs/$run_id"); then
-  echo "::error::CLI release run lookup did not recover after three attempts" >&2
+  echo "::error::CLI release run lookup failed" >&2
   jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
     '{reason:"cli_release_run_unavailable",run_id:$run_id,run_attempt:$run_attempt}' >&2
   exit 1
@@ -49,27 +58,42 @@ jq -e --arg repository "$repository" --arg sha "$source_sha" --arg tag "$source_
   --arg run_id "$run_id" --arg run_attempt "$run_attempt" '
   .repository.full_name == $repository and
   .head_repository.full_name == $repository and
-  .head_sha == $sha and
-  .head_branch == $tag and
+  (.head_sha | test("^[0-9a-f]{40}$")) and
+  .head_branch == "main" and
   .path == ".github/workflows/cli.yml" and .event == "workflow_dispatch" and
-  .display_title == ("CLI release gate " + $sha) and
+  .display_title == ("CLI release gate " + $sha + " " + $tag) and
   (.id | tostring) == $run_id and (.run_attempt | tostring) == $run_attempt
 ' <<<"$run" >/dev/null || {
   echo "::error::CLI release gate run does not match the exact handoff" >&2
   exit 1
 }
+run_head_sha=$(jq -r '.head_sha' <<<"$run")
+if ! tag_commit=$(gh_json "repos/$repository/commits/$source_tag") ||
+  ! jq -e --arg sha "$source_sha" '.sha == $sha' <<<"$tag_commit" >/dev/null; then
+  echo "::error::CLI release tag no longer names the exact tested source" >&2
+  exit 1
+fi
+if [[ "$run_head_sha" != "$source_sha" ]]; then
+  if ! comparison=$(gh_json "repos/$repository/compare/$source_sha...$run_head_sha") ||
+    ! jq -e --arg source "$source_sha" '
+      .status == "ahead" and .merge_base_commit.sha == $source
+    ' <<<"$comparison" >/dev/null; then
+    echo "::error::CLI release source is not an ancestor of the trusted main workflow" >&2
+    exit 1
+  fi
+fi
 run_url=$(jq -r '.html_url // ""' <<<"$run")
 latest_jobs='{}'
 for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
   if ! jobs=$(gh_json \
     "repos/$repository/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"); then
-    echo "::error::CLI release job lookup did not recover after three attempts" >&2
+    echo "::error::CLI release job lookup failed" >&2
     jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
       --arg job_attempt "$attempt" \
       '{reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}' >&2
     exit 1
   fi
-  current_gates=$(jq -c --argjson attempt "$attempt" '
+  if ! current_gates=$(jq -c --argjson attempt "$attempt" '
     if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
       (.jobs | type) != "array" or (.jobs | length) != .total_count
     then error("CLI job data is malformed or truncated")
@@ -84,7 +108,10 @@ for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
     then error("CLI gate job names are ambiguous within one attempt")
     else .
     end
-  ' <<<"$jobs")
+  ' <<<"$jobs"); then
+    echo "::error::CLI release job data is malformed or ambiguous" >&2
+    exit 1
+  fi
   latest_jobs=$(jq -cn --argjson prior "$latest_jobs" --argjson current "$current_gates" '
     reduce $current[] as $job ($prior; .[$job.name] = $job)
   ')
