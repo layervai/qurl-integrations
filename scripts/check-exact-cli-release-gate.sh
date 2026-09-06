@@ -42,7 +42,7 @@ gh_json() {
 if ! run=$(gh_json "repos/$repository/actions/runs/$run_id"); then
   echo "::error::CLI release run lookup did not recover after three attempts" >&2
   jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
-    '{ready:false,reason:"cli_release_run_unavailable",run_id:$run_id,run_attempt:$run_attempt}' >&2
+    '{reason:"cli_release_run_unavailable",run_id:$run_id,run_attempt:$run_attempt}' >&2
   exit 1
 fi
 jq -e --arg repository "$repository" --arg sha "$source_sha" --arg tag "$source_tag" \
@@ -66,7 +66,7 @@ for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
     echo "::error::CLI release job lookup did not recover after three attempts" >&2
     jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
       --arg job_attempt "$attempt" \
-      '{ready:false,reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}' >&2
+      '{reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}' >&2
     exit 1
   fi
   current_gates=$(jq -c --argjson attempt "$attempt" '
@@ -114,7 +114,7 @@ if ! jq -e 'all(.required[], .journeys[], .cleanup[]; .status == "completed")' \
   <<<"$gates" >/dev/null; then
   echo "::error::Exact CLI customer-journey jobs were incomplete after the tested run signaled release" >&2
   jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
-    '{ready:false,reason:"cli_release_journey_incomplete",run_id:$run_id,run_attempt:$run_attempt}' >&2
+    '{reason:"cli_release_journey_incomplete",run_id:$run_id,run_attempt:$run_attempt}' >&2
   exit 1
 fi
 
@@ -130,4 +130,4 @@ if ! jq -e 'all(.required[], .journeys[], .cleanup[]; .conclusion == "success")'
 fi
 
 jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" --arg url "$run_url" \
-  '{ready:true,run_id:$run_id,run_attempt:$run_attempt,url:$url,journey_url:$url}'
+  '{run_id:$run_id,run_attempt:$run_attempt,url:$url,journey_url:$url}'

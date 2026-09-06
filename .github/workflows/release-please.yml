@@ -36,6 +36,9 @@ name: Release Please
 # (release.replace_existing_artifacts in .goreleaser.yml).
 # The exact release journey includes the scheduled 80-minute soak lane. Expect
 # the draft to remain private for about two hours, including setup and queueing.
+# If the automatic handoff fails, dispatch cli.yml at the exact release tag
+# with release_source_sha set to the tag commit. After that run passes, dispatch
+# this workflow from main with the tag, source SHA, run ID, and run attempt.
 #
 # The other failure mode, and the worse one, is a release release-please
 # never made. What it looks like: this workflow runs green, main carries an
@@ -214,7 +217,7 @@ jobs:
       # GITHUB_TOKEN the access level required to verify the draft binding.
       contents: write
     outputs:
-      required: ${{ steps.decision.outputs.required }}
+      required: ${{ steps.source.outputs.required }}
       source_sha: ${{ steps.source.outputs.sha }}
       cli_tag: ${{ steps.source.outputs.tag }}
       run_id: ${{ steps.verify.outputs.run_id }}
@@ -307,31 +310,10 @@ jobs:
             '${{ steps.source.outputs.sha }}' '${{ steps.source.outputs.tag }}' \
             "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 4)
           {
-            echo "ready=$(jq -r .ready <<<"$selection")"
             echo "run_id=$(jq -r .run_id <<<"$selection")"
             echo "run_attempt=$(jq -r .run_attempt <<<"$selection")"
           } >>"$GITHUB_OUTPUT"
-          jq -r 'if .ready then "Exact packaged customer journey passed: " + .journey_url else "Exact release gate is not ready: " + .reason end' <<<"$selection"
-
-      - id: decision
-        name: Decide whether this signal starts the CLI release
-        if: always()
-        env:
-          AUTOMATED_HANDOFF: ${{ inputs.source_sha != '' }}
-          SOURCE_REQUIRED: ${{ steps.source.outputs.required }}
-          GATE_READY: ${{ steps.verify.outputs.ready }}
-        run: |
-          set -euo pipefail
-          if [[ "$SOURCE_REQUIRED" == false ]]; then
-            echo "required=false" >>"$GITHUB_OUTPUT"
-          elif [[ "$GATE_READY" == true ]]; then
-            echo "required=true" >>"$GITHUB_OUTPUT"
-          elif [[ "$AUTOMATED_HANDOFF" == true ]]; then
-            echo "required=false" >>"$GITHUB_OUTPUT"
-          else
-            echo "::error::The exact packaged customer journey is not complete for this release tag" >&2
-            exit 1
-          fi
+          jq -r '"Exact packaged customer journey passed: " + .journey_url' <<<"$selection"
 
   release-cli:
     needs: cli-release-gate

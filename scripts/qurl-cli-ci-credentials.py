@@ -619,7 +619,7 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
 
 
 def cleanup_labels(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
-    profile = getattr(args, "profile", "full")
+    profile = getattr(args, "profile", None)
     if profile == "full":
         return ("smoke", "failure")
     if profile == "soak":
@@ -964,7 +964,6 @@ def create_with_auth(
     jwt: str,
     expected_owner: str,
 ) -> None:
-    validate_create_args(args)
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     write_private(args.output_dir / "run-name", name)
@@ -998,6 +997,7 @@ def create_with_auth(
 
 
 def create(args: argparse.Namespace) -> None:
+    # Reject malformed input before the one metered Auth0 token request.
     validate_create_args(args)
     endpoint, jwt, expected_owner = authenticated_owner(args)
     create_with_auth(args, endpoint, jwt, expected_owner)

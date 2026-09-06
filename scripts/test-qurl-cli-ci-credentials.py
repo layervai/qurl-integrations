@@ -1043,6 +1043,7 @@ def test_reconciliation_reserves_time_for_resource_inventory() -> None:
                 run_attempt="2",
                 run_id="1231",
                 runtime="host",
+                profile="full",
             )
         )
     assert len(deadlines) == 2
@@ -1173,6 +1174,7 @@ def test_resource_failure_still_revokes_every_target_credential() -> None:
                     run_attempt="2",
                     run_id="1231",
                     runtime="host",
+                    profile="full",
                 )
             )
         except credentials.CredentialError as exc:
@@ -1208,6 +1210,7 @@ def test_credential_failure_still_attempts_every_target_and_resources() -> None:
                     run_attempt="2",
                     run_id="1231",
                     runtime="host",
+                    profile="full",
                 )
             )
         except credentials.CredentialError as exc:
@@ -1250,6 +1253,7 @@ def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
                     run_attempt="2",
                     run_id="1231",
                     runtime="host",
+                    profile="full",
                 )
             )
         except credentials.CredentialError as exc:
@@ -1316,6 +1320,7 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
                 run_attempt="2",
                 run_id="1231",
                 runtime="host",
+                profile="full",
             )
         )
     assert set(fake.assignment_retire_attempts) == {
@@ -1424,6 +1429,7 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
                     run_attempt="2",
                     run_id="1231",
                     runtime="host",
+                    profile="full",
                 )
             )
         except credentials.CredentialError as exc:
@@ -1465,23 +1471,42 @@ def main() -> None:
     test_soak_cleanup_requires_and_removes_the_soak_device()
     test_unhashable_inventory_fields_remain_bounded()
     assert credentials.run_device_key_names(
-        argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
+        argparse.Namespace(
+            run_id="1231", run_attempt="2", runtime="host", profile="full"
+        )
     ) == {"agent:qurl-journey-v2-r1231-a2-hs", "agent:qurl-journey-v2-r1231-a2-hf"}
     assert credentials.run_device_key_names(
-        argparse.Namespace(run_id="1231", run_attempt="2", runtime="hardened_container")
+        argparse.Namespace(
+            run_id="1231",
+            run_attempt="2",
+            runtime="hardened_container",
+            profile="full",
+        )
     ) == {"agent:qurl-journey-v2-r1231-a2-cs", "agent:qurl-journey-v2-r1231-a2-cf"}
     assert credentials.run_agent_ids(
-        argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
+        argparse.Namespace(
+            run_id="1231", run_attempt="2", runtime="host", profile="full"
+        )
     ) == {"qurl-journey-v2-r1231-a2-hs", "qurl-journey-v2-r1231-a2-hf"}
     assert credentials.run_connector_ids(
-        argparse.Namespace(run_id="1231", run_attempt="2", runtime="host", lane="linux")
+        argparse.Namespace(
+            run_id="1231",
+            run_attempt="2",
+            runtime="host",
+            lane="linux",
+            profile="full",
+        )
     ) == {
         "connector-cli-journey-v2-415907f85f12d5ffd69c6a62",
         "connector-cli-journey-v2-87e091ca6623843507b5863b",
     }
     lane_identities = [
         argparse.Namespace(
-            run_id="9001" + str(index), run_attempt="3", runtime="host", lane=lane
+            run_id="9001" + str(index),
+            run_attempt="3",
+            runtime="host",
+            lane=lane,
+            profile="full",
         )
         for index, lane in enumerate(("linux", "macos", "windows"), start=1)
     ]
@@ -1573,6 +1598,7 @@ def main() -> None:
                 run_attempt="2",
                 run_id="1231",
                 runtime="host",
+                profile="full",
             )
         )
         expected_connector_resource_ids = {"r_connector_smoke", "r_connector_failure"}
@@ -1630,6 +1656,7 @@ def main() -> None:
                     run_attempt="2",
                     run_id="1231",
                     runtime="host",
+                    profile="full",
                 )
             )
         except credentials.CredentialError as exc:

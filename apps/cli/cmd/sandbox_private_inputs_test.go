@@ -23,7 +23,7 @@ const (
 	sandboxQURLImageIDEnv    = "QURL_SHARING_QURL_IMAGE"
 )
 
-var sandboxPositiveDecimal = regexp.MustCompile(`^[1-9]\d{0,19}$`)
+var sandboxPositiveDecimal = regexp.MustCompile(`^[1-9]\d{0,18}$`)
 var sandboxImmutableImageID = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type sandboxRunNamespace struct {
@@ -111,8 +111,8 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 		}
 		seen[got] = true
 	}
-	t.Setenv(sandboxRunIDEnv, "18446744073709551615")
-	t.Setenv(sandboxRunAttemptEnv, "18446744073709551615")
+	t.Setenv(sandboxRunIDEnv, "9223372036854775807")
+	t.Setenv(sandboxRunAttemptEnv, "9223372036854775807")
 	t.Setenv(sandboxRuntimeEnv, "hardened_container")
 	maximal, maxErr := sandboxNamespace("soak")
 	if maxErr != nil || len(maximal.AgentID) > 64 {

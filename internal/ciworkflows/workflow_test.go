@@ -984,27 +984,27 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	mockGH := `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$GH_CAPTURE"
-if [[ "$*" == *"/attempts/"*"/jobs?per_page=100" ]]; then
-  include_artifact=true
-  if [[ "$*" == *"/attempts/$EXPECTED_ATTEMPT/jobs?per_page=100" && "${MOCK_ARTIFACT_CURRENT:-true}" != true ]]; then
-    include_artifact=false
-  fi
+if [[ "$*" == *"/jobs?filter=all&per_page=100"* ]]; then
+  artifact_attempt=${MOCK_ARTIFACT_ATTEMPT:-$EXPECTED_ATTEMPT}
+  jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
+    --argjson artifact_attempt "$artifact_attempt" '
+    [{jobs:[
+      {name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$artifact_attempt},
+      {name:$name,conclusion:$conclusion,run_attempt:$artifact_attempt}
+    ]} | .total_count = (.jobs | length)]'
+elif [[ "$*" == *"/attempts/"*"/jobs?per_page=100" ]]; then
   if [[ -n "${MOCK_CLEANUP_CONCLUSION:-}" ]]; then
     jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
-      --arg cleanup_conclusion "$MOCK_CLEANUP_CONCLUSION" --argjson include_artifact "$include_artifact" '
-      {jobs:((if $include_artifact then [{name:"cli / customer journey artifacts",conclusion:"success"}] else [] end) +
-        [{name:$name,conclusion:$conclusion},
-         {name:"cli / customer journey cleanup",conclusion:$cleanup_conclusion}])} |
+      --arg cleanup_conclusion "$MOCK_CLEANUP_CONCLUSION" '
+      {jobs:[{name:$name,conclusion:$conclusion},
+         {name:"cli / customer journey cleanup",conclusion:$cleanup_conclusion}]} |
       .total_count = (.jobs | length)'
   elif [[ "$MOCK_JOB_CONCLUSION" == __NULL__ ]]; then
-    jq -n --arg name "$MOCK_JOB_NAME" --argjson include_artifact "$include_artifact" '
-      {jobs:((if $include_artifact then [{name:"cli / customer journey artifacts",conclusion:"success"}] else [] end) +
-        [{name:$name,conclusion:null}])} | .total_count = (.jobs | length)'
+    jq -n --arg name "$MOCK_JOB_NAME" '
+      {jobs:[{name:$name,conclusion:null}]} | .total_count = (.jobs | length)'
   else
-    jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
-      --argjson include_artifact "$include_artifact" '
-      {jobs:((if $include_artifact then [{name:"cli / customer journey artifacts",conclusion:"success"}] else [] end) +
-        [{name:$name,conclusion:$conclusion}])} | .total_count = (.jobs | length)'
+    jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" '
+      {jobs:[{name:$name,conclusion:$conclusion}]} | .total_count = (.jobs | length)'
   fi
 else
   jq -n \
@@ -1085,7 +1085,8 @@ fi
 	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
 		t.Fatalf("attempt-bound cleanup result = %q, want required=true and exact source_runs", workflowOutput)
 	}
-	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") {
+	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") ||
+		!strings.Contains(ghArguments, "/actions/runs/700/jobs?filter=all&per_page=100") {
 		t.Errorf("cleanup queried a different run attempt: %s", ghArguments)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_EVENT": "schedule"})
@@ -1114,12 +1115,12 @@ fi
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
 		t.Fatalf("automatic unsettled journey did not bias toward cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
-	workflowOutput, output, ghArguments, err = runResolver(map[string]string{"MOCK_ARTIFACT_CURRENT": "false"})
+	workflowOutput, output, ghArguments, err = runResolver(map[string]string{"MOCK_ARTIFACT_ATTEMPT": "1"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=false" {
 		t.Fatalf("rerun cleanup did not resolve the persisted identity attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
-	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/1/jobs?per_page=100") {
-		t.Errorf("rerun cleanup did not inspect the prior identity attempt: %s", ghArguments)
+	if strings.Contains(ghArguments, "/actions/runs/700/attempts/1/jobs?per_page=100") {
+		t.Errorf("rerun cleanup inferred identity by walking prior attempts: %s", ghArguments)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_CLEANUP_CONCLUSION": "success"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
@@ -1742,7 +1743,6 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 		"Require the canonical release branch",
 		"Resolve the exact release source",
 		"Check the exact packaged customer-journey gate once",
-		"Decide whether this signal starts the CLI release",
 	} {
 		if steps[name] == nil {
 			t.Fatalf("cli-release-gate is missing %q", name)

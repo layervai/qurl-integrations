@@ -874,9 +874,8 @@ jobs:
           }
           trap cleanup_authority EXIT
           mkdir -m 0700 "$client_dir" "$credential_dir" "$credential_dir/primary" "$credential_dir/failure" "$key_dir"
-          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
-          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
-          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          (umask 077; printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id")
+          (umask 077; printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret")
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
           python3 scripts/qurl-cli-ci-credentials.py create-pair \
             --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
@@ -1134,9 +1133,8 @@ jobs:
           cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
           trap cleanup EXIT
           mkdir -m 0700 "$client_dir"
-          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
-          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
-          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
+          (umask 077; printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id")
+          (umask 077; printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret")
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
           [[ "$JOURNEY_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]] || {
             echo "::error::persisted journey identity attempt is unavailable" >&2

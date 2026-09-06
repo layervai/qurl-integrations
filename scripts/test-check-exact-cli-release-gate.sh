@@ -99,7 +99,7 @@ run_case() {
   }
 }
 
-run_case success 0 '"ready":true'
+run_case success 0 '"journey_url":"https://example.invalid/run/700"'
 run_case incomplete 1 '"reason":"cli_release_journey_incomplete"'
 run_case failed 1 'Exact CLI customer-journey gate failed'
 run_case required_failed 1 'cli / required=failure'
@@ -111,7 +111,7 @@ run_case malformed 5 'job data is malformed or truncated'
 run_case mismatch 1 'run does not match the exact handoff'
 run_case operator 1 'run does not match the exact handoff'
 run_case wrong_tag 1 'run does not match the exact handoff'
-run_case partial_rerun 0 '"ready":true'
+run_case partial_rerun 0 '"journey_url":"https://example.invalid/run/700"'
 run_case unavailable 1 '::error::CLI release run lookup did not recover after three attempts'
 run_case jobs_unavailable 1 '::error::CLI release job lookup did not recover after three attempts'
 

@@ -162,27 +162,39 @@ jobs:
               end
             '
             jq -e "$validate_jobs" <<<"$jobs" >/dev/null
-            # A workflow rerun preserves outputs from successful dependency
-            # jobs. Find the newest attempt that ran the artifact producer;
-            # that is the identity generation used by every rerun journey.
-            identity_attempt=$run_attempt
-            identity_jobs=$jobs
-            artifact_ran=$(jq -r '
-              any(.jobs[];
+            # GitHub records the attempt that created each job. Read all
+            # attempts once and select the latest artifact producer at or
+            # before the source attempt. This works for both full reruns and
+            # reruns of failed jobs without inferring how carried jobs appear.
+            # TODO(upstream-contract): job.run_attempt is the GitHub REST
+            # identity binding for rerun jobs; fail closed if it disappears.
+            all_jobs=$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=all&per_page=100")
+            jq -e --argjson source_attempt "$run_attempt" '
+              if type != "array" or length == 0 then
+                error("all-attempt source jobs are malformed")
+              else .[0].total_count as $total |
+                if ($total | type) != "number" or $total < 0 or $total > 3000 or
+                  any(.[];
+                    .total_count != $total or
+                    (.jobs | type) != "array" or
+                    (.jobs | length) > 100) or
+                  ([.[].jobs[]] | length) != $total or
+                  any(.[].jobs[];
+                    (.name | type) != "string" or
+                    (.run_attempt | type) != "number" or
+                    .run_attempt < 1 or .run_attempt > $source_attempt)
+                then error("all-attempt source jobs are malformed or truncated")
+                else .
+                end
+              end
+            ' <<<"$all_jobs" >/dev/null
+            identity_attempt=$(jq -r '
+              [.[].jobs[] | select(
                 .name == "cli / customer journey artifacts" and
-                .conclusion != "skipped")
-            ' <<<"$identity_jobs")
-            while [[ "$artifact_ran" != true && "$identity_attempt" -gt 1 ]]; do
-              identity_attempt=$((identity_attempt - 1))
-              identity_jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$identity_attempt/jobs?per_page=100")
-              jq -e "$validate_jobs" <<<"$identity_jobs" >/dev/null
-              artifact_ran=$(jq -r '
-                any(.jobs[];
-                  .name == "cli / customer journey artifacts" and
-                  .conclusion != "skipped")
-              ' <<<"$identity_jobs")
-            done
-            if [[ "$artifact_ran" != true ]]; then
+                .conclusion != "skipped") | .run_attempt] | max // ""
+            ' <<<"$all_jobs")
+            if [[ -z "$identity_attempt" ]]; then
               if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
                 echo "required=false" >>"$GITHUB_OUTPUT"
                 exit 0
@@ -190,6 +202,9 @@ jobs:
               echo "::error::cleanup source has no persisted journey identity attempt" >&2
               exit 1
             fi
+            identity_jobs=$(jq -c --argjson identity_attempt "$identity_attempt" '
+              {jobs: [.[].jobs[] | select(.run_attempt == $identity_attempt)]}
+            ' <<<"$all_jobs")
             # A completed workflow event can briefly precede its final job
             # conclusion. Only explicit skipped suppresses idempotent cleanup.
             journey_ran=$(jq -r '
