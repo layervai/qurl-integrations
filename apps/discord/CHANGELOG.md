@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.4...discord-v0.2.5) (2026-09-06)
+
+
+### Bug Fixes
+
+* **discord:** stop duplicate send supersession ([#1395](https://github.com/layervai/qurl-integrations/issues/1395)) ([562dc71](https://github.com/layervai/qurl-integrations/commit/562dc715fe49689543f6c0837844f262e67d0cff))
+
 ## [0.2.4](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.3...discord-v0.2.4) (2026-09-05)
 
 
