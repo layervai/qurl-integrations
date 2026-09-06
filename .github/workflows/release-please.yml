@@ -160,7 +160,8 @@ jobs:
             echo "::error::CLI release source is no longer the exact main head" >&2
             exit 1
           }
-          gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main
+          gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            --field "release_source_sha=$SOURCE_SHA"
 
   # The customer journey enters here after it passes. This job performs one
   # exact lookup and never polls or holds a runner.

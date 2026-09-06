@@ -116,7 +116,6 @@ func testSandboxPOSIXDefaultDaemonLifecycle(t *testing.T, platform, arming strin
 	if err := validateSandboxDeviceIdentity(loadedAfterLogin, loadedAfterLogin.AgentID, ""); err != nil {
 		t.Fatalf("one-time %s customer login durable identity: %v", platform, err)
 	}
-	recordSandboxCleanupDeviceKey(t, loadedAfterLogin.DeviceAPIKeyID)
 	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 	if cleanupJWT != "" {
 		registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, loadedAfterLogin.DeviceAPIKeyID)
@@ -340,7 +339,6 @@ func TestSandboxPOSIXDefaultDaemonControlledFailureCleanupChild(t *testing.T) {
 	if err := validateSandboxDeviceIdentity(device, namespace.AgentID, ""); err != nil {
 		t.Fatalf("controlled-failure POSIX durable identity: %v", err)
 	}
-	recordSandboxCleanupDeviceKey(t, device.DeviceAPIKeyID)
 	if cleanupJWT != "" {
 		registerSandboxDeviceCredentialCleanup(t, cliEnv["QURL_ENDPOINT"], cleanupJWT, device.DeviceAPIKeyID)
 	}

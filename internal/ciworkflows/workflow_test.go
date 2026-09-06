@@ -121,7 +121,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &cliConcurrency); err != nil {
 		t.Fatalf("decode CLI concurrency: %v", err)
 	}
-	wantConcurrency := "${{ github.workflow }}-${{ github.ref }}-${{ contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'soak' || 'ci' }}"
+	wantConcurrency := "${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && 'soak' || 'ci' }}"
 	if cliConcurrency.Concurrency.Group != wantConcurrency {
 		t.Errorf("CLI concurrency group = %q, want separate main-CI and soak groups %q",
 			cliConcurrency.Concurrency.Group, wantConcurrency)
@@ -708,8 +708,8 @@ func TestCLITerminalCleanupBatchesEveryLaneBeforeFailing(t *testing.T) {
 			jobID:           "journey-cleanup",
 			stepName:        "Revoke run resources and credentials",
 			sourceRuns:      "700:2",
-			wantLanes:       "linux\nmacos\nwindows\n",
-			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n",
+			wantLanes:       "linux\nmacos\nwindows\nlinux\n",
+			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n",
 			wantSoakLanes:   "linux\nmacos\nwindows\nlinux\n",
 			wantSoakCalls:   "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n",
 		},
@@ -1689,6 +1689,7 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	})
 	releaseSignal := len(signal.Steps) == 1 &&
 		strings.Contains(signal.Steps[0].Run, "gh workflow run cli.yml") &&
+		strings.Contains(signal.Steps[0].Run, `release_source_sha=$SOURCE_SHA`) &&
 		strings.Contains(signal.Steps[0].Run, `"$tag_sha" == "$SOURCE_SHA"`) &&
 		strings.Contains(signal.Steps[0].Run, `"$main_sha" == "$SOURCE_SHA"`)
 	if !releaseSignal {
@@ -1722,8 +1723,19 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 	}
 
 	cli := readWorkflow(t, cliWorkflow)
+	cliRaw := string(readWorkflowBytes(t, cliWorkflow))
+	for _, required := range []string{
+		"release_source_sha:",
+		"Validate the exact release source",
+		`"$GITHUB_SHA" == "$RELEASE_SOURCE_SHA"`,
+		"fail before any job can request an Auth0 token",
+	} {
+		if !strings.Contains(cliRaw, required) {
+			t.Errorf("CLI workflow does not bind a release handoff before Auth0 use: missing %q", required)
+		}
+	}
 	result := cli.Jobs["signal-cli-release"]
-	wantSignalIf := "github.event_name == 'workflow_dispatch' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'"
+	wantSignalIf := "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release_source_sha != '' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'"
 	if got := strings.Join(strings.Fields(result.If), " "); got != wantSignalIf {
 		t.Errorf("CLI release signal if = %q, want an exact manual customer journey", got)
 	}

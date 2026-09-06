@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import re
@@ -21,10 +23,12 @@ CLI_WORKFLOW = SCRIPT.parent.parent / ".github" / "workflows" / "cli.yml"
 CUSTOMER_CLEANUP_WORKFLOW = (
     SCRIPT.parent.parent / ".github" / "workflows" / "qurl-cli-customer-cleanup.yml"
 )
+RELEASE_GATE = SCRIPT.with_name("check-exact-cli-release-gate.sh")
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("qurl_cli_ci_credentials", SCRIPT)
 assert SPEC and SPEC.loader
 credentials = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = credentials
 SPEC.loader.exec_module(credentials)
 
 
@@ -356,7 +360,12 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "-tags=clisandbox,clisoak" in workflow
     assert "QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK: ${{ matrix.soak && 'enabled' || '' }}" in workflow
     assert "QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}" in workflow
-    assert "lane_specs+=(linux:4)" in workflow
+    lane_count = len(base_matrix["include"]) + 1
+    assert "lane_specs=(linux:1 macos:2 windows:3 linux:4)" in workflow
+    assert credentials.MAX_RECONCILE_RUNS == lane_count * 3
+    assert f"(.journeys | length) == {lane_count}" in RELEASE_GATE.read_text(
+        encoding="utf-8"
+    )
     assert "needs: [required, journey]" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "github.event_name != 'pull_request'" not in workflow
@@ -371,6 +380,10 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "qurl-cli-ci-credentials.py create " not in workflow
     assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
     assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
+    assert "QURL_CLI_CI_CLEANUP_ID_DIR" not in workflow
+    assert 'sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true' in workflow
+    assert "inputs.release_source_sha != ''" in workflow
+    assert '"$GITHUB_SHA" == "$RELEASE_SOURCE_SHA"' in workflow
     assert "needs.required.result == 'success'" in workflow
     assert "needs.journey.result == 'success'" in workflow
     assert "notify-soak-manual-failure:" in workflow
@@ -459,7 +472,10 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
             if run.run_id == "1231":
                 raise credentials.CredentialError("first run failed")
 
-        with mock.patch.object(credentials, "reconcile_run", reconcile):
+        diagnostics = io.StringIO()
+        with mock.patch.object(credentials, "reconcile_run", reconcile), contextlib.redirect_stderr(
+            diagnostics
+        ):
             try:
                 credentials.reconcile_batch(
                     argparse.Namespace(
@@ -475,6 +491,23 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
             else:
                 raise AssertionError("failed reconciliation batch was accepted")
         assert attempted == ["1231", "1232"]
+        assert fake.auth_token_requests == 1
+        assert (
+            "::error::run cleanup failed for linux lane run 1231/2: first run failed"
+            in diagnostics.getvalue()
+        )
+
+        attempted.clear()
+        fake.auth_token_requests = 0
+        maximum = tuple(
+            f"{2000 + index}:1:{('linux', 'macos', 'windows')[index % 3]}:host"
+            for index in range(credentials.MAX_RECONCILE_RUNS)
+        )
+        with mock.patch.object(credentials, "reconcile_run", reconcile):
+            credentials.reconcile_batch(
+                argparse.Namespace(**vars(args), run_spec=maximum)
+            )
+        assert len(attempted) == credentials.MAX_RECONCILE_RUNS
         assert fake.auth_token_requests == 1
 
 
@@ -515,13 +548,74 @@ def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
             )
         except credentials.CredentialError as exc:
             assert str(exc) == (
-                "credential-pair creation failed; every exact key was revoked"
+                "credential-pair creation failed; every created key was revoked"
             )
         else:
             raise AssertionError("invalid second customer identity was accepted")
     assert fake.auth_token_requests == 1
     assert set(fake.deleted_keys) == {"key_AbCdEf123456", "key_Paired000001"}
     assert fake.keys == {}
+
+
+def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
+    fake = FakeAPI()
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ), mock.patch.object(
+        credentials,
+        "prepare_output_directory",
+        side_effect=credentials.CredentialError("output directory rejected"),
+    ):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        try:
+            credentials.create_pair(
+                argparse.Namespace(
+                    **vars(args),
+                    primary_output_dir=root / "primary",
+                    failure_output_dir=root / "failure",
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == (
+                "credential-pair creation failed; every created key was revoked"
+            )
+        else:
+            raise AssertionError("rejected first credential unexpectedly succeeded")
+    assert fake.auth_token_requests == 1
+    assert fake.issued_api_keys == {}
+    assert fake.deleted_keys == []
+
+    fake = FakeAPI()
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ), mock.patch.object(
+        credentials,
+        "create_with_auth",
+        side_effect=credentials.CleanupConvergenceError("cleanup failed"),
+    ):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        try:
+            credentials.create_pair(
+                argparse.Namespace(
+                    **vars(args),
+                    primary_output_dir=root / "primary",
+                    failure_output_dir=root / "failure",
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == (
+                "credential-pair creation failed and bounded revoke did not converge"
+            )
+        else:
+            raise AssertionError("failed inner cleanup was masked")
 
 
 def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
@@ -794,16 +888,6 @@ def test_pagination_safety_limits_fail_closed() -> None:
 
 def test_reconciliation_reserves_time_for_resource_inventory() -> None:
     fake = FakeAPI()
-    recorded_key_id = "key_Shared123456"
-    fake.extra_credentials.append(
-        {
-            "key_id": recorded_key_id,
-            "kind": "device",
-            "name": "agent:qurl-journey-v2-r1231-a2-hs",
-            "scopes": credentials.DEVICE_SCOPES,
-            "status": "revoked",
-        }
-    )
     deadlines: list[tuple[str, float]] = []
     real_paged_rows = credentials.paged_rows
 
@@ -820,25 +904,19 @@ def test_reconciliation_reserves_time_for_resource_inventory() -> None:
     ), mock.patch.object(credentials, "paged_rows", capture_deadline):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
-        cleanup_ids = root / "cleanup-ids"
-        cleanup_ids.mkdir(mode=0o700)
-        digest = credentials.hashlib.sha256(recorded_key_id.encode("ascii")).hexdigest()
-        private_file(cleanup_ids, "device-key-" + digest, recorded_key_id)
         credentials.reconcile_run(
             argparse.Namespace(
                 **vars(args),
-                cleanup_id_dir=cleanup_ids,
                 lane="linux",
                 run_attempt="2",
                 run_id="1231",
                 runtime="host",
             )
         )
-    assert len(deadlines) == 3
-    assert deadlines[0][0] == deadlines[1][0] == "/v1/api-keys"
-    assert deadlines[0][1] == deadlines[1][1]
-    assert deadlines[2][0] == "/v1/resources"
-    assert deadlines[2][1] - deadlines[1][1] == (
+    assert len(deadlines) == 2
+    assert deadlines[0][0] == "/v1/api-keys"
+    assert deadlines[1][0] == "/v1/resources"
+    assert deadlines[1][1] - deadlines[0][1] == (
         credentials.RESOURCE_INVENTORY_RESERVE_SECONDS
     )
 
@@ -916,7 +994,6 @@ def test_resource_failure_still_revokes_every_target_credential() -> None:
             credentials.reconcile_run(
                 argparse.Namespace(
                     **vars(args),
-                    cleanup_id_dir=None,
                     lane="linux",
                     run_attempt="2",
                     run_id="1231",
@@ -945,7 +1022,6 @@ def test_credential_failure_still_attempts_every_target_and_resources() -> None:
             credentials.reconcile_run(
                 argparse.Namespace(
                     **vars(args),
-                    cleanup_id_dir=None,
                     lane="linux",
                     run_attempt="2",
                     run_id="1231",
@@ -976,7 +1052,6 @@ def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
             credentials.reconcile_run(
                 argparse.Namespace(
                     **vars(args),
-                    cleanup_id_dir=None,
                     lane="linux",
                     run_attempt="2",
                     run_id="1231",
@@ -1034,7 +1109,6 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
         credentials.reconcile_run(
             argparse.Namespace(
                 **vars(args),
-                cleanup_id_dir=None,
                 lane="linux",
                 run_attempt="2",
                 run_id="1231",
@@ -1076,15 +1150,10 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
     ), mock.patch.object(credentials.time, "sleep", lambda _: None):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
-        cleanup_ids = root / "active-cleanup-ids"
-        cleanup_ids.mkdir(mode=0o700)
-        digest = credentials.hashlib.sha256(device_key_id.encode("ascii")).hexdigest()
-        private_file(cleanup_ids, "device-key-" + digest, device_key_id)
         try:
             credentials.reconcile_run(
                 argparse.Namespace(
                     **vars(args),
-                    cleanup_id_dir=cleanup_ids,
                     lane="linux",
                     run_attempt="2",
                     run_id="1231",
@@ -1102,60 +1171,12 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
         active_fake.deleted_resources
     )
 
-    revoked_fake = FakeAPI()
-    recorded_key_id = "key_ListName1234"
-    revoked_fake.extra_credentials.extend(
-        (
-            {
-                "key_id": recorded_key_id,
-                "kind": "device",
-                "name": ["unexpected", "array"],
-                "scopes": credentials.DEVICE_SCOPES,
-                "status": "revoked",
-            },
-            {
-                "key_id": {"unexpected": "object"},
-                "kind": "device",
-                "name": "agent:qurl-journey-v2-r1231-a2-hf",
-                "scopes": credentials.DEVICE_SCOPES,
-                "status": "revoked",
-            },
-        )
-    )
-    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
-        credentials, "request", revoked_fake
-    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
-        root = pathlib.Path(raw_root)
-        args = auth_args(root)
-        cleanup_ids = root / "cleanup-ids"
-        cleanup_ids.mkdir(mode=0o700)
-        digest = credentials.hashlib.sha256(recorded_key_id.encode("ascii")).hexdigest()
-        private_file(cleanup_ids, "device-key-" + digest, recorded_key_id)
-        try:
-            credentials.reconcile_run(
-                argparse.Namespace(
-                    **vars(args),
-                    cleanup_id_dir=cleanup_ids,
-                    lane="linux",
-                    run_attempt="2",
-                    run_id="1231",
-                    runtime="host",
-                )
-            )
-        except credentials.CredentialError as exc:
-            assert str(exc) == "run cleanup did not converge (credential_inventory=1, credential_shape=2)"
-        else:
-            raise AssertionError("malformed revoked credential inventory did not fail closed")
-    assert {"r_connector_smoke", "r_connector_failure", "r_customer_ci"}.issubset(
-        revoked_fake.deleted_resources
-    )
-
-
 def main() -> None:
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_request_one_auth0_token()
     test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
+    test_pair_first_create_failure_never_mints_a_recovery_key()
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()
@@ -1247,15 +1268,10 @@ def main() -> None:
             "scopes": credentials.DEVICE_SCOPES,
             "status": "active",
         }
-        cleanup_ids = root / "cleanup-ids"
-        cleanup_ids.mkdir(mode=0o700)
-        device_digest = credentials.hashlib.sha256(device_key_id.encode("ascii")).hexdigest()
-        private_file(cleanup_ids, "device-key-" + device_digest, device_key_id)
         fake.operations.clear()
         credentials.reconcile_run(
             argparse.Namespace(
                 **vars(args),
-                cleanup_id_dir=cleanup_ids,
                 lane="linux",
                 run_attempt="2",
                 run_id="1231",
@@ -1311,7 +1327,6 @@ def main() -> None:
             credentials.reconcile_run(
                 argparse.Namespace(
                     **vars(args),
-                    cleanup_id_dir=None,
                     lane="linux",
                     run_attempt="2",
                     run_id="1231",

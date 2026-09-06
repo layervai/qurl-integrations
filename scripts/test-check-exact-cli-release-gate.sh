@@ -23,24 +23,27 @@ if [[ "$*" == *actions/workflows/cli.yml/runs* ]]; then
   fi
   exit 0
 fi
-status=completed
+required_status=completed
+journey_status=completed
+cleanup_status=completed
 journey_conclusion=success
 case "$SCENARIO" in
-  incomplete) status=in_progress ;;
+  incomplete) journey_status=in_progress; cleanup_status=queued ;;
   failed) journey_conclusion=failure ;;
   missing) journey_count=3 ;;
 esac
 journey_count=${journey_count:-4}
-jq -n --arg status "$status" --arg journey_conclusion "$journey_conclusion" \
+jq -n --arg required_status "$required_status" --arg journey_status "$journey_status" \
+  --arg cleanup_status "$cleanup_status" --arg journey_conclusion "$journey_conclusion" \
   --argjson journey_count "$journey_count" '{
     jobs: (
-      [{name:"cli / required",status:$status,conclusion:"success"}] +
+      [{name:"cli / required",status:$required_status,conclusion:"success"}] +
       [range(0; $journey_count) | {
         name:("cli / customer journey (lane-" + tostring + ")"),
-        status:$status,
+        status:$journey_status,
         conclusion:$journey_conclusion
       }] +
-      [{name:"cli / customer journey cleanup",status:$status,conclusion:"success"}]
+      [{name:"cli / customer journey cleanup",status:$cleanup_status,conclusion:"success"}]
     )
   } | .total_count = (.jobs | length)
 '

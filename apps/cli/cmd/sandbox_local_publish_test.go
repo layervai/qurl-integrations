@@ -562,7 +562,6 @@ func startSandboxLocalPublishInState(t *testing.T, label, requestedStateDir stri
 	if err := validateSandboxDeviceIdentity(loadedAfterLogin, namespace.AgentID, ""); err != nil {
 		t.Fatalf("one-time customer login durable identity: %v", err)
 	}
-	recordSandboxCleanupDeviceKey(t, loadedAfterLogin.DeviceAPIKeyID)
 	assertSandboxStateExcludesSecret(t, stateDir, bootstrapKey)
 
 	fixture := &sandboxLocalFixture{

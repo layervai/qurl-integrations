@@ -17,14 +17,21 @@ on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
+    inputs:
+      release_source_sha:
+        description: "Exact release SHA from the automated handoff; omit for an operator soak"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
   # The long soak must not occupy main CI's concurrency slot. GitHub permits
-  # only one pending run per group, even when cancel-in-progress is false.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'soak' || 'ci' }}
+  # only one pending run per group, even when cancel-in-progress is false. An
+  # exact release handoff gets its own SHA group so an operator soak cannot
+  # replace it while it is pending.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_source_sha != '' && format('release-{0}', inputs.release_source_sha) || contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'soak' || 'ci' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -44,6 +51,25 @@ jobs:
       cli: ${{ contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && 'true' || (steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.cli) }}
       journey_matrix: ${{ steps.journey_matrix.outputs.json }}
     steps:
+      # A release handoff names the SHA that created its draft. If main moved
+      # between the release workflow's check and this server-side dispatch,
+      # fail before any job can request an Auth0 token. An operator soak omits
+      # this input and still runs against the selected main revision.
+      - name: Validate the exact release source
+        if: github.event_name == 'workflow_dispatch' && inputs.release_source_sha != ''
+        env:
+          RELEASE_SOURCE_SHA: ${{ inputs.release_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release source SHA is malformed" >&2
+            exit 1
+          }
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_SHA" == "$RELEASE_SOURCE_SHA" ]] || {
+            echo "::error::main moved before the exact CLI customer journey started" >&2
+            exit 1
+          }
+
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -826,12 +852,11 @@ jobs:
           client_dir=$RUNNER_TEMP/qurl-journey-auth
           credential_dir=$RUNNER_TEMP/qurl-journey-credential
           key_dir=$RUNNER_TEMP/qurl-customer-key
-          cleanup_id_dir=$RUNNER_TEMP/qurl-journey-cleanup-ids
           cleanup_authority() {
             scripts/remove-sensitive-tree.sh "$client_dir" "$credential_dir"
           }
           trap cleanup_authority EXIT
-          mkdir -m 0700 "$client_dir" "$credential_dir" "$credential_dir/primary" "$credential_dir/failure" "$key_dir" "$cleanup_id_dir"
+          mkdir -m 0700 "$client_dir" "$credential_dir" "$credential_dir/primary" "$credential_dir/failure" "$key_dir"
           printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
@@ -857,7 +882,6 @@ jobs:
           {
             echo "QURL_API_KEY_FILE=$key_dir/api-key"
             echo "QURL_CLI_SANDBOX_FAILURE_API_KEY_FILE=$key_dir/failure-api-key"
-            echo "QURL_CLI_CI_CLEANUP_ID_DIR=$cleanup_id_dir"
           } >>"$GITHUB_ENV"
 
       - name: Mint this lane's disposable keys
@@ -870,9 +894,8 @@ jobs:
           $clientDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-auth'
           $credentialDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-credential'
           $keyDir = Join-Path $env:RUNNER_TEMP 'qurl-customer-key'
-          $cleanupIDDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-cleanup-ids'
           try {
-            foreach ($path in @($clientDir, $credentialDir, $keyDir, $cleanupIDDir)) {
+            foreach ($path in @($clientDir, $credentialDir, $keyDir)) {
               New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null
               & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -910,7 +933,6 @@ jobs:
             Write-Output "::add-mask::$failureKey"
             "QURL_API_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             "QURL_CLI_SANDBOX_FAILURE_API_KEY=$failureKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "QURL_CLI_CI_CLEANUP_ID_DIR=$cleanupIDDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           } finally {
             foreach ($path in @($clientDir, $credentialDir)) {
               if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
@@ -1033,12 +1055,12 @@ jobs:
         name: Remove local disposable credentials
         if: always() && runner.os != 'Windows'
         shell: bash
-        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/qurl-customer-key" "$RUNNER_TEMP/qurl-journey-cleanup-ids"
+        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/qurl-customer-key"
 
       - name: Disable Linux runner linger
         if: always() && runner.os == 'Linux' && steps.fence-posix-service.outcome == 'success'
         shell: bash
-        run: sudo loginctl disable-linger "$(id -un)"
+        run: sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true
 
       - id: remove-windows-key
         name: Remove the local disposable keys
@@ -1046,8 +1068,7 @@ jobs:
         shell: pwsh
         run: |
           foreach ($path in @(
-            (Join-Path $env:RUNNER_TEMP 'qurl-customer-key'),
-            (Join-Path $env:RUNNER_TEMP 'qurl-journey-cleanup-ids')
+            (Join-Path $env:RUNNER_TEMP 'qurl-customer-key')
           )) {
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
             if (Test-Path -LiteralPath $path) { throw 'local disposable credential remains on the journey runner' }
@@ -1099,10 +1120,7 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          lane_specs=(linux:1 macos:2 windows:3)
-          if [[ "$GITHUB_EVENT_NAME" == schedule || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            lane_specs+=(linux:4)
-          fi
+          lane_specs=(linux:1 macos:2 windows:3 linux:4)
           run_specs=()
           for lane_spec in "${lane_specs[@]}"; do
             IFS=: read -r lane lane_id <<<"$lane_spec"
@@ -1408,7 +1426,7 @@ jobs:
     # A release-please run dispatches this full journey after it creates the
     # draft CLI release. Ordinary pushes must never publish from hermetic-only
     # CI, and the daily soak must not trigger a release by accident.
-    if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.release_source_sha != '' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

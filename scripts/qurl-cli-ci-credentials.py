@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -41,7 +42,6 @@ RUN_NAME = re.compile(
     r"qurl CLI journey v2 [1-9][0-9]{0,19}/[1-9][0-9]{0,19}/"
     r"(?:linux|macos|windows)/(?:primary|failure)\Z"
 )
-CLEANUP_ID_FILE = re.compile(r"device-key-[0-9a-f]{64}\Z")
 RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 RUN_AGENT_ID = re.compile(
     r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sf]\Z"
@@ -76,6 +76,31 @@ class CredentialError(RuntimeError):
 
 class InventoryBoundError(CredentialError):
     """A trusted cleanup inventory exceeded a runner-safety bound."""
+
+
+class CleanupConvergenceError(CredentialError):
+    """A create failed after a remote key could exist and cleanup also failed."""
+
+
+@dataclass(frozen=True)
+class RunCleanup:
+    """One validated run identity for trusted reconciliation."""
+
+    run_id: str
+    run_attempt: str
+    lane: str
+    runtime: str
+
+
+@dataclass(frozen=True)
+class CredentialCreate:
+    """One validated customer credential creation request."""
+
+    run_id: str
+    run_attempt: str
+    lane: str
+    purpose: str
+    output_dir: pathlib.Path
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -533,34 +558,8 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
     return result
 
 
-def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
-    if path is None or not path.exists():
-        return set()
-    if not path.is_absolute() or path == pathlib.Path(path.anchor):
-        raise CredentialError("cleanup ID directory must be an absolute non-root path")
-    before = path.lstat()
-    private = os.name == "nt" or (before.st_uid == os.getuid() and not before.st_mode & 0o077)
-    if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode) or not private:
-        raise CredentialError("cleanup ID directory is not one private directory")
-    entries = list(path.iterdir())
-    if len(entries) > 16:
-        raise CredentialError("cleanup ID directory exceeds its file limit")
-    result: set[str] = set()
-    for entry in entries:
-        if not CLEANUP_ID_FILE.fullmatch(entry.name):
-            raise CredentialError("cleanup ID directory contains an unexpected entry")
-        key_id = private_value(entry, "device API key ID")
-        if not KEY_ID.fullmatch(key_id):
-            raise CredentialError("cleanup device API key ID is malformed")
-        digest = hashlib.sha256(key_id.encode("ascii")).hexdigest()
-        if entry.name != "device-key-" + digest:
-            raise CredentialError("cleanup device API key ID filename does not match its value")
-        result.add(key_id)
-    return result
-
-
 def reconcile_run(
-    args: argparse.Namespace,
+    args: argparse.Namespace | RunCleanup,
     authenticated: tuple[str, str] | None = None,
 ) -> None:
     description = run_description(args)
@@ -587,7 +586,6 @@ def reconcile_run(
     # and retain only redacted failure categories for the final error.
     key_ids: list[str] = []
     try:
-        device_key_ids = cleanup_device_key_ids(args.cleanup_id_dir)
         credentials = paged_rows(
             endpoint,
             jwt,
@@ -595,7 +593,6 @@ def reconcile_run(
             "qURL credential cleanup",
             deadline=credential_inventory_deadline,
         )
-        seen_device_ids: set[str] = set()
         for row in credentials:
             row_name = row.get("name")
             key_id = row.get("key_id")
@@ -607,7 +604,7 @@ def reconcile_run(
                 record_failure("credential_shape")
                 continue
             is_customer = row_name in credential_names
-            is_device = key_id in device_key_ids or row_name in device_key_names
+            is_device = row_name in device_key_names
             if not is_customer and not is_device:
                 continue
             if is_customer:
@@ -623,42 +620,7 @@ def reconcile_run(
                 ):
                     record_failure("credential_shape")
                 else:
-                    seen_device_ids.add(key_id)
                     key_ids.append(key_id)
-        # A device key that the harness already revoked is correctly absent
-        # from the active inventory. Any still-active recorded key must be
-        # visible and have the exact device scope set before deletion.
-        missing_device_ids = device_key_ids - seen_device_ids
-        if missing_device_ids:
-            all_credentials = paged_rows(
-                endpoint,
-                jwt,
-                "/v1/api-keys",
-                "qURL revoked credential cleanup",
-                status_filter=None,
-                deadline=credential_inventory_deadline,
-            )
-            revoked_ids: set[str] = set()
-            for row in all_credentials:
-                key_id = row.get("key_id")
-                row_name = row.get("name")
-                is_recorded = isinstance(key_id, str) and key_id in missing_device_ids
-                is_named_device = isinstance(row_name, str) and row_name in device_key_names
-                if not is_recorded and not is_named_device:
-                    continue
-                if (
-                    not isinstance(key_id, str)
-                    or not KEY_ID.fullmatch(key_id)
-                    or not isinstance(row_name, str)
-                    or row.get("kind") != "device"
-                    or row.get("scopes") != DEVICE_SCOPES
-                ):
-                    record_failure("credential_shape")
-                    continue
-                if row.get("status") == "revoked":
-                    revoked_ids.add(key_id)
-            if not missing_device_ids.issubset(revoked_ids):
-                record_failure("credential_inventory")
     except InventoryBoundError:
         record_failure("credential_inventory_bound")
     except (CredentialError, OSError, UnicodeError):
@@ -740,19 +702,18 @@ def reconcile_batch(args: argparse.Namespace) -> None:
     if len(set(args.run_spec)) != len(args.run_spec):
         raise CredentialError("reconciliation batch contains a duplicate run")
 
-    parsed: list[argparse.Namespace] = []
+    parsed: list[RunCleanup] = []
     for value in args.run_spec:
         match = RUN_SPEC.fullmatch(value)
         if match is None:
             raise CredentialError("reconciliation run specification is malformed")
         run_id, run_attempt, lane, runtime = match.groups()
         parsed.append(
-            argparse.Namespace(
+            RunCleanup(
                 run_id=run_id,
                 run_attempt=run_attempt,
                 lane=lane,
                 runtime=runtime,
-                cleanup_id_dir=None,
             )
         )
 
@@ -761,8 +722,13 @@ def reconcile_batch(args: argparse.Namespace) -> None:
     for run in parsed:
         try:
             reconcile_run(run, authenticated=(endpoint, jwt))
-        except CredentialError:
+        except CredentialError as exc:
             failures += 1
+            print(
+                f"::error::run cleanup failed for {run.lane} lane "
+                f"run {run.run_id}/{run.run_attempt}: {exc}",
+                file=os.sys.stderr,
+            )
     if failures:
         raise CredentialError(
             f"batch cleanup did not converge for {failures} of {len(parsed)} runs"
@@ -851,6 +817,21 @@ def revoke_named_credential(
     retry_revoke(endpoint, jwt, key_id)
 
 
+def revoke_recorded_credential(
+    endpoint: str,
+    jwt: str,
+    name: str,
+    key_id_path: pathlib.Path,
+) -> None:
+    """Revoke a completed sibling without creating or recovering any key."""
+    if not RUN_NAME.fullmatch(name):
+        raise CredentialError("run-scoped API-key name is malformed")
+    key_id = private_value(key_id_path, "API key ID")
+    if not KEY_ID.fullmatch(key_id):
+        raise CredentialError("API key ID is malformed")
+    retry_revoke(endpoint, jwt, key_id)
+
+
 def revoke_persisted(endpoint: str, directory: pathlib.Path) -> None:
     jwt = private_value(directory / "cleanup-jwt", "cleanup JWT")
     name = private_value(directory / "run-name", "run-scoped API-key name")
@@ -867,7 +848,7 @@ def validate_create_args(args: argparse.Namespace) -> None:
 
 
 def create_with_auth(
-    args: argparse.Namespace,
+    args: argparse.Namespace | CredentialCreate,
     endpoint: str,
     jwt: str,
     expected_owner: str,
@@ -897,7 +878,7 @@ def create_with_auth(
         try:
             revoke_persisted(endpoint, args.output_dir)
         except (OSError, CredentialError) as cleanup_exc:
-            raise CredentialError(
+            raise CleanupConvergenceError(
                 "credential creation failed and bounded revoke did not converge"
             ) from cleanup_exc
         raise CredentialError("credential creation failed; the exact key was revoked") from exc
@@ -913,11 +894,16 @@ def create(args: argparse.Namespace) -> None:
 def create_pair(args: argparse.Namespace) -> None:
     for purpose in ("primary", "failure"):
         validate_create_args(
-            argparse.Namespace(
+            CredentialCreate(
                 run_id=args.run_id,
                 run_attempt=args.run_attempt,
                 lane=args.lane,
                 purpose=purpose,
+                output_dir=(
+                    args.primary_output_dir
+                    if purpose == "primary"
+                    else args.failure_output_dir
+                ),
             )
         )
     for path in (args.primary_output_dir, args.failure_output_dir):
@@ -936,10 +922,11 @@ def create_pair(args: argparse.Namespace) -> None:
         "primary": args.primary_output_dir,
         "failure": args.failure_output_dir,
     }
+    completed_purposes: list[str] = []
     try:
         for purpose, output_dir in directories.items():
             create_with_auth(
-                argparse.Namespace(
+                CredentialCreate(
                     run_id=args.run_id,
                     run_attempt=args.run_attempt,
                     lane=args.lane,
@@ -950,6 +937,7 @@ def create_pair(args: argparse.Namespace) -> None:
                 jwt,
                 expected_owner,
             )
+            completed_purposes.append(purpose)
         primary_id = private_value(
             args.primary_output_dir / "api-key-id", "primary API key ID"
         )
@@ -965,13 +953,14 @@ def create_pair(args: argparse.Namespace) -> None:
         if primary_id == failure_id or primary_key == failure_key:
             raise CredentialError("customer credentials are not isolated")
     except (OSError, CredentialError) as exc:
-        cleanup_failed = False
-        for purpose, directory in directories.items():
+        cleanup_failed = isinstance(exc, CleanupConvergenceError)
+        for purpose in completed_purposes:
+            directory = directories[purpose]
             try:
                 name = run_credential_name(
                     args.run_id, args.run_attempt, args.lane, purpose
                 )
-                revoke_named_credential(
+                revoke_recorded_credential(
                     endpoint, jwt, name, directory / "api-key-id"
                 )
             except (OSError, CredentialError):
@@ -981,7 +970,7 @@ def create_pair(args: argparse.Namespace) -> None:
                 "credential-pair creation failed and bounded revoke did not converge"
             ) from exc
         raise CredentialError(
-            "credential-pair creation failed; every exact key was revoked"
+            "credential-pair creation failed; every created key was revoked"
         ) from exc
     print("created two isolated run-scoped customer API keys with one management token")
 
@@ -1046,7 +1035,6 @@ def parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--run-attempt", required=True)
     reconcile_parser.add_argument("--lane", required=True)
     reconcile_parser.add_argument("--runtime", required=True)
-    reconcile_parser.add_argument("--cleanup-id-dir", type=pathlib.Path)
     reconcile_parser.set_defaults(handler=reconcile_run)
     reconcile_batch_parser.add_argument(
         "--run-spec", action="append", required=True
