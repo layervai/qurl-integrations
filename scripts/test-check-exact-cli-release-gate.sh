@@ -33,7 +33,7 @@ esac
 journey_count=${journey_count:-4}
 jq -n --arg status "$status" --arg journey_conclusion "$journey_conclusion" \
   --argjson journey_count "$journey_count" '{
-    jobs:
+    jobs: (
       [{name:"cli / required",status:$status,conclusion:"success"}] +
       [range(0; $journey_count) | {
         name:("cli / customer journey (lane-" + tostring + ")"),
@@ -41,6 +41,7 @@ jq -n --arg status "$status" --arg journey_conclusion "$journey_conclusion" \
         conclusion:$journey_conclusion
       }] +
       [{name:"cli / customer journey cleanup",status:$status,conclusion:"success"}]
+    )
   } | .total_count = (.jobs | length)
 '
 GH
