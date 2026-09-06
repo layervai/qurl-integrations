@@ -76,6 +76,10 @@ class CredentialError(RuntimeError):
 class InventoryBoundError(CredentialError):
     """A trusted cleanup inventory exceeded a runner-safety bound."""
 
+    def __init__(self, message: str, rows: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.rows = tuple(rows)
+
 
 class CleanupConvergenceError(CredentialError):
     """A create failed after a remote key could exist and cleanup also failed."""
@@ -509,9 +513,13 @@ def paged_rows(
     pages = 0
     while True:
         if pages >= INVENTORY_MAX_PAGES:
-            raise InventoryBoundError(f"{label} inventory exceeded its page limit")
+            raise InventoryBoundError(
+                f"{label} inventory exceeded its page limit", result
+            )
         if time.monotonic() >= deadline:
-            raise InventoryBoundError(f"{label} inventory exceeded its time limit")
+            raise InventoryBoundError(
+                f"{label} inventory exceeded its time limit", result
+            )
         query = {"limit": str(INVENTORY_PAGE_SIZE)}
         if status_filter is not None:
             query["status"] = status_filter
@@ -522,7 +530,9 @@ def paged_rows(
         )
         pages += 1
         if time.monotonic() >= deadline:
-            raise InventoryBoundError(f"{label} inventory exceeded its time limit")
+            raise InventoryBoundError(
+                f"{label} inventory exceeded its time limit", result
+            )
         rows = response.get("data")
         meta = response.get("meta")
         if status != 200 or not isinstance(rows, list) or not isinstance(meta, dict):
@@ -530,7 +540,9 @@ def paged_rows(
         if any(not isinstance(row, dict) for row in rows):
             raise CredentialError(f"{label} inventory contains a malformed row")
         if len(result) + len(rows) > INVENTORY_MAX_ROWS:
-            raise InventoryBoundError(f"{label} inventory exceeded its row limit")
+            raise InventoryBoundError(
+                f"{label} inventory exceeded its row limit", result
+            )
         result.extend(rows)
         has_more = meta.get("has_more", False)
         next_cursor = meta.get("next_cursor", "")
@@ -662,7 +674,8 @@ def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory
                 deadline=credential_deadline,
             )
         )
-    except InventoryBoundError:
+    except InventoryBoundError as exc:
+        credential_rows = exc.rows
         credential_failure = "credential_inventory_bound"
     except (CredentialError, OSError, UnicodeError):
         credential_failure = "credential_inventory"
@@ -680,7 +693,8 @@ def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory
                 deadline=inventory_deadline,
             )
         )
-    except InventoryBoundError:
+    except InventoryBoundError as exc:
+        resource_rows = exc.rows
         resource_failure = "resource_inventory_bound"
     except (CredentialError, OSError, UnicodeError):
         resource_failure = "resource_inventory"
@@ -780,7 +794,7 @@ def reconcile_run(
     resource_ids: list[str] = []
     if inventory.resource_failure is not None:
         record_failure(inventory.resource_failure)
-    elif inventory.resources is not None:
+    if inventory.resources is not None:
         for row in inventory.resources:
             if row.get("description") != description:
                 continue

@@ -62,6 +62,27 @@ gh_json() {
   return 1
 }
 
+gh_json_paginated() {
+  local path=$1 response attempt
+  for attempt in 1 2 3; do
+    : >"$gh_stderr"
+    if response=$(gh api --method GET --paginate "$path" 2>"$gh_stderr"); then
+      if [[ -s "$gh_stderr" ]]; then
+        cat "$gh_stderr" >&2
+      fi
+      printf '%s\n' "$response"
+      return 0
+    fi
+    if [[ -s "$gh_stderr" ]]; then
+      cat "$gh_stderr" >&2
+    fi
+    if ((attempt < 3)); then
+      sleep "$attempt"
+    fi
+  done
+  return 1
+}
+
 if ! run=$(gh_json "repos/$repository/actions/runs/$run_id"); then
   echo "::error::CLI release run lookup failed" >&2
   jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
@@ -99,7 +120,7 @@ fi
 run_url=$(jq -r '.html_url // ""' <<<"$run")
 latest_jobs='{}'
 for ((attempt = 10#$run_attempt; attempt >= 1; attempt--)); do
-  if ! jobs=$(gh_json \
+  if ! jobs=$(gh_json_paginated \
     "repos/$repository/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"); then
     echo "::error::CLI release job lookup failed" >&2
     jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
@@ -107,11 +128,13 @@ for ((attempt = 10#$run_attempt; attempt >= 1; attempt--)); do
       '{reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}' >&2
     exit 1
   fi
-  if ! current_gates=$(jq -c --argjson attempt "$attempt" '
-    if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
-      (.jobs | type) != "array" or (.jobs | length) != .total_count
+  if ! current_gates=$(jq -sc --argjson attempt "$attempt" '
+    (.[0].total_count // null) as $total |
+    if length == 0 or ($total | type) != "number" or $total < 0 or
+      any(.[]; .total_count != $total or (.jobs | type) != "array") or
+      ([.[].jobs[]] | length) != $total
     then error("CLI job data is malformed or truncated")
-    else [.jobs[] | select(
+    else [.[].jobs[] | select(
       .name == "cli / required" or
       .name == "cli / customer journey cleanup" or
       .name == "cli / customer journey" or

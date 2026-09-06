@@ -1154,8 +1154,8 @@ fi
 		t.Fatalf("automatic source with successful primary cleanup did not skip fallback: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "31"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" || !strings.Contains(output, "source run attempt is outside the 1-30 automatic recovery bound") {
-		t.Fatalf("automatic over-bound attempt did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	if err == nil || strings.TrimSpace(workflowOutput) != "" || !strings.Contains(output, "source run attempt is outside the 1-30 automatic recovery bound") {
+		t.Fatalf("automatic over-bound attempt did not fail loudly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	if !strings.Contains(resolverRun, "Run qurl-cli-customer-cleanup.yml from main with source_runs=$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT") {
 		t.Error("automatic cleanup bound has no exact manual-recovery instruction")

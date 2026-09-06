@@ -82,14 +82,13 @@ jobs:
               }
               if [[ ! "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
                 (( 10#$SOURCE_RUN_ATTEMPT > 30 )); then
-                echo "::warning::cleanup source run attempt is outside the 1-30 automatic recovery bound" >&2
+                echo "::error::cleanup source run attempt is outside the 1-30 automatic recovery bound" >&2
                 {
                   echo "## CLI cleanup needs manual action"
                   echo
                   echo "Run qurl-cli-customer-cleanup.yml from main with source_runs=$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT."
                 } >>"$GITHUB_STEP_SUMMARY"
-                echo "required=false" >>"$GITHUB_OUTPUT"
-                exit 0
+                exit 1
               fi
               source_runs="$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT"
               ;;

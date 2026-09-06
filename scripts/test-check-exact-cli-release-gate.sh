@@ -73,6 +73,11 @@ attempt=2
 if [[ "$*" =~ /attempts/([0-9]+)/jobs ]]; then
   attempt=${BASH_REMATCH[1]}
 fi
+if [[ "$SCENARIO" == paginated ]]; then
+  jq -n '{total_count:106,jobs:[range(0;100)|{name:("unrelated-"+tostring),status:"completed",conclusion:"success"}]}'
+  jq -n '{total_count:106,jobs:([{name:"cli / required",status:"completed",conclusion:"success"}] + [range(0;4)|{name:("cli / customer journey (lane-"+tostring+")"),status:"completed",conclusion:"success"}] + [{name:"cli / customer journey cleanup",status:"completed",conclusion:"success"}])}'
+  exit 0
+fi
 case "$SCENARIO" in
   incomplete) journey_status=in_progress; cleanup_status=queued ;;
   failed) journey_conclusion=failure ;;
@@ -139,6 +144,7 @@ run_case mismatch 1 'release source is not an ancestor'
 run_case operator 1 'run does not match the exact handoff'
 run_case wrong_tag 1 'run does not match the exact handoff'
 run_case partial_rerun 0 '"journey_url":"https://example.invalid/run/700"'
+run_case paginated 0 '"journey_url":"https://example.invalid/run/700"'
 run_case unavailable 1 '::error::CLI release run lookup failed'
 run_case jobs_unavailable 1 '::error::CLI release job lookup failed'
 

@@ -996,7 +996,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
         calls += 1
         return 200, json.dumps(
             {
-                "data": [],
+                "data": [{"resource_id": f"r_{calls}"}],
                 "meta": {"has_more": True, "next_cursor": f"cursor-{calls}"},
             }
         ).encode()
@@ -1013,6 +1013,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
             )
         except credentials.InventoryBoundError as exc:
             assert str(exc) == "test inventory exceeded its page limit"
+            assert len(exc.rows) == credentials.INVENTORY_MAX_PAGES
         else:
             raise AssertionError("inventory page limit was not enforced")
     assert calls == credentials.INVENTORY_MAX_PAGES
