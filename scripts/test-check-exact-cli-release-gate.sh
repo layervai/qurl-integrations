@@ -25,6 +25,9 @@ fi
 if [[ "$SCENARIO" == stderr_warning ]]; then
   echo "gh: simulated warning" >&2
 fi
+if [[ "$*" == *"--include"* ]]; then
+  printf 'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
+fi
 if [[ "$*" == *"commits/v1.2.3"* ]]; then
   jq -n --arg sha "$SOURCE_SHA" '{sha:$sha}'
   exit 0

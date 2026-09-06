@@ -281,6 +281,7 @@ def auth_args(root: pathlib.Path) -> argparse.Namespace:
         client_secret_file=private_file(root, "client-secret", "client-secret"),
         qurl_endpoint="https://sandbox.example",
         token_endpoint="https://auth.example/oauth/token",
+        operation_budget_seconds=15 * 60,
     )
 
 
@@ -514,6 +515,21 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
                 raise AssertionError("invalid reconciliation batch was accepted")
         assert fake.auth_token_requests == 0
 
+        for budget in (0, 3301):
+            values = {**vars(args), "operation_budget_seconds": budget}
+            try:
+                credentials.reconcile_batch(
+                    argparse.Namespace(
+                        **values,
+                        run_spec=("1232:2:macos:host:full",),
+                    )
+                )
+            except credentials.CredentialError:
+                pass
+            else:
+                raise AssertionError("invalid reconciliation budget was accepted")
+        assert fake.auth_token_requests == 0
+
         attempted: list[str] = []
 
         def reconcile(
@@ -736,10 +752,13 @@ def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
     )
     assert fallback_cleanup_minutes == 45
     assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
-    assert credentials.RECONCILE_BATCH_BUDGET_SECONDS == fallback_cleanup_minutes * 60
+    assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
+    assert "--operation-budget-seconds 2700" in CUSTOMER_CLEANUP_WORKFLOW.read_text(
+        encoding="utf-8"
+    )
     assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
     assert (
-        credentials.RECONCILE_BATCH_BUDGET_SECONDS
+        fallback_cleanup_minutes * 60
         + credentials.M2M_EXPIRY_MARGIN_SECONDS
         + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
@@ -785,7 +804,7 @@ def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
         for remaining_seconds, issued_ago, budget in (
             (3599, 1, credentials.CREATE_PAIR_BUDGET_SECONDS),
             (1200, 0, credentials.CREATE_PAIR_BUDGET_SECONDS),
-            (3000, 0, credentials.RECONCILE_BATCH_BUDGET_SECONDS),
+            (3000, 0, fallback_cleanup_minutes * 60),
         ):
             value = token(remaining_seconds, issued_ago)
             with (
@@ -801,7 +820,7 @@ def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
 
         for remaining_seconds, budget in (
             (1199, credentials.CREATE_PAIR_BUDGET_SECONDS),
-            (2999, credentials.RECONCILE_BATCH_BUDGET_SECONDS),
+            (2999, fallback_cleanup_minutes * 60),
         ):
             with (
                 mock.patch.object(
@@ -1339,6 +1358,9 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
         )
     assert set(fake.assignment_retire_attempts) == {
         "qurl-journey-v2-r1231-a2-hs",
+        "qurl-journey-v2-r1231-a2-hr",
+        "qurl-journey-v2-r1231-a2-ha",
+        "qurl-journey-v2-r1231-a2-hb",
         "qurl-journey-v2-r1231-a2-hf",
     }
     assert fake.deleted_keys == []
@@ -1507,7 +1529,13 @@ def main() -> None:
         argparse.Namespace(
             run_id="1231", run_attempt="2", runtime="host", profile="full"
         )
-    ) == {"agent:qurl-journey-v2-r1231-a2-hs", "agent:qurl-journey-v2-r1231-a2-hf"}
+    ) == {
+        "agent:qurl-journey-v2-r1231-a2-hs",
+        "agent:qurl-journey-v2-r1231-a2-hr",
+        "agent:qurl-journey-v2-r1231-a2-ha",
+        "agent:qurl-journey-v2-r1231-a2-hb",
+        "agent:qurl-journey-v2-r1231-a2-hf",
+    }
     assert credentials.run_device_key_names(
         argparse.Namespace(
             run_id="1231",
@@ -1515,12 +1543,24 @@ def main() -> None:
             runtime="hardened_container",
             profile="full",
         )
-    ) == {"agent:qurl-journey-v2-r1231-a2-cs", "agent:qurl-journey-v2-r1231-a2-cf"}
+    ) == {
+        "agent:qurl-journey-v2-r1231-a2-cs",
+        "agent:qurl-journey-v2-r1231-a2-cr",
+        "agent:qurl-journey-v2-r1231-a2-ca",
+        "agent:qurl-journey-v2-r1231-a2-cb",
+        "agent:qurl-journey-v2-r1231-a2-cf",
+    }
     assert credentials.run_agent_ids(
         argparse.Namespace(
             run_id="1231", run_attempt="2", runtime="host", profile="full"
         )
-    ) == {"qurl-journey-v2-r1231-a2-hs", "qurl-journey-v2-r1231-a2-hf"}
+    ) == {
+        "qurl-journey-v2-r1231-a2-hs",
+        "qurl-journey-v2-r1231-a2-hr",
+        "qurl-journey-v2-r1231-a2-ha",
+        "qurl-journey-v2-r1231-a2-hb",
+        "qurl-journey-v2-r1231-a2-hf",
+    }
     assert credentials.run_connector_ids(
         argparse.Namespace(
             run_id="1231",
@@ -1531,7 +1571,10 @@ def main() -> None:
         )
     ) == {
         "connector-cli-journey-v2-415907f85f12d5ffd69c6a62",
+        "connector-cli-journey-v2-5ad841a265e47a703aff9ec8",
         "connector-cli-journey-v2-87e091ca6623843507b5863b",
+        "connector-cli-journey-v2-dd1cdad8a4a819078a52fb36",
+        "connector-cli-journey-v2-f01548b839625d9e7d14942a",
     }
     lane_identities = [
         argparse.Namespace(
@@ -1562,7 +1605,7 @@ def main() -> None:
                 *(credentials.run_device_key_names(item) for item in lane_identities)
             )
         )
-        == 6
+        == 15
     )
     assert (
         len(
@@ -1570,7 +1613,7 @@ def main() -> None:
                 *(credentials.run_connector_ids(item) for item in lane_identities)
             )
         )
-        == 6
+        == 15
     )
     fake = FakeAPI()
     with (

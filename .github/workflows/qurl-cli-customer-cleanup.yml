@@ -288,4 +288,5 @@ jobs:
           python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
             --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
             --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" "${batch_args[@]}"
+            --client-secret-file "$client_dir/client-secret" \
+            --operation-budget-seconds 2700 "${batch_args[@]}"

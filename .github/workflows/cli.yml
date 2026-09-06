@@ -1182,6 +1182,7 @@ jobs:
             --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
             --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
             --client-secret-file "$client_dir/client-secret" \
+            --operation-budget-seconds 900 \
             "${run_specs[@]}"
 
   goreleaser-check:

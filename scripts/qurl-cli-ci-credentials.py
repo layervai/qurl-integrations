@@ -31,7 +31,6 @@ AUTH0_ISSUANCE_SKEW_SECONDS = 60
 # command reuses one token for its bounded batch and never exposes that token to
 # a customer process. The lifetime is independent of the 110-minute soak lane.
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
-RECONCILE_BATCH_BUDGET_SECONDS = 45 * 60
 M2M_EXPIRY_MARGIN_SECONDS = 5 * 60
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
@@ -44,7 +43,7 @@ RUN_NAME = re.compile(
 )
 RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 RUN_AGENT_ID = re.compile(
-    r"qurl-journey-v2-r[1-9][0-9]{0,18}-a[1-9][0-9]{0,18}-[hc][sfk]\Z"
+    r"qurl-journey-v2-r[1-9][0-9]{0,18}-a[1-9][0-9]{0,18}-[hc][skrabf]\Z"
 )
 RUN_SPEC = re.compile(
     r"([1-9][0-9]{0,18}):([1-9][0-9]{0,18}):"
@@ -608,7 +607,8 @@ def run_device_key_names(args: argparse.Namespace) -> set[str]:
 
 def run_connector_ids(args: argparse.Namespace) -> set[str]:
     # Derive every Connector ID from the same public test inputs as the Go
-    # harness so the trusted controller can clean up an interrupted runner.
+    # harness so the trusted controller can clean up every route that an
+    # interrupted runner can create.
     run_description(args)
     result: set[str] = set()
     for label in cleanup_labels(args):
@@ -624,14 +624,21 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
 def cleanup_labels(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
     profile = getattr(args, "profile", None)
     if profile == "full":
-        return ("smoke", "failure")
+        return ("smoke", "crid", "sibling-a", "sibling-b", "failure")
     if profile == "soak":
         return ("soak",)
     raise CredentialError("journey cleanup profile is invalid")
 
 
 def cleanup_label_codes(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
-    codes = {"smoke": "s", "failure": "f", "soak": "k"}
+    codes = {
+        "smoke": "s",
+        "soak": "k",
+        "crid": "r",
+        "sibling-a": "a",
+        "sibling-b": "b",
+        "failure": "f",
+    }
     return tuple(codes[label] for label in cleanup_labels(args))
 
 
@@ -699,7 +706,7 @@ def reconcile_run(
     if authenticated is None:
         if isinstance(args, RunCleanup):
             raise CredentialError("run cleanup requires authenticated inventory")
-        endpoint, jwt, _ = authenticated_owner(args, RECONCILE_BATCH_BUDGET_SECONDS)
+        endpoint, jwt, _ = authenticated_owner(args, args.operation_budget_seconds)
     else:
         endpoint, jwt = authenticated
     if inventory is None:
@@ -830,7 +837,7 @@ def reconcile_batch(args: argparse.Namespace) -> None:
             )
         )
 
-    endpoint, jwt, _ = authenticated_owner(args, RECONCILE_BATCH_BUDGET_SECONDS)
+    endpoint, jwt, _ = authenticated_owner(args, args.operation_budget_seconds)
     inventory = reconciliation_inventory(endpoint, jwt)
     failures = 0
     for run in parsed:
@@ -1013,8 +1020,8 @@ def create_pair(args: argparse.Namespace) -> None:
             ("failure", args.failure_output_dir),
         )
     )
-    for request in requests:
-        validate_create_args(request)
+    for credential in requests:
+        validate_create_args(credential)
     for path in (args.primary_output_dir, args.failure_output_dir):
         if not path.is_absolute() or path == pathlib.Path(path.anchor):
             raise CredentialError(
@@ -1031,12 +1038,12 @@ def create_pair(args: argparse.Namespace) -> None:
     endpoint, jwt, expected_owner = authenticated_owner(
         args, CREATE_PAIR_BUDGET_SECONDS
     )
-    directories = {request.purpose: request.output_dir for request in requests}
+    directories = {credential.purpose: credential.output_dir for credential in requests}
     completed_purposes: list[str] = []
     try:
-        for request in requests:
-            create_with_auth(request, endpoint, jwt, expected_owner)
-            completed_purposes.append(request.purpose)
+        for credential in requests:
+            create_with_auth(credential, endpoint, jwt, expected_owner)
+            completed_purposes.append(credential.purpose)
         primary_id = private_value(
             args.primary_output_dir / "api-key-id", "primary API key ID"
         )
@@ -1099,6 +1106,9 @@ def parser() -> argparse.ArgumentParser:
     create_pair_parser.add_argument("--lane", required=True)
     create_pair_parser.set_defaults(handler=create_pair)
     reconcile_batch_parser.add_argument("--run-spec", action="append", required=True)
+    reconcile_batch_parser.add_argument(
+        "--operation-budget-seconds", type=int, required=True
+    )
     reconcile_batch_parser.set_defaults(handler=reconcile_batch)
     return result
 
