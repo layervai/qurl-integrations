@@ -1108,7 +1108,7 @@ jobs:
   journey-cleanup:
     name: cli / customer journey cleanup
     needs: [changes, customer-artifacts, journey]
-    if: always() && (github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true'
+    if: always() && (github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: cli-customer-journey-cleanup
@@ -1128,7 +1128,6 @@ jobs:
           AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
           AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
           JOURNEY_RUN_ATTEMPT: ${{ needs.customer-artifacts.outputs.identity_run_attempt }}
-          REQUIRE_DEVICE_KEYS: ${{ needs.journey.result == 'success' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           client_dir=$RUNNER_TEMP/qurl-journey-auth
@@ -1149,15 +1148,11 @@ jobs:
             IFS=: read -r lane lane_id profile <<<"$lane_spec"
             run_specs+=(--run-spec "${GITHUB_RUN_ID}${lane_id}:${JOURNEY_RUN_ATTEMPT}:${lane}:host:${profile}")
           done
-          device_key_contract=()
-          if [[ "$REQUIRE_DEVICE_KEYS" == true ]]; then
-            device_key_contract+=(--require-device-keys)
-          fi
           python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
             --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
             --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
             --client-secret-file "$client_dir/client-secret" \
-            "${device_key_contract[@]}" "${run_specs[@]}"
+            "${run_specs[@]}"
 
   goreleaser-check:
     name: cli / goreleaser check

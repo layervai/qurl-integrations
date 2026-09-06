@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import stat
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -55,9 +56,9 @@ MAX_RECONCILE_RUNS = 12
 MAX_ATTEMPTS = 3
 # Bound the trusted cleanup inventory independently of per-request timeouts so
 # malformed pagination cannot hold a runner or grow its in-memory result set.
-# TODO(upstream-contract): qurl-service currently honors a 100-row maximum,
-# retains revoked API keys for 30 days, and hard-deletes resources. Recalibrate
-# this dedicated-CI-owner bound if any of those service contracts change.
+# TODO(upstream-contract): qurl-service currently honors a 100-row maximum and
+# hard-deletes resources. Recalibrate this dedicated-CI-owner bound if either
+# service contract changes.
 INVENTORY_PAGE_SIZE = 100
 INVENTORY_MAX_PAGES = 20
 INVENTORY_MAX_ROWS = INVENTORY_PAGE_SIZE * INVENTORY_MAX_PAGES
@@ -92,7 +93,6 @@ class RunCleanup:
     lane: str
     runtime: str
     profile: str
-    require_device_keys: bool = False
 
 
 @dataclass(frozen=True)
@@ -636,13 +636,16 @@ def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory
     credential_rows: tuple[dict[str, Any], ...] | None = None
     credential_failure: str | None = None
     try:
+        # Cleanup needs only live deterministic names. The customer journey
+        # proves device-key creation and revocation; historical retention is
+        # not a cleanup dependency and must not make this inventory unbounded.
         credential_rows = tuple(
             paged_rows(
                 endpoint,
                 jwt,
                 "/v1/api-keys",
                 "qURL credential cleanup",
-                status_filter=None,
+                status_filter="active",
                 deadline=credential_deadline,
             )
         )
@@ -703,10 +706,9 @@ def reconcile_run(
     # Validate each exact target before deletion, attempt every valid target,
     # and retain only redacted failure categories for the final error.
     key_ids: list[str] = []
-    matched_device_names: set[str] = set()
     if inventory.credential_failure is not None:
         record_failure(inventory.credential_failure)
-    elif inventory.credentials is not None:
+    if inventory.credentials is not None:
         for row in inventory.credentials:
             row_name = row.get("name")
             key_id = row.get("key_id")
@@ -733,16 +735,8 @@ def reconcile_run(
             if is_device:
                 if row.get("kind") != "device" or row.get("scopes") != DEVICE_SCOPES:
                     record_failure("credential_shape")
-                else:
-                    matched_device_names.add(row_name)
-                    if status == "active":
-                        key_ids.append(key_id)
-
-    if (
-        getattr(args, "require_device_keys", False)
-        and matched_device_names != device_key_names
-    ):
-        record_failure("device_key_contract")
+                elif status == "active":
+                    key_ids.append(key_id)
 
     unique_key_ids = sorted(set(key_ids))
     for key_id in unique_key_ids:
@@ -824,7 +818,6 @@ def reconcile_batch(args: argparse.Namespace) -> None:
                 lane=lane,
                 runtime=runtime,
                 profile=profile,
-                require_device_keys=getattr(args, "require_device_keys", False),
             )
         )
 
@@ -839,7 +832,7 @@ def reconcile_batch(args: argparse.Namespace) -> None:
             print(
                 f"::error::run cleanup failed for {run.lane} lane "
                 f"run {run.run_id}/{run.run_attempt}: {exc}",
-                file=os.sys.stderr,
+                file=sys.stderr,
             )
     if failures:
         raise CredentialError(
@@ -1143,7 +1136,6 @@ def parser() -> argparse.ArgumentParser:
     create_pair_parser.add_argument("--lane", required=True)
     create_pair_parser.set_defaults(handler=create_pair)
     reconcile_batch_parser.add_argument("--run-spec", action="append", required=True)
-    reconcile_batch_parser.add_argument("--require-device-keys", action="store_true")
     reconcile_batch_parser.set_defaults(handler=reconcile_batch)
     revoke_parser = commands.add_parser("revoke")
     revoke_parser.add_argument("--qurl-endpoint", required=True)

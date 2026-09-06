@@ -93,7 +93,7 @@ run_case() {
 }
 
 run_case success 0 '"ready":true'
-run_case incomplete 0 '"reason":"cli_release_journey_incomplete"'
+run_case incomplete 1 '"reason":"cli_release_journey_incomplete"'
 run_case failed 1 'Exact CLI customer-journey gate failed'
 run_case required_failed 1 'cli / required=failure'
 run_case cleanup_failed 1 'cli / customer journey cleanup=failure'
@@ -102,8 +102,8 @@ run_case mismatch 1 'run does not match the exact handoff'
 run_case operator 1 'run does not match the exact handoff'
 run_case wrong_tag 1 'run does not match the exact handoff'
 run_case partial_rerun 0 '"ready":true'
-run_case unavailable 1 '"reason":"cli_release_run_unavailable"'
-run_case jobs_unavailable 1 '"reason":"cli_release_jobs_unavailable"'
+run_case unavailable 1 '::error::CLI release run lookup did not recover after three attempts'
+run_case jobs_unavailable 1 '::error::CLI release job lookup did not recover after three attempts'
 
 for malformed in 0 01 -1 1.0 900719925474099300000; do
   run_case_name="malformed-$malformed"

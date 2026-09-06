@@ -171,10 +171,8 @@ jobs:
             environment_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment")
             jq -e --arg environment "$environment" '
               .name == $environment and
-              .deployment_branch_policy == {
-                protected_branches:false,
-                custom_branch_policies:true
-              }
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
             ' <<<"$environment_json" >/dev/null || {
               echo "::error::$environment has an unsafe deployment policy" >&2
               exit 1
@@ -282,11 +280,12 @@ jobs:
             exit 1
           fi
           if [[ "$draft" == true ]]; then
-            [[ "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ &&
-              "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || {
+            if [[ ! "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ||
+              ! "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
+              (( 10#$HANDOFF_RUN_ATTEMPT > 30 )); then
               echo "::error::A draft CLI release requires one exact tested workflow run and attempt" >&2
               exit 1
-            }
+            fi
           fi
           required=$draft
           {

@@ -443,7 +443,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	cleanup := workflow.Jobs["journey-cleanup"]
-	if cleanup.If != "always() && (github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true'" ||
+	if cleanup.If != "always() && (github.ref == 'refs/heads/main' || inputs.release_source_sha != '') && contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'" ||
 		contract.Jobs["journey-cleanup"].Environment != "cli-customer-journey-cleanup" {
 		t.Errorf("terminal cleanup is not an exact protected trusted-event gate: if=%q", cleanup.If)
 	}
@@ -544,7 +544,7 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if fallback.Jobs["resolve"] == nil || fallback.Jobs["cleanup"] == nil || len(fallback.Jobs) != 2 {
 		t.Errorf("cancellation cleanup is not one small resolve/cleanup workflow: %v", maps.Keys(fallback.Jobs))
 	}
-	wantFallbackIf := "github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'main' || (github.event.workflow_run.event == 'workflow_dispatch' && startsWith(github.event.workflow_run.display_title, 'CLI release gate '))"
+	wantFallbackIf := "github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'main' || (github.event.workflow_run.event == 'workflow_dispatch' && startsWith(github.event.workflow_run.head_branch, 'v') && startsWith(github.event.workflow_run.display_title, 'CLI release gate '))"
 	if got := strings.Join(strings.Fields(fallback.Jobs["resolve"].If), " "); got != wantFallbackIf {
 		t.Errorf("cancellation cleanup resolve if = %q, want only manual, main, or release-tag runs", got)
 	}
@@ -776,17 +776,14 @@ func TestCLITerminalCleanupBatchesEveryLaneBeforeFailing(t *testing.T) {
 set -euo pipefail
 command_name=
 run_specs=()
-require_device_keys=false
 while (( $# > 0 )); do
   case "$1" in
     reconcile-batch) command_name=$1; shift ;;
     --run-spec) run_specs+=("$2"); shift 2 ;;
-    --require-device-keys) require_device_keys=true; shift ;;
     *) shift ;;
   esac
 done
 [[ "$command_name" == reconcile-batch && ${#run_specs[@]} -gt 0 ]]
-[[ "${EXPECT_DEVICE_KEYS:-false}" != true || "$require_device_keys" == true ]]
 printf 'batch\n' >>"$BATCH_CAPTURE"
 failed=0
 for run_spec in "${run_specs[@]}"; do
@@ -822,24 +819,14 @@ exit "$failed"
 			}
 
 			tests := []struct {
-				name              string
-				failLane          string
-				includeSoak       bool
-				requireDeviceKeys bool
-				wantFail          bool
+				name        string
+				failLane    string
+				includeSoak bool
+				wantFail    bool
 			}{
 				{name: "all lanes succeed"},
 				{name: "first lane fails", failLane: "linux", wantFail: true},
 				{name: "soak lane succeeds", includeSoak: true},
-			}
-			if subject.name == cliWorkflow {
-				tests = append(tests, struct {
-					name              string
-					failLane          string
-					includeSoak       bool
-					requireDeviceKeys bool
-					wantFail          bool
-				}{name: "successful journey requires exact device keys", requireDeviceKeys: true})
 			}
 			for _, test := range tests {
 				t.Run(test.name, func(t *testing.T) {
@@ -884,8 +871,6 @@ exit "$failed"
 						"SOURCE_RUN_ID=700",
 						"SOURCE_RUN_ATTEMPT=2",
 						"SOURCE_RUNS=" + subject.sourceRuns,
-						"REQUIRE_DEVICE_KEYS=" + strconv.FormatBool(test.requireDeviceKeys),
-						"EXPECT_DEVICE_KEYS=" + strconv.FormatBool(test.requireDeviceKeys),
 					}
 					output, err := command.CombinedOutput()
 					if gotFail := err != nil; gotFail != test.wantFail {
@@ -1140,9 +1125,9 @@ fi
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
 		t.Fatalf("automatic source with successful primary cleanup did not skip fallback: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
-	_, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "0"})
-	if err == nil || !strings.Contains(output, "source run attempt is outside the 1-30 recovery bound") {
-		t.Fatalf("cleanup resolver accepted invalid attempt zero: err=%v output=%s", err, output)
+	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "31"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" || !strings.Contains(output, "source run attempt is outside the 1-30 recovery bound") {
+		t.Fatalf("automatic over-bound attempt did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 
 	for _, test := range []struct {
@@ -1153,6 +1138,7 @@ fi
 		{name: "wrong automatic branch", overrides: map[string]string{"SOURCE_BRANCH": "feature"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic event", overrides: map[string]string{"SOURCE_EVENT": "pull_request"}, wantMessage: "source event is not an approved CLI trigger"},
 		{name: "spoofed release title", overrides: map[string]string{"SOURCE_BRANCH": "v1.2.3", "SOURCE_EVENT": "workflow_dispatch", "SOURCE_DISPLAY_TITLE": "Operator CLI soak"}, wantMessage: "exact trusted same-repository CLI workflow"},
+		{name: "release title on branch", overrides: map[string]string{"SOURCE_BRANCH": "feature", "SOURCE_EVENT": "workflow_dispatch", "SOURCE_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic source repository", overrides: map[string]string{"SOURCE_REPOSITORY": "other/repo"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic workflow repository", overrides: map[string]string{"WORKFLOW_REPOSITORY": "other/repo"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic workflow name", overrides: map[string]string{"SOURCE_WORKFLOW_NAME": "other"}, wantMessage: "exact trusted same-repository CLI workflow"},

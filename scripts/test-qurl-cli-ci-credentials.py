@@ -416,8 +416,8 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "qurl-cli-ci-credentials.py create " not in workflow
     assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
     assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
-    assert "--require-device-keys" in workflow
-    assert "needs.journey.result == 'success'" in workflow
+    assert "--require-device-keys" not in workflow
+    assert "needs.customer-artifacts.result == 'success'" in workflow
     assert "QURL_CLI_CI_CLEANUP_ID_DIR" not in workflow
     assert 'sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true' in workflow
     assert "inputs.release_source_sha != ''" in workflow
@@ -526,7 +526,6 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
                         "1232:2:macos:host:full",
                         "1232:2:macos:host:full",
                     ),
-                    require_device_keys=False,
                 )
             )
         assert attempted == ["1232"]
@@ -547,7 +546,6 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
                             "1231:2:linux:host:full",
                             "1232:2:macos:host:full",
                         ),
-                        require_device_keys=False,
                     )
                 )
             except credentials.CredentialError as exc:
@@ -571,9 +569,7 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
         )
         with mock.patch.object(credentials, "reconcile_run", reconcile):
             credentials.reconcile_batch(
-                argparse.Namespace(
-                    **vars(args), run_spec=maximum, require_device_keys=False
-                )
+                argparse.Namespace(**vars(args), run_spec=maximum)
             )
         assert len(attempted) == credentials.MAX_RECONCILE_RUNS
         assert fake.auth_token_requests == 1
@@ -1296,53 +1292,6 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
     assert fake.deleted_resources == []
 
 
-def test_successful_journey_cleanup_requires_device_key_contract() -> None:
-    missing = FakeAPI()
-    missing.assignments.clear()
-    missing.connector_resources.clear()
-    missing.resources.clear()
-    with (
-        tempfile.TemporaryDirectory() as raw_root,
-        mock.patch.object(credentials, "request", missing),
-    ):
-        args = auth_args(pathlib.Path(raw_root))
-        try:
-            credentials.reconcile_run(
-                argparse.Namespace(
-                    **vars(args),
-                    lane="linux",
-                    run_attempt="2",
-                    run_id="1231",
-                    runtime="host",
-                    require_device_keys=True,
-                )
-            )
-        except credentials.CredentialError as exc:
-            assert str(exc) == "run cleanup did not converge (device_key_contract=1)"
-        else:
-            raise AssertionError(
-                "successful journey cleanup accepted missing device keys"
-            )
-
-    present = FakeAPI()
-    add_run_credentials(present)
-    with (
-        tempfile.TemporaryDirectory() as raw_root,
-        mock.patch.object(credentials, "request", present),
-    ):
-        args = auth_args(pathlib.Path(raw_root))
-        credentials.reconcile_run(
-            argparse.Namespace(
-                **vars(args),
-                lane="linux",
-                run_attempt="2",
-                run_id="1231",
-                runtime="host",
-                require_device_keys=True,
-            )
-        )
-
-
 def test_successful_cleanup_contract_is_idempotent_after_revocation() -> None:
     fake = FakeAPI()
     fake.retain_revoked_keys = True
@@ -1359,7 +1308,6 @@ def test_successful_cleanup_contract_is_idempotent_after_revocation() -> None:
             run_id="1231",
             runtime="host",
             profile="full",
-            require_device_keys=True,
         )
         credentials.reconcile_run(run)
         first_revocations = list(fake.deleted_keys)
@@ -1396,7 +1344,6 @@ def test_soak_cleanup_requires_and_removes_the_soak_device() -> None:
             run_id="1231",
             runtime="host",
             profile="soak",
-            require_device_keys=True,
         )
         credentials.reconcile_run(run)
     assert credentials.run_agent_ids(run) == {"qurl-journey-v2-r1231-a2-hk"}
@@ -1478,7 +1425,6 @@ def main() -> None:
     test_assignment_failure_still_attempts_every_target_and_resources()
     test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
     test_empty_run_reconciliation_is_idempotent()
-    test_successful_journey_cleanup_requires_device_key_contract()
     test_successful_cleanup_contract_is_idempotent_after_revocation()
     test_soak_cleanup_requires_and_removes_the_soak_device()
     test_unhashable_inventory_fields_remain_bounded()
