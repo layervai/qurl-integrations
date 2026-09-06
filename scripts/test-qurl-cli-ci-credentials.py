@@ -424,7 +424,9 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "inputs.release_source_sha != ''" in workflow
     assert "release_source_tag:" in workflow
     assert '"$GITHUB_REF" == refs/heads/main' in workflow
-    assert 'git merge-base --is-ancestor "$RELEASE_SOURCE_SHA" "$GITHUB_SHA"' in workflow
+    assert (
+        'git merge-base --is-ancestor "$RELEASE_SOURCE_SHA" "$GITHUB_SHA"' in workflow
+    )
     assert "needs.required.result == 'success'" in workflow
     assert "needs.journey.result == 'success'" in workflow
     assert "notify-soak-manual-failure:" in workflow
@@ -734,10 +736,7 @@ def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
     )
     assert fallback_cleanup_minutes == 45
     assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
-    assert (
-        credentials.RECONCILE_BATCH_BUDGET_SECONDS
-        == fallback_cleanup_minutes * 60
-    )
+    assert credentials.RECONCILE_BATCH_BUDGET_SECONDS == fallback_cleanup_minutes * 60
     assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
     assert (
         credentials.RECONCILE_BATCH_BUDGET_SECONDS
@@ -1347,6 +1346,24 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
     assert fake.deleted_resources == []
 
 
+def test_batch_run_requires_shared_authentication_and_inventory() -> None:
+    run = credentials.RunCleanup(
+        run_id="1231",
+        run_attempt="2",
+        lane="linux",
+        runtime="host",
+        profile="full",
+    )
+    try:
+        credentials.reconcile_run(run)
+    except credentials.CredentialError as exc:
+        assert str(exc) == "run cleanup requires authenticated inventory"
+    else:
+        raise AssertionError(
+            "batch cleanup tried to authenticate without command inputs"
+        )
+
+
 def test_successful_cleanup_contract_is_idempotent_after_revocation() -> None:
     fake = FakeAPI()
     fake.retain_revoked_keys = True
@@ -1482,6 +1499,7 @@ def main() -> None:
     test_assignment_failure_still_attempts_every_target_and_resources()
     test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
     test_empty_run_reconciliation_is_idempotent()
+    test_batch_run_requires_shared_authentication_and_inventory()
     test_successful_cleanup_contract_is_idempotent_after_revocation()
     test_soak_cleanup_requires_and_removes_the_soak_device()
     test_unhashable_inventory_fields_remain_bounded()

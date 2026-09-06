@@ -188,7 +188,7 @@ jobs:
                 {name:"main",type:"branch"}
               ]
             ' <<<"$policies" >/dev/null || {
-              echo "::error::$environment must allow only main" >&2
+              echo "::error::$environment must allow only main; see https://github.com/$GITHUB_REPOSITORY/settings/environments" >&2
               exit 1
             }
           done

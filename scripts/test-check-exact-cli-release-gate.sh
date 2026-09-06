@@ -22,6 +22,9 @@ fi
 if [[ "$SCENARIO" == jobs_unavailable && "$*" == *attempts* ]]; then
   exit 1
 fi
+if [[ "$SCENARIO" == stderr_warning ]]; then
+  echo "gh: simulated warning" >&2
+fi
 if [[ "$*" == *"commits/v1.2.3"* ]]; then
   jq -n --arg sha "$SOURCE_SHA" '{sha:$sha}'
   exit 0
@@ -119,6 +122,7 @@ run_case() {
 }
 
 run_case success 0 '"journey_url":"https://example.invalid/run/700"'
+run_case stderr_warning 0 '"journey_url":"https://example.invalid/run/700"'
 run_case incomplete 1 '"reason":"cli_release_journey_incomplete"'
 run_case failed 1 'Exact CLI customer-journey gate failed'
 run_case required_failed 1 'cli / required=failure'
@@ -133,6 +137,19 @@ run_case wrong_tag 1 'run does not match the exact handoff'
 run_case partial_rerun 0 '"journey_url":"https://example.invalid/run/700"'
 run_case unavailable 1 '::error::CLI release run lookup failed'
 run_case jobs_unavailable 1 '::error::CLI release job lookup failed'
+
+early_capture=$fixture/early-stop-calls
+output=""
+status=0
+output=$(PATH="$fixture:$PATH" SCENARIO=success SOURCE_SHA="$sha" \
+  GH_CALL_CAPTURE="$early_capture" GH_TOKEN=test GITHUB_REPOSITORY=layervai/qurl-integrations \
+  "$root/scripts/check-exact-cli-release-gate.sh" "$sha" v1.2.3 700 2 4 2>&1) || status=$?
+[[ "$status" == 0 && "$output" == *'"journey_url":"https://example.invalid/run/700"'* && \
+  "$(cat "$early_capture")" == *'/attempts/2/jobs?per_page=100'* && \
+  "$(cat "$early_capture")" != *'/attempts/1/jobs?per_page=100'* ]] || {
+  echo "early-stop: status=$status output=$output calls=$(cat "$early_capture")" >&2
+  exit 1
+}
 
 http_capture=$fixture/http-404-calls
 output=""

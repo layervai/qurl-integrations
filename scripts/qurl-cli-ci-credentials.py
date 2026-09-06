@@ -697,6 +697,8 @@ def reconcile_run(
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
     if authenticated is None:
+        if isinstance(args, RunCleanup):
+            raise CredentialError("run cleanup requires authenticated inventory")
         endpoint, jwt, _ = authenticated_owner(args, RECONCILE_BATCH_BUDGET_SECONDS)
     else:
         endpoint, jwt = authenticated
@@ -969,8 +971,6 @@ def create_with_auth(
 ) -> None:
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
-    write_private(args.output_dir / "run-name", name)
-    write_private(args.output_dir / "owner-id", expected_owner)
     try:
         key_id, api_key = mint_ordinary_key(endpoint, jwt, name)
         write_private(args.output_dir / "api-key-id", key_id)

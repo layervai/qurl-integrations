@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -37,12 +36,6 @@ func sandboxNamespace(label string) (sandboxRunNamespace, error) {
 	runtimeName := os.Getenv(sandboxRuntimeEnv)
 	if !sandboxPositiveDecimal.MatchString(runID) || !sandboxPositiveDecimal.MatchString(attempt) {
 		return sandboxRunNamespace{}, errors.New("qURL sharing run ID and attempt must be canonical positive decimals")
-	}
-	if _, err := strconv.ParseUint(runID, 10, 64); err != nil {
-		return sandboxRunNamespace{}, errors.New("qURL sharing run ID exceeds uint64")
-	}
-	if _, err := strconv.ParseUint(attempt, 10, 64); err != nil {
-		return sandboxRunNamespace{}, errors.New("qURL sharing run attempt exceeds uint64")
 	}
 	runtimeCode := ""
 	// TODO(upstream-contract): Keep this exact runtime enum in lockstep with

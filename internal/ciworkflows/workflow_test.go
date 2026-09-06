@@ -544,11 +544,14 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if fallback.Jobs["resolve"] == nil || fallback.Jobs["cleanup"] == nil || len(fallback.Jobs) != 2 {
 		t.Errorf("cancellation cleanup is not one small resolve/cleanup workflow: %v", maps.Keys(fallback.Jobs))
 	}
-	wantFallbackIf := "github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_branch == 'main' || (github.event.workflow_run.event == 'workflow_dispatch' && startsWith(github.event.workflow_run.head_branch, 'v') && startsWith(github.event.workflow_run.display_title, 'CLI release gate '))"
+	wantFallbackIf := "github.event_name == 'workflow_dispatch' || (github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event != 'push')"
 	if got := strings.Join(strings.Fields(fallback.Jobs["resolve"].If), " "); got != wantFallbackIf {
-		t.Errorf("cancellation cleanup resolve if = %q, want only manual, main, or release-tag runs", got)
+		t.Errorf("cancellation cleanup resolve if = %q, want only manual or non-push main runs", got)
 	}
 	fallbackSource := string(readWorkflowBytes(t, "qurl-cli-customer-cleanup.yml"))
+	if !strings.Contains(fallbackSource, "branches: [main]") {
+		t.Error("cancellation cleanup workflow_run trigger is not filtered to main")
+	}
 	for _, forbidden := range []string{"actions/download-artifact", "actions/upload-artifact", "qurl-integrations-infra", "ops-routines"} {
 		if strings.Contains(fallbackSource, forbidden) {
 			t.Errorf("cancellation cleanup retains unnecessary coupling %q", forbidden)
@@ -1095,16 +1098,6 @@ fi
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("scheduled cleanup source omitted soak lane: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
-	releaseSHA := "0123456789abcdef0123456789abcdef01234567"
-	workflowOutput, output, _, err = runResolver(map[string]string{
-		"SOURCE_BRANCH":        "v1.2.3",
-		"SOURCE_EVENT":         "workflow_dispatch",
-		"SOURCE_DISPLAY_TITLE": "CLI release gate " + releaseSHA,
-		"SOURCE_SHA":           releaseSHA,
-	})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
-		t.Fatalf("release-tag cleanup source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
-	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_NAME": "cli / lint"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
 		t.Fatalf("automatic non-journey source did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
@@ -1168,6 +1161,16 @@ fi
 		t.Fatalf("exact manual cleanup source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{
+		"EXPECTED_ATTEMPT":      "31",
+		"GITHUB_EVENT_NAME":     "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS": "700:31",
+		"MOCK_ARTIFACT_ATTEMPT": "31",
+		"MOCK_RUN_ATTEMPT":      "31",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:31\ninclude_soak=false" {
+		t.Fatalf("manual over-bound recovery source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
 		"GITHUB_EVENT_NAME":     "workflow_dispatch",
 		"REQUESTED_SOURCE_RUNS": "700:2",
 		"MOCK_RUN_EVENT":        "schedule",
@@ -1180,7 +1183,7 @@ fi
 		"REQUESTED_SOURCE_RUNS":  "700:2",
 		"MOCK_RUN_EVENT":         "workflow_dispatch",
 		"MOCK_RUN_BRANCH":        "v1.2.3",
-		"MOCK_RUN_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567",
+		"MOCK_RUN_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567 v1.2.3",
 	})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("manual release-tag cleanup source was rejected: err=%v output=%s workflow_output=%q", err, output, workflowOutput)

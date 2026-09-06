@@ -25,10 +25,17 @@ if [[ -z "${GH_TOKEN:-}" || ! "$source_sha" =~ ^[0-9a-f]{40}$ ||
   exit 1
 fi
 
+gh_stderr=$(mktemp)
+trap 'rm -f "$gh_stderr"' EXIT
+
 gh_json() {
   local path=$1 response attempt status
   for attempt in 1 2 3; do
-    if response=$(gh api --include --method GET "$path" 2>&1); then
+    : >"$gh_stderr"
+    if response=$(gh api --include --method GET "$path" 2>"$gh_stderr"); then
+      if [[ -s "$gh_stderr" ]]; then
+        cat "$gh_stderr" >&2
+      fi
       if [[ "$response" == HTTP/* ]]; then
         printf '%s\n' "$response" | awk 'body { print } /^[[:space:]]*$/ { body=1 }'
       else
@@ -84,7 +91,7 @@ if [[ "$run_head_sha" != "$source_sha" ]]; then
 fi
 run_url=$(jq -r '.html_url // ""' <<<"$run")
 latest_jobs='{}'
-for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
+for ((attempt = 10#$run_attempt; attempt >= 1; attempt--)); do
   if ! jobs=$(gh_json \
     "repos/$repository/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"); then
     echo "::error::CLI release job lookup failed" >&2
@@ -113,8 +120,20 @@ for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
     exit 1
   fi
   latest_jobs=$(jq -cn --argjson prior "$latest_jobs" --argjson current "$current_gates" '
-    reduce $current[] as $job ($prior; .[$job.name] = $job)
+    reduce $current[] as $job ($prior;
+      if has($job.name) then . else . + {($job.name): $job} end)
   ')
+  complete=$(jq -r --argjson journey_count "$journey_count" '
+    [. | to_entries[].value] as $jobs |
+    ([$jobs[] | select(.name == "cli / required")] | length) == 1 and
+    ([$jobs[] | select(
+      .name == "cli / customer journey" or
+      (.name | startswith("cli / customer journey (")))] | length) == $journey_count and
+    ([$jobs[] | select(.name == "cli / customer journey cleanup")] | length) == 1
+  ' <<<"$latest_jobs")
+  if [[ "$complete" == true ]]; then
+    break
+  fi
 done
 gates=$(jq -cn --argjson latest "$latest_jobs" '
   [$latest | to_entries[].value] as $jobs |

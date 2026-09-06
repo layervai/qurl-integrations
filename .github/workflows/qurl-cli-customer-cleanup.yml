@@ -12,8 +12,10 @@ on:
         required: true
         type: string
   workflow_run:
-    # Source eligibility is checked in the job; skipped PR run rows are expected.
+    # Release journeys also run trusted workflow code from main. PR and tag
+    # completions cannot mint these credentials and must not wake cleanup.
     workflows: ["cli: Build and Test"]
+    branches: [main]
     types: [completed]
 
 permissions:
@@ -26,14 +28,11 @@ concurrency:
 jobs:
   resolve:
     name: Resolve cleanup requirement
-    # GitHub creates a workflow_run row for every source completion, but this
-    # job performs work only for main or an exact release-tag journey.
+    # Main pushes run only hermetic tests and cannot mint journey credentials.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.head_branch == 'main' ||
-      (github.event.workflow_run.event == 'workflow_dispatch' &&
-       startsWith(github.event.workflow_run.head_branch, 'v') &&
-       startsWith(github.event.workflow_run.display_title, 'CLI release gate '))
+      (github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event != 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -50,11 +49,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
           SOURCE_EVENT: ${{ github.event.workflow_run.event }}
-          SOURCE_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
           SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
           SOURCE_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
           SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
           REQUESTED_SOURCE_RUNS: ${{ inputs.source_runs }}
@@ -64,16 +61,7 @@ jobs:
           include_soak=false
           case "$GITHUB_EVENT_NAME" in
             workflow_run)
-              trusted_ref=false
-              if [[ "$SOURCE_BRANCH" == main ]]; then
-                trusted_ref=true
-              elif [[ "$SOURCE_EVENT" == workflow_dispatch && \
-                "$SOURCE_BRANCH" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ && \
-                "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && \
-                "$SOURCE_DISPLAY_TITLE" == "CLI release gate $SOURCE_SHA" ]]; then
-                trusted_ref=true
-              fi
-              [[ "$trusted_ref" == true && \
+              [[ "$SOURCE_BRANCH" == main && \
                 "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$SOURCE_WORKFLOW_NAME" == "cli: Build and Test" && \
@@ -110,7 +98,7 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$source_runs" =~ ^[1-9][0-9]{0,18}:[1-9][0-9]?(,[1-9][0-9]{0,18}:[1-9][0-9]?){0,2}$ ]] || {
+          [[ "$source_runs" =~ ^[1-9][0-9]{0,18}:[1-9][0-9]{0,18}(,[1-9][0-9]{0,18}:[1-9][0-9]{0,18}){0,2}$ ]] || {
             echo "::error::cleanup source runs are malformed or exceed the 3-run limit" >&2
             exit 1
           }
@@ -125,10 +113,6 @@ jobs:
             }
             seen[$run_spec]=1
             IFS=: read -r run_id run_attempt <<<"$run_spec"
-            (( 10#$run_attempt <= 30 )) || {
-              echo "::error::cleanup source run attempt exceeds the 30-attempt recovery bound" >&2
-              exit 1
-            }
             if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
               jq -e --arg repository "$GITHUB_REPOSITORY" --arg run_attempt "$run_attempt" '
@@ -138,7 +122,7 @@ jobs:
                   (.event == "workflow_dispatch" and
                     (.head_branch | test("^v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$")) and
                     (.head_sha | test("^[0-9a-f]{40}$")) and
-                    .display_title == ("CLI release gate " + .head_sha))) and
+                    .display_title == ("CLI release gate " + .head_sha + " " + .head_branch))) and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml" and
@@ -172,7 +156,7 @@ jobs:
             # identity binding for rerun jobs; fail closed if it disappears.
             all_jobs=$(gh api --paginate --slurp \
               "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=all&per_page=100")
-            jq -e --argjson source_attempt "$run_attempt" '
+            jq -e '
               if type != "array" or length == 0 then
                 error("all-attempt source jobs are malformed")
               else .[0].total_count as $total |
