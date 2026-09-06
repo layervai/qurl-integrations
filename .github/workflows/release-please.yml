@@ -83,11 +83,11 @@ on:
         type: string
       cli_run_id:
         description: "Exact successful CLI workflow run ID; required to build or repair CLI assets"
-        required: false
+        required: true
         type: string
       cli_run_attempt:
         description: "Exact successful CLI workflow run attempt; required to build or repair CLI assets"
-        required: false
+        required: true
         type: string
 
 # Serialize release maintenance, but keep an exact tag/SHA continuation out of

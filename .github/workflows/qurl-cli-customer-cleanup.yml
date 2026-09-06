@@ -138,16 +138,6 @@ jobs:
                 include_soak=true
               fi
             fi
-            jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")
-            validate_jobs='
-              if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
-                (.jobs | type) != "array" or (.jobs | length) != .total_count or
-                any(.jobs[]; (.name | type) != "string")
-              then error("source jobs are malformed or truncated")
-              else .
-              end
-            '
-            jq -e "$validate_jobs" <<<"$jobs" >/dev/null
             # GitHub records the attempt that created each job. Read all
             # attempts once and select the latest artifact producer at or
             # before the source attempt. This works for both full reruns and
@@ -213,11 +203,12 @@ jobs:
             # A workflow_run event has exactly one source run. A successful
             # primary cleanup makes the fallback unnecessary for that source.
             if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-              cleanup_succeeded=$(jq -r '
-                any(.jobs[];
+              cleanup_succeeded=$(jq -r --argjson source_attempt "$run_attempt" '
+                any(.[];
+                  .run_attempt == $source_attempt and
                   .name == "cli / customer journey cleanup" and
                   .conclusion == "success")
-              ' <<<"$jobs")
+              ' <<<"$eligible_jobs")
               if [[ "$cleanup_succeeded" == true ]]; then
                 echo "required=false" >>"$GITHUB_OUTPUT"
                 exit 0

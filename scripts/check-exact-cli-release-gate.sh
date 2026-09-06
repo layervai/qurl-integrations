@@ -47,6 +47,9 @@ gh_json() {
       fi
       return 0
     fi
+    if [[ -s "$gh_stderr" ]]; then
+      cat "$gh_stderr" >&2
+    fi
     status=$(sed -nE 's/^HTTP\/[^ ]+ ([0-9]{3}).*/\1/p' <<<"$response" | tail -1)
     if [[ "$status" =~ ^4[0-9]{2}$ && "$status" != 408 && "$status" != 429 ]]; then
       echo "::error::GitHub API rejected $path with HTTP $status" >&2

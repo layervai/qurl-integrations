@@ -1009,12 +1009,14 @@ if [[ "$*" == *"/jobs?filter=all&per_page=100"* ]]; then
   future_attempt=${MOCK_FUTURE_ATTEMPT:-0}
   future_conclusion=${MOCK_FUTURE_ARTIFACT_CONCLUSION:-success}
   jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
+    --arg cleanup_conclusion "${MOCK_CLEANUP_CONCLUSION:-}" \
     --arg future_conclusion "$future_conclusion" \
     --argjson artifact_attempt "$artifact_attempt" --argjson future_attempt "$future_attempt" '
     [{jobs:([
       {name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$artifact_attempt},
-      {name:$name,conclusion:$conclusion,run_attempt:$artifact_attempt}
-    ] + (if $future_attempt > 0 then [{name:"cli / customer journey artifacts",conclusion:$future_conclusion,run_attempt:$future_attempt}] else [] end))} |
+      {name:$name,conclusion:(if $conclusion == "__NULL__" then null else $conclusion end),run_attempt:$artifact_attempt}
+    ] + (if $cleanup_conclusion != "" then [{name:"cli / customer journey cleanup",conclusion:$cleanup_conclusion,run_attempt:$artifact_attempt}] else [] end) +
+    (if $future_attempt > 0 then [{name:"cli / customer journey artifacts",conclusion:$future_conclusion,run_attempt:$future_attempt}] else [] end))} |
     .total_count = (.jobs | length)]'
 elif [[ "$*" == *"/attempts/"*"/jobs?per_page=100" ]]; then
   if [[ -n "${MOCK_CLEANUP_CONCLUSION:-}" ]]; then
@@ -1110,7 +1112,7 @@ fi
 	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("attempt-bound cleanup result = %q, want required=true and exact source_runs", workflowOutput)
 	}
-	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") ||
+	if strings.Contains(ghArguments, "/attempts/") ||
 		!strings.Contains(ghArguments, "/actions/runs/700/jobs?filter=all&per_page=100") {
 		t.Errorf("cleanup queried a different run attempt: %s", ghArguments)
 	}
@@ -1220,7 +1222,7 @@ fi
 	}
 	for _, want := range []string{
 		"/actions/runs/700\n",
-		"/actions/runs/700/attempts/2/jobs?per_page=100",
+		"/actions/runs/700/jobs?filter=all&per_page=100",
 	} {
 		if !strings.Contains(ghArguments, want) {
 			t.Errorf("manual cleanup did not query %q: %s", want, ghArguments)
@@ -1891,9 +1893,18 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 			t.Errorf("CLI workflow does not bind a release handoff before Auth0 use: missing %q", required)
 		}
 	}
+	releaseWorkflowRaw := string(readWorkflowBytes(t, releasePleaseWorkflow))
 	for _, required := range []string{"cli_run_id:", "cli_run_attempt:"} {
-		if !strings.Contains(string(readWorkflowBytes(t, releasePleaseWorkflow)), required) {
+		if !strings.Contains(releaseWorkflowRaw, required) {
 			t.Errorf("release workflow cannot accept exact CLI handoff field %q", required)
+		}
+	}
+	for _, requiredBlock := range []string{
+		"cli_run_id:\n        description: \"Exact successful CLI workflow run ID; required to build or repair CLI assets\"\n        required: true",
+		"cli_run_attempt:\n        description: \"Exact successful CLI workflow run attempt; required to build or repair CLI assets\"\n        required: true",
+	} {
+		if !strings.Contains(releaseWorkflowRaw, requiredBlock) {
+			t.Errorf("release workflow leaves an exact CLI handoff input optional: %q", requiredBlock)
 		}
 	}
 	result := cli.Jobs["signal-cli-release"]

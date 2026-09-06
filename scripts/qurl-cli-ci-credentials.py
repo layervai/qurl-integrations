@@ -560,7 +560,7 @@ def authenticated_owner(
     return endpoint, jwt, expected_owner
 
 
-def run_description(args: argparse.Namespace) -> str:
+def run_description(args: RunCleanup) -> str:
     if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(
         args.run_attempt
     ):
@@ -574,7 +574,7 @@ def run_description(args: argparse.Namespace) -> str:
     )
 
 
-def run_credential_names(args: argparse.Namespace) -> set[str]:
+def run_credential_names(args: RunCleanup) -> set[str]:
     run_description(args)
     return {
         run_credential_name(args.run_id, args.run_attempt, args.lane, purpose)
@@ -586,7 +586,7 @@ def run_credential_name(run_id: str, run_attempt: str, lane: str, purpose: str) 
     return f"qurl CLI journey v2 {run_id}/{run_attempt}/{lane}/{purpose}"
 
 
-def run_agent_ids(args: argparse.Namespace) -> set[str]:
+def run_agent_ids(args: RunCleanup) -> set[str]:
     # TODO(upstream-contract): qurl-service stores each native device key as
     # "agent:" + AgentID, and the tagged harness derives AgentID from this
     # exact run/attempt/runtime plus its smoke or controlled-failure phase.
@@ -601,11 +601,11 @@ def run_agent_ids(args: argparse.Namespace) -> set[str]:
     }
 
 
-def run_device_key_names(args: argparse.Namespace) -> set[str]:
+def run_device_key_names(args: RunCleanup) -> set[str]:
     return {"agent:" + agent_id for agent_id in run_agent_ids(args)}
 
 
-def run_connector_ids(args: argparse.Namespace) -> set[str]:
+def run_connector_ids(args: RunCleanup) -> set[str]:
     # Derive every Connector ID from the same public test inputs as the Go
     # harness so the trusted controller can clean up every route that an
     # interrupted runner can create.
@@ -621,16 +621,15 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
     return result
 
 
-def cleanup_labels(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
-    profile = getattr(args, "profile", None)
-    if profile == "full":
+def cleanup_labels(args: RunCleanup) -> tuple[str, ...]:
+    if args.profile == "full":
         return ("smoke", "crid", "sibling-a", "sibling-b", "failure")
-    if profile == "soak":
+    if args.profile == "soak":
         return ("soak",)
     raise CredentialError("journey cleanup profile is invalid")
 
 
-def cleanup_label_codes(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
+def cleanup_label_codes(args: RunCleanup) -> tuple[str, ...]:
     codes = {
         "smoke": "s",
         "soak": "k",
@@ -695,22 +694,15 @@ def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory
 
 
 def reconcile_run(
-    args: argparse.Namespace | RunCleanup,
-    authenticated: tuple[str, str] | None = None,
-    inventory: ReconciliationInventory | None = None,
+    args: RunCleanup,
+    authenticated: tuple[str, str],
+    inventory: ReconciliationInventory,
 ) -> None:
     description = run_description(args)
     credential_names = run_credential_names(args)
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
-    if authenticated is None:
-        if isinstance(args, RunCleanup):
-            raise CredentialError("run cleanup requires authenticated inventory")
-        endpoint, jwt, _ = authenticated_owner(args, args.operation_budget_seconds)
-    else:
-        endpoint, jwt = authenticated
-    if inventory is None:
-        inventory = reconciliation_inventory(endpoint, jwt)
+    endpoint, jwt = authenticated
 
     failures: dict[str, int] = {}
 

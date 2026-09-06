@@ -13,6 +13,7 @@ if [[ -n "${GH_CALL_CAPTURE:-}" ]]; then
   printf '%s\n' "$*" >>"$GH_CALL_CAPTURE"
 fi
 if [[ "$SCENARIO" == http_404 ]]; then
+  echo "gh: simulated rejected request" >&2
   printf 'HTTP/2.0 404 Not Found\n'
   exit 1
 fi
@@ -160,7 +161,8 @@ status=0
 output=$(PATH="$fixture:$PATH" SCENARIO=http_404 SOURCE_SHA="$sha" \
   GH_CALL_CAPTURE="$http_capture" GH_TOKEN=test GITHUB_REPOSITORY=layervai/qurl-integrations \
   "$root/scripts/check-exact-cli-release-gate.sh" "$sha" v1.2.3 700 2 4 2>&1) || status=$?
-[[ "$status" == 1 && "$output" == *"GitHub API rejected"* && "$(wc -l <"$http_capture" | tr -d ' ')" == 1 ]] || {
+[[ "$status" == 1 && "$output" == *"gh: simulated rejected request"* && \
+  "$output" == *"GitHub API rejected"* && "$(wc -l <"$http_capture" | tr -d ' ')" == 1 ]] || {
   echo "http_404: status=$status output=$output" >&2
   exit 1
 }

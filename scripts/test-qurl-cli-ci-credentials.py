@@ -285,6 +285,24 @@ def auth_args(root: pathlib.Path) -> argparse.Namespace:
     )
 
 
+def reconcile_one(args: argparse.Namespace) -> None:
+    endpoint, jwt, _ = credentials.authenticated_owner(
+        args, args.operation_budget_seconds
+    )
+    run = credentials.RunCleanup(
+        run_id=args.run_id,
+        run_attempt=args.run_attempt,
+        lane=args.lane,
+        runtime=args.runtime,
+        profile=args.profile,
+    )
+    credentials.reconcile_run(
+        run,
+        authenticated=(endpoint, jwt),
+        inventory=credentials.reconciliation_inventory(endpoint, jwt),
+    )
+
+
 def workflow_timeout_minutes(workflow: pathlib.Path, job_name: str) -> int:
     """Read one fixed timeout from the standard two-/four-space job shape."""
     lines = workflow.read_text(encoding="utf-8").splitlines()
@@ -1107,7 +1125,7 @@ def test_reconciliation_reserves_time_for_resource_inventory() -> None:
     ):
         root = pathlib.Path(raw_root)
         args = auth_args(root)
-        credentials.reconcile_run(
+        reconcile_one(
             argparse.Namespace(
                 **vars(args),
                 lane="linux",
@@ -1238,7 +1256,7 @@ def test_resource_failure_still_revokes_every_target_credential() -> None:
     ):
         args = auth_args(pathlib.Path(raw_root))
         try:
-            credentials.reconcile_run(
+            reconcile_one(
                 argparse.Namespace(
                     **vars(args),
                     lane="linux",
@@ -1274,7 +1292,7 @@ def test_credential_failure_still_attempts_every_target_and_resources() -> None:
     ):
         args = auth_args(pathlib.Path(raw_root))
         try:
-            credentials.reconcile_run(
+            reconcile_one(
                 argparse.Namespace(
                     **vars(args),
                     lane="linux",
@@ -1317,7 +1335,7 @@ def test_assignment_failure_still_attempts_every_target_and_resources() -> None:
     ):
         args = auth_args(pathlib.Path(raw_root))
         try:
-            credentials.reconcile_run(
+            reconcile_one(
                 argparse.Namespace(
                     **vars(args),
                     lane="linux",
@@ -1384,7 +1402,7 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
         mock.patch.object(credentials, "request", fake),
     ):
         args = auth_args(pathlib.Path(raw_root))
-        credentials.reconcile_run(
+        reconcile_one(
             argparse.Namespace(
                 **vars(args),
                 lane="linux",
@@ -1406,24 +1424,6 @@ def test_empty_run_reconciliation_is_idempotent() -> None:
     assert fake.deleted_resources == []
 
 
-def test_batch_run_requires_shared_authentication_and_inventory() -> None:
-    run = credentials.RunCleanup(
-        run_id="1231",
-        run_attempt="2",
-        lane="linux",
-        runtime="host",
-        profile="full",
-    )
-    try:
-        credentials.reconcile_run(run)
-    except credentials.CredentialError as exc:
-        assert str(exc) == "run cleanup requires authenticated inventory"
-    else:
-        raise AssertionError(
-            "batch cleanup tried to authenticate without command inputs"
-        )
-
-
 def test_successful_cleanup_contract_is_idempotent_after_revocation() -> None:
     fake = FakeAPI()
     fake.retain_revoked_keys = True
@@ -1441,9 +1441,9 @@ def test_successful_cleanup_contract_is_idempotent_after_revocation() -> None:
             runtime="host",
             profile="full",
         )
-        credentials.reconcile_run(run)
+        reconcile_one(run)
         first_revocations = list(fake.deleted_keys)
-        credentials.reconcile_run(run)
+        reconcile_one(run)
     assert fake.deleted_keys == first_revocations
     assert {
         row["status"]
@@ -1477,7 +1477,7 @@ def test_soak_cleanup_requires_and_removes_the_soak_device() -> None:
             runtime="host",
             profile="soak",
         )
-        credentials.reconcile_run(run)
+        reconcile_one(run)
     assert credentials.run_agent_ids(run) == {"qurl-journey-v2-r1231-a2-hk"}
     assert fake.deleted_keys == [soak_key_id]
     assert fake.retired_assignments == ["qurl-journey-v2-r1231-a2-hk"]
@@ -1514,7 +1514,7 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
         root = pathlib.Path(raw_root)
         args = auth_args(root)
         try:
-            credentials.reconcile_run(
+            reconcile_one(
                 argparse.Namespace(
                     **vars(args),
                     lane="linux",
@@ -1559,7 +1559,6 @@ def main() -> None:
     test_assignment_failure_still_attempts_every_target_and_resources()
     test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
     test_empty_run_reconciliation_is_idempotent()
-    test_batch_run_requires_shared_authentication_and_inventory()
     test_successful_cleanup_contract_is_idempotent_after_revocation()
     test_soak_cleanup_requires_and_removes_the_soak_device()
     test_unhashable_inventory_fields_remain_bounded()
@@ -1681,7 +1680,7 @@ def main() -> None:
             "status": "active",
         }
         fake.operations.clear()
-        credentials.reconcile_run(
+        reconcile_one(
             argparse.Namespace(
                 **vars(args),
                 lane="linux",
@@ -1739,7 +1738,7 @@ def main() -> None:
             "status": "active",
         }
         try:
-            credentials.reconcile_run(
+            reconcile_one(
                 argparse.Namespace(
                     **vars(args),
                     lane="linux",
