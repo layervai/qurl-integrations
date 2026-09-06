@@ -90,8 +90,9 @@ func TestSandboxNamespaceIsCanonicalAndSeparated(t *testing.T) {
 		!strings.HasPrefix(first.ConnectorID, "connector-cli-journey-v2-") || len(first.AgentID) > 64 {
 		t.Fatalf("namespace = %+v", first)
 	}
-	if first.ConnectorID != "connector-cli-journey-v2-de8ccdb9ceb99a0657d94412" {
-		t.Fatalf("smoke Connector ID = %q; trusted cleanup derivation would drift", first.ConnectorID)
+	if first.AgentID != "qurl-journey-v2-r32635672597-a2-hs" ||
+		first.ConnectorID != "connector-cli-journey-v2-de8ccdb9ceb99a0657d94412" {
+		t.Fatalf("smoke namespace = %+v; trusted cleanup derivation would drift", first)
 	}
 	seen := map[sandboxRunNamespace]bool{first: true}
 	for _, tc := range []struct{ runtime, label string }{

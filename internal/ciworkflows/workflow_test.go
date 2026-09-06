@@ -990,12 +990,14 @@ printf '%s\n' "$*" >>"$GH_CAPTURE"
 if [[ "$*" == *"/jobs?filter=all&per_page=100"* ]]; then
   artifact_attempt=${MOCK_ARTIFACT_ATTEMPT:-$EXPECTED_ATTEMPT}
   future_attempt=${MOCK_FUTURE_ATTEMPT:-0}
+  future_conclusion=${MOCK_FUTURE_ARTIFACT_CONCLUSION:-success}
   jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
+    --arg future_conclusion "$future_conclusion" \
     --argjson artifact_attempt "$artifact_attempt" --argjson future_attempt "$future_attempt" '
     [{jobs:([
       {name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$artifact_attempt},
       {name:$name,conclusion:$conclusion,run_attempt:$artifact_attempt}
-    ] + (if $future_attempt > 0 then [{name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$future_attempt}] else [] end))} |
+    ] + (if $future_attempt > 0 then [{name:"cli / customer journey artifacts",conclusion:$future_conclusion,run_attempt:$future_attempt}] else [] end))} |
     .total_count = (.jobs | length)]'
 elif [[ "$*" == *"/attempts/"*"/jobs?per_page=100" ]]; then
   if [[ -n "${MOCK_CLEANUP_CONCLUSION:-}" ]]; then
@@ -1121,6 +1123,12 @@ fi
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
 		t.Fatalf("future operator rerun raced automatic cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"MOCK_ARTIFACT_ATTEMPT": "1", "MOCK_FUTURE_ATTEMPT": "2", "MOCK_FUTURE_ARTIFACT_CONCLUSION": "failure",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=false" {
+		t.Fatalf("failed rerun artifact hid prior journey cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_CLEANUP_CONCLUSION": "success"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
 		t.Fatalf("automatic source with successful primary cleanup did not skip fallback: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
@@ -1182,7 +1190,7 @@ fi
 		"GITHUB_EVENT_NAME":      "workflow_dispatch",
 		"REQUESTED_SOURCE_RUNS":  "700:2",
 		"MOCK_RUN_EVENT":         "workflow_dispatch",
-		"MOCK_RUN_BRANCH":        "v1.2.3",
+		"MOCK_RUN_BRANCH":        "main",
 		"MOCK_RUN_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567 v1.2.3",
 	})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
@@ -2122,24 +2130,21 @@ exit 2
 			if got.err != nil {
 				t.Fatalf("execute release gate with draft=%t: %v\n%s", draft, got.err, got.output)
 			}
-			wantRequired := fmt.Sprintf("required=%t\n", draft)
+			wantRequired := "required=true\n"
 			if !strings.Contains(got.githubOutput, wantRequired) {
 				t.Errorf("gate output = %q, want %q", got.githubOutput, wantRequired)
 			}
 		})
 	}
 
-	t.Run("public_operator_recovery_needs_no_handoff", func(t *testing.T) {
+	t.Run("public_operator_recovery_requires_exact_run", func(t *testing.T) {
 		got := runStep(t, releaseGateRun, false, "main", map[string]string{
 			"HANDOFF_SOURCE_SHA":  "",
 			"HANDOFF_RUN_ID":      "",
 			"HANDOFF_RUN_ATTEMPT": "",
 		})
-		if got.err != nil {
-			t.Fatalf("public operator recovery failed: %v\n%s", got.err, got.output)
-		}
-		if !strings.Contains(got.githubOutput, "required=false\n") {
-			t.Errorf("public operator gate output = %q, want no journey gate", got.githubOutput)
+		if got.err == nil || !strings.Contains(got.output, "requires one exact tested workflow run") {
+			t.Fatalf("public operator recovery accepted no exact CLI run: err=%v output=%s", got.err, got.output)
 		}
 	})
 

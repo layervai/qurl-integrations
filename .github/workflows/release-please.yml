@@ -30,9 +30,9 @@ name: Release Please
 # Failure/recovery semantics: until every verification succeeds, the tag and a
 # draft GitHub Release exist but no new CLI release is public and the Homebrew
 # tap stays on its prior version. Recover with "Re-run failed jobs" on the
-# failed run, or run this workflow via workflow_dispatch with cli_tag set to
-# the affected tag. Do NOT "Re-run all jobs": release-please then sees the
-# release already exists and skips release-cli. Asset re-uploads are idempotent
+# failed run. To repair an already-public release, first run cli.yml from main
+# for the exact tag, then dispatch this workflow with the tag and exact passing
+# run identity. Asset re-uploads are idempotent
 # (release.replace_existing_artifacts in .goreleaser.yml).
 # The exact release journey includes the scheduled 80-minute soak lane. Expect
 # the draft to remain private for about two hours, including setup and queueing.
@@ -82,11 +82,11 @@ on:
         required: false
         type: string
       cli_run_id:
-        description: "Exact successful CLI workflow run ID; required while the CLI release is a draft"
+        description: "Exact successful CLI workflow run ID; required to build or repair CLI assets"
         required: false
         type: string
       cli_run_attempt:
-        description: "Exact successful CLI workflow run attempt; required while the CLI release is a draft"
+        description: "Exact successful CLI workflow run attempt; required to build or repair CLI assets"
         required: false
         type: string
 
@@ -283,19 +283,16 @@ jobs:
             printf '::error::Draft CLI release target mismatch: observed %q; expected exact tag commit %q\n' "$release_target" "$source_sha" >&2
             exit 1
           fi
-          if [[ "$draft" == true ]]; then
-            if [[ ! "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ||
-              ! "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
-              (( 10#$HANDOFF_RUN_ATTEMPT > 30 )); then
-              echo "::error::A draft CLI release requires one exact tested workflow run and attempt" >&2
-              exit 1
-            fi
+          if [[ ! "$HANDOFF_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ||
+            ! "$HANDOFF_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
+            (( 10#$HANDOFF_RUN_ATTEMPT > 30 )); then
+            echo "::error::CLI asset publication requires one exact tested workflow run and attempt" >&2
+            exit 1
           fi
-          required=$draft
           {
             echo "tag=$CLI_TAG"
             echo "sha=$source_sha"
-            echo "required=$required"
+            echo "required=true"
           } >>"$GITHUB_OUTPUT"
 
       - id: verify
@@ -781,7 +778,7 @@ jobs:
             echo ""
             echo "The artifact job did not finish. \`${CLI_TAG}\` remains a draft and the Homebrew tap stays on its prior version."
             echo ""
-            echo "Recovery: fix the cause, then run workflow_dispatch from main with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs**. Do NOT use 'Re-run all jobs' because release-please will skip this job after it creates the release. Re-uploads are idempotent."
+            echo "Recovery: fix the cause and use **Re-run failed jobs**. For a new recovery run, first pass cli.yml for this exact tag, then dispatch this workflow from main with the tag and exact passing run ID and attempt. Re-uploads are idempotent."
           } >> "$GITHUB_STEP_SUMMARY"
 
   validate-homebrew-cask:

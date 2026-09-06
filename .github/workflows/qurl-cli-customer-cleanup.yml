@@ -117,12 +117,8 @@ jobs:
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
               jq -e --arg repository "$GITHUB_REPOSITORY" --arg run_attempt "$run_attempt" '
                 .status == "completed" and
-                (((.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
-                    .head_branch == "main") or
-                  (.event == "workflow_dispatch" and
-                    (.head_branch | test("^v[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$")) and
-                    (.head_sha | test("^[0-9a-f]{40}$")) and
-                    .display_title == ("CLI release gate " + .head_sha + " " + .head_branch))) and
+                (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
+                .head_branch == "main" and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml" and
@@ -181,7 +177,7 @@ jobs:
             identity_attempt=$(jq -r '
               [.[] | select(
                 .name == "cli / customer journey artifacts" and
-                .conclusion != "skipped") | .run_attempt] | max // ""
+                .conclusion == "success") | .run_attempt] | max // ""
             ' <<<"$eligible_jobs")
             if [[ -z "$identity_attempt" ]]; then
               if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
