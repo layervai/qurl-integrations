@@ -25,9 +25,8 @@ concurrency:
 jobs:
   resolve:
     name: Resolve cleanup requirement
-    # Do not create noisy fallback runs for pull requests or feature branches.
-    # Release journeys use an immutable tag, so their exact run title is the
-    # narrow trigger here; the resolver below still validates the full source.
+    # GitHub creates a workflow_run row for every source completion, but this
+    # job performs work only for main or an exact release-tag journey.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.head_branch == 'main' ||

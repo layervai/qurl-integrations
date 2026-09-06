@@ -264,6 +264,16 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if len(watchdogCountMatch) != 2 || watchdogCountErr != nil || watchdogCount != len(baseMatrix.Include)+1 {
 		t.Errorf("watchdog journey count = %v, want scheduled matrix size %d: %v", watchdogCountMatch, len(baseMatrix.Include)+1, watchdogCountErr)
 	}
+	releaseRaw := string(readWorkflowBytes(t, releasePleaseWorkflow))
+	releaseCountMatch := regexp.MustCompile(`"\$CLI_RUN_ID" "\$CLI_RUN_ATTEMPT" (\d+)\)`).FindStringSubmatch(releaseRaw)
+	releaseCount := 0
+	var releaseCountErr error
+	if len(releaseCountMatch) == 2 {
+		releaseCount, releaseCountErr = strconv.Atoi(releaseCountMatch[1])
+	}
+	if len(releaseCountMatch) != 2 || releaseCountErr != nil || releaseCount != len(baseMatrix.Include)+1 {
+		t.Errorf("release gate journey count = %v, want scheduled matrix size %d: %v", releaseCountMatch, len(baseMatrix.Include)+1, releaseCountErr)
+	}
 
 	journey := workflow.Jobs["journey"]
 	if !slices.Contains(parseWorkflowNeeds(t, "journey", journey.Needs), cliCustomerArtifactsJobID) {
@@ -1950,7 +1960,7 @@ if [ "$1" = "api" ]; then
       environment=${2#*environments/}
       printf '{"name":"%s","deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}\n' "$environment"
       ;;
-    *git/ref/tags/*) printf '%s\n' "$STUB_SHA" ;;
+    *commits/*) printf '%s\n' "$STUB_SHA" ;;
     *) exit 2 ;;
   esac
   exit 0

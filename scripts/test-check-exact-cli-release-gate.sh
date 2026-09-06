@@ -18,14 +18,18 @@ fi
 if [[ "$*" == *actions/runs/700 && "$*" != *attempts* ]]; then
   run_sha=$SOURCE_SHA
   display_title="CLI release gate $run_sha"
+  head_branch=v1.2.3
   if [[ "$SCENARIO" == mismatch ]]; then
     run_sha=ffffffffffffffffffffffffffffffffffffffff
   fi
   if [[ "$SCENARIO" == operator ]]; then
     display_title="Operator CLI soak"
   fi
-  jq -n --arg sha "$run_sha" --arg display_title "$display_title" '{
-    id:700,run_attempt:2,event:"workflow_dispatch",head_branch:"v1.2.3",head_sha:$sha,
+  if [[ "$SCENARIO" == wrong_tag ]]; then
+    head_branch=v1.2.4
+  fi
+  jq -n --arg sha "$run_sha" --arg display_title "$display_title" --arg head_branch "$head_branch" '{
+    id:700,run_attempt:2,event:"workflow_dispatch",head_branch:$head_branch,head_sha:$sha,
     display_title:$display_title,
     path:".github/workflows/cli.yml",html_url:"https://example.invalid/run/700",
     repository:{full_name:"layervai/qurl-integrations"},
@@ -81,7 +85,7 @@ run_case() {
   local output status=0
   output=$(PATH="$fixture:$PATH" SCENARIO="$scenario" SOURCE_SHA="$sha" \
     GH_TOKEN=test GITHUB_REPOSITORY=layervai/qurl-integrations \
-    "$root/scripts/check-exact-cli-release-gate.sh" "$sha" 700 2 2>&1) || status=$?
+    "$root/scripts/check-exact-cli-release-gate.sh" "$sha" v1.2.3 700 2 4 2>&1) || status=$?
   [[ "$status" == "$expected_status" && "$output" == *"$expected"* ]] || {
     echo "$scenario: status=$status output=$output" >&2
     exit 1
@@ -96,9 +100,10 @@ run_case cleanup_failed 1 'cli / customer journey cleanup=failure'
 run_case missing 1 'gate set is missing or ambiguous'
 run_case mismatch 1 'run does not match the exact handoff'
 run_case operator 1 'run does not match the exact handoff'
+run_case wrong_tag 1 'run does not match the exact handoff'
 run_case partial_rerun 0 '"ready":true'
-run_case unavailable 0 '"reason":"cli_release_run_unavailable"'
-run_case jobs_unavailable 0 '"reason":"cli_release_jobs_unavailable"'
+run_case unavailable 1 '"reason":"cli_release_run_unavailable"'
+run_case jobs_unavailable 1 '"reason":"cli_release_jobs_unavailable"'
 
 for malformed in 0 01 -1 1.0 900719925474099300000; do
   run_case_name="malformed-$malformed"
@@ -106,7 +111,7 @@ for malformed in 0 01 -1 1.0 900719925474099300000; do
   status=0
   output=$(PATH="$fixture:$PATH" SCENARIO=success SOURCE_SHA="$sha" \
     GH_TOKEN=test GITHUB_REPOSITORY=layervai/qurl-integrations \
-    "$root/scripts/check-exact-cli-release-gate.sh" "$sha" "$malformed" 2 2>&1) || status=$?
+    "$root/scripts/check-exact-cli-release-gate.sh" "$sha" v1.2.3 "$malformed" 2 4 2>&1) || status=$?
   [[ "$status" == 1 && "$output" == *"input is incomplete"* ]] || {
     echo "$run_case_name: status=$status output=$output" >&2
     exit 1

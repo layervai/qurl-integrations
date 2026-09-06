@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <source-sha> <run-id> <run-attempt>" >&2
+if [[ $# -ne 5 ]]; then
+  echo "usage: $0 <source-sha> <source-tag> <run-id> <run-attempt> <journey-count>" >&2
   exit 2
 fi
 
 source_sha=$1
-run_id=$2
-run_attempt=$3
+source_tag=$2
+run_id=$3
+run_attempt=$4
+journey_count=$5
 repository=${GITHUB_REPOSITORY:-}
 [[ "$repository" == "layervai/qurl-integrations" ]] || {
   echo "::error::CLI release gates require the canonical repository" >&2
   exit 1
 }
 if [[ -z "${GH_TOKEN:-}" || ! "$source_sha" =~ ^[0-9a-f]{40}$ ||
-  ! "$run_id" =~ ^[1-9][0-9]{0,19}$ || ! "$run_attempt" =~ ^[1-9][0-9]?$ ]] ||
-  (( 10#$run_attempt > 30 )); then
+  ! "$source_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ||
+  ! "$run_id" =~ ^[1-9][0-9]{0,19}$ || ! "$run_attempt" =~ ^[1-9][0-9]?$ ||
+  ! "$journey_count" =~ ^[1-9][0-9]?$ ]] ||
+  (( 10#$run_attempt > 30 || 10#$journey_count > 20 )); then
   echo "::error::CLI release gate input is incomplete" >&2
   exit 1
 fi
@@ -37,14 +41,15 @@ gh_json() {
 
 if ! run=$(gh_json "repos/$repository/actions/runs/$run_id"); then
   jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
-    '{ready:false,reason:"cli_release_run_unavailable",run_id:$run_id,run_attempt:$run_attempt}'
-  exit 0
+    '{ready:false,reason:"cli_release_run_unavailable",run_id:$run_id,run_attempt:$run_attempt}' >&2
+  exit 1
 fi
-jq -e --arg repository "$repository" --arg sha "$source_sha" \
+jq -e --arg repository "$repository" --arg sha "$source_sha" --arg tag "$source_tag" \
   --arg run_id "$run_id" --arg run_attempt "$run_attempt" '
   .repository.full_name == $repository and
   .head_repository.full_name == $repository and
   .head_sha == $sha and
+  .head_branch == $tag and
   .path == ".github/workflows/cli.yml" and .event == "workflow_dispatch" and
   .display_title == ("CLI release gate " + $sha) and
   (.id | tostring) == $run_id and (.run_attempt | tostring) == $run_attempt
@@ -59,8 +64,8 @@ for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
     "repos/$repository/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"); then
     jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
       --arg job_attempt "$attempt" \
-      '{ready:false,reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}'
-    exit 0
+      '{ready:false,reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}' >&2
+    exit 1
   fi
   current_gates=$(jq -c --argjson attempt "$attempt" '
     if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
@@ -93,9 +98,9 @@ gates=$(jq -cn --argjson latest "$latest_jobs" '
   }
 ')
 
-gate_shape=$(jq -r '
+gate_shape=$(jq -r --argjson journey_count "$journey_count" '
   (.required | length) == 1 and
-  (.journeys | length) == 4 and
+  (.journeys | length) == $journey_count and
   (.cleanup | length) == 1
 ' <<<"$gates")
 [[ "$gate_shape" == true ]] || {

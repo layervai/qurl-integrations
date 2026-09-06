@@ -24,6 +24,7 @@ CUSTOMER_CLEANUP_WORKFLOW = (
     SCRIPT.parent.parent / ".github" / "workflows" / "qurl-cli-customer-cleanup.yml"
 )
 RELEASE_GATE = SCRIPT.with_name("check-exact-cli-release-gate.sh")
+RELEASE_WORKFLOW = SCRIPT.parent.parent / ".github" / "workflows" / "release-please.yml"
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("qurl_cli_ci_credentials", SCRIPT)
 assert SPEC and SPEC.loader
@@ -391,8 +392,12 @@ def test_scheduled_soak_workflow_contract() -> None:
     soak_spec = f"{soak_row['lane']}:{soak_row['lane_id']}:soak"
     assert f"lane_specs=({' '.join([*base_specs, soak_spec])})" in workflow
     assert credentials.MAX_RECONCILE_RUNS == lane_count * 3
-    assert f"(.journeys | length) == {lane_count}" in RELEASE_GATE.read_text(
+    assert "(.journeys | length) == $journey_count" in RELEASE_GATE.read_text(
         encoding="utf-8"
+    )
+    assert (
+        f'"$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" {lane_count})'
+        in RELEASE_WORKFLOW.read_text(encoding="utf-8")
     )
     assert "needs: [required, journey]" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow

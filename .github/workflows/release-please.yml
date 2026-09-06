@@ -191,7 +191,7 @@ jobs:
               exit 1
             }
           done
-          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CLI_TAG" --jq .object.sha)
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$CLI_TAG" --jq .sha)
           [[ "$tag_sha" == "$SOURCE_SHA" ]] || {
             echo "::error::CLI release tag does not match the exact release source" >&2
             exit 1
@@ -305,7 +305,8 @@ jobs:
         run: |
           set -euo pipefail
           selection=$(scripts/check-exact-cli-release-gate.sh \
-            '${{ steps.source.outputs.sha }}' "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT")
+            '${{ steps.source.outputs.sha }}' '${{ steps.source.outputs.tag }}' \
+            "$CLI_RUN_ID" "$CLI_RUN_ATTEMPT" 4)
           {
             echo "ready=$(jq -r .ready <<<"$selection")"
             echo "run_id=$(jq -r .run_id <<<"$selection")"
