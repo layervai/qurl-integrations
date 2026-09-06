@@ -133,10 +133,10 @@ jobs:
         run: scripts/verify-cli-release.sh
 
   # Keep Actions write authority away from the third-party release action.
-  # This narrow job can only signal the continuation with the exact output of
-  # the completed release creator.
+  # This narrow job starts the credentialed customer journey only for the
+  # exact release commit. The journey signals the continuation after it passes.
   signal-cli-release:
-    name: Signal the exact CLI release continuation
+    name: Start the exact CLI customer journey
     needs: release-please
     if: needs.release-please.outputs.cli_release_created == 'true'
     runs-on: ubuntu-latest
@@ -145,7 +145,7 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Dispatch the exact CLI release continuation
+      - name: Dispatch the exact CLI customer journey
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.release-please.outputs.cli_tag }}
@@ -154,12 +154,16 @@ jobs:
           set -euo pipefail
           [[ "$CLI_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          gh workflow run release-please.yml --repo "$GITHUB_REPOSITORY" --ref main \
-            --field "cli_tag=$CLI_TAG" --field "source_sha=$SOURCE_SHA"
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CLI_TAG" --jq .object.sha)
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          [[ "$tag_sha" == "$SOURCE_SHA" && "$main_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::CLI release source is no longer the exact main head" >&2
+            exit 1
+          }
+          gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main
 
-  # A release-creation signal and a customer-journey signal both enter here.
-  # This job performs one exact lookup. An automated first signal exits green
-  # when its counterpart is not ready; it never polls or holds a runner.
+  # The customer journey enters here after it passes. This job performs one
+  # exact lookup and never polls or holds a runner.
   cli-release-gate:
     name: Verify the exact CLI release gate
     needs: [release-please, signal-cli-release]
@@ -333,7 +337,7 @@ jobs:
           GATED_SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
         run: |
           [ "$(git rev-parse HEAD)" = "$GATED_SOURCE_SHA" ] || {
-            echo "::error::release tag does not match the exact source that passed CLI main CI" >&2
+            echo "::error::release tag does not match the exact source that passed the CLI customer journey" >&2
             exit 1
           }
 
@@ -966,7 +970,7 @@ jobs:
           GATED_SOURCE_SHA: ${{ needs.cli-release-gate.outputs.source_sha }}
         run: |
           [ "$(git rev-parse HEAD)" = "$GATED_SOURCE_SHA" ] || {
-            echo "::error::release tag does not match the exact source that passed CLI main CI" >&2
+            echo "::error::release tag does not match the exact source that passed the CLI customer journey" >&2
             exit 1
           }
 

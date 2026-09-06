@@ -50,6 +50,8 @@ class FakeAPI:
         ) + ".signature"
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_customer-key"
+        self.auth_token_requests = 0
+        self.issued_api_keys: dict[str, tuple[str, str]] = {}
         self.keys: dict[str, dict[str, object]] = {}
         self.extra_credentials: list[dict[str, object]] = []
         self.resources = [
@@ -114,6 +116,7 @@ class FakeAPI:
     ) -> tuple[int, bytes]:
         parsed = urllib.parse.urlsplit(url)
         if parsed.netloc == "auth.example":
+            self.auth_token_requests += 1
             form = urllib.parse.parse_qs((body or b"").decode())
             assert method == "POST"
             assert content_type == "application/x-www-form-urlencoded"
@@ -122,10 +125,13 @@ class FakeAPI:
         if parsed.path == "/v1/me":
             if bearer == self.jwt:
                 data = {"auth_type": "jwt", "owner_id": self.owner}
-            elif bearer == self.api_key:
+            elif bearer == self.api_key or bearer in self.issued_api_keys:
+                key_id, api_key = self.issued_api_keys.get(
+                    bearer, (self.key_id, self.api_key)
+                )
                 data = {
                     "api_key": {
-                        "key_id": self.key_id,
+                        "key_id": key_id,
                         "kind": "api_key",
                         "scopes": credentials.CUSTOMER_SCOPES,
                     },
@@ -143,9 +149,21 @@ class FakeAPI:
                 "scopes": credentials.CUSTOMER_SCOPES,
             }
             assert extra_headers and extra_headers["Idempotency-Key"].startswith("qurl-cli-ci-")
+            issued = len(self.issued_api_keys)
+            key_id = (
+                self.key_id
+                if issued == 0
+                else f"key_Paired{issued:06d}"
+            )
+            api_key = (
+                self.api_key
+                if issued == 0
+                else f"lv_test_customer-key-{issued}"
+            )
+            self.issued_api_keys[api_key] = (key_id, api_key)
             row = {
-                "api_key": self.api_key,
-                "key_id": self.key_id,
+                "api_key": api_key,
+                "key_id": key_id,
                 "kind": "api_key",
                 "name": request["name"],
                 "scopes": credentials.CUSTOMER_SCOPES,
@@ -342,9 +360,17 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "needs: [required, journey]" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "github.event_name != 'pull_request'" not in workflow
-    assert workflow.count(
+    assert (
         "contains(fromJson('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name)"
-    ) >= 3
+        not in workflow
+    )
+    assert workflow.count(
+        "contains(fromJson('[\"schedule\",\"workflow_dispatch\"]'), github.event_name)"
+    ) >= 5
+    assert workflow.count("qurl-cli-ci-credentials.py create-pair") == 2
+    assert "qurl-cli-ci-credentials.py create " not in workflow
+    assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
+    assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
     assert "needs.required.result == 'success'" in workflow
     assert "needs.journey.result == 'success'" in workflow
     assert "notify-soak-manual-failure:" in workflow
@@ -356,6 +382,146 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert "schedule|workflow_dispatch) include_soak=true" in cleanup
     assert '(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")' in cleanup
     assert "lane_specs+=(linux:4)" in cleanup
+    assert "qurl-cli-ci-credentials.py reconcile-run" not in cleanup
+    assert cleanup.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
+    assert '.name == "cli / customer journey cleanup"' in cleanup
+    assert '.conclusion == "success"' in cleanup
+
+
+def test_pair_and_batch_each_request_one_auth0_token() -> None:
+    fake = FakeAPI()
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        primary = root / "primary"
+        failure = root / "failure"
+        primary.mkdir(mode=0o700)
+        failure.mkdir(mode=0o700)
+        credentials.create_pair(
+            argparse.Namespace(
+                **vars(args),
+                primary_output_dir=primary,
+                failure_output_dir=failure,
+                lane="linux",
+                run_attempt="2",
+                run_id="1231",
+            )
+        )
+        assert fake.auth_token_requests == 1
+        assert (primary / "api-key-id").read_text(encoding="utf-8") != (
+            failure / "api-key-id"
+        ).read_text(encoding="utf-8")
+        assert (primary / "api-key").read_text(encoding="utf-8") != (
+            failure / "api-key"
+        ).read_text(encoding="utf-8")
+
+        fake.auth_token_requests = 0
+        credentials.reconcile_batch(
+            argparse.Namespace(
+                **vars(args),
+                run_spec=(
+                    "1231:2:linux:host",
+                    "1232:2:macos:host",
+                ),
+            )
+        )
+        assert fake.auth_token_requests == 1
+
+
+def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> None:
+    fake = FakeAPI()
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", fake
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        for run_specs in (
+            ("1231:2:linux:host", "1231:2:linux:host"),
+            ("malformed",),
+            tuple(f"{1000 + index}:1:linux:host" for index in range(13)),
+        ):
+            try:
+                credentials.reconcile_batch(
+                    argparse.Namespace(**vars(args), run_spec=run_specs)
+                )
+            except credentials.CredentialError:
+                pass
+            else:
+                raise AssertionError("invalid reconciliation batch was accepted")
+        assert fake.auth_token_requests == 0
+
+        attempted: list[str] = []
+
+        def reconcile(run: argparse.Namespace, authenticated=None) -> None:
+            assert authenticated == ("https://sandbox.example", fake.jwt)
+            attempted.append(run.run_id)
+            if run.run_id == "1231":
+                raise credentials.CredentialError("first run failed")
+
+        with mock.patch.object(credentials, "reconcile_run", reconcile):
+            try:
+                credentials.reconcile_batch(
+                    argparse.Namespace(
+                        **vars(args),
+                        run_spec=(
+                            "1231:2:linux:host",
+                            "1232:2:macos:host",
+                        ),
+                    )
+                )
+            except credentials.CredentialError as exc:
+                assert str(exc) == "batch cleanup did not converge for 1 of 2 runs"
+            else:
+                raise AssertionError("failed reconciliation batch was accepted")
+        assert attempted == ["1231", "1232"]
+        assert fake.auth_token_requests == 1
+
+
+def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
+    fake = FakeAPI()
+
+    def reject_second_identity(
+        url: str,
+        method: str,
+        bearer: str | None = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        if method == "GET" and bearer == "lv_test_customer-key-1":
+            return 401, b'{}'
+        return fake(url, method, bearer, body, content_type, extra_headers)
+
+    with tempfile.TemporaryDirectory() as raw_root, mock.patch.object(
+        credentials, "request", reject_second_identity
+    ), mock.patch.object(credentials.time, "sleep", lambda _: None):
+        root = pathlib.Path(raw_root)
+        args = auth_args(root)
+        primary = root / "primary"
+        failure = root / "failure"
+        primary.mkdir(mode=0o700)
+        failure.mkdir(mode=0o700)
+        try:
+            credentials.create_pair(
+                argparse.Namespace(
+                    **vars(args),
+                    primary_output_dir=primary,
+                    failure_output_dir=failure,
+                    lane="linux",
+                    run_attempt="2",
+                    run_id="1231",
+                )
+            )
+        except credentials.CredentialError as exc:
+            assert str(exc) == (
+                "credential-pair creation failed; every exact key was revoked"
+            )
+        else:
+            raise AssertionError("invalid second customer identity was accepted")
+    assert fake.auth_token_requests == 1
+    assert set(fake.deleted_keys) == {"key_AbCdEf123456", "key_Paired000001"}
+    assert fake.keys == {}
 
 
 def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
@@ -365,9 +531,9 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
         CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
     )
     assert fallback_cleanup_minutes == 45
-    assert credentials.M2M_MANAGEMENT_HEADROOM_SECONDS == 30 * 60
+    assert credentials.M2M_MANAGEMENT_HEADROOM_SECONDS == 40 * 60
     assert credentials.JOURNEY_CLEANUP_MARGIN_SECONDS == cleanup_minutes * 60
-    assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 2700, (
+    assert credentials.MIN_M2M_TOKEN_REMAINING_SECONDS == 3300, (
         "journey credential budget changed; confirm the M2M lifetime still covers it"
     )
     assert (
@@ -376,7 +542,7 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
     ), "journey budget no longer fits inside the CI Auth0 M2M token lifetime"
     assert fallback_cleanup_minutes * 60 <= credentials.MIN_M2M_TOKEN_REMAINING_SECONDS, (
-        "fallback cleanup timeout no longer fits inside each freshly minted token"
+        "fallback cleanup timeout no longer fits inside the shared management token"
     )
     # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
     # most three source runs, for twelve total reconciliations in the largest
@@ -409,7 +575,7 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
 
     with tempfile.TemporaryDirectory() as raw_root:
         args = auth_args(pathlib.Path(raw_root))
-        for remaining_seconds, issued_ago in ((3599, 1), (2700, 0)):
+        for remaining_seconds, issued_ago in ((3599, 1), (3300, 0)):
             value = token(remaining_seconds, issued_ago)
             with mock.patch.object(
                 credentials, "request", return_value=token_response(value)
@@ -417,7 +583,7 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
                 assert credentials.auth0_token(args) == (value, "ci-client@clients")
 
         with mock.patch.object(
-            credentials, "request", return_value=token_response(token(2699))
+            credentials, "request", return_value=token_response(token(3299))
         ), mock.patch.object(credentials.time, "time", return_value=fixed_now):
             try:
                 credentials.auth0_token(args)
@@ -426,7 +592,7 @@ def test_auth0_token_remaining_lifetime_matches_workflow_budget() -> None:
                     "Auth0 token does not have the required CI management lifetime"
                 )
             else:
-                raise AssertionError("2699-second Auth0 token was accepted")
+                raise AssertionError("3299-second Auth0 token was accepted")
 
 
 def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
@@ -987,6 +1153,9 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 def main() -> None:
     test_scheduled_soak_workflow_contract()
+    test_pair_and_batch_each_request_one_auth0_token()
+    test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run()
+    test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()
@@ -1057,7 +1226,9 @@ def main() -> None:
         credentials.write_private(recovery / "cleanup-jwt", fake.jwt)
         credentials.write_private(recovery / "run-name", "qurl CLI journey v2 1232/2/macos/failure")
         credentials.revoke_persisted(args.qurl_endpoint, recovery)
-        assert (recovery / "api-key-id").read_text(encoding="utf-8") == fake.key_id
+        recovered_key_id = (recovery / "api-key-id").read_text(encoding="utf-8")
+        assert credentials.KEY_ID.fullmatch(recovered_key_id)
+        assert recovered_key_id in fake.deleted_keys
 
         run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = add_run_credentials(fake)
         unrelated_key_id = "key_OtherKey1234"

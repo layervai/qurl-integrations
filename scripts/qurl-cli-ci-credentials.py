@@ -24,11 +24,10 @@ REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
 AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
 AUTH0_ISSUANCE_SKEW_SECONDS = 60
 # An M2M token is consumed only by one trusted setup or reconciliation command.
-# The setup command removes it before the customer journey starts, and every
-# post-journey or fallback reconciliation mints a fresh token. This headroom is
-# therefore independent of the 110-minute soak lane. It leaves 30 minutes for
-# one bounded management command plus the terminal cleanup job's 15 minutes.
-M2M_MANAGEMENT_HEADROOM_SECONDS = 30 * 60
+# The setup command removes it before the customer journey starts. A cleanup
+# command reuses one token for its bounded batch and never exposes that token to
+# a customer process. The lifetime is independent of the 110-minute soak lane.
+M2M_MANAGEMENT_HEADROOM_SECONDS = 40 * 60
 JOURNEY_CLEANUP_MARGIN_SECONDS = 15 * 60
 MIN_M2M_TOKEN_REMAINING_SECONDS = (
     M2M_MANAGEMENT_HEADROOM_SECONDS + JOURNEY_CLEANUP_MARGIN_SECONDS
@@ -47,6 +46,11 @@ RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 RUN_AGENT_ID = re.compile(
     r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sf]\Z"
 )
+RUN_SPEC = re.compile(
+    r"([1-9][0-9]{0,19}):([1-9][0-9]{0,19}):"
+    r"(linux|macos|windows):(host|hardened_container)\Z"
+)
+MAX_RECONCILE_RUNS = 12
 MAX_ATTEMPTS = 3
 # Bound the trusted cleanup inventory independently of per-request timeouts so
 # malformed pagination cannot hold a runner or grow its in-memory result set.
@@ -57,9 +61,8 @@ INVENTORY_PAGE_SIZE = 100
 INVENTORY_MAX_PAGES = 20
 INVENTORY_MAX_ROWS = INVENTORY_PAGE_SIZE * INVENTORY_MAX_PAGES
 # One absolute deadline covers every inventory scan in one reconciliation. The
-# primary cleanup calls this command three times inside ten minutes; the
-# fallback can call it nine times inside thirty minutes. Two minutes leaves a
-# bounded majority of both job budgets for token minting and cleanup writes.
+# primary cleanup batches four runs and the fallback batches at most twelve.
+# Two minutes per run leaves bounded time for cleanup writes in both jobs.
 RECONCILE_INVENTORY_BUDGET_SECONDS = 2 * 60
 # A slow credential inventory must not consume the whole shared deadline before
 # the final resource inventory can attempt cleanup. This is a reservation inside
@@ -556,12 +559,18 @@ def cleanup_device_key_ids(path: pathlib.Path | None) -> set[str]:
     return result
 
 
-def reconcile_run(args: argparse.Namespace) -> None:
+def reconcile_run(
+    args: argparse.Namespace,
+    authenticated: tuple[str, str] | None = None,
+) -> None:
     description = run_description(args)
     credential_names = run_credential_names(args)
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
-    endpoint, jwt, _ = authenticated_owner(args)
+    if authenticated is None:
+        endpoint, jwt, _ = authenticated_owner(args)
+    else:
+        endpoint, jwt = authenticated
     inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
     credential_inventory_deadline = (
         inventory_deadline - RESOURCE_INVENTORY_RESERVE_SECONDS
@@ -725,6 +734,42 @@ def reconcile_run(args: argparse.Namespace) -> None:
     )
 
 
+def reconcile_batch(args: argparse.Namespace) -> None:
+    if not 1 <= len(args.run_spec) <= MAX_RECONCILE_RUNS:
+        raise CredentialError("reconciliation batch exceeds its run limit")
+    if len(set(args.run_spec)) != len(args.run_spec):
+        raise CredentialError("reconciliation batch contains a duplicate run")
+
+    parsed: list[argparse.Namespace] = []
+    for value in args.run_spec:
+        match = RUN_SPEC.fullmatch(value)
+        if match is None:
+            raise CredentialError("reconciliation run specification is malformed")
+        run_id, run_attempt, lane, runtime = match.groups()
+        parsed.append(
+            argparse.Namespace(
+                run_id=run_id,
+                run_attempt=run_attempt,
+                lane=lane,
+                runtime=runtime,
+                cleanup_id_dir=None,
+            )
+        )
+
+    endpoint, jwt, _ = authenticated_owner(args)
+    failures = 0
+    for run in parsed:
+        try:
+            reconcile_run(run, authenticated=(endpoint, jwt))
+        except CredentialError:
+            failures += 1
+    if failures:
+        raise CredentialError(
+            f"batch cleanup did not converge for {failures} of {len(parsed)} runs"
+        )
+    print(f"reconciled {len(parsed)} runs with one management token")
+
+
 def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
     idempotency = "qurl-cli-ci-" + hashlib.sha256(name.encode("ascii")).hexdigest()
     body = {"kind": "api_key", "name": name, "scopes": CUSTOMER_SCOPES}
@@ -786,12 +831,14 @@ def prepare_output_directory(path: pathlib.Path) -> None:
     path.mkdir(mode=0o700)
 
 
-def revoke_persisted(endpoint: str, directory: pathlib.Path) -> None:
-    jwt = private_value(directory / "cleanup-jwt", "cleanup JWT")
-    name = private_value(directory / "run-name", "run-scoped API-key name")
+def revoke_named_credential(
+    endpoint: str,
+    jwt: str,
+    name: str,
+    key_id_path: pathlib.Path,
+) -> None:
     if not RUN_NAME.fullmatch(name):
         raise CredentialError("run-scoped API-key name is malformed")
-    key_id_path = directory / "api-key-id"
     if key_id_path.exists():
         key_id = private_value(key_id_path, "API key ID")
         if not KEY_ID.fullmatch(key_id):
@@ -804,15 +851,28 @@ def revoke_persisted(endpoint: str, directory: pathlib.Path) -> None:
     retry_revoke(endpoint, jwt, key_id)
 
 
-def create(args: argparse.Namespace) -> None:
+def revoke_persisted(endpoint: str, directory: pathlib.Path) -> None:
+    jwt = private_value(directory / "cleanup-jwt", "cleanup JWT")
+    name = private_value(directory / "run-name", "run-scoped API-key name")
+    revoke_named_credential(endpoint, jwt, name, directory / "api-key-id")
+
+
+def validate_create_args(args: argparse.Namespace) -> None:
     if not POSITIVE_INTEGER.fullmatch(args.run_id) or not POSITIVE_INTEGER.fullmatch(args.run_attempt):
         raise CredentialError("run identity must use canonical positive integers")
     if not LANE.fullmatch(args.lane):
         raise CredentialError("platform lane is invalid")
-    endpoint, jwt, expected_owner = authenticated_owner(args)
-
     if args.purpose not in {"primary", "failure"}:
         raise CredentialError("customer credential purpose is invalid")
+
+
+def create_with_auth(
+    args: argparse.Namespace,
+    endpoint: str,
+    jwt: str,
+    expected_owner: str,
+) -> None:
+    validate_create_args(args)
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     write_private(args.output_dir / "cleanup-jwt", jwt)
@@ -844,6 +904,88 @@ def create(args: argparse.Namespace) -> None:
     print("created one run-scoped customer API key")
 
 
+def create(args: argparse.Namespace) -> None:
+    validate_create_args(args)
+    endpoint, jwt, expected_owner = authenticated_owner(args)
+    create_with_auth(args, endpoint, jwt, expected_owner)
+
+
+def create_pair(args: argparse.Namespace) -> None:
+    for purpose in ("primary", "failure"):
+        validate_create_args(
+            argparse.Namespace(
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                lane=args.lane,
+                purpose=purpose,
+            )
+        )
+    for path in (args.primary_output_dir, args.failure_output_dir):
+        if not path.is_absolute() or path == pathlib.Path(path.anchor):
+            raise CredentialError("credential directory must be an absolute non-root path")
+    primary_path = args.primary_output_dir.resolve()
+    failure_path = args.failure_output_dir.resolve()
+    if (
+        primary_path == failure_path
+        or primary_path in failure_path.parents
+        or failure_path in primary_path.parents
+    ):
+        raise CredentialError("customer credential directories must be distinct")
+    endpoint, jwt, expected_owner = authenticated_owner(args)
+    directories = {
+        "primary": args.primary_output_dir,
+        "failure": args.failure_output_dir,
+    }
+    try:
+        for purpose, output_dir in directories.items():
+            create_with_auth(
+                argparse.Namespace(
+                    run_id=args.run_id,
+                    run_attempt=args.run_attempt,
+                    lane=args.lane,
+                    purpose=purpose,
+                    output_dir=output_dir,
+                ),
+                endpoint,
+                jwt,
+                expected_owner,
+            )
+        primary_id = private_value(
+            args.primary_output_dir / "api-key-id", "primary API key ID"
+        )
+        failure_id = private_value(
+            args.failure_output_dir / "api-key-id", "failure API key ID"
+        )
+        primary_key = private_value(
+            args.primary_output_dir / "api-key", "primary API key"
+        )
+        failure_key = private_value(
+            args.failure_output_dir / "api-key", "failure API key"
+        )
+        if primary_id == failure_id or primary_key == failure_key:
+            raise CredentialError("customer credentials are not isolated")
+    except (OSError, CredentialError) as exc:
+        cleanup_failed = False
+        for purpose, directory in directories.items():
+            try:
+                name = run_credential_name(
+                    args.run_id, args.run_attempt, args.lane, purpose
+                )
+                revoke_named_credential(
+                    endpoint, jwt, name, directory / "api-key-id"
+                )
+            except (OSError, CredentialError):
+                cleanup_failed = True
+        if cleanup_failed:
+            raise CredentialError(
+                "credential-pair creation failed and bounded revoke did not converge"
+            ) from exc
+        raise CredentialError(
+            "credential-pair creation failed; every exact key was revoked"
+        ) from exc
+    print("created two isolated run-scoped customer API keys with one management token")
+
+
 def revoke(args: argparse.Namespace) -> None:
     endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
     if not args.credential_dir.exists():
@@ -866,9 +1008,17 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     commands = result.add_subparsers(dest="command", required=True)
     create_parser = commands.add_parser("create")
+    create_pair_parser = commands.add_parser("create-pair")
     identify_parser = commands.add_parser("identify")
     reconcile_parser = commands.add_parser("reconcile-run")
-    for current in (create_parser, identify_parser, reconcile_parser):
+    reconcile_batch_parser = commands.add_parser("reconcile-batch")
+    for current in (
+        create_parser,
+        create_pair_parser,
+        identify_parser,
+        reconcile_parser,
+        reconcile_batch_parser,
+    ):
         current.add_argument("--token-endpoint", required=True)
         current.add_argument("--audience", required=True)
         current.add_argument("--qurl-endpoint", required=True)
@@ -882,12 +1032,26 @@ def parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--lane", required=True)
     create_parser.add_argument("--purpose", choices=("primary", "failure"), required=True)
     create_parser.set_defaults(handler=create)
+    create_pair_parser.add_argument(
+        "--primary-output-dir", type=pathlib.Path, required=True
+    )
+    create_pair_parser.add_argument(
+        "--failure-output-dir", type=pathlib.Path, required=True
+    )
+    create_pair_parser.add_argument("--run-id", required=True)
+    create_pair_parser.add_argument("--run-attempt", required=True)
+    create_pair_parser.add_argument("--lane", required=True)
+    create_pair_parser.set_defaults(handler=create_pair)
     reconcile_parser.add_argument("--run-id", required=True)
     reconcile_parser.add_argument("--run-attempt", required=True)
     reconcile_parser.add_argument("--lane", required=True)
     reconcile_parser.add_argument("--runtime", required=True)
     reconcile_parser.add_argument("--cleanup-id-dir", type=pathlib.Path)
     reconcile_parser.set_defaults(handler=reconcile_run)
+    reconcile_batch_parser.add_argument(
+        "--run-spec", action="append", required=True
+    )
+    reconcile_batch_parser.set_defaults(handler=reconcile_batch)
     revoke_parser = commands.add_parser("revoke")
     revoke_parser.add_argument("--qurl-endpoint", required=True)
     revoke_parser.add_argument("--credential-dir", type=pathlib.Path, required=True)

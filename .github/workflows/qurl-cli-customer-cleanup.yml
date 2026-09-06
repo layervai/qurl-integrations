@@ -1,9 +1,9 @@
 name: "qURL CLI Customer Cleanup"
 
-# The primary workflow reconciles each lane before it can pass. This small,
-# trusted fallback also runs after cancellation, when an in-workflow cleanup
-# job might not have started. The protected manual entry accepts only verified
-# prior main journey runs and exists for bounded recovery of older leaks.
+# The primary workflow reconciles all lanes with one management token. This
+# trusted fallback runs only when that cleanup did not pass, including after a
+# cancellation. The protected manual entry accepts only verified prior main
+# journey runs and exists for bounded recovery of older leaks.
 on:
   workflow_dispatch:
     inputs:
@@ -125,7 +125,7 @@ jobs:
             jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")
             # A completed workflow event can briefly precede its final job
             # conclusion. Only explicit skipped suppresses idempotent cleanup.
-            required=$(jq -r '
+            journey_ran=$(jq -r '
               if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
                 (.jobs | type) != "array" or (.jobs | length) != .total_count or
                 any(.jobs[]; (.name | type) != "string")
@@ -136,7 +136,7 @@ jobs:
                 .conclusion != "skipped")
               end
             ' <<<"$jobs")
-            [[ "$required" == true ]] || {
+            [[ "$journey_ran" == true ]] || {
               if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
                 echo "required=false" >>"$GITHUB_OUTPUT"
                 exit 0
@@ -144,6 +144,17 @@ jobs:
               echo "::error::cleanup source did not run the customer journey" >&2
               exit 1
             }
+            if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+              cleanup_succeeded=$(jq -r '
+                any(.jobs[];
+                  .name == "cli / customer journey cleanup" and
+                  .conclusion == "success")
+              ' <<<"$jobs")
+              if [[ "$cleanup_succeeded" == true ]]; then
+                echo "required=false" >>"$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
           done
           {
             echo "required=true"
@@ -157,9 +168,9 @@ jobs:
     if: needs.resolve.outputs.required == 'true'
     runs-on: ubuntu-latest
     # Manual recovery accepts at most three source runs. A scheduled/manual
-    # source adds the fourth lane, for at most 12 reconciliations. Their
-    # two-minute inventory budgets consume at most 24 minutes; the remaining
-    # 21 minutes cover token minting, bounded cleanup writes, and runner setup.
+    # source adds the fourth lane, for at most 12 reconciliations under one
+    # management token. Their two-minute inventory budgets consume at most 24
+    # minutes; the remaining 21 minutes cover cleanup writes and runner setup.
     timeout-minutes: 45
     environment: cli-customer-journey-cleanup
     permissions:
@@ -192,7 +203,7 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          reconcile_failed=0
+          batch_args=()
           IFS=, read -ra run_specs <<<"$SOURCE_RUNS"
           for run_spec in "${run_specs[@]}"; do
             IFS=: read -r source_run_id source_run_attempt <<<"$run_spec"
@@ -202,18 +213,10 @@ jobs:
             fi
             for lane_spec in "${lane_specs[@]}"; do
               IFS=: read -r lane lane_id <<<"$lane_spec"
-              if ! python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
-                --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-                --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-                --client-secret-file "$client_dir/client-secret" \
-                --run-id "${source_run_id}${lane_id}" --run-attempt "$source_run_attempt" \
-                --lane "$lane" --runtime host; then
-                echo "::error::run cleanup failed for $lane lane" >&2
-                reconcile_failed=1
-              fi
+              batch_args+=(--run-spec "${source_run_id}${lane_id}:${source_run_attempt}:${lane}:host")
             done
           done
-          if (( reconcile_failed != 0 )); then
-            echo "::error::run cleanup failed for one or more lanes" >&2
-            exit 1
-          fi
+          python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
+            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+            --client-secret-file "$client_dir/client-secret" "${batch_args[@]}"

@@ -664,7 +664,10 @@ jobs:
     # parallel lane in the run UI.
     name: cli / customer journey
     needs: [changes, customer-artifacts]
-    if: github.ref == 'refs/heads/main' && contains(fromJson('["push","schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
+    # Hermetic CLI gates still run on every relevant pull request and push.
+    # The credentialed deployment journey runs daily and on explicit demand;
+    # running it for every main push exhausted the Auth0 M2M token allowance.
+    if: github.ref == 'refs/heads/main' && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.journey_matrix) }}
@@ -833,14 +836,14 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          for purpose in primary failure; do
-            python3 scripts/qurl-cli-ci-credentials.py create \
-              --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-              --client-secret-file "$client_dir/client-secret" --output-dir "$credential_dir/$purpose" \
-              --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
-              --lane '${{ matrix.lane }}' --purpose "$purpose"
-          done
+          python3 scripts/qurl-cli-ci-credentials.py create-pair \
+            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+            --client-secret-file "$client_dir/client-secret" \
+            --primary-output-dir "$credential_dir/primary" \
+            --failure-output-dir "$credential_dir/failure" \
+            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
+            --lane '${{ matrix.lane }}'
           install -m 0600 "$credential_dir/primary/api-key" "$key_dir/api-key"
           install -m 0600 "$credential_dir/failure/api-key" "$key_dir/failure-api-key"
           key=$(<"$key_dir/api-key")
@@ -886,16 +889,14 @@ jobs:
             [IO.File]::WriteAllText($clientIDFile, $env:AUTH_CLIENT_ID)
             [IO.File]::WriteAllText($clientSecretFile, $env:AUTH_CLIENT_SECRET)
             Remove-Item Env:AUTH_CLIENT_ID, Env:AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
-            foreach ($purpose in @('primary', 'failure')) {
-              $outputDir = Join-Path $credentialDir $purpose
-              python scripts/qurl-cli-ci-credentials.py create `
-                --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
-                --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
-                --client-secret-file $clientSecretFile --output-dir $outputDir `
-                --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
-                --lane '${{ matrix.lane }}' --purpose $purpose
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
+            python scripts/qurl-cli-ci-credentials.py create-pair `
+              --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
+              --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
+              --client-secret-file $clientSecretFile `
+              --primary-output-dir $primaryDir --failure-output-dir $failureDir `
+              --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
+              --lane '${{ matrix.lane }}'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $apiKeyFile = Join-Path $keyDir 'api-key'
             $failureAPIKeyFile = Join-Path $keyDir 'failure-api-key'
             Copy-Item -LiteralPath (Join-Path $primaryDir 'api-key') -Destination $apiKeyFile -ErrorAction Stop
@@ -1029,19 +1030,28 @@ jobs:
           }
 
       - id: remove-posix-key
-        name: Remove the local disposable key
+        name: Remove local disposable credentials
         if: always() && runner.os != 'Windows'
         shell: bash
-        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/qurl-customer-key"
+        run: scripts/remove-sensitive-tree.sh "$RUNNER_TEMP/qurl-customer-key" "$RUNNER_TEMP/qurl-journey-cleanup-ids"
+
+      - name: Disable Linux runner linger
+        if: always() && runner.os == 'Linux' && steps.fence-posix-service.outcome == 'success'
+        shell: bash
+        run: sudo loginctl disable-linger "$(id -un)"
 
       - id: remove-windows-key
         name: Remove the local disposable keys
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $path = Join-Path $env:RUNNER_TEMP 'qurl-customer-key'
-          if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
-          if (Test-Path -LiteralPath $path) { throw 'local disposable key remains on the journey runner' }
+          foreach ($path in @(
+            (Join-Path $env:RUNNER_TEMP 'qurl-customer-key'),
+            (Join-Path $env:RUNNER_TEMP 'qurl-journey-cleanup-ids')
+          )) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+            if (Test-Path -LiteralPath $path) { throw 'local disposable credential remains on the journey runner' }
+          }
           "QURL_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "QURL_CLI_SANDBOX_FAILURE_API_KEY=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -1057,69 +1067,10 @@ jobs:
           if (Test-Path -LiteralPath $expected) { Remove-Item -LiteralPath $expected -Recurse -Force }
           if (Test-Path -LiteralPath $expected) { throw 'Windows customer install directory remains after the service fence' }
 
-      - name: Reconcile this lane after the POSIX service fence
-        if: always() && runner.os != 'Windows' && steps.fence-posix-service.outcome == 'success' && steps.remove-posix-key.outcome == 'success'
-        shell: bash
-        env:
-          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
-          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
-        run: |
-          set -euo pipefail
-          client_dir=$RUNNER_TEMP/qurl-journey-auth
-          cleanup_id_dir=$RUNNER_TEMP/qurl-journey-cleanup-ids
-          cleanup() { scripts/remove-sensitive-tree.sh "$client_dir" "$cleanup_id_dir"; }
-          trap cleanup EXIT
-          mkdir -m 0700 "$client_dir"
-          printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id"
-          printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
-          chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
-          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
-            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" \
-            --run-id "$QURL_SHARING_RUN_ID" --run-attempt "$QURL_SHARING_RUN_ATTEMPT" \
-            --lane '${{ matrix.lane }}' --runtime host --cleanup-id-dir "$cleanup_id_dir"
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            sudo loginctl disable-linger "$(id -un)" 2>/dev/null || true
-          fi
-
-      - name: Reconcile this lane after the Windows service fence
-        if: always() && runner.os == 'Windows' && steps.fence-windows-service.outcome == 'success' && steps.remove-windows-key.outcome == 'success'
-        shell: pwsh
-        env:
-          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
-          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
-        run: |
-          $clientDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-auth'
-          $cleanupIDDir = Join-Path $env:RUNNER_TEMP 'qurl-journey-cleanup-ids'
-          try {
-            New-Item -ItemType Directory -Path $clientDir -ErrorAction Stop | Out-Null
-            & icacls.exe $clientDir /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)(F)" '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' | Out-Null
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $clientIDFile = Join-Path $clientDir 'client-id'
-            $clientSecretFile = Join-Path $clientDir 'client-secret'
-            [IO.File]::WriteAllText($clientIDFile, $env:AUTH_CLIENT_ID)
-            [IO.File]::WriteAllText($clientSecretFile, $env:AUTH_CLIENT_SECRET)
-            Remove-Item Env:AUTH_CLIENT_ID, Env:AUTH_CLIENT_SECRET -ErrorAction SilentlyContinue
-            python scripts/qurl-cli-ci-credentials.py reconcile-run `
-              --token-endpoint $env:AUTH_TOKEN_ENDPOINT --audience $env:QURL_ENDPOINT `
-              --qurl-endpoint $env:QURL_ENDPOINT --client-id-file $clientIDFile `
-              --client-secret-file $clientSecretFile `
-              --run-id $env:QURL_SHARING_RUN_ID --run-attempt $env:QURL_SHARING_RUN_ATTEMPT `
-              --lane '${{ matrix.lane }}' --runtime host --cleanup-id-dir $cleanupIDDir
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } finally {
-            foreach ($path in @($clientDir, $cleanupIDDir)) {
-              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
-              if (Test-Path -LiteralPath $path) { throw 'cleanup state remained on the journey runner' }
-            }
-          }
-
   journey-cleanup:
     name: cli / customer journey cleanup
     needs: [changes, journey]
-    if: always() && github.ref == 'refs/heads/main' && contains(fromJson('["push","schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true'
+    if: always() && github.ref == 'refs/heads/main' && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: cli-customer-journey-cleanup
@@ -1148,27 +1099,19 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          reconcile_failed=0
           lane_specs=(linux:1 macos:2 windows:3)
           if [[ "$GITHUB_EVENT_NAME" == schedule || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             lane_specs+=(linux:4)
           fi
+          run_specs=()
           for lane_spec in "${lane_specs[@]}"; do
             IFS=: read -r lane lane_id <<<"$lane_spec"
-            if ! python3 scripts/qurl-cli-ci-credentials.py reconcile-run \
-              --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-              --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-              --client-secret-file "$client_dir/client-secret" \
-              --run-id "${GITHUB_RUN_ID}${lane_id}" --run-attempt "$GITHUB_RUN_ATTEMPT" \
-              --lane "$lane" --runtime host; then
-              echo "::error::run cleanup failed for $lane lane" >&2
-              reconcile_failed=1
-            fi
+            run_specs+=(--run-spec "${GITHUB_RUN_ID}${lane_id}:${GITHUB_RUN_ATTEMPT}:${lane}:host")
           done
-          if (( reconcile_failed != 0 )); then
-            echo "::error::run cleanup failed for one or more lanes" >&2
-            exit 1
-          fi
+          python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
+            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
+            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
+            --client-secret-file "$client_dir/client-secret" "${run_specs[@]}"
 
   goreleaser-check:
     name: cli / goreleaser check
@@ -1304,7 +1247,7 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CLI_CHANGED: ${{ needs.changes.outputs.cli }}
-          LIVE_REQUIRED: ${{ github.ref == 'refs/heads/main' && contains(fromJson('["push","schedule","workflow_dispatch"]'), github.event_name) }}
+          LIVE_REQUIRED: ${{ github.ref == 'refs/heads/main' && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           if [ "$CHANGES_RESULT" != "success" ]; then
@@ -1373,7 +1316,7 @@ jobs:
                 echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
                 failed=1
               elif [[ "$LIVE_REQUIRED" != true && "$result" != skipped && "$result" != success ]]; then
-                echo "::error::$(display_name "$job") concluded ${result:-<empty>} on a pull request"
+                echo "::error::$(display_name "$job") concluded ${result:-<empty>} when the live journey was optional"
                 failed=1
               fi
               continue
@@ -1462,7 +1405,10 @@ jobs:
   signal-cli-release:
     name: cli / signal exact release
     needs: [changes, required]
-    if: github.event_name == 'push' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'
+    # A release-please run dispatches this full journey after it creates the
+    # draft CLI release. Ordinary pushes must never publish from hermetic-only
+    # CI, and the daily soak must not trigger a release by accident.
+    if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.cli == 'true' && needs.required.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
