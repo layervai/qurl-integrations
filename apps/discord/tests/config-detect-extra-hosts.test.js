@@ -1,19 +1,3 @@
-/**
- * Unit tests for config.js's parsing of the env-extendable detect-tunnel
- * non-prod allowlist: DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS and
- * DETECT_EXTRA_NON_PROD_HOST_SUFFIXES.
- *
- * These two vars let a private infra repo grant connector.js's
- * detectTunnelHostSuffixesForEndpoint() extra non-prod endpoint hosts +
- * qurl_site suffixes (e.g. sandbox) without committing real hostnames to
- * this public repo — the built-in DETECT_TUNNEL_NON_PROD_* sets in
- * connector.js are hardcoded and public. config.js owns parsing + the
- * fail-fast shape guard; connector.js only consumes the resolved arrays
- * (see connector-coverage.test.js for the consumption-side tests).
- *
- * Each test uses jest.isolateModules to get a fresh config module so env
- * changes in one test can't leak into another via the require cache.
- */
 
 const { withFreshEnv: withFreshConfig } = require('./helpers/fresh-config');
 describe('config — DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS / DETECT_EXTRA_NON_PROD_HOST_SUFFIXES', () => {

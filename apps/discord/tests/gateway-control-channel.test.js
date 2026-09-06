@@ -1,28 +1,3 @@
-// Unit tests for src/gateway-control-channel.js — Pillar 3 push-
-// handoff receiver. Pins the load-bearing contracts:
-//
-//   1. Only POST /control/yours is accepted; everything else → 404.
-//   2. Body cap enforced before parse; oversize → 413 with no parse,
-//      no onHandoff call, no nonce burn.
-//   3. Invalid envelope (non-JSON / missing body+signature) → 400
-//      without invoking hmac.verify (so an attacker can't even
-//      probe whether a key matches without a well-formed envelope).
-//   4. HMAC verify runs BEFORE payload-shape / routing checks.
-//      Bad signature → 401; stale/replay → 401 with the verifier's
-//      reason field surfaced.
-//   5. Routing checks (peer_instance_id binding + isKnownPeer)
-//      enforced AFTER verify; 400 for mismatch.
-//   6. onHandoff is awaited; thrown errors → 500. ACK 200 only
-//      after onHandoff resolves (the "I'm live" semantic from the
-//      design doc).
-//   7. expected_version is validated as a positive integer; non-
-//      integer / negative / zero → 400 invalid_payload.
-//
-// Test architecture: most tests drive the exported _handleRequestForTest
-// with stub req/res to keep them fast and deterministic. A small set
-// of end-to-end tests bind a real ephemeral port + send via
-// http.request to pin the listen path, body-cap streaming, and
-// header timeouts.
 
 const http = require('node:http');
 const crypto = require('node:crypto');
@@ -53,17 +28,11 @@ function makeLogger() {
   };
 }
 
-// Build a stub IncomingMessage from an in-memory Buffer body.
 function makeReq({ method = 'POST', url = '/control/yours', body = Buffer.alloc(0) } = {}) {
   const req = Readable.from([body]);
   req.method = method;
   req.url = url;
-  // Default to a valid Content-Type so tests focused on other behaviors
-  // don't all need to set it. Tests that exercise the 415 path
-  // explicitly delete or override this header.
   req.headers = { 'content-type': 'application/json' };
-  // The handler may call req.destroy() on body-too-large; the
-  // Readable.from stream implements destroy as a no-op for our needs.
   return req;
 }
 
@@ -106,10 +75,6 @@ function makeCtx({
 }
 
 function makeSignedEnvelope({ payload }) {
-  // Recompute the signature directly with the shared SECRET rather
-  // than calling into a `makeHmac()` instance — that would couple
-  // the fixture to the hmac module's nonce LRU state and require
-  // careful clock injection on every call site.
   const bodyBytes = Buffer.from(JSON.stringify(payload), 'utf8');
   const signature = crypto.createHmac('sha256', SECRET).update(bodyBytes).digest('hex');
   return wrapEnvelope({ bodyBytes, signature }).toString('utf8');
@@ -155,9 +120,6 @@ describe('startControlChannelServer — factory validation', () => {
   });
 
   it('throws on requestTimeoutMs < 1100 (headersTimeout invariant)', () => {
-    // For requestTimeoutMs = 50, the headersTimeout formula yields 1ms,
-    // effectively disabling header-read protection. The factory rejects
-    // the misconfig rather than letting it silently lose the invariant.
     const baseArgs = {
       hmac: { verify() {} }, selfInstanceId: 'a', isKnownPeer: () => true,
       onHandoff: () => {}, logger: makeLogger(), onListenError: () => {}, port: 0,
@@ -240,9 +202,6 @@ describe('handleRequest — method + path routing', () => {
   });
 
   it('415s POST /control/yours when Content-Type header is missing', async () => {
-    // Required, not optional — catches `curl` probes without `-H` and
-    // any future caller that forgets to set the header. Triage-friendly
-    // 415 vs 400 distinguishes "wrong/missing CT" from "bad envelope".
     const ctx = makeCtx();
     const req = makeReq();
     delete req.headers['content-type'];
@@ -286,14 +245,10 @@ describe('handleRequest — body cap', () => {
   });
 
   it('413s on Content-Length over cap WITHOUT reading body chunks (short-circuit)', async () => {
-    // A declared length over cap is unambiguous — short-circuit before
-    // any stream work. Body chunks must NOT be consumed; verify that
-    // by tracking data emissions.
     const ctx = makeCtx({ bodyByteCap: 100 });
     const big = Buffer.alloc(200, 0x61);
     const req = makeReq({ body: big });
     req.headers['content-length'] = '200';
-    // Spy: track whether anyone read from the stream.
     let dataEmitted = false;
     req.on('data', () => { dataEmitted = true; });
 
@@ -301,14 +256,10 @@ describe('handleRequest — body cap', () => {
     await _handleRequestForTest(req, res, ctx);
     expect(res.statusCode).toBe(413);
     expect(JSON.parse(res.body)).toEqual({ error: 'body_too_large' });
-    // The pre-check fires before readRequestBody starts the data
-    // listener, so no chunks were drained.
     expect(dataEmitted).toBe(false);
   });
 
   it('ignores malformed Content-Length and falls through to streaming check', async () => {
-    // "1KB", "0xFF", negative, multi-value-like — anything not pure
-    // digits is ignored, the streaming cap still catches over-cap.
     const ctx = makeCtx({ bodyByteCap: 100 });
     const big = Buffer.alloc(200, 0x61);
     for (const bad of ['1KB', '-50', '0xFF', '1, 2']) {
@@ -323,8 +274,6 @@ describe('handleRequest — body cap', () => {
   });
 
   it('accepts request when Content-Length is under cap (no pre-check trigger)', async () => {
-    // Sanity: under-cap declared length passes the pre-check, then
-    // streaming runs normally.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ bodyByteCap: 8192, hmac });
@@ -338,25 +287,14 @@ describe('handleRequest — body cap', () => {
   });
 
   it('accepts a body exactly at bodyByteCap (boundary: cap = "max allowed", not "first rejected")', async () => {
-    // Off-by-one pin: the cap is the largest accepted size. A body
-    // of exactly `cap` bytes must NOT 413. (`> cap` rejects, `>=
-    // cap` would reject the boundary — wrong shape.)
     const ctx = makeCtx({ bodyByteCap: 100 });
-    // Body must be a valid signed envelope to reach the 200 path,
-    // so we build a tiny payload and verify the envelope fits.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     ctx.hmac = hmac;
     const payload = makeFreshPayload({ now });
     const envelope = makeSignedEnvelope({ payload });
-    // Pin the precondition: the envelope must be longer than cap
-    // for the body-to-cap to mean anything; if not, this is a
-    // useful test of "small envelope passes," which is also fine.
     const padded = Buffer.alloc(100, 0x20); // 100 bytes of spaces
     padded.write(envelope.slice(0, Math.min(envelope.length, 100)), 0);
-    // Either case (passes verify or fails verify) reaches a status
-    // code that isn't 413. The contract under test is "at-cap is
-    // not body_too_large."
     const req = makeReq({ body: padded });
     const res = makeRes();
     await _handleRequestForTest(req, res, ctx);
@@ -364,10 +302,6 @@ describe('handleRequest — body cap', () => {
   });
 
   it('413s when cumulative chunks exceed bodyByteCap (streaming path)', async () => {
-    // Real HTTP streams chunk delivery (~16 KB at a time). A bug in
-    // the cumulative-counter that only checked the LAST chunk would
-    // miss a body where each individual chunk is under cap but the
-    // sum is over. Drive that path with a multi-chunk stream.
     const ctx = makeCtx({ bodyByteCap: 100 });
     const chunk1 = Buffer.alloc(60, 0x61); // 60 bytes — under cap on its own
     const chunk2 = Buffer.alloc(60, 0x62); // 60 bytes — but 120 cumulative
@@ -464,13 +398,11 @@ describe('handleRequest — HMAC verify', () => {
     const payload = makeFreshPayload({ now });
     const envelope = makeSignedEnvelope({ payload });
 
-    // First call succeeds.
     const req1 = makeReq({ body: Buffer.from(envelope) });
     const res1 = makeRes();
     await _handleRequestForTest(req1, res1, ctx);
     expect(res1.statusCode).toBe(200);
 
-    // Second call (same envelope, same nonce) is rejected as replay.
     const req2 = makeReq({ body: Buffer.from(envelope) });
     const res2 = makeRes();
     await _handleRequestForTest(req2, res2, ctx);
@@ -518,8 +450,6 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
     let i = 0;
     for (const bad of [0, -1, 1.5, '7']) {
       const payload = makeFreshPayload({ now, expectedVersion: bad });
-      // Distinct nonce per case so the LRU doesn't false-fail later
-      // iterations as replay.
       i += 1;
       payload.nonce = `bad${i}`.padEnd(32, 'x');
       const envelope = makeSignedEnvelope({ payload });
@@ -534,11 +464,6 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
   });
 
   it('400s when expected_version exceeds Number.MAX_SAFE_INTEGER (sanity ceiling)', async () => {
-    // Defense against a peer adopting an absurd version cursor that
-    // would burn ~2^53 CAS values before the row could match again.
-    // 2^53 is the first integer > MAX_SAFE_INTEGER; isInteger(2^53)
-    // is still true (representable but unsafe), so the ceiling check
-    // is what catches it.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     const payload = makeFreshPayload({ now, expectedVersion: 2 ** 53 });
@@ -555,8 +480,6 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
   it('400s when expected_version is missing entirely', async () => {
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
-    // Build the payload directly so we can omit expected_version
-    // without going through makeFreshPayload's default.
     const payload = {
       ts: now,
       nonce: 'miss'.padEnd(32, 'y'),
@@ -622,11 +545,6 @@ describe('handleRequest — onHandoff', () => {
 });
 
 describe('handleRequest — Connection: close on bail-out paths', () => {
-  // Keep-alive-safety contract: every bail path that leaves the
-  // request body in an indeterminate state MUST set Connection:
-  // close so the parser doesn't see leftover unread bytes on the
-  // next keep-alive request. Pin each bail path here so a future
-  // refactor doesn't silently drop the header.
 
   it('sets Connection: close on 404 (wrong path)', async () => {
     const ctx = makeCtx();
@@ -677,7 +595,6 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
   });
 
   it('sets Connection: close on 400 body_read_failed', async () => {
-    // Drive a stream error by emitting an error mid-read.
     const ctx = makeCtx();
     const req = new (require('node:stream').Readable)({ read() {} });
     req.method = 'POST';
@@ -685,7 +602,6 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
     req.headers = { 'content-type': 'application/json' };
     const res = makeRes();
     const handlePromise = _handleRequestForTest(req, res, ctx);
-    // Emit error after one tick so readRequestBody is listening.
     setImmediate(() => req.emit('error', new Error('socket reset')));
     await handlePromise;
     expect(res.statusCode).toBe(400);
@@ -694,12 +610,6 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
   });
 
   it('does NOT set Connection: close on 400 wrong_peer (body fully consumed)', async () => {
-    // wrong_peer fires AFTER HMAC verify + envelope parse, so the
-    // body is fully consumed and the stream is in a determinate
-    // state. Omitting Connection: close matches the posture of
-    // other post-verify bails (invalid_payload, unauthorized,
-    // handoff_failed). Close is only needed when leftover bytes
-    // could confuse a keep-alive parser.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac, selfInstanceId: 'inst-B' });
@@ -714,7 +624,6 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
   });
 
   it('does NOT set Connection: close on 400 unknown_peer (body fully consumed)', async () => {
-    // Same rationale as wrong_peer above.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({
@@ -733,18 +642,10 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
 
 describe('readRequestBody — settle idempotence on close-after-end', () => {
   it('resolves cleanly when close fires after end (Node 17+ destroy-on-end path)', async () => {
-    // Some Node versions emit `close` with `req.destroyed=true` right
-    // after a normal `end` — this is the post-Node-17 stream lifecycle
-    // for cleanly-consumed request streams. The `settle` helper must
-    // be idempotent so the `end` → resolve wins and the trailing
-    // `close` → reject is a no-op. Without idempotence, the body
-    // would correctly resolve then immediately get a reject for
-    // `request_aborted`, which would unhandled-promise-warn or worse.
     const req = new Readable({ read() {} });
     const p = _readRequestBodyForTest(req, 1024);
     req.push(Buffer.from('hello'));
     req.push(null); // triggers 'end'
-    // Simulate the Node 17+ post-end behavior: close with destroyed.
     setImmediate(() => {
       // eslint-disable-next-line no-param-reassign
       req.destroyed = true;
@@ -754,8 +655,6 @@ describe('readRequestBody — settle idempotence on close-after-end', () => {
   });
 
   it('rejects cleanly when close fires WITHOUT a preceding end (true abort)', async () => {
-    // The mirror case: socket dies mid-body, no `end` ever arrives.
-    // The `close` handler sees `req.destroyed=true` and rejects.
     const req = new Readable({ read() {} });
     const p = _readRequestBodyForTest(req, 1024);
     req.push(Buffer.from('partial'));
@@ -796,12 +695,6 @@ describe('handleRequest — body cap response race (real socket)', () => {
   }));
 
   it('returns the 413 response to the client even after the body exceeds the cap (no socket-destroy race)', async () => {
-    // Earlier shape used req.destroy() on over-cap which tore down
-    // the socket BEFORE the catch handler could write the 413 —
-    // legitimate over-cap clients never saw the response. The fix
-    // uses req.pause(). Drive a real HTTP request that streams
-    // bytes past the cap and assert we get a 413 status code +
-    // JSON body, not a connection-reset error.
     const result = await new Promise((resolve, reject) => {
       const big = Buffer.alloc(500, 0x61); // 5× the cap
       const req = http.request({

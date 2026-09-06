@@ -30,6 +30,100 @@ function readConfigBase(releaseRoot) {
   return buildRelease.readDefaultQurlApiBase(buildRelease.qurlConfigPath(releaseRoot));
 }
 
+test('Edge release applies its version and browser name to shared source', function () {
+  withTempDirSync('qurl-edge-release-test-', function (targetRoot) {
+    const targetReleaseRoot = path.join(targetRoot, 'release');
+    fs.mkdirSync(path.join(targetReleaseRoot, '_locales', 'en'), { recursive: true });
+    fs.mkdirSync(path.join(targetReleaseRoot, 'popup'), { recursive: true });
+    fs.writeFileSync(path.join(targetRoot, 'package.json'), JSON.stringify({ version: '2.3.4' }));
+    fs.writeFileSync(path.join(targetReleaseRoot, 'manifest.json'), JSON.stringify({ version: '1.0.0' }));
+    fs.writeFileSync(path.join(targetReleaseRoot, '_locales', 'en', 'messages.json'), JSON.stringify({
+      ext_name: { message: 'qURL Agent' },
+      permission_request_confirm: { message: 'Your browser will ask next.' },
+    }));
+    fs.writeFileSync(path.join(targetReleaseRoot, 'popup', 'popup.html'), '<title>qURL Agent</title><div>qURL Agent</div>');
+
+    buildRelease.applyTargetMetadata(buildRelease.resolveTarget('edge', targetRoot));
+
+    assert.equal(JSON.parse(fs.readFileSync(path.join(targetReleaseRoot, 'manifest.json'))).version, '2.3.4');
+    const messages = JSON.parse(fs.readFileSync(path.join(targetReleaseRoot, '_locales', 'en', 'messages.json')));
+    assert.equal(messages.ext_name.message, 'qURL File Upload for Edge');
+    assert.equal(messages.permission_request_confirm.message, 'Your browser will ask next.');
+    assert.equal(fs.readFileSync(path.join(targetReleaseRoot, 'popup', 'popup.html'), 'utf8').match(/qURL File Upload for Edge/g).length, 2);
+
+    messages.ext_name.message = 'Renamed extension';
+    fs.writeFileSync(path.join(targetReleaseRoot, '_locales', 'en', 'messages.json'), JSON.stringify(messages));
+    assert.throws(function () {
+      buildRelease.applyTargetMetadata(buildRelease.resolveTarget('edge', targetRoot));
+    }, /Shared extension name must be qURL Agent/);
+
+    messages.ext_name.message = 'qURL Agent';
+    fs.writeFileSync(path.join(targetReleaseRoot, '_locales', 'en', 'messages.json'), JSON.stringify(messages));
+    fs.writeFileSync(path.join(targetReleaseRoot, 'popup', 'popup.html'), '<title>qURL Agent</title>');
+    assert.throws(function () {
+      buildRelease.applyTargetMetadata(buildRelease.resolveTarget('edge', targetRoot));
+    }, /Expected two extension names/);
+
+    fs.mkdirSync(path.join(targetReleaseRoot, '_locales', 'fr'), { recursive: true });
+    fs.writeFileSync(path.join(targetReleaseRoot, '_locales', 'fr', 'messages.json'), JSON.stringify({
+      ext_name: { message: 'Agent qURL' },
+    }));
+    assert.throws(function () {
+      buildRelease.applyTargetMetadata(buildRelease.resolveTarget('edge', targetRoot));
+    }, /support only the en locale/);
+  });
+
+  assert.throws(function () {
+    buildRelease.resolveTarget('opera');
+  }, /Unknown browser target/);
+});
+
+test('release validation rejects other-browser text and Edge update URLs', function () {
+  withTempDirSync('qurl-edge-release-test-', function (releaseRoot) {
+    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+    fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
+    fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
+    fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{"help":{"message":"Use Chrome"}}\n');
+    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), 'qURL File Upload for Edge');
+    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.js'), '');
+    const manifest = {
+      manifest_version: 3,
+      action: { default_popup: 'popup/popup.html' },
+      host_permissions: ['https://getqurllink.layerv.ai/*'],
+    };
+    fs.writeFileSync(path.join(releaseRoot, 'manifest.json'), JSON.stringify(manifest));
+
+    assert.throws(function () {
+      buildRelease.validateReleaseManifest(releaseRoot, 'edge');
+    }, /Chrome-only text/);
+
+    fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{"help":{"message":"Use your browser"}}\n');
+    manifest.update_url = 'https://example.com/updates.xml';
+    fs.writeFileSync(path.join(releaseRoot, 'manifest.json'), JSON.stringify(manifest));
+    assert.throws(function () {
+      buildRelease.validateReleaseManifest(releaseRoot, 'edge');
+    }, /must not contain update_url/);
+
+    delete manifest.update_url;
+    fs.writeFileSync(path.join(releaseRoot, 'manifest.json'), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{"help":{"message":"Use Edge"}}\n');
+    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), 'qURL Agent');
+    assert.throws(function () {
+      buildRelease.validateReleaseManifest(releaseRoot, 'chrome');
+    }, /Edge-only text/);
+
+    fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{"help":{"message":"Handle an edge case"}}\n');
+    assert.doesNotThrow(function () {
+      buildRelease.validateReleaseManifest(releaseRoot, 'chrome');
+    });
+
+    fs.writeFileSync(path.join(releaseRoot, 'background.js'), 'throw new Error("Use Edge");\n');
+    assert.throws(function () {
+      buildRelease.validateReleaseManifest(releaseRoot, 'chrome');
+    }, /Edge-only text/);
+  });
+});
+
 test('writeDefaultApiBaseConfig regenerates the marked declaration regardless of source formatting', function () {
   withTempDirSync('qurl-release-test-', function (releaseRoot) {
     // Odd spacing + single quotes — the rewrite is anchored to the declaration, not its formatting.
@@ -181,6 +275,7 @@ test('applyBuildOverrides keeps the release bundle self-consistent end to end', 
       fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
       fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
       fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
+      fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.js'), '');
       fs.writeFileSync(
         path.join(releaseRoot, 'manifest.json'),
         JSON.stringify({
@@ -256,6 +351,7 @@ test('validateReleaseManifest fails when the bundled host permission drifts from
     fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
     fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
     fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
+    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.js'), '');
     fs.writeFileSync(
       path.join(releaseRoot, 'manifest.json'),
       JSON.stringify({

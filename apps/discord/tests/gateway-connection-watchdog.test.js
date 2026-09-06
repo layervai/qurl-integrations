@@ -1,31 +1,3 @@
-// Unit tests for src/gateway-connection-watchdog.js — Pillar 3
-// connection watchdog that closes the "lock held, WS not connected"
-// gap. Pins the load-bearing contracts:
-//
-//   1. No-op when not holding the lock. Watchdog runs unconditionally;
-//      a standby waiting for promotion ticks but does nothing.
-//   2. No-op when manager.isConnected(). Steady-state: no work, no log.
-//   3. Waits while the manager owns an automatic reconnect. It never
-//      races that reconnect with manager.connect().
-//   4. Tries manager.connect() exactly once per failure tick (at-most-
-//      one outstanding connect — the design depends on this).
-//   5. Attempt counter resets on:
-//        - successful connect()
-//        - lock-not-held tick (covers give-up-and-reacquire)
-//        - manager-already-connected tick
-//   6. Exponential backoff sleeps after failure: 200 / 400 / 800 / 1600 ms
-//      (capped at 5 s — dead code at maxAttempts=5, see source).
-//   7. At attempts >= maxAttempts (default 5): releaseLock() then exit(1).
-//      releaseLock failure is logged and swallowed; exit still fires.
-//   8. start() is idempotent; stop() halts the loop; post-exit, start()
-//      cannot re-enter.
-//
-// Each contract maps to a production failure mode:
-//   - (3)/(4) two parallel connect() calls would race @discordjs/ws internal state.
-//   - (5) without reset on lock-give-up, a previous task's failure ladder
-//     would carry into a re-acquired lock and prematurely exit.
-//   - (6)/(7) without bounded retry + exit, a standby that can't reach
-//     Discord blocks the only failover slot indefinitely.
 
 const {
   createConnectionWatchdog,
@@ -91,16 +63,7 @@ describe('createConnectionWatchdog — factory validation', () => {
   });
 
   it('BACKOFF_CAP_MS stays above the natural ceiling at DEFAULT_MAX_ATTEMPTS', () => {
-    // Source comment names this the "dead-code branch": the highest
-    // backoff that actually sleeps is at `attempts = maxAttempts - 1`
-    // (the next failure tips into the exhaustion-exit path before
-    // sleeping). At default maxAttempts=5 that's 2^4 * 100 = 1600 ms,
-    // well under the 5000 cap. Pin the inequality so a future bump
-    // to maxAttempts that pushes the natural backoff past the cap
-    // surfaces here rather than silently truncating the failure
-    // ladder.
     const naturalCeiling = (2 ** (DEFAULT_MAX_ATTEMPTS - 1)) * BACKOFF_BASE_MS;
-    // At maxAttempts=5: ceiling = 16 * 100 = 1600. Cap 5000 > 1600.
     expect(BACKOFF_CAP_MS).toBeGreaterThan(naturalCeiling);
   });
 
@@ -167,8 +130,6 @@ describe('step() — no-op paths', () => {
     await watchdog._stepForTest();
 
     expect(manager.connect).not.toHaveBeenCalled();
-    // The watchdog still reads process-level WS state so a stale automatic
-    // recovery remains bounded while this replica is a standby.
     expect(manager.isConnected).toHaveBeenCalledTimes(1);
     expect(manager.isRecovering).toHaveBeenCalledTimes(1);
     expect(watchdog._getAttemptsForTest()).toBe(0);
@@ -301,11 +262,9 @@ describe('step() — no-op paths', () => {
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(2);
 
-    // Give up the lock — next tick must reset.
     holding = false;
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(0);
-    // sleep was called on each of the 2 failures, not on the no-op tick.
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 
@@ -318,8 +277,6 @@ describe('step() — no-op paths', () => {
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(2);
 
-    // Manager reconnected on its own (e.g., a successful out-of-band
-    // connect from elsewhere). Next tick must reset.
     manager._setConnected(true);
     await watchdog._stepForTest();
     expect(watchdog._getAttemptsForTest()).toBe(0);
@@ -328,10 +285,6 @@ describe('step() — no-op paths', () => {
 
 describe('step() — isConnecting backoff (race with leader inbound-handoff)', () => {
   it('does NOT call manager.connect() when leader reports isConnecting=true', async () => {
-    // Inbound-handoff path: leader is awaiting `manager.connect()`.
-    // Watchdog tick observes !isConnected() and would normally
-    // fire its own connect — that would race against the same
-    // WebSocketManager. The isConnecting hook gates this off.
     const manager = makeFakeManager();
     const isConnecting = jest.fn(() => true);
     const { watchdog } = makeWatchdog({ manager, isConnecting });
@@ -344,14 +297,6 @@ describe('step() — isConnecting backoff (race with leader inbound-handoff)', (
   });
 
   it('stays at attempts=0 indefinitely while isConnecting=true (escape hatch #415)', async () => {
-    // Pin the *current* failure mode tracked by #415: if @discordjs/ws
-    // ever fails to settle manager.connect(), the leader latches
-    // `connecting=true` forever, isConnecting() returns true on every
-    // tick, the watchdog resets attempts and stands down, and the
-    // exit(1) recovery never fires. The process is permanently broken
-    // without an external process-health monitor. This test pins the
-    // current behavior so the fix (process-level alarm landing later)
-    // is loud about changing it.
     const manager = makeFakeManager();
     const isConnecting = jest.fn(() => true);
     const exit = jest.fn();
@@ -370,10 +315,6 @@ describe('step() — isConnecting backoff (race with leader inbound-handoff)', (
   });
 
   it('resets attempts when leader transitions to isConnecting=true mid-ladder', async () => {
-    // Failure ladder is at attempt 3; leader then takes over the
-    // connect (inbound-handoff). The watchdog must reset attempts
-    // so the leader's eventual outcome doesn't carry a stale
-    // ladder into the next watchdog-driven retry.
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('fail'));
     let leaderConnecting = false;
@@ -599,7 +540,6 @@ describe('step() — connect retries', () => {
     manager.connect.mockImplementation(async () => {
       nthCall += 1;
       if (nthCall < 3) throw new Error('transient');
-      // Third call succeeds.
       manager._setConnected(true);
     });
     const { watchdog } = makeWatchdog({ manager, maxAttempts: 10 });
@@ -629,8 +569,6 @@ describe('step() — connect retries', () => {
   });
 
   it('caps backoff at 5000 ms (dead-code branch — pins the cap for future maxAttempts bumps)', async () => {
-    // With maxAttempts=10 and BACKOFF_BASE=100, attempt 7 would be
-    // 2^7 * 100 = 12_800 ms → capped at 5000. Validates the cap.
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('fail'));
     const sleep = jest.fn(async () => {});
@@ -640,7 +578,6 @@ describe('step() — connect retries', () => {
       // eslint-disable-next-line no-await-in-loop
       await watchdog._stepForTest();
     }
-    // Last call (attempt 7) should hit the cap.
     expect(sleep).toHaveBeenLastCalledWith(5_000);
   });
 
@@ -684,7 +621,6 @@ describe('step() — exhaustion path', () => {
       manager, releaseLock, exit, sleep, maxAttempts: 5,
     });
 
-    // 5 failed attempts.
     for (let i = 0; i < 5; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await watchdog._stepForTest();
@@ -697,8 +633,6 @@ describe('step() — exhaustion path', () => {
       'connection-watchdog: connect retries exhausted, releasing lock',
       expect.objectContaining({ attempts: 5 }),
     );
-    // On the exhaustion tick, the backoff sleep MUST NOT fire — the
-    // exit path supersedes it. So sleep only fired on attempts 1..4.
     expect(sleep).toHaveBeenCalledTimes(4);
   });
 
@@ -770,7 +704,6 @@ describe('step() — exhaustion path', () => {
     manager.connect.mockRejectedValue(new Error('fail'));
     const releaseLock = jest.fn(async () => {});
     const exit = jest.fn();
-    // No deleteOwnRow injected.
     const { watchdog } = makeWatchdog({
       manager, releaseLock, exit, maxAttempts: 3,
     });
@@ -783,16 +716,8 @@ describe('step() — exhaustion path', () => {
   });
 
   it('exits(1) even when releaseLock hangs (Promise.race ceiling kicks in)', async () => {
-    // Defense vs the inbound-handoff-hung-on-manager.connect path
-    // (see #415). releaseLockForImmediateExit awaits through the
-    // leader's serialization chain, which can be stuck behind a
-    // hung connect. Without the race, exit(1) would never fire and
-    // the failover slot stays held with no live gateway. Inject a
-    // tiny ceiling (10ms) so the test runs in real time.
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('persistent-fail'));
-    // releaseLock returns a never-resolving promise — simulates the
-    // serialization chain being stuck behind a hung op.
     const releaseLock = jest.fn(() => new Promise(() => {}));
     const exit = jest.fn();
     const { watchdog, logger } = makeWatchdog({
@@ -812,17 +737,12 @@ describe('step() — exhaustion path', () => {
   });
 
   it('still exits(1) when releaseLock throws AND deleteOwnRow is absent (combined-permutation pin)', async () => {
-    // Pin the cross-product the individual tests don't cover. Both
-    // best-effort awaits are independent, but a future refactor that
-    // accidentally wires them sequentially (one throw aborting the
-    // other) would still need to surface exit(1).
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('fail'));
     const releaseLock = jest.fn(async () => { throw new Error('ddb-blip'); });
     const exit = jest.fn();
     const { watchdog, logger } = makeWatchdog({
       manager, releaseLock, exit, maxAttempts: 3,
-      // deleteOwnRow deliberately omitted.
     });
 
     for (let i = 0; i < 3; i += 1) {
@@ -834,7 +754,6 @@ describe('step() — exhaustion path', () => {
       'connection-watchdog: releaseLock failed during exhaustion-exit',
       expect.objectContaining({ error: 'ddb-blip' }),
     );
-    // No deleteOwnRow log because hook wasn't provided.
     expect(logger.warn).not.toHaveBeenCalledWith(
       'connection-watchdog: deleteOwnRow failed during exhaustion-exit',
       expect.anything(),
@@ -847,7 +766,6 @@ describe('step() — exhaustion path', () => {
     const exit = jest.fn();
     const { watchdog } = makeWatchdog({
       manager, exit, maxAttempts: 5,
-      // Fast poll interval so the next test setup is quick.
       pollIntervalMs: 1,
     });
 
@@ -857,8 +775,6 @@ describe('step() — exhaustion path', () => {
     }
     expect(exit).toHaveBeenCalledWith(1);
 
-    // Calling start() after exhaustion is a no-op (the watchdog is
-    // dead; the process is supposed to be exiting).
     watchdog.start();
     expect(watchdog._getRunningForTest()).toBe(false);
   });
@@ -866,10 +782,6 @@ describe('step() — exhaustion path', () => {
 
 describe('loop backstop — survives unexpected throws from step()', () => {
   it('an isConnected() throw does not exit the loop (logs + retries next tick)', async () => {
-    // Contractually `manager.isConnected()` is non-throwing, but a
-    // future shim refactor could regress. Without a backstop, the
-    // first throw would reject the loop's `await step()` and
-    // silently disable the watchdog. The loop must keep running.
     const manager = makeFakeManager();
     let nthCall = 0;
     manager.isConnected = jest.fn(() => {
@@ -887,17 +799,14 @@ describe('loop backstop — survives unexpected throws from step()', () => {
     await flushMicrotasks();
     expect(sleep).toHaveBeenCalledTimes(1);
 
-    // Wake the loop for tick #1 — isConnected throws.
     sleepResolvers[0]();
     await flushMicrotasks();
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/step threw unexpectedly/),
       expect.objectContaining({ error: 'shim-regression' }),
     );
-    // Loop must have scheduled the next sleep.
     expect(sleep).toHaveBeenCalledTimes(2);
 
-    // Wake tick #2 — isConnected succeeds (returns true).
     sleepResolvers[1]();
     await flushMicrotasks();
     expect(manager.isConnected).toHaveBeenCalledTimes(2);
@@ -911,18 +820,13 @@ describe('start() / stop() lifecycle', () => {
   it('start() schedules ticks via the injected sleep + stop() halts the loop', async () => {
     const manager = makeFakeManager({ initialConnected: true });
     const sleepResolvers = [];
-    // Make sleep a controllable promise — resolve it when the test
-    // wants the next tick to fire.
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
     const { watchdog } = makeWatchdog({ manager, sleep });
 
     watchdog.start();
-    // First sleep is queued before the first step.
     await flushMicrotasks();
     expect(sleep).toHaveBeenCalledTimes(1);
 
-    // Release the first poll: a step runs (no-op, isConnected=true)
-    // then the next poll-sleep is queued.
     sleepResolvers[0]();
     await flushMicrotasks();
     expect(manager.isConnected).toHaveBeenCalledTimes(1);
@@ -943,7 +847,6 @@ describe('start() / stop() lifecycle', () => {
     watchdog.start();
     watchdog.start();
     await flushMicrotasks();
-    // Only the first start scheduled a sleep; later starts must no-op.
     expect(sleep).toHaveBeenCalledTimes(1);
 
     watchdog.stop();
@@ -1027,8 +930,6 @@ describe('start() / stop() lifecycle', () => {
   });
 
   it('start() after stop() without awaiting does NOT orphan a second loop', async () => {
-    // Re-start safety: caller must await stop() before start();
-    // a naked start() during the wind-down window is a no-op.
     const manager = makeFakeManager({ initialConnected: true });
     const sleepResolvers = [];
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
@@ -1043,7 +944,6 @@ describe('start() / stop() lifecycle', () => {
     await flushMicrotasks();
     expect(sleep).toHaveBeenCalledTimes(1);
 
-    // Wake old loop so it exits, then a fresh start is allowed.
     sleepResolvers[0]();
     await flushMicrotasks();
     watchdog.start();
@@ -1052,8 +952,6 @@ describe('start() / stop() lifecycle', () => {
   });
 });
 
-// Lets the queued microtasks (await sleep/connect resolutions) flush
-// before the next assertion.
 function flushMicrotasks() {
   return new Promise((resolve) => { setImmediate(resolve); });
 }

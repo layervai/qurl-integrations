@@ -12,8 +12,6 @@ describe('qURL API error contract', () => {
     const path = resourcePath(CRID_RESOURCE_ID);
     const gone = qurlApiErrorMessage('DELETE', path, 410);
 
-    // Load-bearing literal: this pins the wire-error family independently of
-    // the shared formatter used by reclaim's mock fixtures and expectations.
     expect(gone).toBe(`qURL API DELETE /resources/${CRID_RESOURCE_ID} failed (410)`);
     expect(isGoneQurlApiError(new Error(gone))).toBe(true);
     expect(isGoneQurlApiError(`${gone} request-id=123`)).toBe(false);

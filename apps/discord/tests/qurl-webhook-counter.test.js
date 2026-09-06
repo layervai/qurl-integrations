@@ -1,25 +1,3 @@
-// Sender view-counter fast-path tests (feat #60, PR-B) — the
-// cross-replica editSenderCounterInBackground path that edits the
-// sender's "/qurl send" confirmation to "👀 N viewed / M pending" the
-// instant a qurl.accessed view records, from ANY replica, via the
-// persisted interaction-webhook token.
-//
-// Wire contract for the qurl.accessed branch that drives this:
-//   {id, type: 'qurl.accessed',
-//    data: {qurl_id, resource_id, access_count, consumed},
-//    owner_id, timestamp, api_version}
-//
-// The fast-path runs FIRE-AND-FORGET off the already-returned 200 (the
-// view recorded; a counter-edit miss must not make qurl-service retry the
-// whole accessed event). It terminates by logging a single
-// COUNTER_VERDICT_MSG debug line, so every assertion drains the deferred
-// chain via flushCounter() (poll-for-verdict) first.
-//
-// LOAD-BEARING ORDERING (mirrors the source's numbered steps): the
-// monotonic count advance (tryAdvanceRenderedCount) commits ONLY after a
-// confirmed edit. The "failed-edit self-heal" test below is the anchor
-// that fences the stuck-counter regression — on an edit failure the count
-// must NOT advance, so the poll backstop re-renders.
 
 const crypto = require('crypto');
 
@@ -53,13 +31,8 @@ jest.mock('../src/store', () => ({
   incrementSendViewedCount: (...args) => mockIncrementSendViewedCount(...args),
   getSendViewedCount: (...args) => mockGetSendViewedCount(...args),
   tryAdvanceRenderedCount: (...args) => mockTryAdvanceRenderedCount(...args),
-  // Failure-path debounce stamp — MUST be on the mock or the new
-  // touchRenderedAt call on the !r.ok branch throws into the fast-path's
-  // .catch and the coalescing-on-failure test goes vacuous.
   touchRenderedAt: (...args) => mockTouchRenderedAt(...args),
   tryClaimRenderAttempt: (...args) => mockTryClaimRenderAttempt(...args),
-  // consumed/expired markers are imported by the route module but unused
-  // on the not-consumed accessed path these tests drive.
   markConsumedDMEdited: jest.fn(),
   clearConsumedDMEdited: jest.fn(),
   markExpiredDMEdited: jest.fn(),
@@ -75,9 +48,6 @@ jest.mock('../src/discord-rest', () => ({
   editInteractionReply: (...args) => mockEditInteractionReply(...args),
   sendChannelMessage: jest.fn(),
 }));
-
-// Real renderViewCounter — let the fast-path render a real body so the
-// "👀 N viewed" content assertion fences the byte-identity contract.
 
 let mockPrimed = true;
 let mockWithinLag = false;
@@ -125,8 +95,6 @@ const TOKEN = 'interaction-tok-live'; // SENSITIVE in prod; a fixture here.
 const VALID_PAYLOAD = {
   id: 'evt-counter-1',
   type: 'qurl.accessed',
-  // consumed:false so the consumed-flip path stays out of the way — we're
-  // testing the view-counter fast-path, which fires on dbResult==='recorded'.
   data: { qurl_id: QURL_ID, resource_id: 'r_111', access_count: 1, consumed: false },
   owner_id: 'usr_test',
   timestamp: '2026-05-19T12:00:00Z',
@@ -144,9 +112,6 @@ function signedRequest(payload = VALID_PAYLOAD) {
 
 const VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 
-// Drain the fire-and-forget chain until the terminal verdict line lands
-// (the uniform end signal on every branch), bounded so a path that never
-// scheduled the fast-path returns instead of hanging.
 async function flushCounter() {
   for (let i = 0; i < 50; i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -164,8 +129,6 @@ async function waitFor(predicate) {
 }
 
 async function waitForCounterFlush(predicate, timeoutMs = 1000) {
-  // Use the captured real clock so a test that freezes Date.now() for cache
-  // assertions cannot accidentally turn this bounded poll into an infinite one.
   const deadline = realDateNow() + timeoutMs;
   do {
     // eslint-disable-next-line no-await-in-loop
@@ -177,8 +140,6 @@ async function waitForCounterFlush(predicate, timeoutMs = 1000) {
   throw new Error('Timed out waiting for counter flush');
 }
 
-// A render state that arms the fast-path (token + appId + baseMsg present,
-// not terminal). lastRenderedCount/expectedCount overridable per test.
 function armedState(overrides = {}) {
   return {
     interactionToken: TOKEN,
@@ -186,14 +147,8 @@ function armedState(overrides = {}) {
     expectedCount: 3,
     viewedCount: 1,
     lastRenderedCount: 0,
-    // 0 = never edited → always older than the coalesce window, so the
-    // first edit of a send is never debounced. Tests that exercise the
-    // cooldown override this with a recent epoch-MS instant.
     lastRenderedAt: 0,
     baseMsg: 'Sent to 3 users',
-    // The send's qurl_id set is persisted on the render-state row, so the
-    // fast-path counts views off it directly (getSendItems is only the
-    // empty-set fallback). Default: one tracked, viewed → N = 1.
     qurlIds: [QURL_ID],
     terminal: false,
     ...overrides,
@@ -201,9 +156,6 @@ function armedState(overrides = {}) {
 }
 
 beforeEach(() => {
-  // The route owns module-level render/debounce caches. Reset them before each
-  // test as well as after it so this case cannot depend on a prior test's send
-  // ID or on how much wall-clock time elapsed between the two cases.
   stopIntervals();
   [
     mockRecordQurlView,
@@ -226,8 +178,6 @@ beforeEach(() => {
   mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: true });
   mockFindSendsByQurlId.mockResolvedValue([{ send_id: SEND_ID, sender_discord_id: SENDER_ID }]);
   mockGetSendRenderState.mockResolvedValue(armedState());
-  // getSendItems is the empty-qurlIds fallback only — default armedState
-  // carries qurlIds, so this normally isn't reached.
   mockGetSendItems.mockResolvedValue([{ qurl_id: QURL_ID, recipient_discord_id: 'r1' }]);
   mockGetQurlViews.mockResolvedValue(new Map([[QURL_ID, { accessCount: 1, consumed: false }]]));
   mockIncrementSendViewedCount.mockResolvedValue(undefined);
@@ -245,7 +195,6 @@ afterEach(() => {
 describe('sender view-counter fast-path — happy path', () => {
   it('a recorded view edits the confirmation to "👀 1 viewed", THEN advances the rendered count', async () => {
     const res = await signedRequest();
-    // 200 reflects the PRIMARY op (view record), not the fast-path edit.
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'recorded' });
 
@@ -259,8 +208,6 @@ describe('sender view-counter fast-path — happy path', () => {
     expect(mockIncrementSendViewedCount).toHaveBeenCalledWith(SEND_ID, QURL_ID, 3);
     expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID, 3);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
-    // Commit AFTER the edit — a count-before-edit inversion is the
-    // stuck-counter regression. Assert the call ORDER.
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 1);
     const editOrder = mockEditInteractionReply.mock.invocationCallOrder[0];
     const advanceOrder = mockTryAdvanceRenderedCount.mock.invocationCallOrder[0];
@@ -268,9 +215,6 @@ describe('sender view-counter fast-path — happy path', () => {
   });
 
   it('caches render state inside a burst and refreshes the cached debounce clock after an edit', async () => {
-    // senderCounterRenderStateCacheTtlMs() deliberately caps the render-state
-    // cache at 50ms. Hold the clock fixed so CI scheduling latency between
-    // these two requests cannot turn this same-burst assertion into a flake.
     const now = realDateNow();
     const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
     try {
@@ -364,9 +308,6 @@ describe('sender view-counter fast-path — happy path', () => {
 
 describe('sender view-counter fast-path — content-only (buttons preserved)', () => {
   it('the editInteractionReply payload carries ONLY content — NO components key', async () => {
-    // Discord PATCH .../messages/@original is a PARTIAL update: omitting
-    // `components` preserves the Add/Revoke buttons; sending components:[]
-    // would clear them. The fast-path must send content alone.
     await signedRequest();
     await flushCounter();
     const payload = mockEditInteractionReply.mock.calls[0][2];
@@ -382,14 +323,12 @@ describe('sender view-counter fast-path — terminal skip', () => {
     await flushCounter();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
-    // Terminal is checked BEFORE reading the send items (step 3 < step 5).
     expect(mockGetSendItems).not.toHaveBeenCalled();
   });
 });
 
 describe('sender view-counter fast-path — absent-guard', () => {
   it('no token / no base → no edit (the poll backstop covers it)', async () => {
-    // Legacy send / pre-feature / token TTL'd away.
     mockGetSendRenderState.mockResolvedValue(armedState({ interactionToken: null, baseMsg: undefined }));
     await signedRequest();
     await flushCounter();
@@ -401,7 +340,6 @@ describe('sender view-counter fast-path — absent-guard', () => {
 describe('sender view-counter fast-path — pre-read compare (N <= L)', () => {
   it('N=1 with lastRenderedCount=2 → no edit (redelivery / higher count already shown)', async () => {
     mockGetSendRenderState.mockResolvedValue(armedState({ lastRenderedCount: 2, viewedCount: 1 }));
-    // Only one qurl viewed → N = 1, which is <= L = 2.
     await signedRequest();
     await flushCounter();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
@@ -409,15 +347,6 @@ describe('sender view-counter fast-path — pre-read compare (N <= L)', () => {
   });
 
   it('NO BACKWARDS STEP: after the poll advanced the shared floor to 3, a stale fast-path read of N=2 does NOT edit', async () => {
-    // cr-found gap, now closed by the shared monotonic floor: the poll
-    // renders the settled count (e.g. 3) and advances last_rendered_count
-    // to 3 (monitorLinkStatus → tryAdvanceRenderedCount). A later
-    // fast-path event whose eventually-consistent getQurlViews reads a
-    // stale N=2 must NOT PATCH "2 viewed" over the displayed "3 viewed".
-    // The step-6 N<=L guard (L=3 from the persisted floor the poll wrote)
-    // is exactly what fences it — without the poll sharing the floor, L
-    // would lag at the last FAST-PATH-rendered value and this would edit
-    // backwards.
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 3,
       viewedCount: 2,
@@ -454,40 +383,23 @@ describe('sender view-counter fast-path — repeat access skip', () => {
 
 describe('sender view-counter fast-path — FAILED-EDIT SELF-HEAL (load-bearing)', () => {
   it('editInteractionReply {ok:false} → tryAdvanceRenderedCount NOT called (count stays), but touchRenderedAt IS (debounce armed)', async () => {
-    // THE invariant that prevents the stuck-counter regression: on a
-    // transient edit failure the rendered COUNT must NOT advance, so
-    // last_rendered_count stays at L and the poll backstop will re-render
-    // and self-heal. If the advance ever moved before/independent of the
-    // edit's success, this fails.
     mockEditInteractionReply.mockResolvedValue({ ok: false, status: 500 });
     await signedRequest();
     await flushCounter();
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
-    // …but the debounce CLOCK is still stamped (touchRenderedAt), so a
-    // burst against an erroring Discord coalesces instead of re-attempting
-    // a PATCH per view.
     expect(mockTouchRenderedAt).toHaveBeenCalledWith(SEND_ID);
   });
 
   it('COALESCES ON FAILURE: a 2nd view within the window after a failed edit is debounced (not re-attempted)', async () => {
-    // The failure-path bug the gate would otherwise have: last_rendered_at
-    // is success-only, so during an edit outage every burst view sees
-    // last_rendered_at=0 and re-PATCHes — the exact 429 storm the gate
-    // prevents. touchRenderedAt arms the clock on the failed attempt; the
-    // 2nd view (render state now reflects the stamp) must skip.
     mockEditInteractionReply.mockResolvedValue({ ok: false, status: 500 });
-    // View 1: lastRenderedAt=0 → gate passes → edit fails → touchRenderedAt.
     await signedRequest();
     await flushCounter();
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
     expect(mockTouchRenderedAt).toHaveBeenCalledTimes(1);
 
-    // Now the row's last_rendered_at is fresh (the touch landed). Model
-    // that: the next getSendRenderState reflects a recent stamp.
     logger.debug.mockClear();
     mockGetSendRenderState.mockResolvedValue(armedState({ lastRenderedAt: Date.now() }));
-    // View 2 within the window → coalesced: no immediate 2nd edit, no BatchGet.
     await signedRequest({ ...VALID_PAYLOAD, id: 'evt-counter-2' });
     await flushCounter();
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1); // still just the 1st
@@ -608,11 +520,6 @@ describe('sender view-counter fast-path — defensive row-count skip', () => {
 
 describe('sender view-counter fast-path — edit coalescing (leading-edge debounce)', () => {
   it('a 2nd view within the coalesce window is SKIPPED before the BatchGet and schedules a trailing flush', async () => {
-    // The send already rendered ~200ms ago (well inside the sub-second
-    // window). A fresh view must NOT edit — it would storm Discord on a
-    // high-fan-out send. Crucially the skip happens BEFORE any aggregate
-    // read or getQurlViews fallback; the first-view shard write is enough
-    // to know a trailing flush has work to render.
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 1,
       lastRenderedAt: Date.now() - 200,
@@ -633,7 +540,6 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   });
 
   it('a view OLDER than the coalesce window edits normally', async () => {
-    // 10s since the last edit is well past the sub-second window → not debounced.
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 0,
       lastRenderedAt: Date.now() - 10_000,
@@ -769,9 +675,6 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     mockTryAdvanceRenderedCount.mockResolvedValue(false);
 
     try {
-      // First event: aggregate increment fails while the row is inside the
-      // coalesce window. It must only arm a pending source-of-truth flush; it
-      // must not edit or read either count source yet.
       await signedRequest({ ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, qurl_id: 'q_a' } });
       await flushCounter();
       expect(mockEditInteractionReply).not.toHaveBeenCalled();
@@ -783,15 +686,10 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
       );
 
       logger.debug.mockClear();
-      // Cross the 50ms render-state TTL deterministically while remaining
-      // inside the wider coalesce window. No scheduler timing is involved.
       clock.mockReturnValue(now + 51);
       await signedRequest({ ...VALID_PAYLOAD, id: 'evt-repair-source', data: { ...VALID_PAYLOAD.data, qurl_id: 'q_b' } });
       await waitForCounterFlush(() => mockGetQurlViews.mock.calls.length === 1);
 
-      // The second event's CAS-lost repair replaces the pending timer but keeps
-      // force_source=true, so the repair render reads source qurl_views instead
-      // of trusting the aggregate counter.
       expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
       expect(mockGetQurlViews).toHaveBeenCalledTimes(1);
       expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
@@ -829,16 +727,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   });
 
   it('BURST: many views in a short window → bounded edit count (≤3, not N), final render correct', async () => {
-    // Simulate a high-fan-out send: a wave of qurl.accessed webhooks for
-    // DISTINCT recipients arriving inside one coalesce window. The store
-    // mocks share in-test state that mirrors the real split: render floor
-    // and coalesce clock live on qurl_send_configs, while distinct first
-    // views advance sharded qurl_views counters. This exercises the real
-    // leading-edge gate and per-replica render-state cache end-to-end, not a
-    // mocked verdict.
     const TRACKED = Array.from({ length: 30 }, (_, i) => `q_burst_${i}`);
-    // The row as the store sees it. last_rendered_at starts 0 (never
-    // edited) so the first webhook is NOT debounced.
     const row = { shardedCount: 0, lastRenderedCount: 0, lastRenderedAt: 0 };
 
     mockFindSendsByQurlId.mockResolvedValue([{ send_id: SEND_ID, sender_discord_id: SENDER_ID }]);
@@ -853,8 +742,6 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
       row.shardedCount += 1;
     });
     mockGetSendViewedCount.mockImplementation(async () => row.shardedCount);
-    // Commit-after-edit CAS: advance only if strictly higher; stamp the
-    // debounce clock to "now" so subsequent webhooks in the window skip.
     mockTryAdvanceRenderedCount.mockImplementation(async (_sendId, n) => {
       if (n > row.lastRenderedCount) {
         row.lastRenderedCount = n;
@@ -864,16 +751,6 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
       return false;
     });
 
-    // Fire 30 distinct-recipient views back-to-back within one window.
-    // incrementSendViewedCount advances a shard BEFORE each render
-    // decision, so every chain would see a strictly higher N than the
-    // last committed last_rendered_count if it performed the shard sum.
-    // Only the 4b coalesce gate suppresses most edit attempts before
-    // that read.
-    // That makes this a genuine discriminator for the GATE, not the
-    // pre-existing dedup: with the gate disabled this asserts 30 edits
-    // (verified red), with it ~1. (If a future edit lets the N<=L skip
-    // carry this test, the gate-disabled red-check stops failing — re-pin.)
     for (let i = 0; i < TRACKED.length; i += 1) {
       const payload = {
         ...VALID_PAYLOAD,
@@ -883,42 +760,21 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
       // eslint-disable-next-line no-await-in-loop
       await signedRequest(payload);
     }
-    // Drain every scheduled fast-path chain.
     for (let i = 0; i < 200; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await new Promise((resolve) => setImmediate(resolve));
     }
 
-    // Coalesced: the leading edge edits (lastRenderedAt was 0), then the
-    // rest of the burst lands inside the window and is debounced. With
-    // synchronous in-test timing the whole burst falls in one window, so
-    // exactly ONE edit fires — assert the bound holds (<= 3 << 30) rather
-    // than pinning the exact count, since real wall-clock could straddle
-    // the window and admit a second leading edge.
-    //
-    // SCOPE OF THIS BOUND: the route refreshes its per-replica cache after a
-    // successful tryAdvanceRenderedCount, so this proves single-process
-    // sequential coalescing. It does NOT prove the distributed bound; in
-    // prod, M replicas can each fire one leading edge per window before
-    // their local cache/strong-read view sees another replica's commit.
     expect(mockEditInteractionReply.mock.calls.length).toBeLessThanOrEqual(3);
     expect(mockEditInteractionReply.mock.calls.length).toBeGreaterThanOrEqual(1);
-    // The whole point: the normal fast-path is constant-shape now. It
-    // increments sharded counters and never BatchGets the full qurl_id
-    // set, so max-size sends keep the same latency shape as small sends.
     expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(TRACKED.length);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
 
-    // The webhook trailing flush (not the poll backstop) renders the
-    // SETTLED final count after the burst. Let the real in-memory timer
-    // fire here; it re-enters the fast-path with force=true, so the
-    // repeat-access skip does not suppress the repair render.
     await waitForCounterFlush(() => (
       mockEditInteractionReply.mock.calls.at(-1)?.[2]?.content.includes(`👀 ${TRACKED.length} viewed`)
     ));
     const lastPayload = mockEditInteractionReply.mock.calls.at(-1)[2];
     expect(lastPayload.content).toContain(`👀 ${TRACKED.length} viewed`);
-    // And the persisted count converged to the true total.
     expect(row.lastRenderedCount).toBe(TRACKED.length);
   });
 });

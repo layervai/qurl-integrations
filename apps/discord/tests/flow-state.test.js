@@ -1,18 +1,3 @@
-/**
- * Unit tests for src/flow-state.js — the DDB-backed state-machine
- * harness.
- *
- * Uses `aws-sdk-client-mock` (same pattern as ddb-store.test.js) to
- * intercept DocumentClient commands without hitting AWS. Covers:
- *   - createFlow happy path + idempotent re-create (OCC conflict)
- *   - loadFlow happy path + missing row + logically expired row
- *   - transitionFlow happy path + OCC conflict + not_found + error
- *   - deleteFlow happy path
- *   - TTL-type guards (expires_at must be a finite integer)
- *   - Payload encryption is mandatory and roundtrips
- *   - Audit events emit with the right shape (FLOW_CREATED,
- *     FLOW_TRANSITION with terminal, FLOW_DELETED with reason)
- */
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -22,10 +7,6 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Crypto mock: pass-through encryption that wraps + unwraps without
-// touching the real KEK. The crypto module itself is tested
-// elsewhere (crypto.test.js); here we just need to verify the
-// harness routes payload through encryptStrict / decrypt.
 jest.mock('../src/utils/crypto', () => ({
   encryptStrict: jest.fn((v) => (v == null ? v : `enc:v1:IV:TAG:${Buffer.from(String(v)).toString('hex')}`)),
   decrypt: jest.fn((v) => {
@@ -56,20 +37,11 @@ const { encryptStrict, decrypt } = require('../src/utils/crypto');
 const { AUDIT_EVENTS } = require('../src/constants');
 
 const EXPECTED_TABLE = 'test-prefix-flow-state';
-// Canonical test fixtures. `FLOW_ID` is a real parseable shard-aware
-// composite key (matches what `buildFlowId({...})` would emit) so it
-// passes createFlow's entry-point parseFlowId validation. A future-
-// dated expiry is computed at-test-time so it stays strictly in the
-// future across `assertExpiresAt`'s `> nowEpochSeconds()` guard.
 const FLOW_ID = '0:1#g#c#u';
 function futureExpiry(offset_seconds = 600) {
   return Math.floor(Date.now() / 1000) + offset_seconds;
 }
 
-// Build a synthetic ConditionalCheckFailedException — the v3 SDK's
-// real exception class has a constructor signature that's awkward
-// to invoke from a test. Matching by `.name` is what the harness
-// does in practice.
 function ccfe() {
   const e = new Error('The conditional request failed');
   e.name = 'ConditionalCheckFailedException';
@@ -124,10 +96,8 @@ describe('flow-state.createFlow', () => {
     expect(item.expires_at).toBe(expiresAt);
     expect(typeof item.created_at).toBe('number');
     expect(typeof item.updated_at).toBe('number');
-    // Payload was encrypted (mock wraps in enc:v1:...)
     expect(typeof item.payload).toBe('string');
     expect(item.payload.startsWith('enc:v1:')).toBe(true);
-    // The encrypted blob is the JSON-serialized payload.
     expect(decrypt(item.payload)).toBe('{"foo":"bar"}');
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_CREATED, {
@@ -137,16 +107,10 @@ describe('flow-state.createFlow', () => {
   });
 
   test('undefined payload persists as null (symmetric with explicit null)', async () => {
-    // Reviewer-flagged gap: the documented "null and undefined both
-    // persist as null DDB attribute" semantic is exercised
-    // transitively by other tests but never pinned for `undefined`
-    // explicitly. Lock it in so a future refactor doesn't quietly
-    // change the persisted shape for callers omitting the field.
     ddbMock.on(PutCommand).resolves({});
     await flowState.createFlow({
       flow_id: FLOW_ID,
       stage: 's',
-      // payload intentionally omitted
       expires_at: futureExpiry(),
     });
     const call = ddbMock.commandCalls(PutCommand)[0];
@@ -192,9 +156,6 @@ describe('flow-state.createFlow', () => {
   });
 
   test('redelivery emits a debug breadcrumb for triage', async () => {
-    // The legitimate-redelivery rate would be noise at warn level,
-    // but a debug breadcrumb gives an operator something to grep
-    // for when investigating "why is the user seeing stale data".
     ddbMock.on(PutCommand).rejects(ccfe());
 
     await flowState.createFlow({
@@ -233,9 +194,6 @@ describe('flow-state.createFlow', () => {
   });
 
   test('rejects expires_at in the past (silent-SLI-inflation foot-gun)', async () => {
-    // A row whose TTL is already-past at create time is born expired:
-    // FLOW_CREATED fires, but loadFlow returns null forever after,
-    // and the SLI's silently_dropped numerator inflates.
     await expect(flowState.createFlow({
       flow_id: FLOW_ID,
       stage: 's',
@@ -252,9 +210,6 @@ describe('flow-state.createFlow', () => {
   });
 
   test('rejects malformed flow_id (parseFlowId returns null)', async () => {
-    // Entry-point validation closes the silent-drop foot-gun where a
-    // handler builds a malformed key and flow-state accepts it,
-    // leaving forensic queries broken downstream.
     await expect(flowState.createFlow({
       flow_id: 'not-a-shard-aware-key',
       stage: 's',
@@ -340,9 +295,7 @@ describe('flow-state.loadFlow', () => {
         expires_at: recentExpiry,
       },
     });
-    // Default grace=0 → null
     expect(await flowState.loadFlow('id')).toBeNull();
-    // grace=60 → still alive
     const withGrace = await flowState.loadFlow('id', { grace_seconds: 60 });
     expect(withGrace).not.toBeNull();
     expect(withGrace.flow_id).toBe('id');
@@ -355,7 +308,6 @@ describe('flow-state.loadFlow', () => {
         stage: 's',
         version: 1,
         payload: null,
-        // expires_at intentionally absent
       },
     });
     expect(await flowState.loadFlow('id')).toBeNull();
@@ -366,9 +318,6 @@ describe('flow-state.loadFlow', () => {
   });
 
   test('returns null and warns when expires_at is a non-integer float (writer/reader symmetry)', async () => {
-    // Writer's assertExpiresAt rejects floats (`Math.floor(x) !== x`);
-    // reader must match — a regression writer that puts a float
-    // should not round-trip undetected.
     ddbMock.on(GetCommand).resolves({
       Item: {
         flow_id: 'id',
@@ -412,9 +361,6 @@ describe('flow-state.loadFlow', () => {
   });
 
   test('rejects negative grace_seconds (typo guard)', async () => {
-    // A `-3600` typo (instead of `3600`) would silently shorten flow
-    // lifetimes by an hour. Reject — symmetric with the rest of the
-    // module's type-check-tight posture.
     await expect(flowState.loadFlow('id', { grace_seconds: -1 }))
       .rejects.toThrow(/grace_seconds must be a non-negative finite number/);
     await expect(flowState.loadFlow('id', { grace_seconds: -3600 }))
@@ -422,12 +368,6 @@ describe('flow-state.loadFlow', () => {
   });
 
   test('include_expired:true surfaces a logically-expired row (stuck-orphan recovery)', async () => {
-    // The supersede-and-retry path on two-stage flows needs to
-    // observe the orphan's stored stage to issue a matching
-    // deleteFlow — but DDB physical reap is async (~48h) and the
-    // default loadFlow filter would return null for any logically-
-    // expired row, leaving the supersede unable to recover.
-    // include_expired:true is the opt-in that unblocks the path.
     const pastExpiry = Math.floor(Date.now() / 1000) - 60;
     ddbMock.on(GetCommand).resolves({
       Item: {
@@ -441,10 +381,8 @@ describe('flow-state.loadFlow', () => {
       },
     });
 
-    // Default behavior unchanged: expired row → null.
     expect(await flowState.loadFlow('id')).toBeNull();
 
-    // Opt-in: surfaces the row with its stored stage + version.
     const row = await flowState.loadFlow('id', { include_expired: true });
     expect(row).not.toBeNull();
     expect(row.stage).toBe('awaiting_setup_modal');
@@ -453,11 +391,6 @@ describe('flow-state.loadFlow', () => {
   });
 
   test('include_expired:true STILL filters corrupted rows (missing expires_at)', async () => {
-    // A row with no expires_at cannot be safely surfaced even
-    // under include_expired — its stage isn't a trustworthy
-    // basis for any harness operation. Fail-safe wins over the
-    // opt-in here, matching the warn+null contract of the
-    // default path.
     ddbMock.on(GetCommand).resolves({
       Item: { flow_id: 'id', stage: 's', version: 1, payload: null },
     });
@@ -492,17 +425,11 @@ describe('flow-state.transitionFlow', () => {
     const updCall = ddbMock.commandCalls(UpdateCommand)[0];
     expect(updCall.args[0].input.TableName).toBe(EXPECTED_TABLE);
     expect(updCall.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id) AND #v = :expected AND #e >= :now');
-    // `:now` is set by the harness at write time and passed alongside
-    // the rest of the expression values. Pin `:now === :updated_at`
-    // as a regression guard for the cached `updateNow` — without
-    // the cache, a second-boundary straddle between the two reads
-    // would silently desync the condition and the SET clause.
     expect(typeof updCall.args[0].input.ExpressionAttributeValues[':now']).toBe('number');
     expect(updCall.args[0].input.ExpressionAttributeValues[':now'])
       .toBe(updCall.args[0].input.ExpressionAttributeValues[':updated_at']);
     expect(updCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(4);
     expect(updCall.args[0].input.ExpressionAttributeValues[':stage_to']).toBe('stage_b');
-    // Payload was encrypted via encryptStrict
     expect(updCall.args[0].input.ExpressionAttributeValues[':payload'].startsWith('enc:v1:')).toBe(true);
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
@@ -517,9 +444,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('success with terminal: false stays false (negative-control vs forced-false)', async () => {
-    // Companion to the terminal-force-to-false tests on non-success
-    // paths: confirm that a legitimate terminal=false on a SUCCESSFUL
-    // transition is preserved, not overwritten. Pins symmetry.
     ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
     ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 3 } });
 
@@ -540,10 +464,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('payload: null clears existing payload (asymmetric with createFlow)', async () => {
-    // Documented in the module docstring — `payload: undefined`
-    // preserves existing, `payload: null` clears. This test locks
-    // in the asymmetry so a future refactor doesn't accidentally
-    // collapse them.
     ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
     ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
 
@@ -554,17 +474,11 @@ describe('flow-state.transitionFlow', () => {
     });
 
     const upd = ddbMock.commandCalls(UpdateCommand)[0];
-    // The clause IS present (vs undefined, which omits it)…
     expect(upd.args[0].input.UpdateExpression).toMatch(/#p = :payload/);
-    // …and writes null to clear the existing payload.
     expect(upd.args[0].input.ExpressionAttributeValues[':payload']).toBeNull();
   });
 
   test('created_at is never written by transitionFlow (preserves row birth time)', async () => {
-    // Regression guard: DDB preserves attributes not mentioned in
-    // UpdateExpression. If a future refactor accidentally added
-    // `#c = :created_at` to the SET list, the row would lose its
-    // original birth time on every transition. Lock it down.
     ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
     ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
 
@@ -618,10 +532,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('set_expires_at that SHORTENS the lifetime emits extended=false (honest forensics)', async () => {
-    // The audit field name reads as "the deadline was extended" —
-    // a caller passing a value EARLIER than the current expires_at
-    // is shortening, not extending. Forensic queries like
-    // `count_by(extended=true)` must not over-count.
     const priorExpires = futureExpiry(3600);
     const shorterExpiry = futureExpiry(600);
     ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: priorExpires } });
@@ -645,9 +555,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('set_expires_at equal to prior emits extended=false (strict > semantics)', async () => {
-    // Reading `extended: true` should mean "the deadline genuinely
-    // moved forward". A no-op rewrite (same value) isn't an
-    // extension and shouldn't trip the forensic flag.
     const sameExpiry = futureExpiry(600);
     ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: sameExpiry } });
     ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
@@ -664,11 +571,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('set_expires_at on a row with missing prior expires_at emits extended=false (no honest baseline)', async () => {
-    // A corrupted row with no prior expires_at can't be "extended"
-    // in any meaningful sense (there's no prior baseline to extend
-    // FROM). Emit false rather than true-by-default — downstream
-    // forensic queries will pick up the corruption signal via the
-    // recheck warn path anyway.
     ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
     ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
 
@@ -702,9 +604,6 @@ describe('flow-state.transitionFlow', () => {
   test('returns not_found when pre-read finds no row (forces terminal=false in audit)', async () => {
     ddbMock.on(GetCommand).resolves({});
 
-    // Caller passes terminal: true but the transition didn't actually
-    // advance the row — the audit MUST emit terminal=false so a
-    // forensic `count_by(terminal=true)` doesn't over-count.
     const res = await flowState.transitionFlow('id', 1, {
       stage_to: 's',
       terminal: true,
@@ -723,11 +622,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('returns conflict when Update fails OCC and row still exists (forces terminal=false)', async () => {
-    // Same terminal=true override semantics as the not_found case
-    // above: a transition that didn't advance isn't terminal.
-    // Recheck must see a row that is still LOGICALLY ALIVE to
-    // distinguish conflict from not_found — include a future
-    // expires_at on the mocked item.
     ddbMock.on(GetCommand).resolves({
       Item: { stage: 'a', flow_id: 'id', expires_at: futureExpiry() },
     });
@@ -750,9 +644,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('returns not_found when Update fails OCC and row disappeared (TTL race)', async () => {
-    // First GetCommand: pre-read sees the row.
-    // Update fails (row reaped between pre-read and Update).
-    // Second GetCommand (recheck): row gone.
     let getCalls = 0;
     ddbMock.on(GetCommand).callsFake(() => {
       getCalls += 1;
@@ -778,17 +669,11 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('post-CCFE recheck reports not_found when row is present but logically expired', async () => {
-    // A row whose expires_at slipped into the past between pre-read
-    // and Update will still be returned by GetCommand (DDB TTL reap
-    // is async, up to ~48h delay). The recheck must apply the same
-    // logical-expiry filter as loadFlow — otherwise the caller gets
-    // result=conflict on an expired row and wastes a retry.
     const pastExpiry = Math.floor(Date.now() / 1000) - 30;
     let getCalls = 0;
     ddbMock.on(GetCommand).callsFake(() => {
       getCalls += 1;
       if (getCalls === 1) return { Item: { stage: 'a' } };
-      // Recheck returns the row but it's logically expired.
       return { Item: { flow_id: 'id', expires_at: pastExpiry } };
     });
     ddbMock.on(UpdateCommand).rejects(ccfe());
@@ -810,10 +695,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('post-CCFE recheck warns when row has corrupted expires_at and reports not_found', async () => {
-    // Symmetric with loadFlow's corruption-as-expired fail-safe.
-    // An operator greppping for "row has missing or non-numeric
-    // expires_at" should find the signal from both the read and
-    // the transition recheck paths.
     let getCalls = 0;
     ddbMock.on(GetCommand).callsFake(() => {
       getCalls += 1;
@@ -834,11 +715,6 @@ describe('flow-state.transitionFlow', () => {
   });
 
   test('post-CCFE recheck failure warns and conservatively reports conflict', async () => {
-    // Pre-read sees the row, Update fails OCC, recheck-Get itself
-    // throws (DDB availability blip). The harness must NOT silently
-    // swallow the recheck error — a warn keeps the signal visible
-    // in CloudWatch while still defaulting to the conservative
-    // result=conflict bucket.
     let getCalls = 0;
     ddbMock.on(GetCommand).callsFake(() => {
       getCalls += 1;
@@ -942,10 +818,7 @@ describe('flow-state.deleteFlow', () => {
   });
 
   test('returns deleted:false and does NOT emit when row was already absent (redelivery / TTL reap)', async () => {
-    // The SLI math requires at-most-once FLOW_DELETED per logical flow.
-    // A second delete on an already-gone row must not emit again.
     ddbMock.on(DeleteCommand).rejects(ccfe());
-    // Post-recheck GetCommand sees no row — confirms "row absent" branch.
     ddbMock.on(GetCommand).resolves({ Item: undefined });
 
     const res = await flowState.deleteFlow('id', { stage: 's', reason: 'abort' });
@@ -954,11 +827,6 @@ describe('flow-state.deleteFlow', () => {
   });
 
   test('returns deleted:false when stage mismatch (sibling flow at same flow_id)', async () => {
-    // Critical correctness primitive: a /qurl revoke supersede call
-    // must NOT admin_cleanup an in-flight /qurl setup flow that
-    // shares the same (user, channel) flow_id. The conditional
-    // delete's stage gate enforces "delete the flow I expect,
-    // not whatever happens to live at this key."
     ddbMock.on(DeleteCommand).rejects(ccfe());
     ddbMock.on(GetCommand).resolves({
       Item: {
@@ -1006,10 +874,6 @@ describe('flow-state.deleteFlow', () => {
   });
 
   test('with expectedVersion: condition includes version gate', async () => {
-    // OCC opt-in. Without it, two concurrent supersedes could each
-    // delete-by-stage-only and stomp each other's freshly-created
-    // replacements. With it, only the caller that observed the
-    // specific version wins the claim.
     ddbMock.on(DeleteCommand).resolves({});
 
     const res = await flowState.deleteFlow('id', {
@@ -1031,10 +895,6 @@ describe('flow-state.deleteFlow', () => {
   });
 
   test('with expectedVersion: returns deleted:false when version mismatch (concurrent advance)', async () => {
-    // A peer caller already advanced this row past our observed
-    // version. The right answer is "didn't claim it" — the prior
-    // flow is still active (just at a later version), so we leave
-    // it alone.
     ddbMock.on(DeleteCommand).rejects(ccfe());
     ddbMock.on(GetCommand).resolves({
       Item: { flow_id: 'id', stage: 'awaiting_setup_button', version: 5 },
@@ -1062,10 +922,6 @@ describe('flow-state.deleteFlow', () => {
   });
 
   test('omitting expectedVersion preserves the pre-existing stage-gate-only contract', async () => {
-    // Defensively pin the additive nature of the new parameter:
-    // existing terminal-delete callers (handleRevokeSelect,
-    // handleSetupModal) MUST observe the exact same DDB call
-    // shape as before — no #v in names, no :expected in values.
     ddbMock.on(DeleteCommand).resolves({});
     await flowState.deleteFlow('id', { stage: 's', reason: 'terminal' });
 
@@ -1079,11 +935,6 @@ describe('flow-state.deleteFlow', () => {
 
 describe('flow-state — payload corruption resilience', () => {
   test('loadFlow propagates decrypt-side throws (fail-loud on KEK misconfig)', async () => {
-    // A KEK-unset / KEK-rotated misconfig must fail loudly rather
-    // than silently degrade to payload=null — otherwise a config
-    // bug looks like "no payload" and the caller proceeds with
-    // wrong-shaped data. Symmetric to the harness's broader
-    // fail-closed posture on encryptStrict.
     ddbMock.on(GetCommand).resolves({
       Item: {
         flow_id: 'id',
@@ -1101,15 +952,11 @@ describe('flow-state — payload corruption resilience', () => {
   });
 
   test('loadFlow returns payload=null and logs error when payload JSON is corrupt', async () => {
-    // Decrypt yields a non-JSON string → JSON.parse throws → row
-    // surfaces with payload=null rather than blowing up the caller.
     ddbMock.on(GetCommand).resolves({
       Item: {
         flow_id: 'id',
         stage: 's',
         version: 1,
-        // The mock decrypt strips the enc:v1: prefix and returns the
-        // hex-decoded payload. Use a string that decodes to invalid JSON.
         payload: `enc:v1:IV:TAG:${Buffer.from('not-valid-json{').toString('hex')}`,
         expires_at: Math.floor(Date.now() / 1000) + 600,
       },
@@ -1126,16 +973,8 @@ describe('flow-state — payload corruption resilience', () => {
 });
 
 describe('flow-state.supersedeOrCreate', () => {
-  // The consolidated supersede-and-retry primitive. Tests pin the
-  // five distinct outcome shapes:
-  //   - first-try create succeeds (no predecessor)
-  //   - predecessor at SAME stage, same version → claim wins
-  //   - predecessor at DIFFERENT stage (sibling flow) → surfaced unchanged
-  //   - predecessor advanced between peek and delete → not claimed
-  //   - row vanishes between conflict and peek → retry create
 
   test('first-try create succeeds when no row exists at flow_id', async () => {
-    // Happy path: no collision, single PutCommand to DDB.
     ddbMock.on(PutCommand).resolves({});
 
     const res = await flowState.supersedeOrCreate({
@@ -1147,7 +986,6 @@ describe('flow-state.supersedeOrCreate', () => {
 
     expect(res).toEqual({ created: true, version: 1 });
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
-    // No supersede-side reads or deletes when there's nothing to supersede.
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_CREATED, expect.objectContaining({
@@ -1156,11 +994,6 @@ describe('flow-state.supersedeOrCreate', () => {
   });
 
   test('claims a same-stage predecessor via version-gated delete + retry create', async () => {
-    // 1) PutCommand #1 conflicts on the existing row.
-    // 2) GetCommand (loadFlow include_expired:true) returns the
-    //    predecessor with its stage + version.
-    // 3) DeleteCommand with both stage AND version gates wins.
-    // 4) PutCommand #2 succeeds for the fresh row.
     const priorRow = {
       flow_id: FLOW_ID,
       stage: 'awaiting_setup_button',
@@ -1183,7 +1016,6 @@ describe('flow-state.supersedeOrCreate', () => {
 
     expect(res).toEqual({ created: true, version: 1 });
 
-    // The DeleteCommand must include the version gate.
     const delCall = ddbMock.commandCalls(DeleteCommand)[0];
     expect(delCall.args[0].input.ConditionExpression)
       .toBe('attribute_exists(flow_id) AND #s = :stage AND #v = :expected');
@@ -1192,10 +1024,6 @@ describe('flow-state.supersedeOrCreate', () => {
   });
 
   test('returns surviving (no claim) when predecessor is at a DIFFERENT stage (sibling flow)', async () => {
-    // /qurl setup colliding with an in-flight /qurl revoke menu:
-    // the surviving row is at awaiting_revoke_select. We must NOT
-    // delete it (cross-flow safety) — return it unchanged so the
-    // caller can surface the sibling-message wording.
     const siblingRow = {
       flow_id: FLOW_ID,
       stage: 'awaiting_revoke_select',
@@ -1216,16 +1044,10 @@ describe('flow-state.supersedeOrCreate', () => {
     expect(res.created).toBe(false);
     expect(res.surviving.stage).toBe('awaiting_revoke_select');
     expect(res.surviving.version).toBe(1);
-    // No delete attempted — the sibling flow stays untouched.
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
   });
 
   test('uses include_expired:true on the peek so stuck-orphans (logically expired, not reaped) are observable', async () => {
-    // Without include_expired, the peek would return null for a
-    // row past its logical TTL but not yet physically reaped — and
-    // the caller would fall through to generic "try again" instead
-    // of recovering the orphan. Pin that the peek sees a past-
-    // expires_at row.
     const pastExpiry = Math.floor(Date.now() / 1000) - 120;
     const orphanRow = {
       flow_id: FLOW_ID,
@@ -1244,9 +1066,6 @@ describe('flow-state.supersedeOrCreate', () => {
       ttl_seconds: 120,
     });
 
-    // Surfaced as surviving even though logically expired. The
-    // caller branches on .stage (sibling vs same-stage) before
-    // attempting any delete.
     expect(res.created).toBe(false);
     expect(res.surviving).not.toBeNull();
     expect(res.surviving.stage).toBe('awaiting_setup_modal');
@@ -1254,10 +1073,6 @@ describe('flow-state.supersedeOrCreate', () => {
   });
 
   test('returns surviving (no claim) when predecessor advances between peek and delete (OCC race)', async () => {
-    // We observed version=3 but by the time our DeleteCommand
-    // fires, a concurrent transitionFlow has bumped to version=4.
-    // The version-gated delete fails by design. Re-peek surfaces
-    // the post-advance state for the caller.
     const observedRow = {
       flow_id: FLOW_ID,
       stage: 'awaiting_setup_button',
@@ -1271,10 +1086,6 @@ describe('flow-state.supersedeOrCreate', () => {
       version: 4,
     };
     ddbMock.on(PutCommand).rejects(ccfe());
-    // First Get: peek before delete — sees version=3.
-    // Second Get: post-CCFE recheck inside deleteFlow → sees
-    //   version=4 (project-only on stage/version, fine).
-    // Third Get: re-peek after delete failed → returns advanced row.
     ddbMock.on(GetCommand)
       .resolvesOnce({ Item: observedRow })
       .resolvesOnce({ Item: { stage: 'awaiting_setup_modal', version: 4 } })
@@ -1290,16 +1101,10 @@ describe('flow-state.supersedeOrCreate', () => {
 
     expect(res.created).toBe(false);
     expect(res.surviving.version).toBe(4);
-    // Only one PutCommand — we did not attempt a retry create
-    // after losing the OCC race.
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
   });
 
   test('retries create when the row vanishes between conflict and peek (TTL reap or peer cleanup)', async () => {
-    // First Put conflicts (something exists), but by the time we
-    // peek, the row is gone — a parallel cleanup beat us to it.
-    // The right move is to retry the create as if we never saw a
-    // collision.
     ddbMock.on(PutCommand)
       .rejectsOnce(ccfe())
       .resolves({});
@@ -1318,9 +1123,6 @@ describe('flow-state.supersedeOrCreate', () => {
   });
 
   test('surfaces surviving:null when both attempts collide and the peek then sees nothing', async () => {
-    // Two collisions in a row + a final empty peek. Caller
-    // disambiguates "couldn't claim" vs "stuck-orphan" via
-    // .surviving (null here means "row evaporated").
     ddbMock.on(PutCommand)
       .rejectsOnce(ccfe()) // first create
       .rejectsOnce(ccfe()); // retry create after vanished-peek
@@ -1337,11 +1139,6 @@ describe('flow-state.supersedeOrCreate', () => {
   });
 
   test('recomputes expires_at on the retry create (full TTL budget after deleteFlow RTT)', async () => {
-    // A subtle correctness property: if supersedeOrCreate reused
-    // the first attempt's expires_at, the retry row's lifetime
-    // would be sub-second-truncated by the deleteFlow round-trip.
-    // Pin that the second PutCommand's expires_at is independently
-    // computed from now+ttl_seconds.
     const priorRow = {
       flow_id: FLOW_ID,
       stage: 'awaiting_setup_button',

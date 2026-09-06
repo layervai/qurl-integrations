@@ -5,6 +5,10 @@ name: Release Please
 #   1. release-please maintains per-component release PRs (see
 #      release-please-config.json). Merging one creates the tag and a draft
 #      GitHub Release.
+#      Chrome and Edge use linked versions: either browser change creates both
+#      tags, and release owners must submit both store packages.
+#      The pinned action bundles release-please 17.6.0, whose linked-versions
+#      plugin adds a synthetic commit when one linked component has no changes.
 #   2. CLI releases additionally run GoReleaser to attach binaries and build
 #      deb/rpm packages. The workflow verifies every artifact, audits and
 #      installs the exact staged Homebrew cask, publishes the release, and

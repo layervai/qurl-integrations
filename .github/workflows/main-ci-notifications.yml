@@ -14,8 +14,7 @@ on:
     workflows:
       - "slack: Build and Test"
       - "discord: Build and Test"
-      - "chrome-extension: Build and Test"
-      - "edge-extension: Build and Test"
+      - "browser-extensions: Build and Test"
       - "teams: Build and Test"
       - "cli: Build and Test"
       - "cli: Nightly"
@@ -175,11 +174,8 @@ jobs:
             "discord: Build and Test")
               impact="Discord bot deploy dispatch did not run. No new image was sent to qurl-integrations-infra, so sandbox remains on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
               ;;
-            "chrome-extension: Build and Test")
-              impact="Chrome extension build, tests, or release packaging did not complete successfully. Nothing auto-deploys from this workflow, so treat the packaged bundle from this SHA as unshippable to the Chrome Web Store until the run is repaired."
-              ;;
-            "edge-extension: Build and Test")
-              impact="Edge extension build, tests, or release packaging did not complete successfully. Nothing auto-deploys from this workflow, so treat the packaged bundle from this SHA as unshippable to Microsoft Edge Add-ons until the run is repaired."
+            "browser-extensions: Build and Test")
+              impact="The browser extension tests or release packaging did not complete successfully. Treat both Chrome Web Store and Microsoft Edge Add-ons bundles from this SHA as unshippable until the run is repaired."
               ;;
             "teams: Build and Test")
               impact="Teams app typecheck, lint, tests, or build did not complete successfully. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."

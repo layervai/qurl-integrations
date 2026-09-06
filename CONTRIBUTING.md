@@ -20,10 +20,8 @@ make check
 **not** run the Node.js suites — those are opt-in, see
 [Node.js apps](#nodejs-apps) below.
 
-`make check` shells out to `python3` for the repo-consistency checks
-(`scripts/check-release-please-sync.sh`, `scripts/check-extension-lockstep.sh`).
-Both fail with an explicit install message rather than silently passing if it is
-missing.
+`make check` shells out to `python3` for repo consistency checks such as
+`scripts/check-release-please-sync.sh`.
 
 ## Project Structure
 
@@ -36,11 +34,10 @@ apps/
     internal/        # App-private code — put your logic here
     README.md
   discord/           # Discord bot
-  chrome-extension/  # Chrome MV3 extension for Gmail
-  edge-extension/    # Edge MV3 extension for Gmail (fork of chrome-extension, kept in lockstep)
+  chrome-extension/  # Shared Chrome and Edge MV3 extension source
+  edge-extension/    # Edge version and store documents
   cli/               # CLI tool
   teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
-  zapier/            # Zapier integration (placeholder, no implementation yet)
 origins/
   s3-static-connector/ # Reusable private S3 static origin image
 shared/              # Shared Go libraries used by the Go apps
@@ -83,8 +80,9 @@ gh pr create --title "feat(slack): add thread replies"
 lockfile, so the suites are opt-in targets rather than prerequisites of
 `make check`:
 
-- `make check-chrome-extension`, `check-edge-extension`, `check-discord`,
-  `check-teams` — each mirrors that app's `<app> / build and test` job.
+- `make check-chrome-extension`, `check-discord`, `check-teams` — each runs
+  that app's build and test gate. `make check-edge-extension` also packages the
+  shared source with Edge metadata and requires `zip` on Unix-like hosts.
 - `make check-e2e` — mirrors `e2e / build and test`: `e2e/`'s offline subset
   (typecheck plus `test:unit`). The live suite is excluded from both this
   target and CI, deliberately — it mints real qURL resources, posts real
@@ -106,7 +104,7 @@ All of these must pass before merge:
 - **PR title** follows [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`
   - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
     `build`, `ci`, `chore`, `revert`
-  - Scopes: `slack`, `teams`, `discord`, `cli`, `zapier`,
+  - Scopes: `slack`, `teams`, `discord`, `cli`,
     `chrome-extension`, `edge-extension`, `origins`, `shared`, `ci`
     (`.github/workflows/pr-title.yml` also accepts repository-maintenance
     scopes `infra` and `deps`, tracked in #463.)
@@ -162,20 +160,12 @@ context. It is separate from the existing
 are produced by the same workflow file.
 
 Every PR is likewise gated by `Lint and test scripts`, the single job in
-`.github/workflows/scripts.yml`, which became required on 2026-08-19. It is the
-only pre-merge enforcement of `scripts/check-extension-lockstep.sh` — the 26
-files Chrome and Edge share, among them the multipart header-injection
-sanitizers, the HTTPS-only link normalization, and the optional-host-permission
-grant and revoke paths — as well as of `scripts/check-i18n-parity.sh`, the
-release-please config/manifest pairing, and `install.sh`'s tag-selection policy.
-CLAUDE.md describes all four as CI-enforced and no other workflow re-checks any
-of them, so while this context was advisory the drift it detects annotated a PR
-without blocking its merge. It could also sit red on `main` unnoticed, and did:
-2026-08-13 at `0caf00d4`, fixed the same day by #1052.
+`.github/workflows/scripts.yml`. It checks the release configuration and
+`install.sh` policy without secrets.
 
-It earns the requirement on the three properties `workflow-contract.yml`'s
-header cites for its own context. It is unfiltered on `pull_request`, so it
-reports on every PR rather than going missing on a stacked one; it is
+The required `Lint and test scripts` check has the three properties that
+`workflow-contract.yml` cites for its own context. It is unfiltered on
+`pull_request`, so it reports on every PR rather than going missing on a stacked one; it is
 secret-free on a read-only token, so requiring it adds no privileged surface;
 and it runs in about eight seconds against a five-minute cap. It also carries no
 job-level `if:`, so unlike `claude-review` below it cannot report `skipped` and

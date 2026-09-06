@@ -1,15 +1,3 @@
-// Guard test for the one synchronous caller-supplied step in
-// flipRecipientDMToClosed: buildPayload(row). The helper wraps it in
-// try/catch so a throw becomes a permanent skip (payload-build-error)
-// instead of rejecting up to the caller — on the expired path that
-// rejection would escape into Express v4 (no async-rejection catch).
-//
-// Neither real builder throws today (the expired builder validates +
-// returns null, the consumed builder is static), so to exercise the
-// guard we mock dm-payloads so buildConsumedDMPayload THROWS, then drive
-// a consumed event through the route and assert the flip skips cleanly:
-// no marker claimed, no editDM, verdict = payload-build-error, and
-// crucially no unhandled rejection escapes.
 
 const crypto = require('crypto');
 
@@ -47,9 +35,6 @@ jest.mock('../src/discord-rest', () => ({
   sendChannelMessage: jest.fn(),
 }));
 
-// Force buildConsumedDMPayload to throw so the route's
-// `buildPayload: () => buildConsumedDMPayload()` exercises the helper's
-// guard. Keep buildExpiredDMPayload real (unused on this path).
 jest.mock('../src/dm-payloads', () => {
   const actual = jest.requireActual('../src/dm-payloads');
   return {
@@ -59,12 +44,6 @@ jest.mock('../src/dm-payloads', () => {
     },
   };
 });
-
-jest.mock('../src/view-update-publisher', () => ({
-  publish: jest.fn(),
-  start: jest.fn(),
-  stop: jest.fn(),
-}));
 
 const mockOwnerSecrets = new Map();
 mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
@@ -146,20 +125,15 @@ describe('POST /webhooks/qurl — consumed flip when buildPayload throws', () =>
       timestamp: '2026-05-19T12:00:00Z',
       api_version: '2024-01-01',
     });
-    // Primary op (view) still returns 200 — the throw is contained to
-    // the background flip.
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'recorded' });
 
     await drainTicks();
 
-    // Guard ran BEFORE the marker claim, so nothing to roll back.
     expect(flipVerdict()).toEqual({ status: 'payload-build-error', transient: false });
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockClearConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
-    // The throw surfaced as the guard's error log, NOT the outer
-    // flip-threw .catch (which would mean it escaped flipRecipientDMToClosed).
     const errorMsgs = logger.error.mock.calls.map(([m]) => m);
     expect(errorMsgs).toContain('qURL webhook qurl.accessed-consumed: buildPayload threw — skipping');
     expect(errorMsgs).not.toContain('qURL webhook qurl.accessed-consumed: flip threw');

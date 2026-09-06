@@ -1,9 +1,6 @@
-# Lint and test the repo's shell scripts, release configuration, and
-# cross-app copies that have to stay identical.
+# Lint and test the repo's shell scripts and release configuration.
 # Cheap and unfiltered so the installer's tag-selection policy, the
-# release-please config/manifest pairing, and the Chrome/Edge extension
-# lockstep can never drift without a PR check noticing (each previously
-# relied on reviewers catching it by hand).
+# release-please config, and manifest pairing cannot drift without a PR check.
 name: Scripts
 
 # No `merge_group`. #940 added it here for "future merge-queue compatibility",
@@ -61,7 +58,7 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-release-please-sync.sh
 
-      # Its three invariants are the only pre-merge check on release-please's
+      # Its invariants are the only pre-merge check on release-please's
       # config, and each passes by accident while the repo is already correct,
       # so an assertion that stopped biting would be silent.
       - name: Test release-please sync check
@@ -87,21 +84,6 @@ jobs:
       - name: Test CLI soak freshness watchdog
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-qurl-cli-soak-watchdog.sh
-
-      - name: Check Chrome/Edge extension lockstep
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/check-extension-lockstep.sh
-
-      # The message catalogs are excluded from the lockstep check above
-      # (sanctioned wording deltas), so this is the only thing comparing
-      # them. Its own failure paths are exercised by the test below.
-      - name: Check Chrome/Edge i18n parity
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/check-i18n-parity.sh
-
-      - name: Test i18n parity checker
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-check-i18n-parity.sh
 
       # The jq <= 1.7 parse check is only meaningful on a runner whose jq
       # still has the restricted grammar; jq 1.8 (typical locally, and

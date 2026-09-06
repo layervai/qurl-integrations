@@ -1,5 +1,12 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "browser-extensions",
+      "components": ["chrome-extension", "edge-extension"]
+    }
+  ],
   "packages": {
     "apps/slack": {
       "release-type": "go",
@@ -34,14 +41,7 @@
       "component": "edge-extension",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": "manifest.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "bump-patch-for-minor-pre-major": true
     },
     "apps/cli": {
       "release-type": "go",

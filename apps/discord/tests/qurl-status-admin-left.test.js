@@ -1,18 +1,4 @@
-// Tests for the /qurl status admin-offboarding nudge (#185).
-//
-// The status reply for a configured guild surfaces a passive notice
-// when the admin who originally ran setup has left the server —
-// remaining ManageGuild admins need to know that qURL usage is still
-// billing to the absent admin's layerv.ai account, and that running
-// /qurl setup again will re-bind the key to themselves.
-//
-// Best-effort detection: a Discord API blip during the
-// `members.fetch` call is treated as "skip the nudge", not "fail
-// the status read." The notice only fires on the specific
-// "Unknown Member" error code (10007) so transient errors don't
-// mis-flag a present admin as gone.
 
-// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 process.env.GUILD_ID = '123456789012345678';
 
@@ -35,9 +21,6 @@ const db = require('../src/store');
 const { handleCommand } = require('../src/commands');
 const { PermissionFlagsBits } = require('discord.js');
 
-// Minimal interaction stub for the /qurl status path. The real
-// discord.js Interaction has dozens of fields we don't need; only
-// the surface the status handler actually reads is mocked.
 function makeStatusInteraction({ memberFetchBehavior }) {
   const reply = jest.fn();
   return {
@@ -96,8 +79,6 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     expect(replyContent).toContain('qURL is configured');
     expect(replyContent).toContain('has left this server');
     expect(replyContent).toContain('<@admin-departed>');
-    // Confirms the remediation guidance is on the wire — the whole
-    // point of the nudge is to tell remaining admins what to do next.
     expect(replyContent).toMatch(/run.*\/qurl setup/i);
   });
 
@@ -117,9 +98,6 @@ describe('/qurl status — admin-offboarding nudge (#185)', () => {
     await handleCommand(interaction);
     const replyContent = interaction._reply.mock.calls[0][0].content;
     expect(replyContent).toContain('qURL is configured');
-    // Critical: a rate-limit spike must NOT silently tell an admin
-    // their colleague is gone. Only the specific 10007 fires the
-    // notice.
     expect(replyContent).not.toContain('has left this server');
   });
 });

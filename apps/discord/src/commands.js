@@ -23,8 +23,6 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const viewUpdateRegistry = require('./view-update-registry');
-const { createHandleViewUpdate } = require('./view-update-handler');
 const {
   COLORS,
   TIMEOUTS,
@@ -1334,85 +1332,23 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     });
   }
 
-  // Hoisted so the createHandleViewUpdate factory closes over the
-  // live `let` binding rather than a pre-initialized TDZ slot — a
-  // future synchronous-handler refactor would otherwise hit
-  // ReferenceError on getViewed/setViewed.
   let viewed = 0;
   let allDone = false;
 
-  // View-update push (feat #60). Shared callback per monitor —
-  // registered against every tracked qurl_id; render goes through
-  // linkStatus mutation + safeEdit (NOT runTick) to avoid the
-  // per-event DDB BatchGet. Polling tick remains the correctness
-  // primitive. Handler factory in view-update-handler.js so the
-  // state matrix is unit-testable without a full monitor closure.
-  //
-  // Unregister at stop() iterates `trackedQurlIds` directly (set
-  // cleared AFTER the unregister loop). Registry.unregister is a
-  // no-op for keys never registered (e.g. when the flag is off), so
-  // iterating the superset is safe.
-  const handleViewUpdate = createHandleViewUpdate({
-    sendId,
-    linkStatus,
-    getButtonRow: () => buttonRow,
-    isStopped: () => stopped,
-    isViewCounterDegraded: () => viewCounterDegraded,
-    hasInteraction: () => !!interaction,
-    getViewed: () => viewed,
-    setViewed: (n) => { viewed = n; },
-    getExpectedCount: () => expectedCount,
-    buildStatusMsg,
-    safeEdit,
-    onAllDone: () => {
-      allDone = true;
-      clearTimeout(timer);
-    },
-    logger,
-  });
-  // Hoist the flag read once per monitor — registerViewUpdateFor
-  // is called up to QURL_SEND_MAX_RECIPIENTS times (default 20000) on
-  // construction + once per /qurl add. Re-reading config on every
-  // call is negligible but the hoist reads cleaner.
-  const viewUpdatePushEnabled = config.ENABLE_VIEW_UPDATE_PUSH;
-  function registerViewUpdateFor(qurlId) {
-    if (!viewUpdatePushEnabled) return;
-    viewUpdateRegistry.register(qurlId, handleViewUpdate);
-  }
-  for (const qurlId of trackedQurlIds) {
-    registerViewUpdateFor(qurlId);
-  }
-
-  // Bumped by addRecipients. A tick whose getQurlViews resolves after
-  // generation advanced must skip its render — the views map was built
-  // against the pre-add tracked set and could under-report.
+  // A tick that began before addRecipients must not render its stale view map.
   let trackingGeneration = 0;
 
   const control = {
-    // newLinks: Array<{qurlId, username}> aligned per-recipient. Must
-    // seed `linkStatus` AND `trackedQurlIds` together — extending only
-    // the tracked set means runTick's view-flip lookup misses the new
-    // qurl_ids and the counter never advances for /qurl add recipients.
+    // Keep the status map and tracked IDs aligned for added recipients.
     addRecipients(count, newLinks) {
-      // Early-out if this monitor has already been stopped. Without
-      // this guard a post-stop addRecipients call would extend
-      // expectedCount, linkStatus, AND register new view-update
-      // callbacks against the registry — the latter wouldn't be
-      // unregistered (stop() has already iterated trackedQurlIds),
-      // pinning the closure (linkStatus + safeEdit) until process
-      // restart. Pre-#60 fields (expectedCount,
-      // linkStatus) also leaked into a dead monitor; this guard
-      // closes both the new + pre-existing leak surfaces.
+      // Ignore additions after stop; they would retain linkStatus and safeEdit until process exit.
       if (stopped) return;
       expectedCount += count;
       if (Array.isArray(newLinks)) {
         for (const item of newLinks) {
           const qid = item && item.qurlId;
           if (!qid) {
-            // Mirror the construction-time warn — an operator chasing
-            // "why is the counter blank?" needs a breadcrumb when the
-            // degraded flip happens mid-life via /qurl add, not just
-            // at the original send.
+            // Keep the monitor degraded if a later recipient has no qurl_id.
             if (!viewCounterDegraded) {
               logger.warn('Monitor view counter degraded mid-life — addRecipients link missing qurl_id', { sendId });
             }
@@ -1422,21 +1358,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
           if (!trackedQurlIds.has(qid)) {
             trackedQurlIds.add(qid);
             linkStatus.set(qid, { status: 'pending', username: item.username || 'unknown' });
-            // Register the new qurl_id for view-update push (feat #60).
-            // Symmetric with the construction-time loop above — the
-            // tracked set and the registry must extend together or the
-            // new recipients never get sub-second updates (the polling
-            // path catches them on the next interval regardless).
-            registerViewUpdateFor(qid);
           }
         }
       }
       trackingGeneration++;
-      // /qurl add is an explicit signal the send is NOT idle, so re-enter
-      // the dense early phase. Refreshing earlyPhaseUntil (NOT startTime,
-      // which governs the 14-min life cap) speeds the cadence back up
-      // without extending the monitor's lifetime. nextPollDelay() reads
-      // this at the NEXT reschedule.
+      // Re-enter the dense polling phase without extending monitor lifetime.
       earlyPhaseUntil = Date.now() + EARLY_POLL_WINDOW_MS;
       // Two cases:
       //   - Monitor already settled (all initial recipients viewed → the
@@ -1465,16 +1391,6 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       stopped = true;
       clearTimeout(timer);
       activeMonitors.delete(control);
-      // Unregister the shared callback from every tracked qurl_id so
-      // the registry doesn't pin this monitor's closure state past
-      // stop() (feat #60). Load-bearing: a long-running monitor that
-      // never unregisters would otherwise hold linkStatus + safeEdit
-      // references via the shared closure until process restart.
-      // Iterates trackedQurlIds directly (no parallel bookkeeping
-      // array) — set cleared in the next two lines, so order matters.
-      for (const qurlId of trackedQurlIds) {
-        viewUpdateRegistry.unregister(qurlId, handleViewUpdate);
-      }
       linkStatus.clear();
       trackedQurlIds.clear();
       interaction = null;
@@ -7549,13 +7465,8 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
-  // Mode switches to EVERYONE — like voice-everyone, the click is
-  // unambiguous "fan out to all" intent. Picker row is hidden in the
-  // re-render so the user can't accidentally read back a 25-entry
-  // truncated picker selection over the @everyone fan-out (Discord's
-  // MentionableSelect default_values is capped at 25, and any picker
-  // interaction routes through handleConfirmUserSelect which replaces
-  // recipientIds with the picker's view of the world).
+  // TODO(upstream-contract): Discord caps MentionableSelect default_values at 25,
+  // so @everyone replaces any truncated picker selection.
   const newPayload = {
     ...payload,
     recipientIds: valid.map((u) => u.id),

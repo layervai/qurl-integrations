@@ -1194,6 +1194,7 @@ fi
 type requiredWorkflowSpec struct {
 	name                 string
 	path                 string
+	requiredJobID        string
 	checkNamePrefix      string
 	changeOutput         string
 	changedEnv           string
@@ -1260,11 +1261,12 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 	{
 		name:                 "chrome-extension",
 		path:                 "chrome-extension.yml",
+		requiredJobID:        "chrome-required",
 		checkNamePrefix:      "chrome-extension / ",
 		changeOutput:         "chrome_extension",
 		changedEnv:           "CHROME_EXTENSION_CHANGED",
 		qualityGateCondition: "needs.changes.outputs.chrome_extension == 'true'",
-		detectChangesName:    "chrome-extension / detect changes",
+		detectChangesName:    "browser-extensions / detect changes",
 		requiredName:         "chrome-extension / required",
 		verifierStepName:     "Verify Chrome extension CI result",
 		unchangedOutput:      "No Chrome extension-impacting changes detected",
@@ -1272,12 +1274,13 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 	},
 	{
 		name:                 "edge-extension",
-		path:                 "edge-extension.yml",
+		path:                 "chrome-extension.yml",
+		requiredJobID:        "edge-required",
 		checkNamePrefix:      "edge-extension / ",
 		changeOutput:         "edge_extension",
 		changedEnv:           "EDGE_EXTENSION_CHANGED",
 		qualityGateCondition: "needs.changes.outputs.edge_extension == 'true'",
-		detectChangesName:    "edge-extension / detect changes",
+		detectChangesName:    "browser-extensions / detect changes",
 		requiredName:         "edge-extension / required",
 		verifierStepName:     "Verify Edge extension CI result",
 		unchangedOutput:      "No Edge extension-impacting changes detected",
@@ -3286,17 +3289,20 @@ func pullRequestFilter(t *testing.T, path, trigger string, pullRequest any, key 
 func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 	registered := make(map[string]bool, len(requiredWorkflowSpecs))
 	for i := range requiredWorkflowSpecs {
-		registered[requiredWorkflowSpecs[i].path] = true
+		spec := &requiredWorkflowSpecs[i]
+		registered[spec.path+"\x00"+specRequiredJobID(spec)] = true
 	}
 
 	seen := 0
 	for _, name := range workflowFiles(t) {
-		if _, ok := readWorkflow(t, name).Jobs[requiredJobID]; !ok {
-			continue
-		}
-		seen++
-		if !registered[name] {
-			t.Errorf("%s defines a required aggregate job but has no requiredWorkflowSpecs entry", name)
+		for id, job := range readWorkflow(t, name).Jobs {
+			if id != requiredJobID && !strings.HasSuffix(job.Name, " / required") {
+				continue
+			}
+			seen++
+			if !registered[name+"\x00"+id] {
+				t.Errorf("%s job %q defines a required aggregate but has no requiredWorkflowSpecs entry", name, id)
+			}
 		}
 	}
 
@@ -3306,7 +3312,43 @@ func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 	// whole suite goes red rather than quietly under-enforcing the new
 	// aggregate.
 	if seen != len(requiredWorkflowSpecs) {
-		t.Errorf("found %d workflows with a required aggregate, want %d (one per spec)", seen, len(requiredWorkflowSpecs))
+		t.Errorf("found %d required aggregates, want %d", seen, len(requiredWorkflowSpecs))
+	}
+}
+
+func TestEdgePackageRequiresSharedSourceChecks(t *testing.T) {
+	workflow := readWorkflow(t, "chrome-extension.yml")
+	job := workflow.Jobs["package-edge"]
+	if job == nil {
+		t.Fatal("chrome-extension.yml is missing package-edge")
+	}
+	needs := stringSet(parseWorkflowNeeds(t, "package-edge", job.Needs))
+	if !needs[changesJobID] || !needs["build-chrome"] {
+		t.Fatalf("package-edge needs = %#v, want changes and build-chrome", needs)
+	}
+
+	var guard *step
+	checkoutIndex, guardIndex := -1, -1
+	for i := range job.Steps {
+		if strings.HasPrefix(job.Steps[i].Uses, checkoutActionPrefix) {
+			checkoutIndex = i
+		}
+		if job.Steps[i].Name == "Require shared source checks" {
+			guard = &job.Steps[i]
+			guardIndex = i
+		}
+	}
+	if guard == nil || guard.If != "needs.changes.outputs.chrome_extension == 'true'" {
+		t.Fatalf("package-edge shared-source guard = %#v", guard)
+	}
+	if checkoutIndex < 0 || guardIndex <= checkoutIndex {
+		t.Fatalf("package-edge checkout index = %d, guard index = %d", checkoutIndex, guardIndex)
+	}
+	if _, err := runVerifierScriptWithEnv(t, guard.Run, map[string]string{"CHROME_BUILD_RESULT": "success"}); err != nil {
+		t.Fatalf("shared-source guard rejected success: %v", err)
+	}
+	if output, err := runVerifierScriptWithEnv(t, guard.Run, map[string]string{"CHROME_BUILD_RESULT": "failure"}); err == nil || !strings.Contains(output, "concluded failure") {
+		t.Fatalf("shared-source guard accepted failure: err=%v output=%s", err, output)
 	}
 }
 
@@ -3329,7 +3371,7 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 				t.Fatalf("%s required.if = %q, want always()", spec.name, required.If)
 			}
 
-			requiredNeeds := stringSet(parseWorkflowNeeds(t, requiredJobID, required.Needs))
+			requiredNeeds := stringSet(parseWorkflowNeeds(t, specRequiredJobID(spec), required.Needs))
 			if !requiredNeeds[changesJobID] {
 				t.Fatal("required.needs is missing changes detector")
 			}
@@ -3470,132 +3512,29 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 	}
 }
 
-// TestExtensionWorkflowsStayInLockstep pins chrome-extension.yml and
-// edge-extension.yml as one file with the browser's name swapped.
-//
-// apps/edge-extension is a platform fork of apps/chrome-extension, and their
-// workflows are the same copy-and-swap: a timeout raised, a step dropped, or an
-// action pinned forward on one side only is invisible in review, because
-// nothing ever puts the two files side by side. What ships is one browser's
-// extension going out through a weaker gate than the other's.
-//
-// TestAppWorkflowsRunOnStackedPRs above covers one key of these same two files,
-// pinning each one's pull_request branch filter against the intent recorded in
-// its spec. That is a per-workflow assertion about a value; this is a whole-file
-// assertion about a pair, so a one-sided edit to any other line — which no
-// recorded intent exists for — fails here instead of nowhere.
-//
-// The Chrome<->Edge lockstep section of CLAUDE.md carries the policy: why these
-// two files are guarded here rather than by scripts/check-extension-lockstep.sh,
-// which covers the two app trees.
-func TestExtensionWorkflowsStayInLockstep(t *testing.T) {
-	chromePath, chrome := maskedExtensionWorkflow(t, "chrome-extension", "Chrome")
-	edgePath, edge := maskedExtensionWorkflow(t, "edge-extension", "Edge")
+func TestBrowserRequiredVerifierScriptsStayInLockstep(t *testing.T) {
+	workflow := readWorkflow(t, "chrome-extension.yml")
+	chrome := requiredVerifierScript(t, requiredWorkflowSpecByName(t, "chrome-extension"), workflow)
+	edge := requiredVerifierScript(t, requiredWorkflowSpecByName(t, "edge-extension"), workflow)
 
-	// Reported with the first diverging line and its text, not the counts alone:
-	// "184 lines and 182" says a step was added or dropped without saying where,
-	// which is the one thing the reader needs in order to go look.
-	if len(chrome) != len(edge) {
-		n := firstDivergentLine(chrome, edge)
-		t.Fatalf("%s has %d lines and %s has %d, first diverging at line %d: a step, key, or comment exists in only one copy\n\t%s: %s\n\t%s: %s",
-			chromePath, len(chrome), edgePath, len(edge), n,
-			chromePath, lineAt(chrome, n), edgePath, lineAt(edge, n))
+	chrome = strings.NewReplacer(
+		"CHROME_EXTENSION_CHANGED", "BROWSER_EXTENSION_CHANGED",
+		"chrome_extension", "browser_extension",
+		"No Chrome extension-impacting changes detected", "No browser-impacting changes detected",
+		"chrome-extension / build and test", "browser-extension / gate",
+		"build-chrome", "browser-gate",
+	).Replace(chrome)
+	edge = strings.NewReplacer(
+		"EDGE_EXTENSION_CHANGED", "BROWSER_EXTENSION_CHANGED",
+		"edge_extension", "browser_extension",
+		"No Edge extension-impacting changes detected", "No browser-impacting changes detected",
+		"edge-extension / package", "browser-extension / gate",
+		"package-edge", "browser-gate",
+	).Replace(edge)
+
+	if chrome != edge {
+		t.Fatal("Chrome and Edge required-job verifier scripts drifted")
 	}
-	for i := range chrome {
-		if chrome[i] == edge[i] {
-			continue
-		}
-		t.Errorf("line %d has diverged (shown with the sanctioned tokens masked):\n\t%s: %s\n\t%s: %s",
-			i+1, chromePath, chrome[i], edgePath, edge[i])
-	}
-}
-
-// maskedExtensionWorkflow reads one extension workflow and returns its path
-// alongside its lines, with every sanctioned delta rewritten to a shared
-// placeholder so the two copies can be compared exactly.
-//
-// The app slug, change output and verifier env var are read out of that app's
-// requiredWorkflowSpecs entry rather than restated here, so renaming one there
-// cannot leave a stale duplicate quietly widening what this ignores. Only the
-// browser's prose name is spelled out: the specs carry it too, but embedded in
-// composite strings (verifierStepName, unchangedOutput) that would have to be
-// taken apart to recover it.
-//
-// The four rules cannot interfere with one another because each matches a
-// spelling the others do not: the hyphenated slug, the underscored output, the
-// SCREAMING_CASE env var, and — case-sensitively, under \b anchors — the
-// capitalized prose word. Store names (Chrome Web Store, Microsoft Edge
-// Add-ons) are deliberately not masked, unlike check-extension-lockstep.sh:
-// these workflows carry none today, and a step that adds one is publishing to a
-// different store, which is a real divergence worth stopping on rather than
-// normalizing away. The same goes for any future browser-specific publish step
-// or lowercase store URL: this test failing is the intended signal, and the fix
-// is a new mask documented here and in CLAUDE.md, never deleting the assertion.
-//
-// Each copy is masked for its own slug and browser name only, not for both.
-// That is stricter than check-extension-lockstep.sh, which masks both on both
-// sides: a copy naming the wrong browser reads as a match there and is reported
-// here. The cost is that neither file can name the other — a "keep in lockstep
-// with edge-extension.yml" comment diverges under its own slug mask, as does any
-// prose naming both browsers. A sibling-agnostic pointer does work, and is what
-// both files carry at the top. Relaxing this to symmetric masking would buy
-// those cross-references back at the price of the wrong-browser catch, which
-// would then need a separate assertion, the way check-i18n-parity.sh covers the
-// same blind spot in the script.
-func maskedExtensionWorkflow(t *testing.T, specName, browser string) (path string, lines []string) {
-	t.Helper()
-
-	const browserMask = "<browser>"
-	// Literal matches rather than lookaheads, because RE2 has none. The article
-	// rule runs second, against the placeholder the browser rule leaves behind:
-	// "a Chrome extension" and "an Edge extension" are the same sentence, and
-	// the article is forced by the word just erased. Both cases are matched so a
-	// sentence-initial "A Chrome…"/"An Edge…" is covered too — safe, because the
-	// replacement is fixed-case, so nothing can hide in the article's own
-	// capitalization that is not already visible in the rest of the line.
-	browserWord := regexp.MustCompile(`\b` + regexp.QuoteMeta(browser) + `\b`)
-	article := regexp.MustCompile(`\b[Aa]n? ` + browserMask)
-
-	spec := requiredWorkflowSpecByName(t, specName)
-	source := readWorkflowSource(t, spec.path)
-	source = strings.ReplaceAll(source, spec.name, "<app>")
-	source = strings.ReplaceAll(source, spec.changeOutput, "<change-output>")
-	source = strings.ReplaceAll(source, spec.changedEnv, "<changed-env>")
-	source = browserWord.ReplaceAllString(source, browserMask)
-	source = article.ReplaceAllString(source, "<article> "+browserMask)
-	return spec.path, strings.Split(source, "\n")
-}
-
-// lineAt returns the 1-based line n, or a marker when that copy ended first —
-// which is the normal case for the shorter side of a length mismatch.
-func lineAt(lines []string, n int) string {
-	if n-1 >= len(lines) {
-		return "(end of file)"
-	}
-	return lines[n-1]
-}
-
-// firstDivergentLine returns the 1-based line where two masked copies first
-// differ, or one past the shorter copy when it is a prefix of the longer.
-func firstDivergentLine(a, b []string) int {
-	for i := 0; i < len(a) && i < len(b); i++ {
-		if a[i] != b[i] {
-			return i + 1
-		}
-	}
-	return min(len(a), len(b)) + 1
-}
-
-func requiredWorkflowSpecByName(t *testing.T, name string) *requiredWorkflowSpec {
-	t.Helper()
-
-	for i := range requiredWorkflowSpecs {
-		if requiredWorkflowSpecs[i].name == name {
-			return &requiredWorkflowSpecs[i]
-		}
-	}
-	t.Fatalf("no requiredWorkflowSpecs entry named %q", name)
-	return nil
 }
 
 func readWorkflow(t *testing.T, name string) githubWorkflow {
@@ -3626,11 +3565,7 @@ func readWorkflow(t *testing.T, name string) githubWorkflow {
 	return workflow
 }
 
-// readWorkflowBytes returns a workflow file's raw contents. It returns bytes
-// rather than a string because parsing is the overwhelmingly common use — the
-// tests in this package read the workflow directory many times over — and only
-// the lockstep comparison wants text, so the conversion belongs on that path
-// rather than on every parse.
+// readWorkflowBytes returns a workflow file's raw contents.
 func readWorkflowBytes(t *testing.T, name string) []byte {
 	t.Helper()
 
@@ -3641,16 +3576,6 @@ func readWorkflowBytes(t *testing.T, name string) []byte {
 		t.Fatalf("read %s workflow: %v", name, err)
 	}
 	return data
-}
-
-// readWorkflowSource returns a workflow file's raw text. Callers that only need
-// its shape should use readWorkflow; this exists for the lockstep comparison,
-// which is about the bytes — comments and formatting included — and would be
-// blind to a divergence YAML parsing throws away.
-func readWorkflowSource(t *testing.T, name string) string {
-	t.Helper()
-
-	return string(readWorkflowBytes(t, name))
 }
 
 // workflowFiles lists the workflow files in .github/workflows. It fails rather
@@ -3687,11 +3612,30 @@ func workflowFiles(t *testing.T) []string {
 func requiredAggregateJob(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) *githubJob {
 	t.Helper()
 
-	job, ok := workflow.Jobs[requiredJobID]
+	jobID := specRequiredJobID(spec)
+	job, ok := workflow.Jobs[jobID]
 	if !ok {
-		t.Fatalf("%s workflow is missing its %q aggregate job", spec.name, requiredJobID)
+		t.Fatalf("%s workflow is missing its %q aggregate job", spec.name, jobID)
 	}
 	return job
+}
+
+func specRequiredJobID(spec *requiredWorkflowSpec) string {
+	if spec.requiredJobID != "" {
+		return spec.requiredJobID
+	}
+	return requiredJobID
+}
+
+func requiredWorkflowSpecByName(t *testing.T, name string) *requiredWorkflowSpec {
+	t.Helper()
+	for i := range requiredWorkflowSpecs {
+		if requiredWorkflowSpecs[i].name == name {
+			return &requiredWorkflowSpecs[i]
+		}
+	}
+	t.Fatalf("no requiredWorkflowSpecs entry named %q", name)
+	return nil
 }
 
 func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) map[string]bool {
@@ -3723,7 +3667,7 @@ func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job *githu
 	if job.Name == spec.detectChangesName || job.Name == spec.requiredName {
 		return false
 	}
-	return !slices.Contains(needs, requiredJobID)
+	return !slices.Contains(needs, specRequiredJobID(spec))
 }
 
 func sortedQualityGateIDs(qualityGates map[string]bool) []string {

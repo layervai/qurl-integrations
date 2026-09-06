@@ -1,33 +1,3 @@
-// Unit tests for src/gateway-leader.js — the Pillar 3 orchestrator
-// that ties gateway-lock + peer-heartbeat + control-client + manager
-// into one state machine. Pins the load-bearing contracts:
-//
-//   1. Tick writes heartbeat unconditionally + refreshes peer cache.
-//      Heartbeat failure doesn't block lock op; peer-cache fetch
-//      failure keeps the prior cache (don't blank it on transients).
-//   2. Tick lock op:
-//        - heldLock=false → tries acquireLock; success flips flag.
-//        - heldLock=true  → tries renewLock; CCF flips flag off.
-//        - throw on either → keeps flag as-is (retry next tick).
-//   3. handleInboundHandoff ordering: adopt → flag → connect. Adopt
-//      throw never flips the flag; connect throw flips it (watchdog
-//      retries).
-//   4. pushHandoff:
-//        - not holding → no-op.
-//        - no fresh peer → releaseLock + reason:'no_peer'.
-//        - transferLock CAS fail → reason:'transfer_failed', no release
-//          (peer cold-acquired; the CCF IS the release).
-//        - transferLock success + push success → transferred:true,
-//          pushAcked:true.
-//        - transferLock success + push timeout → transferred:true,
-//          pushAcked:false, pushReason:'timeout' (active still exits;
-//          standby's watchdog recovers).
-//   5. Serialization: tick + inbound-handoff + push-handoff funnel
-//      through the same in-flight chain. No two lock mutators ever
-//      run concurrently.
-//   6. Hooks: isHoldingLock + isKnownPeer + releaseLockForImmediateExit
-//      reflect internal state; releaseLockForImmediateExit clears flag +
-//      calls lock.releaseLock.
 
 const {
   createGatewayLeader,
@@ -144,7 +114,6 @@ describe('step (tick) — heartbeat + peer cache', () => {
 
     await leader._stepForTest();
 
-    // Lock acquire still attempted (heldLock=false initial state).
     expect(lock.acquireLock).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringMatching(/heartbeat write failed/),
@@ -160,7 +129,6 @@ describe('step (tick) — heartbeat + peer cache', () => {
     await leader._stepForTest(); // populate cache
     expect(leader.isKnownPeer('inst-B')).toBe(true);
 
-    // Next tick: listFreshPeers throws — cache must not be blanked.
     peerHeartbeat.listFreshPeers.mockRejectedValueOnce(new Error('ddb-throttled'));
     await leader._stepForTest();
     expect(leader.isKnownPeer('inst-B')).toBe(true);
@@ -198,7 +166,6 @@ describe('step (tick) — lock state machine', () => {
     const mocks = makeMocks();
     mocks.lock.renewLock = jest.fn(async () => ({ renewed: false }));
     const { leader, logger } = makeLeader({ mocks });
-    // Pre-arm heldLock by stepping once with successful acquire (default).
     await leader._stepForTest();
     expect(leader.isHoldingLock()).toBe(true);
 
@@ -233,7 +200,6 @@ describe('handleInboundHandoff', () => {
     mocks.manager.connect = jest.fn(async () => callOrder.push('connect'));
     const { leader } = makeLeader({ mocks });
 
-    // Spy the flag flip by checking inside connect()'s call.
     let flagAtConnect = null;
     mocks.manager.connect = jest.fn(async () => {
       flagAtConnect = leader.isHoldingLock();
@@ -251,11 +217,6 @@ describe('handleInboundHandoff', () => {
   });
 
   it('rejects a stray inbound handoff when already holding lock + connected', async () => {
-    // Defense against a duplicate or misrouted handoff body that
-    // passed the server's HMAC + routing checks. Re-adopting would
-    // re-anchor currentVersion against a possibly-moved row;
-    // re-calling manager.connect() would race the existing WS
-    // (WebSocketManager is NOT concurrent-safe).
     const mocks = makeMocks();
     mocks.manager.isConnected = jest.fn(() => true);
     const { leader } = makeLeader({ mocks });
@@ -265,7 +226,6 @@ describe('handleInboundHandoff', () => {
       activeInstanceId: 'inst-X', expectedVersion: 99,
     })).rejects.toThrow(/already_holding_lock_and_active_ws_lifecycle/);
 
-    // Critical: must NOT have called adopt or connect on the stray.
     expect(mocks.lock.adoptLockFromHandoff).not.toHaveBeenCalled();
     expect(mocks.manager.connect).not.toHaveBeenCalled();
   });
@@ -303,13 +263,6 @@ describe('handleInboundHandoff', () => {
   });
 
   it('inbound handoff on a never-started leader: adopts + connects without start()', async () => {
-    // Pins the SIGTERM-during-startHotStandby race contract. The
-    // control-channel server starts listening BEFORE leader.start()
-    // runs, so an in-flight handoff envelope can land on a leader
-    // whose tick loop has not begun. The runSerialized chain is
-    // primed at factory time (inFlight = Promise.resolve()), so the
-    // adopt → flag → connect ordering must hold without start()
-    // having ever fired.
     const callOrder = [];
     const mocks = makeMocks();
     mocks.lock.adoptLockFromHandoff = jest.fn(() => callOrder.push('adopt'));
@@ -323,7 +276,6 @@ describe('handleInboundHandoff', () => {
       callOrder.push('connect');
     });
 
-    // Pre-condition: no tick loop yet.
     expect(leader.hasStartedTickLoop()).toBe(false);
 
     await leader.handleInboundHandoff({
@@ -338,9 +290,6 @@ describe('handleInboundHandoff', () => {
   });
 
   it('adopt throw — heldLock + connecting both stay false; runSerialized chain stays intact for next call', async () => {
-    // Adopt is the first step of the handoff. If it throws, NO
-    // flag mutations must happen (heldLock=false, connecting=false),
-    // and the serialization chain must still accept the next op.
     const mocks = makeMocks();
     mocks.lock.adoptLockFromHandoff = jest.fn(() => {
       throw new Error('bad-version');
@@ -355,7 +304,6 @@ describe('handleInboundHandoff', () => {
     expect(leader.isConnecting()).toBe(false);
     expect(manager.connect).not.toHaveBeenCalled();
 
-    // Chain still works: a subsequent tick must run cleanly.
     await leader._stepForTest();
     expect(mocks.lock.acquireLock).toHaveBeenCalledTimes(1);
   });
@@ -392,10 +340,6 @@ describe('handleInboundHandoff', () => {
   });
 
   it('synchronous manager.connect throw clears connecting flag (defensive)', async () => {
-    // @discordjs/ws's WebSocketManager.connect contract is async, but
-    // a future shim regression could surface a sync throw. The flag
-    // must clear so the watchdog can take over the retry — otherwise
-    // it would no-op forever.
     const mocks = makeMocks();
     mocks.manager.connect = jest.fn(() => { throw new Error('sync-shim-bug'); });
     const { leader } = makeLeader({ mocks });
@@ -409,10 +353,6 @@ describe('handleInboundHandoff', () => {
   });
 
   it('non-thenable manager.connect return clears connecting flag (defensive)', async () => {
-    // Even stronger defensive: if connect() returns a non-thenable
-    // (i.e., the .then attachment itself throws synchronously after
-    // connectPromise is already assigned), the lifecycle handlers
-    // never register. The catch must still clear `connecting=false`.
     const mocks = makeMocks();
     mocks.manager.connect = jest.fn(() => 'not-a-promise');
     const { leader } = makeLeader({ mocks });
@@ -428,7 +368,6 @@ describe('handleInboundHandoff', () => {
 
 describe('pushHandoff', () => {
   function preHoldLock(leader) {
-    // Drive a tick to flip heldLock=true via successful acquireLock.
     return leader._stepForTest();
   }
 
@@ -501,12 +440,6 @@ describe('pushHandoff', () => {
   });
 
   it('returns transferred:true, pushAcked:false, pushReason:push_threw when controlClient.pushHandoff throws', async () => {
-    // The control-client's documented contract is "never throws", but
-    // its synchronous argument validators DO throw if a row makes it
-    // past listFreshPeers' filters in a future regression. transferLock
-    // has already moved the lock in DDB at this point, so the standby
-    // owns it either way; the standby's watchdog catches lock-held +
-    // WS-disconnected and brings up the gateway from the cold path.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -531,7 +464,6 @@ describe('pushHandoff', () => {
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
-        // no lock_holder
         updated_at: 100,
       }],
     });
@@ -543,7 +475,6 @@ describe('pushHandoff', () => {
   });
 
   it('stops the tick loop before the transferLock', async () => {
-    // Without stop, a tick could race the transferLock with a renewLock.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -556,22 +487,12 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     await leader.pushHandoff();
-    // The loop's running flag must be false after pushHandoff. We
-    // can't observe `running` directly; we observe that no further
-    // step is fired by checking sleep was called only once
-    // (the initial start's first sleep).
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('serialization — SIGTERM-during-tick (pushHandoff while a tick is in-flight)', () => {
   it('pushHandoff queues behind an in-flight tick and runs after the tick settles', async () => {
-    // Real production race: SIGTERM fires mid-tick. The tick is
-    // awaiting renewLock (DDB RTT ~10-30ms); pushHandoff must
-    // queue behind it on `inFlight`, not race the same lock
-    // mutator. The serialization chain pins this — but until now
-    // only the inbound-handoff-vs-tick and parallel-handoff cases
-    // had explicit tests.
     const callOrder = [];
     let resolveRenew;
     const mocks = makeMocks({
@@ -589,20 +510,16 @@ describe('serialization — SIGTERM-during-tick (pushHandoff while a tick is in-
       return { transferred: true, version: 3 };
     });
     const { leader } = makeLeader({ mocks });
-    // Pre-hold the lock so the tick path enters renewLock branch.
     await leader._stepForTest(); // heldLock=true via acquire
 
-    // Now start a SECOND tick (will go into renew); it'll block.
     const tick2 = leader._stepForTest();
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(callOrder).toEqual(['renew-start']);
 
-    // SIGTERM fires: pushHandoff. Queues behind tick2.
     const push = leader.pushHandoff();
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(callOrder).toEqual(['renew-start']); // still blocked
 
-    // Resolve the renew; tick2 settles, then push runs.
     resolveRenew({ renewed: true, version: 2 });
     await tick2;
     await push;
@@ -625,44 +542,26 @@ describe('serialization — no two mutators interleave', () => {
     const { leader, lock } = makeLeader({ mocks });
     await leader._stepForTest(); // heldLock=true
 
-    // Reset transfer mock to count fresh calls.
     lock.transferLock.mockClear();
     const firstAcquireCalls = lock.acquireLock.mock.calls.length;
 
-    // Kick off pushHandoff but don't await yet.
     const pushPromise = leader.pushHandoff();
-    // Immediately schedule a tick — should queue behind the push.
     const tickPromise = leader._stepForTest();
 
-    // Give microtasks a chance to run.
     await new Promise((resolve) => { setImmediate(resolve); });
 
-    // Push is still in flight (controlClient.pushHandoff hasn't
-    // resolved). Tick should NOT have run a lock op yet.
     expect(lock.transferLock).toHaveBeenCalledTimes(1); // from push
-    // acquireLock not called again past the pre-step.
     expect(lock.acquireLock.mock.calls.length).toBe(firstAcquireCalls);
 
-    // Resolve the push; tick should then run.
     resolvePush({ ok: true, status: 200 });
     await pushPromise;
     await tickPromise;
 
-    // After push completes, `closed=true` is latched — the queued
-    // tick's closed-guard now bails before touching the lock. This
-    // matches handleInboundHandoff's closed-state invariant: any
-    // work queued behind pushHandoff is a no-op once the leader is
-    // terminal. The serialization contract is still pinned (the
-    // tick waited; transferLock was called exactly once).
     expect(lock.acquireLock.mock.calls.length).toBe(firstAcquireCalls);
     expect(lock.transferLock).toHaveBeenCalledTimes(1);
   });
 
   it('a SIGTERM pushHandoff during an in-flight inbound-handoff queues behind it', async () => {
-    // Real race: handleInboundHandoff is awaiting manager.connect()
-    // when SIGTERM fires. pushHandoff must queue behind the inbound
-    // handoff on the serialization chain — otherwise both would
-    // touch the lock state concurrently.
     const callOrder = [];
     const mocks = makeMocks({
       initialPeers: [{
@@ -682,27 +581,19 @@ describe('serialization — no two mutators interleave', () => {
     });
     const { leader } = makeLeader({ mocks });
 
-    // Pre-hold lock via a tick so pushHandoff has something to do.
-    // (Note: this acquires; handleInboundHandoff below will overwrite
-    // the version cursor via adoptLockFromHandoff. That's a slight
-    // semantic stretch — in reality we wouldn't have both — but the
-    // test is about serialization ordering.)
     await leader._stepForTest();
     callOrder.length = 0;
 
-    // Kick off inbound handoff; blocks at connect-start.
     const inbound = leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 5,
     });
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(callOrder).toEqual(['adopt', 'connect-start']);
 
-    // SIGTERM fires now: pushHandoff queues.
     const push = leader.pushHandoff();
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(callOrder).toEqual(['adopt', 'connect-start']); // still blocked
 
-    // Release the inbound handoff; push then runs.
     resolveConnect();
     await inbound;
     await push;
@@ -730,13 +621,11 @@ describe('serialization — no two mutators interleave', () => {
     });
 
     await new Promise((resolve) => { setImmediate(resolve); });
-    // Only the FIRST handoff's adopt + connect should have started.
     expect(callOrder).toEqual(['adopt-5', 'connect-start-1']);
 
     connectResolves[0]();
     await p1;
     await new Promise((resolve) => { setImmediate(resolve); });
-    // Now the second handoff runs.
     expect(callOrder).toEqual([
       'adopt-5', 'connect-start-1',
       'adopt-9', 'connect-start-2',
@@ -759,7 +648,6 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
     const handoffPromise = leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 5,
     });
-    // Give the serialized fn a microtask to start.
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(leader.isConnecting()).toBe(true);
 
@@ -769,14 +657,6 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
   });
 
   it('inbound handoff connect times out internally; isConnecting stays true until underlying connect settles', async () => {
-    // A hung Discord WS connect would pin connecting=true forever
-    // without the internal timeout. The leader races connect
-    // against a timer and THROWS on timeout — but critically,
-    // `isConnecting()` stays true until the UNDERLYING connect
-    // promise actually settles. Otherwise the next watchdog tick
-    // (1s) would fire its OWN manager.connect() while the original
-    // is still pending in @discordjs/ws — exactly the concurrent-
-    // connect race the flag exists to prevent.
     const mocks = makeMocks();
     let resolveUnderlying;
     mocks.manager.connect = jest.fn(() => new Promise((resolve) => {
@@ -797,16 +677,9 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
       activeInstanceId: 'inst-X', expectedVersion: 5,
     })).rejects.toThrow(/inbound_connect_timeout/);
 
-    // Post-timeout-throw: connecting MUST still be true. The
-    // underlying connect is still pending — the watchdog must
-    // back off, not race a second connect.
     expect(leader.isConnecting()).toBe(true);
-    // heldLock stays true so the watchdog observes lock-held but
-    // is held off by isConnecting until the underlying settles.
     expect(leader.isHoldingLock()).toBe(true);
 
-    // Resolve the underlying connect — flag clears, watchdog
-    // can take over.
     resolveUnderlying();
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(leader.isConnecting()).toBe(false);
@@ -819,20 +692,12 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
     await expect(leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 5,
     })).rejects.toThrow(/discord-down/);
-    // finally{} block must clear the flag so the watchdog can take
-    // over the retry on its next tick.
     expect(leader.isConnecting()).toBe(false);
   });
 });
 
 describe('pushHandoff — terminal contract (closed sentinel)', () => {
   it('step() is a no-op after pushHandoff (closed-guard mirrors handleInboundHandoff)', async () => {
-    // Mirrors the closed-guard contract: handleInboundHandoff has an
-    // inner closed re-check inside the serialized closure; step() now
-    // has its own closed-guard so a stray post-close `_stepForTest`
-    // call doesn't re-write heartbeat / re-acquire / re-renew. The
-    // production loop guards via running=false, but the seam needs
-    // to match the rest of the module's invariants.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -844,7 +709,6 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     await leader.pushHandoff();
     const writeCallsBefore = peerHeartbeat.writeHeartbeat.mock.calls.length;
     await leader._stepForTest();
-    // No new heartbeat, no new peer-list refresh, no new lock work.
     expect(peerHeartbeat.writeHeartbeat).toHaveBeenCalledTimes(writeCallsBefore);
   });
 
@@ -864,8 +728,6 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     await leader._stepForTest(); // heldLock=true
     await leader.pushHandoff();
 
-    // After pushHandoff, start() must NOT schedule another tick —
-    // the leader is terminal (SIGTERM handler is about to exit).
     const sleepCallsBeforeRestart = sleep.mock.calls.length;
     leader.start();
     await new Promise((resolve) => { setImmediate(resolve); });
@@ -873,9 +735,6 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
   });
 
   it('calls peerHeartbeat.deleteOwnRow on the happy path', async () => {
-    // SIGTERM cleanup: the dying replica should close its discovery
-    // window immediately rather than wait the freshness window for
-    // the row to fade naturally.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -910,15 +769,10 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     const { leader } = makeLeader({ mocks });
     await leader._stepForTest();
     const result = await leader.pushHandoff();
-    // Push still succeeds; cleanup is best-effort.
     expect(result).toEqual({ transferred: true, pushAcked: true });
   });
 
   it('handleInboundHandoff after pushHandoff rejects with leader_closed', async () => {
-    // A race where the SIGTERM path ran AND an inbound handoff hits
-    // the control-channel server BEFORE the process exits. The leader
-    // is dead — must not re-adopt. Uniform terminal-state invariant
-    // alongside start() and releaseLockForImmediateExit.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -932,23 +786,10 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     await expect(leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 99,
     })).rejects.toThrow(/leader_closed/);
-    // adoptLockFromHandoff must NOT have run.
     expect(lock.adoptLockFromHandoff).not.toHaveBeenCalled();
   });
 
   it('inner closed re-check: inbound-handoff queued BEFORE pushHandoff aborts when its turn comes', async () => {
-    // The race: an inbound-handoff arrives, passes the outer closed
-    // check, and is queued in runSerialized behind a tick. SIGTERM
-    // fires DURING the queue wait: pushHandoff sets closed=true and
-    // queues its own work behind the inbound. When the inbound work
-    // pops off the chain and starts running, it must observe
-    // closed=true and throw — otherwise it would adopt + connect
-    // against a soon-to-be-transferred lock.
-    //
-    // Construct: gate a tick on a slow renewLock so the chain blocks,
-    // kick inbound, kick pushHandoff, then release renewLock and
-    // verify inbound throws leader_closed and adoptLockFromHandoff
-    // never ran.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -956,43 +797,29 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
       }],
     });
     const { leader, lock } = makeLeader({ mocks });
-    // Acquire the lock first (heldLock=true) via a tick before we
-    // install the blocking renewLock mock — otherwise the lock
-    // module would be the one stuck.
     await leader._stepForTest();
     expect(leader.isHoldingLock()).toBe(true);
 
-    // Now swap renewLock to block on a held promise. The next tick
-    // will queue and never settle until we release.
     let releaseRenew;
     mocks.lock.renewLock = jest.fn(() => new Promise((resolve) => {
       releaseRenew = () => resolve({ renewed: true, version: 7 });
     }));
 
-    // Kick a tick (queued #1, will block on renewLock).
     const tickPromise = leader._stepForTest();
-    // Yield microtasks so the tick reaches the blocking renewLock.
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(typeof releaseRenew).toBe('function');
 
-    // Kick the inbound (queued #2, will wait for tick to finish).
     const inboundPromise = leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 99,
     });
-    // SIGTERM fires (queued #3 + sets closed=true). pushHandoff's
-    // outer side-effect is `closed = true; running = false`, so by
-    // the time the inbound work pops, closed has latched.
     const pushPromise = leader.pushHandoff();
 
-    // Let the tick complete so the chain drains.
     releaseRenew();
     await tickPromise;
 
-    // Inbound must reject with leader_closed and never call adopt.
     await expect(inboundPromise).rejects.toThrow(/leader_closed/);
     expect(lock.adoptLockFromHandoff).not.toHaveBeenCalled();
 
-    // pushHandoff still proceeds to transfer.
     await pushPromise;
   });
 
@@ -1009,17 +836,12 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     const releaseCallsBefore = lock.releaseLock.mock.calls.length;
 
     await leader.releaseLockForImmediateExit();
-    // releaseLock NOT called again — the closed sentinel short-circuits.
     expect(lock.releaseLock.mock.calls.length).toBe(releaseCallsBefore);
   });
 });
 
 describe('pushHandoff — re-entry safety', () => {
   it('a second pushHandoff call after the first transferred returns not_holding_lock', async () => {
-    // SIGTERM fires twice (rare but possible: ECS retry + signal
-    // bounce). Second call must observe heldLock=false (cleared by
-    // the first push's transfer) and no-op cleanly rather than
-    // attempt to re-transfer.
     const mocks = makeMocks({
       initialPeers: [{
         instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
@@ -1035,7 +857,6 @@ describe('pushHandoff — re-entry safety', () => {
     const second = await leader.pushHandoff();
     expect(second).toEqual({ transferred: false, reason: 'not_holding_lock' });
 
-    // Critical: transferLock was called once, not twice.
     expect(lock.transferLock).toHaveBeenCalledTimes(1);
   });
 
@@ -1054,7 +875,6 @@ describe('pushHandoff — re-entry safety', () => {
       leader.pushHandoff(),
     ]);
     expect(lock.transferLock).toHaveBeenCalledTimes(1);
-    // First call transfers, second sees not_holding_lock.
     const transferred = [a, b].filter((r) => r.transferred === true);
     const noOps = [a, b].filter((r) => r.transferred === false);
     expect(transferred).toHaveLength(1);
@@ -1098,20 +918,12 @@ describe('hooks for watchdog + control-channel', () => {
 
 describe('loop backstop — survives unexpected throws from step()', () => {
   it('a synchronous throw from peerHeartbeat.listFreshPeers does not kill the loop', async () => {
-    // Symmetric to the watchdog's loop backstop. A synchronous throw
-    // (NOT a rejecting promise) from any awaited operation inside
-    // step() escapes the inner try/catch arms — `Promise.all([...])`
-    // captures sync rejections, but the array-element construction
-    // itself can throw synchronously and that's not caught by the
-    // inner .catch() arms. Without the loop-level backstop, the
-    // loop's `await runSerialized(step)` would reject and exit.
     const sleepResolvers = [];
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
     const mocks = makeMocks();
     let throwCount = 0;
     mocks.peerHeartbeat.listFreshPeers = jest.fn(() => {
       throwCount += 1;
-      // Synchronous throw, NOT a rejecting promise.
       throw new Error('sync-list-throw');
     });
 
@@ -1120,12 +932,9 @@ describe('loop backstop — survives unexpected throws from step()', () => {
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(sleep).toHaveBeenCalledTimes(1);
 
-    // Tick #1: throws synchronously → backstop catches → loop
-    // schedules tick #2 sleep.
     sleepResolvers[0]();
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(throwCount).toBeGreaterThanOrEqual(1);
-    // Loop must NOT have exited — another sleep was scheduled.
     expect(sleep.mock.calls.length).toBeGreaterThan(1);
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/tick threw unexpectedly/),
@@ -1139,12 +948,6 @@ describe('loop backstop — survives unexpected throws from step()', () => {
 
 describe('start / stop lifecycle', () => {
   it('stop() before start() is a safe no-op (returns resolved promise, no side effects)', async () => {
-    // Load-bearing for startHotStandby's partial-construction
-    // teardown path: if startControlChannelServer throws after
-    // gatewayLeader is assigned but before .start() runs,
-    // gracefulShutdown calls leader.stop() on a never-started
-    // leader. This must resolve cleanly, NOT throw, and must not
-    // call any of the injected mocks — there's no loop to halt yet.
     const mocks = makeMocks();
     const { leader } = makeLeader({ mocks });
 
@@ -1192,18 +995,10 @@ describe('start / stop lifecycle', () => {
     sleepResolvers[0](); // wake the loop so it observes running=false
     await stopPromise;
 
-    // After stop, the loop must not have called writeHeartbeat (the
-    // first tick's work — running=false check skips step).
     expect(peerHeartbeat.writeHeartbeat).not.toHaveBeenCalled();
   });
 
   it('start after stop without awaiting does NOT orphan a second loop', async () => {
-    // Lifecycle correctness: a re-start must wait for the prior
-    // loop to fully exit, otherwise the in-flight `await sleep(...)`
-    // in the OLD loop resumes after a `start()` toggles running=true
-    // again, and we get two concurrent ticks against the same
-    // single-caller-only gateway-lock. Guard: start() is a no-op
-    // while loopPromise is still pending.
     const sleepResolvers = [];
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
     const { leader } = makeLeader({ sleep });
@@ -1212,15 +1007,11 @@ describe('start / stop lifecycle', () => {
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(sleep).toHaveBeenCalledTimes(1);
 
-    // stop() does NOT immediately resolve — the old loop is still
-    // inside the sleep promise. Calling start() now must NOT spawn
-    // a second loop.
     leader.stop();
     leader.start();
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(sleep).toHaveBeenCalledTimes(1); // still only 1, not 2
 
-    // Wake the old loop so it can exit, then start fresh.
     sleepResolvers[0]();
     await new Promise((resolve) => { setImmediate(resolve); });
     leader.start(); // now safe — loopPromise resolved
@@ -1245,11 +1036,6 @@ describe('hasStartedTickLoop — /health probe seam', () => {
   });
 
   it('returns false again after stop() drains the loop', async () => {
-    // The /health probe on the standby path relies on this predicate.
-    // The crashed-loop case (loop body throws) and the stop() case
-    // both null `loopPromise` via the .finally — so both report
-    // unhealthy via this predicate. (A *hung* tick — DDB call that
-    // never resolves — does NOT flip this; see the helper comment.)
     const sleepResolvers = [];
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
     const { leader } = makeLeader({ sleep });

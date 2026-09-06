@@ -1,18 +1,4 @@
-// Tests for src/utils/qurl-oauth-state.js — the HMAC-signed state token
-// the qURL OAuth flow rides through Auth0 (kept out of cookies because
-// the bot's HTTP server is stateless across deploys).
-//
-// Cover the four invariants the callback relies on:
-//   1. round-trip — sign then verify returns the original payload
-//   2. tamper resistance — flipping any byte invalidates the signature
-//   3. expiry — tokens older than STATE_TTL_SECONDS reject
-//   4. cross-purpose — a state minted for a different `kind` rejects
-//      (defense-in-depth against replaying a GitHub-OAuth state here)
 
-// OAUTH_STATE_SECRET is pinned to '0'.repeat(64) globally in
-// tests/setup-env.js (cross-suite convention from PR #177 review on
-// env-var leakage); this suite reads process.env.OAUTH_STATE_SECRET
-// below when hand-signing forged states.
 
 const crypto = require('crypto');
 const { signQurlOAuthState, verifyQurlOAuthState, STATE_TTL_SECONDS } = require('../src/utils/qurl-oauth-state');
@@ -52,7 +38,6 @@ describe('qurl-oauth-state', () => {
     it('rejects when the payload is mutated', () => {
       const state = signQurlOAuthState('guild-1', 'user-2');
       const [encoded, sig] = state.split('.');
-      // Decode, swap guildId, re-encode without re-signing — sig should now mismatch.
       const decoded = JSON.parse(Buffer.from(encoded.replace(/-/g, '+').replace(/_/g, '/') + '==', 'base64').toString('utf8'));
       decoded.g = 'guild-evil';
       const tamperedEncoded = Buffer.from(JSON.stringify(decoded)).toString('base64')
@@ -65,7 +50,6 @@ describe('qurl-oauth-state', () => {
     it('rejects when the signature is mutated', () => {
       const state = signQurlOAuthState('guild-1', 'user-2');
       const [encoded, sig] = state.split('.');
-      // Flip the last hex char of the sig (preserves length + charset).
       const lastChar = sig[sig.length - 1];
       const flippedChar = lastChar === '0' ? '1' : '0';
       const mutatedSig = sig.slice(0, -1) + flippedChar;
@@ -87,10 +71,8 @@ describe('qurl-oauth-state', () => {
     it('rejects an expired token', async () => {
       const realDateNow = Date.now;
       try {
-        // Mint at t=0
         Date.now = () => 0;
         const state = signQurlOAuthState('guild-1', 'user-2');
-        // Verify at t=now+TTL+1 sec — should reject as expired.
         Date.now = () => (STATE_TTL_SECONDS + 1) * 1000;
         const result = verifyQurlOAuthState(state);
         expect(result.ok).toBe(false);
@@ -116,8 +98,6 @@ describe('qurl-oauth-state', () => {
 
   describe('cross-purpose forgery', () => {
     it('rejects a payload with a wrong `kind` field (defense vs GitHub-OAuth state replay)', () => {
-      // Construct a GitHub-OAuth-shaped payload and sign it with the same
-      // secret — the verifier must reject because `k` is not 'qurl-oauth'.
       const payload = { k: 'github-oauth', g: 'guild-1', u: 'user-2', n: 'abc', e: Math.floor(Date.now() / 1000) + 60 };
       const encoded = Buffer.from(JSON.stringify(payload)).toString('base64')
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -129,9 +109,6 @@ describe('qurl-oauth-state', () => {
   });
 
   describe('secret precedence (#184)', () => {
-    // Pins QURL_OAUTH_STATE_SECRET > OAUTH_STATE_SECRET fallback chain.
-    // Uses jest.isolateModulesAsync so the cached `_warnedFallback`
-    // and `_testFallbackSecret` in the module don't leak across tests.
     it('prefers QURL_OAUTH_STATE_SECRET when set (state signs with the new secret, NOT OAUTH_STATE_SECRET)', async () => {
       const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
       const savedShared = process.env.OAUTH_STATE_SECRET;
@@ -142,9 +119,6 @@ describe('qurl-oauth-state', () => {
           // eslint-disable-next-line global-require
           const { signQurlOAuthState: sign, verifyQurlOAuthState: verify } = require('../src/utils/qurl-oauth-state');
           const state = sign('guild-1', 'user-2');
-          // The signature MUST be HMAC over the QURL_OAUTH_STATE_SECRET,
-          // not OAUTH_STATE_SECRET — verify it round-trips and that a
-          // payload signed with the SHARED secret no longer validates.
           expect(verify(state).ok).toBe(true);
           const [encoded] = state.split('.');
           const wrongSig = crypto.createHmac('sha256', process.env.OAUTH_STATE_SECRET).update(encoded).digest('hex');
@@ -161,7 +135,6 @@ describe('qurl-oauth-state', () => {
     it('falls back to OAUTH_STATE_SECRET when QURL_OAUTH_STATE_SECRET is unset', async () => {
       const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
       delete process.env.QURL_OAUTH_STATE_SECRET;
-      // Keep the shared secret set (the file-level default).
       try {
         await jest.isolateModulesAsync(async () => {
           // eslint-disable-next-line global-require

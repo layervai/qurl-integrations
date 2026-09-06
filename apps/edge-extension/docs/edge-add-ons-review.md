@@ -38,7 +38,7 @@ The extension does not auto-grant access to all HTTPS origins:
 - Grants do not accumulate. When the saved server changes to a different host,
   or is cleared back to the bundled default, the previous custom origin's host
   permission is removed via `chrome.permissions.remove` (see
-  `revokeStaleCustomOrigin` in `lib/qurl-api.js`). Revocation runs only after
+  `revokeStaleCustomOrigin` in `apps/chrome-extension/lib/qurl-api.js`). Revocation runs only after
   the new value is persisted, so a failed save leaves the working permission in
   place, and it is skipped when the host is unchanged (a path-only edit on the
   same server keeps its grant). At any moment the extension therefore holds at
