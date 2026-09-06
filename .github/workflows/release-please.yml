@@ -258,10 +258,7 @@ jobs:
               exit 1
             }
           fi
-          required=true
-          if [[ -n "$HANDOFF_SOURCE_SHA" && "$draft" == false ]]; then
-            required=false
-          fi
+          required=$draft
           {
             echo "tag=$CLI_TAG"
             echo "sha=$source_sha"

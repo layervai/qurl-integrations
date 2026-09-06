@@ -1,4 +1,5 @@
 name: "cli: Build and Test"
+run-name: ${{ inputs.release_source_sha != '' && format('CLI release gate {0}', inputs.release_source_sha) || github.event_name == 'schedule' && 'Scheduled CLI soak' || github.event_name == 'workflow_dispatch' && 'Operator CLI soak' || format('CLI {0}', github.event_name) }}
 
 # Path filtering lives in the `changes` job below, NOT in `on: paths:`.
 # A workflow skipped by a path filter never reports its checks, so a
@@ -641,7 +642,18 @@ jobs:
     if: needs.changes.outputs.cli == 'true'
     permissions:
       contents: read
+    outputs:
+      identity_run_attempt: ${{ steps.identity.outputs.run_attempt }}
     steps:
+      # Keep the identity generation outside the matrix. If only a failed
+      # cleanup job is rerun, this output still names the journey attempt that
+      # created the remote device keys and resources.
+      - id: identity
+        name: Select the journey identity generation
+        run: |
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]]
+          echo "run_attempt=$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -714,7 +726,7 @@ jobs:
       QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
       AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
       QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
-      QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
+      QURL_SHARING_RUN_ATTEMPT: ${{ needs.customer-artifacts.outputs.identity_run_attempt }}
       QURL_SHARING_RUNTIME: host
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1093,7 +1105,7 @@ jobs:
 
   journey-cleanup:
     name: cli / customer journey cleanup
-    needs: [changes, journey]
+    needs: [changes, customer-artifacts, journey]
     if: always() && github.ref == 'refs/heads/main' && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1113,6 +1125,7 @@ jobs:
         env:
           AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
           AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          JOURNEY_RUN_ATTEMPT: ${{ needs.customer-artifacts.outputs.identity_run_attempt }}
           REQUIRE_DEVICE_KEYS: ${{ needs.journey.result == 'success' && 'true' || 'false' }}
         run: |
           set -euo pipefail
@@ -1124,11 +1137,12 @@ jobs:
           printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret"
           chmod 0600 "$client_dir/client-id" "$client_dir/client-secret"
           unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
-          lane_specs=(linux:1 macos:2 windows:3 linux:4)
+          [[ "$JOURNEY_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]]
+          lane_specs=(linux:1:full macos:2:full windows:3:full linux:4:soak)
           run_specs=()
           for lane_spec in "${lane_specs[@]}"; do
-            IFS=: read -r lane lane_id <<<"$lane_spec"
-            run_specs+=(--run-spec "${GITHUB_RUN_ID}${lane_id}:${GITHUB_RUN_ATTEMPT}:${lane}:host")
+            IFS=: read -r lane lane_id profile <<<"$lane_spec"
+            run_specs+=(--run-spec "${GITHUB_RUN_ID}${lane_id}:${JOURNEY_RUN_ATTEMPT}:${lane}:host:${profile}")
           done
           device_key_contract=()
           if [[ "$REQUIRE_DEVICE_KEYS" == true ]]; then

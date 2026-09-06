@@ -171,8 +171,8 @@ jobs:
     runs-on: ubuntu-latest
     # Manual recovery accepts at most three source runs. A scheduled/manual
     # source adds the fourth lane, for at most 12 reconciliations under one
-    # management token. Their two-minute inventory budgets consume at most 24
-    # minutes; the remaining 21 minutes cover cleanup writes and runner setup.
+    # management token and one two-minute owner inventory. The remaining time
+    # covers bounded cleanup writes and runner setup.
     timeout-minutes: 45
     environment: cli-customer-journey-cleanup
     permissions:
@@ -209,13 +209,13 @@ jobs:
           IFS=, read -ra run_specs <<<"$SOURCE_RUNS"
           for run_spec in "${run_specs[@]}"; do
             IFS=: read -r source_run_id source_run_attempt <<<"$run_spec"
-            lane_specs=(linux:1 macos:2 windows:3)
+            lane_specs=(linux:1:full macos:2:full windows:3:full)
             if [[ "$INCLUDE_SOAK" == true ]]; then
-              lane_specs+=(linux:4)
+              lane_specs+=(linux:4:soak)
             fi
             for lane_spec in "${lane_specs[@]}"; do
-              IFS=: read -r lane lane_id <<<"$lane_spec"
-              batch_args+=(--run-spec "${source_run_id}${lane_id}:${source_run_attempt}:${lane}:host")
+              IFS=: read -r lane lane_id profile <<<"$lane_spec"
+              batch_args+=(--run-spec "${source_run_id}${lane_id}:${source_run_attempt}:${lane}:host:${profile}")
             done
           done
           python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \

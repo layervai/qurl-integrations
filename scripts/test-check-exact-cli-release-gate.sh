@@ -11,11 +11,16 @@ cat >"$fixture/gh" <<'GH'
 set -euo pipefail
 if [[ "$*" == *actions/runs/700 && "$*" != *attempts* ]]; then
   run_sha=$SOURCE_SHA
+  display_title="CLI release gate $run_sha"
   if [[ "$SCENARIO" == mismatch ]]; then
     run_sha=ffffffffffffffffffffffffffffffffffffffff
   fi
-  jq -n --arg sha "$run_sha" '{
+  if [[ "$SCENARIO" == operator ]]; then
+    display_title="Operator CLI soak"
+  fi
+  jq -n --arg sha "$run_sha" --arg display_title "$display_title" '{
     id:700,run_attempt:2,event:"workflow_dispatch",head_branch:"main",head_sha:$sha,
+    display_title:$display_title,
     path:".github/workflows/cli.yml",html_url:"https://example.invalid/run/700",
     repository:{full_name:"layervai/qurl-integrations"},
     head_repository:{full_name:"layervai/qurl-integrations"}
@@ -73,4 +78,18 @@ run_case required_failed 1 'cli / required=failure'
 run_case cleanup_failed 1 'cli / customer journey cleanup=failure'
 run_case missing 1 'gate set is missing or ambiguous'
 run_case mismatch 1 'run does not match the exact handoff'
+run_case operator 1 'run does not match the exact handoff'
+
+for malformed in 0 01 -1 1.0 900719925474099300000; do
+  run_case_name="malformed-$malformed"
+  output=""
+  status=0
+  output=$(PATH="$fixture:$PATH" SCENARIO=success SOURCE_SHA="$sha" \
+    GH_TOKEN=test GITHUB_REPOSITORY=layervai/qurl-integrations \
+    "$root/scripts/check-exact-cli-release-gate.sh" "$sha" "$malformed" 2 2>&1) || status=$?
+  [[ "$status" == 1 && "$output" == *"input is incomplete"* ]] || {
+    echo "$run_case_name: status=$status output=$output" >&2
+    exit 1
+  }
+done
 echo "exact CLI release gate tests passed"

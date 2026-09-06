@@ -45,11 +45,11 @@ RUN_NAME = re.compile(
 )
 RUN_CONNECTOR_ID = re.compile(r"connector-cli-journey-v2-[0-9a-f]{24}\Z")
 RUN_AGENT_ID = re.compile(
-    r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sf]\Z"
+    r"qurl-journey-v2-r[1-9][0-9]{0,19}-a[1-9][0-9]{0,19}-[hc][sfk]\Z"
 )
 RUN_SPEC = re.compile(
     r"([1-9][0-9]{0,19}):([1-9][0-9]{0,19}):"
-    r"(linux|macos|windows):(host|hardened_container)\Z"
+    r"(linux|macos|windows):(host|hardened_container):(full|soak)\Z"
 )
 MAX_RECONCILE_RUNS = 12
 MAX_ATTEMPTS = 3
@@ -61,9 +61,9 @@ MAX_ATTEMPTS = 3
 INVENTORY_PAGE_SIZE = 100
 INVENTORY_MAX_PAGES = 20
 INVENTORY_MAX_ROWS = INVENTORY_PAGE_SIZE * INVENTORY_MAX_PAGES
-# One absolute deadline covers every inventory scan in one reconciliation. The
-# primary cleanup batches four runs and the fallback batches at most twelve.
-# Two minutes per run leaves bounded time for cleanup writes in both jobs.
+# One absolute deadline covers the two inventory scans in one reconciliation
+# batch. The inventory is owner-wide, so scanning once per run would multiply
+# service load without finding any additional cleanup targets.
 RECONCILE_INVENTORY_BUDGET_SECONDS = 2 * 60
 # A slow credential inventory must not consume the whole shared deadline before
 # the final resource inventory can attempt cleanup. This is a reservation inside
@@ -91,6 +91,7 @@ class RunCleanup:
     run_attempt: str
     lane: str
     runtime: str
+    profile: str
     require_device_keys: bool = False
 
 
@@ -103,6 +104,16 @@ class CredentialCreate:
     lane: str
     purpose: str
     output_dir: pathlib.Path
+
+
+@dataclass(frozen=True)
+class ReconciliationInventory:
+    """One bounded owner inventory shared by every run in a cleanup batch."""
+
+    credentials: tuple[dict[str, Any], ...] | None
+    credential_failure: str | None
+    resources: tuple[dict[str, Any], ...] | None
+    resource_failure: str | None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -580,7 +591,7 @@ def run_agent_ids(args: argparse.Namespace) -> set[str]:
     runtime_code = {"host": "h", "hardened_container": "c"}[args.runtime]
     return {
         f"qurl-journey-v2-r{args.run_id}-a{args.run_attempt}-{runtime_code}{label_code}"
-        for label_code in ("s", "f")
+        for label_code in cleanup_label_codes(args)
     }
 
 
@@ -589,13 +600,11 @@ def run_device_key_names(args: argparse.Namespace) -> set[str]:
 
 
 def run_connector_ids(args: argparse.Namespace) -> set[str]:
-    # The protected journey creates exactly one normal and one controlled-
-    # failure Connector. Derive their IDs from the same public test inputs as
-    # the Go harness so the trusted controller can remove either resource even
-    # if the runner stops before it records a CRID or resource ID.
+    # Derive every Connector ID from the same public test inputs as the Go
+    # harness so the trusted controller can clean up an interrupted runner.
     run_description(args)
     result: set[str] = set()
-    for label in ("smoke", "failure"):
+    for label in cleanup_labels(args):
         material = "\x00".join(
             ("qurl-cli-journey-v2", args.run_id, args.run_attempt, args.runtime, label)
         ).encode("utf-8")
@@ -605,9 +614,73 @@ def run_connector_ids(args: argparse.Namespace) -> set[str]:
     return result
 
 
+def cleanup_labels(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
+    profile = getattr(args, "profile", "full")
+    if profile == "full":
+        return ("smoke", "failure")
+    if profile == "soak":
+        return ("soak",)
+    raise CredentialError("journey cleanup profile is invalid")
+
+
+def cleanup_label_codes(args: argparse.Namespace | RunCleanup) -> tuple[str, ...]:
+    codes = {"smoke": "s", "failure": "f", "soak": "k"}
+    return tuple(codes[label] for label in cleanup_labels(args))
+
+
+def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory:
+    """Load one bounded snapshot without suppressing either inventory attempt."""
+    inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
+    credential_deadline = inventory_deadline - RESOURCE_INVENTORY_RESERVE_SECONDS
+
+    credential_rows: tuple[dict[str, Any], ...] | None = None
+    credential_failure: str | None = None
+    try:
+        credential_rows = tuple(
+            paged_rows(
+                endpoint,
+                jwt,
+                "/v1/api-keys",
+                "qURL credential cleanup",
+                status_filter=None,
+                deadline=credential_deadline,
+            )
+        )
+    except InventoryBoundError:
+        credential_failure = "credential_inventory_bound"
+    except (CredentialError, OSError, UnicodeError):
+        credential_failure = "credential_inventory"
+
+    resource_rows: tuple[dict[str, Any], ...] | None = None
+    resource_failure: str | None = None
+    try:
+        resource_rows = tuple(
+            paged_rows(
+                endpoint,
+                jwt,
+                "/v1/resources",
+                "qURL resource cleanup",
+                status_filter=None,
+                deadline=inventory_deadline,
+            )
+        )
+    except InventoryBoundError:
+        resource_failure = "resource_inventory_bound"
+    except (CredentialError, OSError, UnicodeError):
+        resource_failure = "resource_inventory"
+
+    return ReconciliationInventory(
+        credentials=credential_rows,
+        credential_failure=credential_failure,
+        resources=resource_rows,
+        resource_failure=resource_failure,
+    )
+
+
 def reconcile_run(
     args: argparse.Namespace | RunCleanup,
     authenticated: tuple[str, str] | None = None,
+    inventory: ReconciliationInventory | None = None,
 ) -> None:
     description = run_description(args)
     credential_names = run_credential_names(args)
@@ -617,10 +690,8 @@ def reconcile_run(
         endpoint, jwt, _ = authenticated_owner(args)
     else:
         endpoint, jwt = authenticated
-    inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
-    credential_inventory_deadline = (
-        inventory_deadline - RESOURCE_INVENTORY_RESERVE_SECONDS
-    )
+    if inventory is None:
+        inventory = reconciliation_inventory(endpoint, jwt)
 
     failures: dict[str, int] = {}
 
@@ -633,15 +704,10 @@ def reconcile_run(
     # and retain only redacted failure categories for the final error.
     key_ids: list[str] = []
     matched_device_names: set[str] = set()
-    try:
-        credentials = paged_rows(
-            endpoint,
-            jwt,
-            "/v1/api-keys",
-            "qURL credential cleanup",
-            deadline=credential_inventory_deadline,
-        )
-        for row in credentials:
+    if inventory.credential_failure is not None:
+        record_failure(inventory.credential_failure)
+    elif inventory.credentials is not None:
+        for row in inventory.credentials:
             row_name = row.get("name")
             key_id = row.get("key_id")
             if (
@@ -655,10 +721,14 @@ def reconcile_run(
             is_device = row_name in device_key_names
             if not is_customer and not is_device:
                 continue
+            status = row.get("status")
+            if status not in {"active", "revoked"}:
+                record_failure("credential_shape")
+                continue
             if is_customer:
                 if row.get("kind") != "api_key" or row.get("scopes") != CUSTOMER_SCOPES:
                     record_failure("credential_shape")
-                else:
+                elif status == "active":
                     key_ids.append(key_id)
             if is_device:
                 if (
@@ -668,12 +738,9 @@ def reconcile_run(
                 ):
                     record_failure("credential_shape")
                 else:
-                    key_ids.append(key_id)
                     matched_device_names.add(row_name)
-    except InventoryBoundError:
-        record_failure("credential_inventory_bound")
-    except (CredentialError, OSError, UnicodeError):
-        record_failure("credential_inventory")
+                    if status == "active":
+                        key_ids.append(key_id)
 
     if (
         getattr(args, "require_device_keys", False)
@@ -711,16 +778,10 @@ def reconcile_run(
 
     # Remote-URL resources remain identifiable by the exact run description.
     resource_ids: list[str] = []
-    try:
-        resources = paged_rows(
-            endpoint,
-            jwt,
-            "/v1/resources",
-            "qURL resource cleanup",
-            status_filter=None,
-            deadline=inventory_deadline,
-        )
-        for row in resources:
+    if inventory.resource_failure is not None:
+        record_failure(inventory.resource_failure)
+    elif inventory.resources is not None:
+        for row in inventory.resources:
             if row.get("description") != description:
                 continue
             resource_id = row.get("resource_id")
@@ -728,10 +789,6 @@ def reconcile_run(
                 record_failure("resource_shape")
                 continue
             resource_ids.append(resource_id)
-    except InventoryBoundError:
-        record_failure("resource_inventory_bound")
-    except CredentialError:
-        record_failure("resource_inventory")
     unique_resource_ids = list(dict.fromkeys(resource_ids))
     for resource_id in unique_resource_ids:
         try:
@@ -761,22 +818,24 @@ def reconcile_batch(args: argparse.Namespace) -> None:
         match = RUN_SPEC.fullmatch(value)
         if match is None:
             raise CredentialError("reconciliation run specification is malformed")
-        run_id, run_attempt, lane, runtime = match.groups()
+        run_id, run_attempt, lane, runtime, profile = match.groups()
         parsed.append(
             RunCleanup(
                 run_id=run_id,
                 run_attempt=run_attempt,
                 lane=lane,
                 runtime=runtime,
+                profile=profile,
                 require_device_keys=getattr(args, "require_device_keys", False),
             )
         )
 
     endpoint, jwt, _ = authenticated_owner(args)
+    inventory = reconciliation_inventory(endpoint, jwt)
     failures = 0
     for run in parsed:
         try:
-            reconcile_run(run, authenticated=(endpoint, jwt))
+            reconcile_run(run, authenticated=(endpoint, jwt), inventory=inventory)
         except CredentialError as exc:
             failures += 1
             print(
@@ -951,6 +1010,7 @@ def create_with_auth(
 
 
 def create(args: argparse.Namespace) -> None:
+    validate_create_args(args)
     endpoint, jwt, expected_owner = authenticated_owner(args)
     create_with_auth(args, endpoint, jwt, expected_owner)
 

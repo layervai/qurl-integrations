@@ -22,12 +22,13 @@ repository=${GITHUB_REPOSITORY:-}
 
 run=$(gh api --method GET "repos/$repository/actions/runs/$run_id")
 jq -e --arg repository "$repository" --arg sha "$source_sha" \
-  --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" '
+  --arg run_id "$run_id" --arg run_attempt "$run_attempt" '
   .repository.full_name == $repository and
   .head_repository.full_name == $repository and
   .head_branch == "main" and .head_sha == $sha and
   .path == ".github/workflows/cli.yml" and .event == "workflow_dispatch" and
-  .id == $run_id and .run_attempt == $run_attempt
+  .display_title == ("CLI release gate " + $sha) and
+  (.id | tostring) == $run_id and (.run_attempt | tostring) == $run_attempt
 ' <<<"$run" >/dev/null || {
   echo "::error::CLI release gate run does not match the exact handoff" >&2
   exit 1
@@ -61,7 +62,7 @@ gate_shape=$(jq -r '
 
 if ! jq -e 'all(.required[], .journeys[], .cleanup[]; .status == "completed")' \
   <<<"$gates" >/dev/null; then
-  jq -cn --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" \
+  jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
     '{ready:false,reason:"cli_release_journey_incomplete",run_id:$run_id,run_attempt:$run_attempt}'
   exit 0
 fi
@@ -77,5 +78,5 @@ if ! jq -e 'all(.required[], .journeys[], .cleanup[]; .conclusion == "success")'
   exit 1
 fi
 
-jq -cn --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg url "$run_url" \
+jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" --arg url "$run_url" \
   '{ready:true,run_id:$run_id,run_attempt:$run_attempt,url:$url,journey_url:$url}'

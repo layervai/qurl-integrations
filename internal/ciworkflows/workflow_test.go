@@ -77,10 +77,12 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		t.Errorf("artifact producer if = %q", artifact.If)
 	}
 	assertJobPermissions(t, cliCustomerArtifactsJobID, artifact.Permissions, map[string]string{"contents": "read"})
-	var checkout, ephemeralPin, build, upload *step
+	var identity, checkout, ephemeralPin, build, upload *step
 	for index := range artifact.Steps {
 		current := &artifact.Steps[index]
 		switch {
+		case current.Name == "Select the journey identity generation":
+			identity = current
 		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
 			checkout = current
 		case current.Name == "Select ephemeral artifact trust root":
@@ -90,6 +92,11 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		case current.Name == "Upload exact packaged customer artifacts":
 			upload = current
 		}
+	}
+	if identity == nil || identity.ID != "identity" ||
+		artifact.Outputs["identity_run_attempt"] != "${{ steps.identity.outputs.run_attempt }}" ||
+		!strings.Contains(identity.Run, `echo "run_attempt=$GITHUB_RUN_ATTEMPT"`) {
+		t.Errorf("artifact producer does not persist the exact journey identity attempt: step=%#v outputs=%#v", identity, artifact.Outputs)
 	}
 	const sourceSHA = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
 	if checkout == nil || checkout.With["ref"] != sourceSHA || checkout.With["persist-credentials"] != false {
@@ -400,6 +407,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(journey.Env["QURL_SHARING_RUN_ID"]), "matrix.lane_id") {
 		t.Error("parallel lanes do not have distinct deterministic run IDs")
 	}
+	if fmt.Sprint(journey.Env["QURL_SHARING_RUN_ATTEMPT"]) != "${{ needs.customer-artifacts.outputs.identity_run_attempt }}" {
+		t.Errorf("journey identity attempt is not the persisted producer value: %v", journey.Env["QURL_SHARING_RUN_ATTEMPT"])
+	}
 	if windowsKeyRemoval == nil || !strings.Contains(windowsKeyRemoval.Run, "QURL_API_KEY=") ||
 		!strings.Contains(windowsKeyRemoval.Run, "QURL_CLI_SANDBOX_FAILURE_API_KEY=") {
 		t.Errorf("Windows journey does not clear both disposable keys after fencing: %#v", windowsKeyRemoval)
@@ -412,6 +422,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 	if fmt.Sprint(cleanup.Env["AUTH_TOKEN_ENDPOINT"]) != "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}" {
 		t.Errorf("terminal cleanup exposes its token endpoint through a non-secret source: %#v", cleanup.Env)
+	}
+	if needs := parseWorkflowNeeds(t, "journey-cleanup", cleanup.Needs); !slices.Equal(needs, []string{"changes", cliCustomerArtifactsJobID, "journey"}) {
+		t.Errorf("terminal cleanup needs = %v, want the persisted journey identity producer", needs)
 	}
 	required := workflow.Jobs[requiredJobID]
 	for _, needed := range []string{"journey", "journey-cleanup"} {
@@ -709,9 +722,9 @@ func TestCLITerminalCleanupBatchesEveryLaneBeforeFailing(t *testing.T) {
 			stepName:        "Revoke run resources and credentials",
 			sourceRuns:      "700:2",
 			wantLanes:       "linux\nmacos\nwindows\nlinux\n",
-			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n",
+			wantInvocations: "7001:2:linux:full\n7002:2:macos:full\n7003:2:windows:full\n7004:2:linux:soak\n",
 			wantSoakLanes:   "linux\nmacos\nwindows\nlinux\n",
-			wantSoakCalls:   "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n",
+			wantSoakCalls:   "7001:2:linux:full\n7002:2:macos:full\n7003:2:windows:full\n7004:2:linux:soak\n",
 		},
 		{
 			name:            "qurl-cli-customer-cleanup.yml",
@@ -719,9 +732,9 @@ func TestCLITerminalCleanupBatchesEveryLaneBeforeFailing(t *testing.T) {
 			stepName:        "Revoke exact-run resources and credentials",
 			sourceRuns:      "700:2,701:3",
 			wantLanes:       "linux\nmacos\nwindows\nlinux\nmacos\nwindows\n",
-			wantInvocations: "7001:2:linux\n7002:2:macos\n7003:2:windows\n7011:3:linux\n7012:3:macos\n7013:3:windows\n",
+			wantInvocations: "7001:2:linux:full\n7002:2:macos:full\n7003:2:windows:full\n7011:3:linux:full\n7012:3:macos:full\n7013:3:windows:full\n",
 			wantSoakLanes:   "linux\nmacos\nwindows\nlinux\nlinux\nmacos\nwindows\nlinux\n",
-			wantSoakCalls:   "7001:2:linux\n7002:2:macos\n7003:2:windows\n7004:2:linux\n7011:3:linux\n7012:3:macos\n7013:3:windows\n7014:3:linux\n",
+			wantSoakCalls:   "7001:2:linux:full\n7002:2:macos:full\n7003:2:windows:full\n7004:2:linux:soak\n7011:3:linux:full\n7012:3:macos:full\n7013:3:windows:full\n7014:3:linux:soak\n",
 		},
 	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -743,10 +756,10 @@ done
 printf 'batch\n' >>"$BATCH_CAPTURE"
 failed=0
 for run_spec in "${run_specs[@]}"; do
-  IFS=: read -r run_id run_attempt lane runtime <<<"$run_spec"
-  [[ -n "$run_id" && -n "$run_attempt" && -n "$lane" && -n "$runtime" ]]
+  IFS=: read -r run_id run_attempt lane runtime profile <<<"$run_spec"
+  [[ -n "$run_id" && -n "$run_attempt" && -n "$lane" && -n "$runtime" && -n "$profile" ]]
   printf '%s\n' "$lane" >>"$LANE_CAPTURE"
-  printf '%s:%s:%s\n' "$run_id" "$run_attempt" "$lane" >>"$INVOCATION_CAPTURE"
+  printf '%s:%s:%s:%s\n' "$run_id" "$run_attempt" "$lane" "$profile" >>"$INVOCATION_CAPTURE"
   if [[ -n "${FAIL_LANE:-}" && "$lane" == "$FAIL_LANE" ]]; then
     failed=1
   fi
@@ -820,6 +833,7 @@ exit "$failed"
 						"QURL_ENDPOINT=https://sandbox.example",
 						"GITHUB_RUN_ID=700",
 						"GITHUB_RUN_ATTEMPT=2",
+						"JOURNEY_RUN_ATTEMPT=2",
 						"GITHUB_EVENT_NAME=" + eventName,
 						"INCLUDE_SOAK=" + includeSoak,
 						"SOURCE_RUN_ID=700",
@@ -1654,6 +1668,13 @@ func TestCLIReleaseUsesAnExactEventDrivenGate(t *testing.T) {
 		strings.Contains(verify.Run, "sleep ") || strings.Contains(verify.Run, "while ") {
 		t.Error("cli-release-gate is not one bounded exact check")
 	}
+	exactGate, err := os.ReadFile(filepath.Join("..", "..", "scripts", "check-exact-cli-release-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(exactGate, []byte(`.display_title == ("CLI release gate " + $sha)`)) {
+		t.Error("exact release gate accepts an operator soak at the same source SHA")
+	}
 	source := steps["Resolve the exact release source"]
 	for _, required := range []string{"HANDOFF_SOURCE_SHA", `"${CLI_TAG}^{commit}"`,
 		"CLI release tag does not match the handed-off source SHA",
@@ -1924,6 +1945,20 @@ exit 2
 			}
 		})
 	}
+
+	t.Run("public_operator_recovery_needs_no_handoff", func(t *testing.T) {
+		got := runStep(t, releaseGateRun, false, "main", map[string]string{
+			"HANDOFF_SOURCE_SHA":  "",
+			"HANDOFF_RUN_ID":      "",
+			"HANDOFF_RUN_ATTEMPT": "",
+		})
+		if got.err != nil {
+			t.Fatalf("public operator recovery failed: %v\n%s", got.err, got.output)
+		}
+		if !strings.Contains(got.githubOutput, "required=false\n") {
+			t.Errorf("public operator gate output = %q, want no journey gate", got.githubOutput)
+		}
+	})
 
 	t.Run("release_gate_draft_requires_exact_run", func(t *testing.T) {
 		got := runStep(t, releaseGateRun, true, sourceSHA, map[string]string{

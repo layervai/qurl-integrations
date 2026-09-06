@@ -59,6 +59,9 @@ class FakeAPI:
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_customer-key"
         self.auth_token_requests = 0
+        self.api_key_inventory_requests = 0
+        self.resource_inventory_requests = 0
+        self.retain_revoked_keys = False
         self.issued_api_keys: dict[str, tuple[str, str]] = {}
         self.keys: dict[str, dict[str, object]] = {}
         self.extra_credentials: list[dict[str, object]] = []
@@ -176,6 +179,7 @@ class FakeAPI:
             self.keys[self.key_id] = row
             return 201, json.dumps({"data": row}).encode()
         if parsed.path == "/v1/api-keys" and method == "GET":
+            self.api_key_inventory_requests += 1
             rows = (
                 list(self.keys.values())
                 + self.extra_credentials
@@ -209,7 +213,10 @@ class FakeAPI:
                 return 503, b"{}"
             self.deleted_keys.append(key_id)
             self.operations.append("revoke:" + key_id)
-            self.keys.pop(key_id, None)
+            if self.retain_revoked_keys and key_id in self.keys:
+                self.keys[key_id]["status"] = "revoked"
+            else:
+                self.keys.pop(key_id, None)
             return 204, b""
         if (
             parsed.path.startswith("/v1/connectors/agents/")
@@ -239,6 +246,7 @@ class FakeAPI:
                 assert len(query["slug"]) == 1
                 row = self.connector_resources.get(query["slug"][0])
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
+            self.resource_inventory_requests += 1
             assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
             return 200, json.dumps(
                 {"data": self.resources, "meta": {"has_more": False}}
@@ -377,7 +385,9 @@ def test_scheduled_soak_workflow_contract() -> None:
         "QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}" in workflow
     )
     lane_count = len(base_matrix["include"]) + 1
-    assert "lane_specs=(linux:1 macos:2 windows:3 linux:4)" in workflow
+    assert (
+        "lane_specs=(linux:1:full macos:2:full windows:3:full linux:4:soak)" in workflow
+    )
     assert credentials.MAX_RECONCILE_RUNS == lane_count * 3
     assert f"(.journeys | length) == {lane_count}" in RELEASE_GATE.read_text(
         encoding="utf-8"
@@ -418,7 +428,7 @@ def test_scheduled_soak_workflow_contract() -> None:
         '(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
         in cleanup
     )
-    assert "lane_specs+=(linux:4)" in cleanup
+    assert "lane_specs+=(linux:4:soak)" in cleanup
     assert "qurl-cli-ci-credentials.py reconcile-run" not in cleanup
     assert cleanup.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
     assert '.name == "cli / customer journey cleanup"' in cleanup
@@ -460,8 +470,8 @@ def test_pair_and_batch_each_request_one_auth0_token() -> None:
             argparse.Namespace(
                 **vars(args),
                 run_spec=(
-                    "1231:2:linux:host",
-                    "1232:2:macos:host",
+                    "1231:2:linux:host:full",
+                    "1232:2:macos:host:full",
                 ),
             )
         )
@@ -477,7 +487,7 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
         args = auth_args(pathlib.Path(raw_root))
         for run_specs in (
             ("malformed",),
-            tuple(f"{1000 + index}:1:linux:host" for index in range(13)),
+            tuple(f"{1000 + index}:1:linux:host:full" for index in range(13)),
         ):
             try:
                 credentials.reconcile_batch(
@@ -491,8 +501,11 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
 
         attempted: list[str] = []
 
-        def reconcile(run: argparse.Namespace, authenticated=None) -> None:
+        def reconcile(
+            run: argparse.Namespace, authenticated=None, inventory=None
+        ) -> None:
             assert authenticated == ("https://sandbox.example", fake.jwt)
+            assert isinstance(inventory, credentials.ReconciliationInventory)
             attempted.append(run.run_id)
             if run.run_id == "1231":
                 raise credentials.CredentialError("first run failed")
@@ -501,7 +514,10 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
             credentials.reconcile_batch(
                 argparse.Namespace(
                     **vars(args),
-                    run_spec=("1232:2:macos:host", "1232:2:macos:host"),
+                    run_spec=(
+                        "1232:2:macos:host:full",
+                        "1232:2:macos:host:full",
+                    ),
                     require_device_keys=False,
                 )
             )
@@ -520,8 +536,8 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
                     argparse.Namespace(
                         **vars(args),
                         run_spec=(
-                            "1231:2:linux:host",
-                            "1232:2:macos:host",
+                            "1231:2:linux:host:full",
+                            "1232:2:macos:host:full",
                         ),
                         require_device_keys=False,
                     )
@@ -539,8 +555,10 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
 
         attempted.clear()
         fake.auth_token_requests = 0
+        fake.api_key_inventory_requests = 0
+        fake.resource_inventory_requests = 0
         maximum = tuple(
-            f"{2000 + index}:1:{('linux', 'macos', 'windows')[index % 3]}:host"
+            f"{2000 + index}:1:{('linux', 'macos', 'windows')[index % 3]}:host:full"
             for index in range(credentials.MAX_RECONCILE_RUNS)
         )
         with mock.patch.object(credentials, "reconcile_run", reconcile):
@@ -551,6 +569,40 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
             )
         assert len(attempted) == credentials.MAX_RECONCILE_RUNS
         assert fake.auth_token_requests == 1
+        assert fake.api_key_inventory_requests == 1
+        assert fake.resource_inventory_requests == 1
+
+
+def test_create_rejects_invalid_input_before_auth0() -> None:
+    fake = FakeAPI()
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+    ):
+        root = pathlib.Path(raw_root)
+        auth = auth_args(root)
+        for field, value in (
+            ("run_id", "0"),
+            ("run_attempt", "01"),
+            ("lane", "solaris"),
+            ("purpose", "admin"),
+        ):
+            values = {
+                **vars(auth),
+                "output_dir": root / "credential",
+                "run_id": "1231",
+                "run_attempt": "2",
+                "lane": "linux",
+                "purpose": "primary",
+            }
+            values[field] = value
+            try:
+                credentials.create(argparse.Namespace(**values))
+            except credentials.CredentialError:
+                pass
+            else:
+                raise AssertionError(f"invalid create field {field} was accepted")
+    assert fake.auth_token_requests == 0
 
 
 def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
@@ -1279,6 +1331,67 @@ def test_successful_journey_cleanup_requires_device_key_contract() -> None:
         )
 
 
+def test_successful_cleanup_contract_is_idempotent_after_revocation() -> None:
+    fake = FakeAPI()
+    fake.retain_revoked_keys = True
+    add_run_credentials(fake)
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        run = argparse.Namespace(
+            **vars(args),
+            lane="linux",
+            run_attempt="2",
+            run_id="1231",
+            runtime="host",
+            profile="full",
+            require_device_keys=True,
+        )
+        credentials.reconcile_run(run)
+        first_revocations = list(fake.deleted_keys)
+        credentials.reconcile_run(run)
+    assert fake.deleted_keys == first_revocations
+    assert {
+        row["status"]
+        for row in fake.keys.values()
+        if row.get("name") in credentials.run_device_key_names(run)
+    } == {"revoked"}
+
+
+def test_soak_cleanup_requires_and_removes_the_soak_device() -> None:
+    fake = FakeAPI()
+    soak_key_id = "key_SoakDev12345"
+    fake.keys[soak_key_id] = {
+        "key_id": soak_key_id,
+        "kind": "device",
+        "name": "agent:qurl-journey-v2-r1231-a2-hk",
+        "scopes": credentials.DEVICE_SCOPES,
+        "status": "active",
+    }
+    fake.assignments = {"qurl-journey-v2-r1231-a2-hk"}
+    fake.connector_resources.clear()
+    with (
+        tempfile.TemporaryDirectory() as raw_root,
+        mock.patch.object(credentials, "request", fake),
+    ):
+        args = auth_args(pathlib.Path(raw_root))
+        run = argparse.Namespace(
+            **vars(args),
+            lane="linux",
+            run_attempt="2",
+            run_id="1231",
+            runtime="host",
+            profile="soak",
+            require_device_keys=True,
+        )
+        credentials.reconcile_run(run)
+    assert credentials.run_agent_ids(run) == {"qurl-journey-v2-r1231-a2-hk"}
+    assert fake.deleted_keys == [soak_key_id]
+    assert fake.retired_assignments == ["qurl-journey-v2-r1231-a2-hk"]
+
+
 def test_unhashable_inventory_fields_remain_bounded() -> None:
     active_fake = FakeAPI()
     run_key_id, failure_key_id, device_key_id, unrecorded_device_key_id = (
@@ -1340,6 +1453,7 @@ def main() -> None:
     test_scheduled_soak_workflow_contract()
     test_pair_and_batch_each_request_one_auth0_token()
     test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run()
+    test_create_rejects_invalid_input_before_auth0()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_pair_first_create_failure_never_mints_a_recovery_key()
     test_auth0_token_remaining_lifetime_matches_workflow_budget()
@@ -1353,6 +1467,8 @@ def main() -> None:
     test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal()
     test_empty_run_reconciliation_is_idempotent()
     test_successful_journey_cleanup_requires_device_key_contract()
+    test_successful_cleanup_contract_is_idempotent_after_revocation()
+    test_soak_cleanup_requires_and_removes_the_soak_device()
     test_unhashable_inventory_fields_remain_bounded()
     assert credentials.run_device_key_names(
         argparse.Namespace(run_id="1231", run_attempt="2", runtime="host")
