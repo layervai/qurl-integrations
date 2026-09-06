@@ -53,7 +53,7 @@ jest.mock('../src/store', () => mockStore);
 // returns 503 (unprimed) on every webhook delivery.
 jest.mock('../src/webhook-subscriptions', () => ({
   isPrimed: () => true,
-  getSecretForOwner: (ownerId) => (ownerId === 'usr_flow_test' ? 'flow-test-secret' : null),
+  getSecretForOwner: (ownerId) => (ownerId === 'usr_flow_test' ? 'whsec_flow_test_secret_value' : null),
   start: jest.fn(),
   stop: jest.fn(),
   upsertGuild: jest.fn(),
@@ -62,7 +62,7 @@ jest.mock('../src/webhook-subscriptions', () => ({
   _resetForTesting: jest.fn(),
 }));
 
-process.env.QURL_WEBHOOK_SECRET = 'flow-test-secret';
+process.env.QURL_WEBHOOK_SECRET = 'whsec_flow_test_secret_value';
 process.env.DDB_TABLE_PREFIX = 'qurl-bot-discord-test-';
 process.env.AWS_REGION = 'us-east-2';
 process.env.BASE_URL = 'http://localhost:3000';
