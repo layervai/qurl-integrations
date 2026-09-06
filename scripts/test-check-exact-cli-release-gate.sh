@@ -9,6 +9,12 @@ sha=0123456789abcdef0123456789abcdef01234567
 cat >"$fixture/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$SCENARIO" == unavailable ]]; then
+  exit 1
+fi
+if [[ "$SCENARIO" == jobs_unavailable && "$*" == *attempts* ]]; then
+  exit 1
+fi
 if [[ "$*" == *actions/runs/700 && "$*" != *attempts* ]]; then
   run_sha=$SOURCE_SHA
   display_title="CLI release gate $run_sha"
@@ -19,7 +25,7 @@ if [[ "$*" == *actions/runs/700 && "$*" != *attempts* ]]; then
     display_title="Operator CLI soak"
   fi
   jq -n --arg sha "$run_sha" --arg display_title "$display_title" '{
-    id:700,run_attempt:2,event:"workflow_dispatch",head_branch:"main",head_sha:$sha,
+    id:700,run_attempt:2,event:"workflow_dispatch",head_branch:"v1.2.3",head_sha:$sha,
     display_title:$display_title,
     path:".github/workflows/cli.yml",html_url:"https://example.invalid/run/700",
     repository:{full_name:"layervai/qurl-integrations"},
@@ -33,24 +39,35 @@ cleanup_status=completed
 required_conclusion=success
 journey_conclusion=success
 cleanup_conclusion=success
+attempt=2
+if [[ "$*" =~ /attempts/([0-9]+)/jobs ]]; then
+  attempt=${BASH_REMATCH[1]}
+fi
 case "$SCENARIO" in
   incomplete) journey_status=in_progress; cleanup_status=queued ;;
   failed) journey_conclusion=failure ;;
   required_failed) required_conclusion=failure ;;
   cleanup_failed) cleanup_conclusion=failure ;;
   missing) journey_count=3 ;;
+  partial_rerun)
+    if [[ "$attempt" != 1 ]]; then
+      journey_count=1
+    fi
+    ;;
 esac
 journey_count=${journey_count:-4}
 jq -n --arg required_status "$required_status" --arg journey_status "$journey_status" \
   --arg cleanup_status "$cleanup_status" --arg required_conclusion "$required_conclusion" \
   --arg journey_conclusion "$journey_conclusion" --arg cleanup_conclusion "$cleanup_conclusion" \
+  --arg scenario "$SCENARIO" --arg attempt "$attempt" \
   --argjson journey_count "$journey_count" '{
     jobs: (
       [{name:"cli / required",status:$required_status,conclusion:$required_conclusion}] +
       [range(0; $journey_count) | {
         name:("cli / customer journey (lane-" + tostring + ")"),
         status:$journey_status,
-        conclusion:$journey_conclusion
+        conclusion:(if $scenario == "partial_rerun" and $attempt == "1" and . == 0
+          then "failure" else $journey_conclusion end)
       }] +
       [{name:"cli / customer journey cleanup",status:$cleanup_status,conclusion:$cleanup_conclusion}]
     )
@@ -79,6 +96,9 @@ run_case cleanup_failed 1 'cli / customer journey cleanup=failure'
 run_case missing 1 'gate set is missing or ambiguous'
 run_case mismatch 1 'run does not match the exact handoff'
 run_case operator 1 'run does not match the exact handoff'
+run_case partial_rerun 0 '"ready":true'
+run_case unavailable 0 '"reason":"cli_release_run_unavailable"'
+run_case jobs_unavailable 0 '"reason":"cli_release_jobs_unavailable"'
 
 for malformed in 0 01 -1 1.0 900719925474099300000; do
   run_case_name="malformed-$malformed"

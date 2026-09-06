@@ -485,7 +485,7 @@ def paged_rows(
     jwt: str,
     path: str,
     label: str,
-    status_filter: str | None = "active",
+    status_filter: str | None,
     *,
     deadline: float,
 ) -> list[dict[str, Any]]:
@@ -731,11 +731,7 @@ def reconcile_run(
                 elif status == "active":
                     key_ids.append(key_id)
             if is_device:
-                if (
-                    row.get("kind") != "device"
-                    or row_name not in device_key_names
-                    or row.get("scopes") != DEVICE_SCOPES
-                ):
+                if row.get("kind") != "device" or row.get("scopes") != DEVICE_SCOPES:
                     record_failure("credential_shape")
                 else:
                     matched_device_names.add(row_name)
@@ -811,7 +807,9 @@ def reconcile_run(
 
 
 def reconcile_batch(args: argparse.Namespace) -> None:
-    if not 1 <= len(args.run_spec) <= MAX_RECONCILE_RUNS:
+    if not args.run_spec:
+        raise CredentialError("reconciliation batch is empty")
+    if len(args.run_spec) > MAX_RECONCILE_RUNS:
         raise CredentialError("reconciliation batch exceeds its run limit")
     parsed: list[RunCleanup] = []
     for value in dict.fromkeys(args.run_spec):
@@ -1112,13 +1110,11 @@ def parser() -> argparse.ArgumentParser:
     create_parser = commands.add_parser("create")
     create_pair_parser = commands.add_parser("create-pair")
     identify_parser = commands.add_parser("identify")
-    reconcile_parser = commands.add_parser("reconcile-run")
     reconcile_batch_parser = commands.add_parser("reconcile-batch")
     for current in (
         create_parser,
         create_pair_parser,
         identify_parser,
-        reconcile_parser,
         reconcile_batch_parser,
     ):
         current.add_argument("--token-endpoint", required=True)
@@ -1146,11 +1142,6 @@ def parser() -> argparse.ArgumentParser:
     create_pair_parser.add_argument("--run-attempt", required=True)
     create_pair_parser.add_argument("--lane", required=True)
     create_pair_parser.set_defaults(handler=create_pair)
-    reconcile_parser.add_argument("--run-id", required=True)
-    reconcile_parser.add_argument("--run-attempt", required=True)
-    reconcile_parser.add_argument("--lane", required=True)
-    reconcile_parser.add_argument("--runtime", required=True)
-    reconcile_parser.set_defaults(handler=reconcile_run)
     reconcile_batch_parser.add_argument("--run-spec", action="append", required=True)
     reconcile_batch_parser.add_argument("--require-device-keys", action="store_true")
     reconcile_batch_parser.set_defaults(handler=reconcile_batch)

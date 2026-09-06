@@ -14,18 +14,37 @@ repository=${GITHUB_REPOSITORY:-}
   echo "::error::CLI release gates require the canonical repository" >&2
   exit 1
 }
-[[ -n "${GH_TOKEN:-}" && "$source_sha" =~ ^[0-9a-f]{40}$ &&
-  "$run_id" =~ ^[1-9][0-9]{0,19}$ && "$run_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || {
+if [[ -z "${GH_TOKEN:-}" || ! "$source_sha" =~ ^[0-9a-f]{40}$ ||
+  ! "$run_id" =~ ^[1-9][0-9]{0,19}$ || ! "$run_attempt" =~ ^[1-9][0-9]?$ ]] ||
+  (( 10#$run_attempt > 30 )); then
   echo "::error::CLI release gate input is incomplete" >&2
   exit 1
+fi
+
+gh_json() {
+  local path=$1 response attempt
+  for attempt in 1 2 3; do
+    if response=$(gh api --method GET "$path" 2>/dev/null); then
+      printf '%s\n' "$response"
+      return 0
+    fi
+    if ((attempt < 3)); then
+      sleep "$attempt"
+    fi
+  done
+  return 1
 }
 
-run=$(gh api --method GET "repos/$repository/actions/runs/$run_id")
+if ! run=$(gh_json "repos/$repository/actions/runs/$run_id"); then
+  jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
+    '{ready:false,reason:"cli_release_run_unavailable",run_id:$run_id,run_attempt:$run_attempt}'
+  exit 0
+fi
 jq -e --arg repository "$repository" --arg sha "$source_sha" \
   --arg run_id "$run_id" --arg run_attempt "$run_attempt" '
   .repository.full_name == $repository and
   .head_repository.full_name == $repository and
-  .head_branch == "main" and .head_sha == $sha and
+  .head_sha == $sha and
   .path == ".github/workflows/cli.yml" and .event == "workflow_dispatch" and
   .display_title == ("CLI release gate " + $sha) and
   (.id | tostring) == $run_id and (.run_attempt | tostring) == $run_attempt
@@ -34,21 +53,45 @@ jq -e --arg repository "$repository" --arg sha "$source_sha" \
   exit 1
 }
 run_url=$(jq -r '.html_url // ""' <<<"$run")
-jobs=$(gh api --method GET \
-  "repos/$repository/actions/runs/$run_id/attempts/$run_attempt/jobs" -f per_page=100)
-gates=$(jq -c '
-  if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
-    (.jobs | type) != "array" or (.jobs | length) != .total_count
-  then error("CLI job data is malformed or truncated")
-  else {
-    required: [.jobs[] | select(.name == "cli / required")],
-    journeys: [.jobs[] | select(
+latest_jobs='{}'
+for ((attempt = 1; attempt <= 10#$run_attempt; attempt++)); do
+  if ! jobs=$(gh_json \
+    "repos/$repository/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"); then
+    jq -cn --arg run_id "$run_id" --arg run_attempt "$run_attempt" \
+      --arg job_attempt "$attempt" \
+      '{ready:false,reason:"cli_release_jobs_unavailable",run_id:$run_id,run_attempt:$run_attempt,job_attempt:$job_attempt}'
+    exit 0
+  fi
+  current_gates=$(jq -c --argjson attempt "$attempt" '
+    if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
+      (.jobs | type) != "array" or (.jobs | length) != .total_count
+    then error("CLI job data is malformed or truncated")
+    else [.jobs[] | select(
+      .name == "cli / required" or
+      .name == "cli / customer journey cleanup" or
+      .name == "cli / customer journey" or
+      (.name | startswith("cli / customer journey ("))) |
+      . + {qurl_run_attempt:$attempt}]
+    end |
+    if length != (unique_by(.name) | length)
+    then error("CLI gate job names are ambiguous within one attempt")
+    else .
+    end
+  ' <<<"$jobs")
+  latest_jobs=$(jq -cn --argjson prior "$latest_jobs" --argjson current "$current_gates" '
+    reduce $current[] as $job ($prior; .[$job.name] = $job)
+  ')
+done
+gates=$(jq -cn --argjson latest "$latest_jobs" '
+  [$latest | to_entries[].value] as $jobs |
+  {
+    required: [$jobs[] | select(.name == "cli / required")],
+    journeys: [$jobs[] | select(
       .name == "cli / customer journey" or
       (.name | startswith("cli / customer journey (")))],
-    cleanup: [.jobs[] | select(.name == "cli / customer journey cleanup")]
+    cleanup: [$jobs[] | select(.name == "cli / customer journey cleanup")]
   }
-  end
-' <<<"$jobs")
+')
 
 gate_shape=$(jq -r '
   (.required | length) == 1 and

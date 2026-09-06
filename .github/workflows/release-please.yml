@@ -34,6 +34,8 @@ name: Release Please
 # the affected tag. Do NOT "Re-run all jobs": release-please then sees the
 # release already exists and skips release-cli. Asset re-uploads are idempotent
 # (release.replace_existing_artifacts in .goreleaser.yml).
+# The exact release journey includes the scheduled 80-minute soak lane. Expect
+# the draft to remain private for about two hours, including setup and queueing.
 #
 # The other failure mode, and the worse one, is a release release-please
 # never made. What it looks like: this workflow runs green, main carries an
@@ -162,13 +164,41 @@ jobs:
           set -euo pipefail
           [[ "$CLI_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          # Both secret-bearing jobs must admit main and immutable release
+          # tags, with no broader deployment policy. Fail before dispatch if
+          # an administrator changes either protected environment.
+          for environment in cli-customer-journey cli-customer-journey-cleanup; do
+            environment_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment")
+            jq -e --arg environment "$environment" '
+              .name == $environment and
+              .deployment_branch_policy == {
+                protected_branches:false,
+                custom_branch_policies:true
+              }
+            ' <<<"$environment_json" >/dev/null || {
+              echo "::error::$environment has an unsafe deployment policy" >&2
+              exit 1
+            }
+            policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$environment/deployment-branch-policies?per_page=100")
+            jq -e '
+              .total_count == 2 and
+              ([.branch_policies[] | {name,type}] | sort_by(.type,.name)) == [
+                {name:"main",type:"branch"},
+                {name:"v*",type:"tag"}
+              ]
+            ' <<<"$policies" >/dev/null || {
+              echo "::error::$environment must allow only main and v* release tags" >&2
+              exit 1
+            }
+          done
           tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CLI_TAG" --jq .object.sha)
-          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
-          [[ "$tag_sha" == "$SOURCE_SHA" && "$main_sha" == "$SOURCE_SHA" ]] || {
-            echo "::error::CLI release source is no longer the exact main head" >&2
+          [[ "$tag_sha" == "$SOURCE_SHA" ]] || {
+            echo "::error::CLI release tag does not match the exact release source" >&2
             exit 1
           }
-          gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main \
+          # Dispatch the immutable release tag. Main can advance after the
+          # draft is created without making that draft unpublishable.
+          gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref "$CLI_TAG" \
             --field "release_source_sha=$SOURCE_SHA"
 
   # The customer journey enters here after it passes. This job performs one

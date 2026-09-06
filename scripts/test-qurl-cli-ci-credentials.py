@@ -385,9 +385,11 @@ def test_scheduled_soak_workflow_contract() -> None:
         "QURL_CLI_SANDBOX_SOAK_DURATION: ${{ matrix.soak && '80m' || '' }}" in workflow
     )
     lane_count = len(base_matrix["include"]) + 1
-    assert (
-        "lane_specs=(linux:1:full macos:2:full windows:3:full linux:4:soak)" in workflow
-    )
+    base_specs = [
+        f"{row['lane']}:{row['lane_id']}:full" for row in base_matrix["include"]
+    ]
+    soak_spec = f"{soak_row['lane']}:{soak_row['lane_id']}:soak"
+    assert f"lane_specs=({' '.join([*base_specs, soak_spec])})" in workflow
     assert credentials.MAX_RECONCILE_RUNS == lane_count * 3
     assert f"(.journeys | length) == {lane_count}" in RELEASE_GATE.read_text(
         encoding="utf-8"
@@ -428,7 +430,8 @@ def test_scheduled_soak_workflow_contract() -> None:
         '(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")'
         in cleanup
     )
-    assert "lane_specs+=(linux:4:soak)" in cleanup
+    assert f"lane_specs=({' '.join(base_specs)})" in cleanup
+    assert f"lane_specs+=({soak_spec})" in cleanup
     assert "qurl-cli-ci-credentials.py reconcile-run" not in cleanup
     assert cleanup.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
     assert '.name == "cli / customer journey cleanup"' in cleanup
@@ -912,6 +915,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
                 "jwt",
                 "/v1/resources",
                 "test",
+                status_filter=None,
                 deadline=time.monotonic() + 60,
             )
         except credentials.InventoryBoundError as exc:
@@ -935,6 +939,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
                 "jwt",
                 "/v1/resources",
                 "test",
+                status_filter=None,
                 deadline=time.monotonic() + 60,
             )
         except credentials.InventoryBoundError as exc:
@@ -961,6 +966,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
                 "jwt",
                 "/v1/resources",
                 "test",
+                status_filter=None,
                 deadline=float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS),
             )
         except credentials.InventoryBoundError as exc:
@@ -996,6 +1002,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
                 "jwt",
                 "/v1/resources",
                 "test",
+                status_filter=None,
                 deadline=float(credentials.RECONCILE_INVENTORY_BUDGET_SECONDS),
             )
         except credentials.InventoryBoundError as exc:

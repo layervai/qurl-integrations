@@ -2,19 +2,18 @@ name: "qURL CLI Customer Cleanup"
 
 # The primary workflow reconciles all lanes with one management token. This
 # trusted fallback runs only when that cleanup did not pass, including after a
-# cancellation. The protected manual entry accepts only verified prior main
+# cancellation. The protected manual entry accepts only verified prior trusted
 # journey runs and exists for bounded recovery of older leaks.
 on:
   workflow_dispatch:
     inputs:
       source_runs:
-        description: "Up to 3 comma-separated main journey run_id:attempt values"
+        description: "Up to 3 comma-separated trusted journey run_id:workflow_attempt values; recovery resolves the persisted identity attempt"
         required: true
         type: string
   workflow_run:
     workflows: ["cli: Build and Test"]
     types: [completed]
-    branches: [main]
 
 permissions:
   contents: read
@@ -26,6 +25,14 @@ concurrency:
 jobs:
   resolve:
     name: Resolve cleanup requirement
+    # Do not create noisy fallback runs for pull requests or feature branches.
+    # Release journeys use an immutable tag, so their exact run title is the
+    # narrow trigger here; the resolver below still validates the full source.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.head_branch == 'main' ||
+      (github.event.workflow_run.event == 'workflow_dispatch' &&
+       startsWith(github.event.workflow_run.display_title, 'CLI release gate '))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -37,14 +44,16 @@ jobs:
       include_soak: ${{ steps.source.outputs.include_soak }}
     steps:
       - id: source
-        name: Require an exact main journey run
+        name: Require an exact trusted journey run
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
           SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
           SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
           SOURCE_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
           SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
           REQUESTED_SOURCE_RUNS: ${{ inputs.source_runs }}
@@ -54,12 +63,20 @@ jobs:
           include_soak=false
           case "$GITHUB_EVENT_NAME" in
             workflow_run)
-              [[ "$SOURCE_BRANCH" == main && \
+              trusted_ref=false
+              if [[ "$SOURCE_BRANCH" == main ]]; then
+                trusted_ref=true
+              elif [[ "$SOURCE_EVENT" == workflow_dispatch && \
+                "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && \
+                "$SOURCE_DISPLAY_TITLE" == "CLI release gate $SOURCE_SHA" ]]; then
+                trusted_ref=true
+              fi
+              [[ "$trusted_ref" == true && \
                 "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$SOURCE_WORKFLOW_NAME" == "cli: Build and Test" && \
                 "$SOURCE_WORKFLOW_PATH" == .github/workflows/cli.yml ]] || {
-                echo "::error::cleanup accepts only the exact same-repository main CLI workflow" >&2
+                echo "::error::cleanup accepts only an exact trusted same-repository CLI workflow" >&2
                 exit 1
               }
               case "$SOURCE_EVENT" in
@@ -74,10 +91,11 @@ jobs:
                 echo "::error::cleanup source run id is not a positive integer" >&2
                 exit 1
               }
-              [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,9}$ ]] || {
-                echo "::error::cleanup source run attempt is not a positive integer" >&2
+              if [[ ! "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]?$ ]] ||
+                (( 10#$SOURCE_RUN_ATTEMPT > 30 )); then
+                echo "::error::cleanup source run attempt is outside the 1-30 recovery bound" >&2
                 exit 1
-              }
+              fi
               source_runs="$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT"
               ;;
             workflow_dispatch)
@@ -89,12 +107,13 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$source_runs" =~ ^[1-9][0-9]{0,18}:[1-9][0-9]{0,9}(,[1-9][0-9]{0,18}:[1-9][0-9]{0,9}){0,2}$ ]] || {
+          [[ "$source_runs" =~ ^[1-9][0-9]{0,18}:[1-9][0-9]?(,[1-9][0-9]{0,18}:[1-9][0-9]?){0,2}$ ]] || {
             echo "::error::cleanup source runs are malformed or exceed the 3-run limit" >&2
             exit 1
           }
           IFS=, read -ra run_specs <<<"$source_runs"
           declare -A seen=()
+          resolved_runs=()
           for run_spec in "${run_specs[@]}"; do
             [[ -z "${seen[$run_spec]:-}" ]] || {
               echo "::error::cleanup source runs contain a duplicate" >&2
@@ -102,17 +121,23 @@ jobs:
             }
             seen[$run_spec]=1
             IFS=: read -r run_id run_attempt <<<"$run_spec"
+            (( 10#$run_attempt <= 30 )) || {
+              echo "::error::cleanup source run attempt exceeds the 30-attempt recovery bound" >&2
+              exit 1
+            }
             if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
-              jq -e --arg repository "$GITHUB_REPOSITORY" '
+              jq -e --arg repository "$GITHUB_REPOSITORY" --arg run_attempt "$run_attempt" '
                 .status == "completed" and
                 (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
-                .head_branch == "main" and
+                (.head_branch == "main" or
+                  .display_title == ("CLI release gate " + .head_sha)) and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
-                .path == ".github/workflows/cli.yml"
+                .path == ".github/workflows/cli.yml" and
+                (.run_attempt | tostring) == $run_attempt
               ' <<<"$run" >/dev/null || {
-                echo "::error::cleanup source is not one exact same-repository main CLI workflow" >&2
+                echo "::error::cleanup source is not one exact trusted same-repository CLI workflow" >&2
                 exit 1
               }
               # This flag is request-wide. One scheduled or manual source adds
@@ -123,19 +148,51 @@ jobs:
               fi
             fi
             jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")
-            # A completed workflow event can briefly precede its final job
-            # conclusion. Only explicit skipped suppresses idempotent cleanup.
-            journey_ran=$(jq -r '
+            validate_jobs='
               if (.total_count | type) != "number" or .total_count < 0 or .total_count > 100 or
                 (.jobs | type) != "array" or (.jobs | length) != .total_count or
                 any(.jobs[]; (.name | type) != "string")
               then error("source jobs are malformed or truncated")
-              else any(.jobs[];
+              else .
+              end
+            '
+            jq -e "$validate_jobs" <<<"$jobs" >/dev/null
+            # A workflow rerun preserves outputs from successful dependency
+            # jobs. Find the newest attempt that ran the artifact producer;
+            # that is the identity generation used by every rerun journey.
+            identity_attempt=$run_attempt
+            identity_jobs=$jobs
+            artifact_ran=$(jq -r '
+              any(.jobs[];
+                .name == "cli / customer journey artifacts" and
+                .conclusion != "skipped")
+            ' <<<"$identity_jobs")
+            while [[ "$artifact_ran" != true && "$identity_attempt" -gt 1 ]]; do
+              identity_attempt=$((identity_attempt - 1))
+              identity_jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$identity_attempt/jobs?per_page=100")
+              jq -e "$validate_jobs" <<<"$identity_jobs" >/dev/null
+              artifact_ran=$(jq -r '
+                any(.jobs[];
+                  .name == "cli / customer journey artifacts" and
+                  .conclusion != "skipped")
+              ' <<<"$identity_jobs")
+            done
+            if [[ "$artifact_ran" != true ]]; then
+              if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+                echo "required=false" >>"$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::cleanup source has no persisted journey identity attempt" >&2
+              exit 1
+            fi
+            # A completed workflow event can briefly precede its final job
+            # conclusion. Only explicit skipped suppresses idempotent cleanup.
+            journey_ran=$(jq -r '
+              any(.jobs[];
                 (.name == "cli / customer journey" or
                   (.name | startswith("cli / customer journey ("))) and
                 .conclusion != "skipped")
-              end
-            ' <<<"$jobs")
+            ' <<<"$identity_jobs")
             [[ "$journey_ran" == true ]] || {
               if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
                 echo "required=false" >>"$GITHUB_OUTPUT"
@@ -157,7 +214,9 @@ jobs:
                 exit 0
               fi
             fi
+            resolved_runs+=("$run_id:$identity_attempt")
           done
+          source_runs=$(IFS=,; echo "${resolved_runs[*]}")
           {
             echo "required=true"
             echo "source_runs=$source_runs"
