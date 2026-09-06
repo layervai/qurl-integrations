@@ -3,18 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-// A key referenced by the code but absent from messages.json does not throw: getMessage
-// falls back to its hard-coded English second argument, so the string silently stops being
-// localizable and nothing in CI notices. _locales/ is deliberately outside the Chrome/Edge
-// lockstep check (see CLAUDE.md), and this is the guard on that fallback path.
-//
-// Scope, deliberately: everything here is within ONE app, and the only thing it asks of a
-// message is that it is non-empty — never what it says.
-// Cross-app parity — identical key sets, the sanctioned per-browser wording deltas, and the
-// __MSG_*__ references in manifest.json, which SOURCE_ROOTS below does not scan — belongs to
-// scripts/check-i18n-parity.sh. It has to live outside this file: this is itself a lockstep
-// file, and the lockstep normalization masks Chrome/Edge on both sides, so an assertion here
-// pinning browser-specific copy would be erased before the comparison.
+// Referenced messages must exist and remain localizable.
 
 const ROOT = path.join(__dirname, '..');
 
@@ -31,6 +20,7 @@ const JS_KEY = /\b(?:api)?[gG]etMessage\(\s*'([a-zA-Z0-9_]+)'/g;
 
 // popup.html localizes nodes declaratively; these attributes name catalog keys too.
 const HTML_KEY = /\bdata-i18n(?:-attr-key)?="([a-zA-Z0-9_]+)"/g;
+const MANIFEST_KEY = /__MSG_([a-zA-Z0-9_]+)__/g;
 
 function walk(entry) {
   const abs = path.join(ROOT, entry);
@@ -77,6 +67,14 @@ test('every data-i18n key used in markup is declared in _locales/en/messages.jso
     [],
     'keys referenced in markup but missing from the message catalog'
   );
+});
+
+test('every manifest message key is declared in _locales/en/messages.json', function () {
+  const used = collect([path.join(ROOT, 'manifest.json')], MANIFEST_KEY, ['.json']);
+  assert.ok(used.size > 0, 'found no manifest message keys — the scan is broken');
+
+  const missing = [...used].filter(([key]) => !(key in catalog));
+  assert.deepEqual(missing.map(([key]) => key), [], 'manifest keys missing from the message catalog');
 });
 
 test('the scan reaches the apiGetMessage call sites in lib/qurl-api.js', function () {

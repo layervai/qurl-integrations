@@ -1,27 +1,4 @@
-/**
- * Send-pipeline back-half tests — monitorLinkStatus polling,
- * revokeAllLinks direct path, and handleAddRecipients flow. Covers the
- * code paths exercised after `/qurl send` or `/qurl map` reaches the
- * "Sent to N" confirmation:
- *   - monitorLinkStatus's setInterval body (init, status diff, pending →
- *     opened/expired transitions, addRecipients() generation bump,
- *     stop() race, allDone, max-duration cap, getResourceStatus errors,
- *     activeMonitors LRU eviction)
- *   - revokeAllLinks (deleteLink fan-out, markSendRevoked, partial failures)
- *   - handleAddRecipients (getSendConfig miss, recipient filtering,
- *     file-path re-download failure modes, location path, mint
- *     underdelivery, recordQURLSendBatch failure, pool-exhaustion 429,
- *     DM batch + status update)
- *
- * The functions are accessed via the `_test` export rather than driven
- * through executeSendPipeline so each spec can target one branch without
- * the front-half setup.
- */
 
-// ---------------------------------------------------------------------------
-// Mocks — each test file gets its own jest module registry, so mocks are
-// file-private (mockMintLinks etc.) to keep specs isolated.
-// ---------------------------------------------------------------------------
 
 jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test-api-key',
@@ -131,21 +108,9 @@ const mockDb = {
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
-  // Cross-replica fast-path render-state persist (PR-B). Default resolves
-  // so the send pipeline's best-effort call is a no-op in tests that
-  // don't assert on it.
   saveSendConfirmState: jest.fn().mockResolvedValue(undefined),
-  // qurl_views webhook-fed reader. Default is an empty Map so a test
-  // that doesn't override gets the "no views yet" path. Per-test
-  // mockResolvedValueOnce drives the status-transition assertions.
   getQurlViews: jest.fn(async () => new Map()),
   recordQurlView: jest.fn(),
-  // Shared monotonic floor between the poll and the webhook fast-path.
-  // The poll now advances it after a confirmed counter render (so the
-  // fast-path can't step backwards). Default resolves true (advanced);
-  // tests asserting commit-after-edit override per-case. MUST exist on
-  // the mock — without it runTick's call throws, gets swallowed by the
-  // floor-advance try/catch, and the assertions below go vacuous.
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
   getSendRenderedCount: jest.fn().mockResolvedValue(0),
   markConfirmTerminal: jest.fn().mockResolvedValue(undefined),
@@ -190,11 +155,6 @@ jest.mock('../src/qurl', () => ({
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
 
-// Stub flow-state so loading commands.js doesn't reach into DDB.
-// These tests target the back-half (monitorLinkStatus, revokeAllLinks,
-// handleAddRecipients) — none of which touch flow_state — but
-// commands.js registers a flow handler at module load and requires
-// the module regardless of which export the test consumes.
 jest.mock('../src/flow-state', () => ({
   createFlow: jest.fn(),
   loadFlow: jest.fn(),
@@ -202,12 +162,6 @@ jest.mock('../src/flow-state', () => ({
   deleteFlow: jest.fn(),
 }));
 
-// Partial-mock time.js so individual tests can force `expiryToMs` to
-// throw without affecting the rest of the suite. Real implementation
-// falls back to DEFAULT_EXPIRY_MS for malformed input (never throws),
-// so the audit-blackhole / orphan-DDB-row failure mode this test pins
-// against is unreachable today — the mock is the only way to exercise
-// the validate-before-DB-write invariant.
 jest.mock('../src/utils/time', () => {
   const actual = jest.requireActual('../src/utils/time');
   return {
@@ -216,10 +170,6 @@ jest.mock('../src/utils/time', () => {
   };
 });
 const mockTime = require('../src/utils/time');
-
-// ---------------------------------------------------------------------------
-// Require modules under test
-// ---------------------------------------------------------------------------
 
 const { _test } = require('../src/commands');
 const logger = require('../src/logger');
@@ -243,10 +193,6 @@ const {
   revokingSendLocks,
 } = _test;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function makeInteraction(overrides = {}) {
   return {
     user: { id: 'sender-1', username: 'Sender' },
@@ -257,20 +203,6 @@ function makeInteraction(overrides = {}) {
   };
 }
 
-// Single drift-anchor for the executeSendPipeline param shape used
-// across every entry-gate describe block below. Each gate test
-// passes `{ [field]: value }` to vary exactly one field; everything
-// else stays at the canonical baseline. Adding a new pipeline param
-// is a one-line edit here instead of touching every gate's
-// describe block.
-//
-// CAVEAT: overrides REPLACE nested objects wholesale (e.g. passing
-// `{ attachment: { url: 'x' } }` drops the baseline's `contentType`
-// and `name`). If a test wants to vary just one nested field, spread
-// the baseline explicitly: `{ attachment: { ...DEFAULT_ATTACHMENT,
-// url: 'x' } }`.
-// Frozen so a test forgetting to spread (`DEFAULT_ATTACHMENT.url = ...`)
-// can't corrupt the constant for later tests.
 const DEFAULT_ATTACHMENT = Object.freeze({ url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' });
 function makePipelineParams(overrides = {}) {
   return {
@@ -299,8 +231,6 @@ function defer() {
 }
 
 async function waitForMicrotaskExpectation(assertion, attempts = 10) {
-  // The Add click should reach the picker in a couple of microtasks; 10 keeps
-  // this deterministic without hiding a path that stopped reaching the picker.
   let lastError;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -314,25 +244,11 @@ async function waitForMicrotaskExpectation(assertion, attempts = 10) {
   throw lastError;
 }
 
-// Accept-path verifier: pin that the named gate did NOT reject the
-// given params. Two branches both count as success:
-//   - executeSendPipeline throws something downstream → assert the
-//     throw message doesn't match any of the gate-specific rejection
-//     regexes. A non-matching downstream throw is fine; what we're
-//     pinning is "we got PAST the gate."
-//   - executeSendPipeline resolves cleanly → also fine; the gate
-//     didn't reject.
-// `expect.hasAssertions()` forces both branches to produce at least
-// one observation, so a future test-setup tightening that lets the
-// await silently resolve doesn't turn this into a vacuous pass
-// (was the issue #291 surfaced).
 async function expectGateAccepts(params, ...gateRejectionRegexes) {
   expect.hasAssertions();
   const interaction = makeInteraction();
   try {
     await executeSendPipeline(interaction, params);
-    // Resolved cleanly — gate accepted. Pin one assertion so
-    // hasAssertions() is satisfied on this branch too.
     expect(true).toBe(true);
   } catch (err) {
     for (const re of gateRejectionRegexes) {
@@ -341,9 +257,6 @@ async function expectGateAccepts(params, ...gateRejectionRegexes) {
   }
 }
 
-// monitorLinkStatus polls at max(15s, min(60s, expiryMs/10)).
-// Tests use '1m' expiry → expiryMs/10 = 6s → max(15s, 6s) = 15s. So one
-// POLL_INTERVAL tick fires the setInterval body once.
 const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
@@ -353,35 +266,15 @@ beforeEach(() => {
   mockDb.markSendRevoked.mockReset();
   mockDb.markSendRevoked.mockResolvedValue(true);
   revokingSendLocks.clear();
-  // clearAllMocks resets call records but NOT queued one-shot
-  // implementations, so a `mockResolvedValueOnce` a test queues but the
-  // monitor never consumes would bleed into the next test's first
-  // getQurlViews. The monitor's poll cadence (and thus how many
-  // getQurlViews calls a `advanceTimersByTimeAsync` drains) is an
-  // implementation detail tests shouldn't be coupled to — reset the
-  // implementation queue and restore the "no views yet" default so each
-  // test starts from a known baseline regardless of tick count.
   mockDb.getQurlViews.mockReset();
   mockDb.getQurlViews.mockResolvedValue(new Map());
-  // Same one-shot-bleed reset for the shared-floor advance.
   mockDb.tryAdvanceRenderedCount.mockReset();
   mockDb.tryAdvanceRenderedCount.mockResolvedValue(true);
   mockDb.getSendRenderedCount.mockReset();
   mockDb.getSendRenderedCount.mockResolvedValue(0);
-  // Drain any monitors a prior test left registered. activeMonitors is the
-  // module-private set; clearing it prevents the LRU-cap eviction test
-  // from being polluted by happy-path leftovers.
   for (const m of Array.from(activeMonitors)) m.stop();
 });
 
-// ===========================================================================
-// monitorLinkStatus
-// ===========================================================================
-
-// Canonical qurlLinks shape: every link carries a qurlId, which the
-// monitor uses as the BatchGet key against the qurl_views table.
-// Pre-rollout, upstream connectors didn't surface qurl_id from
-// MintLink — the empty-id boundary guard handles that case.
 const TWO_LINK_SET = [
   { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
   { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa2', qurlLink: 'https://q.test/2', recipientId: 'r2' },
@@ -414,8 +307,6 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
       '1m', 'Sent to 2 users', { components: [] }, 2,
     );
 
-    // First tick: one of the two has been viewed (webhook landed via
-    // the qurl-webhook receiver, which wrote to qurl_views).
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
     ]));
@@ -459,7 +350,6 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
     expect(logger.error).toHaveBeenCalledWith('Link monitor poll failed', expect.any(Object));
-    // No editReply because the BatchGet failed before any status diff.
     expect(interaction.editReply).not.toHaveBeenCalled();
     monitor.stop();
   });
@@ -470,10 +360,6 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
   afterEach(() => { jest.useRealTimers(); });
 
   it('advances last_rendered_count to the DISPLAYED count after a confirmed counter render', async () => {
-    // The poll is now a first-class renderer (coalescing makes the burst
-    // tail poll-only), so it must share the monotonic floor — else a
-    // stale fast-path read could step the display backwards. After it
-    // renders "1 viewed" it advances the floor to 1.
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-1', interaction,
@@ -487,7 +373,6 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
     expect(interaction.editReply).toHaveBeenCalled();
-    // Floor advanced to exactly what was displayed (1), AFTER the edit.
     expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 1);
     const editOrder = interaction.editReply.mock.invocationCallOrder[0];
     const advOrder = mockDb.tryAdvanceRenderedCount.mock.invocationCallOrder[0];
@@ -521,8 +406,6 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
       content: expect.stringContaining('👀 2 viewed / 1 pending'),
     }));
     expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 2);
-    // The local counter is not mutated to the floor; it catches up from
-    // source qurl_views rows to avoid double-counting later pending flips.
     expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
     monitor.stop();
   });
@@ -553,9 +436,6 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
   });
 
   it('COMMIT-AFTER-EDIT: a failed poll render does NOT advance the floor (mirror of the fast-path fence)', async () => {
-    // If the poll advanced the floor on a render that DIDN'T land, the
-    // fast-path's N<=L skip would strand a count never displayed —
-    // stuck-counter, round two. So advance only on a confirmed edit.
     const interaction = makeInteraction({
       editReply: jest.fn().mockRejectedValue(new Error('Discord 500')),
     });
@@ -576,10 +456,6 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
   });
 
   it('does NOT advance the floor on a degraded send (no counter displayed)', async () => {
-    // Degraded sends render bare baseMsg (no counter) and the fast-path
-    // is disarmed; advancing the floor here would strand a counter that
-    // was never shown. The degraded early-return skips getQurlViews AND
-    // the advance.
     const interaction = makeInteraction();
     const DEGRADED_SET = [
       { resourceId: 'res-1', qurlId: '', qurlLink: 'https://q.test/1', recipientId: 'r1' },
@@ -602,25 +478,6 @@ describe('monitorLinkStatus — early-poll latency (long-expiry sends tick withi
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  // Regression for the "👀 0 viewed" latency bug (operator-confirmed
-  // 2026-06-17): the sub-second SQS push silent-drops on the replicas
-  // that don't host the monitor (load-bearing by design — see
-  // view-update-registry.js), so the polling fallback is the path that
-  // actually renders the counter on most sends. Before the early-poll
-  // ramp, a long-expiry send polled on the flat steady interval
-  // (max(15s, min(60s, expiryMs/10)) = 60s for a 30m expiry), so a view
-  // that landed seconds after the send wasn't reflected until the next
-  // 60s tick — "far too much latency" for a counter the product calls
-  // sub-second. The dense early phase polls every few seconds for the
-  // first window of the monitor's life, so the view renders within
-  // seconds regardless of expiry.
-  //
-  // 30m expiry is load-bearing: at the old code's steady interval this
-  // is 60s, so advancing only ~20s would read 0 — that's the regression
-  // this test guards. (A short '1m' expiry already polled at 15s, so it
-  // would not exercise the bug.) Keep the early ramp at ~5s until the
-  // live cross-replica PATCH primitive is verified, so a missed fast-path
-  // still cannot regress the backstop below #839.
   it('a view recorded seconds after a 30m-expiry send is reflected within ~5s, not ~60s', async () => {
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
@@ -631,18 +488,13 @@ describe('monitorLinkStatus — early-poll latency (long-expiry sends tick withi
     );
     expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
 
-    // First tick (~3s) runs before the view lands — counter stays 0.
     await jest.advanceTimersByTimeAsync(3000);
     expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
 
-    // The recipient opens the link a few seconds into the send.
     mockDb.getQurlViews.mockResolvedValue(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: true }],
     ]));
 
-    // Advance into the early window (next tick at ~8s) but well short of
-    // the old 60s steady interval. The early backstop must have caught the
-    // view by now — a flat-60s regression would still read 0.
     await jest.advanceTimersByTimeAsync(6000);
 
     expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
@@ -658,10 +510,6 @@ describe('monitorLinkStatus — empty-qurl_id boundary guard', () => {
   afterEach(() => { jest.useRealTimers(); });
 
   it('any missing qurlId degrades the whole monitor to bare base-msg', async () => {
-    // Mixed batch: one link has qurlId, one does not. Misattribution
-    // would render `1 of 2 viewed` from a partial-attribution set —
-    // worse UX than no counter. Boundary guard degrades the whole
-    // monitor.
     const mixed = [
       { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
       { resourceId: 'res-1', qurlId: '', qurlLink: 'https://q.test/2', recipientId: 'r2' },
@@ -679,8 +527,6 @@ describe('monitorLinkStatus — empty-qurl_id boundary guard', () => {
       expect.objectContaining({ sendId: 'send-1', missing: 1, total: 2 }),
     );
 
-    // No DDB read happens during degraded mode — the BatchGet is
-    // unconditionally skipped at the top of runTick when degraded.
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     expect(mockDb.getQurlViews).not.toHaveBeenCalled();
     monitor.stop();
@@ -706,10 +552,6 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
   });
 
   it('keeps the 5s early backstop during the early window, then decays to the steady interval', async () => {
-    // 30m expiry → steady interval = 60s; early phase = every ~5s for the
-    // first 90s. The webhook fast-path owns normal sub-second latency, but
-    // the poll backstop stays at #839's 5s floor until the live
-    // cross-replica PATCH primitive is verified.
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
@@ -717,25 +559,13 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
       '30m', 'Sent', { components: [] }, 1,
     );
 
-    // First tick at ~3s.
     await jest.advanceTimersByTimeAsync(3000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
 
-    // Dense early phase: ~5s spacing → several ticks over the next 20s.
-    // Floor-bound assertion so
-    // the exact boundary count isn't brittle; the point is the early
-    // phase still ticks several times within the window (a regression to
-    // the flat 60s steady would yield 0 more here).
     await jest.advanceTimersByTimeAsync(20000);
     const callsAfterEarly = mockDb.getQurlViews.mock.calls.length;
     expect(callsAfterEarly).toBeGreaterThanOrEqual(4);
 
-    // After the 90s early window, cadence decays to the 60s steady
-    // interval. Drain past earlyPhaseUntil so the last early tick (~93s)
-    // has rescheduled at the 60s steady delay; a SHORT advance then yields
-    // no new tick (we're well inside that 60s gap), proving the decay.
-    // (A larger advance would cross the steady tick and false-fail — the
-    // point is the cadence widened, not that it stopped.)
     await jest.advanceTimersByTimeAsync(90000); // past earlyPhaseUntil; drains remaining early ticks
     const callsAtWindowEnd = mockDb.getQurlViews.mock.calls.length;
     await jest.advanceTimersByTimeAsync(10000); // 10s ≪ 60s steady interval
@@ -759,8 +589,6 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     mockDb.getQurlViews.mockClear();
 
-    // Add a recipient with a new qurl_id. The monitor's next BatchGet
-    // must include the new id in its key list.
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa3', username: 'Charlie' }]);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
 
@@ -771,9 +599,6 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
   });
 
   it('addRecipients() re-arms the monitor after allDone so post-resolve adds still see views', async () => {
-    // cr-flagged repro: send to N → all view → setInterval clears
-    // (allDone) → /qurl add M more → without the re-arm, the counter
-    // stays frozen for the rest of the 1h cap.
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-resolve-add', interaction,
@@ -782,40 +607,28 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       '1m', 'Sent to 1 user', { components: [] }, 1,
     );
 
-    // Initial recipient views — triggers allDone + clearInterval.
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
     ]));
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
 
-    // /qurl add a new recipient AFTER the monitor settled.
     monitor.updateBaseMsg('Sent to 2 users');
     const callsBeforeAdd = mockDb.getQurlViews.mock.calls.length;
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
 
-    // Re-arm uses the FIRST_POLL_DELAY_MS (3s) fast-tick pattern,
-    // mirroring construction. Eve's view should land within a few
-    // seconds of /qurl add, not pollInterval later.
     mockDb.getQurlViews.mockResolvedValueOnce(new Map([
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
       ['q_aaaaaaaaaa9', { accessCount: 1, consumed: false }],
     ]));
     await jest.advanceTimersByTimeAsync(3500);
 
-    // The post-allDone tick must actually have fired — a missing
-    // re-arm would leave callsBeforeAdd == calls.length and the
-    // counter frozen at 1/0 instead of advancing to 2/0.
     expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(callsBeforeAdd);
     expect(monitor.getFullMsg()).toBe('Sent to 2 users\n👀 2 viewed / 0 pending');
     monitor.stop();
   });
 
   it('addRecipients() seeds linkStatus so views on newly-added recipients flip pending → viewed', async () => {
-    // Regression guard for the cr-flagged bug: extending trackedQurlIds
-    // without also seeding linkStatus left the new recipients invisible
-    // to the status-flip loop. Webhook would land, BatchGet would
-    // return the row, but the counter never advanced.
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-add-bug', interaction,
@@ -837,9 +650,6 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
   });
 
   it('addRecipients() with a missing qurl_id flips viewCounterDegraded AND warns once', async () => {
-    // Regression guard for the silent-degrade bug cr round 3 surfaced:
-    // construction-time degrade warns once at send-start, but a /qurl
-    // add link arriving without qurl_id has to leave a breadcrumb too.
     const monitor = monitorLinkStatus(
       'send-degrade-add', makeInteraction(),
       ONE_LINK_SET,
@@ -853,7 +663,6 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       expect.stringContaining('degraded mid-life'),
       expect.objectContaining({ sendId: 'send-degrade-add' }),
     );
-    // Counter degrades to bare base msg, NOT a partial-attribution render.
     expect(monitor.getFullMsg()).toBe('Sent to 1 user');
     monitor.stop();
   });
@@ -865,23 +674,14 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       [{ id: 'r1', username: 'Alice' }],
       '1m', 'Sent', { components: [] }, 1,
     );
-    // Same ID already tracked — should be a no-op insertion-wise.
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa1', username: 'Alice' }]);
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     const lastCallKeys = mockDb.getQurlViews.mock.calls.at(-1)[0];
-    // Set semantics — only one entry for q_aaaaaaaaaa1.
     expect(lastCallKeys.filter(k => k === 'q_aaaaaaaaaa1')).toHaveLength(1);
     monitor.stop();
   });
 
   it('addRecipients() called AFTER stop() is a strict no-op', async () => {
-    // Defends the GC leak surface: a post-stop addRecipients would
-    // otherwise extend expectedCount + linkStatus + register new
-    // view-update callbacks against the registry that the unregister
-    // loop (already iterated) won't pick up — pinning closure state
-    // to process restart. The early-out at the top of addRecipients
-    // closes both the pre-#60 (expectedCount/linkStatus) and post-#60
-    // (registry register) leak shapes.
     const monitor = monitorLinkStatus(
       'send-after-stop', makeInteraction(),
       ONE_LINK_SET,
@@ -889,20 +689,11 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       '1m', 'Sent to 1 user', { components: [] }, 1,
     );
 
-    // Snapshot the monitor's pre-stop render state so we can assert
-    // it doesn't change after the post-stop addRecipients call.
     const preStopMsg = monitor.getFullMsg();
     monitor.stop();
 
-    // Post-stop addRecipients call. Without the guard this would
-    // bump expectedCount from 1 to 2 and visibly change the render
-    // (pending count would increment).
     monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
 
-    // expectedCount unchanged → buildStatusMsg returns the same
-    // string. (getFullMsg() also returns the post-stop sentinel
-    // depending on internal state — equality with the pre-stop
-    // snapshot is the assertion that matters.)
     expect(monitor.getFullMsg()).toBe(preStopMsg);
   });
 
@@ -921,74 +712,12 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
     await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
     monitor.stop();
     await jest.advanceTimersByTimeAsync(10000);
-    // Contract: no uncaught throw, no "poll failed" log emission from
-    // the racing tick. logger.error firing here would mean stop() let
-    // a thrown error escape the setInterval callback.
     expect(logger.error).not.toHaveBeenCalledWith(
       'Link monitor poll failed',
       expect.any(Object),
     );
   });
 
-  it('re-arm racing a mid-await tick keeps a single poll chain (loopGen guard)', async () => {
-    // The race cr flagged: a tick suspended inside `await getQurlViews`
-    // resumes AFTER the push path flipped the last link (allDone) and a
-    // /qurl add re-armed the loop with a fresh timer. Without the loopGen
-    // guard the stale resumed tick also arm()s, leaving TWO concurrent
-    // poll chains (double the BatchGet rate) until stop()/the 14-min cap.
-    // (Bounded + self-healing — stop() nulls the closure refs, so there's
-    // no leak past stop — but the guard keeps the "single timer handle"
-    // invariant exact rather than commented-around.)
-    //
-    // Driving allDone REQUIRES the push path: only handleViewUpdate →
-    // onAllDone() sets allDone from outside a running tick. So this test
-    // enables the push and dispatches through the real registry.
-    const config = require('../src/config');
-    const registry = require('../src/view-update-registry');
-    const prevFlag = config.ENABLE_VIEW_UPDATE_PUSH;
-    config.ENABLE_VIEW_UPDATE_PUSH = true;
-    try {
-      const interaction = makeInteraction();
-      // First tick blocks until released — simulates a tick suspended in
-      // its getQurlViews await across the re-arm; later ticks are instant.
-      let releaseFirstTick;
-      mockDb.getQurlViews
-        .mockImplementationOnce(() => new Promise((resolve) => { releaseFirstTick = () => resolve(new Map()); }));
-
-      const monitor = monitorLinkStatus(
-        'send-rearm-race', interaction,
-        ONE_LINK_SET,
-        [{ id: 'r1', username: 'Alice' }],
-        '1m', 'Sent to 1 user', { components: [] }, 1,
-      );
-
-      // First tick (~3s) suspends inside getQurlViews.
-      await jest.advanceTimersByTimeAsync(3000);
-      expect(typeof releaseFirstTick).toBe('function');
-
-      // Push path flips the only link → onAllDone() sets allDone, then
-      // /qurl add re-arms the loop (allDone → false, fresh timer).
-      registry.dispatch('q_aaaaaaaaaa1', { accessCount: 1 });
-      monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
-
-      // Resume the now-stale first tick. The guard must suppress its
-      // reschedule so only the re-arm's chain remains.
-      releaseFirstTick();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      // Measure the poll RATE over one dense window. One chain ticks
-      // every 5s (~3 ticks in 15s); a stale-tick orphan would double it.
-      const callsBefore = mockDb.getQurlViews.mock.calls.length;
-      await jest.advanceTimersByTimeAsync(15000);
-      const ticksInWindow = mockDb.getQurlViews.mock.calls.length - callsBefore;
-      expect(ticksInWindow).toBeLessThanOrEqual(4); // single chain; two would be ~6+
-      monitor.stop();
-    } finally {
-      config.ENABLE_VIEW_UPDATE_PUSH = prevFlag;
-      registry._test._resetForTest();
-    }
-  });
 });
 
 describe('monitorLinkStatus — edits always go through interaction.editReply (ephemeral-safe)', () => {
@@ -996,14 +725,6 @@ describe('monitorLinkStatus — edits always go through interaction.editReply (e
   afterEach(() => { jest.useRealTimers(); });
 
   it('never falls back to editDM — the confirm message is ephemeral and ephemeral edits are interaction-token-only', async () => {
-    // Pre-refactor the monitor switched to editDM (bot-token PATCH)
-    // past the 14-min cutover to bypass the interaction-token TTL.
-    // That fallback is broken on ephemeral messages (executeSendPipeline
-    // deferReplies ephemeral, and ephemeral messages can only be edited
-    // via the interaction webhook token). The monitor cap was lowered
-    // to 14 min so we don't run setIntervals past the usable window.
-    // This test pins the contract: no editDM call from the monitor
-    // path, no matter what.
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-1', interaction,
@@ -1033,7 +754,6 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
       [{ id: 'r1', username: 'Alice' }],
       '7d', 'Sent', { components: [] }, 1,
     );
-    // Skip ~14min+1min so the cap branch fires.
     await jest.advanceTimersByTimeAsync(14 * 60 * 1000 + 60 * 1000);
     monitor.stop();
   });
@@ -1071,15 +791,7 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
   });
 });
 
-// ===========================================================================
-// revokeAllLinks
-// ===========================================================================
-
 describe('revokeAllLinks', () => {
-  // Helper: items shape mirrors `getSendItems` return — `{resource_id,
-  // recipient_discord_id}` per row. The recipient_discord_id values
-  // are surfaced via `successUserIds`/`failureUserIds` so callers can
-  // resolve usernames against their in-scope `recipients` array.
   const makeItems = (n) => Array.from({ length: n }, (_, i) => ({
     resource_id: `res-${i + 1}`,
     recipient_discord_id: `user-${i + 1}`,
@@ -1138,8 +850,6 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-1', success: 1, total: 2, unresolvable_recipients: 0,
     });
-    // The durable revoking_at intent keeps Add disabled, while withholding
-    // revoked_at keeps this send visible in /qurl revoke for retry.
     expect(mockDb.markSendRevoking).toHaveBeenCalledWith('send-1', 'sender-1');
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
@@ -1170,10 +880,6 @@ describe('revokeAllLinks', () => {
     expect(mockDeleteLink).toHaveBeenCalledTimes(4);
     expect(mockDb.markSendRevoking).toHaveBeenCalledTimes(2);
     expect(mockDb.markSendRevoked).toHaveBeenCalledTimes(1);
-    // The retry repeats the already-successful recipient's identical PATCH
-    // and adds the newly-successful one. PATCHing the same terminal payload
-    // is idempotent and avoids a second durable marker/race in this recovery
-    // path.
     expect(mockEditDM.mock.calls.map(call => call.slice(0, 2))).toEqual([
       ['channel-1', 'message-1'],
       ['channel-1', 'message-1'],
@@ -1259,11 +965,6 @@ describe('revokeAllLinks', () => {
   });
 
   it('propagates a getSendItems failure to the caller (no DELETE attempted, no audit emitted)', async () => {
-    // DDB outage during getSendItems means the function can't safely
-    // run revokes (no items to iterate) — propagate the error so the
-    // button-click handler surfaces a generic failure to the operator
-    // rather than reporting 0/0 success. Pinned for symmetry with the
-    // other "DDB throws" cases inside persistDispatchResult.
     mockDb.getSendItems.mockRejectedValueOnce(new Error('DDB throttled'));
 
     await expect(
@@ -1351,9 +1052,6 @@ describe('revokeAllLinks', () => {
     );
   });
 
-  // mintLinksInBatches packs up to TOKENS_PER_RESOURCE recipients onto
-  // a single resource_id. Grouping avoids redundant DELETEs and keeps the
-  // result user-centric even though one resource invalidates every token.
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
@@ -1365,7 +1063,6 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-shared', 'sender-1', 'apikey');
 
-    // 1 DELETE per unique resource, not per recipient.
     expect(mockDeleteLink).toHaveBeenCalledTimes(2);
     expect(result.success).toBe(4);
     expect(result.total).toBe(4);
@@ -1461,10 +1158,6 @@ describe('revokeAllLinks', () => {
     });
   });
 
-  // Failure-wins semantics: if a recipient has rows on multiple
-  // resources and any DELETE fails, they count as failure (not
-  // success) — better to tell the operator "alice is partial" than
-  // misleadingly claim full success.
   it('failure-wins: mixed-outcome recipient (one resource ok, another failed) → failure only', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-a', recipient_discord_id: 'alice' },  // succeeds
@@ -1502,12 +1195,6 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM).toHaveBeenCalledTimes(2);
       const calls = mockEditDM.mock.calls.map(c => [c[0], c[1]]).sort();
       expect(calls).toEqual([['c-1', 'm-1'], ['c-2', 'm-2']]);
-      // Edit payload MUST include components: [] so the original Step
-      // Through button is cleared — Discord doesn't drop unset fields
-      // on PATCH /messages, so omitting this would leave the live link
-      // button in the recipient's DM after revoke. Embed copy is
-      // exercised by build-delivery-embed.test.js's buildRevokedDMPayload
-      // suite (where the mock captures setDescription).
       const payload = mockEditDM.mock.calls[0][2];
       expect(payload.components).toEqual([]);
       expect(payload.embeds).toHaveLength(1);
@@ -1524,18 +1211,11 @@ describe('revokeAllLinks', () => {
 
       await revokeAllLinks('send-partial', 'sender-1', 'apikey', 'Alice');
 
-      // Only the strict-success recipient gets the DM edit.
       expect(mockEditDM).toHaveBeenCalledTimes(1);
       expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-ok', 'm-ok']);
     });
 
     it('does NOT edit the DM of a mixed-outcome recipient (one of their resources failed to revoke)', async () => {
-      // Within one recipient: two resources, one DELETE succeeds + one
-      // DELETE fails. Pins that the mixed-outcome recipient lands in
-      // failureUserIds (not successUserIds) AND that editDM is NOT
-      // called for them — the door isn't fully closed, so the
-      // "closed the door" copy would be misleading. Companion to the
-      // bucket-level `failure-wins` test above.
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-a', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed' },
         { resource_id: 'res-b', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed' },
@@ -1555,11 +1235,6 @@ describe('revokeAllLinks', () => {
     });
 
     it('does NOT call editDM when every DELETE threw (success === 0)', async () => {
-      // Pins the `if (success > 0)` guard at the top of the post-
-      // revoke edit block. When every per-resource DELETE fails (e.g.,
-      // the qURL service is fully down), successUserIds is empty and
-      // no recipient has had their link revoked. Editing their DM to
-      // "closed the door" would be a lie.
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent', dm_channel_id: 'c-a', dm_message_id: 'm-a' },
         { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent', dm_channel_id: 'c-b', dm_message_id: 'm-b' },
@@ -1570,8 +1245,6 @@ describe('revokeAllLinks', () => {
 
       expect(result.success).toBe(0);
       expect(mockEditDM).not.toHaveBeenCalled();
-      // Also no debug skip-log: the `if (success > 0)` guard short-
-      // circuits before we even try to build editTargets.
       const skipLog = logger.debug.mock.calls.find(c => c[0] === 'Revoke succeeded but no editable DM targets');
       expect(skipLog).toBeUndefined();
     });
@@ -1586,14 +1259,8 @@ describe('revokeAllLinks', () => {
       await revokeAllLinks('send-all-legacy', 'sender-1', 'apikey', 'Alice');
 
       expect(mockEditDM).not.toHaveBeenCalled();
-      // Skip the "Edited DMs after revoke" info log entirely when
-      // there's nothing to edit — keeps CloudWatch alerts from
-      // interpreting attempted=0 as a noteworthy event.
       const editedLog = logger.info.mock.calls.find(c => c[0] === 'Edited DMs after revoke');
       expect(editedLog).toBeUndefined();
-      // Debug-level silent-skip log surfaces the SQLite local-dev path
-      // (where DM refs aren't persisted) so devs don't chase a phantom
-      // bug. Doesn't fire in prod by default.
       const skipLog = logger.debug.mock.calls.find(c => c[0] === 'Revoke succeeded but no editable DM targets');
       expect(skipLog).toBeTruthy();
       expect(skipLog[1]).toMatchObject({ sendId: 'send-all-legacy', revoke_success: 2 });
@@ -1628,11 +1295,6 @@ describe('revokeAllLinks', () => {
       ['ok:false',      () => mockEditDM.mockResolvedValueOnce({ ok: false, expected: false })],
       ['ok:false+exp',  () => mockEditDM.mockResolvedValueOnce({ ok: false, expected: true })],
     ])('does not affect revoke success/total when DM edit fails as %s', async (_shape, setupMock) => {
-      // Both shapes of edit failure (thrown + soft ok:false return)
-      // and both severities (expected / unexpected) must keep the
-      // revoke success/total counts honest — those track the DELETE,
-      // not the edit, so a recipient-side state change can't poison
-      // the operator-facing tally.
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
       ]);
@@ -1646,10 +1308,6 @@ describe('revokeAllLinks', () => {
     });
 
     it('logs split attempted/edited/expectedFailures/failed counts', async () => {
-      // Three recipients — one ok, one operational outcome (recipient
-      // deleted DM), one true failure. The split log lets CloudWatch
-      // alert on `failed` without false-positiving on user-side state
-      // changes (`expectedFailures`).
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-ok',  dm_status: 'sent', dm_channel_id: 'c-ok',  dm_message_id: 'm-ok' },
         { resource_id: 'res-2', recipient_discord_id: 'u-exp', dm_status: 'sent', dm_channel_id: 'c-exp', dm_message_id: 'm-exp' },
@@ -1669,9 +1327,6 @@ describe('revokeAllLinks', () => {
     });
 
     it('renders the fallback alias when senderAlias is omitted (forgotten-4th-arg defense)', async () => {
-      // Production callers always pass resolveSenderAlias(interaction);
-      // pin the defaulted-param defense so a forgotten arg renders
-      // "Someone closed the door" instead of "undefined closed the door".
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
       ]);
@@ -1680,13 +1335,8 @@ describe('revokeAllLinks', () => {
       await revokeAllLinks('send-no-alias', 'sender-1', 'apikey'); // no senderAlias
 
       expect(mockEditDM).toHaveBeenCalledTimes(1);
-      // The Embed mock chains via setDescription returning `this`, so
-      // the rendered description lives on the captured mock — verify
-      // the fallback string actually lands in the embed.
       const payload = mockEditDM.mock.calls[0][2];
       expect(payload.embeds).toHaveLength(1);
-      // EmbedBuilder mock in this test only chains; assert via the
-      // setDescription spy on the captured embed instance.
       const embed = payload.embeds[0];
       const setDescCall = embed.setDescription.mock?.calls?.[0]?.[0];
       expect(setDescCall).toBeTruthy();
@@ -1694,9 +1344,6 @@ describe('revokeAllLinks', () => {
     });
 
     it('de-dupes per recipient when multiple rows share recipient_discord_id', async () => {
-      // SQLite has no UNIQUE constraint on (send_id, recipient_discord_id);
-      // a hypothetical multi-resource fan-out to one recipient would yield
-      // multiple rows. The DM edit should fire ONCE per recipient.
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
         { resource_id: 'res-2', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
@@ -1742,15 +1389,10 @@ describe('persistDispatchResult — divergence guard', () => {
     ['only channelId missing', { ok: true, messageId: 'm' },                 true,  false],
     ['both missing',           { ok: true },                                  false, false],
   ])('records SENT + emits DISPATCH_SENT_NO_REFS on divergence (%s)', async (_name, result, hasMessageId, hasChannelId) => {
-    // Asymmetric coverage protects against a future refactor that
-    // flips `&&` to `||` in the persistDispatchResult guard — only
-    // BOTH refs present should land on the happy path.
     await persistDispatchResult('s', 'r', result);
     expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'sent');
     expect(logger.audit).toHaveBeenCalledWith('dispatch_sent_no_refs', { send_id: 's' });
-    // Diagnostic fields tell the operator which side of the response
-    // shape drifted.
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('missing channelId/messageId'),
       expect.objectContaining({ hasChannelId, hasMessageId }),
@@ -1758,12 +1400,6 @@ describe('persistDispatchResult — divergence guard', () => {
   });
 
   it('does NOT throw when markSendDMDelivered fails — emits DISPATCH_PERSIST_FAILED + logs error', async () => {
-    // The DM was actually delivered. A bookkeeping failure here must
-    // not propagate up as a thrown rejection — the dispatch lambda
-    // would otherwise classify the recipient as "could not be reached"
-    // even though the DM landed in their inbox. Closes the cr-flagged
-    // gap where a wider markSendDMDelivered Update widens the
-    // ValidationException surface.
     mockDb.markSendDMDelivered.mockRejectedValueOnce(new Error('throttled'));
     await expect(
       persistDispatchResult('s', 'r', { ok: true, channelId: 'c', messageId: 'm' }),
@@ -1776,11 +1412,6 @@ describe('persistDispatchResult — divergence guard', () => {
   });
 
   it('emits DISPATCH_PERSIST_FAILED when divergence-branch updateSendDMStatus fails (canary survives DDB outage)', async () => {
-    // Cycle-7 ordering moved the audit AFTER the DDB write; cycle-8
-    // cr flagged that this masks the discord.js shape-drift canary
-    // during a DDB outage. Audit + warn now fire BEFORE the persist
-    // (canary preserved), and DISPATCH_PERSIST_FAILED fires alongside
-    // when the persist also fails.
     mockDb.updateSendDMStatus.mockRejectedValueOnce(new Error('throttled'));
     await expect(
       persistDispatchResult('s', 'r', { ok: true }),
@@ -1790,10 +1421,6 @@ describe('persistDispatchResult — divergence guard', () => {
   });
 
   it('does NOT emit DISPATCH_PERSIST_FAILED when the FAILED-status write fails (no delivered DM)', async () => {
-    // sendDM said failed; no DM exists. A bookkeeping miss here is a
-    // dropped status update, not a real-vs-recorded divergence. Log
-    // an error for grep-ability but skip the canary event so it
-    // stays a high-signal indicator of "delivered but not recorded."
     mockDb.updateSendDMStatus.mockRejectedValueOnce(new Error('throttled'));
     await expect(
       persistDispatchResult('s', 'r', { ok: false }),
@@ -1807,11 +1434,6 @@ describe('persistDispatchResult — divergence guard', () => {
 });
 
 describe('renderViewCounter — pure "👀 N viewed / M pending" line', () => {
-  // This is the byte-identity anchor: both the in-memory monitor's
-  // buildStatusMsg() and PR-B's off-monitor fast-path render through this
-  // pure fn, so pinning its exact output here guarantees the two render
-  // sites can't drift. The strings below MUST match what the pre-extraction
-  // buildStatusMsg() produced (PR-A is behavior-neutral).
   it('degraded → baseMsg alone (no counter line)', () => {
     expect(renderViewCounter({
       baseMsg: 'Sent to 3 users', viewed: 1, expectedCount: 3, degraded: true,
@@ -1831,8 +1453,6 @@ describe('renderViewCounter — pure "👀 N viewed / M pending" line', () => {
   });
 
   it('pending floors at 0 when viewed > expectedCount (no negative pending)', () => {
-    // Race shape: a webhook double-fire / a count landing before
-    // expectedCount is bumped by /qurl add. Must never render "-1 pending".
     expect(renderViewCounter({
       baseMsg: 'Sent to 1 user', viewed: 3, expectedCount: 1, degraded: false,
     })).toBe('Sent to 1 user\n👀 3 viewed / 0 pending');
@@ -1840,7 +1460,6 @@ describe('renderViewCounter — pure "👀 N viewed / M pending" line', () => {
 });
 
 describe('renderSendConfirm — post-send confirmation overflow', () => {
-  // Common args.
   const baseArgs = {
     delivered: 0, expiresIn: '1h',
     failedNamesPlain: [], successNames: [], showAll: false,
@@ -1855,10 +1474,6 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(r.needsExpand).toBe(true);
   });
 
-  // Pin the third header segment: self-destruct status. The 7b.3 follow-up
-  // replaced the legacy "One-time links" trailer with the timer the user
-  // picked (or "off" when no timer is set), so the sender sees the actual
-  // viewer behavior right next to the link expiry.
   it('header includes "Self-destruct: <label>" when a timer is set', () => {
     const r = renderSendConfirm({
       ...baseArgs, delivered: 1, successNames: ['alice'], selfDestructSeconds: 300,
@@ -1868,8 +1483,6 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
   });
 
   it('header renders "Self-destruct: off" when no timer is set', () => {
-    // selfDestructSeconds omitted (undefined) — same as a send with no
-    // timer picked. The segment is still present for header alignment.
     const r = renderSendConfirm({
       ...baseArgs, delivered: 1, successNames: ['alice'],
     });
@@ -1885,7 +1498,6 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
   });
 
   it('overflow: full list >2000 chars triggers attachment + suppresses Show Recipients', () => {
-    // 200 long names ~= ~6kB inline; well over Discord's 2000-char cap.
     const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });
     expect(r.content.length).toBeLessThanOrEqual(2000);
@@ -1913,12 +1525,10 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
   });
 
   it('plain names land verbatim in attachment (markdown not escaped)', () => {
-    // 100 names with markdown chars to force overflow + verify plain rendering.
     const successNames = Array.from({ length: 100 }, () => '*alice*_long_name_to_force_overflow');
     const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames });
     expect(r.attachmentText).toContain('*alice*_long_name_to_force_overflow');
     expect(r.attachmentText).not.toContain('\\*alice\\*');
-    // Inline preview escapes for message rendering.
     expect(r.content).toContain('\\*alice\\*');
   });
 
@@ -1929,10 +1539,6 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(r.needsExpand).toBe(false);
   });
 
-  // failed-only overflow: 0 success + 200 long failed names. Exercises
-  // the attachment branch where the DELIVERED block is absent (no
-  // leading `\n\n` separator) and the failed line is the only content
-  // driver.
   it('failed-only overflow: NOT DELIVERED block alone, no DELIVERED block, no leading separator', () => {
     const failedNamesPlain = Array.from({ length: 200 }, (_, i) => `failed_${String(i).padStart(3, '0')}_with_long_name_to_force_overflow`);
     const r = renderSendConfirm({
@@ -1946,17 +1552,8 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(r.content).not.toContain('Recipients:');
   });
 
-  // Pin the boundary at REVOKE_CONTENT_SAFE_MAX = 1900. Off-by-one in
-  // the size calc would not be caught by 200-name (way over) or small-
-  // list (way under) tests. Use plain alphanumeric names so escape
-  // doesn't double underscores and skew the math.
   it('overflow-vs-inline boundary at REVOKE_CONTENT_SAFE_MAX', () => {
-    // 20-char alphanumeric, no markdown chars → escaped == raw.
     const make = (n) => Array.from({ length: n }, (_, i) => `aaaaaaaaaaaaa${String(i).padStart(7, '0')}`);
-    // Per-name footprint: 20 chars + ", " = 22 chars. Header ~50 +
-    // prefix 13 = 63. So budget = (1900 - 63) / 22 ≈ 83 names.
-    // Subtract 2 to leave headroom for the trailing comma not present:
-    // 80 names = 50 + 13 + (80*22 − 2) = ~1821 — under cap.
     const namesUnder = make(80);
     const under = renderSendConfirm({
       ...baseArgs, delivered: namesUnder.length, successNames: namesUnder, showAll: true,
@@ -1964,7 +1561,6 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(under.attachmentText).toBeNull();
     expect(under.content.length).toBeLessThanOrEqual(1900);
 
-    // 95 names: 50 + 13 + (95*22 − 2) = ~2151 — over cap → attachment.
     const namesOver = make(95);
     const over = renderSendConfirm({
       ...baseArgs, delivered: namesOver.length, successNames: namesOver, showAll: true,
@@ -1973,23 +1569,16 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(over.content.length).toBeLessThanOrEqual(2000);
   });
 
-  // "(see attached)" pointer must NOT appear on a line that fits
-  // inline — even when overflow is driven by the OTHER list. Pinned
-  // because Agent 1 flagged the unconditional-pointer bug.
   it('(see attached) only on lines that were truncated', () => {
-    // 2 failed names (fits) + 200 success names (overflows).
     const failedNamesPlain = ['fail1', 'fail2'];
     const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderSendConfirm({
       ...baseArgs, delivered: successNames.length,
       successNames, failedNamesPlain, showAll: true,
     });
-    // Failed line: full inline, no pointer.
     expect(r.content).toContain('2 could not be reached: fail1, fail2');
     expect(r.content).not.toMatch(/could not be reached:[^\n]*\(see attached\)/);
-    // Recipients line: truncated, with pointer.
     expect(r.content).toMatch(/Recipients:.*\(see attached\)/);
-    // Attachment still has both lists.
     expect(r.attachmentText).toContain('DELIVERED (200):');
     expect(r.attachmentText).toContain('NOT DELIVERED (2):');
   });
@@ -2011,9 +1600,6 @@ describe('renderRevokeMsg', () => {
     expect(r.content).not.toContain(names.at(-1)); // last name truncated off
     expect(r.needsExpand).toBe(true);
     expect(r.row).not.toBeNull();
-    // Pin the renamed label so a regression that flips it back to the
-    // ambiguous "Show All" (which users misread as a permissions
-    // action next to "Revoke All") fails here.
     expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Show Recipients');
   });
 
@@ -2045,16 +1631,13 @@ describe('renderRevokeMsg', () => {
   });
 
   it('emits attachmentText + suppresses Show Recipients when full list would exceed Discord 2000-char cap', () => {
-    // 200 long usernames (~30 chars each) → ~6000 chars uncapped.
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true, names.length);
     expect(r.content.length).toBeLessThanOrEqual(2000);
     expect(r.content).toContain('(see attached)');
     expect(r.attachmentText).not.toBeNull();
-    // Newline-separated full list — every name present.
     expect(r.attachmentText.split('\n')).toHaveLength(200);
     expect(r.attachmentText).toContain(names[199]);
-    // Show Recipients button suppressed — file IS the full list.
     expect(r.needsExpand).toBe(false);
     expect(r.row).toBeNull();
   });
@@ -2064,29 +1647,20 @@ describe('renderRevokeMsg', () => {
     expect(r.attachmentText).toBeNull();
   });
 
-  // names with markdown chars must survive plain in the .txt
-  // attachment but render escaped in message content.
   it('attachmentText is plain; content escapes markdown per name', () => {
     const names = ['*alice*', 'normal', '[bob](evil)'];
-    // Force attachment by repeating to overflow REVOKE_CONTENT_SAFE_MAX.
     const many = Array.from({ length: 200 }, () => '*alice*');
     const r = renderRevokeMsg('send-md', many, many.length, true, many.length);
     expect(r.attachmentText).toContain('*alice*');
     expect(r.attachmentText).not.toContain('\\*alice\\*');
     expect(r.content).toContain('\\*alice\\*'); // preview line is escaped
 
-    // Inline (small list) path also escapes.
     const inline = renderRevokeMsg('send-md2', names, names.length, false, names.length);
     expect(inline.content).toContain('\\*alice\\*');
     expect(inline.content).toContain('\\[bob\\]\\(evil\\)');
   });
 
-  // Header takes its count from `success` (authoritative DDB count),
-  // not `names.length` — guards against `recipients[]` being incomplete
-  // when the caller filters by Set membership.
   it('header uses explicit success arg, not names.length', () => {
-    // 5 users had links revoked but only 4 names resolvable in
-    // recipients[] — header must still say "5/5".
     const r = renderRevokeMsg('send-mismatch', ['alice', 'bob', 'carol', 'dave'], 5, false, 5);
     expect(r.content).toMatch(/^Revoked 5\/5 users\./);
     expect(r.content).toContain('Revoked for: alice, bob, carol, dave');
@@ -2111,8 +1685,6 @@ describe('renderRevokeMsg', () => {
   });
 });
 
-// Slash-command /qurl revoke uses buildRevokeHeader directly (no
-// Recipients line); unit-test it so wording stays pinned.
 describe('buildRevokeHeader (slash-command revoke path)', () => {
   // eslint-disable-next-line global-require
   const { buildRevokeHeader } = require('../src/revoke-render');
@@ -2152,13 +1724,7 @@ describe('buildRevokeHeader (slash-command revoke path)', () => {
   });
 });
 
-// ===========================================================================
-// handleAddRecipients
-// ===========================================================================
-
 function makeUsersCollection(users) {
-  // Mirrors discord.js Collection just enough for the function under test:
-  // .filter() returns a new collection with .values()
   return {
     filter: jest.fn((fn) => {
       const filtered = users.filter(fn);
@@ -2191,7 +1757,6 @@ describe('handleAddRecipients — pre-flight guards', () => {
 
     const result = await handleAddRecipients(
       'send-1',
-      // Sender + bot — both filtered out.
       makeUsersCollection([
         { id: 'sender-1', username: 'Sender', bot: false },
         { id: 'bot-1', username: 'Botty', bot: true },
@@ -2239,9 +1804,6 @@ describe('handleAddRecipients — pre-flight guards', () => {
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
 
-  // newRecipients carries {id, username} so callers can render added
-  // users by name on a post-Add revoke. Renaming/dropping the field
-  // would break that wiring silently.
   it('returns newRecipients with {id, username} pairs (post-Add revoke wiring)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: null, expires_in: '30m',
@@ -2263,12 +1825,6 @@ describe('handleAddRecipients — pre-flight guards', () => {
     ]);
   });
 
-  // #352: a stale or directly-written sendConfig row could carry an
-  // off-set `expires_in` value. The pre-flight gate rejects it BEFORE
-  // any mint or recordQURLSendBatch work, so we can't strand QURL
-  // links upstream or write orphan DDB rows. Symmetric with the
-  // failGate inside executeSendPipeline — coverage shapes mirror the
-  // executeSendPipeline allowed-set gate test below.
   test.each([
     ['off-set numeric-style', '25h'],
     ['totally bogus', 'never'],
@@ -2291,17 +1847,8 @@ describe('handleAddRecipients — pre-flight guards', () => {
     );
 
     expect(result.msg).toMatch(/saved expiry is invalid/i);
-    // UX: surface that the ORIGINAL send is intact — only Add
-    // Recipients is blocked. Support-ticket-friendly wording.
     expect(result.msg).toMatch(/original send's links still work/i);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
-    // Audit signal: pin the structured log so a future operator-
-    // facing metric can be wired on the same shape. The motivation
-    // for #352 was preserving audit visibility on the orphan-row
-    // failure mode; the entry gate's log is the operator-side
-    // counterpart to user-visible `result.msg`. `truncForLog` coerces
-    // via String(v), so non-string inputs (e.g. number 24) surface
-    // as their stringified form.
     expect(logger.warn).toHaveBeenCalledWith(
       'addRecipients refused invalid expires_in',
       expect.objectContaining({ sendId: 'send-1', expiresIn: String(expiresIn) }),
@@ -2343,13 +1890,6 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
   });
 
-  // The addRecipients file catch ALWAYS emits (no source-side skip): every
-  // failure — CDN re-download, connector re-upload, or mint — is a "couldn't
-  // create links" event. The classifier derives the reason from err.status
-  // (absent on a bare CDN-download Error → unknown; set by throwConnectorError
-  // on a connector error → upstream_4xx/5xx). The user-message branch
-  // (isExpired) is independent and pre-existing.
-
   it('CDN re-download failure (no err.status) emits reason=unknown + shows the expired message', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
@@ -2389,10 +1929,6 @@ describe('handleAddRecipients — file path failure modes', () => {
   });
 
   it('a connector failure carrying err.status emits the classified reason (403 → upstream_4xx)', async () => {
-    // Connector 403 (revoked key / auth outage) from the re-upload step inside
-    // downloadAndUpload — the outage shape #276 must surface. Previously a
-    // message/phase-based skip mis-bucketed this as CDN-expiry and swallowed
-    // it; now there is no skip, so it emits with its real status-derived reason.
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -2434,9 +1970,6 @@ describe('handleAddRecipients — file path failure modes', () => {
   });
 
   it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
-    // The outer catch only fires from the LOCATION path's mintLinksInBatches —
-    // the file path has its own inner try/catch that maps re-download errors
-    // to "expired" / "Failed to prepare links" rather than "pool exhausted".
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower', expires_in: '30m',
@@ -2453,26 +1986,6 @@ describe('handleAddRecipients — file path failure modes', () => {
   });
 });
 
-// =========================================================================
-// QURL_SEND_CREATE_LINK_FAILURE audit emission (#276)
-//
-// These pin the observability contract for #276: the bot's "Failed to create
-// links" surface must emit a metric-filterable audit event so a sustained
-// mint/upload outage is visible to on-call before users report it (the
-// 2026-05-13 incident ran ~4h unnoticed because this path was un-instrumented).
-//
-// The reason taxonomy (timeout / upstream_4xx / upstream_5xx / unknown) is
-// pinned separately in classify-mint-failure.test.js. Here we pin the catch
-// SITES inside handleAddRecipients: that the event fires with the correct
-// `kind`, that the quota_exceeded skip holds (a viral upload is a normal
-// product condition, not an on-call page), and that the `activeKind` fix
-// labels a mixed send's location failure as 'location', not 'file'.
-//
-// The third emission site — executeSendPipeline's initial-send catch, the
-// PRIMARY /qurl send surface from the incident — is pinned separately in the
-// 'executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (primary site)'
-// describe below (it derives kind via kindMap[resourceType], a different
-// mechanism from the activeKind tracking these addRecipients tests pin).
 describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)', () => {
   it('inner file catch: emits with kind=file when the file re-upload + mint fails', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
@@ -2481,9 +1994,6 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    // Plain Error — no status/code/name → classifyMintFailure → 'unknown'.
-    // Pin the exact category, not expect.any(String): the whole point of the
-    // classifier is the taxonomy, and any-string would pass on a broken one.
     mockMintLinks.mockRejectedValueOnce(new Error('Connector down'));
 
     const result = await handleAddRecipients(
@@ -2539,9 +2049,6 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
   });
 
   it('mixed send config is rejected before minting duplicate-key rows', async () => {
-    // Mixed file/location configs cannot be represented in qurl_sends: the
-    // table is keyed by (send_id, recipient_discord_id), so two links for one
-    // recipient would collide. Reject before upload/mint/DB side effects.
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', actual_url: 'https://maps.example.com/x',
       location_name: 'Mixed', expires_in: '30m',
@@ -2588,13 +2095,6 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
   });
 });
 
-// The PRIMARY incident surface: /qurl send itself failing at the upload+mint
-// step (executeSendPipeline's initial-send catch), as opposed to the
-// addRecipients sites above. This site derives `kind` via
-// `kindMap[resourceType] ?? null` — a different mechanism from the
-// activeKind tracking the addRecipients tests pin — so it needs its own
-// coverage. Driven directly through executeSendPipeline with valid params
-// past every entry gate; the mint rejection lands in the catch at the emit.
 describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, primary site)', () => {
   it('file send: mint failure emits kind=file with the classified reason + status', async () => {
     const interaction = makeInteraction();
@@ -2645,10 +2145,6 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     expect(failureCalls).toHaveLength(0);
   });
 
-  // Pins the `?? null` (not `|| null`) choice in emitMintFailureAudit: an
-  // empty-string apiCode is a forensic dimension that `|| null` would silently
-  // collapse to null. Without this, the commented intent could drift in a
-  // future edit without any test catching it.
   it('preserves empty-string apiCode as forensic dimension (?? null, not || null)', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
@@ -3151,8 +2647,6 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
         components: [],
       });
     } finally {
-      // Add sets the per-user send cooldown before opening the picker; clear it
-      // as test teardown so later tests do not inherit this sender's cooldown.
       clearCooldown('sender-1');
     }
   });
@@ -3196,20 +2690,9 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
 });
 
 describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch (#352)', () => {
-  // Pins the invariant that a thrown `expiryToMs` aborts the dispatch
-  // BEFORE any DDB rows are written. Today's `expiryToMs` falls back
-  // to DEFAULT_EXPIRY_MS for malformed input and never throws, so this
-  // path is unreachable in practice — but a future regression in
-  // time.js (or a future caller that swaps the helper for one that
-  // does throw) would otherwise leave orphan DDB rows + audit-blackhole
-  // for the batch. The mock forces the throw to exercise the ordering.
   afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
 
   it('does not write to DB if expiryToMs throws (no orphan rows, no audit-blackhole)', async () => {
-    // Fixture uses a VALID expires_in so the entry-level allowed-set
-    // gate (added on top of the hoist) passes — we want the synthetic
-    // throw to fire at the hoist site, not be short-circuited by the
-    // pre-flight gate above.
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -3224,11 +2707,7 @@ describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch
       makeInteraction(), 'apikey',
     )).rejects.toThrow(/synthetic expiryToMs failure/);
 
-    // The structural invariant: recordQURLSendBatch must NOT have been
-    // reached, so no orphan DDB rows for the QURL links minted above.
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
-    // sendDM also unreached — defense-in-depth that nothing actually
-    // dispatched downstream of the bad expiry.
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 });
@@ -3251,7 +2730,6 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
 
     expect(result.msg).toMatch(/Failed to save link records/);
     expect(result.delivered).toBe(0);
-    // sendDM must NOT have been called — the abort happens before DMs.
     expect(mockSendDM).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
     expect(logger.info).toHaveBeenCalledWith(
@@ -3388,12 +2866,7 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.delivered).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
-    // Happy-path delivery coalesces status='sent' + DM refs into a
-    // single markSendDMDelivered write per recipient.
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledTimes(2);
-    // Audit emission: upload_success + dispatch_sent (×2 recipients).
-    // mint_* is intentionally not emitted from the bot — see
-    // constants.js AUDIT_EVENTS comment.
     const emitted = logger.audit.mock.calls.map(c => c[0]);
     expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'dispatch_sent']));
     expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({
@@ -3404,16 +2877,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(emitted).not.toContain('mint_failed');
   });
 
-  // Bulk-path button-packing contract: handleAddRecipients now
-  // discards the trust button inside each per-link payload and
-  // appends ONE trust button at the bottom of the dispatched
-  // message (so multi-link recipients don't see N redundant
-  // "What is qURL?" verify buttons). For the N=1 case asserted
-  // here, the result must match the executeSendPipeline single-
-  // path layout: one ActionRow holding [Step Through, What is qURL?].
-  // A future refactor that re-introduces per-link trust buttons,
-  // or that breaks the contract that components[0].components[0]
-  // is the Step Through button, would surface here.
   it('packs the trust button once at the bottom (not per-link) for the bulk path', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
@@ -3433,15 +2896,9 @@ describe('handleAddRecipients — happy path (location)', () => {
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     const [, payload] = mockSendDM.mock.calls[0];
-    // One ActionRow holding both buttons — matches the
-    // executeSendPipeline layout for the typical 1-link send.
     expect(payload.components).toHaveLength(1);
     const buttons = payload.components[0].components;
     expect(buttons).toHaveLength(2);
-    // No assertion on label/url shape here; build-delivery-embed.test.js
-    // owns those contracts. This test only pins the packing structure
-    // — that the bulk path produces a [Step Through, What is qURL?]
-    // row, not a separate trust row, in the 1-link case.
   });
 
   it('delivers an over-512-character qv2 link without invalid Discord components', async () => {
@@ -3470,13 +2927,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(description).toContain('[🛡️ What is qURL?](https://layerv.ai/qurl/)');
   });
 
-  // The bulk-path shared-embed optimization: at N>1, the EmbedBuilder
-  // is built once and the same reference repeated via Array(N).fill.
-  // discord.js' .toJSON() is a pure read of internal state, so the
-  // optimization is safe — but a future discord.js bump that
-  // introduces a mutating serialize hook (or a buildDeliveryEmbed
-  // change that turns the embed mutation-aware) would break the
-  // pattern silently. This test pins the reference-equality contract.
   it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
     const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-loc'];
     const embed = buildDeliveryEmbed({
@@ -3492,28 +2942,14 @@ describe('handleAddRecipients — happy path (location)', () => {
     };
 
     expect(payload.embeds).toHaveLength(2);
-    // The optimization: same EmbedBuilder reference, not two copies.
     expect(payload.embeds[0]).toBe(payload.embeds[1]);
-    // Belt-and-braces: even if a future discord.js bump introduced a
-    // position-aware toJSON (some library serialize hooks consult
-    // internal counters), the serialized output must remain identical
-    // across the embeds[] entries — otherwise the recipient would see
-    // diverged author/footer/description across embeds that share the
-    // builder reference.
     if (typeof payload.embeds[0].toJSON === 'function') {
       expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
     }
-    // Link-ordering contract: the qURLs must map positionally onto the Step
-    // Through buttons in the assembled payload.
-    // discord.js mock here is the lightweight chainable variant —
-    // setURL.mock.calls captures the URL each button was built with;
-    // pull the URL via the first call's first arg.
     const urls = payload.components
       .flatMap(row => row.components)
       .map(b => b.setURL.mock.calls[0]?.[0])
       .filter(Boolean);
-    // The two step-throughs precede the trust button; the trust button's
-    // URL is the hardcoded brand landing.
     expect(urls).toEqual([
       'https://q.test/share-file',
       'https://q.test/share-loc',
@@ -3521,15 +2957,11 @@ describe('handleAddRecipients — happy path (location)', () => {
     ]);
   });
 
-  // qurl_sends is keyed by (send_id, recipient_discord_id), so one
-  // recipient cannot receive both file and location rows in one send.
-  // Reject mixed configs before any upload/mint side effects.
   it('does not emit upload_success for unsupported mixed file + location configs', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-file-orig', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
-      // Both paths active.
       actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower',
     });
@@ -3558,7 +2990,6 @@ describe('handleAddRecipients — happy path (location)', () => {
       { qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
       { qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
     ]);
-    // First DM fails, second succeeds.
     mockSendDM.mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-2', messageId: 'dm-m-2' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3576,10 +3007,6 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.msg).toMatch(/1 could not be reached/);
   });
 });
-
-// ===========================================================================
-// mintLinksInBatches
-// ===========================================================================
 
 describe('mintLinksInBatches', () => {
   it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
@@ -3618,7 +3045,6 @@ describe('mintLinksInBatches', () => {
     expect(reuploadFn).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(11);
-    // First 10 carry res-1, 11th carries res-2.
     expect(result[10].resourceId).toBe('res-2');
   });
 
@@ -3636,10 +3062,6 @@ describe('mintLinksInBatches', () => {
   });
 
   it('forwards guildId to mintLinks on EVERY batch (#1101 attribution)', async () => {
-    // guildId threads through the batcher into mintLinks so the connector
-    // can guild-scope a watermark-attribution lookup. Pin it across a
-    // re-upload boundary (>TOKENS_PER_RESOURCE) so a regression that drops
-    // it on the second batch is caught too.
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/10' }]);
@@ -3661,16 +3083,6 @@ describe('mintLinksInBatches', () => {
   });
 });
 
-// ===========================================================================
-// guild_id threading end-to-end (#1101) — the attribution linchpin
-// ===========================================================================
-//
-// These pin that the SEND pipelines actually pass interaction.guildId into
-// both the mint AND the DDB row write. The isolated connector/store tests
-// verify each function HONORS a guildId it's handed; these verify the
-// pipelines HAND it the right one. Without this, deleting the
-// `guildId: interaction.guildId` line would leave every other test green
-// while silently making every /qurl detect return "no match".
 describe('executeSendPipeline — guild_id threading (#1101)', () => {
   it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
     const interaction = makeInteraction({ guildId: 'guild-1' });
@@ -3681,30 +3093,16 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
 
     await executeSendPipeline(interaction, makePipelineParams());
 
-    // Mint carried the guild (via mintLinksInBatches → mintLinks).
     expect(mockMintLinks).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ guildId: 'guild-1' }),
     );
-    // Every persisted row carried the guild for the detect read-path filter.
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
     );
   });
 });
 
-// ===========================================================================
-// Cross-replica view-counter fast-path render-state persist (feat #60, PR-B)
-// ===========================================================================
-//
-// After the initial confirmation editReply, executeSendPipeline persists
-// the render state (token + appId + expectedCount + collapsed baseMsg +
-// TTL) so the webhook receiver can edit the counter from any replica.
-// These pin (a) the send-time persist carries the live token + the
-// COLLAPSED base (not getFullMsg's counter line), and (b) the /qurl add
-// re-persist updates ONLY count + base and NEVER nulls the token — the
-// silent regression that would permanently disarm the fast-path after a
-// single /qurl add.
 describe('executeSendPipeline — view-counter fast-path render-state persist', () => {
   it('persists token + appId + collapsed baseMsg + expected_count after editReply', async () => {
     const interaction = makeInteraction({
@@ -3724,25 +3122,15 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
     expect(fields.interactionAppId).toBe('app-123');
     expect(fields.expectedCount).toBe(1);
     expect(fields.viewedCount).toBe(0);
-    // The COLLAPSED base — the "Sent to N users | Expires…" header, NOT a
-    // string carrying the "👀 …" counter line (which would double-stamp
-    // when the fast-path re-renders through renderViewCounter).
     expect(typeof fields.confirmBaseMsg).toBe('string');
     expect(fields.confirmBaseMsg).toContain('Sent to 1 user');
     expect(fields.confirmBaseMsg).not.toContain('👀');
-    // TTL is epoch seconds in the future (token self-reaps at ~the real
-    // ~15-min Discord token TTL, just above the 14-min monitor cap).
     expect(fields.confirmExpiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 
   it('does NOT arm the fast-path on a view-counter-degraded send (link missing qurl_id)', async () => {
-    // A degraded send (any link without a qurl_id) renders the BARE
-    // baseMsg with no counter — the fast-path can't see the degrade and
-    // would stamp a forbidden partial-attribution "N viewed", so the
-    // send-time gate must skip persisting the render-state entirely.
     const interaction = makeInteraction({ token: 'tok-live', applicationId: 'app-123', guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    // Mint returns a link WITHOUT qurl_id → qurlLinks[i].qurlId undefined → degraded.
     mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
@@ -3772,7 +3160,6 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
     mockDb.saveSendConfirmState.mockRejectedValueOnce(new Error('ddb throttle'));
 
-    // Must not reject — the send already delivered.
     await expect(executeSendPipeline(interaction, makePipelineParams())).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('saveSendConfirmState failed'),
@@ -3829,15 +3216,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
   });
 
   test('logger.warn fires BEFORE cancelEdit on the SSRF rejection path', async () => {
-    // Lock in the #292 reorder. Old order in commands.js was
-    // clearCooldown → cancelEdit → logger.warn → throw. cancelEdit
-    // is `interaction.editReply(...).catch(...)` — an async failure
-    // is swallowed by .catch, but a SYNC throw from editReply would
-    // bypass the catch and lose the SSRF breadcrumb. Reordering to
-    // logger.warn → failGate(...) means the warn lands first even
-    // under that hypothetical sync-throw shape. Use invocation-
-    // order to pin the warn-before-editReply sequence so a future
-    // refactor moving the warn back after cancelEdit fails loudly.
     logger.warn.mockClear();
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams({
@@ -3847,10 +3225,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
       'executeSendPipeline: attachment.url failed isAllowedSourceUrl gate',
       expect.objectContaining({ user_id: expect.any(String) }),
     );
-    // Anchor `[0]` to a single observable call on each side. The
-    // SSRF gate fires before the "Preparing links for…" edit, so
-    // logger.warn fires exactly once (the SSRF breadcrumb) and
-    // editReply fires exactly once (cancelEdit's underlying call).
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(interaction.editReply).toHaveBeenCalledTimes(1);
     const warnOrder = logger.warn.mock.invocationCallOrder[0];
@@ -3859,10 +3233,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
   });
 
   test('SSRF gate is skipped when resourceType is NOT file (location sends carry no user URL)', async () => {
-    // Bogus attachment.url that WOULD fail isAllowedSourceUrl — but
-    // resourceType is 'location' so the gate is bypassed. The pipeline
-    // will fail later downstream (mocks aren't configured for the
-    // location path), but NOT with the SSRF gate message.
     const params = makePipelineParams({
       resourceType: 'location',
       attachment: { ...DEFAULT_ATTACHMENT, url: 'http://localhost/whatever' },
@@ -3874,9 +3244,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
 });
 
 describe('executeSendPipeline — expiresIn allowed-set gate', () => {
-  // Defensive: any test in this block that pollutes expiryToMs (the
-  // #352 hoist test below uses mockImplementationOnce) gets reset.
-  // Mirrors the parallel block at the top of handleAddRecipients tests.
   afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
 
   test.each([
@@ -3901,20 +3268,11 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
     await expectGateAccepts(makePipelineParams({ expiresIn }), /expiresIn must be one of/);
   });
 
-  // #352: expiresAt is computed BEFORE recordQURLSendBatch so a future
-  // `expiryToMs`-throws regression can't leave orphan DDB rows. Today
-  // the entry-level failGate above protects, but the hoist makes the
-  // ordering invariant explicit. Mock `expiryToMs` to throw — file-
-  // prep must succeed so execution actually reaches the hoist site,
-  // otherwise the test passes vacuously (mintLinks would throw first
-  // with no mock implementation, hitting an upstream code path).
   test('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
     const { expiryToMs } = require('../src/utils/time');
     expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs throw'); });
     mockDb.recordQURLSendBatch.mockClear();
 
-    // File-prep succeeds so execution proceeds past mintLinksInBatches
-    // to the new hoist site right above recordQURLSendBatch.
     mockDownloadAndUpload.mockResolvedValueOnce({
       resource_id: 'res-new', fileBuffer: new ArrayBuffer(10),
     });
@@ -3926,8 +3284,6 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
     await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn: '30m' })))
       .rejects.toThrow(/synthetic expiryToMs throw/);
 
-    // Load-bearing assertion: even though file-prep succeeded and
-    // links were minted upstream, NO DDB rows were written.
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
 });
@@ -3953,17 +3309,7 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
   });
 });
 
-// Defensive guards for the `recipients` invariants — non-empty and
-// ≤ config.QURL_SEND_MAX_RECIPIENTS. The `/qurl send` + `/qurl map`
-// front-half already enforces these before the pipeline call; the
-// gates are defense-in-depth for a future caller (deserialized
-// payload, programmatic retry) that skips those checks. Without
-// them, a trip would surface deep inside mintLinksInBatches as
-// "Failed to create any links" with no caller-side breadcrumb.
 describe('executeSendPipeline — recipients shape + cap gates', () => {
-  // Read the cap once from the same config module the gate consults
-  // so the tests don't drift if the cap is bumped. Hoisting out of
-  // the individual tests centralizes the drift-anchor.
   const { QURL_SEND_MAX_RECIPIENTS: RECIPIENT_CAP } = require('../src/config');
 
   test.each([
@@ -3978,8 +3324,6 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients })))
       .rejects.toThrow(/recipients must be a non-empty array/);
-    // Cancel-edit fires before the throw — same shape as the other
-    // entry gates.
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringMatching(/Internal error — send cancelled/),
@@ -3993,45 +3337,23 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     ['plain object', {}, /typeof=object/],
     ['empty array', [], /typeof=object, value=<empty array>/],
   ])('rejection message distinguishes %s in the value-detail field', async (_label, recipients, detailRe) => {
-    // Rendering both `null` and `{}` as `typeof=object` would
-    // force a prod-log reader to guess which one tripped the
-    // gate. Pin that the value-detail field disambiguates the
-    // realistic miscoding shapes.
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients })))
       .rejects.toThrow(detailRe);
   });
 
   test('rejection message truncates pathological values with `…` marker', async () => {
-    // A future caller handing a 1MB string would otherwise dump
-    // the whole blob into the rejection message AND into the
-    // prod logger.error. truncForLog slices at 64 chars and
-    // appends `…` so a reader can tell "the caller passed
-    // exactly these 64 chars" from "we cut a longer value."
     const interaction = makeInteraction();
     const oneKB = 'x'.repeat(1024);
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: oneKB })))
       .rejects.toThrow(/value=x{64}…/);
-    // Negative pin: a 64-char value should NOT have the marker
-    // (otherwise we can't distinguish exact-fit from truncated).
     const exact64 = 'y'.repeat(64);
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: exact64 })))
       .rejects.toThrow(/value=y{64}\)/);
   });
 
   test.each([
-    // Hostile-toString: the obvious adversarial shape. Without the
-    // try/catch in truncForLog, the throw-message renderer would
-    // itself throw, replacing the gate's TypeError with an opaque
-    // "Cannot convert object to primitive value" — the exact
-    // worse-than-original-error shape the gate exists to prevent.
     ['throws on toString', { toString() { throw new Error('nope'); } }],
-    // Object.create(null) is the realistic miscoding shape — a
-    // deserialized payload with prototype detached has no
-    // @@toPrimitive / toString, so `String(v)` throws "Cannot
-    // convert object to primitive value". Pin that the catch
-    // branch handles this shape too, not just the explicitly-
-    // hostile toString case.
     ['null-prototype object', Object.create(null)],
   ])('rejection message falls back to <unrepresentable> when String() throws (%s)', async (_label, value) => {
     const interaction = makeInteraction();
@@ -4040,19 +3362,10 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   });
 
   test('truncation slices on code points, not UTF-16 code units (astral-char safety)', async () => {
-    // `slice(0, 64)` on code units would split a high-surrogate
-    // at position 63 from its low-surrogate at 64, producing a
-    // malformed UTF-16 pair before the `…`. Iterating via [...s]
-    // (the string iterator) operates on code points, so an emoji
-    // at the boundary stays intact. Build a string with 64 emoji
-    // (each 2 code units) — under code-unit slicing this would
-    // surface as 32 intact emoji + a lone high-surrogate; under
-    // code-point slicing it surfaces as 64 intact emoji.
     const interaction = makeInteraction();
     const sixtyFourEmoji = '🚀'.repeat(64);
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: sixtyFourEmoji })))
       .rejects.toThrow(/value=(?:🚀){64}\)/u);
-    // 65 emoji → 64 in the rendering + `…` marker.
     const sixtyFiveEmoji = '🚀'.repeat(65);
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: sixtyFiveEmoji })))
       .rejects.toThrow(/value=(?:🚀){64}…/u);
@@ -4079,17 +3392,10 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
 
     await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: [] })))
       .rejects.toThrow(TypeError);
-    // The gate's own clearCooldown call IS the cleanup; the
-    // post-throw isOnCooldown assertion is what verifies it.
     expect(isOnCooldown(interaction.user.id)).toBe(false);
   });
 
   test('clears cooldown on the recipients-oversized path (RangeError branch)', async () => {
-    // The empty-array test above pins clearCooldown on the
-    // TypeError branch; the oversized-array (RangeError) branch
-    // has its own clearCooldown call. Pin it separately so a
-    // future refactor that drops one of the two clearCooldown
-    // calls is caught by exactly one test failing.
     const interaction = makeInteraction();
     const { setCooldown, isOnCooldown } = _test;
     const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
@@ -4105,10 +3411,6 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   test.each([
     ['one recipient', [{ id: 'u1', username: 'u1' }]],
     ['several recipients', Array.from({ length: 5 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
-    // Boundary case: pin that `length === cap` is accepted (the
-    // gate uses `>`, not `>=`). A future typo flipping `>` to
-    // `>=` would otherwise only show up if a real send happened
-    // to hit exactly the cap.
     ['exactly at the cap', Array.from({ length: RECIPIENT_CAP }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
   ])('accepts the allowed shape: %s', async (_label, recipients) => {
     await expectGateAccepts(
@@ -4119,10 +3421,6 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   });
 });
 
-// Pin that truncForLog applies to the value-rendering gates in the
-// entry-gate family. A future caller handing a 1MB string as
-// `expiresIn` (or any value-rendering gate added later) would otherwise
-// dump the whole blob into the rejection message.
 describe('executeSendPipeline — truncForLog applies to value-rendering gates', () => {
   test('expiresIn rejection message is bounded with `…` on oversized input', async () => {
     const interaction = makeInteraction();
@@ -4132,18 +3430,6 @@ describe('executeSendPipeline — truncForLog applies to value-rendering gates',
   });
 });
 
-// Channel-notification on @everyone / voice mode. Each test drives
-// executeSendPipeline through the full file-prep + mint + DM happy
-// path so the post-send notification site is actually reached; the
-// collector setup that runs after the notification throws because
-// the editReply mock returns undefined, but the throw is caught
-// inside the pipeline and is not load-bearing for these assertions.
-//
-// The channel post is fire-and-forget — the call to sendChannelMessage
-// is synchronous (so `.toHaveBeenCalled()` reads true immediately after
-// the pipeline resolves), but the `.then` callback that emits the
-// failure warn-log runs on the microtask queue. Tests that assert on
-// the warn-log flush microtasks with `await Promise.resolve()` first.
 describe('executeSendPipeline — channel notification on @everyone / voice mode', () => {
   beforeEach(() => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-1', fileBuffer: new ArrayBuffer(10) });
@@ -4175,10 +3461,6 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     );
   });
 
-  // 'picker' is the gate's explicit no-notify branch; `undefined`
-  // exercises the normalizeRecipientMode fallback that maps stale
-  // pre-field flow rows + any future off-set drift to picker. Two
-  // distinct branches, not two framings of the same one.
   test.each([
     ['picker', 'picker'],
     ['undefined (stale flow row, normalizeRecipientMode fallback)', undefined],
@@ -4189,8 +3471,6 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
   });
 
   test('does NOT post channel notification when delivered === 0 (every DM failed)', async () => {
-    // Without this gate, a public "X shared something with everyone"
-    // would post even though nobody actually got the DM.
     mockSendDM.mockResolvedValue({ ok: false, error: 'all DMs blocked' });
     const interaction = makeInteraction();
     await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' }));
@@ -4204,7 +3484,6 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     await expect(
       executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' })),
     ).resolves.not.toThrow();
-    // Flush the fire-and-forget `.then` so the warn-log assertion sees it.
     await Promise.resolve();
     await Promise.resolve();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -4214,8 +3493,6 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
   });
 
   test('sanitizes the sender display name before posting (bidi/RTL spoof defense)', async () => {
-    // U+202E (RIGHT-TO-LEFT OVERRIDE) in a public post would flip the
-    // announcement RTL for every viewer in the channel.
     const interaction = makeInteraction({
       member: { displayName: 'Alice\u202EEvil' },
       user: { id: 'sender-1', username: 'Alice' },

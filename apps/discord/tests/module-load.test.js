@@ -7,9 +7,6 @@
 // doesn't depend on ESLint having seen the post-merge state.
 
 describe('module load smoke', () => {
-  // Discord-side require()s are heavy (discord.js, jose, AWS SDK) but
-  // jest already imports a similar surface via the existing test files,
-  // so the marginal cost here is negligible.
   test.each([
     ['../src/commands'],
     ['../src/qurl'],

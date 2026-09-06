@@ -1,9 +1,3 @@
-// Tests for the webhook-registrar Lambda handler.
-//
-// Strategy: mock @aws-sdk/client-ssm + global.fetch (qurl-service
-// calls), then invoke the handler directly. Asserts the Lambda's
-// orchestration contract — input validation, SSM secret read, ensure
-// → persist → return shape — without booting AWS.
 
 const { mockClient } = require('aws-sdk-client-mock');
 const {
@@ -50,19 +44,11 @@ function mockQurlService(handlers) {
   });
 }
 
-// Lambda module is required once — `aws-sdk-client-mock` patches the
-// SSMClient class globally, so the cached client inside the handler
-// still routes through the per-test `ssmMock.reset()`. Re-requiring
-// the module would create a fresh SDK class that the mock doesn't
-// cover, breaking the dynamic-import path.
 const lambdaModule = require('../../../lambda/webhook-registrar/index');
 const { handler } = lambdaModule;
 const { _resetSsmClientCacheForTests, getSsmClient } = lambdaModule._internals;
 
 beforeEach(() => {
-  // Reset the module-level SSM client cache between tests so a region
-  // change in one test doesn't leak into the next, and so the
-  // ssmMock-patched class is what the handler resolves on first use.
   _resetSsmClientCacheForTests();
 });
 
@@ -101,21 +87,11 @@ describe('webhook-registrar Lambda — input validation', () => {
     'Some unrelated description (env=prod)',
     'Discord bot view counterX (env=prod)', // no boundary
   ])('throws on description prefix drift (%s) — orphan-sweep matcher invariant', async (badDescription) => {
-    // The URL-migration orphan sweep derives its prefix from this
-    // `description`. If terraform ever sets a string that doesn't
-    // begin with `Discord bot view counter (` (or equal exactly), the
-    // sweep silently goes uncatchable for the central registrar's
-    // own future orphans. Fail-fast at the boundary instead.
     await expect(handler({ ...BASE_EVENT, description: badDescription }, CONTEXT))
       .rejects.toThrow(/description must start with "Discord bot view counter \("/);
   });
 
   it('KEEPS the sweep enabled when QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=0 (footgun guard, normalize-then-test)', async () => {
-    // An operator typing `=0` intuitively expects sweep ON; without
-    // env-var normalization the previous `!process.env.VAR` would
-    // treat any non-empty string as truthy and DISABLE the sweep —
-    // benign blast radius (no deletions) but surprising. Pin the
-    // normalize-then-test semantics.
     const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
     process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '0';
     try {
@@ -164,7 +140,6 @@ describe('webhook-registrar Lambda — input validation', () => {
       let deleted = false;
       mockQurlService({
         'GET /v1/webhooks': () => ({ body: { data: [
-          // Would be a confirmed orphan if sweep were enabled.
           {
             webhook_id: 'wh_orphan',
             url: 'https://oldhost.example/webhooks/qurl',
@@ -189,8 +164,6 @@ describe('webhook-registrar Lambda — input validation', () => {
   });
 
   it('accepts description that exactly equals the prefix (boundary case)', async () => {
-    // The matcher allows either `prefix` exactly OR `prefix + " ("`.
-    // The Lambda boundary must allow the same shape for parity.
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
@@ -228,8 +201,6 @@ describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM s
     
     const result = await handler(BASE_EVENT, CONTEXT);
     expect(result).toEqual({ webhookId: 'wh_lambda_created', action: 'created' });
-    // Secret persisted via SSM, NOT echoed in the response (avoids
-    // leaking through Terraform's invocation log).
     expect(result.secret).toBeUndefined();
     const putCalls = ssmMock.commandCalls(PutParameterCommand);
     expect(putCalls).toHaveLength(1);
@@ -271,10 +242,6 @@ describe('webhook-registrar Lambda — steady-state (existing sub + SSM secret p
 });
 
 describe('webhook-registrar Lambda — secret never echoes in handler response (all action paths)', () => {
-  // The handler-response shape MUST NOT contain `secret` — Terraform's
-  // aws_lambda_invocation echoes the entire response into its state +
-  // invocation log. Already pinned for `created`; this also covers
-  // `rotated` and `reused` to catch any future "convenience" return.
   it('does not return secret on the rotated action', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
@@ -316,11 +283,6 @@ describe('webhook-registrar Lambda — secret never echoes in handler response (
 });
 
 describe('webhook-registrar Lambda — bootstrap rotate (existing sub, SSM empty)', () => {
-  // Path that fires when an operator-or-prior-deploy created the
-  // subscription out-of-band but the Lambda hasn't populated the
-  // SSM secret yet. The Lambda rotates the secret to a known value
-  // and persists it. Common during a manual-recovery → automated-
-  // takeover transition.
   it('rotates the existing sub when SSM returns empty/missing', async () => {
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
@@ -367,9 +329,6 @@ describe('webhook-registrar Lambda — bridgeUrl normalization', () => {
       },
     });
     await handler({ ...BASE_EVENT, bridgeUrl: 'https://bot.test.example/webhooks/qurl/' }, CONTEXT);
-    // No trailing slash on the wire. canonicalUrl in the registrar
-    // normalizes trailing-slash drift BETWEEN matched subs but not
-    // an internal `//` from a stale `BASE_URL=https://bot/`.
     expect(createBody.url).toBe('https://bot.test.example/webhooks/qurl');
   });
 });
@@ -383,9 +342,6 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
   });
 
   it('throws the same error when SSM API key value is present but empty', async () => {
-    // SSM returning Value: '' (operator put-parameter --value "") is a
-    // distinct cold-fail mode from ParameterNotFound — but both indicate
-    // unusable API key state. The same error fires for grep parity.
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: '' } });
@@ -405,12 +361,6 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
   });
 
   it('throws when SSM PutParameter fails on the persist call (strict-persist; Terraform deploy must fail fast)', async () => {
-    // Critical: the Lambda uses strict-persist (not bestEffortPersist
-    // which swallows errors). If qurl-service returns a new secret
-    // and SSM PutParameter fails, the secret never reaches the bot's
-    // env on next deploy → receiver 503s every webhook silently. The
-    // Lambda MUST throw so aws_lambda_invocation surfaces the failure
-    // and Terraform apply rolls back / halts.
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
@@ -428,9 +378,6 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
   });
 
   it('does NOT call PutParameter on the reuse path (steady-state re-invocations are no-op for SSM)', async () => {
-    // Re-invoking the Lambda when nothing has changed should be free —
-    // no SSM write, no qurl-service rotate. Pin the no-op invariant
-    // so a future refactor doesn't re-introduce noisy steady-state writes.
     ssmMock
       .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
       .resolves({ Parameter: { Value: 'lv_test_key' } })
@@ -452,12 +399,6 @@ describe('webhook-registrar Lambda — failure surfacing', () => {
 });
 
 describe('webhook-registrar Lambda — getSsmClient cache', () => {
-  // The cache key (region) is tracked in a closure — NOT read back
-  // off `client.config.region` which in AWS SDK v3 is a Provider<string>
-  // (function returning Promise). Comparing the Promise to a region
-  // string would always be truthy → cache never invalidates AND
-  // forcing this helper async would propagate up. These tests pin
-  // the closure-based behavior.
   it('warm invocation returns the same client instance for the same region', () => {
     _resetSsmClientCacheForTests();
     const a = getSsmClient('us-east-2');
@@ -470,7 +411,6 @@ describe('webhook-registrar Lambda — getSsmClient cache', () => {
     const a = getSsmClient('us-east-2');
     const b = getSsmClient('us-west-2');
     expect(b).not.toBe(a);
-    // ...and reverts again on the original region (no permanent cache).
     const c = getSsmClient('us-east-2');
     expect(c).not.toBe(a); // a fresh instance — the cache only holds the LATEST region
   });

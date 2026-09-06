@@ -608,27 +608,7 @@ module.exports = {
   // error message as before — no observable behavior change.
   hasGatewayHandoffHmac: Boolean(process.env.GATEWAY_HANDOFF_HMAC),
 
-  // Persistence backend selector. Lifted from raw env into config
-  // so the boot-guard (`unsupportedRoleResumeCombo`) and the
-  // gateway-shim wiring both read through the same parsed shape.
-  // Unset / empty / whitespace-only falls back to 'ddb', matching
-  // src/store/index.js's selection precedence.
-  //
-  // `src/store/index.js` is the source of truth for STORE_TYPE
-  // validation — it throws on unknown values at module load (which
-  // runs before any consumer reads this config field). This field
-  // is retained solely so the downstream guard `unsupportedRole-
-  // ResumeCombo` and other config-level checks can read a normalized
-  // string instead of re-parsing the env. Don't add validation
-  // logic here; surface it in store/index.js where it belongs.
-  STORE_TYPE: (process.env.STORE_TYPE ?? '').trim() || 'ddb',
-
-  // DDB table-name prefix shared by every per-table consumer
-  // (ddb-store.js + gateway-session-store.js construction in
-  // index.js). Trimmed here so a whitespace-padded env value
-  // doesn't compute a different table name at one call site than
-  // the others — ddb-store.js's `.trim()` was the original
-  // normalization point.
+  // One normalized prefix feeds every DynamoDB table-name consumer.
   DDB_TABLE_PREFIX: (process.env.DDB_TABLE_PREFIX ?? '').trim(),
 
   // SQS Standard queue the gateway publishes to and the worker
@@ -638,24 +618,6 @@ module.exports = {
   // silently no-op'ing the consumer or dropping every dispatch on
   // the producer side.
   QURL_BOT_EVENTS_QUEUE_URL: process.env.QURL_BOT_EVENTS_QUEUE_URL,
-
-  // View-update push (feat #60, sub-second view counter). When true,
-  // qurl-webhook.js publishes view events to a separate SQS queue
-  // after a successful recordQurlView; the HTTP tier (same process
-  // that owns the webhook receiver and the live monitorLinkStatus
-  // instances) drains the queue and dispatches into the process-
-  // local view-update-registry. The polling fallback in
-  // commands.js stays as the correctness primitive — this flag gates
-  // ONLY the latency-optimization path. Default false so a deploy
-  // without the flag behaves identically to the legacy polling shape.
-  // Must be the literal string "true" (same parsing posture as
-  // ENABLE_EVENT_SHIPPER) so an env-var typo can't flip prod.
-  ENABLE_VIEW_UPDATE_PUSH: process.env.ENABLE_VIEW_UPDATE_PUSH === 'true',
-
-  // SQS Standard queue for view updates (separate from
-  // QURL_BOT_EVENTS_QUEUE_URL, which carries Discord interactions).
-  // Required when ENABLE_VIEW_UPDATE_PUSH=true.
-  QURL_BOT_VIEW_UPDATES_QUEUE_URL: process.env.QURL_BOT_VIEW_UPDATES_QUEUE_URL,
 
   // Backpressure cap for the event consumer's in-flight handler
   // tracker (see src/event-consumer.js module header). Read here

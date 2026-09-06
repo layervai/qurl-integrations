@@ -1,18 +1,3 @@
-// Integration test: full worker-tier dispatch-reconstruction path.
-//
-// Regression pin for the class of "Cannot read properties of null
-// (reading 'id')" bugs that have repeatedly broken interactions in
-// http-only mode. Constructs the REAL discord.js Client, runs the
-// REAL `initHttpOnly` (REST mocked), then drives the REAL
-// `client.actions.InteractionCreate.handle(data)` with a realistic
-// guild INTERACTION_CREATE payload. Any null-deref in discord.js
-// internals (client.user, client.application, channel resolution,
-// etc.) surfaces here instead of in production.
-//
-// If this test fails with the production error signature
-// (`Cannot read properties of null (reading 'id')`), it has
-// successfully reproduced the failing path; the stack trace
-// points at the exact null-deref site.
 
 const { Client, GatewayIntentBits } = require('discord.js');
 const { initHttpOnly } = require('../src/http-only-init');
@@ -21,11 +6,6 @@ function makeLogger() {
   return { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 }
 
-// Realistic Discord guild slash-command INTERACTION_CREATE payload.
-// Shapes match what Discord actually sends — verified against the
-// raw gateway dispatch a real /qurl invocation produces. Keep this
-// faithful to upstream's docs so the test catches the same nulls
-// production would.
 function makeGuildSlashInteractionPayload() {
   return {
     id: '1234567890123456789',
@@ -95,12 +75,7 @@ describe('http-tier interaction reconstruction (regression pin)', () => {
   let client;
 
   beforeEach(async () => {
-    // Real discord.js Client constructed exactly like
-    // src/discord.js does (intents-only, no login). Matches the
-    // worker-tier instance shape.
     client = new Client({ intents: [GatewayIntentBits.Guilds] });
-    // Mock REST: setToken is a no-op for tests, and rest.get for
-    // /users/@me returns the bot's own identity.
     client.rest.setToken = jest.fn();
     client.rest.get = jest.fn().mockResolvedValue({
       id: '1491278419530285056',
@@ -118,9 +93,6 @@ describe('http-tier interaction reconstruction (regression pin)', () => {
   });
 
   afterEach(async () => {
-    // discord.js's Client retains an internal sweepInterval timer
-    // unless destroyed; without this, jest hangs on open handles.
-    // .destroy() is safe to call on an un-logged-in Client.
     await client.destroy().catch(() => {});
   });
 
@@ -148,10 +120,6 @@ describe('http-tier interaction reconstruction (regression pin)', () => {
   });
 
   it('interaction.guildId is set even when client.guilds.cache is empty', () => {
-    // Authoritative guild signal for handler routing. In http-only
-    // mode the cache is empty (no GUILD_CREATE events), but guildId
-    // comes straight from the payload — handlers must use this for
-    // DM-vs-guild decisions, NOT interaction.guild.
     const data = makeGuildSlashInteractionPayload();
     let captured = null;
     client.on('interactionCreate', (i) => { captured = i; });
@@ -160,12 +128,6 @@ describe('http-tier interaction reconstruction (regression pin)', () => {
   });
 
   it('interaction.guild is null when cache is empty (documents the http-only state)', () => {
-    // Pre-PR-#444+#445 regression bait: handlers used to guard on
-    // `!interaction.guildId || !interaction.guild` which evaluated
-    // true here (cache empty) and replied "can only be used in a
-    // server, not in DMs" for every guild slash command. Pinning
-    // `interaction.guild === null` makes the broken-guard regression
-    // surface in CI instead of in production.
     const data = makeGuildSlashInteractionPayload();
     let captured = null;
     client.on('interactionCreate', (i) => { captured = i; });

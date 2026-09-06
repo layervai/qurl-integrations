@@ -20,10 +20,6 @@
  * guarantees uniqueness.
  */
 
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
-
 import { trackedQurlResources, withRunNonce } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';

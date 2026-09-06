@@ -1,19 +1,3 @@
-/**
- * Tests for the target safety guard in scripts/loadtest-standalone.js.
- *
- * The script mints COUNT resources per round for the whole DURATION_S window —
- * tens of thousands on a normal run — so the guard deciding WHERE that volume
- * lands is the highest-consequence code in the file. It is also the part with
- * no natural runtime signal: a guard that wrongly permits a target does not
- * fail, it succeeds against the wrong environment.
- *
- * The guard replaced a two-entry exact-string denylist that failed OPEN. Each
- * spelling that slipped past that denylist has a test below, so a future
- * refactor back toward string equality fails here instead of in production.
- *
- * Requiring the script does NOT run the load test: its CLI entry point is
- * behind `require.main === module`, matching scripts/gateway-resume-spike.js.
- */
 
 const {
   targetHost,
@@ -34,10 +18,6 @@ const NO_ALLOWLIST = new Set();
 const verdictFor = (url, allowed = NO_ALLOWLIST) => classifyTarget('QURL_ENDPOINT', url, allowed).verdict;
 
 describe('loadtest target guard — production spellings that the old denylist missed', () => {
-  // The old guard was `config.QURL_ENDPOINT === 'https://api.layerv.ai'` and
-  // `config.CONNECTOR_URL === 'https://get.qurl.link:9808'`. Everything in
-  // this table is a real production host wearing a spelling that is not
-  // byte-equal to those two strings.
   it.each([
     ['exact prod API', 'https://api.layerv.ai'],
     ['exact prod connector', 'https://get.qurl.link:9808'],
@@ -60,9 +40,6 @@ describe('loadtest target guard — production spellings that the old denylist m
   });
 
   it('rejects a trailing-dot production host in LOADTEST_TARGET_HOSTS', () => {
-    // Fail-open guard on the guard: `api.layerv.ai.` is the same host to DNS,
-    // so if it were stored verbatim it would be an ordinary allowlist grant
-    // that silently outranks nothing — and then permit production.
     const { hosts, errors } = parseTargetAllowlist('api.layerv.ai.');
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('--allow-production');
@@ -76,8 +53,6 @@ describe('loadtest target guard — production spellings that the old denylist m
   });
 
   it('refuses production even when the host is named in LOADTEST_TARGET_HOSTS', () => {
-    // Production must not be grantable from the environment — env vars get
-    // copied between environments and pasted into .env.loadtest files.
     const allowed = new Set(['api.layerv.ai']);
     expect(verdictFor('https://api.layerv.ai', allowed)).toBe('production');
   });
@@ -109,10 +84,6 @@ describe('loadtest target guard — unrecognized hosts fail closed', () => {
   });
 
   it('does not treat private addresses as safe', () => {
-    // A 10.x address is "private" per src/utils/private-host.js but can be a
-    // production VPC endpoint, so isPrivateHost is deliberately not the
-    // predicate here. Pin that: a change to isLoopbackHost that reaches for
-    // isPrivateHost instead would flip these to true.
     expect(isLoopbackHost('10.0.0.5')).toBe(false);
     expect(isLoopbackHost('192.168.1.10')).toBe(false);
     expect(isLoopbackHost('172.16.0.1')).toBe(false);
@@ -145,8 +116,6 @@ describe('loadtest target guard — hosts that may proceed', () => {
   });
 
   it('does not extend an allowlisted host to its subdomains', () => {
-    // Entries are exact hosts. Granting a parent would silently widen the
-    // grant to every name under it.
     const { hosts } = parseTargetAllowlist('sandbox.example.internal');
     expect(verdictFor('https://api.sandbox.example.internal', hosts)).toBe('unrecognized');
   });
@@ -155,8 +124,6 @@ describe('loadtest target guard — hosts that may proceed', () => {
     ['a qurl.site tunnel host', 'sbx.qurl.site.layerv.ai'],
     ['a qurl.link tunnel host', 'qurl.link.layerv.xyz'],
   ])('does not misfile %s as production', (_label, host) => {
-    // The non-prod tunnel spellings end in .layerv.ai / .layerv.xyz, so
-    // widening PROD_DOMAINS to qurl.link must not swallow them.
     expect(isProductionHost(host)).toBe(false);
     const { hosts, errors } = parseTargetAllowlist(host);
     expect(errors).toEqual([]);
@@ -164,9 +131,6 @@ describe('loadtest target guard — hosts that may proceed', () => {
   });
 
   it('permits a non-prod tunnel host without misfiling it as production', () => {
-    // `.qurl.site.layerv.ai` is connector.js's NON-prod tunnel suffix. It must
-    // not collide with the `qurl.site` production domain rule — it is merely
-    // unrecognized until the operator names it.
     expect(isProductionHost('sbx.qurl.site.layerv.ai')).toBe(false);
     expect(isProductionHost('sbx.qurl.site.layerv.xyz')).toBe(false);
     const { hosts } = parseTargetAllowlist('sbx.qurl.site.layerv.ai');
@@ -191,9 +155,6 @@ describe('loadtest target guard — LOADTEST_TARGET_HOSTS parsing', () => {
     expect(hosts.size).toBe(0);
   });
 
-  // Fail-fast on entries that could never match a hostname, matching config.js's
-  // posture on DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: a quietly-inert grant means
-  // the operator believes they allowed a host they did not.
   it.each([
     ['a scheme', 'https://sandbox.example'],
     ['a port', 'sandbox.example:9808'],
@@ -211,9 +172,6 @@ describe('loadtest target guard — LOADTEST_TARGET_HOSTS parsing', () => {
     ['0', '0'],
     ['12345', '12345'],
   ])('rejects the boolean-looking value %s', (_label, entry) => {
-    // The name takes hostnames, but reads enough like a switch that someone
-    // will try `=1`. Stored verbatim it is a grant that can never match:
-    // `new URL('http://1')` canonicalizes the host to the ADDRESS 0.0.0.1.
     const { hosts, errors } = parseTargetAllowlist(entry);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('not an on/off switch');
@@ -253,10 +211,6 @@ describe('loadtest target guard — LOADTEST_TARGET_HOSTS parsing', () => {
   });
 
   it('normalizes an entry the same way a target URL is normalized', () => {
-    // A fullwidth 's' is IDNA-mapped to ASCII by the URL parser on the TARGET
-    // side. Storing the entry verbatim would make it a grant no target could
-    // ever match — inert, and the operator would see a refusal for a host they
-    // believe they named.
     const { hosts, errors } = parseTargetAllowlist('\uFF53andbox.example.internal');
     expect(errors).toEqual([]);
     expect([...hosts]).toEqual(['sandbox.example.internal']);
@@ -272,8 +226,6 @@ describe('loadtest target guard — LOADTEST_TARGET_HOSTS parsing', () => {
 
 describe('loadtest target guard — both targets are judged', () => {
   it('judges the connector independently of the API endpoint', () => {
-    // The failure this pins: a sandbox API paired with a production connector.
-    // Both targets take load, so both have to clear the guard.
     const targets = classifyTargets({
       qurlEndpoint: 'http://localhost:8080',
       connectorUrl: 'https://get.qurl.link:9808',
@@ -305,8 +257,6 @@ describe('loadtest target guard — both targets are judged', () => {
   });
 
   it('carries the raw target through for the operator-facing message', () => {
-    // The refusal prints rawUrl, not the parsed host, so the operator sees
-    // exactly the value their environment supplied.
     const [endpoint] = classifyTargets({
       qurlEndpoint: 'https://api.layerv.ai:8443/v1',
       connectorUrl: 'http://localhost:9808',
@@ -324,23 +274,15 @@ describe('loadtest target guard — override strength is asymmetric', () => {
   const target = (verdict) => ({ name: 'QURL_ENDPOINT', rawUrl: 'x', host: 'h', verdict });
 
   it('lets the env var clear an unnamed sandbox', () => {
-    // A host the operator simply did not enumerate is a recognition failure,
-    // not a known-dangerous target, so the cheaper override is enough.
     expect(isTargetAuthorized(target('unrecognized'), ENV_ONLY)).toBe(true);
   });
 
   it('does NOT let the env var clear an unparseable target', () => {
-    // A URL that will not parse is never a legitimate sandbox, so there is
-    // nothing for the weaker override to mean.
     expect(isTargetAuthorized(target('unparseable'), ENV_ONLY)).toBe(false);
     expect(isTargetAuthorized(target('unparseable'), FLAG_ONLY)).toBe(true);
   });
 
   it('does NOT let the env var clear a production target', () => {
-    // The load-bearing one. `.env.loadtest` is spliced into process.env when
-    // the script runs, so an env-only override would let a gitignored file in
-    // a working copy silently disable this guard for every future run — the
-    // same vector parseTargetAllowlist refuses for LOADTEST_TARGET_HOSTS.
     expect(isTargetAuthorized(target('production'), ENV_ONLY)).toBe(false);
   });
 
@@ -355,8 +297,6 @@ describe('loadtest target guard — override strength is asymmetric', () => {
   });
 
   it('refuses every unsafe verdict and no safe one', () => {
-    // Direct assertion on the predicate itself, rather than only through
-    // classifyTargets — a verdict added to neither set would slip past.
     expect(['loopback', 'allowlisted'].map((v) => isRefusedTarget(target(v)))).toEqual([false, false]);
     expect(['production', 'unrecognized', 'unparseable'].map((v) => isRefusedTarget(target(v))))
       .toEqual([true, true, true]);
@@ -375,9 +315,6 @@ describe('loadtest target guard — the mirrored production hostnames are real',
     process.env.NODE_ENV = 'production';
     delete process.env.QURL_ENDPOINT;
     delete process.env.CONNECTOR_URL;
-    // config.js throws at module load if this is set under NODE_ENV=production.
-    // Unset here so the drift check fails on drift, not on the DDB-mock setup
-    // a future runner might have in its environment.
     delete process.env.DDB_TEST_ENDPOINT;
     try {
       return require('../src/config');
@@ -399,9 +336,6 @@ describe('loadtest target guard — the mirrored production hostnames are real',
 });
 
 describe('loadtest target guard — the enforcement decision', () => {
-  // main() is unreachable from a test (it runs the load test) and scripts/ is
-  // outside collectCoverageFrom, so this is the only thing standing between a
-  // refactor and a guard that silently stops guarding.
   const build = (urls, opts = {}) => targetGuardReport({
     targets: classifyTargets({
       qurlEndpoint: urls.qurl,
@@ -430,8 +364,6 @@ describe('loadtest target guard — the enforcement decision', () => {
   });
 
   it('blocks a production target under the env override alone', () => {
-    // The regression that matters most: .env.loadtest must not be able to do
-    // this. Asserted on the real decision, not just on isTargetAuthorized.
     const r = build(PROD, { allowProdEnv: true });
     expect(r.fatal).toBe(true);
     expect(r.warnings).toEqual([]);
@@ -451,7 +383,6 @@ describe('loadtest target guard — the enforcement decision', () => {
   });
 
   it('keeps the port visible in the override warning', () => {
-    // rawUrl, not host — a warning that hid :9808 would misreport the target.
     const r = build({ qurl: 'http://localhost:8080', connector: 'https://sbx.example.invalid:9808' }, { allowProdFlag: true });
     expect(r.warnings[0]).toContain('sbx.example.invalid:9808');
   });
@@ -460,7 +391,6 @@ describe('loadtest target guard — the enforcement decision', () => {
     const r = build({ qurl: 'https://api-eu.layerv.ai:8443/v1', connector: 'https://api.layerv.ai' });
     const line = r.lines.find((l) => l.includes('LOADTEST_TARGET_HOSTS='));
     expect(line).toBe('If that is the intended sandbox: LOADTEST_TARGET_HOSTS=api-eu.layerv.ai');
-    // Never offers to allowlist the production host alongside it.
     expect(line).not.toContain('api.layerv.ai,');
   });
 
@@ -491,8 +421,6 @@ describe('loadtest target guard — the enforcement decision', () => {
   });
 
   it('labels every verdict, marking safe ones ok and the rest REFUSED', () => {
-    // A verdict added to neither SAFE_VERDICTS nor VERDICT_LABEL would print
-    // `[undefined]` in the operator's table.
     const verdicts = ['loopback', 'allowlisted', 'production', 'unrecognized', 'unparseable'];
     for (const v of verdicts) {
       expect(VERDICT_LABEL[v]).toBeDefined();
@@ -504,10 +432,6 @@ describe('loadtest target guard — the enforcement decision', () => {
 
 describe('loadtest target guard — requiring the script is inert', () => {
   it('does not run the load test or touch process.env', () => {
-    // The file gates BOTH main() and the .env.loadtest splice on
-    // `require.main === module`. If a future edit dropped the conjunct on the
-    // splice, a developer with a .env.loadtest would silently get it merged
-    // into the jest process while CI, which has no such file, stayed green.
     const before = JSON.stringify(process.env);
     jest.isolateModules(() => { require('../scripts/loadtest-standalone'); });
     expect(JSON.stringify(process.env)).toBe(before);
@@ -515,8 +439,6 @@ describe('loadtest target guard — requiring the script is inert', () => {
 });
 
 describe('loadtest target guard — the names read from the outside world', () => {
-  // Pins the literal env-var and flag spellings. Every other test supplies
-  // these values directly, so without this a rename here would be invisible.
   it('reads the allowlist from LOADTEST_TARGET_HOSTS', () => {
     const r = resolveGuardInputs({ LOADTEST_TARGET_HOSTS: 'sbx.example.internal' }, []);
     expect([...r.hosts]).toEqual(['sbx.example.internal']);
@@ -530,8 +452,6 @@ describe('loadtest target guard — the names read from the outside world', () =
 
   it('reads the env override from LOADTEST_ALLOW_PRODUCTION=1 only', () => {
     expect(resolveGuardInputs({ LOADTEST_ALLOW_PRODUCTION: '1' }, []).allowProdEnv).toBe(true);
-    // Must be the literal '1' — 'true'/'yes' stay off, matching the repo's
-    // posture on MAP_COMMAND_ENABLED, so a typo cannot enable an override.
     expect(resolveGuardInputs({ LOADTEST_ALLOW_PRODUCTION: 'true' }, []).allowProdEnv).toBe(false);
     expect(resolveGuardInputs({}, []).allowProdEnv).toBe(false);
   });
@@ -576,14 +496,12 @@ describe('loadtest script — mintLinks call shape', () => {
       sourceType: 'unambiguous',
     });
 
-  /** Option names mintLinks actually destructures, read from its signature. */
   const declaredOptionKeys = () => {
     let keys = null;
     traverse(parseFile('src', 'connector.js'), {
       FunctionDeclaration(p) {
         if (p.node.id?.name !== 'mintLinks') return;
         const second = p.node.params[1];
-        // `{ ... } = {}` parses as AssignmentPattern wrapping the ObjectPattern.
         const pattern = second.type === 'AssignmentPattern' ? second.left : second;
         expect(pattern.type).toBe('ObjectPattern');
         keys = new Set(
@@ -595,7 +513,6 @@ describe('loadtest script — mintLinks call shape', () => {
     return keys;
   };
 
-  /** Every mintLinks(...) call node in the load-test script. */
   const mintLinksCalls = () => {
     const calls = [];
     traverse(parseFile('scripts', 'loadtest-standalone.js'), {
@@ -614,11 +531,8 @@ describe('loadtest script — mintLinks call shape', () => {
 
   it('passes an options object, never positional arguments', () => {
     const calls = mintLinksCalls();
-    // Fails closed if the call site moves or a second one appears unreviewed.
     expect(calls).toHaveLength(1);
     const args = calls[0].arguments;
-    // mintLinks takes exactly (resourceId, opts) — a third argument is the
-    // positional form that silently dropped batchSize.
     expect(args).toHaveLength(2);
     expect(args[1].type).toBe('ObjectExpression');
   });
@@ -626,14 +540,9 @@ describe('loadtest script — mintLinks call shape', () => {
   it('names only options mintLinks destructures, and always passes n', () => {
     const declared = declaredOptionKeys();
     const opts = mintLinksCalls()[0].arguments[1];
-    // A spread would make the passed keys unresolvable statically; keep the
-    // call site literal so this check stays meaningful.
     expect(opts.properties.every(pr => pr.type === 'ObjectProperty')).toBe(true);
     const passed = opts.properties.map(pr => pr.key.name ?? pr.key.value);
-    // Catches a misspelled key (`count:`/`batchSize:`) that would leave n
-    // undefined and reproduce the original throw.
     expect(passed.filter(k => !declared.has(k))).toEqual([]);
-    // n is the one whose absence caused the 100%-failure bug.
     expect(passed).toContain('n');
     expect(passed).toContain('expiresAt');
   });

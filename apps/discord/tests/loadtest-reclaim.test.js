@@ -1,21 +1,3 @@
-/**
- * Tests for the reclaim-ledger helpers in scripts/loadtest-standalone.js.
- *
- * The load test itself is unmockable live API traffic, but the ledger is the
- * mechanism the whole leak-prevention story rests on, and its invariants are
- * pure and cheap to pin:
- *
- *   - a torn final line (what a SIGKILL mid-append leaves) must not cost the
- *     rest of the ledger — that case IS the reason recovery mode exists, and
- *     a regression is invisible until the exact day it matters;
- *   - a missing ledger must be distinguishable from an empty one, because in
- *     recovery mode those mean opposite things and reporting "clean" for a
- *     mistyped path is how thousands of live resources get abandoned;
- *   - one failing revoke must not abandon the remaining thousands (the
- *     natural refactor to Promise.all breaks this silently);
- *   - only an explicit terminal response counts as reclaimed; an ambiguous
- *     404 stays visible for manual verification.
- */
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -51,31 +33,18 @@ function tempLedger(contents) {
   return p;
 }
 
-// The same place, but absent when handed over — matching the `absent` naming
-// the readLedger cases use, and naming the precondition rather than the end
-// state, since the probe does go on to create it. Deliberately not created
-// here: that creation is the thing under test, and a file this helper had
-// already written would carry this process's umask rather than the mode the
-// probe asks for. Registered for the same cleanup, since the probe leaves it
-// behind. Its own `-absent-` infix, matching the readLedger case that already
-// spells a nonexistent path that way, keeps it out of tempLedger's namespace:
-// that helper suffixes with `created.length`, so sharing the prefix would let
-// a future numerically-named call here alias a fixture.
 function absentLedgerPath(name) {
   const p = path.join(os.tmpdir(), `loadtest-ledger-absent-${process.pid}-${name}.jsonl`);
   created.push(p);
   return p;
 }
 
-// Mirrors what recordResource actually writes, endpoint included — the
-// tenancy guard is fail-closed, so a fixture without one is refused.
 function line(id, extra = {}) {
   return `${JSON.stringify({
     resource_id: id, kind: 'location', endpoint: config.QURL_ENDPOINT, ...extra,
   })}\n`;
 }
 
-// An older or hand-edited entry carrying no provenance.
 function bareLine(id) {
   return `${JSON.stringify({ resource_id: id, kind: 'location' })}\n`;
 }
@@ -94,9 +63,6 @@ afterEach(() => {
 });
 
 describe('preflightLedger', () => {
-  // Mode bits do not map cleanly on Windows, so the two 0600 cases are
-  // Unix-only — the same guard, for the same reason, as the sibling
-  // tests/gateway-resume-spike.test.js.
   const isUnix = process.platform !== 'win32';
 
   it('creates the ledger rather than only probing for it', () => {
@@ -106,26 +72,6 @@ describe('preflightLedger', () => {
   });
 
   (isUnix ? it : it.skip)('creates it owner-only', () => {
-    // Opening is how this probe proves the path writable — a stat cannot —
-    // and opening with 'a' CREATES the ledger, so the mode it lands at is a
-    // lasting property of a real file. That file sits at a predictable path
-    // under a world-writable /tmp and holds live resource ids: the threat
-    // model the script's own comment inherits from gateway-resume-spike.js,
-    // whose 0600 is pinned twice while this one was pinned nowhere.
-    //
-    // Under umask 0, so this pins the MODE ARGUMENT rather than the runner.
-    // Dropping that argument leaves 0666 & ~umask, which on a host at umask
-    // 077 masks back down to exactly 0600 — the mutant would survive there
-    // while this stayed green, which is the failure a mode assertion is most
-    // likely to have. At umask 0 it lands 0666 and dies everywhere. Jest runs
-    // one test file at a time per worker and the cases within a file
-    // serially, so the window this widens is the try block.
-    //
-    // Both halves of that describe jest's default child-process runner. The
-    // setter is process-wide, so under a thread worker it does not widen a
-    // window at all — it throws ERR_WORKER_UNSUPPORTED_OPERATION, failing
-    // this case rather than skipping it, which is the direction a runner
-    // switch should fail in.
     const ledger = absentLedgerPath('preflight-mode');
     const priorUmask = process.umask(0o000);
     try {
@@ -137,12 +83,6 @@ describe('preflightLedger', () => {
   });
 
   (isUnix ? it : it.skip)('leaves the mode of a ledger that already exists alone', () => {
-    // openSync applies its mode on CREATION only, so a second run against the
-    // same path does not re-permission it. Pinned rather than fixed: by then
-    // the file is one the operator named with --ledger, and the chmod that
-    // gateway-resume-spike.js does after its own write would silently narrow
-    // it. This is what makes that a decision rather than an oversight — and
-    // what stops the next reader from "finishing" the mirror of that file.
     const ledger = tempLedger('');
     fs.chmodSync(ledger, 0o644);
     preflightLedger(ledger);
@@ -150,10 +90,6 @@ describe('preflightLedger', () => {
   });
 
   it('appends rather than truncates, so a resumed run keeps what is outstanding', () => {
-    // 'a' vs 'w' is one character, and both prove the path writable. 'w'
-    // empties the ledger of a run being resumed under the same --ledger path,
-    // and the loss is silent in the worst direction: the sweep that follows
-    // reports nothing outstanding for resources that are still live.
     const ledger = tempLedger(line('r_kept'));
     preflightLedger(ledger);
     expect(readLedger(ledger)).toEqual(['r_kept']);
@@ -162,7 +98,6 @@ describe('preflightLedger', () => {
 
 describe('readLedger', () => {
   it('keeps every intact entry when the final line is torn', () => {
-    // A hard kill mid-append leaves exactly this shape.
     const ledger = tempLedger(`${line('r_1')}${line('r_2')}{"resource_id":"r_3`);
     expect(readLedger(ledger)).toEqual(['r_1', 'r_2']);
   });
@@ -204,9 +139,6 @@ describe('pruneLedger', () => {
   });
 
   it('preserves endpoint provenance, so the tenancy guard survives a prune', () => {
-    // A prune that drops `endpoint` disarms the guard on exactly the
-    // recovery re-run it exists to protect: ledgerEndpoints would come back
-    // empty and the sweep would delete against whatever host is configured.
     const ledger = tempLedger(line('r_1', { endpoint: 'https://sandbox.example' }));
     pruneLedger(ledger, new Set(['r_1']));
     expect([...ledgerEndpoints(ledger)]).toEqual(['https://sandbox.example']);
@@ -226,9 +158,6 @@ describe('reclaimOnce', () => {
   afterAll(() => resetReclaimStateForTests());
 
   it('shares one sweep between concurrent callers instead of racing them', async () => {
-    // The guarantee the memoization exists for: a Ctrl-C landing during the
-    // end-of-run sweep must join it, not start a competitor that doubles the
-    // delete rate and then exits out from under the first.
     const ledger = tempLedger(line('r_1'));
     const [first, second] = await Promise.all([reclaimOnce(ledger), reclaimOnce(ledger)]);
     expect(deleteLink).toHaveBeenCalledTimes(1);
@@ -236,8 +165,6 @@ describe('reclaimOnce', () => {
   });
 
   it('clears the memo on rejection so the error path can genuinely retry', async () => {
-    // Without clearing, main().catch's fallback re-awaits the same rejected
-    // promise — reading as a retry while structurally unable to retry.
     const ledger = tempLedger(line('r_1'));
     const spy = jest.spyOn(fs, 'readFileSync').mockImplementationOnce(() => {
       throw new Error('boom');
@@ -252,16 +179,11 @@ describe('recordResource', () => {
   afterAll(() => fs.rmSync(LEDGER_PATH, { force: true }));
 
   it('writes an entry the ledger readers consume, endpoint included', () => {
-    // Round-trips through the real writer rather than this file's `line()`
-    // fixture. If the two drift, every tenancy-guard test above would still
-    // pass while the guard's actual input no longer carried an endpoint.
     recordResource('r_roundtrip', 'upload');
     expect(readLedger(LEDGER_PATH)).toContain('r_roundtrip');
     expect([...ledgerEndpoints(LEDGER_PATH)]).toEqual([config.QURL_ENDPOINT]);
   });
 
-  // A malformed id would otherwise be recorded, then fail every sweep with
-  // "Invalid resource ID format" and require manual ledger repair.
   it.each([
     ['missing', undefined],
     ['empty', ''],
@@ -274,19 +196,12 @@ describe('recordResource', () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('carried no usable resource_id'),
     );
-    // The omission matters as much as the warning: recording a shape-rejected
-    // id would make it fail every sweep forever, which is what the check
-    // exists to prevent.
     const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     expect(after).toBe(before);
   });
 });
 
 describe('runRound ledgering', () => {
-  // The re-upload leg (#1173) mints a NEW parent resource each time a token
-  // pool drains. Each one is as leakable as the round's first upload, and
-  // nothing about the leg itself makes that visible — so this pins that every
-  // parent a round creates reaches the ledger, not just the first.
   const { mintLinks, reUploadBuffer } = require('../src/connector');
 
   function loadWith(argvTail) {
@@ -318,8 +233,6 @@ describe('runRound ledgering', () => {
     const mod = loadWith(['--count', '30', '--file', payload, '--ledger', ledger]);
     await mod.runRound(1);
 
-    // 30 recipients at 10 per resource: one initial upload plus two
-    // re-uploads. All three parents must be reclaimable.
     expect(reUploadBuffer).toHaveBeenCalledTimes(3);
     expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
   });
@@ -339,9 +252,6 @@ describe('resolveLedgerArg', () => {
   });
 
   it('reads the inline form, which the removed reader silently ignored', () => {
-    // `--ledger=/tmp/x` read as absent under the old indexOf-based getArg, so
-    // the run recorded to a generated path instead — and the ledger is the one
-    // file an operator has to be able to find afterwards.
     expect(resolveLedgerArg(['--ledger=/tmp/x.jsonl'], FALLBACK))
       .toEqual({ ledgerPath: '/tmp/x.jsonl', errors: [] });
   });
@@ -370,8 +280,6 @@ describe('parseReclaimArg', () => {
   });
 
   it('rejects a bare --reclaim rather than letting it start a load test', () => {
-    // The worst outcome in the file: falling through here mints thousands of
-    // resources when the operator asked to delete some.
     expect(parseReclaimArg(['--reclaim'])).toEqual({ requested: true, path: null });
   });
 
@@ -386,9 +294,6 @@ describe('parseReclaimArg', () => {
   });
 
   it('recognizes the --reclaim=PATH form rather than starting a load test', () => {
-    // An unmatched equals form reports no request at all and falls through to
-    // the run loop — the same "meant to delete, minted thousands instead"
-    // outcome the empty-value guard exists to prevent.
     expect(parseReclaimArg(['--reclaim=/tmp/x.jsonl']))
       .toEqual({ requested: true, path: '/tmp/x.jsonl' });
   });
@@ -400,59 +305,18 @@ describe('parseReclaimArg', () => {
 
 describe('resolveReclaimArg', () => {
   it('forwards the mode parseReclaimArg read, adding only the refusal', () => {
-    // Scoped deliberately: the refusal itself is already the flag-table
-    // wiring check's job in tests/loadtest-silent-failure.test.js, which
-    // drives this same argv and asserts on the errors array alone — delete
-    // the push at the call site and that check fails first.
-    //
-    // What is pinned HERE is the shape around it. resolveReclaimArg
-    // re-exports the mode decision rather than forming a second opinion on
-    // it: main() reads the mode from parseReclaimArg directly and
-    // resolveArgErrors takes only the errors, so a divergence here would be
-    // one that nothing reads and nothing contradicts.
     expect(resolveReclaimArg(['--reclaim'])).toEqual({
       requested: true, path: null, errors: [expect.stringContaining('--reclaim')],
     });
   });
 
   it('points at the temp directory rather than a hard-coded /tmp', () => {
-    // The path this message tells the operator to type has to be the one the
-    // run actually wrote to, and DEFAULT_LEDGER_PATH is built from
-    // os.tmpdir() — which is /tmp on neither platform that runs this. macOS
-    // resolves it per-user to /var/folders/.../T at 0700, Windows to %TEMP%.
-    // The macOS case is the common one and the sharper one: /tmp there is a
-    // symlink to the world-writable 1777 directory whose symlink hazard is
-    // the whole reason the ledger is created 0600, a few lines above
-    // DEFAULT_LEDGER_PATH. So the old text sent every operator to a
-    // directory the ledger had never been written to — and it is read by
-    // someone who has already lost a run and is trying to find thousands of
-    // live resources.
-    //
-    // The header docs spell the same default `<tmpdir>` twice; this was the
-    // third mention and the only one ever out of step with them.
     const [message] = resolveReclaimArg(['--reclaim']).errors;
     expect(message).toContain('--reclaim <tmpdir>/loadtest-ledger-');
     expect(message).not.toContain('/tmp/');
   });
 
   it('stays silent on the paths that are not a refusal', () => {
-    // The first case is the one that closes a real gap: nothing else in this
-    // suite drives a VALID --reclaim PATH through this resolver, so without
-    // it the `&& !reclaimPath` conjunct is unpinned and `if (requested)`
-    // survives. The second case is the run that never asked to reclaim at
-    // all, which an always-erroring resolver would abort.
-    //
-    // Both asserted as the whole shape rather than just the silence, and
-    // both are needed for it: the refusal case above fixes `path` at null
-    // and `requested` at true, so this is the only place either field is
-    // pinned carrying anything else. Drop the shape here and `path` can stop
-    // propagating, or `requested` can hard-code true, with nothing failing —
-    // the two survive the whole 405-test loadtest battery otherwise.
-    //
-    // The /tmp literals here are opaque tokens, not guidance — this resolver
-    // reads argv and never opens the path, and the parseReclaimArg cases
-    // above use the same fixture. The refusal message is the only string in
-    // this file an operator is ever told to copy.
     expect(resolveReclaimArg(['--reclaim', '/tmp/x.jsonl']))
       .toEqual({ requested: true, path: '/tmp/x.jsonl', errors: [] });
     expect(resolveReclaimArg(['--count', '10']))
@@ -460,25 +324,6 @@ describe('resolveReclaimArg', () => {
   });
 
   it('reports a whitespace-only path, quoting it so the fault is visible', () => {
-    // The sibling refusal in resolveLedgerArg above, which --reclaim did not
-    // have: `--reclaim '   '` was a real path as far as this resolver was
-    // concerned, so preflight passed it through.
-    //
-    // Not a resource leak — reclaim() finds no such file and main() exits 1 —
-    // which is exactly why the message is the whole of what this pins. The
-    // operator's answer arrived as `no ledger file at    — nothing was
-    // reclaimed.`, a sentence with a hole where the path should be, and the
-    // reader of it has already lost a run.
-    //
-    // So `got "   "` is asserted whole rather than as a `--reclaim must name`
-    // prefix: drop the JSON.stringify and the message still says every word
-    // it says now, still names the flag, and is still exactly as unreadable
-    // as the downstream line this exists to keep it from becoming.
-    //
-    // The full shape, because the refusal must not null the path the way
-    // resolveLedgerArg swaps in its fallback: main() re-reads the mode from
-    // parseReclaimArg, so a resolver that quietly disagreed about the value
-    // here would be a second opinion nothing reads.
     expect(resolveReclaimArg(['--reclaim', '   '])).toEqual({
       requested: true,
       path: '   ',
@@ -489,16 +334,6 @@ describe('resolveReclaimArg', () => {
   });
 
   it('applies the same refusal to the inline spelling', () => {
-    // Not a restatement of the case above: the inline value never becomes a
-    // separate argv token, so the two reach the guard by different routes and
-    // a guard rewritten to read argv rather than the resolved value passes
-    // this file's separated case while ignoring this one.
-    //
-    // Which is the drift with history here rather than a hypothetical — an
-    // indexOf-based reader is what used to read `--ledger=/tmp/x` as absent,
-    // recorded by 'reads the inline form, which the removed reader silently
-    // ignored' above. This is the only case in the block that fails when the
-    // guard is written that way.
     expect(resolveReclaimArg(['--reclaim=  ']).errors)
       .toEqual([expect.stringContaining('got "  "')]);
   });
@@ -515,10 +350,8 @@ describe('reclaim', () => {
 
     const result = await reclaim(ledger);
 
-    // Five attempts, not two: a single failure must not abandon the remainder.
     expect(deleteLink).toHaveBeenCalledTimes(5);
     expect(result).toMatchObject({ missing: false, revoked: 4, failed: 1 });
-    // Only the failure survives, so a re-run sweeps just that one.
     expect(readLedger(ledger)).toEqual(['r_2']);
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('1 other resource(s) failed with potentially retryable errors'),
@@ -526,9 +359,6 @@ describe('reclaim', () => {
   });
 
   it('aggregates failures sharing a cause into one tally line', async () => {
-    // callQurl embeds the resource id in every message, so keying the tally
-    // on the raw message gives one bucket per id — a uniform 401 across
-    // thousands of ids would print thousands of "1x" lines instead of one.
     const ledger = tempLedger(['r_1', 'r_2', 'r_3'].map((id) => line(id)).join(''));
     deleteLink.mockImplementation(async (id) => {
       throw new Error(qurlApiErrorMessage('DELETE', resourcePath(id), 401));
@@ -645,8 +475,6 @@ describe('reclaim', () => {
   });
 
   it('refuses a ledger mixing two tenancies even when the current one is present', async () => {
-    // Deletes carry no per-id host, so a ledger spanning two endpoints would
-    // otherwise pass the guard and revoke the other tenancy's resources too.
     const ledger = tempLedger(
       line('r_1', { endpoint: config.QURL_ENDPOINT })
       + line('r_2', { endpoint: `${config.QURL_ENDPOINT}-elsewhere` }),
@@ -664,9 +492,6 @@ describe('reclaim', () => {
   });
 
   it('drains an id appended after the first pass had already read the ledger', async () => {
-    // The invariant the header comment leans on: a round still unwinding when
-    // a sweep starts can append behind it, and a single-pass sweep would exit
-    // having left that resource live.
     const ledger = tempLedger(line('r_1'));
     deleteLink.mockImplementation(async (id) => {
       if (id === 'r_1') fs.appendFileSync(ledger, line('r_late'));
@@ -680,10 +505,6 @@ describe('reclaim', () => {
   });
 
   it('waits for a create still in flight instead of finishing without it', async () => {
-    // The interleaving the whole sweep-vs-run-loop fix exists for: `stopping`
-    // cannot un-issue a request already awaiting a response, so a create can
-    // resolve and record AFTER the drain's last on-disk pass. Re-reading the
-    // ledger alone does not catch that — only waiting on the counter does.
     const ledger = tempLedger(line('r_1'));
     let release;
     const suspended = new Promise((resolve) => { release = resolve; });
@@ -693,8 +514,6 @@ describe('reclaim', () => {
     });
 
     const sweep = reclaim(ledger);
-    // Let the sweep revoke r_1 and reach an empty pass with the create still
-    // outstanding; without the in-flight wait it would resolve here.
     await new Promise((r) => { setTimeout(r, 250); });
     release();
     await creating;
@@ -734,8 +553,6 @@ describe('reclaim', () => {
   });
 
   it('treats a ledger with content but no readable ids as corrupt, not clean', async () => {
-    // Recovery mode exists because something already went wrong; reporting a
-    // corrupt ledger as an all-clear is how live resources get abandoned.
     const ledger = tempLedger('{"resource_id":"r_1\n{"resou\n');
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ unreadable: true });
@@ -743,9 +560,6 @@ describe('reclaim', () => {
   });
 
   it('refuses an entry that records no endpoint at all', async () => {
-    // Missing provenance must read as foreign, not as absence of evidence —
-    // otherwise the guard passes trivially on the ledger most likely to have
-    // come from somewhere else.
     const ledger = tempLedger(bareLine('r_1'));
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ refused: true });

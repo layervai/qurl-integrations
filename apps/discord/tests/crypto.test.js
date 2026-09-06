@@ -1,7 +1,3 @@
-/**
- * Tests for src/utils/crypto.js — AES-256-GCM envelope encryption used to
- * protect guild API keys + attachment URLs at rest.
- */
 
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
@@ -51,7 +47,6 @@ describe('utils/crypto', () => {
 
     it('rejects tampered ciphertext via the auth tag', () => {
       const ct = encrypt('secret');
-      // Flip a byte in the ct portion: format is enc:v1:iv:tag:ct
       const parts = ct.split(':');
       const ctHex = parts[parts.length - 1];
       parts[parts.length - 1] = ctHex.replace(/.$/, (c) => (c === '0' ? '1' : '0'));
@@ -80,7 +75,6 @@ describe('utils/crypto', () => {
     });
 
     it('throws when the key does not round-trip base64', () => {
-      // Leading whitespace changes decoded length; trailing garbage does too.
       process.env.KEY_ENCRYPTION_KEY = 'not_real_base64!!!!!!!';
       _resetKeyCache();
       expect(() => encrypt('x')).toThrow(/KEY_ENCRYPTION_KEY is malformed/);
@@ -91,16 +85,13 @@ describe('utils/crypto', () => {
     it('returns plaintext from encrypt() and logs a one-time warning', () => {
       _resetKeyCache();
       expect(encrypt('hello')).toBe('hello');
-      // Second call should not re-warn (tested via mock call count).
       expect(encrypt('world')).toBe('world');
     });
 
     it('throws if asked to decrypt a real ciphertext', () => {
-      // First encrypt WITH a key.
       process.env.KEY_ENCRYPTION_KEY = VALID_KEY;
       _resetKeyCache();
       const ct = encrypt('secret');
-      // Now unset the key.
       delete process.env.KEY_ENCRYPTION_KEY;
       _resetKeyCache();
       expect(() => decrypt(ct)).toThrow(/KEY_ENCRYPTION_KEY is not set/);

@@ -1,14 +1,3 @@
-// qurl.expired webhook handler tests — DM tense-flip on per-qurl expiry.
-//
-// Pins the wire contract for the qurl.expired branch added in this PR:
-//   {id, type: 'qurl.expired', data: {qurl_id, resource_id},
-//    owner_id, timestamp, api_version}
-//
-// `data.expires_at` is intentionally NOT on the wire — the wire
-// payload is exactly {qurl_id, resource_id} (transit-safe by design).
-// The bot reconstructs the absolute expiry from the recipient row's
-// `created_at` + `expires_in` (both already projected on the
-// qurl_id-index GSI as ALL).
 
 const crypto = require('crypto');
 
@@ -32,7 +21,6 @@ jest.mock('../src/store', () => ({
   markExpiredDMEdited: (...args) => mockMarkExpiredDMEdited(...args),
   clearExpiredDMEdited: (...args) => mockClearExpiredDMEdited(...args),
   isSendRevoked: (...args) => mockIsSendRevoked(...args),
-  // qurl.accessed flow stubs (server boot touches healthCheck).
   recordQurlView: jest.fn(async () => ({ result: 'recorded', firstView: true })),
   healthCheck: jest.fn(),
   getStats: jest.fn(() => ({})),
@@ -41,21 +29,10 @@ jest.mock('../src/store', () => ({
 const mockEditDM = jest.fn();
 jest.mock('../src/discord-rest', () => ({
   editDM: (...args) => mockEditDM(...args),
-  // sendChannelMessage isn't called on the qurl.expired path but is
-  // imported alongside editDM elsewhere in the bot, so mock for parity.
   sendChannelMessage: jest.fn(),
 }));
 
-// Real buildExpiredDMPayload is a pure function — pull it through and
-// let the receiver render a real Discord payload so a future shape drift
-// (renamed field, removed embed) fails the assertion below.
 const { buildExpiredDMPayload } = require('../src/dm-payloads');
-
-jest.mock('../src/view-update-publisher', () => ({
-  publish: jest.fn(),
-  start: jest.fn(),
-  stop: jest.fn(),
-}));
 
 let mockPrimed = true;
 let mockWithinLag = false;
@@ -99,10 +76,6 @@ const RECIPIENT_ID = 'usr-recipient';
 const DM_CHANNEL_ID = 'dm-channel-1';
 const DM_MESSAGE_ID = 'dm-message-1';
 
-// Row attrs used to reconstruct the absolute expiry instant — the
-// handler reads `created_at` + `expires_in` (already projected on
-// the qurl_id-index GSI as ALL) rather than expecting expires_at on
-// the wire.
 const CREATED_AT_ISO = '2026-05-19T12:00:00.000Z';
 const EXPIRES_IN = '24h';
 const EXPECTED_EXPIRES_AT_SECONDS = Math.floor((Date.parse(CREATED_AT_ISO) + 24 * 3600 * 1000) / 1000);
@@ -146,9 +119,6 @@ beforeEach(() => {
   mockMarkExpiredDMEdited.mockResolvedValue(true);
   mockClearExpiredDMEdited.mockResolvedValue(undefined);
   mockIsSendRevoked.mockResolvedValue(false);
-  // editDM mirror the real contract from discord-rest.js:139 — { ok: true }
-  // on success (no `expected` key), { ok: false, expected: <bool> } only on
-  // failure. Tests that exercise the not-ok path override below.
   mockEditDM.mockResolvedValue({ ok: true });
 });
 
@@ -159,16 +129,11 @@ describe('POST /webhooks/qurl — qurl.expired happy path', () => {
     expect(res.body).toEqual({ status: 'edited' });
     expect(mockFindSendsByQurlId).toHaveBeenCalledWith(QURL_ID);
     expect(mockIsSendRevoked).toHaveBeenCalledWith(SEND_ID);
-    // Idempotency marker claimed BEFORE the edit fires. If a future
-    // refactor inverts the order, a concurrent retry could edit twice
-    // before the marker lands.
     expect(mockMarkExpiredDMEdited).toHaveBeenCalledWith(SEND_ID, RECIPIENT_ID);
     const markCallOrder = mockMarkExpiredDMEdited.mock.invocationCallOrder[0];
     const editCallOrder = mockEditDM.mock.invocationCallOrder[0];
     expect(markCallOrder).toBeLessThan(editCallOrder);
     expect(mockEditDM).toHaveBeenCalledWith(DM_CHANNEL_ID, DM_MESSAGE_ID, expect.any(Object));
-    // Pin the payload shape — a future drift to omit `components: []`
-    // would leave the now-dead Step Through button live in the DM.
     const payload = mockEditDM.mock.calls[0][2];
     expect(payload).toMatchObject({
       embeds: expect.any(Array),
@@ -185,9 +150,6 @@ describe('POST /webhooks/qurl — qurl.expired happy path', () => {
   });
 
   it('reconstructs expires_at from row.created_at + row.expires_in for the wire payload (no expires_at)', async () => {
-    // Wire-shape contract regression test: data carries only
-    // {qurl_id, resource_id}. The DM marker must still hit the right
-    // absolute instant, derived from the row.
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'edited' });
@@ -208,10 +170,6 @@ describe('POST /webhooks/qurl — qurl.expired short-circuits', () => {
   });
 
   it('200/ambiguous-recipient when GSI returns multiple rows (write-path invariant breach)', async () => {
-    // GSI does NOT enforce hash-key uniqueness in DDB — see modules/
-    // qurl-bot-ddb/main.tf "Uniqueness caveat". Two rows means the
-    // bot's write path has a regression; log + skip rather than edit
-    // a wrong recipient's DM.
     mockFindSendsByQurlId.mockResolvedValue([READY_ROW, { ...READY_ROW, recipient_discord_id: 'usr-other' }]);
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
@@ -237,10 +195,6 @@ describe('POST /webhooks/qurl — qurl.expired short-circuits', () => {
   });
 
   it('200/sibling-already-flipped when the consumed-flip already closed the DM (cross-marker skip)', async () => {
-    // A one-time qURL was consumed (consumed_edited_at set) and THEN its
-    // TTL elapsed, so qurl-service still emits qurl.expired. Don't
-    // overwrite the more-accurate "you opened it" consumed copy with a
-    // generic "expired N ago" marker.
     mockFindSendsByQurlId.mockResolvedValue([{ ...READY_ROW, consumed_edited_at: '2026-05-19T12:05:00.000Z' }]);
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
@@ -314,11 +268,6 @@ describe('POST /webhooks/qurl — qurl.expired expiry reconstruction', () => {
   });
 
   it('200/cannot-reconstruct-expiry when row.expires_in is an off-set non-empty string (corrupt row, NOT silently defaulted to 24h)', async () => {
-    // Regression guard against using expiryToMs (which silently
-    // falls back to DEFAULT_EXPIRY_MS=24h for unparseable input).
-    // parseExpiryMs is the null-returning variant the handler MUST
-    // use so a corrupt row skips the edit instead of rendering a
-    // wrong-time <t:N:R> marker.
     for (const bad of ['garbage', '99x', '7y', '5', '24', '24h ', ' 24h', '24H']) {
       jest.clearAllMocks();
       mockMarkExpiredDMEdited.mockResolvedValue(true);
@@ -334,9 +283,6 @@ describe('POST /webhooks/qurl — qurl.expired expiry reconstruction', () => {
   });
 
   it('renders the expected absolute marker for each EXPIRY_LABELS preset', async () => {
-    // Pin the reconstruction across the closed set of legitimate
-    // labels so a future expiryToMs regression on any one preset
-    // surfaces as a wrong-marker failure here.
     const presets = [
       ['30m', 30 * 60],
       ['1h', 3600],
@@ -362,10 +308,6 @@ describe('POST /webhooks/qurl — qurl.expired expiry reconstruction', () => {
 
 describe('POST /webhooks/qurl — qurl.expired error handling', () => {
   it('503/lookup-error when GSI Query throws (PRE-marker transient → qurl-service retries)', async () => {
-    // 503 (not 200): the marker hasn't been claimed yet, so retry can
-    // recover cleanly. qurl-service retries 503 with 1+2+4+8+16=31s
-    // backoff over 5 attempts — exactly the window a transient DDB
-    // throttle needs.
     mockFindSendsByQurlId.mockRejectedValue(new Error('throttle'));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(503);
@@ -373,9 +315,6 @@ describe('POST /webhooks/qurl — qurl.expired error handling', () => {
   });
 
   it('503/mark-error when markExpiredDMEdited throws on a non-CCFE error (PRE-marker transient)', async () => {
-    // Same rationale as lookup-error: UpdateItem threw before the
-    // marker landed, so qurl-service's retry can re-enter cleanly.
-    // CCFE returns false (handled as already-edited), not a throw.
     mockMarkExpiredDMEdited.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(503);
@@ -384,9 +323,6 @@ describe('POST /webhooks/qurl — qurl.expired error handling', () => {
   });
 
   it('200/edit-failed-expected when editDM returns ok:false with expected:true (recipient blocked/deleted DM) — marker stays', async () => {
-    // Recipient-side permanent failure. A retry CAN'T recover (the
-    // recipient relationship is gone), so keep the marker and return
-    // 200 so qurl-service doesn't loop.
     mockEditDM.mockResolvedValue({ ok: false, expected: true });
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
@@ -396,9 +332,6 @@ describe('POST /webhooks/qurl — qurl.expired error handling', () => {
   });
 
   it('503/edit-failed-transient when editDM returns ok:false with expected:false (Discord 5xx) — marker rolled back', async () => {
-    // Discord-side transient failure. The marker rolls back so
-    // qurl-service's retry can re-enter cleanly and recover the edit.
-    // 503 trips the 5-attempt backoff (1+2+4+8+16=31s).
     mockEditDM.mockResolvedValue({ ok: false, expected: false });
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(503);
@@ -408,11 +341,6 @@ describe('POST /webhooks/qurl — qurl.expired error handling', () => {
   });
 
   it('503/edit-failed-transient when editDM throws (treat as expected:false) — marker rolled back', async () => {
-    // A throw out of editDM is rare (editDM normally swallows), but
-    // when it happens we treat it as a transient failure: the throw
-    // could be a network error, a Discord 5xx that escaped the
-    // swallow, or something else uncategorized. Default to the
-    // recoverable side and let qurl-service retry.
     mockEditDM.mockRejectedValue(new Error('network'));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(503);
@@ -422,11 +350,6 @@ describe('POST /webhooks/qurl — qurl.expired error handling', () => {
   });
 
   it('200/edit-failed-rollback-failed when transient editDM + marker rollback both fail (terminal — falls back to S3 lifecycle)', async () => {
-    // Belt-and-suspenders: if the rollback ITSELF fails, the marker
-    // stays, the next retry short-circuits at `already-edited`, and
-    // the edit is permanently missed. Return 200 here so qurl-service
-    // doesn't loop on the doomed event; the 8-day S3 lifecycle bounds
-    // the blast radius of the missed edit.
     mockEditDM.mockResolvedValue({ ok: false, expected: false });
     mockClearExpiredDMEdited.mockRejectedValue(new Error('throttle'));
     const res = await signedRequest(VALID_PAYLOAD);
@@ -457,10 +380,6 @@ describe('buildExpiredDMPayload', () => {
     expect(payload).not.toBeNull();
     const desc = payload.embeds[0].toJSON().description;
     expect(desc).toContain('<t:1717000000:R>');
-    // Pin specifically the timestamp marker — `.` appears elsewhere in
-    // the description copy (sentence-ending period), so a blanket
-    // `.not.toContain('.')` would fail without saying anything about
-    // the marker's integrity.
     expect(desc).not.toMatch(/<t:\d+\.\d+:R>/);
   });
 });

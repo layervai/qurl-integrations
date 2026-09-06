@@ -46,9 +46,7 @@
  *     `_`-bearing routing label end-to-end.
  */
 
-import * as dotenv from 'dotenv';
 import * as path from 'path';
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';

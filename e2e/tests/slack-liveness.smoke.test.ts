@@ -39,13 +39,6 @@
  * still passes — a confusing red that's clock drift, not a signing regression.
  */
 
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-// Explicit load matches every sibling e2e test. It overlaps jest.config's
-// `setupFiles: ['dotenv/config']`, but the absolute path is intentional — it's
-// robust to the run cwd, unlike the cwd-relative setupFiles load.
-dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
-
 import { randomUUID } from 'crypto';
 import { loadOptionalEnv } from '../helpers/env';
 import { postSigned } from '../helpers/slack-sign';

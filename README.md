@@ -6,7 +6,7 @@ Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that 
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and Chrome and Edge extensions for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress; Zapier is planned.
+This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and Chrome and Edge extensions for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress.
 
 ## Structure
 
@@ -14,11 +14,10 @@ This monorepo contains qURL integrations across several surfaces — a Slack app
 apps/                Per-integration apps (released apps get independent release tracks)
   slack/             Slack Secure Access Agent — /qurl slash commands (Go)
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
-  chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
-  edge-extension/    Edge extension — Gmail file uploads as expiring qURL links (MV3)
+  chrome-extension/  Shared Chrome and Edge extension source (MV3)
+  edge-extension/    Edge release metadata and store documents
   cli/               CLI — publish, share, and manage qURL resources by CRID (Go)
   teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
-  zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
 shared/              Shared Go libraries used by the Go apps
@@ -44,7 +43,7 @@ The Slack, Discord, and CLI apps connect to the qURL API:
 - **Endpoint** — the qURL API is `https://api.layerv.ai`, set via `QURL_ENDPOINT`. Required for Slack; the CLI and Discord use it by default.
 - **Authentication** — the CLI uses an account API key once to enroll a restricted device identity. Run `qurl login`, or set `QURL_API_KEY` for automated bootstrap; qurl does not store the account key. See [apps/cli/README.md](apps/cli/README.md#authentication).
 
-The Chrome and Edge extensions upload to a qURL file server instead; see their [Chrome README](apps/chrome-extension/README.md) and [Edge README](apps/edge-extension/README.md) for configuration.
+The Chrome and Edge builds use the same extension source and upload to a qURL file server; see the [browser extension README](apps/chrome-extension/README.md) and [Edge release notes](apps/edge-extension/README.md).
 
 ## Slack Connector Onboarding
 
@@ -89,7 +88,7 @@ This repo uses [Release Please](https://github.com/googleapis/release-please) in
 Each *released* app has an independent version track. A track is earned by cutting a semver
 version stream that something downstream pins to — not by merely publishing an artifact.
 `origins/s3-static-connector/` ships a container image but tags it only `:main` and `:<sha>`, and
-`shared/`, `apps/teams/`, and `apps/zapier/` ship nothing, so none of them have a track:
+`shared/` and `apps/teams/` ship nothing, so neither has a track:
 
 - Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack-v0.2.0`
 - The CLI is the one component tagged **without** its prefix (`v0.2.0`, not `cli-v0.2.0`) so OSS
