@@ -582,6 +582,44 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
             in diagnostics.getvalue()
         )
 
+        for failure in (OSError("protected path"), UnicodeError("protected value")):
+            attempted.clear()
+            fake.auth_token_requests = 0
+            diagnostics = io.StringIO()
+
+            def fail_once(
+                run: argparse.Namespace, authenticated=None, inventory=None
+            ) -> None:
+                del authenticated, inventory
+                attempted.append(run.run_id)
+                if run.run_id == "1231":
+                    raise failure
+
+            with (
+                mock.patch.object(credentials, "reconcile_run", fail_once),
+                contextlib.redirect_stderr(diagnostics),
+            ):
+                try:
+                    credentials.reconcile_batch(
+                        argparse.Namespace(
+                            **vars(args),
+                            run_spec=(
+                                "1231:2:linux:host:full",
+                                "1232:2:macos:host:full",
+                            ),
+                        )
+                    )
+                except credentials.CredentialError as exc:
+                    assert str(exc) == "batch cleanup did not converge for 1 of 2 runs"
+                else:
+                    raise AssertionError(
+                        "unexpected local cleanup failure was accepted"
+                    )
+            assert attempted == ["1231", "1232"]
+            assert fake.auth_token_requests == 1
+            assert "local cleanup error" in diagnostics.getvalue()
+            assert "protected" not in diagnostics.getvalue()
+
         attempted.clear()
         fake.auth_token_requests = 0
         fake.api_key_inventory_requests = 0

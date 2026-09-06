@@ -199,6 +199,8 @@ jobs:
           }
           # Run trusted workflow code from main. The CLI workflow checks out
           # and builds this exact immutable tag after it proves main ancestry.
+          # TestCLICustomerJourneyIsConsolidatedAndTrusted pins the display
+          # title, exact gate names, and four-lane release matrix together.
           gh workflow run cli.yml --repo "$GITHUB_REPOSITORY" --ref main \
             --field "release_source_sha=$SOURCE_SHA" \
             --field "release_source_tag=$CLI_TAG"

@@ -739,6 +739,8 @@ def reconcile_run(
             is_device = row_name in device_key_names
             if not is_customer and not is_device:
                 continue
+            # TODO(upstream-contract): qurl-service list rows always include
+            # status, even when the request already filters status=active.
             status = row.get("status")
             if status not in {"active", "revoked"}:
                 record_failure("credential_shape")
@@ -808,8 +810,10 @@ def reconcile_run(
         )
         raise CredentialError(f"run cleanup did not converge ({summary})")
 
-    # Cancellation cleanup can start before zero, one, or both ordinary keys
-    # exist. Reconcile every matching key, but do not require a fixed count.
+    # Cancellation cleanup can start before ordinary or device enrollment.
+    # Normal lanes revoke exact device-key IDs in their test cleanup; this
+    # crash-recovery pass uses the qurl-service name contract above. Reconcile
+    # every match, but do not require a fixed count for work that may not start.
     print(
         f"reconciled {connector_resources + len(unique_resource_ids)} run resources "
         f"and {len(unique_key_ids)} run credentials"
@@ -848,6 +852,15 @@ def reconcile_batch(args: argparse.Namespace) -> None:
             print(
                 f"::error::run cleanup failed for {run.lane} lane "
                 f"run {run.run_id}/{run.run_attempt}: {exc}",
+                file=sys.stderr,
+            )
+        except (OSError, UnicodeError):
+            # Keep processing the remaining runs. Unexpected local I/O text
+            # can contain protected paths or values, so report only a category.
+            failures += 1
+            print(
+                f"::error::run cleanup failed for {run.lane} lane "
+                f"run {run.run_id}/{run.run_attempt}: local cleanup error",
                 file=sys.stderr,
             )
     if failures:

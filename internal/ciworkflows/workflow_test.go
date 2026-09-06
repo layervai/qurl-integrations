@@ -66,7 +66,21 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	t.Parallel()
 
 	workflow := readWorkflow(t, cliWorkflow)
-	for _, name := range []string{cliCustomerArtifactsJobID, "journey", "journey-cleanup", requiredJobID, "notify-soak-success", "notify-soak-manual-failure", "signal-cli-release"} {
+	wantGateNames := map[string]string{
+		cliCustomerArtifactsJobID: "cli / customer journey artifacts",
+		"journey":                 "cli / customer journey",
+		"journey-cleanup":         "cli / customer journey cleanup",
+		requiredJobID:             "cli / required",
+	}
+	for name, wantDisplayName := range wantGateNames {
+		if workflow.Jobs[name] == nil {
+			t.Fatalf("%s is missing %q", cliWorkflow, name)
+		}
+		if workflow.Jobs[name].Name != wantDisplayName {
+			t.Errorf("%s display name = %q, want %q", name, workflow.Jobs[name].Name, wantDisplayName)
+		}
+	}
+	for _, name := range []string{"notify-soak-success", "notify-soak-manual-failure", "signal-cli-release"} {
 		if workflow.Jobs[name] == nil {
 			t.Fatalf("%s is missing %q", cliWorkflow, name)
 		}
@@ -120,6 +134,9 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	raw := readWorkflowBytes(t, cliWorkflow)
+	if !bytes.Contains(raw, []byte("format('CLI release gate {0} {1}', inputs.release_source_sha, inputs.release_source_tag)")) {
+		t.Error("CLI workflow release display title drifted from the exact release gate")
+	}
 	var cliConcurrency struct {
 		Concurrency struct {
 			Group string `yaml:"group"`
@@ -1043,12 +1060,13 @@ fi
 			"GH_CAPTURE":              capturePath,
 			"EXPECTED_ATTEMPT":        "2",
 			"GITHUB_OUTPUT":           outputPath,
+			"GITHUB_STEP_SUMMARY":     filepath.Join(runDir, "step-summary"),
 			"GITHUB_REPOSITORY":       "layervai/qurl-integrations",
 			"GITHUB_EVENT_NAME":       "workflow_run",
 			"GITHUB_REF":              "refs/heads/main",
 			"REQUESTED_SOURCE_RUNS":   "",
 			"SOURCE_BRANCH":           "main",
-			"SOURCE_EVENT":            "push",
+			"SOURCE_EVENT":            "schedule",
 			"SOURCE_DISPLAY_TITLE":    "CLI push",
 			"SOURCE_REPOSITORY":       "layervai/qurl-integrations",
 			"SOURCE_RUN_ID":           "700",
@@ -1089,7 +1107,7 @@ fi
 	if err != nil {
 		t.Fatalf("execute attempt-bound cleanup resolver: %v: %s", err, output)
 	}
-	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
+	if strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("attempt-bound cleanup result = %q, want required=true and exact source_runs", workflowOutput)
 	}
 	if !strings.Contains(ghArguments, "/actions/runs/700/attempts/2/jobs?per_page=100") ||
@@ -1109,24 +1127,24 @@ fi
 		t.Fatalf("automatic skipped journey did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_JOB_CONCLUSION": "__NULL__"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("automatic unsettled journey did not bias toward cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, ghArguments, err = runResolver(map[string]string{"MOCK_ARTIFACT_ATTEMPT": "1"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=false" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=true" {
 		t.Fatalf("rerun cleanup did not resolve the persisted identity attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	if strings.Contains(ghArguments, "/actions/runs/700/attempts/1/jobs?per_page=100") {
 		t.Errorf("rerun cleanup inferred identity by walking prior attempts: %s", ghArguments)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_FUTURE_ATTEMPT": "3"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("future operator rerun raced automatic cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{
 		"MOCK_ARTIFACT_ATTEMPT": "1", "MOCK_FUTURE_ATTEMPT": "2", "MOCK_FUTURE_ARTIFACT_CONCLUSION": "failure",
 	})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=false" {
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=true" {
 		t.Fatalf("failed rerun artifact hid prior journey cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_CLEANUP_CONCLUSION": "success"})
@@ -1137,6 +1155,9 @@ fi
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" || !strings.Contains(output, "source run attempt is outside the 1-30 automatic recovery bound") {
 		t.Fatalf("automatic over-bound attempt did not skip cleanly: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
+	if !strings.Contains(resolverRun, "Run qurl-cli-customer-cleanup.yml from main with source_runs=$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT") {
+		t.Error("automatic cleanup bound has no exact manual-recovery instruction")
+	}
 
 	for _, test := range []struct {
 		name        string
@@ -1145,6 +1166,7 @@ fi
 	}{
 		{name: "wrong automatic branch", overrides: map[string]string{"SOURCE_BRANCH": "feature"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic event", overrides: map[string]string{"SOURCE_EVENT": "pull_request"}, wantMessage: "source event is not an approved CLI trigger"},
+		{name: "retired automatic push", overrides: map[string]string{"SOURCE_EVENT": "push"}, wantMessage: "source event is not an approved CLI trigger"},
 		{name: "spoofed release title", overrides: map[string]string{"SOURCE_BRANCH": "v1.2.3", "SOURCE_EVENT": "workflow_dispatch", "SOURCE_DISPLAY_TITLE": "Operator CLI soak"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "release title on branch", overrides: map[string]string{"SOURCE_BRANCH": "feature", "SOURCE_EVENT": "workflow_dispatch", "SOURCE_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic source repository", overrides: map[string]string{"SOURCE_REPOSITORY": "other/repo"}, wantMessage: "exact trusted same-repository CLI workflow"},

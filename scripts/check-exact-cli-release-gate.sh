@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Cleanup is part of the release gate by design. A product journey that leaves
+# live customer or device credentials is a failed security journey, even when
+# the CLI assertions passed. The fallback workflow still retries that cleanup.
+
 if [[ $# -ne 5 ]]; then
   echo "usage: $0 <source-sha> <source-tag> <run-id> <run-attempt> <journey-count>" >&2
   exit 2
