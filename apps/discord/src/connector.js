@@ -782,13 +782,8 @@ function buildDetectTargetUrl(qurlSite) {
 
 // Scrub legacy access tokens and qv2t1 credentials before logging.
 // The detect access token originates in the mint RESPONSE (qurl_link fragment)
-// and is echoed back in the resolve REQUEST, so a future @layervai/qurl that
-// surfaced either in a QURLError message would otherwise leak it. As of 0.3.0,
-// errors are built from the RFC-7807 response envelope (errors.js), not bodies —
-// so this is defense-in-depth that keeps the never-log-the-token invariant
-// self-enforced across SDK versions. Applied uniformly to all three breadcrumbs;
-// it's a no-op on the token-free slug-lookup leg but keeps that log line null-safe
-// + consistent (the `String(... ?? '')` guard).
+// and is echoed back in the resolve request. Keep redaction independent of
+// SDK error formatting. qv2t1 segments use unpadded base64url and dots.
 function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]')
     .replace(/qv2t1\.[A-Za-z0-9_.-]+/g, 'qv2t1.[REDACTED]');
@@ -912,13 +907,14 @@ async function resolveDetectTarget() {
     throw err;
   }
 
+  let clearResourceCache = false;
   try {
     // qv2t1 carries an offline credential, not an at_ API-resolve token.
     // The native SDK verifies the issuer and cell against deployment trust.
     if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
       if (minted.resource_id !== resourceId) {
         const err = new Error('Detect mint returned a mismatched resource_id');
-        rememberDetectResourceFailure(err);
+        clearResourceCache = true;
         throw err;
       }
       const { createPortalOpener } = require('@layervai/qurl/node');
@@ -939,8 +935,8 @@ async function resolveDetectTarget() {
     // A malformed qurl_link is a mint response-shape issue, not evidence that
     // the cached resource_id is stale. Keep the resource cache and retry only
     // the mint after the short failure window.
-    rememberDetectResourceFailure(err, { clearResourceCache: false });
-    logger.warn('Detect tunnel mint failed', { error: redactAccessToken(err.message) });
+    rememberDetectResourceFailure(err, { clearResourceCache });
+    logger.warn('Detect native open or link validation failed', { error: redactAccessToken(err.message) });
     throw err;
   }
 
@@ -1032,8 +1028,7 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
       // headroom the upload paths use rather than the 30s mint window.
       signal: AbortSignal.timeout(60000),
     };
-    let response;
-    response = opener
+    const response = opener
       ? await opener.fetchDescendant(['api', 'detect'], (authenticatedTarget) => {
         // Check the signed ACK target before sending guild data or a Bearer.
         if (authenticatedTarget.href !== targetUrl) {
@@ -1041,7 +1036,7 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
         }
         return request;
       }, { redirects: 'error' })
-      : await fetch(targetUrl, request);
+      : await fetch(targetUrl, { ...request, redirect: 'error' });
 
     if (!response.ok) {
       return await throwConnectorError('Connector detect', response);
@@ -1060,7 +1055,7 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
     };
   } catch (err) {
     const message = redactAccessToken(err?.message);
-    if (opener && message !== err?.message) {
+    if (opener && typeof err?.message === 'string' && message !== err.message) {
       const safeError = new Error(message);
       safeError.status = err?.status;
       throw safeError;

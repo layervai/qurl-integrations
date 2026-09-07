@@ -778,7 +778,10 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
           close: jest.fn().mockResolvedValue(undefined),
           fetchDescendant: jest.fn(async (segments, build) => {
             expect(segments).toEqual(['api', 'detect']);
-            return globalThis.fetch(TUNNEL_TARGET, build(new URL(TUNNEL_TARGET)));
+            const request = build(new URL(TUNNEL_TARGET));
+            // SDK 0.6 owns redirects and rejects RequestInit.redirect.
+            expect(request).not.toHaveProperty('redirect');
+            return globalThis.fetch(TUNNEL_TARGET, request);
           }),
         };
         mockCreatePortalOpener.mockReset().mockReturnValue(opener);
@@ -848,6 +851,13 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
           .rejects.toThrow(/mismatched resource_id/);
         expect(mockCreatePortalOpener).not.toHaveBeenCalled();
         expect(globalThis.fetch).not.toHaveBeenCalled();
+        mockClient.createQurlForResource.mockResolvedValue({
+          qurl_link: qurl, qurl_site: TUNNEL_SITE, resource_id: RESOURCE_ID,
+        });
+        await expect(connector.detectWatermark(Buffer.from('image'), { guildId: 'g' }))
+          .resolves.toMatchObject({ detected: false });
+        expect(mockClient.listAllResources).toHaveBeenCalledTimes(2);
+
       });
 
       it('redacts the native credential from an SDK failure log', async () => {
@@ -906,6 +916,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9', apiKey: 'k-detect' });
       expect(get().url).toBe(`${TUNNEL_SITE}/api/detect`);
+      expect(get().opts.redirect).toBe('error');
     });
 
     it('self-mints then POSTs to qurl_site with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
@@ -1389,7 +1400,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(logger.warn).toHaveBeenCalledWith(
-        'Detect tunnel mint failed',
+        'Detect native open or link validation failed',
         expect.objectContaining({ error: expect.stringMatching(/access token/) }),
       );
     });
@@ -1409,7 +1420,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(logger.warn).toHaveBeenCalledWith(
-        'Detect tunnel mint failed',
+        'Detect native open or link validation failed',
         expect.objectContaining({ error: expect.stringMatching(/invalid qurl_link/) }),
       );
     });
