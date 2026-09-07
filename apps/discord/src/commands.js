@@ -174,6 +174,14 @@ function emitMintFailureAudit(error, { sendId, kind }) {
   });
 }
 
+function partialLinkLogFields(error) {
+  if (!error?.partialLinkCount) return {};
+  return {
+    partial_link_count: error.partialLinkCount,
+    partial_qurl_refs: (error.partialQurlIds || []).slice(0, 5).map(resourceIdLogRef),
+  };
+}
+
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
 // degraded, we log a warning and continue rather than fail the whole flow.
@@ -1690,38 +1698,77 @@ async function mintLinksInBatches({
     throw new Error('Private send mint deadline is invalid or expired');
   }
 
-  // The public shape is mirrored by planMintBatches in
-  // scripts/loadtest-standalone.js. The live load runner uses the public
-  // Connector path; it is not a private-send journey test. This loop's 100-link
-  // private shape is pinned directly in send-pipeline-back-half.test.js.
-  for (let i = 0; i < recipientCount; i += batchCapacity) {
-    if (tokensUsed >= batchCapacity && i > 0) {
-      const re = await reuploadFn();
-      currentResourceId = re.resource_id;
-      currentPrivateUpload = re.private_upload;
-      tokensUsed = 0;
+  try {
+    // The public shape is mirrored by planMintBatches in
+    // scripts/loadtest-standalone.js. The live load runner uses the public
+    // Connector path; it is not a private-send journey test. This loop's 100-link
+    // private shape is pinned directly in send-pipeline-back-half.test.js.
+    for (let i = 0; i < recipientCount; i += batchCapacity) {
+      if (tokensUsed >= batchCapacity && i > 0) {
+        const re = await reuploadFn();
+        currentResourceId = re.resource_id;
+        currentPrivateUpload = re.private_upload;
+        tokensUsed = 0;
+      }
+      const batchSize = Math.min(batchCapacity, recipientCount - i);
+      const mintOptions = {
+        expiresAt,
+        n: batchSize,
+        apiKey,
+        selfDestructSeconds,
+        guildId,
+      };
+      if (config.PRIVATE_UPLOAD_QURL) {
+        mintOptions.expiresIn = expiresIn;
+        mintOptions.audienceKeyId = audienceKeyId;
+        mintOptions.privateUpload = currentPrivateUpload;
+        mintOptions.privateSendDeadlineMs = privateSendDeadlineMs;
+      }
+      const minted = await mintLinks(currentResourceId, mintOptions);
+      for (const link of minted) {
+        // qurl_id is the join key against qurl.accessed webhooks; empty
+        // string degrades the whole monitor to bare base-msg.
+        allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: link.resource_id || currentResourceId });
+      }
+      tokensUsed += batchSize;
     }
-    const batchSize = Math.min(batchCapacity, recipientCount - i);
-    const mintOptions = {
-      expiresAt,
-      n: batchSize,
-      apiKey,
-      selfDestructSeconds,
-      guildId,
-    };
-    if (config.PRIVATE_UPLOAD_QURL) {
-      mintOptions.expiresIn = expiresIn;
-      mintOptions.audienceKeyId = audienceKeyId;
-      mintOptions.privateUpload = currentPrivateUpload;
-      mintOptions.privateSendDeadlineMs = privateSendDeadlineMs;
+  } catch (error) {
+    if (!config.PRIVATE_UPLOAD_QURL) throw error;
+    const qurlIds = [...new Set([
+      ...allLinks.map(link => link.qurl_id),
+      ...(error.partialQurlIds || []),
+    ].filter(id => /^q_[0-9a-f]{11}$/.test(id)))];
+    error.partialLinkCount = qurlIds.length;
+    error.partialQurlIds = qurlIds;
+    let failedCount = 0;
+    const failureSamples = [];
+    let attempted = 0;
+    while (attempted < qurlIds.length && Date.now() < privateSendDeadlineMs) {
+      const batch = qurlIds.slice(attempted, attempted + 5);
+      const results = await batchSettled(batch, async (qurlId) => {
+        await deleteLink(qurlId, apiKey, { deadlineMs: privateSendDeadlineMs });
+      }, 5);
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          failedCount++;
+          if (failureSamples.length < 5) {
+            failureSamples.push({ resource_ref: resourceIdLogRef(batch[index]), error: result.reason?.message });
+          }
+        }
+      });
+      attempted += batch.length;
     }
-    const minted = await mintLinks(currentResourceId, mintOptions);
-    for (const link of minted) {
-      // qurl_id is the join key against qurl.accessed webhooks; empty
-      // string degrades the whole monitor to bare base-msg.
-      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: link.resource_id || currentResourceId });
+    const unattempted = qurlIds.length - attempted;
+    if (failedCount > 0 || unattempted > 0) {
+      logger.error('Failed to revoke qURLs after a private mint failure', {
+        failed_count: failedCount,
+        unattempted_count: unattempted,
+        total: qurlIds.length,
+        failure_samples: failureSamples,
+        unattempted_samples: qurlIds.slice(attempted, attempted + 5).map(resourceIdLogRef),
+      });
     }
-    tokensUsed += batchSize;
+    throw error;
   }
   return allLinks;
 }
@@ -2021,7 +2068,7 @@ async function executeSendPipeline(interaction, {
       // exhaustion → re-upload → new connector resource).
       const firstUpload = await downloadAndUpload(
         attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds,
-        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
       );
       connectorResourceId = firstUpload.resource_id;
       // Use a holder so we can null out the reference after all re-uploads
@@ -2040,7 +2087,7 @@ async function executeSendPipeline(interaction, {
           initialPrivateUpload: firstUpload.private_upload,
           reuploadFn: () => reUploadBuffer(
             bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds,
-            ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+            ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
           ),
           expiresAt,
           expiresIn,
@@ -2083,7 +2130,7 @@ async function executeSendPipeline(interaction, {
       // contract once the carve-out is removed; today it's a no-op.
       const firstUpload = await uploadJsonToConnector(
         locPayload, 'location.json', apiKey, selfDestructSeconds,
-        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
       );
       connectorResourceId = firstUpload.resource_id;
 
@@ -2093,7 +2140,7 @@ async function executeSendPipeline(interaction, {
         initialPrivateUpload: firstUpload.private_upload,
         reuploadFn: () => uploadJsonToConnector(
           locPayload, 'location.json', apiKey, selfDestructSeconds,
-          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
         ),
         expiresAt,
         expiresIn,
@@ -2136,10 +2183,7 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
-      ...(error.partialLinkCount ? {
-        partial_link_count: error.partialLinkCount,
-        partial_qurl_ids: error.partialQurlIds,
-      } : {}),
+      ...partialLinkLogFields(error),
       sendId,
     });
     clearCooldown(interaction.user.id); // allow retry on failure
@@ -3006,22 +3050,26 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     await deleteLink(resourceId, apiKey);
     return resourceId;
   }, 5);
-  const failed = [];
+  let failedCount = 0;
+  const failureSamples = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
-      failed.push({
-        resource_ref: resourceIdLogRef(resourceIds[index]),
-        error: result.reason?.message,
-      });
+      failedCount++;
+      if (failureSamples.length < 5) {
+        failureSamples.push({
+          resource_ref: resourceIdLogRef(resourceIds[index]),
+          error: result.reason?.message,
+        });
+      }
     }
   });
-  if (failed.length > 0) {
+  if (failedCount > 0) {
     logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      failed_count: failed.length,
+      failed_count: failedCount,
       total: resourceIds.length,
-      failures: failed,
+      failure_samples: failureSamples,
     });
   } else {
     logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
@@ -3212,7 +3260,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         // Initial download+upload gives us the buffer for subsequent re-uploads.
         const first = await downloadAndUpload(
           sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct,
-          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
         );
         fileBuffer = first.fileBuffer;
         allLinks = await mintLinksInBatches({
@@ -3220,7 +3268,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           initialPrivateUpload: first.private_upload,
           reuploadFn: () => reUploadBuffer(
             fileBuffer, filename, contentType, apiKey, inheritedDestruct,
-            ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+            ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
           ),
           expiresAt,
           expiresIn: sendConfig.expires_in,
@@ -3252,10 +3300,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           error: err.message,
           apiCode: err.apiCode,
           status: err.status,
-          ...(err.partialLinkCount ? {
-            partial_link_count: err.partialLinkCount,
-            partial_qurl_ids: err.partialQurlIds,
-          } : {}),
+          ...partialLinkLogFields(err),
           isExpired,
         });
         // Always emit — every failure here (CDN re-download, connector
@@ -3300,7 +3345,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
       const firstUpload = await uploadJsonToConnector(
         locPayload, 'location.json', apiKey, inheritedDestruct,
-        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
       );
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = await mintLinksInBatches({
@@ -3308,7 +3353,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         initialPrivateUpload: firstUpload.private_upload,
         reuploadFn: () => uploadJsonToConnector(
           locPayload, 'location.json', apiKey, inheritedDestruct,
-          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
         ),
         expiresAt,
         expiresIn: sendConfig.expires_in,
@@ -3342,10 +3387,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
-      ...(error.partialLinkCount ? {
-        partial_link_count: error.partialLinkCount,
-        partial_qurl_ids: error.partialQurlIds,
-      } : {}),
+      ...partialLinkLogFields(error),
     });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted

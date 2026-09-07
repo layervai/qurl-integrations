@@ -251,20 +251,28 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
   return result;
 }
 
-async function deleteLink(resourceId, apiKey) {
+async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
   if (config.PRIVATE_UPLOAD_QURL) {
     qurlPath(resourceId);
     const key = apiKey || config.QURL_API_KEY;
     if (!key) throw new Error('QURL_API_KEY is not configured');
+    if (deadlineMs !== undefined
+        && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now())) {
+      throw new Error('Delegated qURL revoke deadline is invalid or expired');
+    }
     const target = `${config.QURL_ENDPOINT}/v1/delegated-qurls/${encodeURIComponent(resourceId)}`;
     let lastError;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
+        const remainingMs = deadlineMs === undefined ? REQUEST_TIMEOUT_MS : deadlineMs - Date.now();
+        if (remainingMs <= 0) {
+          throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
+        }
         const response = await fetch(target, {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' },
           redirect: 'error',
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remainingMs)),
         });
         if (response.status === 204) {
           logger.info('Revoked delegated qURL', { resource_ref: resourceIdLogRef(resourceId) });
@@ -291,10 +299,19 @@ async function deleteLink(resourceId, apiKey) {
         throw err;
       } catch (err) {
         lastError = err;
+        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+          throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
+        }
         if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) {
           throw err;
         }
-        if (attempt < MAX_RETRIES) await delay(retryDelayMs(err.response, attempt));
+        if (attempt < MAX_RETRIES) {
+          const waitMs = retryDelayMs(err.response, attempt);
+          if (deadlineMs !== undefined && Date.now() + waitMs > deadlineMs) {
+            throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
+          }
+          await delay(waitMs);
+        }
       }
     }
     throw lastError;
@@ -304,10 +321,8 @@ async function deleteLink(resourceId, apiKey) {
   // Revoke at the resource level: every link minted on the resource stops
   // resolving. Repeats against an existing revoked row are idempotent 204;
   // a never-existent public ID remains 404, so a corrupt send-row ID cannot
-  // report false success. SDK 0.3.x's delete() rejects current public IDs using
-  // a retired `r_` prefix check before any request is sent.
-  // qurl-typescript#244 fixes that older SDK method for other consumers; keep
-  // deleteResource() here because it directly names this whole-resource action.
+  // report false success. Keep deleteResource() because it directly names this
+  // whole-resource action.
   await callQurl(
     'DELETE',
     RESOURCE_ID_LOG_PATH,
@@ -320,8 +335,6 @@ async function deleteLink(resourceId, apiKey) {
 async function getResourceStatus(resourceId, apiKey) {
   qurlPath(resourceId);
   const client = makeClient(apiKey);
-  // SDK 0.3.x's get() applies only its non-empty-ID guard; unlike delete(), it
-  // does not impose the retired `r_` prefix before making this request.
   // Returns the SDK's QURL shape — access tokens are under `access_tokens`
   // (the SDK renames the API's wire-format `qurls` field).
   return callQurl(

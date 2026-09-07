@@ -1046,7 +1046,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(callsNamed('reUploadBuffer')).toHaveLength(2);
   });
 
-  it('keeps credentials and viewer policy as optional trailing parameters', () => {
+  it('keeps credentials, viewer policy, and the private deadline as optional trailing parameters', () => {
     let params = null;
     const paramName = (param) =>
       (param.type === 'AssignmentPattern' ? param.left.name : param.name);
@@ -1065,6 +1065,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     });
     expect(params).toEqual([
       'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds', 'audienceKeyId',
+      'privateSendDeadlineMs',
     ]);
     const calls = callsNamed('reUploadBuffer');
     expect(calls).not.toHaveLength(0);

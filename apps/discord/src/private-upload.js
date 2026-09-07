@@ -13,13 +13,14 @@ const logger = require('./logger');
 
 const UPLOAD_PATH = '/internal/v1/uploads';
 const UPLOAD_DOMAIN = 'LV-QURL-UPLOAD-AUTH-V1';
-const UPLOAD_REQUEST_DOMAIN = 'LV-QURL-UPLOAD-REQUEST-V1';
 const P256_ORDER = BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551');
 const P256_HALF_ORDER = P256_ORDER / 2n;
 const MAX_UPLOAD_ATTEMPTS = 3;
 const MAX_BATCH_ATTEMPTS = 3;
 const MAX_BATCH_POLLS = 900;
 const RETRY_BACKOFF_BASE_MS = 250;
+const UPLOAD_REQUEST_TIMEOUT_MS = 60000;
+const BATCH_REQUEST_TIMEOUT_MS = 30000;
 
 let opener = null;
 let recoveryTimer = null;
@@ -51,15 +52,6 @@ function canonicalUploadMessage(fields) {
     fields.bodyLength, fields.contentType, fields.filename, fields.viewerTtlSeconds,
     fields.authorityExpiresAt, fields.requestId,
   ]);
-}
-
-function stableUploadRequestDigest(fields) {
-  const canonical = canonicalMessage(UPLOAD_REQUEST_DOMAIN, [
-    fields.clientId, fields.audienceKeyId, fields.bodySha256,
-    fields.bodyLength, fields.contentType, fields.filename,
-    fields.viewerTtlSeconds, fields.authorityExpiresAt, fields.requestId,
-  ]);
-  return sha256Hex(canonical);
 }
 
 function bigintFromBytes(bytes) {
@@ -201,9 +193,8 @@ function isUuidV4(value) {
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 }
 
-function validateUploadResult(data, { authorityExpiresAt, uploadHandle } = {}) {
+function validateUploadResult(data, { authorityExpiresAt } = {}) {
   if (!isUploadHandle(data?.upload_handle)
-      || (uploadHandle && data.upload_handle !== uploadHandle)
       || typeof data?.mint_capability !== 'string'
       || data.mint_capability.length < 1
       || data.mint_capability.length > 8192
@@ -278,10 +269,13 @@ async function portalRequest(build) {
 
 async function uploadPrivate(bodyInput, {
   filename, contentType, viewerTtlSeconds, credential, authorityExpiresAt,
-  requestId = randomUUID(), sleep = delay,
+  deadlineMs, requestId = randomUUID(), sleep = delay,
 }) {
   const body = Buffer.from(bodyInput);
   if (body.length < 1) throw new Error('private upload body must not be empty');
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now()) {
+    throw new Error('Private upload deadline is invalid or expired');
+  }
   if (!isUuidV4(requestId)) throw new Error('private upload request ID must be a lowercase UUIDv4');
   if (!isCanonicalUtcSecond(authorityExpiresAt)) {
     throw new Error('private upload authority expiry must be canonical UTC RFC3339 seconds');
@@ -294,6 +288,11 @@ async function uploadPrivate(bodyInput, {
   for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
     try {
       const response = await portalRequest((target) => {
+        const timeoutMs = requestTimeoutMs(
+          deadlineMs,
+          UPLOAD_REQUEST_TIMEOUT_MS,
+          'Private upload did not complete before the Discord interaction deadline',
+        );
         const authority = authorityFor(target);
         const auth = signedTransportFields({
           authority, body, contentType: safeContentType, filename: safeFilename, viewerTtlSeconds: safeViewerTtl,
@@ -317,7 +316,7 @@ async function uploadPrivate(bodyInput, {
             'X-LayerV-Upload-Signature': auth.signature,
           },
           body,
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(timeoutMs),
         };
       });
       const result = await responseJson(response, 'Private upload');
@@ -335,7 +334,11 @@ async function uploadPrivate(bodyInput, {
       lastError = err;
       if (err.noRetry || (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))) throw err;
       if (attempt < MAX_UPLOAD_ATTEMPTS) {
-        await sleep(retryDelayMs(err.response, attempt));
+        const waitMs = retryDelayMs(err.response, attempt);
+        if (Date.now() + waitMs > deadlineMs) {
+          throw new Error('Private upload did not complete before the Discord interaction deadline');
+        }
+        await sleep(waitMs);
       }
     }
   }
@@ -348,10 +351,11 @@ function requiredRetryAfterMs(response) {
     throw new Error('Delegated qURL batch returned an invalid Retry-After header');
   }
   const seconds = Number(raw);
-  if (!Number.isSafeInteger(seconds)) {
+  const milliseconds = seconds * 1000;
+  if (!Number.isSafeInteger(milliseconds)) {
     throw new Error('Delegated qURL batch returned an invalid Retry-After header');
   }
-  return seconds * 1000;
+  return milliseconds;
 }
 
 function retryDelayMs(response, attempt) {
@@ -360,6 +364,12 @@ function retryDelayMs(response, attempt) {
     return requiredRetryAfterMs(response);
   }
   return RETRY_BACKOFF_BASE_MS * (2 ** (attempt - 1));
+}
+
+function requestTimeoutMs(deadlineMs, maximumMs, deadlineMessage) {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) throw new Error(deadlineMessage);
+  return Math.min(maximumMs, remainingMs);
 }
 
 function requiredEtag(response) {
@@ -396,6 +406,9 @@ async function redeemDelegatedBatch(upload, {
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now()) {
     throw new Error('Delegated qURL batch deadline is invalid or expired');
   }
+  if (!config.QURL_LINK_DOMAIN) {
+    throw new Error('QURL_LINK_DOMAIN is required for delegated qURL batches');
+  }
   const guildCredential = requirePrivateCredential(credential);
   const body = JSON.stringify({ mint_capability: upload.mint_capability, grants });
   const headers = {
@@ -409,7 +422,15 @@ async function redeemDelegatedBatch(upload, {
   for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt++) {
     try {
       const response = await fetch(`${config.QURL_ENDPOINT}/v1/delegated-qurl-batches`, {
-        method: 'POST', headers, body, redirect: 'error', signal: AbortSignal.timeout(30000),
+        method: 'POST',
+        headers,
+        body,
+        redirect: 'error',
+        signal: AbortSignal.timeout(requestTimeoutMs(
+          deadlineMs,
+          BATCH_REQUEST_TIMEOUT_MS,
+          'Delegated qURL batch did not complete before the Discord interaction deadline',
+        )),
       });
       if (response.status === 202) {
         const result = await responseJson(response, 'Delegated qURL batch');
@@ -454,7 +475,13 @@ async function redeemDelegatedBatch(upload, {
     const pollHeaders = { 'Authorization': `Bearer ${guildCredential.apiKey}`, 'Accept': 'application/json' };
     if (etag) pollHeaders['If-None-Match'] = etag;
     const response = await fetch(location, {
-      headers: pollHeaders, redirect: 'error', signal: AbortSignal.timeout(30000),
+      headers: pollHeaders,
+      redirect: 'error',
+      signal: AbortSignal.timeout(requestTimeoutMs(
+        deadlineMs,
+        BATCH_REQUEST_TIMEOUT_MS,
+        'Delegated qURL batch did not complete before the Discord interaction deadline',
+      )),
     });
     if (response.status === 304) {
       etag = requiredEtag(response);
@@ -486,7 +513,13 @@ async function redeemDelegatedBatch(upload, {
     if (!Array.isArray(items) || items.length !== grants.length) {
       throw new Error('Delegated qURL batch returned an invalid terminal response');
     }
-    return items.map((item, index) => {
+    const partialQurlIds = [...new Set(items
+      .filter(item => item?.status === 'succeeded' && /^q_[0-9a-f]{11}$/.test(item?.qurl?.qurl_id || ''))
+      .map(item => item.qurl.qurl_id))];
+    const expectedLinkOrigin = `https://${config.QURL_LINK_DOMAIN}`;
+    const seenQurlIds = new Set();
+    const seenQurlLinks = new Set();
+    const links = items.map((item, index) => {
       let qurlLink;
       try {
         qurlLink = new URL(item?.qurl?.qurl_link);
@@ -496,13 +529,34 @@ async function redeemDelegatedBatch(upload, {
       if (item?.index !== index || item?.status !== 'succeeded'
           || !/^q_[0-9a-f]{11}$/.test(item?.qurl?.qurl_id || '')
           || !qurlLink || qurlLink.protocol !== 'https:' || qurlLink.username || qurlLink.password
+          || qurlLink.origin !== expectedLinkOrigin || qurlLink.pathname !== '/'
+          || qurlLink.search || qurlLink.hash.length < 2
           || !isCanonicalUtcSecond(item?.qurl?.expires_at)) {
         const err = new Error(`Delegated qURL batch item ${index} failed`);
         err.apiCode = item?.error?.code || 'delegated_batch_item_failed';
+        err.partialLinkCount = partialQurlIds.length;
+        err.partialQurlIds = partialQurlIds;
         throw err;
       }
+      if (seenQurlIds.has(item.qurl.qurl_id) || seenQurlLinks.has(qurlLink.href)) {
+        const err = new Error('Delegated qURL batch returned a duplicate bearer grant');
+        err.apiCode = 'delegated_batch_item_failed';
+        err.partialLinkCount = partialQurlIds.length;
+        err.partialQurlIds = partialQurlIds;
+        throw err;
+      }
+      seenQurlIds.add(item.qurl.qurl_id);
+      seenQurlLinks.add(qurlLink.href);
       return { ...item.qurl, resource_id: item.qurl.qurl_id };
     });
+    if (result.data.status !== 'succeeded') {
+      const err = new Error('Delegated qURL batch did not fully succeed');
+      err.apiCode = 'delegated_batch_item_failed';
+      err.partialLinkCount = partialQurlIds.length;
+      err.partialQurlIds = partialQurlIds;
+      throw err;
+    }
+    return links;
   }
   throw new Error('Delegated qURL batch did not complete before the poll limit');
 }
@@ -517,7 +571,6 @@ module.exports = {
 if (process.env.NODE_ENV === 'test') {
   module.exports.__testExports = {
     canonicalUploadMessage,
-    stableUploadRequestDigest,
     strictDerLowSSign,
     canonicalFilename,
     canonicalContentType,

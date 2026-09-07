@@ -218,13 +218,14 @@ function privateCredential(apiKey, audienceKeyId) {
   return { apiKey: apiKey || config.QURL_API_KEY, keyId: audienceKeyId };
 }
 
-async function privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
+async function privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, deadlineMs) {
   const uploaded = await uploadPrivate(fileBuffer, {
     filename,
     contentType,
     viewerTtlSeconds,
     credential: privateCredential(apiKey, audienceKeyId),
     authorityExpiresAt: privateAuthorityExpiresAt(),
+    deadlineMs,
   });
   return {
     success: true,
@@ -265,7 +266,7 @@ function appendViewerTtl(form, viewerTtlSeconds) {
  * tests/connector-coverage.test.js and tests/send-pipeline-helpers.test.js, and those
  * cases would lose coverage if it were removed.
  */
-async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
+async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
@@ -291,7 +292,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
   if (config.PRIVATE_UPLOAD_QURL) {
-    return privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId);
+    return privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs);
   }
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
 
@@ -334,12 +335,12 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
  * re-downloading from Discord CDN. Used when the per-resource token
  * quota (10) is exhausted and more recipients need links.
  */
-async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
+async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
   if (config.PRIVATE_UPLOAD_QURL) {
-    return privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId);
+    return privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs);
   }
 
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
@@ -378,7 +379,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
  * Download a file from Discord CDN and return the buffer + upload result.
  * The buffer is cached so subsequent re-uploads don't re-download.
  */
-async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
+async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs) {
   filename = sanitizeFilename(filename);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
@@ -402,7 +403,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
   }
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
-  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId);
+  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs);
   return { ...result, fileBuffer };
 }
 
@@ -836,8 +837,8 @@ function buildDetectTargetUrl(qurlSite) {
 // Scrub any `at_…` access token from a free-text error message before logging.
 // The detect access token originates in the mint RESPONSE (qurl_link fragment)
 // and is echoed back in the resolve REQUEST, so a future @layervai/qurl that
-// surfaced either in a QURLError message would otherwise leak it. As of 0.3.0,
-// errors are built from the RFC-7807 response envelope (errors.js), not bodies —
+// surfaced either in a QURLError message would otherwise leak it. SDK errors
+// are built from the RFC-7807 response envelope (errors.js), not bodies —
 // so this is defense-in-depth that keeps the never-log-the-token invariant
 // self-enforced across SDK versions. Applied uniformly to all three breadcrumbs;
 // it's a no-op on the token-free slug-lookup leg but keeps that log line null-safe
@@ -1143,13 +1144,14 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
  * Upload a JSON object to the connector as a file.
  * Used for structured payloads like location data.
  */
-async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds, audienceKeyId) {
+async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
   if (config.PRIVATE_UPLOAD_QURL) {
     return privateUploadBuffer(
       Buffer.from(JSON.stringify(jsonPayload)), filename, 'application/json', apiKey, viewerTtlSeconds, audienceKeyId,
+      privateSendDeadlineMs,
     );
   }
 

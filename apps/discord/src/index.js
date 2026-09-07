@@ -204,6 +204,7 @@ if (config.PRIVATE_UPLOAD_QURL) {
     'PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM',
     'PRIVATE_UPLOAD_SIGNER_CLIENT_ID',
     'PRIVATE_UPLOAD_SIGNER_KEY_ID',
+    'QURL_LINK_DOMAIN',
     'QURL_DEPLOYMENT',
   ].filter(key => !process.env[key]?.trim());
   if (privateUploadMissing.length > 0) {

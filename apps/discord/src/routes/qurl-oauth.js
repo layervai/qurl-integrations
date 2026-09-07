@@ -21,11 +21,11 @@ const { fireAndForgetLinkGuildWebhookSubscription } = require('../guild-webhook-
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
-// route files. 15s matches the existing per-call budget; the 5s and 10s
-// values are for cleanup paths that should fail faster.
+// route files. 15s matches the existing per-call budget. Two 5s orphan
+// DELETE attempts bound persistence-failure cleanup to 10s.
 const AUTH0_TIMEOUT_MS = 15000;
 const QURL_SERVICE_TIMEOUT_MS = 15000;
-const ORPHAN_DELETE_TIMEOUT_MS = 10000;
+const ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS = 5000;
 
 const router = express.Router();
 
@@ -105,6 +105,37 @@ function renderError(res, statusCode, headline, detail) {
 function clearQurlOAuthCookies(res) {
   clearQurlOAuthCookie(res);
   clearQurlOAuthPkceCookie(res);
+}
+
+async function deleteOrphanCredential({ accessToken, bindingId, keyId, guildId }) {
+  const isPrivateBinding = Boolean(bindingId);
+  const credentialKind = isPrivateBinding ? 'external identity binding' : 'API key';
+  const resourcePath = isPrivateBinding
+    ? `/v1/external-identity-bindings/${encodeURIComponent(bindingId)}`
+    : `/v1/api-keys/${encodeURIComponent(keyId)}`;
+  let lastError;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(ORPHAN_DELETE_ATTEMPT_TIMEOUT_MS),
+      });
+      if (response.status === 204 || response.status === 404) return;
+      if (response.status >= 500 && response.status <= 599 && attempt < 2) continue;
+      logger.warn('Orphan credential delete returned non-terminal status', {
+        status: response.status, credentialKind, guildId,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  logger.warn('Orphan credential delete remained transport-unknown after exact retry', {
+    error: lastError?.message, credentialKind, guildId,
+  });
 }
 
 // /oauth/qurl/start — admin lands here after clicking the link in
@@ -375,19 +406,26 @@ router.get('/callback', rateLimit, async (req, res) => {
       body: JSON.stringify(useExternalBinding
         ? { provider: 'discord', external_id: guildId, display_name: keyName }
         : { kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
-      signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
     };
     let mintResp;
-    try {
-      mintResp = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, request);
-    } catch (firstError) {
-      if (!useExternalBinding) throw firstError;
-      // A transport failure can hide a committed rotation. Retry the exact
-      // body and Idempotency-Key once so qurl-service reconciles it.
-      mintResp = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
-        ...request,
-        signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
-      });
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        mintResp = await fetch(`${config.QURL_ENDPOINT}${resourcePath}`, {
+          ...request,
+          signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
+        });
+      } catch (firstError) {
+        if (!useExternalBinding || attempt === 2) throw firstError;
+        continue;
+      }
+      // A service-side transaction can commit before a 5xx response reaches
+      // us. Retry the exact body and Idempotency-Key once so the durable replay
+      // returns the only copy of the plaintext key.
+      if (useExternalBinding && mintResp.status >= 500 && attempt === 1) {
+        await mintResp.body?.cancel?.();
+        continue;
+      }
+      break;
     }
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
@@ -469,29 +507,13 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.error('Failed to persist guild API key after successful mint', {
       error: err?.message, guildId, discordUserId, keyId,
     });
-    // Key was minted but not stored. Best-effort delete on qurl-service
-    // so retries don't pile up orphan keys under the admin's account.
-    // Fire-and-forget — even if the cleanup fails, the user-facing 500
-    // response below is the right outcome (admin runs /qurl setup
-    // again to retry; the orphan only persists if delete also fails).
-    // `keyId` is guaranteed non-empty here — the missing-key_id 502
-    // earlier in the handler returned before this block can run, so
-    // the historical `if (keyId)` guard was dead code (round-9 #5).
-    fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),
-    })
-      .then((r) => {
-        if (!r.ok) {
-          logger.warn('Best-effort orphan-key delete returned non-ok', {
-            status: r.status, keyId, guildId,
-          });
-        }
-      })
-      .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
-        error: dErr?.message, keyId, guildId,
-      }));
+    // Key was minted but not stored. Private setup must remove the binding,
+    // which also releases its reserved provider identity; deleting only the
+    // child API key can leave the next setup blocked by a binding conflict.
+    // Public setup still owns only an API key, so it keeps that delete target.
+    // Await one exact retry after a transport-unknown result or 5xx. DELETE
+    // is idempotent, and 404 confirms that another attempt completed cleanup.
+    await deleteOrphanCredential({ accessToken, bindingId, keyId, guildId });
     return renderError(res, 500, 'qURL key provisioned but not stored',
       'Your qURL API key was created but the bot could not save it. Please run /qurl setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');
@@ -523,3 +545,7 @@ router.get('/callback', rateLimit, async (req, res) => {
 });
 
 module.exports = router;
+
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = { deleteOrphanCredential };
+}

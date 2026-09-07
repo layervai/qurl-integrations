@@ -524,4 +524,24 @@ describe('qURL client — delegated qURL revoke', () => {
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
+
+  it('bounds an ambiguous delegated DELETE by the caller deadline', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1_000);
+    const timeout = jest.spyOn(AbortSignal, 'timeout');
+    globalThis.fetch = jest.fn().mockResolvedValue(
+      apiError(503, { code: 'mutation_outcome_unknown' }, { 'Retry-After': '30' }),
+    );
+
+    try {
+      await expect(qurl.deleteLink(
+        'q_0123456789a', undefined, { deadlineMs: 2_000 },
+      )).rejects.toThrow(/interaction deadline/);
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(timeout).toHaveBeenCalledWith(1_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
 });

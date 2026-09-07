@@ -1721,11 +1721,16 @@ describe('detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowl
 });
 
 describe('Connector client — private delegated mint', () => {
+  const uploadPrivate = jest.fn();
   const redeemDelegatedBatch = jest.fn();
   let connector;
 
   beforeEach(() => {
     jest.resetModules();
+    uploadPrivate.mockReset().mockResolvedValue({
+      upload_handle: `upl_${'u'.repeat(43)}`,
+      mint_capability: 'qmc1.upload',
+    });
     redeemDelegatedBatch.mockReset().mockResolvedValue([{ qurl_link: 'https://qurl.site/private' }]);
     jest.doMock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
@@ -1734,7 +1739,7 @@ describe('Connector client — private delegated mint', () => {
       PRIVATE_UPLOAD_QURL: 'qurl://private-upload',
     }));
     jest.doMock('../src/private-upload', () => ({
-      uploadPrivate: jest.fn(),
+      uploadPrivate,
       redeemDelegatedBatch,
     }));
     connector = require('../src/connector');
@@ -1763,6 +1768,19 @@ describe('Connector client — private delegated mint', () => {
         { one_time_use: true, session_duration: '30s' },
       ],
     });
+  });
+
+  it('forwards the shared send deadline into every private upload', async () => {
+    const privateSendDeadlineMs = Date.now() + 60_000;
+
+    await connector.reUploadBuffer(
+      Buffer.from('file'), 'file.txt', 'text/plain', 'lv_test_example', 30,
+      'key_A1b2C3d4E5f6', privateSendDeadlineMs,
+    );
+
+    expect(uploadPrivate).toHaveBeenCalledWith(Buffer.from('file'), expect.objectContaining({
+      deadlineMs: privateSendDeadlineMs,
+    }));
   });
 
   it('rejects a capability whose upload handle does not match the resource ID', async () => {

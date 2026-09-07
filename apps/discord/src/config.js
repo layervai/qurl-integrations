@@ -117,6 +117,22 @@ function normalizeBaseUrl(raw) {
   return value;
 }
 
+function normalizeQurlLinkDomain(raw) {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return null;
+  let url;
+  try {
+    url = new URL(`https://${value}`);
+  } catch {
+    throw new Error('QURL_LINK_DOMAIN must be a bare hostname');
+  }
+  if (url.hostname !== value || url.port || url.username || url.password
+      || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('QURL_LINK_DOMAIN must be a bare hostname');
+  }
+  return url.hostname;
+}
+
 // Safe int parser: handles NaN and falsy-zero correctly.
 //
 // Options:
@@ -380,6 +396,9 @@ module.exports = {
   QURL_API_KEY: process.env.QURL_API_KEY,
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
+  // Must match qurl-service's QURL_LINK_DOMAIN. The private delegated-mint
+  // response is rejected unless every share link uses this exact HTTPS origin.
+  QURL_LINK_DOMAIN: normalizeQurlLinkDomain(process.env.QURL_LINK_DOMAIN),
 
   // Dormant private-upload v1 consumer. Presence of PRIVATE_UPLOAD_QURL is
   // the only enablement switch. The qURL and signer key are secrets; the

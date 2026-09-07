@@ -2140,10 +2140,11 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
 
   it('file send: mint partial metadata reaches the primary failure log without links', async () => {
     const interaction = makeInteraction();
+    const partialQurlIds = Array.from({ length: 6 }, (_, i) => `q_partial_${i}`);
     const partialErr = Object.assign(new Error('Connector mint_link failed (502)'), {
       status: 502,
-      partialLinkCount: 2,
-      partialQurlIds: ['q_partial_one', 'q_partial_two'],
+      partialLinkCount: partialQurlIds.length,
+      partialQurlIds,
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
     mockMintLinks.mockRejectedValueOnce(partialErr);
@@ -2154,10 +2155,11 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       'Failed to prepare QURL links',
       expect.objectContaining({
         status: 502,
-        partial_link_count: 2,
-        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+        partial_link_count: partialQurlIds.length,
+        partial_qurl_refs: partialQurlIds.slice(0, 5).map(resourceIdLogRef),
       }),
     );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(resourceIdLogRef(partialQurlIds[5]));
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
@@ -2822,7 +2824,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
+        failure_samples: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);
@@ -3137,6 +3139,84 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     for (const call of mockMintLinks.mock.calls) {
       expect(call[1]).toEqual(expect.objectContaining({ privateSendDeadlineMs }));
+    }
+  });
+
+  it('revokes prior and terminal-partial qURLs when a later private batch fails', async () => {
+    require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    const firstBatch = Array.from({ length: 100 }, (_, i) => {
+      const qurlId = `q_${i.toString(16).padStart(11, '0')}`;
+      return { qurl_id: qurlId, qurl_link: `https://q.test/${i}`, resource_id: qurlId };
+    });
+    const partialId = 'q_fffffffffff';
+    const partialError = Object.assign(new Error('delegated batch item failed'), {
+      partialLinkCount: 1,
+      partialQurlIds: [partialId],
+    });
+    mockMintLinks
+      .mockResolvedValueOnce(firstBatch)
+      .mockRejectedValueOnce(partialError);
+    const nextHandle = `upl_${'b'.repeat(43)}`;
+    const reuploadFn = jest.fn().mockResolvedValueOnce({
+      resource_id: nextHandle,
+      private_upload: { upload_handle: nextHandle, mint_capability: 'qmc1.next' },
+    });
+    const privateSendDeadlineMs = Date.now() + 60_000;
+
+    const error = await mintLinksInBatches({
+      initialResourceId: `upl_${'a'.repeat(43)}`,
+      initialPrivateUpload: { upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.first' },
+      reuploadFn,
+      expiresIn: '1h',
+      recipientCount: 101,
+      apiKey: 'lv_test_example',
+      audienceKeyId: 'key_A1b2C3d4E5f6',
+      privateSendDeadlineMs,
+    }).then(() => null, err => err);
+
+    expect(error).toBe(partialError);
+    expect(error.partialQurlIds).toEqual([...firstBatch.map(link => link.qurl_id), partialId]);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(101);
+    expect(mockDeleteLink).toHaveBeenCalledWith(partialId, 'lv_test_example', { deadlineMs: privateSendDeadlineMs });
+  });
+
+  it('stops private failure cleanup at the shared send deadline', async () => {
+    require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    let now = 1_000;
+    const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const firstBatch = Array.from({ length: 100 }, (_, i) => {
+      const qurlId = `q_${i.toString(16).padStart(11, '0')}`;
+      return { qurl_id: qurlId, qurl_link: `https://q.test/${i}`, resource_id: qurlId };
+    });
+    mockMintLinks
+      .mockResolvedValueOnce(firstBatch)
+      .mockRejectedValueOnce(new Error('later batch failed'));
+    mockDeleteLink.mockImplementation(async () => { now = 2_000; });
+    const nextHandle = `upl_${'b'.repeat(43)}`;
+
+    try {
+      await expect(mintLinksInBatches({
+        initialResourceId: `upl_${'a'.repeat(43)}`,
+        initialPrivateUpload: { upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.first' },
+        reuploadFn: jest.fn().mockResolvedValue({
+          resource_id: nextHandle,
+          private_upload: { upload_handle: nextHandle, mint_capability: 'qmc1.next' },
+        }),
+        expiresIn: '1h',
+        recipientCount: 101,
+        apiKey: 'lv_test_example',
+        audienceKeyId: 'key_A1b2C3d4E5f6',
+        privateSendDeadlineMs: 1_500,
+      })).rejects.toThrow(/later batch failed/);
+
+      expect(mockDeleteLink).toHaveBeenCalledTimes(5);
+      expect(logger.error).toHaveBeenCalledWith(
+        'Failed to revoke qURLs after a private mint failure',
+        expect.objectContaining({ unattempted_count: 95, total: 100 }),
+      );
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain(firstBatch[10].qurl_id);
+    } finally {
+      dateNow.mockRestore();
     }
   });
 });

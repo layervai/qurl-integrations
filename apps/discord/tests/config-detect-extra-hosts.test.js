@@ -39,3 +39,20 @@ describe('config — DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS / DETECT_EXTRA_NO
     });
   });
 });
+
+describe('config — QURL_LINK_DOMAIN', () => {
+  it('normalizes the service-configured share-link host', () => {
+    withFreshConfig({ QURL_LINK_DOMAIN: ' QURL.EXAMPLE ' }, () => {
+      expect(require('../src/config').QURL_LINK_DOMAIN).toBe('qurl.example');
+    });
+  });
+
+  it.each([
+    'https://qurl.example', 'user@qurl.example', 'qurl.example/path',
+    'qurl.example:443', 'qurl.example:8443',
+  ])('rejects non-host input %s', (value) => {
+    withFreshConfig({ QURL_LINK_DOMAIN: value }, () => {
+      expect(() => require('../src/config')).toThrow(/QURL_LINK_DOMAIN/);
+    });
+  });
+});

@@ -49,6 +49,7 @@ const {
   QURL_OAUTH_PKCE_COOKIE,
 } = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
+const { rateLimitStore } = require('../src/utils/oauth-rate-limit');
 const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
@@ -69,6 +70,7 @@ function expectQurlOAuthCookiesCleared(res) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  rateLimitStore.clear();
   globalThis.fetch = originalFetch;
 });
 
@@ -428,10 +430,40 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_abc1<\/dd>/);
     });
 
-    it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
+    it('retries an exact private binding create after a service 5xx', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      let resolveDeleteFired;
-      const deleteFired = new Promise((resolve) => { resolveDeleteFired = resolve; });
+      const cancelBody = jest.fn().mockResolvedValue(undefined);
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({ ok: false, status: 500, body: { cancel: cancelBody } })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({
+            binding_id: 'eib_12345678901',
+            api_key: { key_id: 'key_123456789012', plaintext: 'lv_live_abc123', key_prefix: 'lv_live_abc1' },
+          }),
+        });
+
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+
+      expect(res.status).toBe(200);
+      const createCalls = globalThis.fetch.mock.calls.filter(([url]) => String(url).endsWith('/v1/external-identity-bindings'));
+      expect(createCalls).toHaveLength(2);
+      expect(createCalls[1][1].body).toBe(createCalls[0][1].body);
+      expect(createCalls[1][1].headers['Idempotency-Key']).toBe(createCalls[0][1].headers['Idempotency-Key']);
+      expect(cancelBody).toHaveBeenCalledTimes(1);
+      expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2', {
+        keyId: 'key_123456789012', bindingId: 'eib_12345678901',
+      });
+    });
+
+    it('retries a private binding DELETE after 5xx and accepts terminal 204', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
       const fetchSpy = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -444,10 +476,8 @@ describe('qurl-oauth routes', () => {
             api_key: { key_id: 'key_123456789012', plaintext: 'lv_live_abc123', key_prefix: 'lv_live_abc1' },
           }),
         })
-        .mockImplementationOnce(async () => {
-          resolveDeleteFired();
-          return { ok: true, status: 204, text: () => Promise.resolve('') };
-        });
+        .mockResolvedValueOnce({ ok: false, status: 503 })
+        .mockResolvedValueOnce({ ok: true, status: 204 });
       globalThis.fetch = fetchSpy;
       db.setGuildApiKey.mockRejectedValueOnce(new Error('DDB throttled'));
       const res = await request(app).get(
@@ -455,10 +485,51 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(500);
       expect(res.text).toContain('provisioned but not stored');
-      await deleteFired;
-      const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
-      expect(deleteCall).toBeDefined();
-      expect(deleteCall[0]).toContain('/v1/api-keys/key_123456789012');
+      const deleteCalls = fetchSpy.mock.calls.filter(([, init]) => init?.method === 'DELETE');
+      expect(deleteCalls).toHaveLength(2);
+      expect(deleteCalls.map(([url]) => url)).toEqual([
+        'http://localhost:9999/v1/external-identity-bindings/eib_12345678901',
+        'http://localhost:9999/v1/external-identity-bindings/eib_12345678901',
+      ]);
+      expect(deleteCalls[1][1].headers).toEqual(deleteCalls[0][1].headers);
+    });
+
+    it('awaits one exact private-binding DELETE retry after a transport-unknown result', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const timeout = jest.spyOn(AbortSignal, 'timeout');
+      const fetchSpy = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({
+            binding_id: 'eib_12345678901',
+            api_key: { key_id: 'key_123456789012', plaintext: 'lv_live_abc123', key_prefix: 'lv_live_abc1' },
+          }),
+        })
+        .mockRejectedValueOnce(new Error('connection reset after send'))
+        .mockResolvedValueOnce({ ok: false, status: 404 });
+      globalThis.fetch = fetchSpy;
+      db.setGuildApiKey.mockRejectedValueOnce(new Error('DDB throttled'));
+
+      try {
+        const res = await request(app).get(
+          `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+        )
+          .set('Cookie', cookieFor(state))
+          .set('X-Forwarded-For', '198.51.100.17');
+
+        expect(res.status).toBe(500);
+        const deleteCalls = fetchSpy.mock.calls.filter(([, init]) => init?.method === 'DELETE');
+        expect(deleteCalls).toHaveLength(2);
+        expect(deleteCalls[1][0]).toBe(deleteCalls[0][0]);
+        expect(deleteCalls[1][1].headers).toEqual(deleteCalls[0][1].headers);
+        expect(timeout).toHaveBeenCalledWith(5000);
+      } finally {
+        timeout.mockRestore();
+      }
     });
 
     it('renders success without qURL-account-email line when id_token verification fails', async () => {
@@ -740,5 +811,28 @@ describe('qurl-oauth — public upload path', () => {
       process.env.PRIVATE_UPLOAD_QURL = savedPrivateUploadQurl;
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('retries a public API-key DELETE after 5xx and accepts terminal 404', async () => {
+    const router = require('../src/routes/qurl-oauth');
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 500 })
+      .mockResolvedValueOnce({ ok: false, status: 404 });
+
+    await router.__testExports.deleteOrphanCredential({
+      accessToken: 'jwt-xyz',
+      keyId: 'key-public-1',
+      guildId: 'guild-1',
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(globalThis.fetch.mock.calls.map(([url]) => url)).toEqual([
+      'http://localhost:9999/v1/api-keys/key-public-1',
+      'http://localhost:9999/v1/api-keys/key-public-1',
+    ]);
+    expect(globalThis.fetch.mock.calls[0][1]).toEqual(expect.objectContaining({
+      method: 'DELETE',
+      headers: expect.objectContaining({ Authorization: 'Bearer jwt-xyz' }),
+    }));
   });
 });

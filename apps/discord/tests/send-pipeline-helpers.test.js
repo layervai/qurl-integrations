@@ -1504,13 +1504,14 @@ describe('handleAddRecipients', () => {
     expect(result.msg).toMatch(/Failed to prepare links/);
 
     const logger = require('../src/logger');
+    const { resourceIdLogRef } = require('../src/utils/resource-id');
     expect(logger.error).toHaveBeenCalledWith(
       'addRecipients file re-upload failed',
       expect.objectContaining({
         sendId: 'send-fail',
         status: 502,
         partial_link_count: 2,
-        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+        partial_qurl_refs: ['q_partial_one', 'q_partial_two'].map(resourceIdLogRef),
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');

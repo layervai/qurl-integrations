@@ -14,6 +14,7 @@ const mockConfig = {
   PRIVATE_UPLOAD_SIGNER_CLIENT_ID: 'discord-sandbox',
   PRIVATE_UPLOAD_SIGNER_KEY_ID: 'discord-signing-v1',
   QURL_ENDPOINT: 'https://api.test.local',
+  QURL_LINK_DOMAIN: 'qurl.site',
 };
 
 jest.mock('@layervai/qurl/node', () => ({ createPortalOpener: mockCreatePortalOpener }));
@@ -23,7 +24,6 @@ jest.mock('../src/logger', () => ({ warn: jest.fn() }));
 const privateUpload = require('../src/private-upload');
 const {
   canonicalUploadMessage,
-  stableUploadRequestDigest,
   strictDerLowSSign,
   canonicalViewerTtl,
 } = privateUpload.__testExports;
@@ -45,8 +45,6 @@ const UPLOAD_VECTOR = {
 };
 
 const UPLOAD_CANONICAL_HEX = '4c562d5155524c2d55504c4f41442d415554482d56310000000004504f53540000000f3132372e302e302e313a3438313233000000142f696e7465726e616c2f76312f75706c6f6164730000000a313738383634353630300000002b576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c6f0000000f646973636f72642d73616e64626f7800000012646973636f72642d7369676e696e672d7631000000106b65795f413162324333643445356636000000403263663234646261356662306133306532366538336232616335623965323965316231363165356331666137343235653733303433333632393338623938323400000001350000000a746578742f706c61696e0000000a7265706f72742e74787400000002333000000014323032362d30392d30365432323a30303a30305a0000002431323365343536372d653839622d343264332d613435362d343236363134313734303030';
-const UPLOAD_REQUEST_DIGEST = '5573b5e08e820de835e3c6929de7f4602c403f5068a6b636653cae02a1fe0c9d';
-
 function jsonResponse(status, body, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
@@ -74,7 +72,6 @@ afterEach(async () => {
 
 test('upload canonical bytes match the private-upload v1 vector', () => {
   expect(canonicalUploadMessage(UPLOAD_VECTOR).toString('hex')).toBe(UPLOAD_CANONICAL_HEX);
-  expect(stableUploadRequestDigest(UPLOAD_VECTOR)).toBe(UPLOAD_REQUEST_DIGEST);
 });
 
 test('viewer TTL uses the exact signed canonical decimal contract', () => {
@@ -126,6 +123,7 @@ test('upload ambiguity respects Retry-After and accepts an exact 200 replay', as
     credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
     viewerTtlSeconds: 30,
     authorityExpiresAt: '2026-09-06T22:00:00Z',
+    deadlineMs: Date.now() + 60_000,
     requestId: UPLOAD_VECTOR.requestId,
     sleep,
   });
@@ -137,6 +135,29 @@ test('upload ambiguity respects Retry-After and accepts an exact 200 replay', as
   expect(seen[0]['X-LayerV-Viewer-TTL-Seconds']).toBe('30');
   expect(sleep).toHaveBeenCalledTimes(1);
   expect(sleep).toHaveBeenCalledWith(1000);
+});
+
+test('upload rejects Retry-After beyond the shared send deadline without retaining the body', async () => {
+  const sleep = jest.fn();
+  mockOpener.fetch.mockResolvedValue(jsonResponse(
+    503,
+    { error: { code: 'mutation_outcome_unknown', retryable: true } },
+    { 'Retry-After': '100000' },
+  ));
+
+  await expect(privateUpload.uploadPrivate(Buffer.alloc(25 * 1024 * 1024), {
+    filename: 'report.bin',
+    contentType: 'application/octet-stream',
+    credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+    viewerTtlSeconds: 30,
+    authorityExpiresAt: '2026-09-06T22:00:00Z',
+    deadlineMs: Date.now() + 60_000,
+    requestId: UPLOAD_VECTOR.requestId,
+    sleep,
+  })).rejects.toThrow(/interaction deadline/);
+
+  expect(mockOpener.fetch).toHaveBeenCalledTimes(1);
+  expect(sleep).not.toHaveBeenCalled();
 });
 
 test('upload to delegated batch honors retry timing and accepts terminal 200 without ETag', async () => {
@@ -177,8 +198,8 @@ test('upload to delegated batch honors retry timing and accepts terminal 200 wit
       item_count: 2,
       submitted_at: '2026-09-06T21:00:00Z',
       results: [
-        { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/a', expires_at: '2026-09-06T22:00:00Z' } },
-        { index: 1, status: 'succeeded', qurl: { qurl_id: 'q_00000000002', qurl_link: 'https://qurl.site/b', expires_at: '2026-09-06T22:00:00Z' } },
+        { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_a', expires_at: '2026-09-06T22:00:00Z' } },
+        { index: 1, status: 'succeeded', qurl: { qurl_id: 'q_00000000002', qurl_link: 'https://qurl.site/#at_b', expires_at: '2026-09-06T22:00:00Z' } },
       ],
     } }));
   try {
@@ -187,6 +208,7 @@ test('upload to delegated batch honors retry timing and accepts terminal 200 wit
       filename: 'report.txt', contentType: 'text/plain', credential,
       viewerTtlSeconds: 30,
       authorityExpiresAt: '2026-09-06T22:00:00Z',
+      deadlineMs: Date.now() + 60_000,
     });
     const sleep = jest.fn();
     const links = await privateUpload.redeemDelegatedBatch(upload, {
@@ -203,10 +225,55 @@ test('upload to delegated batch honors retry timing and accepts terminal 200 wit
     expect(sleep.mock.calls).toEqual([[1000], [2000]]);
     expect(links.map(link => link.resource_id)).toEqual(['q_00000000001', 'q_00000000002']);
     expect(deliveries).toEqual([
-      { recipientId: 'discord-user-1', qurlLink: 'https://qurl.site/a', ok: true },
-      { recipientId: 'discord-user-2', qurlLink: 'https://qurl.site/b', ok: true },
+      { recipientId: 'discord-user-1', qurlLink: 'https://qurl.site/#at_a', ok: true },
+      { recipientId: 'discord-user-2', qurlLink: 'https://qurl.site/#at_b', ok: true },
     ]);
   } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('delegated batch POST and poll requests cannot outlive the shared send deadline', async () => {
+  const batchId = `dqb_${'e'.repeat(22)}`;
+  const realFetch = global.fetch;
+  let now = 1_000;
+  const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => now);
+  const timeout = jest.spyOn(AbortSignal, 'timeout');
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse(202, { data: {
+      batch_id: batchId,
+      status: 'queued',
+      item_count: 1,
+      submitted_at: '2026-09-06T21:00:00Z',
+    } }, {
+      Location: `https://api.test.local/v1/delegated-qurl-batches/${batchId}`,
+      ETag: '"queued"',
+      'Retry-After': '1',
+    }))
+    .mockResolvedValueOnce(jsonResponse(200, { data: {
+      batch_id: batchId,
+      status: 'succeeded',
+      item_count: 1,
+      submitted_at: '2026-09-06T21:00:00Z',
+      results: [
+        { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_a', expires_at: '2026-09-06T22:00:00Z' } },
+      ],
+    } }));
+  try {
+    await privateUpload.redeemDelegatedBatch(
+      { mint_capability: 'qmc1.test' },
+      {
+        credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+        grants: [{ one_time_use: true }],
+        deadlineMs: 3_500,
+        sleep: jest.fn(async (ms) => { now += ms; }),
+      },
+    );
+
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([2_500, 1_500]);
+  } finally {
+    timeout.mockRestore();
+    dateNow.mockRestore();
     global.fetch = realFetch;
   }
 });
@@ -227,6 +294,150 @@ test('delegated batch rejects an unexpected successful POST without retrying', a
     )).rejects.toThrow(/unexpected success status \(200\)/);
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('delegated batch preserves successful qURL IDs when a terminal item fails', async () => {
+  const batchId = `dqb_${'b'.repeat(22)}`;
+  const realFetch = global.fetch;
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse(202, { data: {
+      batch_id: batchId,
+      status: 'queued',
+      item_count: 2,
+      submitted_at: '2026-09-06T21:00:00Z',
+    } }, {
+      Location: `https://api.test.local/v1/delegated-qurl-batches/${batchId}`,
+      ETag: '"queued"',
+      'Retry-After': '1',
+    }))
+    .mockResolvedValueOnce(jsonResponse(200, { data: {
+      batch_id: batchId,
+      status: 'partially_failed',
+      item_count: 2,
+      submitted_at: '2026-09-06T21:00:00Z',
+      results: [
+        { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_a', expires_at: '2026-09-06T22:00:00Z' } },
+        { index: 1, status: 'failed', error: { code: 'creation_failed', message: 'failed' } },
+      ],
+    } }));
+  try {
+    const error = await privateUpload.redeemDelegatedBatch(
+      { mint_capability: 'qmc1.test' },
+      {
+        credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+        grants: [{ one_time_use: true }, { one_time_use: true }],
+        deadlineMs: Date.now() + 60_000,
+        sleep: jest.fn(),
+      },
+    ).then(() => null, err => err);
+
+    expect(error).toEqual(expect.any(Error));
+    expect(error.partialQurlIds).toEqual(['q_00000000001']);
+    expect(error.partialLinkCount).toBe(1);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test.each([
+  ['a foreign origin', 'https://phishing.example/#at_secret'],
+  ['a non-root path', 'https://qurl.site/share#at_secret'],
+  ['a query', 'https://qurl.site/?next=bad#at_secret'],
+  ['no bearer fragment', 'https://qurl.site/'],
+])('delegated batch rejects a share link with %s', async (_case, qurlLink) => {
+  const batchId = `dqb_${'c'.repeat(22)}`;
+  const realFetch = global.fetch;
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse(202, { data: {
+      batch_id: batchId,
+      status: 'queued',
+      item_count: 1,
+      submitted_at: '2026-09-06T21:00:00Z',
+    } }, {
+      Location: `https://api.test.local/v1/delegated-qurl-batches/${batchId}`,
+      ETag: '"queued"',
+      'Retry-After': '1',
+    }))
+    .mockResolvedValueOnce(jsonResponse(200, { data: {
+      batch_id: batchId,
+      status: 'succeeded',
+      item_count: 1,
+      submitted_at: '2026-09-06T21:00:00Z',
+      results: [
+        { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: qurlLink, expires_at: '2026-09-06T22:00:00Z' } },
+      ],
+    } }));
+  try {
+    const error = await privateUpload.redeemDelegatedBatch(
+      { mint_capability: 'qmc1.test' },
+      {
+        credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+        grants: [{ one_time_use: true }],
+        deadlineMs: Date.now() + 60_000,
+        sleep: jest.fn(),
+      },
+    ).then(() => null, err => err);
+
+    expect(error).toEqual(expect.any(Error));
+    expect(error.partialQurlIds).toEqual(['q_00000000001']);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test.each([
+  {
+    name: 'qurl_id',
+    second: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_b' },
+    expectedIds: ['q_00000000001'],
+  },
+  {
+    name: 'qurl_link',
+    second: { qurl_id: 'q_00000000002', qurl_link: 'https://qurl.site/#at_a' },
+    expectedIds: ['q_00000000001', 'q_00000000002'],
+  },
+])('delegated batch rejects a duplicate $name bearer grant', async ({ second, expectedIds }) => {
+  const batchId = `dqb_${'d'.repeat(22)}`;
+  const expiresAt = '2026-09-06T22:00:00Z';
+  const realFetch = global.fetch;
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse(202, { data: {
+      batch_id: batchId,
+      status: 'queued',
+      item_count: 2,
+      submitted_at: '2026-09-06T21:00:00Z',
+    } }, {
+      Location: `https://api.test.local/v1/delegated-qurl-batches/${batchId}`,
+      ETag: '"queued"',
+      'Retry-After': '1',
+    }))
+    .mockResolvedValueOnce(jsonResponse(200, { data: {
+      batch_id: batchId,
+      status: 'succeeded',
+      item_count: 2,
+      submitted_at: '2026-09-06T21:00:00Z',
+      results: [
+        { index: 0, status: 'succeeded', qurl: { qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_a', expires_at: expiresAt } },
+        { index: 1, status: 'succeeded', qurl: { ...second, expires_at: expiresAt } },
+      ],
+    } }));
+  try {
+    const error = await privateUpload.redeemDelegatedBatch(
+      { mint_capability: 'qmc1.test' },
+      {
+        credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+        grants: [{ one_time_use: true }, { one_time_use: true }],
+        deadlineMs: Date.now() + 60_000,
+        sleep: jest.fn(),
+      },
+    ).then(() => null, err => err);
+
+    expect(error).toEqual(expect.any(Error));
+    expect(error.message).toMatch(/duplicate bearer grant/);
+    expect(error.partialQurlIds).toEqual(expectedIds);
   } finally {
     global.fetch = realFetch;
   }
