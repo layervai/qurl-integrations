@@ -1361,9 +1361,11 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 
 func TestValidateSandboxCrashStateRequiresExactNonServingResource(t *testing.T) {
 	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
-	valid := sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8}
-	if err := validateSandboxCrashState(valid, crid, "resource"); err != nil {
-		t.Fatalf("valid crash state: %v", err)
+	for _, connectionState := range []string{"connecting", "stopped"} {
+		valid := sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: connectionState, ServingEpoch: 8}
+		if err := validateSandboxCrashState(valid, crid, "resource"); err != nil {
+			t.Fatalf("valid %s crash state: %v", connectionState, err)
+		}
 	}
 	for name, doc := range map[string]sandboxSharingDoc{
 		"wrong CRID":     {CRID: "other", ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},

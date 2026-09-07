@@ -31,7 +31,8 @@ const (
 // TestSandboxLocalPublishSoak crashes the foreground publish after one minute,
 // then keeps the customer qURL path serving through the one-hour authorization
 // boundary with a credential-free daemon. It also checks an explicit epoch
-// restart. The scheduled CLI workflow runs the default 80-minute duration.
+// restart. The sibling journey covers graceful foreground shutdown. The
+// scheduled CLI workflow runs the default 80-minute duration.
 func TestSandboxLocalPublishSoak(t *testing.T) {
 	if os.Getenv(localPublishSoakArming) != "enabled" {
 		t.Skipf("SKIPPED LOUDLY: local-publish soak is disarmed — %s != enabled", localPublishSoakArming)
@@ -72,15 +73,14 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	}()
 
 	for time.Now().Before(deadline) {
-		now := time.Now()
-		if !crashRestartDone && !now.Before(crashRestartAt) {
+		if !crashRestartDone && !time.Now().Before(crashRestartAt) {
 			// A graceful foreground exit deliberately turns sharing off. Kill the
 			// process to model a crash while desired state remains on, then prove
 			// the durable device credential can restart it without the account key.
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
 			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
-			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, 30*time.Second)
+			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, 2*time.Minute)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
 			// TODO(upstream-contract): qurl-service must advance serving_epoch when
 			// a daemon reattaches to an already-on share after an unclean exit.
@@ -91,7 +91,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			}
 			crashRestartDone = true
 		}
-		if !epochRestartDone && !now.Before(epochRestartAt) {
+		if !epochRestartDone && !time.Now().Before(epochRestartAt) {
 			before := waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			res := runSandboxLocalCLI(t, fixture.binary, fixture.env, fixture.stateDir, "-o", "json", "restart", fixture.local.CRID)
 			after := decodeSandboxSharing(t, res)

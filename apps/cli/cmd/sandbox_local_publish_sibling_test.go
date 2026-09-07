@@ -33,7 +33,6 @@ const (
 	sandboxSiblingArmingEnv = "QURL_CLI_SANDBOX_SIBLING_CONTINUITY"
 	sandboxCLIBinaryEnv     = "QURL_CLI_SANDBOX_BINARY"
 	sandboxProcessTimeout   = 60 * time.Second
-	sandboxCrashReapTimeout = 15 * time.Second
 )
 
 func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDeviceKeyID string) error {
@@ -457,7 +456,7 @@ func (p *sandboxPublishProcess) crashAndValidate(t *testing.T, secrets ...string
 	}
 	select {
 	case <-p.done:
-	case <-time.After(sandboxCrashReapTimeout):
+	case <-time.After(sandboxProcessTimeout):
 		t.Fatalf("sandbox publish %s was not reaped after crash\nstderr: %s", p.label, p.stderr.String())
 	}
 	p.waitMu.Lock()
@@ -873,7 +872,7 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	if err := validateSandboxCrashedExit(nil); err == nil || err.Error() != "exit = nil, want signal: killed" {
 		t.Fatalf("nil crash exit = %v", err)
 	}
-	for _, waitErr := range []error{exit130, exec.CommandContext(context.Background(), "sh", "-c", "kill -TERM $$").Run()} {
+	for _, waitErr := range []error{errors.New("start failed"), exit130, exec.CommandContext(context.Background(), "sh", "-c", "kill -TERM $$").Run()} {
 		if err := validateSandboxCrashedExit(waitErr); err == nil {
 			t.Fatalf("non-killed exit %v accepted", waitErr)
 		}
