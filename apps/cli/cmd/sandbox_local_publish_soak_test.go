@@ -54,7 +54,9 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 
 	startFDs, startRSS := sandboxProcessUsage(t)
 	started := time.Now()
-	warmRestartAt := started.Add(duration / 3)
+	// Fail fast on broken crash recovery; the remaining soak still crosses the
+	// one-hour authorization lifetime while the credential-free daemon serves.
+	warmRestartAt := started.Add(time.Minute)
 	epochRestartAt := started.Add(2 * duration / 3)
 	deadline := started.Add(duration)
 	warmRestartDone := false
@@ -72,8 +74,30 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	for time.Now().Before(deadline) {
 		now := time.Now()
 		if !warmRestartDone && !now.Before(warmRestartAt) {
+			// A graceful foreground exit deliberately turns sharing off. Kill the
+			// process to model a crash while desired state remains on, then prove
+			// the durable device credential can restart it without the account key.
+			fixture.process.requireRunning(t, "before crash restart")
+			if err := fixture.process.cmd.Process.Kill(); err != nil {
+				t.Fatalf("kill foreground publish for crash restart: %v", err)
+			}
 			foregroundOwned = false
-			fixture.interruptAndValidate(t)
+			select {
+			case <-fixture.process.done:
+			case <-time.After(15 * time.Second):
+				t.Fatal("foreground publish was not reaped after crash")
+			}
+			fixture.process.waitMu.Lock()
+			waitErr := fixture.process.waitErr
+			fixture.process.waitMu.Unlock()
+			if waitErr == nil {
+				t.Fatal("killed foreground publish exited successfully")
+			}
+			if err := validateSandboxProtectedProcessOutput(
+				fixture.process.stdout.String(), fixture.process.stderr.String(), fixture.key, fixture.cleanupJWT,
+			); err != nil {
+				t.Fatalf("crashed foreground publish output: %v", err)
+			}
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
