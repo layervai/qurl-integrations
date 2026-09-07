@@ -806,15 +806,21 @@ def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
     fallback_cleanup_minutes = workflow_timeout_minutes(
         CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
     )
+    fallback_operation_seconds = 40 * 60
+    cleanup_workflow = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
     assert fallback_cleanup_minutes == 45
+    assert (
+        fallback_operation_seconds + credentials.M2M_EXPIRY_MARGIN_SECONDS
+        == fallback_cleanup_minutes * 60
+    )
     assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
     assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
-    assert "--operation-budget-seconds 2700" in CUSTOMER_CLEANUP_WORKFLOW.read_text(
-        encoding="utf-8"
+    assert (
+        f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow
     )
     assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
     assert (
-        fallback_cleanup_minutes * 60
+        fallback_operation_seconds
         + credentials.M2M_EXPIRY_MARGIN_SECONDS
         + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
         <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
@@ -825,9 +831,20 @@ def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
     assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60, (
         "primary inventory budgets no longer leave room for cleanup writes"
     )
+    resolver_cap = re.search(
+        r"cleanup_cap=([1-9][0-9]*)",
+        cleanup_workflow,
+    )
+    base_lanes = re.search(r"lane_specs=\(([^)\n]+)\)", cleanup_workflow)
+    added_lanes = re.search(r"lane_specs\+=\(([^)\n]+)\)", cleanup_workflow)
+    assert resolver_cap and base_lanes and added_lanes
+    assert "if (( ${#resolved_runs[@]} > cleanup_cap )); then" in cleanup_workflow
+    assert 'resolved_runs=("${resolved_runs[@]: -cleanup_cap}")' in cleanup_workflow
+    max_lanes = len(base_lanes.group(1).split()) + len(added_lanes.group(1).split())
+    assert int(resolver_cap.group(1)) * max_lanes <= credentials.MAX_RECONCILE_RUNS
     assert (
         credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12
-        < fallback_cleanup_minutes * 60
+        < fallback_operation_seconds
     ), "fallback inventory budgets no longer leave room for cleanup writes"
     assert (
         0
