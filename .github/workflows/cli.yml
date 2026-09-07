@@ -240,6 +240,23 @@ jobs:
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
             ./apps/cli/...
 
+      # TODO(upstream-contract): the regression name belongs to qurl-connector.
+      # Use the CLI's FRP pin. New upstream test imports must fit this module's
+      # dependency graph; readonly mode makes a changed requirement fail here.
+      - name: Verify Connector recovery with the CLI dependency versions
+        shell: bash
+        run: |
+          go test -mod=readonly -race -count=1 -timeout=3m -json \
+            -run '^TestHermeticSessionGroupRecoversLostControlOnFreshAdmission$' \
+            github.com/layervai/qurl-connector/pkg/share \
+            | tee "$RUNNER_TEMP/connector-recovery.jsonl" \
+            | jq -j 'select(.Action == "output") | .Output'
+          jq -se 'any(.[]; .Action == "pass" and .Test == "TestHermeticSessionGroupRecoversLostControlOnFreshAdmission")' \
+            "$RUNNER_TEMP/connector-recovery.jsonl" >/dev/null || {
+              echo "::error::Connector recovery regression did not pass: the named test is missing or skipped."
+              exit 1
+            }
+
       # This is an independent named release gate, not an accidental repeat of
       # the coverage run. Keep the lifecycle result visible and stable on every
       # CLI pull request.
