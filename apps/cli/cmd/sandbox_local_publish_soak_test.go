@@ -26,6 +26,7 @@ const (
 	defaultLocalPublishSoak  = 80 * time.Minute
 	minimumLocalPublishSoak  = 75 * time.Minute
 	soakCrashCheckpointDelay = time.Minute
+	soakCrashRecoveryTimeout = 5 * time.Minute
 )
 
 // TestSandboxLocalPublishSoak crashes the foreground publish after one minute,
@@ -80,11 +81,13 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
 			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
-			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, 2*time.Minute)
+			// TODO(upstream-contract): qRTS currently uses FRP's 90-second stale
+			// control cleanup; keep enough margin for detection and observation.
+			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, soakCrashRecoveryTimeout)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
 			// TODO(upstream-contract): qurl-service must advance serving_epoch when
 			// a daemon reattaches to an already-on share after an unclean exit.
-			waitSandboxSharingStateAfterEpoch(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", crashed.ServingEpoch, 2*time.Minute)
+			waitSandboxSharingStateAfterEpoch(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", crashed.ServingEpoch, soakCrashRecoveryTimeout)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)
@@ -380,8 +383,8 @@ func sandboxProcessUsage(t *testing.T) (fds int, rssBytes int64) {
 }
 
 func TestSandboxSoakDurationContract(t *testing.T) {
-	if minimumLocalPublishSoak-soakCrashCheckpointDelay <= time.Hour {
-		t.Fatalf("minimum soak %s with crash delay %s leaves no full post-crash authorization hour", minimumLocalPublishSoak, soakCrashCheckpointDelay)
+	if minimumLocalPublishSoak-soakCrashCheckpointDelay-sandboxProcessTimeout-2*soakCrashRecoveryTimeout <= time.Hour {
+		t.Fatalf("minimum soak %s with crash delay %s, process timeout %s, and two recovery timeouts of %s leaves no full post-crash authorization hour", minimumLocalPublishSoak, soakCrashCheckpointDelay, sandboxProcessTimeout, soakCrashRecoveryTimeout)
 	}
 	for _, test := range []struct {
 		name, value string
