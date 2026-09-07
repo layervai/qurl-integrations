@@ -241,6 +241,7 @@ jobs:
             ./apps/cli/...
 
       - name: Verify Connector recovery with the CLI dependency versions
+        shell: bash
         run: |
           go test -mod=readonly -race -count=1 -json \
             -run '^TestHermeticSessionGroupRecoversLostControlOnFreshAdmission$' \
