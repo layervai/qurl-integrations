@@ -16,6 +16,11 @@ jest.mock('@layervai/qurl', () => ({
   QURLClient: jest.fn().mockImplementation(() => mockClient),
 }));
 
+const mockCreatePortalOpener = jest.fn();
+jest.mock('@layervai/qurl/node', () => ({
+  createPortalOpener: (...args) => mockCreatePortalOpener(...args),
+}));
+
 function resetDetectSdkMocks() {
   mockClient.listAllResources.mockReset();
   mockClient.createQurlForResource.mockReset();
@@ -759,6 +764,79 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       });
       return () => captured;
     }
+
+    describe('native qv2t1 detect', () => {
+      const qurl = 'https://qurl.link/#qv2t1.test-credential';
+      let opener;
+      beforeEach(() => {
+        captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+        mockClient.createQurlForResource.mockResolvedValue({
+          qurl_link: qurl, qurl_site: TUNNEL_SITE, resource_id: RESOURCE_ID,
+        });
+        opener = {
+          start: jest.fn().mockResolvedValue(undefined),
+          close: jest.fn().mockResolvedValue(undefined),
+          fetchDescendant: jest.fn(async (segments, build) => {
+            expect(segments).toEqual(['api', 'detect']);
+            return globalThis.fetch(TUNNEL_TARGET, build(new URL(TUNNEL_TARGET)));
+          }),
+        };
+        mockCreatePortalOpener.mockReset().mockReturnValue(opener);
+      });
+
+      it('uses runtime-configured native SDK access and closes after the guild-scoped POST', async () => {
+        await expect(connector.detectWatermark(Buffer.from('image'), {
+          guildId: 'guild-9', apiKey: 'guild-key', contentType: 'image/png',
+        })).resolves.toMatchObject({ detected: false });
+        expect(mockCreatePortalOpener).toHaveBeenCalledWith({ qurl });
+        expect(opener.start).toHaveBeenCalledTimes(1);
+        expect(mockClient.resolve).not.toHaveBeenCalled();
+        expect(globalThis.fetch).toHaveBeenCalledWith(TUNNEL_TARGET, expect.objectContaining({
+          method: 'POST', body: Buffer.from('image'),
+          headers: expect.objectContaining({ 'X-Guild-Id': 'guild-9', Authorization: 'Bearer guild-key' }),
+        }));
+        expect(opener.fetchDescendant).toHaveBeenCalledWith(
+          ['api', 'detect'], expect.any(Function), { redirects: 'error' },
+        );
+        expect(opener.start.mock.invocationCallOrder[0]).toBeLessThan(opener.fetchDescendant.mock.invocationCallOrder[0]);
+        expect(opener.close).toHaveBeenCalledTimes(1);
+      });
+
+      it('rejects a different authenticated target before sending credentials or image bytes', async () => {
+        opener.fetchDescendant.mockImplementation(async (_, build) => build(new URL('https://other.qurl.site/api/detect')));
+        await expect(connector.detectWatermark(Buffer.from('image'), { guildId: 'g' }))
+          .rejects.toThrow(/native target does not match/);
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(opener.close).toHaveBeenCalledTimes(1);
+      });
+
+      it('rejects a different mint resource before opening', async () => {
+        mockClient.createQurlForResource.mockResolvedValue({
+          qurl_link: qurl, qurl_site: TUNNEL_SITE, resource_id: OTHER_RESOURCE_ID,
+        });
+        await expect(connector.detectWatermark(Buffer.from('image'), { guildId: 'g' }))
+          .rejects.toThrow(/mismatched resource_id/);
+        expect(mockCreatePortalOpener).not.toHaveBeenCalled();
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      });
+
+      it('redacts the native credential from an SDK failure log', async () => {
+        opener.start.mockRejectedValue(new Error(`failed to open ${qurl}`));
+        await expect(connector.detectWatermark(Buffer.from('image'), { guildId: 'g' }))
+          .rejects.toThrow('qv2t1.[REDACTED]');
+        const logs = JSON.stringify(require('../src/logger').warn.mock.calls);
+        expect(logs).toContain('qv2t1.[REDACTED]');
+        expect(logs).not.toContain('test-credential');
+      });
+
+      it.each(['start', 'fetchDescendant'])('closes after %s fails', async (method) => {
+        opener[method].mockRejectedValue(new Error('native unavailable'));
+        await expect(connector.detectWatermark(Buffer.from('image'), { guildId: 'g' }))
+          .rejects.toThrow(/native unavailable/);
+        expect(opener.close).toHaveBeenCalledTimes(1);
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      });
+    });
 
     function freezeDetectClock(initialNow = 1_000_000) {
       let now = initialNow;
