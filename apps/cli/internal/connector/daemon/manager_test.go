@@ -455,11 +455,13 @@ func TestManagerStopOneRouteLeavesSiblingsUntouched(t *testing.T) {
 	stopA := daemonShare("a", 2, "off")
 	registry.setShare(&stopA)
 	manager.Trigger()
+	runner := factory.runner(1)
 	waitManagerCondition(t, func() bool {
 		_, present := manager.Diagnostics()["a"]
-		return !present
-	}, "stopped share pruned")
-	runner := factory.runner(1)
+		// Diagnostics are pruned before the runner receives the route set.
+		routes := runner.lastSetRoutes()
+		return !present && len(routes) == 1 && routes[0] == "connector-b"
+	}, "stopped share pruned and route withdrawn")
 	if got := runner.lastSetRoutes(); len(got) != 1 || got[0] != "connector-b" {
 		t.Fatalf("SetRoutes after stop = %v, want only connector-b", got)
 	}
