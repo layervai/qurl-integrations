@@ -82,6 +82,7 @@ STUB = {
     "GH_TOKEN": "stub-token",
     "REPOSITORY": "layervai/qurl-integrations",
     "REPOSITORY_URL": "https://github.com/layervai/qurl-integrations",
+    "WORKFLOW_PATH": ".github/workflows/slack.yml",
     "WORKFLOW_ID": "242171096",
     "EVENT": "push",
     "CONCLUSION": "failure",
@@ -307,6 +308,7 @@ if not re.search(r"(?m)^permissions:\n  actions: read\s*$", workflow_text):
     die("top-level permissions must grant actions: read for supersession lookup")
 for variable, expression in {
     "GH_TOKEN": "github.token",
+    "WORKFLOW_PATH": "github.event.workflow_run.path",
     "RUN_ID": "github.event.workflow_run.id",
     "RUN_ATTEMPT": "github.event.workflow_run.run_attempt",
 }.items():
@@ -504,10 +506,16 @@ try:
     # an empty field.
     cases.append((triggers[0], {"EVENT": "schedule"}))
     cases.append(("cli: Build and Test", {"EVENT": "schedule"}))
+    cases.append(("Operator CLI soak", {
+        "EVENT": "schedule", "WORKFLOW_PATH": ".github/workflows/cli.yml",
+    }))
     cases.append((triggers[0], {"ACTOR": ""}))
 
     for workflow, extra in cases:
-        listed = workflow in triggers
+        effective_workflow = ("cli: Build and Test"
+                              if extra.get("WORKFLOW_PATH") ==
+                              ".github/workflows/cli.yml" else workflow)
+        listed = effective_workflow in triggers
         env = {"WORKFLOW_NAME": workflow}
         env.update(extra)
         label = "%s%s" % (workflow, (" " + str(extra)) if extra else "")
@@ -548,7 +556,7 @@ try:
         trigger = ("Scheduled" if ctx["EVENT"] == "schedule"
                    else "Push by %s" % (ctx["ACTOR"] or "unknown"))
         expected = [
-            "*Workflow:*\n`%s`" % workflow,
+            "*Workflow:*\n`%s`" % effective_workflow,
             "*Result:*\n:x: `failure`",
             "*Branch:*\n`%s` (%s)"
             % (ctx["DEFAULT_BRANCH"], ctx["HEAD_SHA"][:7]),
@@ -589,7 +597,8 @@ try:
                 "case statement drifted)" % workflow)
         if not listed and not generic:
             die("unlisted %r did not hit the fallback arm" % workflow)
-        if workflow == "cli: Build and Test" and extra.get("EVENT") == "schedule" and \
+        if effective_workflow == "cli: Build and Test" and \
+                extra.get("EVENT") == "schedule" and \
                 "Slack result-delivery gate" not in impact:
             die("scheduled CLI failure impact does not cover result delivery")
 
@@ -662,7 +671,8 @@ try:
     # The dedicated soak job already posts the scheduled CLI success. A rerun
     # must not add a second green message from this general notifier.
     proc, payload = run({
-        "WORKFLOW_NAME": "cli: Build and Test", "EVENT": "schedule",
+        "WORKFLOW_NAME": "Scheduled CLI soak",
+        "WORKFLOW_PATH": ".github/workflows/cli.yml", "EVENT": "schedule",
         "CONCLUSION": "success", "RUN_ATTEMPT": "2",
         "GH_STUB_MODE": "previous", "GH_PREVIOUS_CONCLUSION": "failure",
     })

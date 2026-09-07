@@ -1109,7 +1109,6 @@ fi
 			"SOURCE_RUN_ID":           "700",
 			"SOURCE_RUN_ATTEMPT":      "2",
 			"SOURCE_SHA":              "0123456789abcdef0123456789abcdef01234567",
-			"SOURCE_WORKFLOW_NAME":    "cli: Build and Test",
 			"SOURCE_WORKFLOW_PATH":    ".github/workflows/cli.yml",
 			"WORKFLOW_REPOSITORY":     "layervai/qurl-integrations",
 			"MOCK_JOB_NAME":           "cli / customer journey (linux, 1, ubuntu-latest, TestSandboxLinuxDefaultDaemonLifecycle, 35, false)",
@@ -1119,7 +1118,7 @@ fi
 			"MOCK_RUN_EVENT":          "push",
 			"MOCK_RUN_BRANCH":         "main",
 			"MOCK_RUN_REPOSITORY":     "layervai/qurl-integrations",
-			"MOCK_RUN_NAME":           "cli: Build and Test",
+			"MOCK_RUN_NAME":           "Operator CLI soak",
 			"MOCK_RUN_PATH":           ".github/workflows/cli.yml",
 			"MOCK_RUN_ATTEMPT":        "2",
 			"MOCK_RUN_SHA":            "0123456789abcdef0123456789abcdef01234567",
@@ -1248,7 +1247,6 @@ fi
 		{name: "release title on branch", overrides: map[string]string{"SOURCE_BRANCH": "feature", "SOURCE_EVENT": "workflow_dispatch", "SOURCE_DISPLAY_TITLE": "CLI release gate 0123456789abcdef0123456789abcdef01234567"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic source repository", overrides: map[string]string{"SOURCE_REPOSITORY": "other/repo"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic workflow repository", overrides: map[string]string{"WORKFLOW_REPOSITORY": "other/repo"}, wantMessage: "exact trusted same-repository CLI workflow"},
-		{name: "wrong automatic workflow name", overrides: map[string]string{"SOURCE_WORKFLOW_NAME": "other"}, wantMessage: "exact trusted same-repository CLI workflow"},
 		{name: "wrong automatic workflow path", overrides: map[string]string{"SOURCE_WORKFLOW_PATH": ".github/workflows/other.yml"}, wantMessage: "exact trusted same-repository CLI workflow"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
