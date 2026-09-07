@@ -510,6 +510,9 @@ func validateSandboxForegroundOutput(stdout, stderr, crid string, secrets ...str
 }
 
 func validateSandboxCrashedExit(waitErr error) error {
+	if waitErr == nil {
+		return errors.New("exit = nil, want signal: killed")
+	}
 	var exitErr *exec.ExitError
 	if !errors.As(waitErr, &exitErr) {
 		return fmt.Errorf("exit = %w, want signal: killed", waitErr)
@@ -866,7 +869,10 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	if err := validateSandboxCrashedExit(killed); err != nil {
 		t.Fatalf("killed fixture: %v", err)
 	}
-	for _, waitErr := range []error{nil, exit130, exec.CommandContext(context.Background(), "sh", "-c", "kill -TERM $$").Run()} {
+	if err := validateSandboxCrashedExit(nil); err == nil || err.Error() != "exit = nil, want signal: killed" {
+		t.Fatalf("nil crash exit = %v", err)
+	}
+	for _, waitErr := range []error{exit130, exec.CommandContext(context.Background(), "sh", "-c", "kill -TERM $$").Run()} {
 		if err := validateSandboxCrashedExit(waitErr); err == nil {
 			t.Fatalf("non-killed exit %v accepted", waitErr)
 		}

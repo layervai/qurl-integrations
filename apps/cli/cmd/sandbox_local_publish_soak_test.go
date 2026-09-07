@@ -57,10 +57,10 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	started := time.Now()
 	// Fail fast on broken crash recovery; the remaining soak still crosses the
 	// one-hour authorization lifetime while the credential-free daemon serves.
-	warmRestartAt := started.Add(soakCrashCheckpointDelay)
+	crashRestartAt := started.Add(soakCrashCheckpointDelay)
 	epochRestartAt := started.Add(2 * duration / 3)
 	deadline := started.Add(duration)
-	warmRestartDone := false
+	crashRestartDone := false
 	epochRestartDone := false
 	requestCount := 1
 	routeDest := filepath.Join(t.TempDir(), "payload")
@@ -74,24 +74,26 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 
 	for time.Now().Before(deadline) {
 		now := time.Now()
-		if !warmRestartDone && !now.Before(warmRestartAt) {
+		if !crashRestartDone && !now.Before(crashRestartAt) {
 			// A graceful foreground exit deliberately turns sharing off. Kill the
 			// process to model a crash while desired state remains on, then prove
 			// the durable device credential can restart it without the account key.
 			before := waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
 			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
-			crashed := decodeSandboxSharing(t, runSandboxLocalCLI(t, fixture.binary, fixture.env, fixture.stateDir, "-o", "json", "status", fixture.local.CRID))
+			crashed := readSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, 15*time.Second)
 			if crashed.DesiredState != "on" {
 				t.Fatalf("crash cleared the authoritative desired state: %+v", crashed)
 			}
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
+			// TODO(upstream-contract): qurl-service must advance serving_epoch when
+			// a daemon reattaches to an already-on share after an unclean exit.
 			waitSandboxSharingStateAfterEpoch(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", before.ServingEpoch, 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)
 			}
-			warmRestartDone = true
+			crashRestartDone = true
 		}
 		if !epochRestartDone && !now.Before(epochRestartAt) {
 			before := waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
@@ -116,8 +118,8 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 		}
 		time.Sleep(remaining)
 	}
-	if !warmRestartDone || !epochRestartDone {
-		t.Fatalf("soak did not execute both lifecycle checkpoints (warm=%v epoch=%v)", warmRestartDone, epochRestartDone)
+	if !crashRestartDone || !epochRestartDone {
+		t.Fatalf("soak did not execute both lifecycle checkpoints (crash=%v epoch=%v)", crashRestartDone, epochRestartDone)
 	}
 	if requestCount < 3 {
 		t.Fatalf("soak completed only %d public-route requests", requestCount)
@@ -383,7 +385,7 @@ func sandboxProcessUsage(t *testing.T) (fds int, rssBytes int64) {
 
 func TestSandboxSoakDurationContract(t *testing.T) {
 	if minimumLocalPublishSoak-soakCrashCheckpointDelay <= time.Hour {
-		t.Fatalf("minimum soak %s leaves no full post-crash authorization hour", minimumLocalPublishSoak)
+		t.Fatalf("minimum soak %s with crash delay %s leaves no full post-crash authorization hour", minimumLocalPublishSoak, soakCrashCheckpointDelay)
 	}
 	for _, test := range []struct {
 		name, value string
