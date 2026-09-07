@@ -441,6 +441,35 @@ func (p *sandboxPublishProcess) stopAndValidate(t *testing.T, secrets ...string)
 	return stopped
 }
 
+func (p *sandboxPublishProcess) crashAndValidate(t *testing.T, secrets ...string) {
+	t.Helper()
+	if p.stopped {
+		t.Fatalf("sandbox publish %s was stopped twice", p.label)
+	}
+	p.stopped = true
+	p.requireRunning(t, "before requested crash")
+	if err := p.cmd.Process.Kill(); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			t.Fatalf("sandbox publish %s exited before the crash signal\nstderr: %s", p.label, p.stderr.String())
+		}
+		t.Fatalf("kill sandbox publish %s: %v\nstderr: %s", p.label, err, p.stderr.String())
+	}
+	select {
+	case <-p.done:
+	case <-time.After(sandboxProcessTimeout):
+		t.Fatalf("sandbox publish %s was not reaped after crash\nstderr: %s", p.label, p.stderr.String())
+	}
+	p.waitMu.Lock()
+	waitErr := p.waitErr
+	p.waitMu.Unlock()
+	if err := validateSandboxCrashedExit(waitErr); err != nil {
+		t.Fatalf("sandbox publish %s crash: %v\nstderr: %s", p.label, err, p.stderr.String())
+	}
+	if err := validateSandboxForegroundOutput(p.stdout.String(), p.stderr.String(), p.crid, secrets...); err != nil {
+		t.Fatalf("sandbox publish %s crash: %v\nstderr: %s", p.label, err, p.stderr.String())
+	}
+}
+
 func (p *sandboxPublishProcess) interruptAndValidate(t *testing.T, secrets ...string) {
 	t.Helper()
 	if p.stopped {
@@ -470,10 +499,29 @@ func validateSandboxForegroundExit(waitErr error, stdout, stderr, crid string, s
 	if err := validateSandboxInterruptedExit(waitErr); err != nil {
 		return fmt.Errorf("foreground publish %w", err)
 	}
+	return validateSandboxForegroundOutput(stdout, stderr, crid, secrets...)
+}
+
+func validateSandboxForegroundOutput(stdout, stderr, crid string, secrets ...string) error {
 	if stdout != crid+"\n" {
 		return errors.New("foreground publish did not print exactly one complete CRID line")
 	}
 	return validateSandboxProtectedProcessOutput(stdout, stderr, secrets...)
+}
+
+func validateSandboxCrashedExit(waitErr error) error {
+	if waitErr == nil {
+		return errors.New("exit = nil, want signal: killed")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		return fmt.Errorf("exit = %w, want signal: killed", waitErr)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		return fmt.Errorf("exit = %w, want signal: killed", waitErr)
+	}
+	return nil
 }
 
 func validateSandboxInterruptedExit(waitErr error) error {
@@ -817,6 +865,18 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	if err := validateSandboxForegroundExit(exit130, crid+"\n", "", crid, "api-secret"); err != nil {
 		t.Fatal(err)
 	}
+	killed := exec.CommandContext(context.Background(), "sh", "-c", "kill -9 $$").Run()
+	if err := validateSandboxCrashedExit(killed); err != nil {
+		t.Fatalf("killed fixture: %v", err)
+	}
+	if err := validateSandboxCrashedExit(nil); err == nil || err.Error() != "exit = nil, want signal: killed" {
+		t.Fatalf("nil crash exit = %v", err)
+	}
+	for _, waitErr := range []error{errors.New("start failed"), exit130, exec.CommandContext(context.Background(), "sh", "-c", "kill -TERM $$").Run()} {
+		if err := validateSandboxCrashedExit(waitErr); err == nil {
+			t.Fatalf("non-killed exit %v accepted", waitErr)
+		}
+	}
 	for name, fixture := range map[string]struct {
 		waitErr error
 		stdout  string
@@ -876,6 +936,29 @@ func TestSandboxPublishProcessReportsEarlyExit(t *testing.T) {
 		!strings.Contains(err.Error(), "foreground publish exited before persisting a local share") {
 		t.Fatalf("early-exit local registry result = %v", err)
 	}
+}
+
+func TestSandboxPublishProcessCrashAndValidate(t *testing.T) {
+	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+	script := filepath.Join(t.TempDir(), "qurl")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '"+crid+"\\n'\nexec sleep 30\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o700); err != nil { //nolint:gosec // The fixture must be executable.
+		t.Fatal(err)
+	}
+	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
+		t.Setenv(name, "fixture")
+	}
+	process := startSandboxPublishProcess(t, script, map[string]string{"QURL_ENDPOINT": "https://sandbox.invalid"}, sandboxRunNamespace{
+		AgentID: "qurl-share-r1-a1-ha", ConnectorID: "connector-sandbox-local-publish-crash",
+	}, t.TempDir(), "http://127.0.0.1:1")
+	got, err := process.waitReadyResult(5 * time.Second)
+	if err != nil || got != crid {
+		t.Fatalf("crash fixture readiness = %q, %v", got, err)
+	}
+	process.crid = crid
+	process.crashAndValidate(t, "protected-secret")
 }
 
 func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {

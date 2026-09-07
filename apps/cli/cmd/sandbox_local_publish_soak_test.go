@@ -21,17 +21,19 @@ import (
 )
 
 const (
-	localPublishSoakArming  = "QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK"
-	localPublishSoakLength  = "QURL_CLI_SANDBOX_SOAK_DURATION"
-	defaultLocalPublishSoak = 80 * time.Minute
-	minimumLocalPublishSoak = 75 * time.Minute
+	localPublishSoakArming   = "QURL_CLI_SANDBOX_LOCAL_PUBLISH_SOAK"
+	localPublishSoakLength   = "QURL_CLI_SANDBOX_SOAK_DURATION"
+	defaultLocalPublishSoak  = 80 * time.Minute
+	minimumLocalPublishSoak  = 75 * time.Minute
+	soakCrashCheckpointDelay = time.Minute
+	soakCrashRecoveryTimeout = 5 * time.Minute
 )
 
-// TestSandboxLocalPublishSoak keeps the customer qURL path serving across
-// multiple native authorization lifetimes, a credential-free warm daemon
-// restart, and an explicit epoch restart. The scheduled CLI workflow runs the
-// default 80-minute duration; a shorter run would not cross the one-hour
-// enrollment/qURL lifetime boundary this validation is intended to catch.
+// TestSandboxLocalPublishSoak crashes the foreground publish after one minute,
+// then keeps the customer qURL path serving through the one-hour authorization
+// boundary with a credential-free daemon. It also checks an explicit epoch
+// restart. The sibling journey covers graceful foreground shutdown. The
+// scheduled CLI workflow runs the default 80-minute duration.
 func TestSandboxLocalPublishSoak(t *testing.T) {
 	if os.Getenv(localPublishSoakArming) != "enabled" {
 		t.Skipf("SKIPPED LOUDLY: local-publish soak is disarmed — %s != enabled", localPublishSoakArming)
@@ -54,10 +56,12 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 
 	startFDs, startRSS := sandboxProcessUsage(t)
 	started := time.Now()
-	warmRestartAt := started.Add(duration / 3)
+	// Fail fast on broken crash recovery; the remaining soak still crosses the
+	// one-hour authorization lifetime while the credential-free daemon serves.
+	crashRestartAt := started.Add(soakCrashCheckpointDelay)
 	epochRestartAt := started.Add(2 * duration / 3)
 	deadline := started.Add(duration)
-	warmRestartDone := false
+	crashRestartDone := false
 	epochRestartDone := false
 	requestCount := 1
 	routeDest := filepath.Join(t.TempDir(), "payload")
@@ -70,24 +74,32 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 	}()
 
 	for time.Now().Before(deadline) {
-		now := time.Now()
-		if !warmRestartDone && !now.Before(warmRestartAt) {
+		if !crashRestartDone && !time.Now().Before(crashRestartAt) {
+			// A graceful foreground exit deliberately turns sharing off. Kill the
+			// process to model a crash while desired state remains on, then prove
+			// the durable device credential can restart it without the account key.
+			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
-			fixture.interruptAndValidate(t)
+			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
+			// TODO(upstream-contract): qRTS currently uses FRP's 90-second stale
+			// control cleanup; keep enough margin for detection and observation.
+			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, soakCrashRecoveryTimeout)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
-			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
+			// TODO(upstream-contract): qurl-service must advance serving_epoch when
+			// a daemon reattaches to an already-on share after an unclean exit.
+			waitSandboxSharingStateAfterEpoch(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", crashed.ServingEpoch, soakCrashRecoveryTimeout)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)
 			}
-			warmRestartDone = true
+			crashRestartDone = true
 		}
-		if !epochRestartDone && !now.Before(epochRestartAt) {
+		if !epochRestartDone && !time.Now().Before(epochRestartAt) {
 			before := waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			res := runSandboxLocalCLI(t, fixture.binary, fixture.env, fixture.stateDir, "-o", "json", "restart", fixture.local.CRID)
 			after := decodeSandboxSharing(t, res)
-			if after.ConnectionState != "serving" || after.ServingEpoch <= before.ServingEpoch {
-				t.Fatalf("soak restart did not advance a serving epoch: before=%+v after=%+v", before, after)
+			if err := validateSandboxSharingTransition(after, "on", "serving", before.ServingEpoch); err != nil {
+				t.Fatalf("soak restart did not advance a serving epoch: before=%+v after=%+v: %v", before, after, err)
 			}
 			epochRestartDone = true
 		}
@@ -105,8 +117,8 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 		}
 		time.Sleep(remaining)
 	}
-	if !warmRestartDone || !epochRestartDone {
-		t.Fatalf("soak did not execute both lifecycle checkpoints (warm=%v epoch=%v)", warmRestartDone, epochRestartDone)
+	if !crashRestartDone || !epochRestartDone {
+		t.Fatalf("soak did not execute both lifecycle checkpoints (crash=%v epoch=%v)", crashRestartDone, epochRestartDone)
 	}
 	if requestCount < 3 {
 		t.Fatalf("soak completed only %d public-route requests", requestCount)
@@ -371,6 +383,9 @@ func sandboxProcessUsage(t *testing.T) (fds int, rssBytes int64) {
 }
 
 func TestSandboxSoakDurationContract(t *testing.T) {
+	if minimumLocalPublishSoak-soakCrashCheckpointDelay-sandboxProcessTimeout-2*soakCrashRecoveryTimeout <= time.Hour {
+		t.Fatalf("minimum soak %s with crash delay %s, process timeout %s, and two recovery timeouts of %s leaves no full post-crash authorization hour", minimumLocalPublishSoak, soakCrashCheckpointDelay, sandboxProcessTimeout, soakCrashRecoveryTimeout)
+	}
 	for _, test := range []struct {
 		name, value string
 		want        time.Duration
