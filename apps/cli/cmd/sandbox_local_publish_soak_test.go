@@ -85,9 +85,12 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			// control cleanup; keep enough margin for detection and observation.
 			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, soakCrashRecoveryTimeout)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
-			// TODO(upstream-contract): qurl-service must advance serving_epoch when
-			// a daemon reattaches to an already-on share after an unclean exit.
-			waitSandboxSharingStateAfterEpoch(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", crashed.ServingEpoch, soakCrashRecoveryTimeout)
+			// TODO(upstream-contract): qurl-service currently keeps serving_epoch
+			// stable on reattach. Accept a newer nonzero epoch because stale-control
+			// cleanup may finish after the non-serving snapshot; never accept a regression.
+			waitSandboxSharing(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, soakCrashRecoveryTimeout, fmt.Sprintf("the exact resource to reattach at or after epoch %d", crashed.ServingEpoch), func(doc sandboxSharingDoc) bool {
+				return validateSandboxReattachState(doc, fixture.local.CRID, fixture.local.ResourceID, crashed.ServingEpoch) == nil
+			})
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)

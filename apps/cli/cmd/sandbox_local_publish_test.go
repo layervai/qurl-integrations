@@ -797,13 +797,6 @@ func waitSandboxSharingStateAfterCrash(t *testing.T, binary string, env map[stri
 	})
 }
 
-func waitSandboxSharingStateAfterEpoch(t *testing.T, binary string, env map[string]string, stateDir, crid, desired, observed string, priorEpoch uint64, limit time.Duration) sandboxSharingDoc {
-	t.Helper()
-	return waitSandboxSharing(t, binary, env, stateDir, crid, limit, fmt.Sprintf("%s/%s sharing state after epoch %d", desired, observed, priorEpoch), func(doc sandboxSharingDoc) bool {
-		return validateSandboxSharingTransition(doc, desired, observed, priorEpoch) == nil
-	})
-}
-
 func waitSandboxSharing(t *testing.T, binary string, env map[string]string, stateDir, crid string, limit time.Duration, want string, ready func(sandboxSharingDoc) bool) sandboxSharingDoc {
 	t.Helper()
 	deadline := time.Now().Add(limit)
@@ -1193,6 +1186,22 @@ func validateSandboxCrashState(doc sandboxSharingDoc, crid, resourceID string) e
 	return nil
 }
 
+func validateSandboxReattachState(doc sandboxSharingDoc, crid, resourceID string, priorEpoch uint64) error { //nolint:gocritic // Passing the immutable decoded snapshot by value keeps validation isolated from later mutation.
+	if doc.CRID != crid || doc.ResourceID != resourceID {
+		return errors.New("status returned the wrong resource identity")
+	}
+	if doc.DesiredState != "on" || doc.ConnectionState != "serving" {
+		return fmt.Errorf("got %s/%s, want on/serving", doc.DesiredState, doc.ConnectionState)
+	}
+	if priorEpoch == 0 || doc.ServingEpoch == 0 {
+		return fmt.Errorf("serving epoch missing (prior=%d, got %d)", priorEpoch, doc.ServingEpoch)
+	}
+	if doc.ServingEpoch < priorEpoch {
+		return fmt.Errorf("serving epoch %d regressed below %d", doc.ServingEpoch, priorEpoch)
+	}
+	return nil
+}
+
 func TestRunSandboxLocalCLIUsesExactBinaryAndState(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "qurl")
 	script := `#!/bin/sh
@@ -1380,6 +1389,33 @@ func TestValidateSandboxCrashStateRequiresExactNonServingResource(t *testing.T) 
 				t.Fatal("invalid crash state accepted")
 			}
 		})
+	}
+}
+
+func TestValidateSandboxReattachStateAcceptsCurrentOrNewerEpoch(t *testing.T) {
+	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+	for _, epoch := range []uint64{8, 9} {
+		valid := sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: epoch}
+		if err := validateSandboxReattachState(valid, crid, "resource", 8); err != nil {
+			t.Fatalf("valid epoch %d reattach: %v", epoch, err)
+		}
+	}
+	for name, doc := range map[string]sandboxSharingDoc{
+		"wrong CRID":      {CRID: "other", ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8},
+		"wrong resource":  {CRID: crid, ResourceID: "other", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8},
+		"wrong desired":   {CRID: crid, ResourceID: "resource", DesiredState: "off", ConnectionState: "serving", ServingEpoch: 8},
+		"not serving":     {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},
+		"missing epoch":   {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving"},
+		"regressed epoch": {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSandboxReattachState(doc, crid, "resource", 8); err == nil {
+				t.Fatal("invalid reattach state accepted")
+			}
+		})
+	}
+	if err := validateSandboxReattachState(sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 1}, crid, "resource", 0); err == nil {
+		t.Fatal("missing prior epoch accepted")
 	}
 }
 
