@@ -235,6 +235,51 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
 }
 
 async function deleteLink(resourceId, apiKey) {
+  if (config.PRIVATE_UPLOAD_QURL) {
+    qurlPath(resourceId);
+    const key = apiKey || config.QURL_API_KEY;
+    if (!key) throw new Error('QURL_API_KEY is not configured');
+    const target = `${config.QURL_ENDPOINT}/v1/delegated-qurls/${encodeURIComponent(resourceId)}`;
+    let lastError;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(target, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' },
+          redirect: 'error',
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+        if (response.status === 204) {
+          logger.info('Revoked delegated qURL', { resource_ref: resourceIdLogRef(resourceId) });
+          return;
+        }
+        let code = null;
+        try {
+          const problem = await response.json();
+          code = problem?.error?.code || problem?.code || null;
+        } catch {
+          // The status remains safe to report. Never surface the response body.
+        }
+        if (response.status === 401 || response.status === 403) {
+          logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
+            dependency: 'qurl_service',
+            method: 'DELETE', path: '/delegated-qurls/:qurlId', status: response.status,
+          });
+        }
+        const err = new Error(`qURL API request failed (${response.status})`);
+        err.status = response.status;
+        err.apiCode = code;
+        lastError = err;
+        if (response.status !== 503 || code !== 'mutation_outcome_unknown') throw err;
+      } catch (err) {
+        lastError = err;
+        if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) {
+          throw err;
+        }
+      }
+    }
+    throw lastError;
+  }
   resourcePath(resourceId);
   const client = makeClient(apiKey);
   // Revoke at the resource level: every link minted on the resource stops

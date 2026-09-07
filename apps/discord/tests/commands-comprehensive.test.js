@@ -222,6 +222,11 @@ crypto.randomBytes = jest.fn((size) => {
 const originalRandomUUID = crypto.randomUUID;
 crypto.randomUUID = jest.fn(() => 'mock-uuid-1234');
 
+afterAll(() => {
+  crypto.randomBytes = originalRandomBytes;
+  crypto.randomUUID = originalRandomUUID;
+});
+
 const { commands, handleCommand, registerCommands, _test } = require('../src/commands');
 const {
   isGoogleMapsURL, sanitizeFilename, sanitizeMessage,

@@ -381,6 +381,14 @@ module.exports = {
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
 
+  // Dormant private-upload v1 consumer. Presence of PRIVATE_UPLOAD_QURL is
+  // the only enablement switch. The qURL and signer key are secrets; the
+  // deployment trust document and signer IDs are public configuration.
+  PRIVATE_UPLOAD_QURL: process.env.PRIVATE_UPLOAD_QURL?.trim() || null,
+  PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM: process.env.PRIVATE_UPLOAD_SIGNER_PRIVATE_KEY_PEM,
+  PRIVATE_UPLOAD_SIGNER_CLIENT_ID: process.env.PRIVATE_UPLOAD_SIGNER_CLIENT_ID?.trim(),
+  PRIVATE_UPLOAD_SIGNER_KEY_ID: process.env.PRIVATE_UPLOAD_SIGNER_KEY_ID?.trim(),
+
   // Slug of the qURL reverse-tunnel resource that fronts the watermark-detect
   // endpoint (#1101). connector.js's resolveDetectTarget() resolves this slug to
   // a resource_id (`GET /resources?slug=…`), then self-mints a FRESH ephemeral

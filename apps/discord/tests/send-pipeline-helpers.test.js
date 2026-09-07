@@ -494,13 +494,9 @@ describe('qURL client', () => {
 
   describe('createOneTimeLink', () => {
     it('sends correct POST body with one_time_use: true', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          data: { resource_id: 'res-1', qurl_link: 'https://q.test/abc' },
-        }),
-      });
+      globalThis.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({
+        data: { resource_id: 'res-1', qurl_link: 'https://q.test/abc' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
 
       const result = await qurl.createOneTimeLink('https://example.com', '24h', 'test label');
 
@@ -532,11 +528,9 @@ describe('qURL client', () => {
     });
 
     it('includes authorization header', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ data: { resource_id: 'r1', qurl_link: 'l1' } }),
-      });
+      globalThis.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({
+        data: { resource_id: 'r1', qurl_link: 'l1' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
 
       await qurl.createOneTimeLink('https://example.com', '1h', 'label');
 
@@ -550,10 +544,7 @@ describe('qURL client', () => {
       ['public-key resource ID', PUBLIC_KEY_RESOURCE_ID],
       ['CRID', CRID_RESOURCE_ID],
     ])('revokes a %s through DELETE /v1/resources/{id}', async (_kind, resourceId) => {
-      globalThis.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 204,
-      });
+      globalThis.fetch = jest.fn().mockResolvedValue(new Response(null, { status: 204 }));
 
       await qurl.deleteLink(resourceId);
 

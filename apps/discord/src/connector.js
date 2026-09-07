@@ -13,6 +13,7 @@ const { isPrivateHost } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
+const { uploadPrivate, redeemDelegatedBatch } = require('./private-upload');
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
@@ -199,12 +200,38 @@ function isAllowedSourceUrl(sourceUrl) {
  * Uses the provided API key, or falls back to the global config key.
  */
 function connectorAuthHeaders(apiKey) {
-  const key = apiKey || config.QURL_API_KEY;
+  const key = (typeof apiKey === 'object' ? apiKey?.apiKey : apiKey) || config.QURL_API_KEY;
   const headers = {};
   if (key) {
     headers['Authorization'] = `Bearer ${key}`;
   }
   return headers;
+}
+
+function privateAuthorityExpiresAt() {
+  const seconds = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+  return new Date(seconds * 1000).toISOString().replace('.000Z', 'Z');
+}
+
+function privateCredential(apiKey, audienceKeyId) {
+  if (apiKey && typeof apiKey === 'object') return apiKey;
+  return { apiKey: apiKey || config.QURL_API_KEY, keyId: audienceKeyId };
+}
+
+async function privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
+  const uploaded = await uploadPrivate(fileBuffer, {
+    filename,
+    contentType,
+    viewerTtlSeconds,
+    credential: privateCredential(apiKey, audienceKeyId),
+    authorityExpiresAt: privateAuthorityExpiresAt(),
+  });
+  return {
+    success: true,
+    resource_id: uploaded.upload_handle,
+    mint_capability: uploaded.mint_capability,
+    private_upload: uploaded,
+  };
 }
 
 // Append `viewer_ttl_seconds` to the multipart form when a positive value
@@ -238,7 +265,7 @@ function appendViewerTtl(form, viewerTtlSeconds) {
  * tests/connector-coverage.test.js and tests/send-pipeline-helpers.test.js, and those
  * cases would lose coverage if it were removed.
  */
-async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
+async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
@@ -263,6 +290,9 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
   }
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
+  if (config.PRIVATE_UPLOAD_QURL) {
+    return privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId);
+  }
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
 
   const form = new FormData();
@@ -304,9 +334,13 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
  * re-downloading from Discord CDN. Used when the per-resource token
  * quota (10) is exhausted and more recipients need links.
  */
-async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
+async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+
+  if (config.PRIVATE_UPLOAD_QURL) {
+    return privateUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId);
+  }
 
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
   const form = new FormData();
@@ -344,7 +378,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerT
  * Download a file from Discord CDN and return the buffer + upload result.
  * The buffer is cached so subsequent re-uploads don't re-download.
  */
-async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
+async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId) {
   filename = sanitizeFilename(filename);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
@@ -368,7 +402,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
   }
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
-  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds);
+  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId);
   return { ...result, fileBuffer };
 }
 
@@ -405,7 +439,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  *   legacy callers and pre-#1101 send paths keep working untouched.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null, guildId } = {}) {
+async function mintLinks(resourceId, { expiresAt, expiresIn, n, apiKey, audienceKeyId, privateUpload, selfDestructSeconds = null, guildId } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   // Same public-resource boundary as status/revoke: mintLinks receives a
   // connector-returned public ID, never a qURL bearer token. Reuse the shared
@@ -418,6 +452,21 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   // make the qURL backend behave unpredictably; 100 is a comfortable ceiling.
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
+  }
+  if (config.PRIVATE_UPLOAD_QURL) {
+    if (!privateUpload?.mint_capability || privateUpload.upload_handle !== resourceId) {
+      throw new Error('Private upload capability is missing for delegated mint');
+    }
+    const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
+    const grants = Array.from({ length: n }, () => ({
+      ...(expiresIn === '24h' ? {} : { expires_in: expiresIn }),
+      one_time_use: true,
+      ...(sessionDuration === null ? {} : { session_duration: sessionDuration }),
+    }));
+    return redeemDelegatedBatch(privateUpload, {
+      credential: privateCredential(apiKey, audienceKeyId),
+      grants,
+    });
   }
   const body = { expires_at: expiresAt, n, one_time_use: true };
   const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
@@ -1090,9 +1139,15 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
  * Upload a JSON object to the connector as a file.
  * Used for structured payloads like location data.
  */
-async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds) {
+async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds, audienceKeyId) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+
+  if (config.PRIVATE_UPLOAD_QURL) {
+    return privateUploadBuffer(
+      Buffer.from(JSON.stringify(jsonPayload)), filename, 'application/json', apiKey, viewerTtlSeconds, audienceKeyId,
+    );
+  }
 
   const blob = new Blob([JSON.stringify(jsonPayload)], { type: 'application/json' });
   const form = new FormData();

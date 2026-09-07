@@ -1046,7 +1046,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(callsNamed('reUploadBuffer')).toHaveLength(2);
   });
 
-  it('passes the first three parameters positionally and omits the last two', () => {
+  it('keeps credentials and viewer policy as optional trailing parameters', () => {
     let params = null;
     const paramName = (param) =>
       (param.type === 'AssignmentPattern' ? param.left.name : param.name);
@@ -1064,7 +1064,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       },
     });
     expect(params).toEqual([
-      'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds',
+      'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds', 'audienceKeyId',
     ]);
     const calls = callsNamed('reUploadBuffer');
     expect(calls).not.toHaveLength(0);

@@ -812,7 +812,7 @@ const EXPIRY_LABELS = {
   '1h': '1 hour',
   '6h': '6 hours',
   '24h': '24 hours',
-  '7d': '7 days',
+  ...(config.PRIVATE_UPLOAD_QURL ? {} : { '7d': '7 days' }),
 };
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
@@ -1670,9 +1670,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
+async function mintLinksInBatches({ initialResourceId, initialPrivateUpload, reuploadFn, expiresAt, expiresIn, recipientCount, apiKey, audienceKeyId, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
+  const batchCapacity = config.PRIVATE_UPLOAD_QURL ? 100 : TOKENS_PER_RESOURCE;
   let currentResourceId = initialResourceId;
+  let currentPrivateUpload = initialPrivateUpload;
   let tokensUsed = 0;
 
   // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
@@ -1681,24 +1683,31 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   // loop as an oracle and diffs the shapes. If the guard, the increment or the
   // batchSize formula below changes, update that oracle in the same PR or the
   // load test keeps measuring the old shape while staying green.
-  for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
-    if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+  for (let i = 0; i < recipientCount; i += batchCapacity) {
+    if (tokensUsed >= batchCapacity && i > 0) {
       const re = await reuploadFn();
       currentResourceId = re.resource_id;
+      currentPrivateUpload = re.private_upload;
       tokensUsed = 0;
     }
-    const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, {
+    const batchSize = Math.min(batchCapacity, recipientCount - i);
+    const mintOptions = {
       expiresAt,
       n: batchSize,
       apiKey,
       selfDestructSeconds,
       guildId,
-    });
+    };
+    if (config.PRIVATE_UPLOAD_QURL) {
+      mintOptions.expiresIn = expiresIn;
+      mintOptions.audienceKeyId = audienceKeyId;
+      mintOptions.privateUpload = currentPrivateUpload;
+    }
+    const minted = await mintLinks(currentResourceId, mintOptions);
     for (const link of minted) {
       // qurl_id is the join key against qurl.accessed webhooks; empty
       // string degrades the whole monitor to bare base-msg.
-      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: currentResourceId });
+      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: link.resource_id || currentResourceId });
     }
     tokensUsed += batchSize;
   }
@@ -1806,6 +1815,7 @@ function persistenceErrorMessageForLog(err) {
 
 async function executeSendPipeline(interaction, {
   apiKey,
+  audienceKeyId,
   resourceType,
   attachment,
   locationUrl,
@@ -1991,7 +2001,10 @@ async function executeSendPipeline(interaction, {
       // re-upload, so the bot's "Add Recipients" mints the same TTL on
       // each new resource that gets registered (TOKENS_PER_RESOURCE
       // exhaustion → re-upload → new connector resource).
-      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds);
+      const firstUpload = await downloadAndUpload(
+        attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds,
+        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+      );
       connectorResourceId = firstUpload.resource_id;
       // Use a holder so we can null out the reference after all re-uploads
       // finish — the subsequent link-monitor closure would otherwise pin up
@@ -2006,10 +2019,16 @@ async function executeSendPipeline(interaction, {
       try {
         allLinks = await mintLinksInBatches({
           initialResourceId: firstUpload.resource_id,
-          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
+          initialPrivateUpload: firstUpload.private_upload,
+          reuploadFn: () => reUploadBuffer(
+            bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds,
+            ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+          ),
           expiresAt,
+          expiresIn,
           recipientCount: recipients.length,
           apiKey,
+          audienceKeyId,
           selfDestructSeconds,
           // Guild-scope the mint so watermark attribution (/qurl detect,
           // #1101) can resolve back to this guild. interaction.guildId is
@@ -2043,16 +2062,25 @@ async function executeSendPipeline(interaction, {
       // expire_after at view time — qurl-integrations-infra#480).
       // We still forward selfDestructSeconds so behavior matches the
       // contract once the carve-out is removed; today it's a no-op.
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
+      const firstUpload = await uploadJsonToConnector(
+        locPayload, 'location.json', apiKey, selfDestructSeconds,
+        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+      );
       connectorResourceId = firstUpload.resource_id;
 
       const expiresAt = expiryToISO(expiresIn);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
+        initialPrivateUpload: firstUpload.private_upload,
+        reuploadFn: () => uploadJsonToConnector(
+          locPayload, 'location.json', apiKey, selfDestructSeconds,
+          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+        ),
         expiresAt,
+        expiresIn,
         recipientCount: recipients.length,
         apiKey,
+        audienceKeyId,
         selfDestructSeconds,
         // Guild-scope the mint for watermark attribution (#1101) — see the
         // file-send branch above. Maps payloads carry no image to watermark
@@ -2268,7 +2296,7 @@ async function executeSendPipeline(interaction, {
 
   // Save send config for "Add Recipients" reuse. For file sends, also stash
   // the Discord CDN URL + content type so we can re-download + re-upload when
-  // adding recipients (the original resource's 10-token pool may be drained).
+  // adding recipients (the original resource's grant pool may be drained).
   // Logged-and-swallowed: a failure here doesn't block DM delivery (already
   // done above) but it disables future Add Recipients / revoke-via-ui for
   // this send. The per-link rows in qurl_sends persisted above, so /qurl
@@ -2592,10 +2620,34 @@ async function executeSendPipeline(interaction, {
           monitor.stop();
           await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
           let persistedSendConfig;
+          let revokeCredential;
+          let precheckFailed = false;
           try {
-            persistedSendConfig = await db.getSendConfig(sendId, interaction.user.id);
+            [persistedSendConfig, revokeCredential] = await Promise.all([
+              db.getSendConfig(sendId, interaction.user.id),
+              config.PRIVATE_UPLOAD_QURL
+                ? db.getGuildQurlCredential(interaction.guildId)
+                : null,
+            ]);
           } catch (err) {
+            precheckFailed = true;
             logger.warn('Could not pre-check send revoked state before button revoke', { sendId, error: err.message });
+          }
+          if (precheckFailed && config.PRIVATE_UPLOAD_QURL) {
+            revokeInFlight = false;
+            await interaction.editReply({
+              content: 'Could not load the current qURL credentials. Try `/qurl revoke` in a moment.',
+              components: [],
+            }).catch(logIgnoredDiscordErr);
+            return;
+          }
+          if (config.PRIVATE_UPLOAD_QURL && !revokeCredential?.apiKey) {
+            revokeInFlight = false;
+            await interaction.editReply({
+              content: 'qURL is no longer configured for private sharing in this server. Ask an admin to run `/qurl setup`.',
+              components: [],
+            }).catch(logIgnoredDiscordErr);
+            return;
           }
           if (persistedSendConfig?.revoked_at) {
             // Stale collectors do not share revokeSucceeded, so persisted
@@ -2614,7 +2666,12 @@ async function executeSendPipeline(interaction, {
             return;
           }
           await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
-          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
+          const revoked = await revokeAllLinks(
+            sendId,
+            interaction.user.id,
+            revokeCredential?.apiKey || apiKey,
+            resolveSenderAlias(interaction),
+          );
           if (!revoked.barrierEstablished) {
             revokeResultUserNames = [];
             revokeResultTotal = 0;
@@ -2769,7 +2826,7 @@ async function executeSendPipeline(interaction, {
 
             await selectInteraction.deferUpdate();
             const addResult = await handleAddRecipients(
-              sendId, selectInteraction.users, interaction, apiKey,
+              sendId, selectInteraction.users, interaction, apiKey, audienceKeyId,
             );
 
             // Extend recipients[] for the post-revoke names line.
@@ -2959,11 +3016,26 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
 // user's send.
-async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
+async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey, audienceKeyId) {
   const senderDiscordId = originalInteraction.user.id;
-  const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
+  const [sendConfig, currentCredential] = await Promise.all([
+    db.getSendConfig(sendId, senderDiscordId),
+    config.PRIVATE_UPLOAD_QURL
+      ? db.getGuildQurlCredential(originalInteraction.guildId)
+      : null,
+  ]);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
+  }
+  if (config.PRIVATE_UPLOAD_QURL) {
+    if (!currentCredential?.apiKey || !currentCredential?.keyId) {
+      return {
+        msg: 'Cannot add recipients — qURL is no longer configured for private sharing. Ask an admin to run `/qurl setup`.',
+        newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+      };
+    }
+    apiKey = currentCredential.apiKey;
+    audienceKeyId = currentCredential.keyId;
   }
 
   // getSendConfig runs after the user-select await, so revoking_at/revoked_at
@@ -3078,7 +3150,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     if (hasFile) {
       activeKind = 'file';
       // Re-download from the stored Discord CDN URL, then upload a fresh
-      // resource so the 10-token pool is full. Re-upload again every
+      // resource so the grant pool is full. Re-upload again every
       // TOKENS_PER_RESOURCE recipients. The original resource is drained by
       // the initial send, so we CANNOT reuse sendConfig.connector_resource_id.
       if (!sendConfig.attachment_url) {
@@ -3111,14 +3183,23 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
       try {
         // Initial download+upload gives us the buffer for subsequent re-uploads.
-        const first = await downloadAndUpload(sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct);
+        const first = await downloadAndUpload(
+          sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct,
+          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+        );
         fileBuffer = first.fileBuffer;
         allLinks = await mintLinksInBatches({
           initialResourceId: first.resource_id,
-          reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey, inheritedDestruct),
+          initialPrivateUpload: first.private_upload,
+          reuploadFn: () => reUploadBuffer(
+            fileBuffer, filename, contentType, apiKey, inheritedDestruct,
+            ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+          ),
           expiresAt,
+          expiresIn: sendConfig.expires_in,
           recipientCount: newRecipients.length,
           apiKey,
+          audienceKeyId,
           selfDestructSeconds: inheritedDestruct,
           // Guild-scope the mint for watermark attribution (#1101). Add
           // Recipients reuses the original send's guild via
@@ -3189,14 +3270,23 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     if (hasLocation) {
       activeKind = 'location';
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct);
+      const firstUpload = await uploadJsonToConnector(
+        locPayload, 'location.json', apiKey, inheritedDestruct,
+        ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+      );
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct),
+        initialPrivateUpload: firstUpload.private_upload,
+        reuploadFn: () => uploadJsonToConnector(
+          locPayload, 'location.json', apiKey, inheritedDestruct,
+          ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId] : []),
+        ),
         expiresAt,
+        expiresIn: sendConfig.expires_in,
         recipientCount: newRecipients.length,
         apiKey,
+        audienceKeyId,
         selfDestructSeconds: inheritedDestruct,
         // Guild-scope for attribution (#1101) — see the file branch above.
         guildId: originalInteraction.guildId,
@@ -3776,6 +3866,12 @@ const SETUP_SUCCESS_MSG =
 // flag on the FLOW_TRANSITION event — correct: the deadline really
 // was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
+  if (config.PRIVATE_UPLOAD_QURL) {
+    return interaction.reply({
+      content: 'Private sharing requires managed qURL authorization. Ask the bot operator to configure the qURL OAuth setup flow.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
@@ -3908,6 +4004,12 @@ async function handleSetupButton(interaction, { flow_id, row }) {
 // without burning a qURL API key validation call. Same ordering
 // rationale as handleRevokeSelect.
 async function handleSetupModal(interaction, { flow_id }) {
+  if (config.PRIVATE_UPLOAD_QURL) {
+    return interaction.reply({
+      content: 'Private sharing does not accept pasted API keys. Run `/qurl setup` after the qURL OAuth setup flow is configured.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
   // Modal-stage flow_state delete is terminal — the user committed
   // the form, the flow has lifecycled out.
   const { deleted } = await deleteFlow(flow_id, {
@@ -7976,7 +8078,9 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // silently shrink the delivered set with no signal.
   const [resolveResult, apiKeyResult] = await Promise.allSettled([
     resolveRecipientUsers(interaction, payload.recipientIds),
-    db.getGuildApiKey(interaction.guildId),
+    config.PRIVATE_UPLOAD_QURL
+      ? db.getGuildQurlCredential(interaction.guildId)
+      : db.getGuildApiKey(interaction.guildId),
   ]);
   if (resolveResult.status === 'rejected') {
     logger.error('handleConfirmSendClick: resolveRecipientUsers threw', {
@@ -8075,7 +8179,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  const guildApiKey = apiKeyResult.value;
+  const guildCredential = apiKeyResult.value;
   // Check the resolved key BEFORE deleteFlow. If both guildApiKey and
   // config.QURL_API_KEY are null (rare: key rotation removed the key
   // between dispatcher pre-check and Send click), there's nothing to
@@ -8083,11 +8187,14 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // admin re-runs `/qurl setup` without re-invoking the slash command.
   // Cooldown clears so the user isn't stranded for the 30s window
   // while waiting on the admin.
-  const apiKey = guildApiKey || config.QURL_API_KEY;
-  if (!apiKey) {
+  const apiKey = typeof guildCredential === 'object'
+    ? guildCredential?.apiKey
+    : guildCredential || config.QURL_API_KEY;
+  const audienceKeyId = typeof guildCredential === 'object' ? guildCredential?.keyId : null;
+  if (!apiKey || (config.PRIVATE_UPLOAD_QURL && !audienceKeyId)) {
     clearCooldown(interaction.user.id);
     return interaction.editReply({
-      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
+      content: '❌ qURL is no longer configured for private sharing in this server. Ask an admin to run `/qurl setup`.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
@@ -8144,6 +8251,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
 
   return executeSendPipeline(interaction, {
     apiKey,
+    audienceKeyId,
     resourceType: payload.resourceType,
     attachment: payload.attachment,
     locationUrl: payload.locationUrl,
@@ -8833,6 +8941,13 @@ const commands = [
             content: '🔐 **Connect qURL to this server**\n\n'
               + `**[Click here to authorize qURL](${startUrl})**\n\n`
               + '_Open in this browser; the link expires in 5 minutes._',
+            ephemeral: true,
+          });
+        }
+
+        if (config.PRIVATE_UPLOAD_QURL) {
+          return interaction.reply({
+            content: '❌ Private sharing requires the managed qURL authorization flow. Ask the bot operator to configure qURL OAuth, then run `/qurl setup` again.',
             ephemeral: true,
           });
         }

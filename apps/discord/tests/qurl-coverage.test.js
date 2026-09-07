@@ -15,23 +15,16 @@ jest.mock('../src/logger', () => ({
 const originalFetch = globalThis.fetch;
 
 function apiOk(status, data) {
-  return {
-    ok: true,
+  return new Response(status === 204 ? null : JSON.stringify(data === undefined ? {} : { data }), {
     status,
-    headers: { get: () => null },
-    json: async () => (data === undefined ? {} : { data }),
-  };
+    headers: status === 204 ? {} : { 'Content-Type': 'application/json' },
+  });
 }
 
 function apiError(status, { code = 'error', detail } = {}) {
-  return {
-    ok: false,
-    status,
-    headers: { get: () => null },
-    json: async () => ({
+  return new Response(JSON.stringify({
       error: { status, code, title: `HTTP ${status}`, detail: detail ?? `HTTP ${status}` },
-    }),
-  };
+  }), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
 describe('qURL client — getResourceStatus', () => {
@@ -377,12 +370,12 @@ describe('qURL client — retry + audit behavior', () => {
     }
   });
 
-  it('retries DELETE on 503 then succeeds (revoke shares the GET/DELETE retry budget)', async () => {
+  it('does not replay DELETE after a 503 because the mutation outcome is unknown', async () => {
     globalThis.fetch = jest.fn()
       .mockResolvedValueOnce(apiError(503))
       .mockResolvedValueOnce(apiOk(204, undefined));
-    await qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID);
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    await expect(qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID)).rejects.toThrow(/503/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
   it('redacts the resource ID from DELETE error logs and auth audit metadata', async () => {
@@ -475,5 +468,52 @@ describe('qURL client — createOneTimeLink happy path', () => {
     const q = require('../src/qurl');
     await expect(q.createOneTimeLink('https://nowhere.example/file', '1h', 'label'))
       .rejects.toThrow(/resolved/);
+  });
+});
+
+describe('qURL client — delegated qURL revoke', () => {
+  let qurl;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      QURL_API_KEY: 'binding-api-key',
+      QURL_ENDPOINT: 'https://api.test.local',
+      PRIVATE_UPLOAD_QURL: 'qurl://private-upload',
+    }));
+    jest.doMock('../src/logger', () => ({
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+    }));
+    qurl = require('../src/qurl');
+  });
+
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('retries an ambiguous DELETE with the same target and bearer until 204', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiError(503, { code: 'mutation_outcome_unknown' }))
+      .mockResolvedValueOnce(apiOk(204));
+
+    await qurl.deleteLink('q_0123456789a');
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    const [firstUrl, firstInit] = globalThis.fetch.mock.calls[0];
+    const [secondUrl, secondInit] = globalThis.fetch.mock.calls[1];
+    expect(firstUrl).toBe('https://api.test.local/v1/delegated-qurls/q_0123456789a');
+    expect(secondUrl).toBe(firstUrl);
+    expect(firstInit).toMatchObject({
+      method: 'DELETE',
+      redirect: 'error',
+      headers: { Authorization: 'Bearer binding-api-key', Accept: 'application/json' },
+    });
+    expect(secondInit.headers).toEqual(firstInit.headers);
+  });
+
+  it('does not retry a non-ambiguous delegated DELETE failure', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(503, { code: 'service_unavailable' }));
+
+    await expect(qurl.deleteLink('q_0123456789a')).rejects.toThrow(/503/);
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 });
