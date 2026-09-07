@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.3](https://github.com/layervai/qurl-integrations/compare/v2.3.2...v2.3.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **cli:** model crash in warm-restart soak ([#1402](https://github.com/layervai/qurl-integrations/issues/1402)) ([238dacf](https://github.com/layervai/qurl-integrations/commit/238dacf5e1f60d6a0a6a8fe2c6d04664cf6e0ed7))
+* **cli:** recover tunnel sessions after control loss ([#1414](https://github.com/layervai/qurl-integrations/issues/1414)) ([ac94aa3](https://github.com/layervai/qurl-integrations/commit/ac94aa380c7f8b5553b4e3d9ccfece7886de2e32))
+
 ## [2.3.2](https://github.com/layervai/qurl-integrations/compare/v2.3.1...v2.3.2) (2026-09-05)
 
 
