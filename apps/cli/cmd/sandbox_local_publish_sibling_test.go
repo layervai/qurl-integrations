@@ -512,11 +512,11 @@ func validateSandboxForegroundOutput(stdout, stderr, crid string, secrets ...str
 func validateSandboxCrashedExit(waitErr error) error {
 	var exitErr *exec.ExitError
 	if !errors.As(waitErr, &exitErr) {
-		return fmt.Errorf("exit = %v, want signal: killed", waitErr)
+		return fmt.Errorf("exit = %w, want signal: killed", waitErr)
 	}
 	status, ok := exitErr.Sys().(syscall.WaitStatus)
 	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-		return fmt.Errorf("exit = %v, want signal: killed", waitErr)
+		return fmt.Errorf("exit = %w, want signal: killed", waitErr)
 	}
 	return nil
 }
