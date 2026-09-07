@@ -240,6 +240,14 @@ jobs:
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
             ./apps/cli/...
 
+      - name: Verify Connector recovery with the CLI dependency versions
+        run: |
+          go test -mod=readonly -race -count=1 -json \
+            -run '^TestHermeticSessionGroupRecoversLostControlOnFreshAdmission$' \
+            github.com/layervai/qurl-connector/pkg/share | tee connector-recovery.jsonl
+          jq -se 'any(.[]; .Action == "pass" and .Test == "TestHermeticSessionGroupRecoversLostControlOnFreshAdmission")' \
+            connector-recovery.jsonl >/dev/null
+
       # This is an independent named release gate, not an accidental repeat of
       # the coverage run. Keep the lifecycle result visible and stable on every
       # CLI pull request.
