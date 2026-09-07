@@ -34,7 +34,7 @@ const (
 	ConnectorResourcesFile = "connector_resources.json"
 	connectorResourcesLock = ".connector_resources.lock"
 
-	connectorResourcesVersion = 2
+	connectorResourcesVersion = 3
 	// connectorResourcesMaxBytes bounds the whole state file. Bindings and
 	// pending both filled to connectorResourcesMaxItems with maximal entries
 	// marshal to ~3.5 MiB (measured by
@@ -147,14 +147,13 @@ type ConnectorResourceBinding struct {
 
 // PendingConnectorResourceRequest is the exact logical LST that must be
 // replayed after an uncertain outcome. The nonce is generated and persisted
-// before the first packet is sent. A configured request stores its CRID,
-// routing ID, and effective knock ID here; its Connector and resource IDs use
-// the two request fields shared with ordinary publish.
+// before the first packet is sent. Continuity uses the CRID. Configured
+// requests also retain their verification key, routing ID, and knock ID.
 type PendingConnectorResourceRequest struct {
 	ConnectorID                  string `json:"connector_id"`
 	RequestNonce                 string `json:"request_nonce"`
-	ExpectedResourceID           string `json:"expected_resource_id,omitempty"`
-	ConfiguredCRID               string `json:"configured_crid,omitempty"`
+	ExpectedCRID                 string `json:"expected_crid,omitempty"`
+	ConfiguredResourcePublicKey  string `json:"configured_resource_public_key,omitempty"`
 	ConfiguredConnectorRoutingID string `json:"configured_connector_routing_id,omitempty"`
 	ConfiguredKnockResourceID    string `json:"configured_knock_resource_id,omitempty"`
 }
@@ -283,9 +282,9 @@ func (s *Store) beginConnectorResource(ctx context.Context, connectorID string, 
 		store: s,
 		state: current,
 		request: qurl.NativeConnectorResourceRequest{
-			ConnectorID:        pending.ConnectorID,
-			RequestNonce:       pending.RequestNonce,
-			ExpectedResourceID: pending.ExpectedResourceID,
+			ConnectorID:  pending.ConnectorID,
+			RequestNonce: pending.RequestNonce,
+			ExpectedCRID: pending.ExpectedCRID,
 		},
 		expected: expected,
 		unlock:   unlock,
@@ -325,22 +324,22 @@ func (s *connectorResourcesState) preparePendingConnectorResource(connectorID st
 		}
 		return pending, false, nil
 	}
-	expectedResourceID := ""
+	expectedCRID := ""
 	if binding, exists := s.Bindings[connectorID]; exists {
-		expectedResourceID = binding.ResourceID
+		expectedCRID = binding.CRID
 	} else if configured != nil {
-		expectedResourceID = configured.ResourceID
+		expectedCRID = configured.CRID
 	}
-	request, err := qurl.NewNativeConnectorResourceRequest(connectorID, expectedResourceID)
+	request, err := qurl.NewNativeConnectorResourceRequest(connectorID, expectedCRID)
 	if err != nil {
 		return PendingConnectorResourceRequest{}, false, fmt.Errorf("prepare native Connector resource request: %w", err)
 	}
 	pending := PendingConnectorResourceRequest{
 		ConnectorID: connectorID, RequestNonce: request.RequestNonce,
-		ExpectedResourceID: expectedResourceID,
+		ExpectedCRID: expectedCRID,
 	}
 	if configured != nil {
-		pending.ConfiguredCRID = configured.CRID
+		pending.ConfiguredResourcePublicKey = configured.ResourceID
 		pending.ConfiguredConnectorRoutingID = configured.ConnectorRoutingID
 		pending.ConfiguredKnockResourceID = configured.KnockResourceID
 	}
@@ -600,7 +599,7 @@ func (t *ConnectorResourceTransaction) commit(binding, configuredResult *Connect
 	if err := validateBinding(binding); err != nil {
 		return t.rejectCommit(ErrConnectorResourceVerification, fmt.Sprintf("response binding is invalid: %v", err))
 	}
-	if t.request.ExpectedResourceID != "" && binding.ResourceID != t.request.ExpectedResourceID {
+	if t.request.ExpectedCRID != "" && binding.CRID != t.request.ExpectedCRID {
 		return t.rejectCommit(ErrConnectorResourceVerification, "response identity does not match the continuity assertion")
 	}
 	if t.expected != nil {
@@ -1062,11 +1061,11 @@ func validatePendingConnectorResources(state connectorResourcesState) error {
 		}
 		binding, exists := state.Bindings[key]
 		switch {
-		case exists && pending.ExpectedResourceID != binding.ResourceID:
+		case exists && pending.ExpectedCRID != binding.CRID:
 			return fmt.Errorf("pending %q does not assert its cached resource identity", key)
 		case exists && hasConfigured && configuredBindingMismatch(&binding, &configured, false) != "":
 			return fmt.Errorf("pending %q configured binding does not match its cached binding", key)
-		case !exists && pending.ExpectedResourceID != "" && !hasConfigured:
+		case !exists && pending.ExpectedCRID != "" && !hasConfigured:
 			return fmt.Errorf("pending %q asserts an identity without a cached or configured binding", key)
 		}
 	}
@@ -1126,8 +1125,8 @@ func validatePending(pending *PendingConnectorResourceRequest) error {
 	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != pending.RequestNonce {
 		return errors.New("request nonce must be canonical unpadded base64url of 32 bytes")
 	}
-	if pending.ExpectedResourceID != "" {
-		if _, err := validateResourceID(pending.ExpectedResourceID); err != nil {
+	if pending.ExpectedCRID != "" {
+		if err := crid.Validate(pending.ExpectedCRID); err != nil {
 			return fmt.Errorf("expected resource identity: %w", err)
 		}
 	}
@@ -1138,13 +1137,13 @@ func (pending *PendingConnectorResourceRequest) configuredBinding() (ConnectorRe
 	if pending == nil {
 		return ConnectorResourceBinding{}, false, errors.New("pending request is nil")
 	}
-	present := pending.ConfiguredCRID != "" || pending.ConfiguredConnectorRoutingID != "" || pending.ConfiguredKnockResourceID != ""
+	present := pending.ConfiguredResourcePublicKey != "" || pending.ConfiguredConnectorRoutingID != "" || pending.ConfiguredKnockResourceID != ""
 	if !present {
 		return ConnectorResourceBinding{}, false, nil
 	}
 	binding := ConnectorResourceBinding{
-		ConnectorID: pending.ConnectorID, ResourceID: pending.ExpectedResourceID,
-		CRID: pending.ConfiguredCRID, ConnectorRoutingID: pending.ConfiguredConnectorRoutingID,
+		ConnectorID: pending.ConnectorID, ResourceID: pending.ConfiguredResourcePublicKey,
+		CRID: pending.ExpectedCRID, ConnectorRoutingID: pending.ConfiguredConnectorRoutingID,
 		KnockResourceID: pending.ConfiguredKnockResourceID,
 	}
 	if err := validateBinding(&binding); err != nil {
@@ -1466,9 +1465,9 @@ func rejectNonCanonicalResourceFields(data []byte) error {
 		return err
 	}
 	return rejectNonCanonicalResourceMap(envelope["pending"], "pending", map[string]bool{
-		"connector_id": true, "request_nonce": true, "expected_resource_id": true,
-		"configured_crid": true, "configured_connector_routing_id": true, "configured_knock_resource_id": true,
-	}, "expected_resource_id", "configured_crid", "configured_connector_routing_id", "configured_knock_resource_id")
+		"connector_id": true, "request_nonce": true, "expected_crid": true,
+		"configured_resource_public_key": true, "configured_connector_routing_id": true, "configured_knock_resource_id": true,
+	}, "expected_crid", "configured_resource_public_key", "configured_connector_routing_id", "configured_knock_resource_id")
 }
 
 func rejectNonCanonicalResourceMap(raw json.RawMessage, field string, allowed map[string]bool, optional ...string) error {

@@ -563,7 +563,7 @@ func TestShareVerifyKeyPassesAndFailsClosed(t *testing.T) {
 	srv := apitest.NewServer(t)
 	client := newTestClient(t, srv, nil)
 
-	res, err := client.Share(context.Background(), srv.Key.ResourceID, ShareOptions{})
+	res, err := client.Share(context.Background(), srv.Key.CRID, ShareOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

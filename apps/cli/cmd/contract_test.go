@@ -106,15 +106,13 @@ func TestShareByCRIDEchoVerifies(t *testing.T) {
 	}
 }
 
-func TestShareByResourceKeyVerifies(t *testing.T) {
+func TestShareRejectsResourceKey(t *testing.T) {
 	srv := apitest.NewServer(t)
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.ResourceID}})
-	if res.code != 0 {
-		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	if res.code != 2 || len(srv.Requests()) != 0 {
+		t.Fatalf("exit = %d, requests = %d", res.code, len(srv.Requests()))
 	}
-	if !strings.Contains(res.stdout.String(), "https://qurl.link/") {
-		t.Errorf("expected link on stdout, got %q", res.stdout.String())
-	}
+	mustEmptyStdout(t, res)
 }
 
 func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
@@ -131,13 +129,6 @@ func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
 	if !strings.Contains(res.stderr.String(), "nothing was printed") {
 		t.Errorf("expected fail-closed message on stderr, got %q", res.stderr.String())
 	}
-
-	// By resource key: VerifyKey fails against the delivered CRID.
-	res = runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.ResourceID}})
-	if res.code != 12 {
-		t.Fatalf("key-form exit = %d, want 12; stderr: %s", res.code, res.stderr.String())
-	}
-	mustEmptyStdout(t, res)
 }
 
 func TestShareResponseWithoutCRIDFailsClosed(t *testing.T) {
@@ -698,20 +689,20 @@ func TestProductionCRIDOnLocalEndpointWarnsAndProceeds(t *testing.T) {
 	}
 }
 
-func TestCRIDTypoWarnsAndForwards(t *testing.T) {
+func TestCRIDTypoRejectsBeforeRequest(t *testing.T) {
 	srv := apitest.NewServer(t)
 	// Corrupt the final character to break the CRID's internal check while
 	// keeping the alphabet and length valid.
 	typo := srv.Key.CRID[:59] + flipCRIDChar(srv.Key.CRID[59])
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", typo}})
-	if res.code != 0 {
+	if res.code != 2 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
 	if !strings.Contains(res.stderr.String(), "appears to contain a typo") {
 		t.Errorf("expected the typo warning, got %q", res.stderr.String())
 	}
-	if len(srv.Requests()) != 1 {
-		t.Errorf("typo-warned input must still be forwarded, requests = %d", len(srv.Requests()))
+	if len(srv.Requests()) != 0 {
+		t.Errorf("invalid CRID must not be forwarded, requests = %d", len(srv.Requests()))
 	}
 }
 

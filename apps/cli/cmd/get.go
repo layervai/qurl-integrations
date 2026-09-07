@@ -116,10 +116,7 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 	var shareLink *qurlapi.ShareLink
 	mint := func(ctx context.Context) (string, error) {
 		result, err := client.Share(ctx, assessment.Input, qurlapi.ShareOptions{})
-		if err != nil {
-			return "", err
-		}
-		if err := verifyShareLink(assessment, result); err != nil {
+		if err := verifyShareLink(assessment, result, err); err != nil {
 			return "", err
 		}
 		shareLink = result

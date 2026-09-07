@@ -29,7 +29,7 @@ func (a *fakeAdmitter) Admit(_ context.Context, knockResourceID, resourceID stri
 	sessionID := a.next
 	a.mu.Unlock()
 	return connectorshare.Admission{
-		KnockResourceID: knockResourceID, ResourceID: resourceID,
+		KnockResourceID: knockResourceID, ResourcePublicKey: resourceID,
 		RunID: runID, RunAttempt: 1, Token: "ac-hermetic", ResourceHost: "127.0.0.1:7000",
 		SessionID: sessionID,
 		SessionReceipt: qurl.NativeSessionReceipt{

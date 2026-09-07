@@ -133,7 +133,7 @@ func resolveResourceWithRequestObserver(
 	resource := resolution.Resource
 	resourceBinding := &state.ConnectorResourceBinding{
 		ConnectorID:        resource.Slug,
-		ResourceID:         resource.ResourceID,
+		ResourceID:         resource.ResourcePublicKey,
 		CRID:               resource.CRID,
 		ConnectorRoutingID: resource.ConnectorRoutingID,
 		KnockResourceID:    resource.KnockResourceID,
