@@ -785,6 +785,11 @@ func decodeSandboxSharing(t *testing.T, res *runResult) sandboxSharingDoc {
 
 func waitSandboxSharingState(t *testing.T, binary string, env map[string]string, stateDir, crid, desired, observed string, limit time.Duration) sandboxSharingDoc {
 	t.Helper()
+	return waitSandboxSharingStateAfterEpoch(t, binary, env, stateDir, crid, desired, observed, 0, limit)
+}
+
+func waitSandboxSharingStateAfterEpoch(t *testing.T, binary string, env map[string]string, stateDir, crid, desired, observed string, priorEpoch uint64, limit time.Duration) sandboxSharingDoc {
+	t.Helper()
 	deadline := time.Now().Add(limit)
 	var last string
 	for time.Now().Before(deadline) {
@@ -792,7 +797,7 @@ func waitSandboxSharingState(t *testing.T, binary string, env map[string]string,
 		if res.code == 0 {
 			var doc sandboxSharingDoc
 			if err := json.Unmarshal(res.stdout.Bytes(), &doc); err == nil {
-				if doc.DesiredState == desired && doc.ConnectionState == observed {
+				if validateSandboxSharingTransition(doc, desired, observed, priorEpoch) == nil {
 					return doc
 				}
 				last = res.stdout.String()
@@ -804,7 +809,7 @@ func waitSandboxSharingState(t *testing.T, binary string, env map[string]string,
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s/%s sharing state for %s; last result: %s", desired, observed, crid, last)
+	t.Fatalf("timed out waiting for %s/%s sharing state after epoch %d for %s; last result: %s", desired, observed, priorEpoch, crid, last)
 	return sandboxSharingDoc{}
 }
 

@@ -37,6 +37,9 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 		t.Skipf("SKIPPED LOUDLY: local-publish soak is disarmed — %s != enabled", localPublishSoakArming)
 	}
 	duration := sandboxSoakDuration(t)
+	if duration-time.Minute <= time.Hour {
+		t.Fatalf("soak duration %s leaves no full post-crash authorization hour", duration)
+	}
 	fixture := startSandboxLocalPublish(t, "soak")
 	foregroundOwned := true
 	defer func() {
@@ -77,29 +80,11 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			// A graceful foreground exit deliberately turns sharing off. Kill the
 			// process to model a crash while desired state remains on, then prove
 			// the durable device credential can restart it without the account key.
-			fixture.process.requireRunning(t, "before crash restart")
-			if err := fixture.process.cmd.Process.Kill(); err != nil {
-				t.Fatalf("kill foreground publish for crash restart: %v", err)
-			}
+			before := waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
-			select {
-			case <-fixture.process.done:
-			case <-time.After(15 * time.Second):
-				t.Fatal("foreground publish was not reaped after crash")
-			}
-			fixture.process.waitMu.Lock()
-			waitErr := fixture.process.waitErr
-			fixture.process.waitMu.Unlock()
-			if waitErr == nil {
-				t.Fatal("killed foreground publish exited successfully")
-			}
-			if err := validateSandboxProtectedProcessOutput(
-				fixture.process.stdout.String(), fixture.process.stderr.String(), fixture.key, fixture.cleanupJWT,
-			); err != nil {
-				t.Fatalf("crashed foreground publish output: %v", err)
-			}
+			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
-			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 2*time.Minute)
+			waitSandboxSharingStateAfterEpoch(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", before.ServingEpoch, 2*time.Minute)
 			resumed := loadSandboxAgentState(t, fixture.stateDir)
 			if resumed == nil || resumed.AgentID != initialAgent.AgentID || resumed.DeviceAPIKeyID != initialAgent.DeviceAPIKeyID {
 				t.Fatalf("warm daemon restart changed durable agent identity: before=%s/%s after=%v", initialAgent.AgentID, initialAgent.DeviceAPIKeyID, resumed)

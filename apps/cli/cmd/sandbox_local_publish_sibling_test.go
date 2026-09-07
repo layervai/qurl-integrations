@@ -441,6 +441,35 @@ func (p *sandboxPublishProcess) stopAndValidate(t *testing.T, secrets ...string)
 	return stopped
 }
 
+func (p *sandboxPublishProcess) crashAndValidate(t *testing.T, secrets ...string) {
+	t.Helper()
+	if p.stopped {
+		t.Fatalf("sandbox publish %s was stopped twice", p.label)
+	}
+	p.stopped = true
+	p.requireRunning(t, "before requested crash")
+	if err := p.cmd.Process.Kill(); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			t.Fatalf("sandbox publish %s exited before the crash signal", p.label)
+		}
+		t.Fatalf("kill sandbox publish %s: %v", p.label, err)
+	}
+	select {
+	case <-p.done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("sandbox publish %s was not reaped after crash", p.label)
+	}
+	p.waitMu.Lock()
+	waitErr := p.waitErr
+	p.waitMu.Unlock()
+	if err := validateSandboxCrashedExit(waitErr); err != nil {
+		t.Fatalf("sandbox publish %s crash: %v", p.label, err)
+	}
+	if err := validateSandboxForegroundOutput(p.stdout.String(), p.stderr.String(), p.crid, secrets...); err != nil {
+		t.Fatalf("sandbox publish %s crash: %v", p.label, err)
+	}
+}
+
 func (p *sandboxPublishProcess) interruptAndValidate(t *testing.T, secrets ...string) {
 	t.Helper()
 	if p.stopped {
@@ -470,10 +499,26 @@ func validateSandboxForegroundExit(waitErr error, stdout, stderr, crid string, s
 	if err := validateSandboxInterruptedExit(waitErr); err != nil {
 		return fmt.Errorf("foreground publish %w", err)
 	}
+	return validateSandboxForegroundOutput(stdout, stderr, crid, secrets...)
+}
+
+func validateSandboxForegroundOutput(stdout, stderr, crid string, secrets ...string) error {
 	if stdout != crid+"\n" {
 		return errors.New("foreground publish did not print exactly one complete CRID line")
 	}
 	return validateSandboxProtectedProcessOutput(stdout, stderr, secrets...)
+}
+
+func validateSandboxCrashedExit(waitErr error) error {
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		return fmt.Errorf("exit = %v, want signal: killed", waitErr)
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		return fmt.Errorf("exit = %v, want signal: killed", waitErr)
+	}
+	return nil
 }
 
 func validateSandboxInterruptedExit(waitErr error) error {
@@ -816,6 +861,15 @@ func TestSandboxForegroundLifecycleStateContract(t *testing.T) {
 	}
 	if err := validateSandboxForegroundExit(exit130, crid+"\n", "", crid, "api-secret"); err != nil {
 		t.Fatal(err)
+	}
+	killed := exec.CommandContext(context.Background(), "sh", "-c", "kill -9 $$").Run()
+	if err := validateSandboxCrashedExit(killed); err != nil {
+		t.Fatalf("killed fixture: %v", err)
+	}
+	for _, waitErr := range []error{nil, exit130, exec.CommandContext(context.Background(), "sh", "-c", "kill -TERM $$").Run()} {
+		if err := validateSandboxCrashedExit(waitErr); err == nil {
+			t.Fatalf("non-killed exit %v accepted", waitErr)
+		}
 	}
 	for name, fixture := range map[string]struct {
 		waitErr error
