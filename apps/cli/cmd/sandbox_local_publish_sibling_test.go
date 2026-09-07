@@ -451,23 +451,23 @@ func (p *sandboxPublishProcess) crashAndValidate(t *testing.T, secrets ...string
 	p.requireRunning(t, "before requested crash")
 	if err := p.cmd.Process.Kill(); err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
-			t.Fatalf("sandbox publish %s exited before the crash signal", p.label)
+			t.Fatalf("sandbox publish %s exited before the crash signal\nstderr: %s", p.label, p.stderr.String())
 		}
-		t.Fatalf("kill sandbox publish %s: %v", p.label, err)
+		t.Fatalf("kill sandbox publish %s: %v\nstderr: %s", p.label, err, p.stderr.String())
 	}
 	select {
 	case <-p.done:
 	case <-time.After(sandboxCrashReapTimeout):
-		t.Fatalf("sandbox publish %s was not reaped after crash", p.label)
+		t.Fatalf("sandbox publish %s was not reaped after crash\nstderr: %s", p.label, p.stderr.String())
 	}
 	p.waitMu.Lock()
 	waitErr := p.waitErr
 	p.waitMu.Unlock()
 	if err := validateSandboxCrashedExit(waitErr); err != nil {
-		t.Fatalf("sandbox publish %s crash: %v", p.label, err)
+		t.Fatalf("sandbox publish %s crash: %v\nstderr: %s", p.label, err, p.stderr.String())
 	}
 	if err := validateSandboxForegroundOutput(p.stdout.String(), p.stderr.String(), p.crid, secrets...); err != nil {
-		t.Fatalf("sandbox publish %s crash: %v", p.label, err)
+		t.Fatalf("sandbox publish %s crash: %v\nstderr: %s", p.label, err, p.stderr.String())
 	}
 }
 

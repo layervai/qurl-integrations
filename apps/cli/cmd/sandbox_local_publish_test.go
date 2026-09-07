@@ -790,9 +790,11 @@ func waitSandboxSharingState(t *testing.T, binary string, env map[string]string,
 	})
 }
 
-func readSandboxSharingState(t *testing.T, binary string, env map[string]string, stateDir, crid string, limit time.Duration) sandboxSharingDoc {
+func waitSandboxSharingStateAfterCrash(t *testing.T, binary string, env map[string]string, stateDir, crid, resourceID string, limit time.Duration) sandboxSharingDoc {
 	t.Helper()
-	return waitSandboxSharing(t, binary, env, stateDir, crid, limit, "a readable sharing state", func(sandboxSharingDoc) bool { return true })
+	return waitSandboxSharing(t, binary, env, stateDir, crid, limit, "the exact resource to reflect the foreground crash", func(doc sandboxSharingDoc) bool {
+		return validateSandboxCrashState(doc, crid, resourceID) == nil
+	})
 }
 
 func waitSandboxSharingStateAfterEpoch(t *testing.T, binary string, env map[string]string, stateDir, crid, desired, observed string, priorEpoch uint64, limit time.Duration) sandboxSharingDoc {
@@ -1178,6 +1180,19 @@ func validateSandboxSharingTransition(doc sandboxSharingDoc, desired, observed s
 	return nil
 }
 
+func validateSandboxCrashState(doc sandboxSharingDoc, crid, resourceID string) error { //nolint:gocritic // Passing the immutable decoded snapshot by value keeps validation isolated from later mutation.
+	if doc.CRID != crid || doc.ResourceID != resourceID || doc.ServingEpoch == 0 {
+		return errors.New("status returned an incomplete resource identity")
+	}
+	if doc.DesiredState != "on" {
+		return fmt.Errorf("desired state = %s, want on after crash", doc.DesiredState)
+	}
+	if doc.ConnectionState != "connecting" && doc.ConnectionState != "stopped" {
+		return fmt.Errorf("connection state = %s, want a non-serving crash state", doc.ConnectionState)
+	}
+	return nil
+}
+
 func TestRunSandboxLocalCLIUsesExactBinaryAndState(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "qurl")
 	script := `#!/bin/sh
@@ -1339,6 +1354,28 @@ func TestValidateSandboxSharingTransitionRequiresAdvancedEpoch(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if err := validateSandboxSharingTransition(observedState, "on", "serving", 7); err == nil {
 				t.Fatal("invalid lifecycle transition accepted")
+			}
+		})
+	}
+}
+
+func TestValidateSandboxCrashStateRequiresExactNonServingResource(t *testing.T) {
+	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+	valid := sandboxSharingDoc{CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8}
+	if err := validateSandboxCrashState(valid, crid, "resource"); err != nil {
+		t.Fatalf("valid crash state: %v", err)
+	}
+	for name, doc := range map[string]sandboxSharingDoc{
+		"wrong CRID":     {CRID: "other", ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},
+		"wrong resource": {CRID: crid, ResourceID: "other", DesiredState: "on", ConnectionState: "connecting", ServingEpoch: 8},
+		"zero epoch":     {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "connecting"},
+		"desired off":    {CRID: crid, ResourceID: "resource", DesiredState: "off", ConnectionState: "stopped", ServingEpoch: 8},
+		"still serving":  {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "serving", ServingEpoch: 8},
+		"unknown state":  {CRID: crid, ResourceID: "resource", DesiredState: "on", ConnectionState: "", ServingEpoch: 8},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSandboxCrashState(doc, crid, "resource"); err == nil {
+				t.Fatal("invalid crash state accepted")
 			}
 		})
 	}

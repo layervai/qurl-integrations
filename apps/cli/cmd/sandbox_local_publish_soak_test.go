@@ -80,10 +80,7 @@ func TestSandboxLocalPublishSoak(t *testing.T) {
 			waitSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, "on", "serving", 30*time.Second)
 			foregroundOwned = false
 			fixture.process.crashAndValidate(t, fixture.key, fixture.cleanupJWT)
-			crashed := readSandboxSharingState(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, 15*time.Second)
-			if crashed.DesiredState != "on" {
-				t.Fatalf("crash cleared the authoritative desired state: %+v", crashed)
-			}
+			crashed := waitSandboxSharingStateAfterCrash(t, fixture.binary, fixture.env, fixture.stateDir, fixture.local.CRID, fixture.local.ResourceID, 30*time.Second)
 			warmDaemon = startCredentialFreeSandboxDaemon(t, fixture)
 			// TODO(upstream-contract): qurl-service must advance serving_epoch when
 			// a daemon reattaches to an already-on share after an unclean exit.
