@@ -794,6 +794,14 @@ function redactAccessToken(message) {
     .replace(/qv2t1\.[A-Za-z0-9_.-]+/g, 'qv2t1.[REDACTED]');
 }
 
+async function closeDetectOpener(opener) {
+  try {
+    await opener.close();
+  } catch (err) {
+    logger.warn('Detect native opener close failed', { error: redactAccessToken(err?.message) });
+  }
+}
+
 /**
  * Look up the active detect resource and mint a fresh five-minute qURL.
  * Cache only the resource ID. Never cache the minted credential or site.
@@ -886,35 +894,6 @@ async function resolveDetectTarget() {
     throw err;
   }
   try {
-    // qv2t1 carries an offline credential, not an at_ API-resolve token.
-    // The native SDK verifies the issuer and cell against deployment trust.
-    if (typeof minted?.qurl_link === 'string' && minted.qurl_link.includes('#qv2t1.')) {
-      const nativeTarget = buildDetectTargetUrl(minted?.qurl_site);
-      if (minted.resource_id !== resourceId) {
-        throw new Error('Detect mint returned a mismatched resource_id');
-      }
-      const { createPortalOpener } = require('@layervai/qurl/node');
-      const opener = createPortalOpener({ qurl: minted.qurl_link });
-      try {
-        await opener.start();
-        clearDetectResourceFailureState();
-        return { targetUrl: nativeTarget, opener };
-      } catch (err) {
-        await opener.close();
-        // The command handler also logs this error; keep credentials out of it.
-        throw new Error(redactAccessToken(err.message));
-      }
-    }
-    accessToken = extractAccessToken(minted?.qurl_link);
-  } catch (err) {
-    // A malformed qurl_link is a mint response-shape issue, not evidence that
-    // the cached resource_id is stale. Keep the resource cache and retry only
-    // the mint after the short failure window.
-    rememberDetectResourceFailure(err, { clearResourceCache: false });
-    logger.warn('Detect tunnel mint failed', { error: redactAccessToken(err.message) });
-    throw err;
-  }
-  try {
     targetUrl = buildDetectTargetUrl(minted?.qurl_site);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
@@ -930,6 +909,38 @@ async function resolveDetectTarget() {
       error: redactAccessToken(err.message),
       hostname: detectTargetHostname(minted?.qurl_site),
     });
+    throw err;
+  }
+
+  try {
+    // qv2t1 carries an offline credential, not an at_ API-resolve token.
+    // The native SDK verifies the issuer and cell against deployment trust.
+    if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
+      if (minted.resource_id !== resourceId) {
+        const err = new Error('Detect mint returned a mismatched resource_id');
+        rememberDetectResourceFailure(err);
+        throw err;
+      }
+      const { createPortalOpener } = require('@layervai/qurl/node');
+      const opener = createPortalOpener({ qurl: minted.qurl_link });
+      try {
+        // SDK 0.6 bounds native opening to 15 seconds and aborts it on close.
+        await opener.start();
+        clearDetectResourceFailureState();
+        return { targetUrl, opener };
+      } catch (err) {
+        await closeDetectOpener(opener);
+        // The command handler also logs this error; keep credentials out of it.
+        throw new Error(redactAccessToken(err.message));
+      }
+    }
+    accessToken = extractAccessToken(minted?.qurl_link);
+  } catch (err) {
+    // A malformed qurl_link is a mint response-shape issue, not evidence that
+    // the cached resource_id is stale. Keep the resource cache and retry only
+    // the mint after the short failure window.
+    rememberDetectResourceFailure(err, { clearResourceCache: false });
+    logger.warn('Detect tunnel mint failed', { error: redactAccessToken(err.message) });
     throw err;
   }
 
@@ -1008,20 +1019,20 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
   // (rationale in the REACH MODEL note above and resolveDetectTarget's docstring).
   const { targetUrl, opener } = await resolveDetectTarget();
 
-  const request = {
-    method: 'POST',
-    headers: {
-      'Content-Type': contentType || 'application/octet-stream',
-      'X-Guild-Id': guildId,
-      ...connectorAuthHeaders(apiKey),
-    },
-    body: imageBytes,
-    // Neural-net inference is the slow leg here; give it the same 60s
-    // headroom the upload paths use rather than the 30s mint window.
-    signal: AbortSignal.timeout(60000),
-  };
-  let response;
   try {
+    const request = {
+      method: 'POST',
+      headers: {
+        'Content-Type': contentType || 'application/octet-stream',
+        'X-Guild-Id': guildId,
+        ...connectorAuthHeaders(apiKey),
+      },
+      body: imageBytes,
+      // Neural-net inference is the slow leg here; give it the same 60s
+      // headroom the upload paths use rather than the 30s mint window.
+      signal: AbortSignal.timeout(60000),
+    };
+    let response;
     response = opener
       ? await opener.fetchDescendant(['api', 'detect'], (authenticatedTarget) => {
         // Check the signed ACK target before sending guild data or a Bearer.
@@ -1047,8 +1058,16 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
       match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
       confidence: typeof result.confidence === 'number' ? result.confidence : 0,
     };
+  } catch (err) {
+    const message = redactAccessToken(err?.message);
+    if (opener && message !== err?.message) {
+      const safeError = new Error(message);
+      safeError.status = err?.status;
+      throw safeError;
+    }
+    throw err;
   } finally {
-    if (opener) await opener.close();
+    if (opener) await closeDetectOpener(opener);
   }
 }
 

@@ -1,3 +1,4 @@
+// QURL_DEPLOYMENT is consumed and strictly validated by @layervai/qurl/node.
 const os = require('os');
 
 // Prod safety guard: refuse to boot with DDB_TEST_ENDPOINT set under
