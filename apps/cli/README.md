@@ -511,6 +511,7 @@ path survives normal upgrades, and a binary-version change reloads the resident
 daemon deliberately. Ordinary lifecycle commands reload desired state over an
 owner-only local control channel without restarting healthy sibling shares.
 
+<!-- TODO(upstream-contract): the grace mirrors qurl-connector groupControlRecoveryGrace. -->
 If the tunnel control connection cannot restore its proxy table within 25
 seconds, the daemon retires that session and requests fresh admission. Brief
 connection losses can recover with the existing session.
