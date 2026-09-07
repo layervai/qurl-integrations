@@ -42,6 +42,7 @@ const {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
+  shouldStartPrivateUploader,
   resolveProcessRole,
 } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
@@ -1028,9 +1029,14 @@ async function start() {
     await initHttpOnly({ client, config, refreshCache, logger });
   }
 
-  // The SQS HTTP worker executes Discord commands. Warm its one process-level
-  // NHP 1.1 session before the listener and queue consumer become ready.
-  if (isWorker && config.PRIVATE_UPLOAD_QURL) {
+  // Every role that executes Discord commands needs the private uploader.
+  // Warm its one process-level NHP 1.1 session before command intake begins.
+  if (shouldStartPrivateUploader({
+    isGateway,
+    isHttp,
+    eventShipperEnabled: config.ENABLE_EVENT_SHIPPER,
+    privateUploadQurl: config.PRIVATE_UPLOAD_QURL,
+  })) {
     await startPrivateUploader();
   }
 

@@ -13,6 +13,7 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
+  PRIVATE_UPLOAD_QURL: null,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -3393,6 +3394,20 @@ describe('handleConfirmSendClick', () => {
     expect(int.update).not.toHaveBeenCalled();
   });
 
+  test('public send falls back to the global API key when the guild key is null', async () => {
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    mockDb.getGuildApiKey.mockResolvedValueOnce(null);
+
+    await handleConfirmSendClick(int, {
+      flow_id: 'fid', row: { payload: validPayload, version: 1 },
+    });
+
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Preparing send/),
+    }));
+  });
+
   test('deleteFlow dedup loser → version-fenced "Recipients changed" reply, no pipeline call', async () => {
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
@@ -3439,6 +3454,9 @@ describe('handleConfirmSendClick', () => {
     await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/not configured|setup/i),
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/private sharing/i),
     }));
     expect(isOnCooldown(SENDER_ID)).toBe(false);
   });

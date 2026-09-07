@@ -69,6 +69,12 @@ const TIMEOUTS = {
   QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
 };
 
+// TODO(upstream-contract): Discord interaction tokens remain valid for 15
+// minutes after acknowledgement. Give the private upload and DM completion
+// paths five minutes of headroom by limiting all delegated-mint batches in one
+// send to one shared 10-minute deadline.
+const PRIVATE_SEND_MINT_BUDGET_MS = 10 * 60 * 1000;
+
 // Limits
 const LIMITS = {
   EMBED_DESCRIPTION: 4096,
@@ -644,6 +650,7 @@ module.exports = {
   DM_STATUS,
   ROLE_COLORS,
   TIMEOUTS,
+  PRIVATE_SEND_MINT_BUDGET_MS,
   LIMITS,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,

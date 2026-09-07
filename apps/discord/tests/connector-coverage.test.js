@@ -1719,3 +1719,61 @@ describe('detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowl
       .toEqual(['.qurl.site', '.qurl.site.layerv.xyz', '.qurl.site.layerv.ai']);
   });
 });
+
+describe('Connector client — private delegated mint', () => {
+  const redeemDelegatedBatch = jest.fn();
+  let connector;
+
+  beforeEach(() => {
+    jest.resetModules();
+    redeemDelegatedBatch.mockReset().mockResolvedValue([{ qurl_link: 'https://qurl.site/private' }]);
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.test.local',
+      QURL_API_KEY: '',
+      PRIVATE_UPLOAD_QURL: 'qurl://private-upload',
+    }));
+    jest.doMock('../src/private-upload', () => ({
+      uploadPrivate: jest.fn(),
+      redeemDelegatedBatch,
+    }));
+    connector = require('../src/connector');
+  });
+
+  it('forwards one deadline and omits the default 24h grant expiry', async () => {
+    const uploadHandle = `upl_${'a'.repeat(43)}`;
+    const privateUpload = { upload_handle: uploadHandle, mint_capability: 'qmc1.test' };
+    const privateSendDeadlineMs = Date.now() + 60_000;
+
+    await connector.mintLinks(uploadHandle, {
+      expiresIn: '24h',
+      n: 2,
+      apiKey: 'lv_test_example',
+      audienceKeyId: 'key_A1b2C3d4E5f6',
+      privateUpload,
+      privateSendDeadlineMs,
+      selfDestructSeconds: 30,
+    });
+
+    expect(redeemDelegatedBatch).toHaveBeenCalledWith(privateUpload, {
+      credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+      deadlineMs: privateSendDeadlineMs,
+      grants: [
+        { one_time_use: true, session_duration: '30s' },
+        { one_time_use: true, session_duration: '30s' },
+      ],
+    });
+  });
+
+  it('rejects a capability whose upload handle does not match the resource ID', async () => {
+    await expect(connector.mintLinks(`upl_${'a'.repeat(43)}`, {
+      expiresIn: '1h',
+      n: 1,
+      apiKey: 'lv_test_example',
+      audienceKeyId: 'key_A1b2C3d4E5f6',
+      privateUpload: { upload_handle: `upl_${'b'.repeat(43)}`, mint_capability: 'qmc1.test' },
+      privateSendDeadlineMs: Date.now() + 60_000,
+    })).rejects.toThrow(/capability is missing/);
+    expect(redeemDelegatedBatch).not.toHaveBeenCalled();
+  });
+});

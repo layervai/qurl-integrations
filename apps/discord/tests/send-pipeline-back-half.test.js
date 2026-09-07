@@ -12,6 +12,7 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
+  PRIVATE_UPLOAD_QURL: null,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -114,6 +115,7 @@ const mockDb = {
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
   getSendRenderedCount: jest.fn().mockResolvedValue(0),
   markConfirmTerminal: jest.fn().mockResolvedValue(undefined),
+  getGuildQurlCredential: jest.fn(),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -273,6 +275,7 @@ beforeEach(() => {
   mockDb.getSendRenderedCount.mockReset();
   mockDb.getSendRenderedCount.mockResolvedValue(0);
   for (const m of Array.from(activeMonitors)) m.stop();
+  require('../src/config').PRIVATE_UPLOAD_QURL = null;
 });
 
 const TWO_LINK_SET = [
@@ -1854,6 +1857,31 @@ describe('handleAddRecipients — pre-flight guards', () => {
       expect.objectContaining({ sendId: 'send-1', expiresIn: String(expiresIn) }),
     );
   });
+
+  it('refuses a persisted 7d public expiry after private uploads are enabled', async () => {
+    require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    mockDb.getGuildQurlCredential.mockResolvedValueOnce({
+      apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6',
+    });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1',
+      expires_in: '7d',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+
+    const result = await handleAddRecipients(
+      'send-private-expiry',
+      makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction({ guildId: 'guild-1' }),
+      'stale-api-key',
+    );
+
+    expect(result.msg).toMatch(/saved expiry is invalid/i);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
 });
 
 describe('handleAddRecipients — file path failure modes', () => {
@@ -3079,6 +3107,36 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     for (const call of mockMintLinks.mock.calls) {
       expect(call[1]).toEqual(expect.objectContaining({ guildId: 'guild-77' }));
+    }
+  });
+
+  it('uses one private-send deadline for every 100-recipient batch', async () => {
+    require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 100 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/100' }]);
+    const reuploadFn = jest.fn().mockResolvedValueOnce({
+      resource_id: `upl_${'b'.repeat(43)}`,
+      private_upload: { upload_handle: `upl_${'b'.repeat(43)}`, mint_capability: 'qmc1.next' },
+    });
+    const privateSendDeadlineMs = Date.now() + 60_000;
+
+    const result = await mintLinksInBatches({
+      initialResourceId: `upl_${'a'.repeat(43)}`,
+      initialPrivateUpload: { upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.first' },
+      reuploadFn,
+      expiresIn: '1h',
+      recipientCount: 101,
+      apiKey: 'lv_test_example',
+      audienceKeyId: 'key_A1b2C3d4E5f6',
+      privateSendDeadlineMs,
+    });
+
+    expect(result).toHaveLength(101);
+    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    for (const call of mockMintLinks.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ privateSendDeadlineMs }));
     }
   });
 });

@@ -439,7 +439,10 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  *   legacy callers and pre-#1101 send paths keep working untouched.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, { expiresAt, expiresIn, n, apiKey, audienceKeyId, privateUpload, selfDestructSeconds = null, guildId } = {}) {
+async function mintLinks(resourceId, {
+  expiresAt, expiresIn, n, apiKey, audienceKeyId, privateUpload,
+  privateSendDeadlineMs, selfDestructSeconds = null, guildId,
+} = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   // Same public-resource boundary as status/revoke: mintLinks receives a
   // connector-returned public ID, never a qURL bearer token. Reuse the shared
@@ -466,6 +469,7 @@ async function mintLinks(resourceId, { expiresAt, expiresIn, n, apiKey, audience
     return redeemDelegatedBatch(privateUpload, {
       credential: privateCredential(apiKey, audienceKeyId),
       grants,
+      deadlineMs: privateSendDeadlineMs,
     });
   }
   const body = { expires_at: expiresAt, n, one_time_use: true };

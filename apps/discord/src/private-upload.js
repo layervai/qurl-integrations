@@ -8,21 +8,18 @@ const {
 const { createPortalOpener } = require('@layervai/qurl/node');
 
 const config = require('./config');
+const { PRIVATE_SEND_MINT_BUDGET_MS } = require('./constants');
 const logger = require('./logger');
 
 const UPLOAD_PATH = '/internal/v1/uploads';
 const UPLOAD_DOMAIN = 'LV-QURL-UPLOAD-AUTH-V1';
 const UPLOAD_REQUEST_DOMAIN = 'LV-QURL-UPLOAD-REQUEST-V1';
-const REFRESH_DOMAIN = 'LV-QURL-UPLOAD-REFRESH-AUTH-V1';
 const P256_ORDER = BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551');
 const P256_HALF_ORDER = P256_ORDER / 2n;
 const MAX_UPLOAD_ATTEMPTS = 3;
 const MAX_BATCH_ATTEMPTS = 3;
 const MAX_BATCH_POLLS = 900;
-// Discord interaction tokens remain valid for 15 minutes after the initial
-// acknowledgement. Keep the service-side batch wait below that limit so the
-// command still has time to deliver DMs and update the deferred response.
-const MAX_BATCH_WAIT_MS = 10 * 60 * 1000;
+const RETRY_BACKOFF_BASE_MS = 250;
 
 let opener = null;
 let recoveryTimer = null;
@@ -63,14 +60,6 @@ function stableUploadRequestDigest(fields) {
     fields.viewerTtlSeconds, fields.authorityExpiresAt, fields.requestId,
   ]);
   return sha256Hex(canonical);
-}
-
-function canonicalRefreshMessage(fields) {
-  return canonicalMessage(REFRESH_DOMAIN, [
-    'PATCH', fields.authority, UPLOAD_PATH, fields.timestamp, fields.nonce,
-    fields.clientId, fields.keyId, fields.bodySha256, fields.bodyLength,
-    fields.requestId,
-  ]);
 }
 
 function bigintFromBytes(bytes) {
@@ -169,7 +158,7 @@ function contentDigest(body) {
   return `sha-256=:${createHash('sha256').update(body).digest('base64')}:`;
 }
 
-function signedTransportFields({ authority, body, contentType, filename, viewerTtlSeconds, audienceKeyId, authorityExpiresAt, requestId, method }) {
+function signedTransportFields({ authority, body, contentType, filename, viewerTtlSeconds, audienceKeyId, authorityExpiresAt, requestId }) {
   const timestamp = String(Math.floor(Date.now() / 1000));
   const nonce = randomBytes(32).toString('base64url');
   const bodySha256 = sha256Hex(body);
@@ -183,9 +172,9 @@ function signedTransportFields({ authority, body, contentType, filename, viewerT
     bodyLength: String(body.length),
     requestId,
   };
-  const message = method === 'POST'
-    ? canonicalUploadMessage({ ...base, audienceKeyId, contentType, filename, viewerTtlSeconds, authorityExpiresAt })
-    : canonicalRefreshMessage(base);
+  const message = canonicalUploadMessage({
+    ...base, audienceKeyId, contentType, filename, viewerTtlSeconds, authorityExpiresAt,
+  });
   return {
     signature: strictDerLowSSign(getSigner(), message),
     timestamp,
@@ -239,6 +228,7 @@ async function responseJson(response, label) {
     const err = new Error(`${label} failed (${response.status})`);
     err.status = response.status;
     err.apiCode = errorCode(body);
+    err.response = response;
     throw err;
   }
   return body;
@@ -286,7 +276,10 @@ async function portalRequest(build) {
   return getOpener().fetch(build, { redirects: 'error' });
 }
 
-async function uploadPrivate(bodyInput, { filename, contentType, viewerTtlSeconds, credential, authorityExpiresAt, requestId = randomUUID() }) {
+async function uploadPrivate(bodyInput, {
+  filename, contentType, viewerTtlSeconds, credential, authorityExpiresAt,
+  requestId = randomUUID(), sleep = delay,
+}) {
   const body = Buffer.from(bodyInput);
   if (body.length < 1) throw new Error('private upload body must not be empty');
   if (!isUuidV4(requestId)) throw new Error('private upload request ID must be a lowercase UUIDv4');
@@ -304,7 +297,7 @@ async function uploadPrivate(bodyInput, { filename, contentType, viewerTtlSecond
         const authority = authorityFor(target);
         const auth = signedTransportFields({
           authority, body, contentType: safeContentType, filename: safeFilename, viewerTtlSeconds: safeViewerTtl,
-          audienceKeyId: guildCredential.keyId, authorityExpiresAt, requestId, method: 'POST',
+          audienceKeyId: guildCredential.keyId, authorityExpiresAt, requestId,
         });
         return {
           method: 'POST',
@@ -328,69 +321,22 @@ async function uploadPrivate(bodyInput, { filename, contentType, viewerTtlSecond
         };
       });
       const result = await responseJson(response, 'Private upload');
-      if (response.status !== 201) {
-        throw new Error(`Private upload returned an unexpected status (${response.status})`);
+      // TODO(upstream-contract): the private-upload v1 service returns 201 for
+      // the first completion and 200 for an exact replay after an ambiguous
+      // result. Both carry the same validated response shape.
+      if (response.status !== 201 && response.status !== 200) {
+        const err = new Error(`Private upload returned an unexpected status (${response.status})`);
+        err.noRetry = true;
+        throw err;
       }
       const data = validateUploadResult(result?.data, { authorityExpiresAt });
       return { ...data, upload_request_id: requestId };
     } catch (err) {
       lastError = err;
-      if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) throw err;
-    }
-  }
-  throw lastError;
-}
-
-async function refreshPrivateUpload(upload, { maxBatchSize, maxLinkTtlSeconds, authorityExpiresAt, requestId = randomUUID() }) {
-  if (!isUploadHandle(upload?.upload_handle) || !isUuidV4(upload?.upload_request_id)) {
-    throw new Error('private upload refresh source is invalid');
-  }
-  if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1 || maxBatchSize > 100
-      || !Number.isInteger(maxLinkTtlSeconds) || maxLinkTtlSeconds < 1
-      || !isUuidV4(requestId) || !isCanonicalUtcSecond(authorityExpiresAt)) {
-    throw new Error('private upload refresh policy is invalid');
-  }
-  const body = Buffer.from(JSON.stringify({
-    upload_handle: upload.upload_handle,
-    upload_request_id: requestId,
-    max_batch_size: maxBatchSize,
-    max_link_ttl_seconds: maxLinkTtlSeconds,
-    authority_expires_at: authorityExpiresAt,
-  }));
-  let lastError;
-  for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
-    try {
-      const response = await portalRequest((target) => {
-        const auth = signedTransportFields({ authority: authorityFor(target), body, requestId, method: 'PATCH' });
-        return {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': String(body.length),
-            'Content-Digest': contentDigest(body),
-            'X-LayerV-Client-ID': config.PRIVATE_UPLOAD_SIGNER_CLIENT_ID,
-            'X-LayerV-Key-ID': config.PRIVATE_UPLOAD_SIGNER_KEY_ID,
-            'X-LayerV-Timestamp': auth.timestamp,
-            'X-LayerV-Nonce': auth.nonce,
-            'X-LayerV-Upload-Request-ID': requestId,
-            'X-LayerV-Upload-Signature': auth.signature,
-          },
-          body,
-          signal: AbortSignal.timeout(30000),
-        };
-      });
-      const result = await responseJson(response, 'Private upload refresh');
-      if (response.status !== 200) {
-        throw new Error(`Private upload refresh returned an unexpected status (${response.status})`);
+      if (err.noRetry || (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))) throw err;
+      if (attempt < MAX_UPLOAD_ATTEMPTS) {
+        await sleep(retryDelayMs(err.response, attempt));
       }
-      const data = validateUploadResult(result?.data, {
-        authorityExpiresAt,
-        uploadHandle: upload.upload_handle,
-      });
-      return { ...data, upload_request_id: upload.upload_request_id };
-    } catch (err) {
-      lastError = err;
-      if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) throw err;
     }
   }
   throw lastError;
@@ -406,6 +352,14 @@ function requiredRetryAfterMs(response) {
     throw new Error('Delegated qURL batch returned an invalid Retry-After header');
   }
   return seconds * 1000;
+}
+
+function retryDelayMs(response, attempt) {
+  const raw = response?.headers?.get('retry-after');
+  if (raw != null) {
+    return requiredRetryAfterMs(response);
+  }
+  return RETRY_BACKOFF_BASE_MS * (2 ** (attempt - 1));
 }
 
 function requiredEtag(response) {
@@ -435,7 +389,13 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function redeemDelegatedBatch(upload, { credential, grants, idempotencyKey = randomUUID(), sleep = delay }) {
+async function redeemDelegatedBatch(upload, {
+  credential, grants, idempotencyKey = randomUUID(), sleep = delay,
+  deadlineMs = Date.now() + PRIVATE_SEND_MINT_BUDGET_MS,
+}) {
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now()) {
+    throw new Error('Delegated qURL batch deadline is invalid or expired');
+  }
   const guildCredential = requirePrivateCredential(credential);
   const body = JSON.stringify({ mint_capability: upload.mint_capability, grants });
   const headers = {
@@ -462,19 +422,32 @@ async function redeemDelegatedBatch(upload, { credential, grants, idempotencyKey
         accepted = { response, batchId: data.batch_id };
         break;
       }
+      if (response.ok) {
+        const err = new Error(`Delegated qURL batch returned an unexpected success status (${response.status})`);
+        err.noRetry = true;
+        throw err;
+      }
       await responseJson(response, 'Delegated qURL batch');
     } catch (err) {
       lastError = err;
-      if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) throw err;
+      if (err.noRetry || (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))) throw err;
+      if (attempt < MAX_BATCH_ATTEMPTS) {
+        const waitMs = err.status === 503
+          ? requiredRetryAfterMs(err.response)
+          : retryDelayMs(err.response, attempt);
+        if (Date.now() + waitMs > deadlineMs) {
+          throw new Error('Delegated qURL batch did not complete before the Discord interaction deadline');
+        }
+        await sleep(waitMs);
+      }
     }
   }
   if (!accepted) throw lastError || new Error('Delegated qURL batch was not accepted');
   const location = validatedBatchLocation(accepted.response.headers.get('location'), accepted.batchId);
   let etag = requiredEtag(accepted.response);
   let waitMs = requiredRetryAfterMs(accepted.response);
-  const deadline = Date.now() + MAX_BATCH_WAIT_MS;
   for (let poll = 0; poll < MAX_BATCH_POLLS; poll++) {
-    if (Date.now() + waitMs > deadline) {
+    if (Date.now() + waitMs > deadlineMs) {
       throw new Error('Delegated qURL batch did not complete before the Discord interaction deadline');
     }
     await sleep(waitMs);
@@ -483,12 +456,13 @@ async function redeemDelegatedBatch(upload, { credential, grants, idempotencyKey
     const response = await fetch(location, {
       headers: pollHeaders, redirect: 'error', signal: AbortSignal.timeout(30000),
     });
-    etag = requiredEtag(response);
     if (response.status === 304) {
+      etag = requiredEtag(response);
       waitMs = requiredRetryAfterMs(response);
       continue;
     }
     if (response.status === 202) {
+      etag = requiredEtag(response);
       waitMs = requiredRetryAfterMs(response);
       const pending = await responseJson(response, 'Delegated qURL batch status');
       if (pending?.data?.batch_id !== accepted.batchId
@@ -537,7 +511,6 @@ module.exports = {
   startPrivateUploader,
   closePrivateUploader,
   uploadPrivate,
-  refreshPrivateUpload,
   redeemDelegatedBatch,
 };
 
@@ -545,7 +518,6 @@ if (process.env.NODE_ENV === 'test') {
   module.exports.__testExports = {
     canonicalUploadMessage,
     stableUploadRequestDigest,
-    canonicalRefreshMessage,
     strictDerLowSSign,
     canonicalFilename,
     canonicalContentType,

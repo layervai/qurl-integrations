@@ -14,6 +14,7 @@ const {
   invalidHotStandbyValues,
   invalidStateSecretValues,
   shouldRegisterInteractionListener,
+  shouldStartPrivateUploader,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
@@ -351,6 +352,22 @@ describe('shouldRegisterInteractionListener', () => {
     const first = shouldRegisterInteractionListener(args);
     const second = shouldRegisterInteractionListener(args);
     expect(first).toBe(second);
+  });
+});
+
+describe('shouldStartPrivateUploader', () => {
+  test.each([
+    ['combined', false, 'qurl://private-upload', true],
+    ['gateway', false, 'qurl://private-upload', true],
+    ['gateway', true, 'qurl://private-upload', false],
+    ['http', false, 'qurl://private-upload', false],
+    ['http', true, 'qurl://private-upload', true],
+    ['combined', false, null, false],
+  ])('role=%s shipper=%s private=%s -> %s', (role, eventShipperEnabled, privateUploadQurl, expected) => {
+    const { isGateway, isHttp } = resolveProcessRole(role);
+    expect(shouldStartPrivateUploader({
+      isGateway, isHttp, eventShipperEnabled, privateUploadQurl,
+    })).toBe(expected);
   });
 });
 

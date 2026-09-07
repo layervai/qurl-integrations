@@ -21,10 +21,10 @@ function apiOk(status, data) {
   });
 }
 
-function apiError(status, { code = 'error', detail } = {}) {
+function apiError(status, { code = 'error', detail } = {}, headers = {}) {
   return new Response(JSON.stringify({
       error: { status, code, title: `HTTP ${status}`, detail: detail ?? `HTTP ${status}` },
-  }), { status, headers: { 'Content-Type': 'application/json' } });
+  }), { status, headers: { 'Content-Type': 'application/json', ...headers } });
 }
 
 describe('qURL client — getResourceStatus', () => {
@@ -487,14 +487,22 @@ describe('qURL client — delegated qURL revoke', () => {
     qurl = require('../src/qurl');
   });
 
-  afterEach(() => { globalThis.fetch = originalFetch; });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    jest.useRealTimers();
+  });
 
-  it('retries an ambiguous DELETE with the same target and bearer until 204', async () => {
+  it('respects Retry-After and retries an ambiguous DELETE with the same target and bearer', async () => {
+    jest.useFakeTimers();
     globalThis.fetch = jest.fn()
-      .mockResolvedValueOnce(apiError(503, { code: 'mutation_outcome_unknown' }))
+      .mockResolvedValueOnce(apiError(503, { code: 'mutation_outcome_unknown' }, { 'Retry-After': '1' }))
       .mockResolvedValueOnce(apiOk(204));
 
-    await qurl.deleteLink('q_0123456789a');
+    const revoke = qurl.deleteLink('q_0123456789a');
+    await jest.advanceTimersByTimeAsync(999);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(1);
+    await revoke;
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     const [firstUrl, firstInit] = globalThis.fetch.mock.calls[0];

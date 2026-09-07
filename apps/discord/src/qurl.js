@@ -40,6 +40,7 @@ const { isPrivateHost } = require('./utils/private-host');
 // deliberately leave untouched here.)
 const REQUEST_TIMEOUT_MS = 30000;
 const MAX_RETRIES = 2;
+const RETRY_BACKOFF_BASE_MS = 250;
 // User-Agent the qURL service sees for the bot's calls. Preserved verbatim
 // across the SDK migration (a literal wire identifier — see CLAUDE.md).
 const USER_AGENT = 'qurl-discord-bot/1.0';
@@ -58,6 +59,22 @@ const SAFE_STATUS0_CODES = new Set([
   ERROR_CODE_NETWORK,
   ERROR_CODE_TIMEOUT,
 ]);
+
+function retryDelayMs(response, attempt) {
+  // TODO(upstream-contract): qURL service mutation_outcome_unknown responses
+  // carry Retry-After delta seconds. Use bounded backoff if an intermediary
+  // removes or damages that advisory header.
+  const raw = response?.headers?.get('retry-after');
+  if (/^\d+$/.test(raw || '')) {
+    const seconds = Number(raw);
+    if (Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 30) return seconds * 1000;
+  }
+  return RETRY_BACKOFF_BASE_MS * (2 ** attempt);
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Construct a per-call SDK client. Per-call (not cached) because each call
 // carries its own apiKey (the bot is multi-tenant) and because these are rare
@@ -269,13 +286,15 @@ async function deleteLink(resourceId, apiKey) {
         const err = new Error(`qURL API request failed (${response.status})`);
         err.status = response.status;
         err.apiCode = code;
+        err.response = response;
         lastError = err;
-        if (response.status !== 503 || code !== 'mutation_outcome_unknown') throw err;
+        throw err;
       } catch (err) {
         lastError = err;
         if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) {
           throw err;
         }
+        if (attempt < MAX_RETRIES) await delay(retryDelayMs(err.response, attempt));
       }
     }
     throw lastError;

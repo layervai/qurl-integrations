@@ -2233,8 +2233,9 @@ async function runRound(roundNum) {
     });
     results.uploadMs = performance.now() - uploadStart;
 
-    // Mint a pool at a time, re-uploading once each pool drains — the shape a
-    // real send takes through mintLinksInBatches (../src/commands.js).
+    // Mint a pool at a time, re-uploading once each pool drains — the public
+    // Connector shape in mintLinksInBatches (../src/commands.js). This runner
+    // does not exercise the private upload or delegated-mint path.
     //
     // The re-upload leg is what makes this leg generate real load: reusing one
     // resource_id for every batch spends the initial pool on batch 1 and takes

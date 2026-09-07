@@ -35,6 +35,7 @@ const {
   PREWARM_MAX_PAGES,
   AUDIT_EVENTS,
   TRUST,
+  PRIVATE_SEND_MINT_BUDGET_MS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
 } = require('./constants');
@@ -823,7 +824,10 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // would otherwise pass a truthy check via prototype access.
 // `git grep isValidExpiry` for call sites.
 function isValidExpiry(v) {
-  return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
+  return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v)
+    // A persisted public-mode row can outlive a later private-mode rollout.
+    // Do not let its 7-day value cross the private upload authority limit.
+    && (!config.PRIVATE_UPLOAD_QURL || v !== '7d');
 }
 
 // Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
@@ -1670,19 +1674,26 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, initialPrivateUpload, reuploadFn, expiresAt, expiresIn, recipientCount, apiKey, audienceKeyId, selfDestructSeconds = null, guildId }) {
+async function mintLinksInBatches({
+  initialResourceId, initialPrivateUpload, reuploadFn, expiresAt, expiresIn,
+  recipientCount, apiKey, audienceKeyId, privateSendDeadlineMs,
+  selfDestructSeconds = null, guildId,
+}) {
   const allLinks = [];
   const batchCapacity = config.PRIVATE_UPLOAD_QURL ? 100 : TOKENS_PER_RESOURCE;
   let currentResourceId = initialResourceId;
   let currentPrivateUpload = initialPrivateUpload;
   let tokensUsed = 0;
 
-  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
-  // test issues the upload/mint pattern a real send does. Nothing ties the two
-  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
-  // loop as an oracle and diffs the shapes. If the guard, the increment or the
-  // batchSize formula below changes, update that oracle in the same PR or the
-  // load test keeps measuring the old shape while staying green.
+  if (config.PRIVATE_UPLOAD_QURL
+      && (!Number.isSafeInteger(privateSendDeadlineMs) || privateSendDeadlineMs <= Date.now())) {
+    throw new Error('Private send mint deadline is invalid or expired');
+  }
+
+  // The public shape is mirrored by planMintBatches in
+  // scripts/loadtest-standalone.js. The live load runner uses the public
+  // Connector path; it is not a private-send journey test. This loop's 100-link
+  // private shape is pinned directly in send-pipeline-back-half.test.js.
   for (let i = 0; i < recipientCount; i += batchCapacity) {
     if (tokensUsed >= batchCapacity && i > 0) {
       const re = await reuploadFn();
@@ -1702,6 +1713,7 @@ async function mintLinksInBatches({ initialResourceId, initialPrivateUpload, reu
       mintOptions.expiresIn = expiresIn;
       mintOptions.audienceKeyId = audienceKeyId;
       mintOptions.privateUpload = currentPrivateUpload;
+      mintOptions.privateSendDeadlineMs = privateSendDeadlineMs;
     }
     const minted = await mintLinks(currentResourceId, mintOptions);
     for (const link of minted) {
@@ -1837,6 +1849,12 @@ async function executeSendPipeline(interaction, {
   // callers and the picker happy path.
   recipientMode,
 }) {
+  // One absolute deadline covers every delegated batch in this interaction.
+  // Computing it here prevents a large send from receiving a fresh 10-minute
+  // wait budget for each 100-recipient batch.
+  const privateSendDeadlineMs = config.PRIVATE_UPLOAD_QURL
+    ? Date.now() + PRIVATE_SEND_MINT_BUDGET_MS
+    : undefined;
   // Shared cancel-edit for every entry gate. Fire-and-forget — the
   // throw is the load-bearing signal (test pins + logger.error in
   // handleCommand's outer catch). The outer catch will still append
@@ -2029,6 +2047,7 @@ async function executeSendPipeline(interaction, {
           recipientCount: recipients.length,
           apiKey,
           audienceKeyId,
+          privateSendDeadlineMs,
           selfDestructSeconds,
           // Guild-scope the mint so watermark attribution (/qurl detect,
           // #1101) can resolve back to this guild. interaction.guildId is
@@ -2081,6 +2100,7 @@ async function executeSendPipeline(interaction, {
         recipientCount: recipients.length,
         apiKey,
         audienceKeyId,
+        privateSendDeadlineMs,
         selfDestructSeconds,
         // Guild-scope the mint for watermark attribution (#1101) — see the
         // file-send branch above. Maps payloads carry no image to watermark
@@ -3079,6 +3099,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
+  // Add Recipients is a new Discord interaction. Give all of its delegated
+  // batches one shared deadline; do not inherit or reset the original send's
+  // budget for each batch.
+  const privateSendDeadlineMs = config.PRIVATE_UPLOAD_QURL
+    ? Date.now() + PRIVATE_SEND_MINT_BUDGET_MS
+    : undefined;
+
   // Filter out bots and the sender. Convert the Discord Collection to a
   // plain array so later callers (map/forEach over newRecipients[i]) work.
   const newRecipients = [...usersCollection
@@ -3200,6 +3227,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           recipientCount: newRecipients.length,
           apiKey,
           audienceKeyId,
+          privateSendDeadlineMs,
           selfDestructSeconds: inheritedDestruct,
           // Guild-scope the mint for watermark attribution (#1101). Add
           // Recipients reuses the original send's guild via
@@ -3287,6 +3315,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         recipientCount: newRecipients.length,
         apiKey,
         audienceKeyId,
+        privateSendDeadlineMs,
         selfDestructSeconds: inheritedDestruct,
         // Guild-scope for attribution (#1101) — see the file branch above.
         guildId: originalInteraction.guildId,
@@ -8187,14 +8216,18 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // admin re-runs `/qurl setup` without re-invoking the slash command.
   // Cooldown clears so the user isn't stranded for the 30s window
   // while waiting on the admin.
-  const apiKey = typeof guildCredential === 'object'
-    ? guildCredential?.apiKey
-    : guildCredential || config.QURL_API_KEY;
-  const audienceKeyId = typeof guildCredential === 'object' ? guildCredential?.keyId : null;
+  const structuredCredential = guildCredential && typeof guildCredential === 'object'
+    ? guildCredential
+    : null;
+  const apiKey = structuredCredential?.apiKey
+    || (!config.PRIVATE_UPLOAD_QURL ? guildCredential || config.QURL_API_KEY : null);
+  const audienceKeyId = structuredCredential?.keyId || null;
   if (!apiKey || (config.PRIVATE_UPLOAD_QURL && !audienceKeyId)) {
     clearCooldown(interaction.user.id);
     return interaction.editReply({
-      content: '❌ qURL is no longer configured for private sharing in this server. Ask an admin to run `/qurl setup`.',
+      content: config.PRIVATE_UPLOAD_QURL
+        ? '❌ qURL is no longer configured for private sharing in this server. Ask an admin to run `/qurl setup`.'
+        : '❌ qURL is no longer configured in this server. Ask an admin to run `/qurl setup`.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
