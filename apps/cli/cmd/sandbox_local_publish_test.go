@@ -101,6 +101,7 @@ func mintConnectorRow(t *testing.T, slug string) connectorResourceRow {
 	digest := sha256.Sum256(der)
 	return connectorResourceRow{
 		ResourceID:         base64.RawURLEncoding.EncodeToString(der),
+		CRID:               apitest.DeriveCRID(t, der, apitest.VersionTest),
 		ConnectorRoutingID: "c-" + connectorRoutingIDEncoding.EncodeToString(digest[:]),
 		KnockResourceID:    "resource-public-key", Type: "tunnel", Status: "active", Slug: slug,
 	}
@@ -1866,7 +1867,7 @@ func registerSandboxResourceCleanup(t *testing.T, endpoint, connectorID, deviceA
 			t.Error("find sandbox Connector resource for cleanup failed")
 			return
 		}
-		if err := client.DeleteConnectorResource(ctx, resource.ResourceID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
+		if err := client.DeleteConnectorResource(ctx, resource.CRID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
 			t.Error("revoke sandbox Connector resource cleanup failed")
 		}
 	})
@@ -1988,7 +1989,7 @@ func TestSandboxCleanupReclaimsResourceBeforeDeviceCredential(t *testing.T) {
 			if err := json.NewEncoder(w).Encode(map[string]any{"data": []connectorResourceRow{row}}); err != nil {
 				t.Errorf("encode resource lookup: %v", err)
 			}
-		case r.Method == http.MethodDelete && r.URL.EscapedPath() == "/v1/resources/"+url.PathEscape(row.ResourceID):
+		case r.Method == http.MethodDelete && r.URL.EscapedPath() == "/v1/resources/"+url.PathEscape(row.CRID):
 			if got := r.Header.Get("Authorization"); got != "Bearer device-token" {
 				t.Errorf("resource cleanup authorization = %q, want device credential", got)
 			}

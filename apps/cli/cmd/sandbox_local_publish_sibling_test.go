@@ -684,7 +684,7 @@ func deleteSandboxSiblingResource(ctx context.Context, endpoint, connectorID, de
 	if err != nil || resource == nil {
 		return errors.New("find sandbox sibling resource failed")
 	}
-	if err := client.DeleteConnectorResource(ctx, resource.ResourceID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
+	if err := client.DeleteConnectorResource(ctx, resource.CRID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
 		return errors.New("delete sandbox sibling resource failed")
 	}
 	return nil
