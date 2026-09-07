@@ -1031,25 +1031,25 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
         return request;
       }, { redirects: 'error' })
       : await fetch(targetUrl, request);
+
+    if (!response.ok) {
+      return await throwConnectorError('Connector detect', response);
+    }
+
+    const result = await response.json();
+    // Normalize the shape so the caller can destructure without
+    // optional-chaining every field. The connector owns the values;
+    // we only coerce `detected` to a hard boolean (a missing/garbled
+    // field must read as "no attribution", never as a truthy object).
+    return {
+      detected: result.detected === true,
+      qurl_id: typeof result.qurl_id === 'string' ? result.qurl_id : null,
+      match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
+      confidence: typeof result.confidence === 'number' ? result.confidence : 0,
+    };
   } finally {
     if (opener) await opener.close();
   }
-
-  if (!response.ok) {
-    return throwConnectorError('Connector detect', response);
-  }
-
-  const result = await response.json();
-  // Normalize the shape so the caller can destructure without
-  // optional-chaining every field. The connector owns the values;
-  // we only coerce `detected` to a hard boolean (a missing/garbled
-  // field must read as "no attribution", never as a truthy object).
-  return {
-    detected: result.detected === true,
-    qurl_id: typeof result.qurl_id === 'string' ? result.qurl_id : null,
-    match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
-    confidence: typeof result.confidence === 'number' ? result.confidence : 0,
-  };
 }
 
 /**

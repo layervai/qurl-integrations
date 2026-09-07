@@ -802,6 +802,23 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         expect(opener.close).toHaveBeenCalledTimes(1);
       });
 
+      it.each([200, 400])('consumes the response body before closing (%s)', async (status) => {
+        const response = new Response(JSON.stringify(status === 200
+          ? { detected: false }
+          : { error: 'detect rejected' }), { status });
+        const read = response[status === 200 ? 'json' : 'text'].bind(response);
+        response[status === 200 ? 'json' : 'text'] = async () => {
+          expect(opener.close).not.toHaveBeenCalled();
+          return read();
+        };
+        opener.fetchDescendant.mockResolvedValue(response);
+        const pending = connector.detectWatermark(Buffer.from('image'), { guildId: 'g' });
+        if (status === 200) await expect(pending).resolves.toMatchObject({ detected: false });
+        else await expect(pending).rejects.toThrow();
+        expect(response.bodyUsed).toBe(true);
+        expect(opener.close).toHaveBeenCalledTimes(1);
+      });
+
       it('rejects a different authenticated target before sending credentials or image bytes', async () => {
         opener.fetchDescendant.mockImplementation(async (_, build) => build(new URL('https://other.qurl.site/api/detect')));
         await expect(connector.detectWatermark(Buffer.from('image'), { guildId: 'g' }))
