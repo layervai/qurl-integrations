@@ -15,7 +15,7 @@ describe('/qurl detect activation', () => {
       commands = require('../src/commands');
     });
     const rest = { get: jest.fn().mockResolvedValue([]), put: jest.fn() };
-    await commands.registerCommands({ rest, appId: '123456789012345678' });
+    await commands.registerCommands({ rest, appId: 'app-123' });
     const registered = rest.put.mock.calls.at(-1)[1].body.find(c => c.name === 'qurl');
     const detect = registered.options.find(option => option.name === 'detect');
     if (enabled) {
