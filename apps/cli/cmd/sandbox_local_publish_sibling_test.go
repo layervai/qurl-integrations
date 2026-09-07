@@ -33,6 +33,7 @@ const (
 	sandboxSiblingArmingEnv = "QURL_CLI_SANDBOX_SIBLING_CONTINUITY"
 	sandboxCLIBinaryEnv     = "QURL_CLI_SANDBOX_BINARY"
 	sandboxProcessTimeout   = 60 * time.Second
+	sandboxCrashReapTimeout = 15 * time.Second
 )
 
 func validateSandboxDeviceIdentity(loaded *qurl.AgentState, wantAgentID, wantDeviceKeyID string) error {
@@ -456,7 +457,7 @@ func (p *sandboxPublishProcess) crashAndValidate(t *testing.T, secrets ...string
 	}
 	select {
 	case <-p.done:
-	case <-time.After(15 * time.Second):
+	case <-time.After(sandboxCrashReapTimeout):
 		t.Fatalf("sandbox publish %s was not reaped after crash", p.label)
 	}
 	p.waitMu.Lock()
@@ -936,6 +937,29 @@ func TestSandboxPublishProcessReportsEarlyExit(t *testing.T) {
 		!strings.Contains(err.Error(), "foreground publish exited before persisting a local share") {
 		t.Fatalf("early-exit local registry result = %v", err)
 	}
+}
+
+func TestSandboxPublishProcessCrashAndValidate(t *testing.T) {
+	const crid = "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q"
+	script := filepath.Join(t.TempDir(), "qurl")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '"+crid+"\\n'\nexec sleep 30\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o700); err != nil { //nolint:gosec // The fixture must be executable.
+		t.Fatal(err)
+	}
+	for _, name := range []string{hub.EnvHost, hub.EnvPort, hub.EnvServerPublicKey} {
+		t.Setenv(name, "fixture")
+	}
+	process := startSandboxPublishProcess(t, script, map[string]string{"QURL_ENDPOINT": "https://sandbox.invalid"}, sandboxRunNamespace{
+		AgentID: "qurl-share-r1-a1-ha", ConnectorID: "connector-sandbox-local-publish-crash",
+	}, t.TempDir(), "http://127.0.0.1:1")
+	got, err := process.waitReadyResult(5 * time.Second)
+	if err != nil || got != crid {
+		t.Fatalf("crash fixture readiness = %q, %v", got, err)
+	}
+	process.crid = crid
+	process.crashAndValidate(t, "protected-secret")
 }
 
 func TestSandboxProcessRecoveryCleanupAfterPreReadyFailure(t *testing.T) {
