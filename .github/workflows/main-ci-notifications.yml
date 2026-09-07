@@ -68,6 +68,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
           WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
           EVENT: ${{ github.event.workflow_run.event }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
@@ -87,6 +88,11 @@ jobs:
           if [[ -z "${SLACK_WEBHOOK_URL}" ]]; then
             echo "::error::SLACK_WEBHOOK_URL is required for main CI notifications."
             exit 1
+          fi
+
+          # cli.yml sets run-name, so workflow_run.name is the per-run label.
+          if [[ "$WORKFLOW_PATH" == ".github/workflows/cli.yml" ]]; then
+            WORKFLOW_NAME="cli: Build and Test"
           fi
 
           recovered_from=""

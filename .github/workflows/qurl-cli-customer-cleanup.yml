@@ -52,7 +52,6 @@ jobs:
           SOURCE_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          SOURCE_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
           SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
           REQUESTED_SOURCE_RUNS: ${{ inputs.source_runs }}
           WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
@@ -61,10 +60,10 @@ jobs:
           include_soak=false
           case "$GITHUB_EVENT_NAME" in
             workflow_run)
+              # cli.yml sets run-name; its exact path is the stable identity.
               [[ "$SOURCE_BRANCH" == main && \
                 "$SOURCE_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$WORKFLOW_REPOSITORY" == "$GITHUB_REPOSITORY" && \
-                "$SOURCE_WORKFLOW_NAME" == "cli: Build and Test" && \
                 "$SOURCE_WORKFLOW_PATH" == .github/workflows/cli.yml ]] || {
                 echo "::error::cleanup accepts only an exact trusted same-repository CLI workflow" >&2
                 exit 1
@@ -126,7 +125,6 @@ jobs:
                 (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
                 .head_branch == "main" and
                 .head_repository.full_name == $repository and
-                .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml" and
                 (.run_attempt | type) == "number" and
                 .run_attempt >= $identity_attempt
