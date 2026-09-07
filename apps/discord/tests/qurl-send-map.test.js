@@ -2407,7 +2407,9 @@ describe('handleQurlDetect', () => {
     const usersFetch = jest.fn(async (id) => ({ id, username: 'AliceRecipient' }));
     const int = makeDetectInteraction({ usersFetch });
 
-    await handleQurlDetect(int);
+    int.options.getSubcommand = () => 'detect';
+    await commands.commands[0].execute(int);
+    expect(int.deferReply).toHaveBeenCalledWith({ ephemeral: true });
 
     expect(mockDetectWatermark).toHaveBeenCalledWith(
       expect.any(Buffer),
