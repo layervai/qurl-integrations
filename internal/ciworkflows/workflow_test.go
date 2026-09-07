@@ -91,12 +91,12 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 		t.Errorf("artifact producer if = %q", artifact.If)
 	}
 	assertJobPermissions(t, cliCustomerArtifactsJobID, artifact.Permissions, map[string]string{"contents": "read"})
-	var identity, checkout, ephemeralPin, build, upload *step
+	var artifactAttempt, checkout, ephemeralPin, build, upload *step
 	for index := range artifact.Steps {
 		current := &artifact.Steps[index]
 		switch {
-		case current.Name == "Select the journey identity generation":
-			identity = current
+		case current.Name == "Record the packaged artifact attempt":
+			artifactAttempt = current
 		case strings.HasPrefix(current.Uses, checkoutActionPrefix):
 			checkout = current
 		case current.Name == "Select ephemeral artifact trust root":
@@ -107,10 +107,10 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			upload = current
 		}
 	}
-	if identity == nil || identity.ID != "identity" ||
-		artifact.Outputs["identity_run_attempt"] != "${{ steps.identity.outputs.run_attempt }}" ||
-		!strings.Contains(identity.Run, `echo "run_attempt=$GITHUB_RUN_ATTEMPT"`) {
-		t.Errorf("artifact producer does not persist the exact journey identity attempt: step=%#v outputs=%#v", identity, artifact.Outputs)
+	if artifactAttempt == nil || artifactAttempt.ID != "artifact" ||
+		artifact.Outputs["artifact_run_attempt"] != "${{ steps.artifact.outputs.run_attempt }}" ||
+		!strings.Contains(artifactAttempt.Run, `echo "run_attempt=$GITHUB_RUN_ATTEMPT"`) {
+		t.Errorf("artifact producer does not persist its exact workflow attempt: step=%#v outputs=%#v", artifactAttempt, artifact.Outputs)
 	}
 	const sourceSHA = "${{ needs.changes.outputs.source_sha }}"
 	if checkout == nil || checkout.With["ref"] != sourceSHA || checkout.With["persist-credentials"] != false {
@@ -356,8 +356,8 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 			download++
 			if current.With["run-id"] != nil || current.With["repository"] != nil ||
 				current.With["digest-mismatch"] != "error" ||
-				fmt.Sprint(current.With["name"]) != "qurl-customer-journey-${{ needs.changes.outputs.source_sha }}-${{ needs.customer-artifacts.outputs.identity_run_attempt }}" {
-				t.Errorf("journey artifact crosses a workflow or identity-attempt boundary, or skips digest validation: %#v", current)
+				fmt.Sprint(current.With["name"]) != "qurl-customer-journey-${{ needs.changes.outputs.source_sha }}-${{ needs.customer-artifacts.outputs.artifact_run_attempt }}" {
+				t.Errorf("journey artifact crosses a workflow or artifact-attempt boundary, or skips digest validation: %#v", current)
 			}
 		}
 		if strings.HasPrefix(current.Uses, "actions/upload-artifact@") {
@@ -451,8 +451,8 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(journey.Env["QURL_SHARING_RUN_ID"]), "matrix.lane_id") {
 		t.Error("parallel lanes do not have distinct deterministic run IDs")
 	}
-	if fmt.Sprint(journey.Env["QURL_SHARING_RUN_ATTEMPT"]) != "${{ needs.customer-artifacts.outputs.identity_run_attempt }}" {
-		t.Errorf("journey identity attempt is not the persisted producer value: %v", journey.Env["QURL_SHARING_RUN_ATTEMPT"])
+	if fmt.Sprint(journey.Env["QURL_SHARING_RUN_ATTEMPT"]) != "${{ github.run_attempt }}" {
+		t.Errorf("journey identity attempt is not the current workflow attempt: %v", journey.Env["QURL_SHARING_RUN_ATTEMPT"])
 	}
 	if windowsKeyRemoval == nil || !strings.Contains(windowsKeyRemoval.Run, "QURL_API_KEY=") ||
 		!strings.Contains(windowsKeyRemoval.Run, "QURL_CLI_SANDBOX_FAILURE_API_KEY=") {
@@ -467,8 +467,21 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	if fmt.Sprint(cleanup.Env["AUTH_TOKEN_ENDPOINT"]) != "${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}" {
 		t.Errorf("terminal cleanup exposes its token endpoint through a non-secret source: %#v", cleanup.Env)
 	}
+	var cleanupRun *step
+	for index := range cleanup.Steps {
+		if cleanup.Steps[index].Name == "Revoke run resources and credentials" {
+			cleanupRun = &cleanup.Steps[index]
+			break
+		}
+	}
+	if cleanupRun == nil {
+		t.Fatal("terminal cleanup step is missing")
+	}
+	if fmt.Sprint(cleanupRun.Env["JOURNEY_RUN_ATTEMPT"]) != "${{ github.run_attempt }}" {
+		t.Errorf("terminal cleanup does not reconcile only the current journey attempt: %#v", cleanupRun)
+	}
 	if needs := parseWorkflowNeeds(t, "journey-cleanup", cleanup.Needs); !slices.Equal(needs, []string{"changes", cliCustomerArtifactsJobID, "journey"}) {
-		t.Errorf("terminal cleanup needs = %v, want the persisted journey identity producer", needs)
+		t.Errorf("terminal cleanup needs = %v, want the artifact producer and journey", needs)
 	}
 	required := workflow.Jobs[requiredJobID]
 	for _, needed := range []string{"journey", "journey-cleanup"} {
@@ -860,6 +873,7 @@ exit "$failed"
 					capture := filepath.Join(runnerTemp, "lanes")
 					invocationCapture := filepath.Join(runnerTemp, "invocations")
 					batchCapture := filepath.Join(runnerTemp, "batches")
+					summaryCapture := filepath.Join(runnerTemp, "summary")
 					command := exec.CommandContext(t.Context(), "bash", "--noprofile", "--norc", "-c", cleanup.Run) //nolint:gosec // Executes the checked-in workflow step with a test-owned python3.
 					command.Dir = repoRoot
 					eventName := "push"
@@ -878,6 +892,7 @@ exit "$failed"
 						"LANE_CAPTURE=" + capture,
 						"INVOCATION_CAPTURE=" + invocationCapture,
 						"BATCH_CAPTURE=" + batchCapture,
+						"GITHUB_STEP_SUMMARY=" + summaryCapture,
 						"FAIL_LANE=" + test.failLane,
 						"AUTH_CLIENT_ID=test-client",
 						"AUTH_CLIENT_SECRET=secret-value-must-not-print",
@@ -917,6 +932,15 @@ exit "$failed"
 					if got, want := string(batches), "batch\n"; got != want {
 						t.Errorf("cleanup command count = %q, want one batch", got)
 					}
+					if subject.name == "qurl-cli-customer-cleanup.yml" {
+						summary, readErr := os.ReadFile(summaryCapture) //nolint:gosec // Test-owned path under t.TempDir.
+						if readErr != nil {
+							t.Fatal(readErr)
+						}
+						if !strings.Contains(string(summary), "source_runs="+subject.sourceRuns) {
+							t.Errorf("cleanup summary does not preserve recovery input: %s", summary)
+						}
+					}
 					text := string(output)
 					if strings.Contains(text, "secret-value-must-not-print") {
 						t.Error("cleanup output contains protected authority")
@@ -952,7 +976,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	}
 	resolverRun := resolverStep.Run
 	const jqPrefix = "journey_ran=$(jq -r '\n"
-	const jqSuffix = "\n  ' <<<\"$identity_jobs\")"
+	const jqSuffix = "\n  ' <<<\"$eligible_jobs\")"
 	start := strings.Index(resolverRun, jqPrefix)
 	if start < 0 {
 		t.Fatal("cleanup resolver does not contain its required-job jq predicate")
@@ -981,10 +1005,7 @@ func TestCLICancellationCleanupMatchesRenderedMatrixJobsAtExactSource(t *testing
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			fixture, err := json.Marshal(map[string]any{
-				"total_count": 1,
-				"jobs":        []map[string]string{{"name": test.jobName, "conclusion": "success"}},
-			})
+			fixture, err := json.Marshal([]map[string]string{{"name": test.jobName, "conclusion": "success"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1006,17 +1027,29 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$GH_CAPTURE"
 if [[ "$*" == *"/jobs?filter=all&per_page=100"* ]]; then
   artifact_attempt=${MOCK_ARTIFACT_ATTEMPT:-$EXPECTED_ATTEMPT}
-  future_attempt=${MOCK_FUTURE_ATTEMPT:-0}
-  future_conclusion=${MOCK_FUTURE_ARTIFACT_CONCLUSION:-success}
+  journey_attempt=${MOCK_JOURNEY_ATTEMPT:-$EXPECTED_ATTEMPT}
+  prior_journey_attempt=${MOCK_PRIOR_JOURNEY_ATTEMPT:-0}
+  older_journey_attempt=${MOCK_OLDER_JOURNEY_ATTEMPT:-0}
+  oldest_journey_attempt=${MOCK_OLDEST_JOURNEY_ATTEMPT:-0}
+  cleanup_attempt=${MOCK_CLEANUP_ATTEMPT:-$journey_attempt}
+  other_cleanup_attempt=${MOCK_OTHER_CLEANUP_ATTEMPT:-0}
+  future_journey_attempt=${MOCK_FUTURE_JOURNEY_ATTEMPT:-0}
   jq -n --arg name "$MOCK_JOB_NAME" --arg conclusion "$MOCK_JOB_CONCLUSION" \
     --arg cleanup_conclusion "${MOCK_CLEANUP_CONCLUSION:-}" \
-    --arg future_conclusion "$future_conclusion" \
-    --argjson artifact_attempt "$artifact_attempt" --argjson future_attempt "$future_attempt" '
+    --argjson artifact_attempt "$artifact_attempt" --argjson journey_attempt "$journey_attempt" \
+    --argjson prior_journey_attempt "$prior_journey_attempt" \
+    --argjson older_journey_attempt "$older_journey_attempt" --argjson oldest_journey_attempt "$oldest_journey_attempt" \
+    --argjson cleanup_attempt "$cleanup_attempt" --argjson other_cleanup_attempt "$other_cleanup_attempt" \
+    --argjson future_journey_attempt "$future_journey_attempt" '
     [{jobs:([
       {name:"cli / customer journey artifacts",conclusion:"success",run_attempt:$artifact_attempt},
-      {name:$name,conclusion:(if $conclusion == "__NULL__" then null else $conclusion end),run_attempt:$artifact_attempt}
-    ] + (if $cleanup_conclusion != "" then [{name:"cli / customer journey cleanup",conclusion:$cleanup_conclusion,run_attempt:$artifact_attempt}] else [] end) +
-    (if $future_attempt > 0 then [{name:"cli / customer journey artifacts",conclusion:$future_conclusion,run_attempt:$future_attempt}] else [] end))} |
+      {name:$name,conclusion:(if $conclusion == "__NULL__" then null else $conclusion end),run_attempt:$journey_attempt}
+    ] + (if $prior_journey_attempt > 0 then [{name:$name,conclusion:"failure",run_attempt:$prior_journey_attempt}] else [] end) +
+    (if $older_journey_attempt > 0 then [{name:$name,conclusion:"failure",run_attempt:$older_journey_attempt}] else [] end) +
+    (if $oldest_journey_attempt > 0 then [{name:$name,conclusion:"failure",run_attempt:$oldest_journey_attempt}] else [] end) +
+    (if $cleanup_conclusion != "" then [{name:"cli / customer journey cleanup",conclusion:$cleanup_conclusion,run_attempt:$cleanup_attempt}] else [] end) +
+    (if $other_cleanup_attempt > 0 then [{name:"cli / customer journey cleanup",conclusion:"success",run_attempt:$other_cleanup_attempt}] else [] end) +
+    (if $future_journey_attempt > 0 then [{name:$name,conclusion:"failure",run_attempt:$future_journey_attempt}] else [] end))} |
     .total_count = (.jobs | length)]'
 elif [[ "$*" == *"/attempts/"*"/jobs?per_page=100" ]]; then
   if [[ -n "${MOCK_CLEANUP_CONCLUSION:-}" ]]; then
@@ -1041,11 +1074,12 @@ else
     --arg name "$MOCK_RUN_NAME" \
     --arg path "$MOCK_RUN_PATH" \
     --arg run_attempt "$MOCK_RUN_ATTEMPT" \
+    --arg run_attempt_type "${MOCK_RUN_ATTEMPT_TYPE:-number}" \
     --arg sha "$MOCK_RUN_SHA" \
     --arg display_title "$MOCK_RUN_DISPLAY_TITLE" \
     '{status:$status,event:$event,head_branch:$branch,head_sha:$sha,
       display_title:$display_title,head_repository:{full_name:$repository},name:$name,path:$path,
-      run_attempt:($run_attempt | tonumber)}'
+      run_attempt:(if $run_attempt_type == "string" then $run_attempt else ($run_attempt | tonumber) end)}'
 fi
 `
 	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(mockGH), 0o700); err != nil { //nolint:gosec // Test-owned executable in t.TempDir.
@@ -1056,13 +1090,14 @@ fi
 		runDir := t.TempDir()
 		capturePath := filepath.Join(runDir, "gh-arguments")
 		outputPath := filepath.Join(runDir, "workflow-output")
+		summaryPath := filepath.Join(runDir, "step-summary")
 		command := exec.CommandContext(t.Context(), "bash", "-c", resolverRun) //nolint:gosec // Executes the repository-owned fixed workflow step.
 		env := map[string]string{
 			"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"GH_CAPTURE":              capturePath,
 			"EXPECTED_ATTEMPT":        "2",
 			"GITHUB_OUTPUT":           outputPath,
-			"GITHUB_STEP_SUMMARY":     filepath.Join(runDir, "step-summary"),
+			"GITHUB_STEP_SUMMARY":     summaryPath,
 			"GITHUB_REPOSITORY":       "layervai/qurl-integrations",
 			"GITHUB_EVENT_NAME":       "workflow_run",
 			"GITHUB_REF":              "refs/heads/main",
@@ -1103,7 +1138,11 @@ fi
 		if captureErr != nil && !os.IsNotExist(captureErr) {
 			t.Fatal(captureErr)
 		}
-		return string(workflowBytes), string(output), string(captureBytes), err
+		summaryBytes, summaryErr := os.ReadFile(summaryPath) //nolint:gosec // Test-owned path under t.TempDir.
+		if summaryErr != nil && !os.IsNotExist(summaryErr) {
+			t.Fatal(summaryErr)
+		}
+		return string(workflowBytes), string(output) + "\nSTEP_SUMMARY:\n" + string(summaryBytes), string(captureBytes), err
 	}
 	workflowOutput, output, ghArguments, err := runResolver(nil)
 	if err != nil {
@@ -1132,26 +1171,62 @@ fi
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("automatic unsettled journey did not bias toward cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
-	workflowOutput, output, ghArguments, err = runResolver(map[string]string{"MOCK_ARTIFACT_ATTEMPT": "1"})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=true" {
-		t.Fatalf("rerun cleanup did not resolve the persisted identity attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	workflowOutput, output, ghArguments, err = runResolver(map[string]string{"MOCK_JOURNEY_ATTEMPT": "2"})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
+		t.Fatalf("failed-job rerun cleanup did not resolve the executed journey attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	if strings.Contains(ghArguments, "/actions/runs/700/attempts/1/jobs?per_page=100") {
-		t.Errorf("rerun cleanup inferred identity by walking prior attempts: %s", ghArguments)
+		t.Errorf("rerun cleanup inferred execution by walking prior attempts: %s", ghArguments)
 	}
-	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_FUTURE_ATTEMPT": "3"})
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"MOCK_JOURNEY_ATTEMPT": "1",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=true" {
+		t.Fatalf("cleanup-only rerun lost the prior journey attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"MOCK_PRIOR_JOURNEY_ATTEMPT": "1",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1,700:2\ninclude_soak=true" {
+		t.Fatalf("failed-job rerun cleanup did not preserve both executed journey attempts: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_FUTURE_JOURNEY_ATTEMPT": "3"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
 		t.Fatalf("future operator rerun raced automatic cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{
-		"MOCK_ARTIFACT_ATTEMPT": "1", "MOCK_FUTURE_ATTEMPT": "2", "MOCK_FUTURE_ARTIFACT_CONCLUSION": "failure",
+		"MOCK_PRIOR_JOURNEY_ATTEMPT": "1", "MOCK_CLEANUP_ATTEMPT": "1", "MOCK_CLEANUP_CONCLUSION": "success",
 	})
-	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=true" {
-		t.Fatalf("failed rerun artifact hid prior journey cleanup: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=true" {
+		t.Fatalf("successful prior cleanup hid the current journey attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"MOCK_CLEANUP_CONCLUSION": "success"})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
 		t.Fatalf("automatic source with successful primary cleanup did not skip fallback: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"MOCK_PRIOR_JOURNEY_ATTEMPT": "1", "MOCK_CLEANUP_ATTEMPT": "1",
+		"MOCK_CLEANUP_CONCLUSION": "success", "MOCK_OTHER_CLEANUP_ATTEMPT": "2",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=false" {
+		t.Fatalf("automatic source retried fully reconciled journey attempts: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"EXPECTED_ATTEMPT": "4", "SOURCE_RUN_ATTEMPT": "4", "MOCK_RUN_ATTEMPT": "4",
+		"MOCK_PRIOR_JOURNEY_ATTEMPT": "3", "MOCK_OLDER_JOURNEY_ATTEMPT": "2", "MOCK_OLDEST_JOURNEY_ATTEMPT": "1",
+	})
+	commandOutput, summaryOutput, hasSummary := strings.Cut(output, "\nSTEP_SUMMARY:\n")
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2,700:3,700:4\ninclude_soak=true" ||
+		!strings.Contains(commandOutput, "automatic cleanup is limited to the newest 3 unreconciled journey attempts") ||
+		!hasSummary || !strings.Contains(summaryOutput, "## CLI cleanup needs manual follow-up\n\nRun qurl-cli-customer-cleanup.yml from main with source_runs=700:1.") {
+		t.Fatalf("automatic cleanup cap did not preserve the newest recoveries: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
+	}
+	workflowOutput, output, _, err = runResolver(map[string]string{
+		"EXPECTED_ATTEMPT": "4", "MOCK_RUN_ATTEMPT": "4",
+		"GITHUB_EVENT_NAME": "workflow_dispatch", "REQUESTED_SOURCE_RUNS": "700:1", "MOCK_ARTIFACT_ATTEMPT": "1",
+	})
+	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:1\ninclude_soak=false" {
+		t.Fatalf("manual cleanup rejected an older identity attempt: err=%v output=%s workflow_output=%q", err, output, workflowOutput)
 	}
 	workflowOutput, output, _, err = runResolver(map[string]string{"SOURCE_RUN_ATTEMPT": "31"})
 	if err == nil || strings.TrimSpace(workflowOutput) != "" || !strings.Contains(output, "source run attempt is outside the 1-30 automatic recovery bound") {
@@ -1185,8 +1260,9 @@ fi
 	}
 
 	manualSuccess := map[string]string{
-		"GITHUB_EVENT_NAME":     "workflow_dispatch",
-		"REQUESTED_SOURCE_RUNS": "700:2",
+		"GITHUB_EVENT_NAME":          "workflow_dispatch",
+		"REQUESTED_SOURCE_RUNS":      "700:2",
+		"MOCK_PRIOR_JOURNEY_ATTEMPT": "1",
 	}
 	workflowOutput, output, ghArguments, err = runResolver(manualSuccess)
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:2\ninclude_soak=false" {
@@ -1196,7 +1272,7 @@ fi
 		"EXPECTED_ATTEMPT":      "31",
 		"GITHUB_EVENT_NAME":     "workflow_dispatch",
 		"REQUESTED_SOURCE_RUNS": "700:31",
-		"MOCK_ARTIFACT_ATTEMPT": "31",
+		"MOCK_JOURNEY_ATTEMPT":  "31",
 		"MOCK_RUN_ATTEMPT":      "31",
 	})
 	if err != nil || strings.TrimSpace(workflowOutput) != "required=true\nsource_runs=700:31\ninclude_soak=false" {
@@ -1308,8 +1384,25 @@ fi
 		},
 		{
 			name:        "skipped journey",
-			overrides:   map[string]string{"MOCK_JOB_CONCLUSION": "skipped"},
+			overrides:   map[string]string{"MOCK_JOB_CONCLUSION": "skipped", "MOCK_PRIOR_JOURNEY_ATTEMPT": "0"},
 			wantMessage: "source did not run the customer journey",
+		},
+		{
+			name:        "identity attempt newer than run",
+			overrides:   map[string]string{"REQUESTED_SOURCE_RUNS": "700:3"},
+			wantMessage: "exact trusted same-repository CLI workflow",
+		},
+		{
+			name:        "run attempt has the wrong type",
+			overrides:   map[string]string{"MOCK_RUN_ATTEMPT_TYPE": "string"},
+			wantMessage: "exact trusted same-repository CLI workflow",
+		},
+		{
+			name: "identity attempt without a producer",
+			overrides: map[string]string{
+				"REQUESTED_SOURCE_RUNS": "700:1", "MOCK_PRIOR_JOURNEY_ATTEMPT": "0",
+			},
+			wantMessage: "identity attempt did not produce a journey or artifact",
 		},
 	} {
 		t.Run("manual "+test.name, func(t *testing.T) {
@@ -1348,6 +1441,13 @@ fi
 	if cleanupStep == nil || fmt.Sprint(cleanupStep.Env["SOURCE_RUNS"]) != "${{ needs.resolve.outputs.source_runs }}" ||
 		strings.Contains(cleanupStep.Run, "${{ needs.resolve.outputs.source_runs }}") {
 		t.Errorf("cleanup source runs are not passed through a sanitized step environment value: %#v", cleanupStep)
+	}
+	if cleanupStep != nil {
+		recoverySummary := strings.Index(cleanupStep.Run, "source_runs=$SOURCE_RUNS")
+		reconcile := strings.Index(cleanupStep.Run, "reconcile-batch")
+		if recoverySummary < 0 || reconcile < 0 || recoverySummary > reconcile || !strings.Contains(cleanupStep.Run, "$GITHUB_STEP_SUMMARY") {
+			t.Error("cleanup does not record its exact recovery input before reconciliation")
+		}
 	}
 	if timeout, ok := cleanup.TimeoutMinutes.(int); !ok || timeout != 45 {
 		t.Errorf("cancellation cleanup timeout = %#v, want 45 minutes for the bounded 12-reconciliation workload", cleanup.TimeoutMinutes)

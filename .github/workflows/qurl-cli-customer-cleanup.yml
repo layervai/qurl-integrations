@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       source_runs:
-        description: "Up to 3 comma-separated trusted journey run_id:workflow_attempt values; recovery resolves the persisted identity attempt"
+        description: "Up to 3 comma-separated trusted journey run_id:identity_attempt values to reconcile exactly"
         required: true
         type: string
   workflow_run:
@@ -116,20 +116,25 @@ jobs:
             }
             seen[$run_spec]=1
             IFS=: read -r run_id run_attempt <<<"$run_spec"
+            job_attempt_ceiling=$run_attempt
             if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              # Manual input names remote state, not necessarily the latest
+              # workflow attempt. This also recovers legacy artifact-keyed runs.
               run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
-              jq -e --arg repository "$GITHUB_REPOSITORY" --arg run_attempt "$run_attempt" '
+              jq -e --arg repository "$GITHUB_REPOSITORY" --argjson identity_attempt "$run_attempt" '
                 .status == "completed" and
                 (.event == "push" or .event == "schedule" or .event == "workflow_dispatch") and
                 .head_branch == "main" and
                 .head_repository.full_name == $repository and
                 .name == "cli: Build and Test" and
                 .path == ".github/workflows/cli.yml" and
-                (.run_attempt | tostring) == $run_attempt
+                (.run_attempt | type) == "number" and
+                .run_attempt >= $identity_attempt
               ' <<<"$run" >/dev/null || {
                 echo "::error::cleanup source is not one exact trusted same-repository CLI workflow" >&2
                 exit 1
               }
+              job_attempt_ceiling=$(jq -r '.run_attempt' <<<"$run")
               # This flag is request-wide. One scheduled or manual source adds
               # lane 4 to every selected run; extra reconciliation is a safe
               # no-op and is included in the 12-operation timeout budget.
@@ -138,9 +143,8 @@ jobs:
               fi
             fi
             # GitHub records the attempt that created each job. Read all
-            # attempts once and select the latest artifact producer at or
-            # before the source attempt. This works for both full reruns and
-            # reruns of failed jobs without inferring how carried jobs appear.
+            # attempts once and select each journey execution at or before the
+            # source attempt that has no successful same-attempt cleanup.
             # TODO(upstream-contract): job.run_attempt is the GitHub REST
             # identity binding for rerun jobs; fail closed if it disappears.
             all_jobs=$(gh api --paginate --slurp \
@@ -164,33 +168,19 @@ jobs:
                 end
               end
             ' <<<"$all_jobs" >/dev/null
-            eligible_jobs=$(jq -c --argjson source_attempt "$run_attempt" '
+            eligible_jobs=$(jq -c --argjson source_attempt "$job_attempt_ceiling" '
               [.[].jobs[] | select(.run_attempt <= $source_attempt)]
             ' <<<"$all_jobs")
-            identity_attempt=$(jq -r '
-              [.[] | select(
-                .name == "cli / customer journey artifacts" and
-                .conclusion == "success") | .run_attempt] | max // ""
-            ' <<<"$eligible_jobs")
-            if [[ -z "$identity_attempt" ]]; then
-              if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-                echo "required=false" >>"$GITHUB_OUTPUT"
-                exit 0
-              fi
-              echo "::error::cleanup source has no persisted journey identity attempt" >&2
-              exit 1
-            fi
-            identity_jobs=$(jq -c --argjson identity_attempt "$identity_attempt" '
-              {jobs: [.[] | select(.run_attempt == $identity_attempt)]}
-            ' <<<"$eligible_jobs")
             # A completed workflow event can briefly precede its final job
             # conclusion. Only explicit skipped suppresses idempotent cleanup.
+            # This broad gate decides whether automatic recovery is needed.
+            # Manual recovery validates its exact identity attempt below.
             journey_ran=$(jq -r '
-              any(.jobs[];
+              any(.[];
                 (.name == "cli / customer journey" or
                   (.name | startswith("cli / customer journey ("))) and
                 .conclusion != "skipped")
-            ' <<<"$identity_jobs")
+            ' <<<"$eligible_jobs")
             [[ "$journey_ran" == true ]] || {
               if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
                 echo "required=false" >>"$GITHUB_OUTPUT"
@@ -199,26 +189,61 @@ jobs:
               echo "::error::cleanup source did not run the customer journey" >&2
               exit 1
             }
-            # A workflow_run event has exactly one source run. A successful
-            # primary cleanup makes the fallback unnecessary for that source.
-            if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-              cleanup_succeeded=$(jq -r --argjson source_attempt "$run_attempt" '
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              exact_identity=$(jq -r --argjson identity_attempt "$run_attempt" '
                 any(.[];
-                  .run_attempt == $source_attempt and
-                  .name == "cli / customer journey cleanup" and
-                  .conclusion == "success")
+                  .run_attempt == $identity_attempt and
+                  (((.name == "cli / customer journey" or
+                    (.name | startswith("cli / customer journey ("))) and
+                    .conclusion != "skipped") or
+                    (.name == "cli / customer journey artifacts" and
+                      .conclusion == "success")))
               ' <<<"$eligible_jobs")
-              if [[ "$cleanup_succeeded" == true ]]; then
-                echo "required=false" >>"$GITHUB_OUTPUT"
-                exit 0
+              [[ "$exact_identity" == true ]] || {
+                echo "::error::cleanup identity attempt did not produce a journey or artifact" >&2
+                exit 1
+              }
+              journey_attempts=$run_attempt
+            else
+              journey_attempts=$(jq -r '
+                [.[] | select(
+                  .name == "cli / customer journey cleanup" and
+                  .conclusion == "success") | .run_attempt] as $reconciled |
+                [.[] | select(
+                  (.name == "cli / customer journey" or
+                    (.name | startswith("cli / customer journey ("))) and
+                  .conclusion != "skipped") | .run_attempt] |
+                unique | map(select(IN($reconciled[]) | not))[]
+              ' <<<"$eligible_jobs")
+            fi
+            while read -r journey_attempt; do
+              [[ -n "$journey_attempt" ]] || continue
+              resolved_spec="$run_id:$journey_attempt"
+              if [[ -z "${seen_resolved[$resolved_spec]:-}" ]]; then
+                seen_resolved[$resolved_spec]=1
+                resolved_runs+=("$resolved_spec")
               fi
-            fi
-            resolved_spec="$run_id:$identity_attempt"
-            if [[ -z "${seen_resolved[$resolved_spec]:-}" ]]; then
-              seen_resolved[$resolved_spec]=1
-              resolved_runs+=("$resolved_spec")
-            fi
+            done <<<"$journey_attempts"
           done
+          if (( ${#resolved_runs[@]} == 0 )); then
+            echo "required=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cleanup_cap=3
+          if (( ${#resolved_runs[@]} > cleanup_cap )); then
+            dropped_count=$((${#resolved_runs[@]} - cleanup_cap))
+            echo "::warning::automatic cleanup is limited to the newest $cleanup_cap unreconciled journey attempts" >&2
+            # Each completion gives its current attempt one fallback pass.
+            # Prefer newest because older fallback successes are not recorded.
+            {
+              echo "## CLI cleanup needs manual follow-up"
+              echo
+              for dropped_run in "${resolved_runs[@]:0:$dropped_count}"; do
+                echo "Run qurl-cli-customer-cleanup.yml from main with source_runs=$dropped_run."
+              done
+            } >>"$GITHUB_STEP_SUMMARY"
+            resolved_runs=("${resolved_runs[@]: -cleanup_cap}")
+          fi
           source_runs=$(IFS=,; echo "${resolved_runs[*]}")
           {
             echo "required=true"
@@ -231,10 +256,12 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.required == 'true'
     runs-on: ubuntu-latest
-    # Manual recovery accepts at most three source runs. A scheduled/manual
+    # Manual recovery accepts at most three exact run attempts. Automatic
+    # recovery also keeps at most three unresolved attempts. A scheduled/manual
     # source adds the fourth lane, for at most 12 reconciliations under one
-    # management token and one two-minute owner inventory. The remaining time
-    # covers bounded cleanup writes and runner setup.
+    # management token and one two-minute owner inventory. The 40-minute token
+    # work budget plus its five-minute expiry margin matches the job timeout;
+    # token mint happens after runner setup.
     timeout-minutes: 45
     environment: cli-customer-journey-cleanup
     permissions:
@@ -259,6 +286,11 @@ jobs:
           SOURCE_RUNS: ${{ needs.resolve.outputs.source_runs }}
         run: |
           set -euo pipefail
+          {
+            echo "## CLI cleanup batch"
+            echo
+            echo "If this job does not complete, run qurl-cli-customer-cleanup.yml from main with source_runs=$SOURCE_RUNS."
+          } >>"$GITHUB_STEP_SUMMARY"
           client_dir=$RUNNER_TEMP/qurl-journey-auth
           cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
           trap cleanup EXIT
@@ -283,4 +315,4 @@ jobs:
             --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
             --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
             --client-secret-file "$client_dir/client-secret" \
-            --operation-budget-seconds 2700 "${batch_args[@]}"
+            --operation-budget-seconds 2400 "${batch_args[@]}"
