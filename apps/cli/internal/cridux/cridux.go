@@ -1,15 +1,7 @@
-// Package cridux is the warn-only UX layer over the SDK's crid package.
-//
-// The validation hierarchy is the design doc's: the server is the only
-// authoritative validator. Locally the CLI may *warn* — a checksum that does
-// not match is almost certainly a typo worth telling the user about — but it
-// forwards anything ambiguous rather than rejecting it, so a future
-// identifier form is never bricked by an old client. Only input that cannot
-// be a resource identifier under any version (illegal characters, the
-// permanently forbidden version byte) is rejected locally.
-//
-// Unknown-but-well-formed version bytes are forwarded silently: a false
-// "Known" from a newer registry is the server's call, not ours.
+// Package cridux classifies identifier input for CLI diagnostics.
+// Resource commands require a CRID that passes local validation. Public keys,
+// malformed CRIDs, and unrecognized forms are rejected before HTTP.
+// Unknown version bytes within a valid CRID remain the server's decision.
 package cridux
 
 import (
@@ -23,9 +15,7 @@ import (
 // Sentinel errors. ErrUnusableID maps to the invalid-input exit code;
 // ErrTestIDOnProduction maps to the usage exit code (it is remedied by --yes).
 var (
-	// ErrUnusableID reports input that cannot be a resource identifier under
-	// any current or future form: illegal characters, emptiness, or the
-	// permanently forbidden version byte.
+	// ErrUnusableID reports an unsupported resource identifier operand.
 	ErrUnusableID = errors.New("cli: input cannot be a resource identifier")
 	// ErrTestIDOnProduction reports a test-environment CRID aimed at the
 	// production endpoint without --yes.
@@ -35,33 +25,28 @@ var (
 // Kind classifies what the CLI locally believes an identifier operand is.
 type Kind int
 
-// Identifier kinds. The zero value is KindUnknown: forward silently, hold no
-// verification anchor.
+// Identifier kinds. Only KindCRID is accepted by resource commands.
 const (
 	// KindUnknown is a well-formed-enough operand the CLI cannot classify.
-	// It is forwarded silently; the server decides.
+	// Resource commands reject it.
 	KindUnknown Kind = iota
 	// KindCRID is a CRID that passed the full local gate.
 	KindCRID
 	// KindCRIDTypo looks like a CRID with a typo (bad checksum, wrong
-	// alphabet characters). It is warned about and still forwarded.
+	// alphabet characters). Warnings describe the rejection.
 	KindCRIDTypo
-	// KindResourceKey is a public-key resource identifier; KeyDER holds the
-	// decoded key so the share response can be verified against it.
+	// KindResourceKey identifies a public key so rejection can explain the CRID requirement.
 	KindResourceKey
 )
 
 // Assessment is the local classification of one identifier operand.
 type Assessment struct {
-	// Input is the operand exactly as supplied; it is what gets forwarded.
+	// Input is the operand exactly as supplied.
 	Input string
 	// Kind is the local classification.
 	Kind Kind
 	// CRID is set when Kind is KindCRID.
 	CRID *crid.CRID
-	// KeyDER holds the decoded DER SubjectPublicKeyInfo bytes when Kind is
-	// KindResourceKey.
-	KeyDER []byte
 	// Warnings are §17.1-anatomy messages for stderr, in order.
 	Warnings []string
 }
@@ -76,8 +61,8 @@ const (
 )
 
 // Assess classifies input locally. A non-nil error means the input cannot be
-// a resource identifier at all and was rejected before any request; every
-// other outcome forwards, with warnings where a typo is likely.
+// a resource identifier at all. Other outcomes describe its kind; callers
+// require KindCRID before sending a request.
 func Assess(input string) (*Assessment, error) {
 	if input == "" {
 		return nil, fmt.Errorf("%w: it is empty", ErrUnusableID)
@@ -93,9 +78,8 @@ func Assess(input string) (*Assessment, error) {
 		return assessCRIDLength(a)
 	}
 	if len(input) >= minResourceKeyLength {
-		if der, err := base64.RawURLEncoding.DecodeString(input); err == nil {
+		if _, err := base64.RawURLEncoding.DecodeString(input); err == nil {
 			a.Kind = KindResourceKey
-			a.KeyDER = der
 			return a, nil
 		}
 	}
@@ -125,7 +109,7 @@ func assessCRIDLength(a *Assessment) (*Assessment, error) {
 			a.Warnings = append(a.Warnings, MsgTypo, MsgAlphabetHint)
 		}
 		// Otherwise (uppercase, '-', '_') it is some other identifier form:
-		// forward silently as KindUnknown.
+		// classify as KindUnknown for rejection by resource commands.
 	}
 	return a, nil
 }

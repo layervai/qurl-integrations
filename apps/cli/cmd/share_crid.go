@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -90,15 +91,16 @@ else, ready to hand out or open.`,
 	return cmd
 }
 
-// applyCRIDGuards prints local warnings and applies the environment guard
-// for parsed CRIDs. Warn-only cases proceed; a test CRID aimed at the
-// production endpoint refuses without --yes.
+// applyCRIDGuards requires a valid CRID and applies the environment guard.
 func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, productionEndpoint, yes bool) error {
-	for _, warning := range assessment.Warnings {
-		printer.Warnf("%s", warning)
-	}
 	if assessment.Kind != cridux.KindCRID {
-		return exitcode.UsageError(errors.New("a valid CRID is required; copy it from the resource listing"))
+		message := "a valid CRID is required; copy it from the resource listing"
+		if assessment.Kind == cridux.KindResourceKey {
+			message = "public keys are verification data; use the resource's CRID"
+		} else if len(assessment.Warnings) > 0 {
+			message = strings.Join(assessment.Warnings, " ")
+		}
+		return exitcode.InvalidInputError(message, cridux.ErrUnusableID)
 	}
 	warning, err := cridux.EnvironmentGuard(assessment.CRID.Environment(), productionEndpoint, yes)
 	if err != nil {

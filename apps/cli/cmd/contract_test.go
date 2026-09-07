@@ -106,13 +106,26 @@ func TestShareByCRIDEchoVerifies(t *testing.T) {
 	}
 }
 
-func TestShareRejectsResourceKey(t *testing.T) {
-	srv := apitest.NewServer(t)
-	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", srv.Key.ResourceID}})
-	if res.code != 2 || len(srv.Requests()) != 0 {
-		t.Fatalf("exit = %d, requests = %d", res.code, len(srv.Requests()))
+func TestResourceCommandsRejectNonCRIDBeforeRequest(t *testing.T) {
+	for _, command := range []string{"share", "get", "delete"} {
+		for _, kind := range []string{"public key", "unknown"} {
+			t.Run(command+"/"+kind, func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				operand := "not-a-crid"
+				if kind == "public key" {
+					operand = srv.Key.ResourceID
+				}
+				res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, command, operand}})
+				if res.code != 8 || len(srv.Requests()) != 0 {
+					t.Fatalf("exit = %d, requests = %d, stderr: %s", res.code, len(srv.Requests()), res.stderr.String())
+				}
+				if !strings.Contains(res.stderr.String(), "CRID") {
+					t.Errorf("missing CRID guidance: %s", res.stderr.String())
+				}
+				mustEmptyStdout(t, res)
+			})
+		}
 	}
-	mustEmptyStdout(t, res)
 }
 
 func TestShareWrongKeyCRIDMismatchEmitsNothingExit12(t *testing.T) {
@@ -695,7 +708,7 @@ func TestCRIDTypoRejectsBeforeRequest(t *testing.T) {
 	// keeping the alphabet and length valid.
 	typo := srv.Key.CRID[:59] + flipCRIDChar(srv.Key.CRID[59])
 	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "share", typo}})
-	if res.code != 2 {
+	if res.code != 8 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
 	if !strings.Contains(res.stderr.String(), "appears to contain a typo") {

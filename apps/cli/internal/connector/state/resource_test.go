@@ -98,7 +98,7 @@ func TestConnectorResourceTransactionPersistsExactRequestAndWarmContinuity(t *te
 		t.Fatal("warm request reused a completed nonce")
 	}
 	if warmRequest.ExpectedCRID != binding.CRID {
-		t.Fatalf("warm expected resource = %q, want %q", warmRequest.ExpectedCRID, binding.ResourceID)
+		t.Fatalf("warm expected resource = %q, want %q", warmRequest.ExpectedCRID, binding.CRID)
 	}
 }
 
