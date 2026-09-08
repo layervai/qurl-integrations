@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.4.0](https://github.com/layervai/qurl-integrations/compare/v2.3.3...v2.4.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** Resource commands and native Connector continuity require CRID. Resource public keys are verification data. Old protocol fields and resource journals are rejected without conversion. Before starting fresh, preserve unresolved state, stop the daemon, revoke its device key, move the complete state directory aside, then log in and publish again with new CRIDs.
+
+### Features
+
+* **cli:** use CRID for Connector continuity and resource management ([8779071](https://github.com/layervai/qurl-integrations/commit/877907180c1220ec6ea325c95704818bab926a75))
+
 ## [2.3.3](https://github.com/layervai/qurl-integrations/compare/v2.3.2...v2.3.3) (2026-09-07)
 
 
