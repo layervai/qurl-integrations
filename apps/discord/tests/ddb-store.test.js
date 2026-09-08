@@ -1398,6 +1398,12 @@ describe('qurl sends', () => {
     const items = await store.getSendItems('s1', 'owner', { consistentRead: true });
     const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(query.ConsistentRead).toBe(true);
+    // This is a base-table query with no ProjectionExpression, so DynamoDB
+    // returns every stored attribute, including the sparse qurl_id. Pin both
+    // properties: a future GSI/projection optimization must not silently drop
+    // the connector-child identity needed by revokeAllLinks.
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
     expect(items).toEqual([expect.objectContaining({
       resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
     })]);
@@ -1418,6 +1424,9 @@ describe('qurl sends', () => {
       .resolves.toEqual([expect.objectContaining({
         resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
       })]);
+    const query = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(query.IndexName).toBeUndefined();
+    expect(query.ProjectionExpression).toBeUndefined();
   });
 
   test('getSendItems: defaults to eventual consistency outside the revoke barrier path', async () => {

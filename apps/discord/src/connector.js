@@ -2,7 +2,7 @@ const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { validateResourceId } = require('./utils/resource-id');
+const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -21,6 +21,11 @@ const MAX_CDN_REDIRECTS = 3;
 // Leave 10s for response transport so the caller does not abort valid work
 // while the connector can still mint shared-tunnel tokens.
 const MINT_LINK_TIMEOUT_MS = 65_000;
+// TODO(upstream-contract): qurl-integrations-infra#1553 bounds concurrent
+// per-ID processing (at most 10 unique IDs) under one 55s handler deadline.
+// Match mint's 10s response-transport margin so the caller, rather than an
+// accidental 30s race with the connector's qURL client, owns the outer bound.
+const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -457,8 +462,11 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     if (partialQurlIds.length > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
+      // qurl_id is the non-secret display/revocation handle, not the bearer
+      // qurl_link fragment. Log it before cleanup so a process interruption
+      // still leaves operators the identities needed for reconciliation.
       logger.warn('Connector mint_link returned partial links on non-2xx', {
-        resource_id: resourceId,
+        resource_ref: resourceIdLogRef(resourceId),
         status: response.status,
         apiCode,
         bodyLen: bodyText.length,
@@ -484,7 +492,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     } catch (cleanupError) {
       mintError.partialCleanupFailed = true;
       logger.error('Connector partial mint cleanup failed', {
-        resource_id: resourceId,
+        resource_ref: resourceIdLogRef(resourceId),
         partial_link_count: partialQurlIds.length,
         cleanup_error_name: cleanupError?.name,
         cleanup_status: cleanupError?.status,
@@ -521,33 +529,35 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  * callable even when render-at-mint is currently disabled. On a mint-row miss,
  * it strongly reads qurl-service under the connector identity: only an
  * authoritative owner-hidden 404 proves the id is not servable on the shared
- * tunnel (`already_gone`); 200, transport, and ambiguous responses fail. Every
- * requested qurl_id has one unique result in an unordered exact set. A 404,
- * 410, or 503 from this endpoint itself is never evidence that a historical
- * send lacked connector-managed links, so all non-2xx responses fail closed.
+ * tunnel (`already_gone`); 200, transport, and ambiguous responses fail. The
+ * connector binds every id to the caller-owned source resource before acting,
+ * and returns every requested qurl_id exactly once in an unordered unique set.
+ * A 404, 410, or 503 from this endpoint itself is never evidence that a
+ * historical send lacked connector-managed links, so all non-2xx responses
+ * fail closed.
  *
  * @returns {Promise<boolean>} true when the connector revoked (or had nothing to
  *   revoke); throws when links may still be live, so the caller can leave the
  *   send retryable rather than reporting a revoke that did not happen.
  */
 async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+  validateResourceId(resourceId);
   if (!Array.isArray(qurlIds)) {
     throw new Error('Invalid connector revoke token list');
   }
-  const rawIds = qurlIds;
-  if (rawIds.some(id => typeof id !== 'string' || id.trim().length === 0)) {
+  if (qurlIds.some(id => typeof id !== 'string' || id.trim().length === 0)) {
     throw new Error('Invalid connector revoke token identity');
   }
   // A repaired/resend row can repeat a token. Revoke each identity once and
   // require one response outcome per unique requested identity.
-  const ids = [...new Set(rawIds.map(id => id.trim()))];
+  const ids = [...new Set(qurlIds.map(id => id.trim()))];
   if (ids.length === 0) return true;
 
   const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
     body: JSON.stringify({ resource_id: resourceId, qurl_ids: ids }),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -567,13 +577,12 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   // for bad statuses would accept an empty/short result array and finalize a
   // send while omitted links may still be live. Results may be reordered, but
   // duplicate or foreign outcomes violate the exact-coverage contract.
-  const results = Array.isArray(parsed?.results) ? parsed.results : [];
   let unresolvedCount = ids.length;
   if (parsed?.success === true && Array.isArray(parsed.results)) {
     const requested = new Set(ids);
     const confirmed = new Set();
     let invalidOutcomeCount = 0;
-    for (const result of results) {
+    for (const result of parsed.results) {
       const statusConfirmed = result?.status === 'revoked' || result?.status === 'already_gone';
       if (!requested.has(result?.qurl_id) || confirmed.has(result.qurl_id) || !statusConfirmed) {
         invalidOutcomeCount++;
@@ -590,7 +599,10 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     err.unresolvedCount = unresolvedCount;
     throw err;
   }
-  logger.info('Revoked watermarked recipient links', { count: ids.length });
+  logger.info('Confirmed connector-managed link revoke', {
+    resource_ref: resourceIdLogRef(resourceId),
+    count: ids.length,
+  });
   return true;
 }
 

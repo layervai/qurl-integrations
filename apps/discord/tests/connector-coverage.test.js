@@ -481,7 +481,7 @@ describe('Connector client — coverage boost', () => {
       expect(logger.warn).toHaveBeenCalledWith(
         'Connector mint_link returned partial links on non-2xx',
         expect.objectContaining({
-          resource_id: 'res-1',
+          resource_ref: expect.stringMatching(/^sha256:/),
           status: 502,
           bodyLen: expect.any(Number),
           partial_link_count: 2,
@@ -492,6 +492,7 @@ describe('Connector client — coverage boost', () => {
         logger.warn.mock.calls,
         logger.debug.mock.calls,
       ]);
+      expect(serializedLogs).not.toContain('res-1');
       expect(serializedLogs).not.toContain('at_secret');
       expect(serializedLogs).not.toContain('qurl.link');
     });
@@ -523,7 +524,7 @@ describe('Connector client — coverage boost', () => {
       expect(logger.error).toHaveBeenCalledWith(
         'Connector partial mint cleanup failed',
         expect.objectContaining({
-          resource_id: 'res-1',
+          resource_ref: expect.stringMatching(/^sha256:/),
           partial_link_count: 1,
           cleanup_error_name: 'TypeError',
         }),
@@ -629,6 +630,11 @@ describe('Connector client — coverage boost', () => {
           }),
         }),
       );
+      const logger = require('../src/logger');
+      expect(logger.info).toHaveBeenCalledWith(
+        'Confirmed connector-managed link revoke',
+        { resource_ref: expect.stringMatching(/^sha256:/), count: 2 },
+      );
     });
 
     it('accepts exact id-keyed coverage when results are reordered', async () => {
@@ -675,6 +681,18 @@ describe('Connector client — coverage boost', () => {
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });
 
+    it.each([undefined, null, '', 'bad/id', 'at_bearer_like'])(
+      'rejects invalid resource id %p before fetch',
+      async (resourceId) => {
+        globalThis.fetch = jest.fn();
+
+        await expect(connector.revokeMintedLinks(resourceId, ['q_one'], 'guild-key'))
+          .rejects.toThrow('Invalid resource ID format');
+
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      },
+    );
+
     it.each([undefined, null, 'q_one'])('rejects invalid token list %p before fetch', async (qurlIds) => {
       globalThis.fetch = jest.fn();
 
@@ -692,6 +710,26 @@ describe('Connector client — coverage boost', () => {
 
       await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
         .rejects.toBe(error);
+    });
+
+    it('allows the bounded revoke handler deadline plus transport slack', async () => {
+      const signal = new AbortController().signal;
+      const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(signal);
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          results: [{ qurl_id: 'q_one', status: 'revoked' }],
+        }),
+      });
+
+      try {
+        await connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key');
+        expect(timeoutSpy).toHaveBeenCalledWith(65_000);
+      } finally {
+        timeoutSpy.mockRestore();
+      }
     });
 
     it.each([404, 410, 503])('fails closed on connector HTTP %i', async (status) => {
@@ -789,6 +827,20 @@ describe('Connector client — coverage boost', () => {
       await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
         .rejects.toMatchObject({ unresolvedCount: 1 });
     });
+
+    it.each([undefined, null, 'not-an-array', {}])(
+      'rejects success true with malformed results %p',
+      async (results) => {
+        globalThis.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, results }),
+        });
+
+        await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+          .rejects.toMatchObject({ unresolvedCount: 1 });
+      },
+    );
 
     it.each(['refused', 'failed', 'unknown'])(
       'rejects the per-token %s status',

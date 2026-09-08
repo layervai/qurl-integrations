@@ -2918,14 +2918,22 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   // Called when no recipient rows landed, or when a terminal guarded
   // transaction failure is ambiguous enough that deleting freshly minted qURLs
   // is the fail-closed outcome (no DMs have been sent yet).
-  const resourceIds = [...new Set(
-    batchSends
-      .map(s => s.resourceId)
-      .filter(id => typeof id === 'string' && id.length > 0),
-  )];
-  if (resourceIds.length === 0) return;
+  const qurlIdsByResource = new Map();
+  for (const send of batchSends) {
+    if (typeof send.resourceId !== 'string' || send.resourceId.length === 0) continue;
+    const qurlIds = qurlIdsByResource.get(send.resourceId) || [];
+    qurlIds.push(send.qurlId);
+    qurlIdsByResource.set(send.resourceId, qurlIds);
+  }
+  const resourceEntries = [...qurlIdsByResource.entries()];
+  if (resourceEntries.length === 0) return;
 
-  const results = await batchSettled(resourceIds, async (resourceId) => {
+  const results = await batchSettled(resourceEntries, async ([resourceId, qurlIds]) => {
+    // These are freshly minted connector results rather than legacy store rows,
+    // so every child identity must be present. revokeMintedLinks rejects a
+    // missing/malformed id and preserves the source resource as the connector's
+    // authorization anchor for a later operator-assisted retry.
+    await revokeMintedLinks(resourceId, qurlIds, apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;
   }, 5);
@@ -2933,7 +2941,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       failed.push({
-        resource_ref: resourceIdLogRef(resourceIds[index]),
+        resource_ref: resourceIdLogRef(resourceEntries[index][0]),
         error: result.reason?.message,
       });
     }
@@ -2943,14 +2951,14 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
-      total: resourceIds.length,
+      total: resourceEntries.length,
       failures: failed,
     });
   } else {
     logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
-      total: resourceIds.length,
+      total: resourceEntries.length,
     });
   }
 }
@@ -8398,11 +8406,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
     // The store projection materializes absent sparse attributes as undefined;
-    // null/undefined/empty therefore remain the legitimate legacy path.
-    if (item.qurl_id == null || (typeof item.qurl_id === 'string' && item.qurl_id.trim().length === 0)) {
+    // null/undefined/exact-empty therefore remain the legitimate legacy path.
+    // Whitespace is present corrupt data, not evidence that no child was ever
+    // minted, and must keep the resource on the malformed fail-closed path.
+    if (item.qurl_id == null || item.qurl_id === '') {
       continue;
     }
-    if (typeof item.qurl_id !== 'string') {
+    if (typeof item.qurl_id !== 'string' || item.qurl_id.trim().length === 0) {
       const malformedCount = malformedQurlIdCountsByResource.get(item.resource_id) || 0;
       malformedQurlIdCountsByResource.set(item.resource_id, malformedCount + 1);
     } else {
@@ -8418,32 +8428,33 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const failureUserIds = [];
 
   const results = await batchSettled(resourceEntries, async ([resourceId]) => {
+    const qurlIds = qurlIdsByResource.get(resourceId) || [];
     const malformedTokenCount = malformedQurlIdCountsByResource.get(resourceId) || 0;
     if (malformedTokenCount > 0) {
       // We cannot identify every possible connector-managed child, but still
-      // revoke every well-formed child and the parent resource independently.
-      // Keep the resource outcome failed afterwards so the send never finalizes
-      // based on partial evidence. The distinct log gives an operator a durable
-      // escape-hatch signal for a retry that data repair may be needed to fix.
-      let connectorRevokeConfirmed = true;
-      let resourceRevokeConfirmed = true;
+      // revoke every well-formed child first. The source resource remains the
+      // connector's authorization anchor unless that child step succeeds. Even
+      // after both steps succeed, keep the send unfinalized because the
+      // malformed residue can never be positively confirmed from this row.
+      let connectorRevokeConfirmed = false;
+      let resourceRevokeConfirmed = false;
       try {
-        await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId) || [], apiKey);
-      } catch {
-        connectorRevokeConfirmed = false;
-      }
-      try {
+        await revokeMintedLinks(resourceId, qurlIds, apiKey);
+        connectorRevokeConfirmed = true;
         await deleteLink(resourceId, apiKey);
-      } catch {
-        resourceRevokeConfirmed = false;
+        resourceRevokeConfirmed = true;
+      } finally {
+        // This is distinct from the generic per-resource failure log below: it
+        // tells operators that repairing stored token identity is required even
+        // when every identifiable revoke happened to succeed.
+        logger.error('Cannot fully revoke resource with malformed stored token identity', {
+          sendId,
+          resource_ref: resourceIdLogRef(resourceId),
+          malformedTokenCount,
+          connectorRevokeConfirmed,
+          resourceRevokeConfirmed,
+        });
       }
-      logger.error('Cannot fully revoke resource with malformed stored token identity', {
-        sendId,
-        resource_ref: resourceIdLogRef(resourceId),
-        malformedTokenCount,
-        connectorRevokeConfirmed,
-        resourceRevokeConfirmed,
-      });
       throw new Error('Cannot fully confirm revoke with malformed stored token identity');
     }
     // Revoke the connector-side watermarked views FIRST. If this throws the
@@ -8452,7 +8463,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     // remains callable when render-at-mint is off; a mapping miss is confirmed
     // against the shared tunnel before the explicit `already_gone` outcome,
     // never inferred from an HTTP error.
-    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId) || [], apiKey);
+    await revokeMintedLinks(resourceId, qurlIds, apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;
   }, 5);
