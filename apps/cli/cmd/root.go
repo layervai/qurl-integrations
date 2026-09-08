@@ -69,6 +69,7 @@ type globalOpts struct {
 	// acknowledged lifetime. Tests always inject (the harness refuses by
 	// default), so no hermetic test sends a real access request.
 	enterPortalGrant func(ctx context.Context, link string) (consume.AccessGrant, error)
+	verifyLink       func(ctx context.Context, link, expectedCRID string) error
 
 	// redirectFRPLogs rebinds the FRP library's process-global logger to this
 	// invocation's stderr (production default). The cmd test binary injects a
@@ -269,6 +270,10 @@ func (o *globalOpts) applyDefaults() {
 	if o.openBrowser == nil {
 		launcher := &consume.Launcher{LookupEnv: o.lookupEnv, GOOS: runtime.GOOS}
 		o.openBrowser = launcher.Open
+	}
+	if o.verifyLink == nil {
+		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}
+		o.verifyLink = opener.Verify
 	}
 	if o.enterPortalGrant == nil {
 		opener := &consume.AccessOpener{LookupEnv: o.lookupEnv}

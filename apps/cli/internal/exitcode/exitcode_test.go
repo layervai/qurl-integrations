@@ -57,6 +57,7 @@ var cliSentinels = map[string]struct {
 	// link check shares CRID verification's fail-closed row; a platform
 	// deny is Forbidden and a platform defer is Unavailable.
 	"consume.ErrAccessNotConfigured":        {consume.ErrAccessNotConfigured, Config},
+	"consume.ErrUnsupportedCRIDVersion":     {consume.ErrUnsupportedCRIDVersion, Config},
 	"consume.ErrAccessSettingsMismatch":     {consume.ErrAccessSettingsMismatch, Config},
 	"consume.ErrLinkVerification":           {consume.ErrLinkVerification, VerificationFailed},
 	"consume.ErrAccessDenied":               {consume.ErrAccessDenied, Forbidden},

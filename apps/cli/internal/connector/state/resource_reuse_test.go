@@ -34,7 +34,7 @@ func TestPrepareConnectorResourceReusePersistsExactRequestAcrossRestart(t *testi
 	}
 	pending := prepared.Pending[old.ConnectorID]
 	if len(prepared.Bindings) != 0 || len(prepared.Retired) != 0 || len(prepared.Pending) != 1 ||
-		pending.ExpectedResourceID != "" || pending.RequestNonce == "" || pending.ConnectorID != old.ConnectorID {
+		pending.ExpectedCRID != "" || pending.RequestNonce == "" || pending.ConnectorID != old.ConnectorID {
 		t.Fatalf("prepared state = %+v, want only a fresh pending request", prepared)
 	}
 	dir := store.Dir()
@@ -56,7 +56,7 @@ func TestPrepareConnectorResourceReusePersistsExactRequestAcrossRestart(t *testi
 	}
 	defer func() { _ = tx.Close() }()
 	request := tx.Request()
-	if request.RequestNonce != pending.RequestNonce || request.ConnectorID != pending.ConnectorID || request.ExpectedResourceID != "" {
+	if request.RequestNonce != pending.RequestNonce || request.ConnectorID != pending.ConnectorID || request.ExpectedCRID != "" {
 		t.Fatalf("request after restart = %+v, want exact prepared request %+v", request, pending)
 	}
 	// A shared cell knock target can stay the same while the public and routing
@@ -73,7 +73,7 @@ func TestPrepareConnectorResourceReusePersistsExactRequestAcrossRestart(t *testi
 		t.Fatal(err)
 	}
 	defer func() { _ = warm.Close() }()
-	if got := warm.Request(); got.ExpectedResourceID != replacement.ResourceID || got.RequestNonce == pending.RequestNonce {
+	if got := warm.Request(); got.ExpectedCRID != replacement.CRID || got.RequestNonce == pending.RequestNonce {
 		t.Fatalf("warm replacement request = %+v", got)
 	}
 }
@@ -146,7 +146,7 @@ func TestPrepareConnectorResourceReuseConcurrentRetriesKeepNonce(t *testing.T) {
 	}
 	close(requests)
 	first := <-requests
-	if first.RequestNonce == "" || first.ExpectedResourceID != "" {
+	if first.RequestNonce == "" || first.ExpectedCRID != "" {
 		t.Fatalf("first prepared request = %+v", first)
 	}
 	for request := range requests {

@@ -370,10 +370,8 @@ describe('qURL client — retry + audit behavior', () => {
     }
   });
 
-  it('does not replay DELETE after a 503 because the mutation outcome is unknown', async () => {
-    globalThis.fetch = jest.fn()
-      .mockResolvedValueOnce(apiError(503))
-      .mockResolvedValueOnce(apiOk(204, undefined));
+  it('does not replay DELETE on 503 because the mutation outcome is unknown', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
     await expect(qurl.deleteLink(PUBLIC_KEY_RESOURCE_ID)).rejects.toThrow(/503/);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });

@@ -103,8 +103,8 @@ function makeClient(apiKey) {
  *
  *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
  *     alarm fires independently of any caller's catch path.
- *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403 (its retryable set is
- *     {429, 502, 503, 504}), so this fires once per request, not once per
+ *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403, so this fires
+ *     once per request, not once per
  *     attempt. If that ever changes, the audit count would multiply on a single
  *     auth failure. Pinned by tests/qurl-coverage.test.js.
  *   - REDACTION: never let a qURL error body escape this module. On an

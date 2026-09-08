@@ -285,7 +285,7 @@ func desiredShares(shares []connectorstate.LocalShare) []connectorstate.LocalSha
 func shareRoute(share *connectorstate.LocalShare) connectorshare.LocalHTTPRoute {
 	return connectorshare.LocalHTTPRoute{
 		RouteID: share.ConnectorID, LocalIP: share.LocalIP, LocalPort: share.LocalPort,
-		ResourceID: share.ResourceID, ConnectorRoutingID: share.ConnectorRoutingID,
+		ResourcePublicKey: share.ResourceID, ConnectorRoutingID: share.ConnectorRoutingID,
 	}
 }
 
@@ -521,7 +521,7 @@ func (m *Manager) startGroup(ctx context.Context, desired []connectorstate.Local
 	// authorizes each proxy by its own metadata.
 	representative := desired[0]
 	for i := range desired {
-		if desired[i].ResourceID == routes[0].ResourceID {
+		if desired[i].ResourceID == routes[0].ResourcePublicKey {
 			representative = desired[i]
 			break
 		}

@@ -98,12 +98,27 @@ setup) means required to use that feature.
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
 | `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
+| `QURL_DEPLOYMENT` | Native `/qurl detect` | Environment-specific public SDK trust: JSON or an absolute JSON file path, with `issuers` and `cells` |
 | `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect` qURLs |
 | `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` | No | Comma-separated extra non-prod `QURL_ENDPOINT` hosts for `/qurl detect` (extends the built-in set below) |
 | `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
+
+Discord uses `@layervai/qurl/node` to open current `qv2t1` links. Set
+`QURL_ENDPOINT` and `QURL_DEPLOYMENT` for the same environment. The deployment
+settings contain trusted issuer public keys (`kid`, `spki_der_b64`) and cell
+endpoints (`host`, `port`, `server_public_key_b64`). No trust root is embedded
+in the bot image. The SDK verifies the link and opens native UDP access, then
+Discord sends the image to the authenticated detect endpoint. Each request
+closes its opener on success or failure. Legacy `at_` links retain API resolve.
+
+Run `npm run test:detect:live` with the deployment environment above and
+`DETECT_SMOKE_GUILD_ID` set to a test server ID. The check mints, opens, and
+POSTs an unmarked PNG through the real tunnel, and requires a no-match result.
+To check known attribution, add `DETECT_SMOKE_QURL_ID` and run
+`npm run test:detect:live -- /absolute/path/to/watermarked.png`.
 
 When enabling `/qurl detect`, the minted `qurl_site` must be host-only. The
 detect target is constructed from that value, so both have the same hostname

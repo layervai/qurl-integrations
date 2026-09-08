@@ -832,61 +832,31 @@ function buildDetectTargetUrl(qurlSite) {
   return new URL(DETECT_TARGET_PATH, parsed.origin).toString();
 }
 
-// Scrub any `at_…` access token from a free-text error message before logging.
+// Scrub legacy access tokens and qv2t1 credentials before logging.
 // The detect access token originates in the mint RESPONSE (qurl_link fragment)
-// and is echoed back in the resolve REQUEST, so a future @layervai/qurl that
-// surfaced either in a QURLError message would otherwise leak it. SDK errors
-// are built from the RFC-7807 response envelope (errors.js), not bodies —
-// so this is defense-in-depth that keeps the never-log-the-token invariant
-// self-enforced across SDK versions. Applied uniformly to all three breadcrumbs;
-// it's a no-op on the token-free slug-lookup leg but keeps that log line null-safe
-// + consistent (the `String(... ?? '')` guard).
+// and is echoed back in the resolve request. Keep redaction independent of
+// SDK error formatting. qv2t1 segments use unpadded base64url and dots.
 function redactAccessToken(message) {
-  return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
+  return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]')
+    .replace(/qv2t1\.[A-Za-z0-9_.-]+/g, 'qv2t1.[REDACTED]');
+}
+
+async function closeDetectOpener(opener) {
+  try {
+    await opener.close();
+  } catch (err) {
+    logger.warn('Detect native opener close failed', { error: redactAccessToken(err?.message) });
+  }
 }
 
 /**
- * Resolve the qURL reverse-tunnel target for the watermark-detect endpoint.
+ * Look up the active detect resource and mint a fresh five-minute qURL.
+ * Cache only the resource ID. Never cache the minted credential or site.
+ * Current qv2t1 links use the native SDK with QURL_DEPLOYMENT runtime trust;
+ * legacy at_ links use API resolve. Validate the tunnel site before opening,
+ * then bind the authenticated target before sending image bytes or a Bearer.
  *
- * Self-mints an EPHEMERAL qURL to the detect tunnel resource per call (no
- * pre-seeded token), using the bot's own `QURL_API_KEY` via the @layervai/qurl
- * SDK (getQurlClient):
- *   1. resolve the tunnel resource_id from DETECT_TUNNEL_SLUG
- *      (`listAllResources({ slug, limit: 100 })`, then client-side
- *      `status === 'active'` filtering because the live API rejects
- *      status+slug; the SDK walks all pages so accumulated revoked rows can't
- *      hide the one active detect resource) — CACHED in `_detectResourceId`
- *      (it's stable + non-secret). A short process-global failure backoff
- *      suppresses repeated full slug-history scans after persistent hard
- *      failures. This is keyed process-wide because the dark launch has a
- *      single DETECT_TUNNEL_SLUG; if detect becomes per-guild/per-resource,
- *      key the backoff by slug/resource instead.
- *   2. mint a fresh short-lived qURL on that resource
- *      (`createQurlForResource(resource_id, { expires_in })`) whose
- *      `qurl_link` fragment carries the `at_…` access token and whose
- *      host-only `qurl_site` is the tunnel POST host. No `target_path` —
- *      it is not a CreateQurlForResourceRequest property (see the
- *      getQurlClient note above); buildDetectTargetUrl appends
- *      DETECT_TARGET_PATH to `qurl_site` in step 4 instead;
- *   3. `resolve({ access_token })` — this is the NHP knock: it grants network
- *      access for the CALLER'S CURRENT IP. The live tunnel API returns
- *      `target_url: ""`; do not use it as the POST target.
- * The caller MUST POST to qurl_site within the knock window from the same IP —
- * hence this is invoked immediately before each detect POST
- * (mint-and-resolve-per-call), and NEITHER the minted token NOR qurl_site is
- * cached. A fresh 5m-expiry qURL per detect (the mint passes expires_in: '5m')
- * means there's no long-lived credential to leak. Detect is low-frequency so
- * the extra mint+resolve calls are negligible.
- *
- * SECURITY: never log the minted access token, qurl_link, or raw qurl_site. The
- * mint + resolve breadcrumbs run `err.message` through `redactAccessToken` (the
- * token lives in the mint response / resolve request), and the SSRF assert
- * messages are static/URL-free.
- *
- * @returns {Promise<string>} the SSRF-validated qurl_site + /api/detect target.
- * @throws if DETECT_TUNNEL_SLUG is unset, the tunnel resource can't be resolved,
- *   the mint doesn't return an access token, or the minted qurl_site fails the
- *   public-https SSRF guard.
+ * @returns {Promise<{targetUrl: string, opener?: object}>} validated target and optional native opener.
  */
 async function resolveDetectTarget() {
   if (!config.DETECT_TUNNEL_SLUG) {
@@ -899,8 +869,8 @@ async function resolveDetectTarget() {
   // extract so a failed lookup doesn't poison it. The SDK owns pagination and
   // response shaping: listAllResources yields resources from every page, and
   // each resource carries `resource_id` (not `id`). There is intentionally no
-  // in-flight dedup for concurrent cold-cache lookups: detect is dark-launched
-  // and low frequency, while the failure backoff bounds repeated hard failures.
+  // in-flight dedup for concurrent cold-cache lookups; the failure backoff
+  // bounds repeated hard failures.
   let resourceId = _detectResourceId;
   if (!resourceId) {
     // Breadcrumb a slug-lookup transport failure (message only — no token, no
@@ -971,16 +941,6 @@ async function resolveDetectTarget() {
     throw err;
   }
   try {
-    accessToken = extractAccessToken(minted?.qurl_link);
-  } catch (err) {
-    // A malformed qurl_link is a mint response-shape issue, not evidence that
-    // the cached resource_id is stale. Keep the resource cache and retry only
-    // the mint after the short failure window.
-    rememberDetectResourceFailure(err, { clearResourceCache: false });
-    logger.warn('Detect tunnel mint failed', { error: redactAccessToken(err.message) });
-    throw err;
-  }
-  try {
     targetUrl = buildDetectTargetUrl(minted?.qurl_site);
   } catch (err) {
     // qurl_site hostname-pin failures happen after a successful slug
@@ -996,6 +956,39 @@ async function resolveDetectTarget() {
       error: redactAccessToken(err.message),
       hostname: detectTargetHostname(minted?.qurl_site),
     });
+    throw err;
+  }
+
+  let clearResourceCache = false;
+  try {
+    // qv2t1 carries an offline credential, not an at_ API-resolve token.
+    // The native SDK verifies the issuer and cell against deployment trust.
+    if (typeof minted?.qurl_link === 'string' && minted.qurl_link.split('#')[1]?.startsWith('qv2t1.')) {
+      if (minted.resource_id !== resourceId) {
+        const err = new Error('Detect mint returned a mismatched resource_id');
+        clearResourceCache = true;
+        throw err;
+      }
+      const { createPortalOpener } = require('@layervai/qurl/node');
+      const opener = createPortalOpener({ qurl: minted.qurl_link });
+      try {
+        // SDK 0.6 bounds native opening to 15 seconds and aborts it on close.
+        await opener.start();
+        clearDetectResourceFailureState();
+        return { targetUrl, opener };
+      } catch (err) {
+        await closeDetectOpener(opener);
+        // The command handler also logs this error; keep credentials out of it.
+        throw new Error(redactAccessToken(err.message));
+      }
+    }
+    accessToken = extractAccessToken(minted?.qurl_link);
+  } catch (err) {
+    // A malformed qurl_link is a mint response-shape issue, not evidence that
+    // the cached resource_id is stale. Keep the resource cache and retry only
+    // the mint after the short failure window.
+    rememberDetectResourceFailure(err, { clearResourceCache });
+    logger.warn('Detect native open or link validation failed', { error: redactAccessToken(err.message) });
     throw err;
   }
 
@@ -1045,56 +1038,22 @@ async function resolveDetectTarget() {
     throw err;
   }
   clearDetectResourceFailureState();
-  return targetUrl;
+  return { targetUrl };
 }
 
 /**
- * Watermark-attribution detect (the bot side of #1101). Self-mints a fresh
- * qURL to the detect tunnel, resolves that access token to issue the NHP knock
- * (resolveDetectTarget — see its rationale), then POSTs the raw image bytes to
- * the minted `qurl_site + /api/detect`. The detect service
- * reads the invisible meta-seal watermark and resolves it to the qurl_id it
- * was minted for, GUILD-SCOPED via the `X-Guild-Id` header so an image
- * watermarked in guild A never attributes in guild B. This is a
- * deanonymization oracle by design — the caller (handleQurlDetect) owns the
- * cooldown + ephemeral-reply abuse guards and the second-layer same-guild
- * filter on the returned rows.
+ * Recover watermark attribution through the private detect tunnel.
+ * The bot credential lists and mints; an optional guild key authenticates the
+ * POST. Current qv2t1 links open through native UDP using runtime SDK trust.
+ * Legacy at_ links still require qurl:resolve. Each request closes its native
+ * opener, and credentials never go to an unvalidated or redirected target.
+ * The caller enforces sender/staff standing and filters attribution by guild.
  *
- * REACH MODEL: the public connector `/api/detect` path is gone; detect now
- * lives behind the qURL reverse-tunnel. resolveDetectTarget() self-mints a
- * fresh ephemeral qURL to the detect tunnel resource and resolves it; the
- * resolve grants network access to the bot's current egress IP and the POST
- * goes to qurl_site from that same IP within the knock window — so
- * mint-and-resolve-then-POST happens per call and neither the minted token nor
- * qurl_site is ever reused.
- *
- * Contract:
- *   - Reach: resolveDetectTarget() self-mints + resolves using the bot's own
- *     `config.QURL_API_KEY` (the SDK Bearer; needs `qurl:read` + `qurl:write` +
- *     `qurl:resolve` — list / mint / resolve) against the DETECT_TUNNEL_SLUG
- *     resource. It calls listAllResources({ slug, limit: 100 }), filters
- *     active resources client-side, mints for 5m, ignores resolve target_url,
- *     and POSTs to qurl_site + /api/detect (the path is appended locally by
- *     buildDetectTargetUrl, not carried on the mint). No pre-seeded access
- *     token.
- *   - POST headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
- *     Content-Type: <imageContentType || 'application/octet-stream'>.
- *   - Body: the raw image bytes (Buffer / ArrayBuffer / Uint8Array).
- *   - 200 JSON: { detected: boolean, qurl_id: string|null,
- *     match_pct: number|null, confidence: number }. detected=false ⇒ no
- *     mark OR no same-guild match (qurl_id / match_pct null). detected=true
- *     ⇒ qurl_id + match_pct (0–100) + confidence (0–1).
- *   - 401 bad auth / 400 missing guild|image / 429 rate-limited / 5xx —
- *     surfaced as a thrown Error (with .status) via throwConnectorError so
- *     the handler can ephemeral-error rather than leak the body.
- *
- * @param {Buffer|ArrayBuffer|Uint8Array} imageBytes — raw image bytes.
+ * @param {Buffer} imageBytes
  * @param {object} opts
- * @param {string} opts.guildId — Discord guild snowflake (X-Guild-Id scope).
- * @param {?string} [opts.contentType] — image MIME; defaults to octet-stream.
- * @param {?string} [opts.apiKey] — caller API key for the detect POST Bearer;
- *   falls back to config.QURL_API_KEY. (The mint+resolve leg always uses the
- *   global config.QURL_API_KEY as the SDK Bearer — see resolveDetectTarget.)
+ * @param {string} opts.guildId Discord guild scope.
+ * @param {string} [opts.contentType]
+ * @param {string} [opts.apiKey] Guild key for the POST; defaults to the bot key.
  * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
  */
 async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
@@ -1106,36 +1065,57 @@ async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}
 
   // Mint-and-resolve-per-call — never cache the minted token or qurl_site
   // (rationale in the REACH MODEL note above and resolveDetectTarget's docstring).
-  const targetUrl = await resolveDetectTarget();
+  const { targetUrl, opener } = await resolveDetectTarget();
 
-  const response = await fetch(targetUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': contentType || 'application/octet-stream',
-      'X-Guild-Id': guildId,
-      ...connectorAuthHeaders(apiKey),
-    },
-    body: imageBytes,
-    // Neural-net inference is the slow leg here; give it the same 60s
-    // headroom the upload paths use rather than the 30s mint window.
-    signal: AbortSignal.timeout(60000),
-  });
+  try {
+    const request = {
+      method: 'POST',
+      headers: {
+        'Content-Type': contentType || 'application/octet-stream',
+        'X-Guild-Id': guildId,
+        ...connectorAuthHeaders(apiKey),
+      },
+      body: imageBytes,
+      // Neural-net inference is the slow leg here; give it the same 60s
+      // headroom the upload paths use rather than the 30s mint window.
+      signal: AbortSignal.timeout(60000),
+    };
+    const response = opener
+      ? await opener.fetchDescendant(['api', 'detect'], (authenticatedTarget) => {
+        // Check the signed ACK target before sending guild data or a Bearer.
+        if (authenticatedTarget.href !== targetUrl) {
+          throw new Error('Detect native target does not match the minted tunnel');
+        }
+        return request;
+      }, { redirects: 'error' })
+      : await fetch(targetUrl, { ...request, redirect: 'error' });
 
-  if (!response.ok) {
-    return throwConnectorError('Connector detect', response);
+    if (!response.ok) {
+      return await throwConnectorError('Connector detect', response);
+    }
+
+    const result = await response.json();
+    // Normalize the shape so the caller can destructure without
+    // optional-chaining every field. The connector owns the values;
+    // we only coerce `detected` to a hard boolean (a missing/garbled
+    // field must read as "no attribution", never as a truthy object).
+    return {
+      detected: result.detected === true,
+      qurl_id: typeof result.qurl_id === 'string' ? result.qurl_id : null,
+      match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
+      confidence: typeof result.confidence === 'number' ? result.confidence : 0,
+    };
+  } catch (err) {
+    const message = redactAccessToken(err?.message);
+    if (opener && typeof err?.message === 'string' && message !== err.message) {
+      const safeError = new Error(message);
+      safeError.status = err?.status;
+      throw safeError;
+    }
+    throw err;
+  } finally {
+    if (opener) await closeDetectOpener(opener);
   }
-
-  const result = await response.json();
-  // Normalize the shape so the caller can destructure without
-  // optional-chaining every field. The connector owns the values;
-  // we only coerce `detected` to a hard boolean (a missing/garbled
-  // field must read as "no attribution", never as a truthy object).
-  return {
-    detected: result.detected === true,
-    qurl_id: typeof result.qurl_id === 'string' ? result.qurl_id : null,
-    match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
-    confidence: typeof result.confidence === 'number' ? result.confidence : 0,
-  };
 }
 
 /**
