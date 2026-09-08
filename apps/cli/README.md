@@ -237,7 +237,8 @@ selected with `--profile` or `QURL_PROFILE`. A missing file simply means
 defaults apply. **Config files never hold secrets** — a file carrying an
 `api_key` entry is rejected outright rather than silently honored.
 
-Also honored: `NO_COLOR` (disables color while `--color` is `auto`), and
+Also honored: `QURL_DEPLOYMENT` (the settings-file path used to verify share
+and access links; environment-only, with no profile override), `NO_COLOR` (disables color while `--color` is `auto`), and
 `QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
 CLI at a plain-`http` endpoint on a non-local address warns that the key
 would travel unencrypted; loopback endpoints are exempt.
@@ -376,7 +377,8 @@ from a script, use `qurl get <CRID> --file <path>`.
 | `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
 | `--yes` | Proceed without confirmation, including sending a test CRID to production |
 
-Before anything is printed, the CLI verifies the service's answer against
+Share needs the deployment verification settings described under `qurl get`.
+Before anything is printed, the CLI verifies the signed link against
 the CRID you asked for; a mismatched answer is discarded and the command
 exits with code 12 without printing a link.
 
@@ -658,7 +660,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 0 | success | The command did what was asked. |
 | 1 | general | An unclassified failure, including features not yet available in this build. |
 | 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
-| 3 | configuration | Configuration files or profiles are invalid. |
+| 3 | configuration | Settings or profiles are invalid, or this CRID needs a newer CLI. |
 | 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
 | 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. |
 | 6 | permission | The credential lacks permission for this operation. |

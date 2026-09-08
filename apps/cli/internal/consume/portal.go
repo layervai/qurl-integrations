@@ -60,7 +60,7 @@ const (
 	MsgUnsupportedCRIDVersion = "this CRID needs a newer version of the CLI — update qurl, then try again"
 
 	// MsgAccessSettingsMismatch reports settings that don't cover the link.
-	MsgAccessSettingsMismatch = "your deployment settings don't match the service this access link came from — check QURL_DEPLOYMENT, or ask whoever runs your qURL deployment"
+	MsgAccessSettingsMismatch = "your deployment settings do not allow this link — confirm the deployment with its operator before trying again"
 
 	// MsgLinkVerification is the fail-closed discard of a link that did not
 	// pass its local check; same posture as the CRID verification messages.
