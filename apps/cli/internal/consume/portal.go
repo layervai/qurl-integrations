@@ -266,7 +266,7 @@ func classifyAccessError(err error) error {
 		return err
 	case errors.Is(err, qurl.ErrNotConfigured):
 		return ErrAccessNotConfigured
-	case errors.Is(err, qurl.ErrUnknownKID), errors.Is(err, qurl.ErrRelayURL):
+	case errors.Is(err, qurl.ErrUnknownKID), errors.Is(err, qurl.ErrRelayURL), errors.Is(err, qurl.ErrUnsupportedCRIDVersion):
 		return ErrAccessSettingsMismatch
 	case errors.Is(err, qurl.ErrCRIDMismatch), errors.Is(err, qurl.ErrNoCRID),
 		errors.Is(err, qurl.ErrSignature),

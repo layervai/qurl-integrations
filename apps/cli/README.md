@@ -410,12 +410,11 @@ or use `qurl share` if you only need the link. With `-o json`, get is a
 machine asking for data, so browser mode and `--file -` are refused
 loudly; `--file <path> -o json` downloads and emits the outcome document.
 
-Direct downloads use the deployment settings shipped with the CLI. On a
-self-hosted or custom deployment, set `QURL_DEPLOYMENT` to the path of that
-deployment's settings file (ask whoever runs the deployment for it). Without
-usable settings, `get
---file` fails loudly with exit code 3 rather than downloading the wrong
-thing; browser mode needs no settings at all.
+Both `share` and `get` need deployment settings to check that the signed link
+belongs to the CRID you supplied. Set `QURL_DEPLOYMENT` to the path of your
+deployment's settings file (ask whoever runs the deployment for it), unless
+your build includes those settings. Without usable settings, the command
+fails with exit code 3 before printing a link, opening a browser, or downloading.
 
 ### qurl list
 
