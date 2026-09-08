@@ -39,8 +39,8 @@ A CRID is safe to paste anywhere — it grants nothing by itself. The share
 link is what turns it into access, so treat the link as a secret. It expires
 on its own; share again whenever you need a fresh one.
 
-Before anything is printed, the CLI verifies that the service's answer
-matches the CRID you asked for — a mismatched answer is discarded and the
+Before anything is printed, the CLI verifies that the link belongs
+to the CRID you asked for — a mismatched answer is discarded and the
 command exits with code 12 without printing a link.
 
 The link opens in a browser. Passing it to a tool like curl fetches the
@@ -78,6 +78,9 @@ else, ready to hand out or open.`,
 				TTLSeconds: int(ttl.Seconds()),
 			})
 			if err := verifyShareLink(assessment, link, err); err != nil {
+				return err
+			}
+			if err := opts.verifyLink(cmd.Context(), link.QURL, assessment.Input); err != nil {
 				return err
 			}
 			reportClamp(printer, ttl, link)

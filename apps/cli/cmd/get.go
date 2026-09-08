@@ -119,6 +119,9 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		if err := verifyShareLink(assessment, result, err); err != nil {
 			return "", err
 		}
+		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
+			return "", err
+		}
 		shareLink = result
 		return result.QURL, nil
 	}
@@ -131,6 +134,8 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		if err != nil {
 			return consume.DownloadTarget{}, err
 		}
+		// Legacy direct-link test path. Production mint rejects unsigned links
+		// before this point; keep plain-URL downloader fixtures isolated here.
 		if !consume.NeedsAccessGrant(link) {
 			return consume.DownloadTarget{URL: link}, nil
 		}
