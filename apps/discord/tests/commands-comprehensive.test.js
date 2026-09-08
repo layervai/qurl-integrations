@@ -175,6 +175,9 @@ const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 const mockUploadJsonToConnector = jest.fn();
 jest.mock('../src/connector', () => ({
+  // Watermarked views live on the connector's shared tunnel; revoke calls
+  // this before the resource DELETE. Default to a clean no-op revoke.
+  revokeMintedLinks: jest.fn().mockResolvedValue(true),
   uploadToConnector: mockUploadToConnector,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,

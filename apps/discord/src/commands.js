@@ -52,7 +52,7 @@ const {
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
-const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const {
@@ -8383,6 +8383,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
   // recipients per resource, so the same resource_id is shared.
   const byResource = new Map();
+  // Per-recipient tokens, kept beside the resource grouping. Watermarked sends
+  // mint these on the connector's shared tunnel rather than on this resource,
+  // so revoking the resource alone leaves them live (infra#1552).
+  const qurlIdsByResource = new Map();
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {
     if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
@@ -8392,6 +8396,11 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
+    if (typeof item.qurl_id === 'string' && item.qurl_id.length > 0) {
+      const minted = qurlIdsByResource.get(item.resource_id) || [];
+      minted.push(item.qurl_id);
+      qurlIdsByResource.set(item.resource_id, minted);
+    }
   }
   const resourceEntries = [...byResource.entries()];
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
@@ -8400,6 +8409,11 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const failureUserIds = [];
 
   const results = await batchSettled(resourceEntries, async ([resourceId]) => {
+    // Revoke the connector-side watermarked views FIRST. If this throws the
+    // resource revoke is skipped, so the send stays retryable instead of being
+    // marked revoked while recipient links are still live. A deployment without
+    // render-at-mint answers 503 and this resolves without doing anything.
+    await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId) || [], apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;
   }, 5);

@@ -477,6 +477,67 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   return result.links;
 }
 
+/**
+ * Revoke the watermarked recipient links minted from an uploaded resource.
+ *
+ * Watermarked views are minted on the connector's own shared fileviewer tunnel,
+ * not on the resource this guild owns, so revoking the resource through the
+ * qURL API cannot reach them (qurl-integrations-infra#1552 — confirmed live: the
+ * recipient token still read `active` after a successful resource revoke). The
+ * connector owns that tunnel and exposes this route to revoke them on our
+ * behalf; it authorizes the call by checking that `apiKey` can see `resourceId`,
+ * so a guild can only ever revoke links derived from its own upload.
+ *
+ * Deployments without render-at-mint answer 503. That is not a failure: it means
+ * no watermarked view exists for this send, so there is nothing to revoke and
+ * the caller should carry on to the resource-level revoke.
+ *
+ * @returns {Promise<boolean>} true when the connector revoked (or had nothing to
+ *   revoke); throws when links may still be live, so the caller can leave the
+ *   send retryable rather than reporting a revoke that did not happen.
+ */
+async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
+  const ids = (Array.isArray(qurlIds) ? qurlIds : []).filter(
+    id => typeof id === 'string' && id.length > 0,
+  );
+  if (ids.length === 0) return true;
+
+  const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+    body: JSON.stringify({ resource_id: resourceId, qurl_ids: ids }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (response.status === 503) {
+    // Render-at-mint is off in this deployment, so this send has no
+    // watermarked views. Nothing to revoke.
+    return true;
+  }
+  if (!response.ok) {
+    return throwConnectorError('Connector revoke_links', response);
+  }
+
+  let parsed = null;
+  try {
+    parsed = await response.json();
+  } catch { /* fall through to the shape check below */ }
+
+  // Treat anything other than an all-clear as a failure. `refused` means the
+  // connector could not tie a token to this resource, which is exactly the case
+  // where a link may still be live — reporting success there would repeat the
+  // bug this path exists to close.
+  const results = Array.isArray(parsed?.results) ? parsed.results : [];
+  const unresolved = results.filter(r => r?.status !== 'revoked' && r?.status !== 'already_gone');
+  if (parsed?.success !== true || unresolved.length > 0) {
+    const err = new Error(`Connector revoke_links did not revoke ${unresolved.length || ids.length} link(s)`);
+    err.unresolvedCount = unresolved.length || ids.length;
+    throw err;
+  }
+  logger.info('Revoked watermarked recipient links', { count: results.length });
+  return true;
+}
+
 const DETECT_TARGET_PATH = '/api/detect';
 const DETECT_LINK_EXPIRES_IN = '5m';
 const DETECT_RESOURCE_LIST_LIMIT = 100;
@@ -1106,7 +1167,8 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   return result;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+module.exports = {
+  revokeMintedLinks, uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
 // Keep the future-caller exact-host invariant directly testable without
 // extending production's connector API. Jest sets NODE_ENV=test, matching the
 // precedent in logger.js.
