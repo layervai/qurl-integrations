@@ -54,7 +54,7 @@ func NeedsAccessGrant(link string) bool {
 const (
 	// MsgAccessNotConfigured reports that no deployment trust settings are
 	// available, so direct downloads cannot run at all on this machine.
-	MsgAccessNotConfigured = "this machine isn't set up to download qURL content directly — set QURL_DEPLOYMENT to your deployment settings file, or open the CRID in your browser instead (`qurl get <CRID>` on a terminal, without --file)"
+	MsgAccessNotConfigured = "this machine is not set up to verify qURL links — set QURL_DEPLOYMENT to your deployment settings file"
 
 	// MsgAccessSettingsMismatch reports settings that don't cover the link
 	// the service answered with (typically production settings against a
@@ -122,6 +122,25 @@ func (o *AccessOpener) Grant(ctx context.Context, link string) (AccessGrant, err
 		return AccessGrant{}, classifyAccessError(err)
 	}
 	return accessGrantFromHandle(handle)
+}
+
+// Verify checks the issuer and independently held CRID without requesting access.
+func (o *AccessOpener) Verify(ctx context.Context, link, expectedCRID string) error {
+	if o.LookupEnv != nil {
+		if path, ok := o.LookupEnv(qurl.EnvDeploymentPath); ok && strings.TrimSpace(path) != "" {
+			d, err := qurl.LoadDeployment(strings.TrimSpace(path))
+			if err != nil {
+				return ErrAccessNotConfigured
+			}
+			cfg, err := openerConfig(d)
+			if err != nil {
+				return err
+			}
+			_, err = qurl.VerifyLinkForCRID(link, expectedCRID, cfg.TrustStore)
+			return classifyAccessError(err)
+		}
+	}
+	return classifyAccessError(qurl.VerifyPortalLink(ctx, link, expectedCRID))
 }
 
 func accessGrantFromHandle(handle *qurl.ResourceHandle) (AccessGrant, error) {
@@ -249,7 +268,8 @@ func classifyAccessError(err error) error {
 		return ErrAccessNotConfigured
 	case errors.Is(err, qurl.ErrUnknownKID), errors.Is(err, qurl.ErrRelayURL):
 		return ErrAccessSettingsMismatch
-	case errors.Is(err, qurl.ErrSignature),
+	case errors.Is(err, qurl.ErrCRIDMismatch), errors.Is(err, qurl.ErrNoCRID),
+		errors.Is(err, qurl.ErrSignature),
 		errors.Is(err, qurl.ErrStrictParse),
 		errors.Is(err, qurl.ErrFragment),
 		errors.Is(err, qurl.ErrEncoding),

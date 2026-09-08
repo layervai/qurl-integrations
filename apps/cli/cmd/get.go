@@ -119,6 +119,9 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		if err := verifyShareLink(assessment, result, err); err != nil {
 			return "", err
 		}
+		if err := opts.verifyLink(ctx, result.QURL, assessment.Input); err != nil {
+			return "", err
+		}
 		shareLink = result
 		return result.QURL, nil
 	}
