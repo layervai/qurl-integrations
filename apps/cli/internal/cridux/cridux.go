@@ -51,6 +51,7 @@ type Assessment struct {
 	Warnings []string
 }
 
+// TODO(upstream-contract): update these lengths when the CRID specification adds a form.
 // The two registered CRID encoded lengths (47-character truncated form and
 // 60-character full form) and the boundary above which a value can be a
 // public-key resource identifier (~122 characters today).

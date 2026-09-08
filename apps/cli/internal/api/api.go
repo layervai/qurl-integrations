@@ -9,6 +9,8 @@
 //
 // Share delegates to qurl-go's CRID-based ShareResource. Publish, list, and
 // delete use the resource REST surface through the same transport and errors.
+// qurl-go v0.14.0 ProtectURL still omits the required type discriminator;
+// the REST path also preserves the CLI pagination and single-attempt publish contract.
 package qurlapi
 
 import (

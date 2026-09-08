@@ -207,6 +207,14 @@ complete state directory and run `qurl login` with the other account. Do not
 edit or delete individual state files; qurl rejects cross-account reuse and
 prints the exact directory and device-key ID needed for this recovery.
 
+This release requires CRID continuity and version 3 of the Connector resource
+journal. It does not convert old journals or use the old protocol. Preserve
+old state and finish unresolved operations with its matching binary before
+replacing that environment. To start fresh, stop the daemon, revoke its device
+key in the dashboard, move the complete state directory aside, then run
+`qurl login` and publish again. Fresh publication creates new CRIDs. Do not
+copy individual bindings or pending requests into the new state.
+
 ## Configuration
 
 Every setting resolves through the same precedence chain:

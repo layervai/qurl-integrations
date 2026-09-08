@@ -1015,7 +1015,7 @@ func decodeConnectorResources(data []byte) (connectorResourcesState, error) {
 
 func validateConnectorResourcesState(state connectorResourcesState) error {
 	if state.Version != connectorResourcesVersion {
-		return fmt.Errorf("unsupported version %d; this binary requires version %d and cannot convert old journals; preserve enrollment and pending request state and finish unresolved operations with the previous binary before upgrading", state.Version, connectorResourcesVersion)
+		return fmt.Errorf("unsupported version %d; this binary requires version %d and cannot convert journals; preserve this state and use its matching binary to finish unresolved operations; to start fresh, stop the daemon, revoke its device key in the dashboard, move the complete state directory aside, then run qurl login and publish again (new CRIDs)", state.Version, connectorResourcesVersion)
 	}
 	if state.Bindings == nil || state.Pending == nil || state.Retired == nil {
 		return errors.New("bindings, pending, and retired maps are required")
