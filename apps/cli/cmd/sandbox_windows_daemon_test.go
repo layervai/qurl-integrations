@@ -869,7 +869,7 @@ func registerWindowsSandboxResourceCleanup(t *testing.T, endpoint, connectorID, 
 			t.Errorf("find Windows Connector resource for cleanup: %v", err)
 			return
 		}
-		if err := client.DeleteConnectorResource(ctx, resource.ResourceID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
+		if err := client.DeleteConnectorResource(ctx, resource.CRID); err != nil && !errors.Is(err, qurl.ErrConnectorResourceNotFound) {
 			t.Errorf("revoke Windows Connector resource: %v", err)
 		}
 	})

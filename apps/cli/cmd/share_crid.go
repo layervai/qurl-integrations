@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -75,11 +77,7 @@ else, ready to hand out or open.`,
 			link, err := client.Share(cmd.Context(), assessment.Input, qurlapi.ShareOptions{
 				TTLSeconds: int(ttl.Seconds()),
 			})
-			if err != nil {
-				return err
-			}
-
-			if err := verifyShareLink(assessment, link); err != nil {
+			if err := verifyShareLink(assessment, link, err); err != nil {
 				return err
 			}
 			reportClamp(printer, ttl, link)
@@ -93,15 +91,16 @@ else, ready to hand out or open.`,
 	return cmd
 }
 
-// applyCRIDGuards prints local warnings and applies the environment guard
-// for parsed CRIDs. Warn-only cases proceed; a test CRID aimed at the
-// production endpoint refuses without --yes.
+// applyCRIDGuards requires a valid CRID and applies the environment guard.
 func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, productionEndpoint, yes bool) error {
-	for _, warning := range assessment.Warnings {
-		printer.Warnf("%s", warning)
-	}
 	if assessment.Kind != cridux.KindCRID {
-		return nil
+		message := "a valid CRID is required; copy it from the resource listing"
+		if assessment.Kind == cridux.KindResourceKey {
+			message = "public keys are verification data; use the resource's CRID"
+		} else if len(assessment.Warnings) > 0 {
+			message = strings.Join(assessment.Warnings, " ")
+		}
+		return exitcode.InvalidInputError(message, cridux.ErrUnusableID)
 	}
 	warning, err := cridux.EnvironmentGuard(assessment.CRID.Environment(), productionEndpoint, yes)
 	if err != nil {
@@ -113,37 +112,24 @@ func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, pro
 	return nil
 }
 
-// verifyShareLink is the fail-closed client half of the CRID trust story,
-// applied before anything is emitted:
-//
-//   - shared by CRID: the response must echo exactly that CRID;
-//   - shared by resource key: the response CRID must derive from the key
-//     (the SDK's VerifyCRID);
-//   - shared by an operand the CLI holds no anchor for (typo-warned or
-//     unknown forms): nothing to verify against, so nothing is enforced.
-//
-// Any failure returns a verification error: stdout stays empty and the run
-// exits with code 12.
-func verifyShareLink(assessment *cridux.Assessment, link *qurlapi.ShareLink) error {
-	switch assessment.Kind {
-	case cridux.KindCRID:
-		if link.CRID == "" {
-			return exitcode.VerificationError(msgVerifyMissing, qurl.ErrNoCRID)
-		}
-		if subtle.ConstantTimeCompare([]byte(link.CRID), []byte(assessment.Input)) != 1 {
-			return exitcode.VerificationError(msgVerifyMismatch, qurl.ErrCRIDMismatch)
-		}
-		return nil
-	case cridux.KindResourceKey:
-		if err := link.VerifyKey(assessment.KeyDER); err != nil {
-			return exitcode.VerificationError(msgVerifyMismatch, err)
-		}
-		return nil
-	case cridux.KindCRIDTypo, cridux.KindUnknown:
-		return nil
-	default:
-		return nil
+// verifyShareLink rejects unverified responses before any link is used or printed.
+func verifyShareLink(assessment *cridux.Assessment, link *qurlapi.ShareLink, err error) error {
+	if errors.Is(err, qurl.ErrNoCRID) {
+		return exitcode.VerificationError(msgVerifyMissing, err)
 	}
+	if errors.Is(err, qurl.ErrCRIDMismatch) {
+		return exitcode.VerificationError(msgVerifyMismatch, err)
+	}
+	if err != nil {
+		return err
+	}
+	if link == nil || link.CRID == "" {
+		return exitcode.VerificationError(msgVerifyMissing, qurl.ErrNoCRID)
+	}
+	if subtle.ConstantTimeCompare([]byte(link.CRID), []byte(assessment.Input)) != 1 {
+		return exitcode.VerificationError(msgVerifyMismatch, qurl.ErrCRIDMismatch)
+	}
+	return nil
 }
 
 // reportClamp tells the user when the service granted a shorter lifetime

@@ -106,7 +106,7 @@ func TestPerShareManagerServesEachShareOnItsOwnGroup(t *testing.T) {
 	signed := make([]string, 0, 3)
 	for _, cfg := range groupConfigs(factory) {
 		signed = append(signed, cfg.ResourceID)
-		if len(cfg.Routes) != 1 || cfg.Routes[0].ResourceID != cfg.ResourceID {
+		if len(cfg.Routes) != 1 || cfg.Routes[0].ResourcePublicKey != cfg.ResourceID {
 			t.Fatalf("group for %s carries routes %v, want exactly its own", cfg.ResourceID, cfg.Routes)
 		}
 		if cfg.KnockResourceID != "knock-"+cfg.ResourceID {
@@ -167,14 +167,14 @@ func TestPerShareManagerSpendsOneAdmissionAndOneSessionPerShare(t *testing.T) {
 			t.Fatalf("session %d carries %d routes, want exactly one", i, len(states))
 		}
 		for _, state := range states {
-			if state.Route.ResourceID != session.admission.ResourceID {
-				t.Fatalf("session %d signed for %q but serves %q", i, session.admission.ResourceID, state.Route.ResourceID)
+			if state.Route.ResourcePublicKey != session.admission.ResourcePublicKey {
+				t.Fatalf("session %d signed for %q but serves %q", i, session.admission.ResourcePublicKey, state.Route.ResourcePublicKey)
 			}
 		}
-		if session.admission.KnockResourceID != "knock-"+session.admission.ResourceID {
+		if session.admission.KnockResourceID != "knock-"+session.admission.ResourcePublicKey {
 			t.Fatalf("session %d knocked for %q, want its own row's knock resource", i, session.admission.KnockResourceID)
 		}
-		signed = append(signed, session.admission.ResourceID)
+		signed = append(signed, session.admission.ResourcePublicKey)
 	}
 	sort.Strings(signed)
 	if signed[0] != "a" || signed[1] != "b" || signed[2] != "c" {
@@ -361,7 +361,7 @@ func sessionsFor(sessions *fakeSessionGroupFactory, resourceID string) []*fakeGr
 	defer sessions.mu.Unlock()
 	var matched []*fakeGroupSession
 	for _, session := range sessions.sessions {
-		if session.admission.ResourceID == resourceID {
+		if session.admission.ResourcePublicKey == resourceID {
 			matched = append(matched, session)
 		}
 	}
