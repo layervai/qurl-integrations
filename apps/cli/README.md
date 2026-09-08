@@ -415,6 +415,8 @@ belongs to the CRID you supplied. Set `QURL_DEPLOYMENT` to the path of your
 deployment's settings file (ask whoever runs the deployment for it), unless
 your build includes those settings. Without usable settings, the command
 fails with exit code 3 before printing a link, opening a browser, or downloading.
+Direct or pre-signed URLs in share responses are rejected because they cannot
+be checked against the advertised CRID.
 
 ### qurl list
 

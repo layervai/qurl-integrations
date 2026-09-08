@@ -283,7 +283,7 @@ func TestClassifyAccessError(t *testing.T) {
 		"already classified":     {ErrAccessNotConfigured, ErrAccessNotConfigured},
 		"sdk not configured":     {qurl.ErrNotConfigured, ErrAccessNotConfigured},
 		"unknown kid":            {qurl.ErrUnknownKID, ErrAccessSettingsMismatch},
-		"unsupported CRID":       {qurl.ErrUnsupportedCRIDVersion, ErrAccessSettingsMismatch},
+		"unsupported CRID":       {qurl.ErrUnsupportedCRIDVersion, ErrUnsupportedCRIDVersion},
 		"CRID mismatch":          {qurl.ErrCRIDMismatch, ErrLinkVerification},
 		"missing CRID":           {qurl.ErrNoCRID, ErrLinkVerification},
 		"disallowed endpoint":    {qurl.ErrRelayURL, ErrAccessSettingsMismatch},
@@ -308,5 +308,14 @@ func TestClassifyAccessError(t *testing.T) {
 				t.Errorf("classifyAccessError(%v) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestVerifyPreservesDeploymentFileError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.json")
+	opener := &AccessOpener{LookupEnv: func(name string) (string, bool) { return path, name == qurl.EnvDeploymentPath }}
+	err := opener.Verify(t.Context(), portalLink, "unused")
+	if !errors.Is(err, ErrAccessNotConfigured) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("file error lost: %v", err)
 	}
 }

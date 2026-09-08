@@ -134,6 +134,8 @@ func runGet(ctx context.Context, opts *globalOpts, operand string, flags getFlag
 		if err != nil {
 			return consume.DownloadTarget{}, err
 		}
+		// Legacy direct-link test path. Production mint rejects unsigned links
+		// before this point; keep plain-URL downloader fixtures isolated here.
 		if !consume.NeedsAccessGrant(link) {
 			return consume.DownloadTarget{URL: link}, nil
 		}

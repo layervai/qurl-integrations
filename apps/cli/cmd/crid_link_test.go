@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
@@ -28,8 +29,7 @@ func TestCRIDBindingBeforeShareBrowserAndDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	deployment, err := json.Marshal(qurl.Deployment{
-		Issuers:        []qurl.ManifestIssuer{{Kid: signer.KID(), SPKIDERB64: base64.RawURLEncoding.EncodeToString(issuer)}},
-		RelayAllowlist: []string{"relay.example.com"},
+		Issuers: []qurl.ManifestIssuer{{Kid: signer.KID(), SPKIDERB64: base64.RawURLEncoding.EncodeToString(issuer)}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +92,15 @@ func TestCRIDBindingBeforeShareBrowserAndDownload(t *testing.T) {
 					}
 					if mode == "file" && string(readTestFile(t, dest)) != apitest.DefaultDownloadPayload {
 						t.Fatal("wrong download")
+					}
+					if mode == "share" && strings.TrimSpace(result.stdout.String()) != link {
+						t.Fatal("matching share link not printed")
+					}
+					if mode == "stdout" && result.stdout.String() != apitest.DefaultDownloadPayload {
+						t.Fatal("matching payload not streamed")
+					}
+					if mode == "browser" && (len(browser.opened) != 1 || browser.opened[0] != link) {
+						t.Fatal("matching link not opened")
 					}
 					return
 				}
