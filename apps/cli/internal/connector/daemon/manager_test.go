@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1034,10 +1035,11 @@ func ipcStatus(t *testing.T, client IPCClient) IPCStatus {
 // while keeping the row desired-on, and re-register it under a fresh proxy
 // name after its backoff; once the platform accepts it, it serves.
 func TestManagerHotAddedShareRefusedByPlatformIsVisibleAndRetriedUntilAccepted(t *testing.T) {
-	// Refuse b's first registration only (generation 0), as a platform whose
-	// authorization catches up would; the retry under generation 1 is accepted.
+	// Keep refusing until IPC observes the failure; a 20ms retry can otherwise
+	// finish before a Windows named-pipe status round trip sees it.
+	var accept atomic.Bool
 	refuse := func(route *connectorshare.GroupRoute) bool {
-		return route.RouteID == "connector-b" && route.Generation == 0
+		return route.RouteID == "connector-b" && !accept.Load()
 	}
 	manager, registry, admitter, sessions, client := newRefusingGroupHarness(t, refuse)
 	second := daemonShare("b", 1, "on")
@@ -1075,8 +1077,9 @@ func TestManagerHotAddedShareRefusedByPlatformIsVisibleAndRetriedUntilAccepted(t
 	}
 	// The retry re-registers b under a fresh proxy name and, once accepted,
 	// reaches serving — still on the one admission.
+	accept.Store(true)
 	waitServing(t, manager, "b")
-	if names := session.proxyNames("connector-b"); len(names) != 2 || names[0] == names[1] {
+	if names := session.proxyNames("connector-b"); len(names) < 2 || names[0] == names[len(names)-1] {
 		t.Fatalf("route b registrations = %v, want a refused name then a fresh one", names)
 	}
 	if got := admitter.admissions(); got != 1 {
