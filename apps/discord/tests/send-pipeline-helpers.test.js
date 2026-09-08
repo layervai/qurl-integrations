@@ -1538,7 +1538,6 @@ describe('handleAddRecipients', () => {
 
     const fileBuffer = new ArrayBuffer(16);
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-A', fileBuffer });
-    mockReUploadBuffer.mockResolvedValue({ resource_id: 'new-res-B' });
 
     const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/r-${i}` }));
     const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_link: `https://q.test/r2-${i}` }));
@@ -1552,10 +1551,10 @@ describe('handleAddRecipients', () => {
     const result = await handleAddRecipients('send-batch', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
-    expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 10, apiKey: 'test-api-key', selfDestructSeconds: null });
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 

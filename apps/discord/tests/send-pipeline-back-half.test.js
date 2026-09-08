@@ -263,6 +263,11 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Resource reuse leaves upload stubs unused; never leak once-results across tests.
+  mockDownloadAndUpload.mockReset();
+  mockReUploadBuffer.mockReset();
+  mockUploadJsonToConnector.mockReset();
+  mockMintLinks.mockReset();
   mockDb.markSendRevoking.mockReset();
   mockDb.markSendRevoking.mockResolvedValue(true);
   mockDb.markSendRevoked.mockReset();
@@ -1997,20 +2002,20 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(result.delivered).toBe(0);
   });
 
-  it('surfaces "Link pool exhausted" on a 429 error from the location path (outer catch)', async () => {
+  it('surfaces rate-limit guidance on a 429 error from the location path (outer catch)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower', expires_in: '30m',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockMintLinks.mockRejectedValueOnce(new Error('HTTP 429: rate limit exceeded'));
+    mockMintLinks.mockRejectedValueOnce(Object.assign(new Error('HTTP 429: rate limit exceeded'), { status: 429 }));
 
     const result = await handleAddRecipients(
       'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
     );
 
-    expect(result.msg).toMatch(/pool exhausted/i);
+    expect(result.msg).toMatch(/Too many requests/i);
   });
 });
 
@@ -2843,8 +2848,6 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-0', fileBuffer: new ArrayBuffer(10) });
-    let reuploadIndex = 1;
-    mockReUploadBuffer.mockImplementation(async () => ({ resource_id: `res-${reuploadIndex++}` }));
     for (let batch = 0; batch < 10; batch++) {
       mockMintLinks.mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({
         qurl_id: `q_${batch}_${i}`,
@@ -2862,10 +2865,13 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.newRecipients).toEqual([]);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
-    expect(mockDeleteLink).toHaveBeenCalledTimes(10);
-    expect(mockDeleteLink.mock.calls.map(call => call[0]).sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+    expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
+    expect(mockMintLinks.mock.calls.map(call => [call[0], call[1].n])).toEqual(
+      Array(10).fill(['res-0', 10]),
     );
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-0', 'apikey');
   });
 });
 
@@ -3039,7 +3045,7 @@ describe('handleAddRecipients — happy path (location)', () => {
 });
 
 describe('mintLinksInBatches', () => {
-  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('mints once for recipientCount <= PUBLIC_MINT_BATCH_SIZE (10)', async () => {
     mockMintLinks.mockResolvedValueOnce([
       { qurl_link: 'https://q.test/1' },
       { qurl_link: 'https://q.test/2' },
@@ -3058,7 +3064,7 @@ describe('mintLinksInBatches', () => {
     expect(result[0].resourceId).toBe('res-1');
   });
 
-  it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
+  it('reuses the uploaded resource beyond ten recipients without another upload', async () => {
     mockMintLinks
       .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/10' }]);
@@ -3072,10 +3078,13 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     });
 
-    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(reuploadFn).not.toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockMintLinks.mock.calls.map(call => [call[0], call[1].n])).toEqual([
+      ['res-1', 10], ['res-1', 1],
+    ]);
     expect(result).toHaveLength(11);
-    expect(result[10].resourceId).toBe('res-2');
+    expect(result[10].resourceId).toBe('res-1');
   });
 
   it('returns empty array when recipientCount = 0', async () => {

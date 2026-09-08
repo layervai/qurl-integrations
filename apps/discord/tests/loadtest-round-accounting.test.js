@@ -16,7 +16,6 @@ jest.mock('../src/qurl', () => ({
   deleteLink: jest.fn().mockResolvedValue({}),
 }));
 
-const TOKENS = 10; // TOKENS_PER_RESOURCE, asserted against the export below.
 
 let tmpFile;
 
@@ -76,14 +75,8 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-describe('runRound accounting — pool depth', () => {
-  it('agrees with the constant the batch plan is built from', () => {
-    expect(loadWithCount(10).TOKENS_PER_RESOURCE).toBe(TOKENS);
-  });
-});
-
 describe('runRound accounting — all uploads succeed', () => {
-  it('counts one re-upload per drained pool and mints every batch', async () => {
+  it('uploads once and mints every batch against the same resource', async () => {
     const { runRound } = loadWithCount(30);
     mockReUploadBuffer
       .mockResolvedValueOnce(upload('res-1'))
@@ -93,14 +86,14 @@ describe('runRound accounting — all uploads succeed', () => {
 
     const r = await runRound(1);
 
-    expect(mockReUploadBuffer).toHaveBeenCalledTimes(3);
-    expect(r.reuploads).toBe(2);
+    expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(r.reuploads).toBe(0);
     expect(r.reuploadFail).toBe(0);
     expect(r.fileLinks).toBe(30);
     expect(r.fileFail).toBe(0);
   });
 
-  it('mints each batch against the resource its own re-upload produced', async () => {
+  it('mints each batch against the original uploaded resource', async () => {
     const { runRound } = loadWithCount(30);
     mockReUploadBuffer
       .mockResolvedValueOnce(upload('res-1'))
@@ -110,10 +103,10 @@ describe('runRound accounting — all uploads succeed', () => {
 
     await runRound(1);
 
-    expect(mockMintLinks.mock.calls.map((c) => c[0])).toEqual(['res-1', 'res-2', 'res-3']);
+    expect(mockMintLinks.mock.calls.map((c) => c[0])).toEqual(['res-1', 'res-1', 'res-1']);
   });
 
-  it('registers every resource in a round under one filename series', async () => {
+  it('registers the round resource under its stable filename', async () => {
     const { runRound } = loadWithCount(30);
     mockReUploadBuffer.mockResolvedValue(upload('res'));
     mockMintLinks.mockResolvedValue({});
@@ -121,52 +114,22 @@ describe('runRound accounting — all uploads succeed', () => {
     await runRound(7);
 
     const names = mockReUploadBuffer.mock.calls.map((c) => c[1]);
-    expect(names).toEqual(Array(3).fill('loadtest-round7.bin'));
+    expect(names).toEqual(['loadtest-round7.bin']);
   });
 });
 
-describe('runRound accounting — a re-upload fails', () => {
-  it('charges the batch and continues without minting against the spent resource', async () => {
+describe('runRound accounting — upload fails', () => {
+  it('stops the round before minting when the initial upload fails', async () => {
     const { runRound } = loadWithCount(30);
-    mockReUploadBuffer
-      .mockResolvedValueOnce(upload('res-1'))
-      .mockRejectedValueOnce(new Error('connector blip'))
-      .mockResolvedValueOnce(upload('res-3'));
-    mockMintLinks.mockResolvedValue({});
+    mockReUploadBuffer.mockRejectedValueOnce(new Error('connector blip'));
 
-    const r = await runRound(1);
-
-    expect(r.fileFail).toBe(10);
-    expect(r.fileLinks).toBe(20);
-    expect(r.reuploads).toBe(1);
-    expect(r.reuploadFail).toBe(1);
-
-    expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks.mock.calls.map((c) => c[0])).toEqual(['res-1', 'res-3']);
-  });
-
-  it('reports every distinct re-upload failure, weighted by attempts', async () => {
-    const { runRound } = loadWithCount(30);
-    mockReUploadBuffer
-      .mockResolvedValueOnce(upload('res-1'))
-      .mockRejectedValueOnce(new Error('first blip'))
-      .mockRejectedValueOnce(new Error('second blip'));
-    mockMintLinks.mockResolvedValue({});
-
-    const r = await runRound(1);
-
-    expect(r.reuploadFail).toBe(2);
-    expect(r.fileFail).toBe(20);
-    const logged = console.error.mock.calls.map((c) => String(c[0]));
-    expect(logged.filter((m) => m.includes('re-upload error'))).toEqual([
-      '  File re-upload error x1: first blip',
-      '  File re-upload error x1: second blip',
-    ]);
+    await expect(runRound(1)).rejects.toThrow('connector blip');
+    expect(mockMintLinks).not.toHaveBeenCalled();
   });
 });
 
 describe('runRound accounting — mint failures are a separate population', () => {
-  it('still logs the first mint error on a round where a re-upload failed first', async () => {
+  it('charges only a failed batch and continues minting on the same resource', async () => {
     const { runRound } = loadWithCount(30);
     mockReUploadBuffer
       .mockResolvedValueOnce(upload('res-1'))
@@ -174,12 +137,13 @@ describe('runRound accounting — mint failures are a separate population', () =
       .mockResolvedValueOnce(upload('res-3'));
     mockMintLinks
       .mockResolvedValueOnce({})
-      .mockRejectedValueOnce(new Error('mint exploded'));
+      .mockRejectedValueOnce(new Error('mint exploded'))
+      .mockResolvedValueOnce({});
 
     const r = await runRound(1);
 
-    expect(r.fileFail).toBe(20);
-    expect(r.fileLinks).toBe(10);
+    expect(r.fileFail).toBe(10);
+    expect(r.fileLinks).toBe(20);
     const logged = console.error.mock.calls.map((c) => String(c[0]));
     expect(logged.filter((m) => m.includes('mint error'))).toHaveLength(1);
     expect(logged.find((m) => m.includes('mint error'))).toContain('mint exploded');
@@ -194,7 +158,7 @@ describe('runRound accounting — mint failures are a separate population', () =
 
     expect(r.fileFail).toBe(30);
     expect(r.fileLinks).toBe(0);
-    expect(r.reuploads).toBe(2);
+    expect(r.reuploads).toBe(0);
     const logged = console.error.mock.calls.map((c) => String(c[0]));
     expect(logged.filter((m) => m.includes('mint error'))).toHaveLength(1);
   });
@@ -203,32 +167,6 @@ describe('runRound accounting — mint failures are a separate population', () =
 describe('runRound accounting — latency figures', () => {
   const slow = (ms, value) => () => new Promise((resolve, reject) => {
     setTimeout(() => (value instanceof Error ? reject(value) : resolve(value)), ms);
-  });
-
-  it('keeps re-upload latency out of the mint figure', async () => {
-    const { runRound } = loadWithCount(30);
-    mockReUploadBuffer.mockImplementation(slow(40, upload('res')));
-    mockMintLinks.mockResolvedValue({});
-
-    const r = await runRound(1);
-
-    expect(r.reuploadMs).toBeGreaterThanOrEqual(70);
-    expect(r.mintMs).toBeLessThan(r.reuploadMs / 2);
-  });
-
-  it('accumulates reuploadMs over failed attempts too', async () => {
-    const { runRound } = loadWithCount(30);
-    mockReUploadBuffer
-      .mockImplementationOnce(slow(5, upload('res-1')))
-      .mockImplementationOnce(slow(40, new Error('slow failure')))
-      .mockImplementationOnce(slow(40, new Error('slow failure')));
-    mockMintLinks.mockResolvedValue({});
-
-    const r = await runRound(1);
-
-    expect(r.reuploads).toBe(0);
-    expect(r.reuploadFail).toBe(2);
-    expect(r.reuploadMs).toBeGreaterThanOrEqual(70);
   });
 
   it('charges the initial upload to uploadMs, not reuploadMs', async () => {

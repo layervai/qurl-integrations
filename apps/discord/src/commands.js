@@ -29,7 +29,7 @@ const {
   RESOURCE_TYPES,
   DM_STATUS,
   MAX_FILE_SIZE,
-  TOKENS_PER_RESOURCE,
+  PUBLIC_MINT_BATCH_SIZE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
@@ -79,8 +79,8 @@ const {
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
 // where DM fan-out at Discord's ~5/sec per-bot limit starts taking
-// minutes (1000 / 5 = ~3 min) and qurl-service re-uploads get
-// non-trivial (1000 / TOKENS_PER_RESOURCE = 100 re-uploads).
+// minutes (1000 / 5 = ~3 min) and public Connector minting needs
+// 100 bounded requests (1000 / PUBLIC_MINT_BATCH_SIZE).
 //
 // The effective threshold (`largeSendThreshold()` below) takes the
 // MIN of this floor and half the configured cap, so operators who
@@ -1654,18 +1654,14 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 // own PR against a stable baseline.
 
 /**
- * Mint one-time links across a stream of connector resources, each capped at
- * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
- * `reuploadFn` is invoked to produce a new one.
- *
- * Centralizes the re-upload / batching / quota logic so a fix lands in one
- * place across the send pipeline (file/location) and handleAddRecipients
- * (file/location).
+ * Mint one-time links in bounded requests. Public batches reuse one uploaded
+ * resource. Private batches require a fresh upload capability after each
+ * 100-recipient redemption.
  *
  * @param {object} opts
  * @param {string} opts.initialResourceId — resource_id from the first upload
- * @param {() => Promise<{resource_id: string}>} opts.reuploadFn — called when
- *   the current resource's token pool is drained. Must return a fresh resource.
+ * @param {() => Promise<{resource_id: string}>} opts.reuploadFn — supplies a
+ *   fresh private upload capability for the next delegated batch.
  * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
  * @param {number} opts.recipientCount — number of tokens to mint in total.
  * @param {string} opts.apiKey — QURL API key.
@@ -1688,7 +1684,7 @@ async function mintLinksInBatches({
   selfDestructSeconds = null, guildId,
 }) {
   const allLinks = [];
-  const batchCapacity = config.PRIVATE_UPLOAD_QURL ? 100 : TOKENS_PER_RESOURCE;
+  const batchCapacity = config.PRIVATE_UPLOAD_QURL ? 100 : PUBLIC_MINT_BATCH_SIZE;
   let currentResourceId = initialResourceId;
   let currentPrivateUpload = initialPrivateUpload;
   let tokensUsed = 0;
@@ -1704,7 +1700,7 @@ async function mintLinksInBatches({
     // Connector path; it is not a private-send journey test. This loop's 100-link
     // private shape is pinned directly in send-pipeline-back-half.test.js.
     for (let i = 0; i < recipientCount; i += batchCapacity) {
-      if (tokensUsed >= batchCapacity && i > 0) {
+      if (config.PRIVATE_UPLOAD_QURL && tokensUsed >= batchCapacity && i > 0) {
         const re = await reuploadFn();
         currentResourceId = re.resource_id;
         currentPrivateUpload = re.private_upload;
@@ -2063,9 +2059,7 @@ async function executeSendPipeline(interaction, {
 
       // Download once, cache the buffer for re-uploads.
       // selfDestructSeconds threads through both initial upload AND every
-      // re-upload, so the bot's "Add Recipients" mints the same TTL on
-      // each new resource that gets registered (TOKENS_PER_RESOURCE
-      // exhaustion → re-upload → new connector resource).
+      // private capability renewal and any later Add Recipients upload.
       const firstUpload = await downloadAndUpload(
         attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds,
         ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
@@ -2121,7 +2115,7 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
     } else {
       // Location send — upload JSON payload to connector, then mint in batches
-      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
+      // of PUBLIC_MINT_BATCH_SIZE against the same public resource.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       // Note: google-map JSON resources hit the connector's render
       // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
@@ -2191,14 +2185,9 @@ async function executeSendPipeline(interaction, {
     // after a return-from-catch, and `releaseSlot` is idempotent via
     // the `fileSendSlotClaimed` flag. Dropping the duplicate call here
     // keeps the single-release-path invariant visible at a glance.
-    // Surface a specific message for known upstream failure codes so the
-    // user knows what to do (re-upload to refresh the per-resource quota)
-    // instead of seeing a generic "try again" that won't help.
     if (error.apiCode === 'quota_exceeded') {
-      const isFile = resourceType === RESOURCE_TYPES.FILE;
-      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
       return interaction.editReply({
-        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
+        content: "Couldn't create links because your account has reached a quota. Check your qURL plan and usage before trying again.",
       });
     }
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
@@ -2359,8 +2348,8 @@ async function executeSendPipeline(interaction, {
   }
 
   // Save send config for "Add Recipients" reuse. For file sends, also stash
-  // the Discord CDN URL + content type so we can re-download + re-upload when
-  // adding recipients (the original resource's grant pool may be drained).
+  // the Discord CDN URL + content type for the next Add Recipients upload,
+  // whose resource remains the scope of that operation's failure cleanup.
   // Logged-and-swallowed: a failure here doesn't block DM delivery (already
   // done above) but it disables future Add Recipients / revoke-via-ui for
   // this send. The per-link rows in qurl_sends persisted above, so /qurl
@@ -3224,10 +3213,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   try {
     if (hasFile) {
       activeKind = 'file';
-      // Re-download from the stored Discord CDN URL, then upload a fresh
-      // resource so the grant pool is full. Re-upload again every
-      // TOKENS_PER_RESOURCE recipients. The original resource is drained by
-      // the initial send, so we CANNOT reuse sendConfig.connector_resource_id.
+      // Keep one upload boundary per Add Recipients operation: failure cleanup
+      // revokes this operation's parent resource. Reusing a prior parent needs
+      // child-only revocation coordinated with #1420 before that is safe.
+      // Public recipient batches below reuse this one upload.
       if (!sendConfig.attachment_url) {
         return {
           msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
@@ -3257,7 +3246,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       const contentType = sendConfig.attachment_content_type || 'application/octet-stream';
 
       try {
-        // Initial download+upload gives us the buffer for subsequent re-uploads.
         const first = await downloadAndUpload(
           sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct,
           ...(config.PRIVATE_UPLOAD_QURL ? [audienceKeyId, privateSendDeadlineMs] : []),
@@ -3292,9 +3280,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         // never reaches a Discord reply. (The expiry-shaped user copy is
         // pre-existing; decoupling it from the network case is tracked in #634.)
         const isExpired = /403|expired|network|CDN/i.test(err.message || '');
-        const msg = isExpired
-          ? 'Original attachment URL has expired. Please create a new send.'
-          : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
+        const msg = err.apiCode === 'quota_exceeded'
+          ? 'Your account has reached a quota. Check your qURL plan and usage before adding recipients.'
+          : isExpired
+            ? 'Original attachment URL has expired. Please create a new send.'
+            : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
           sendId,
           error: err.message,
@@ -3306,7 +3296,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         // Always emit — every failure here (CDN re-download, connector
         // re-upload, or mint) is a "couldn't create links" event. A rare,
         // expected CDN-expiry (Add Recipients on a >24h-old send) is absorbed
-        // by the alarm's sustained threshold, exactly like pool-exhaustion — no
+        // by the alarm's sustained threshold — no
         // source-side skip. (An earlier message/phase-based skip here risked
         // silently suppressing real connector 403/auth outages.) quota_exceeded
         // — the one genuinely high-volume normal condition — is still skipped
@@ -3389,10 +3379,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       status: error.status,
       ...partialLinkLogFields(error),
     });
-    const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
-    const msg = isPoolExhausted
-      ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
-      : 'Failed to create links for new recipients.';
+    const msg = error.apiCode === 'quota_exceeded'
+      ? 'Your account has reached a quota. Check your qURL plan and usage before adding recipients.'
+      : error.status === 429
+        ? 'Too many requests. Wait a moment before adding recipients again.'
+        : 'Failed to create links for new recipients.';
     // kind: activeKind — set on entry to each branch (see its decl above);
     // a future refactor that throws before either branch lands kind=null,
     // discoverable in CloudWatch. quota_exceeded skip lives in emitMintFailureAudit.
@@ -8563,8 +8554,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   // deleteLink deletes the whole resource; one DELETE per unique
   // resource_id, fan result out to every recipient sharing it.
-  // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
-  // recipients per resource, so the same resource_id is shared.
+  // Public sends share one resource across all recipient batches.
   const byResource = new Map();
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {

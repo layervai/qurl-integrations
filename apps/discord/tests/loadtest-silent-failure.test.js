@@ -1042,10 +1042,6 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(preflight).toBeLessThan(guard);
   });
 
-  it('uploads through reUploadBuffer, twice and only twice', () => {
-    expect(callsNamed('reUploadBuffer')).toHaveLength(2);
-  });
-
   it('keeps credentials, viewer policy, and the private deadline as optional trailing parameters', () => {
     let params = null;
     const paramName = (param) =>

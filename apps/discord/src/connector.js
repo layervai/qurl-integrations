@@ -331,9 +331,8 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
 
 /**
  * Re-register an already-downloaded file buffer with the connector.
- * Creates a new qURL resource (with a fresh token pool) without
- * re-downloading from Discord CDN. Used when the per-resource token
- * quota (10) is exhausted and more recipients need links.
+ * Used by the load runner and private capability renewal to upload without
+ * re-downloading from Discord CDN.
  */
 async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds, audienceKeyId, privateSendDeadlineMs) {
   filename = sanitizeFilename(filename);
@@ -450,10 +449,9 @@ async function mintLinks(resourceId, {
   // generic-error guard so the duplicate validation cannot drift or echo a
   // cross-wired token into a caller's logs.
   validateResourceId(resourceId);
-  // Bound `n` defensively — callers in this codebase already cap at 10
-  // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
-  // so validate at the API boundary. Negative or non-integer values would
-  // make the qURL backend behave unpredictably; 100 is a comfortable ceiling.
+  // Bound `n` defensively. Public sends use PUBLIC_MINT_BATCH_SIZE (10);
+  // private delegated batches allow up to 100. Keep this validation at the
+  // exported client boundary as well as in the send pipeline.
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }

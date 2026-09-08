@@ -216,7 +216,7 @@ describe('runRound ledgering', () => {
     return mod;
   }
 
-  it('records every parent a round creates, re-uploads included', async () => {
+  it('records the one parent reused by every mint batch', async () => {
     const payload = path.join(os.tmpdir(), `loadtest-payload-${process.pid}.bin`);
     const ledger = path.join(os.tmpdir(), `loadtest-round-ledger-${process.pid}.jsonl`);
     fs.writeFileSync(payload, 'x');
@@ -233,8 +233,8 @@ describe('runRound ledgering', () => {
     const mod = loadWith(['--count', '30', '--file', payload, '--ledger', ledger]);
     await mod.runRound(1);
 
-    expect(reUploadBuffer).toHaveBeenCalledTimes(3);
-    expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
+    expect(reUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(mod.readLedger(ledger)).toEqual(['res-1']);
   });
 });
 

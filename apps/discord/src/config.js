@@ -476,8 +476,8 @@ module.exports = {
   // to the desired bound in their env; the voice-everyone path will then
   // partial-resolve up to that bound rather than refusing.
   // Operational implications a max-size send carries:
-  //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
-  //     qurl-service per send (`mintLinksInBatches`).
+  //   - up to 2000 public mint requests against one resource, or 200
+  //     private uploads with one delegated capability per 100 recipients.
   //   - DM delivery is bounded by Discord's per-bot DM rate limit
   //     (~5/sec); a 20k send takes >1 hour to finish DM fan-out, and
   //     `monitorLinkStatus`'s interval-based progress tracking must
