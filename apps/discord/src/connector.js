@@ -488,9 +488,12 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  * behalf; it authorizes the call by checking that `apiKey` can see `resourceId`,
  * so a guild can only ever revoke links derived from its own upload.
  *
- * Deployments without render-at-mint answer 503. That is not a failure: it means
- * no watermarked view exists for this send, so there is nothing to revoke and
- * the caller should carry on to the resource-level revoke.
+ * TODO(upstream-contract): qurl-integrations-infra#1553 keeps this endpoint
+ * callable even when render-at-mint is currently disabled. Tokens without a
+ * tunnel-mint row return `already_gone`; every requested qurl_id must have one
+ * ordered result bearing the same id. A 404, 410, or 503 is never evidence that
+ * a historical send lacked connector-managed links, so all non-2xx responses
+ * fail closed.
  *
  * @returns {Promise<boolean>} true when the connector revoked (or had nothing to
  *   revoke); throws when links may still be live, so the caller can leave the
@@ -509,32 +512,41 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     signal: AbortSignal.timeout(30000),
   });
 
-  if (response.status === 503) {
-    // Render-at-mint is off in this deployment, so this send has no
-    // watermarked views. Nothing to revoke.
-    return true;
-  }
   if (!response.ok) {
     return throwConnectorError('Connector revoke_links', response);
   }
 
-  let parsed = null;
+  let parsed;
   try {
     parsed = await response.json();
-  } catch { /* fall through to the shape check below */ }
-
-  // Treat anything other than an all-clear as a failure. `refused` means the
-  // connector could not tie a token to this resource, which is exactly the case
-  // where a link may still be live — reporting success there would repeat the
-  // bug this path exists to close.
-  const results = Array.isArray(parsed?.results) ? parsed.results : [];
-  const unresolved = results.filter(r => r?.status !== 'revoked' && r?.status !== 'already_gone');
-  if (parsed?.success !== true || unresolved.length > 0) {
-    const err = new Error(`Connector revoke_links did not revoke ${unresolved.length || ids.length} link(s)`);
-    err.unresolvedCount = unresolved.length || ids.length;
+  } catch {
+    const err = new Error('Connector revoke_links returned invalid JSON');
+    err.unresolvedCount = ids.length;
     throw err;
   }
-  logger.info('Revoked watermarked recipient links', { count: results.length });
+
+  // Require one ordered all-clear outcome for every requested id. Checking only
+  // for bad statuses would accept an empty/short result array and finalize a
+  // send while omitted links may still be live. `refused` is also a failure: it
+  // means the connector could not tie the token to this authorized resource.
+  const results = Array.isArray(parsed?.results) ? parsed.results : [];
+  let unresolvedCount = ids.length;
+  if (parsed?.success === true && Array.isArray(parsed.results)) {
+    unresolvedCount = ids.reduce((count, id, index) => {
+      const result = results[index];
+      const statusConfirmed = result?.status === 'revoked' || result?.status === 'already_gone';
+      return count + (result?.qurl_id === id && statusConfirmed ? 0 : 1);
+    }, 0);
+    // Extra outcomes violate the same one-for-one contract. Count them without
+    // exposing any token value in the thrown message or application logs.
+    unresolvedCount += Math.max(0, results.length - ids.length);
+  }
+  if (unresolvedCount > 0) {
+    const err = new Error(`Connector revoke_links did not confirm ${unresolvedCount} link(s)`);
+    err.unresolvedCount = unresolvedCount;
+    throw err;
+  }
+  logger.info('Revoked watermarked recipient links', { count: ids.length });
   return true;
 }
 
@@ -1168,7 +1180,16 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
 }
 
 module.exports = {
-  revokeMintedLinks, uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, detectTunnelHostSuffixesForEndpoint };
+  uploadToConnector,
+  downloadAndUpload,
+  reUploadBuffer,
+  mintLinks,
+  revokeMintedLinks,
+  detectWatermark,
+  uploadJsonToConnector,
+  isAllowedSourceUrl,
+  detectTunnelHostSuffixesForEndpoint,
+};
 // Keep the future-caller exact-host invariant directly testable without
 // extending production's connector API. Jest sets NODE_ENV=test, matching the
 // precedent in logger.js.

@@ -139,10 +139,11 @@ const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 const mockUploadJsonToConnector = jest.fn();
+const mockRevokeMintedLinks = jest.fn().mockResolvedValue(true);
 jest.mock('../src/connector', () => ({
   // Watermarked views live on the connector's shared tunnel; revoke calls
   // this before the resource DELETE. Default to a clean no-op revoke.
-  revokeMintedLinks: jest.fn().mockResolvedValue(true),
+  revokeMintedLinks: mockRevokeMintedLinks,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
@@ -799,6 +800,72 @@ describe('revokeAllLinks', () => {
     resource_id: `res-${i + 1}`,
     recipient_discord_id: `user-${i + 1}`,
   }));
+
+  it('revokes connector-managed links before deleting their source resource', async () => {
+    const order = [];
+    mockRevokeMintedLinks.mockImplementationOnce(async () => { order.push('connector'); return true; });
+    mockDeleteLink.mockImplementationOnce(async () => { order.push('resource'); });
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
+      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: 'q_bbb' },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'res-1', ['q_aaa', 'q_bbb'], 'apikey',
+    );
+    // Order is load-bearing: deleting the resource first would finalize the
+    // send while connector-managed recipient links are still live.
+    expect(order).toEqual(['connector', 'resource']);
+    expect(result.success).toBe(2);
+  });
+
+  it('leaves the send retryable and skips the resource delete when connector revoke fails', async () => {
+    mockRevokeMintedLinks.mockRejectedValueOnce(
+      new Error('Connector revoke_links did not confirm 1 link(s)'),
+    );
+    mockDeleteLink.mockResolvedValueOnce(undefined);
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(result.success).toBe(0);
+    expect(result.total).toBe(1);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
+
+  it('still revokes a legacy resource whose rows have no recorded token ids', async () => {
+    mockRevokeMintedLinks.mockResolvedValueOnce(true);
+    mockDeleteLink.mockResolvedValueOnce(undefined);
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1' },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(1);
+  });
+
+  it('fails closed when a stored token id is present but malformed', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 42 },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(result.success).toBe(0);
+    expect(result.total).toBe(1);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+  });
 
   it('records revocation intent before DELETEs and marks the send revoked only after every DELETE succeeds', async () => {
     mockDb.getSendItems.mockResolvedValueOnce(makeItems(3));
@@ -3504,64 +3571,5 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
     const [, message] = mockSendChannelMessage.mock.calls[0];
     expect(message.content).not.toMatch(/\u202E/u);
-  });
-});
-
-
-// infra#1552: watermarked recipient links are minted on the connector's shared
-// fileviewer tunnel, not on the resource this guild owns, so revoking the
-// resource alone leaves them live. Confirmed in sandbox before this was
-// written: the token still read `active` after a 204 on the upload resource.
-describe('revokeAllLinks - watermarked recipient links', () => {
-  const { revokeMintedLinks } = require('../src/connector');
-
-  it('revokes the connector-side minted links before deleting the resource', async () => {
-    const order = [];
-    revokeMintedLinks.mockImplementation(async () => { order.push('connector'); return true; });
-    mockDeleteLink.mockImplementation(async () => { order.push('resource'); });
-    mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
-      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: 'q_bbb' },
-    ]);
-
-    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
-
-    expect(revokeMintedLinks).toHaveBeenCalledTimes(1);
-    const [resourceId, qurlIds] = revokeMintedLinks.mock.calls[0];
-    expect(resourceId).toBe('res-1');
-    expect(qurlIds).toEqual(['q_aaa', 'q_bbb']);
-    // Order is load-bearing: revoking the resource first would finalize the
-    // send while the watermarked views are still live.
-    expect(order).toEqual(['connector', 'resource']);
-    expect(result.success).toBe(2);
-  });
-
-  it('leaves the send retryable and skips the resource delete when the connector revoke fails', async () => {
-    revokeMintedLinks.mockRejectedValueOnce(new Error('Connector revoke_links did not revoke 1 link(s)'));
-    mockDeleteLink.mockResolvedValue(undefined);
-    mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
-    ]);
-
-    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
-
-    expect(mockDeleteLink).not.toHaveBeenCalled();
-    expect(result.success).toBe(0);
-    expect(result.total).toBe(1);
-    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
-  });
-
-  it('still revokes the resource for a send with no minted token ids', async () => {
-    revokeMintedLinks.mockResolvedValue(true);
-    mockDeleteLink.mockResolvedValue(undefined);
-    mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-1', recipient_discord_id: 'user-1' },
-    ]);
-
-    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
-
-    expect(revokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
-    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
-    expect(result.success).toBe(1);
   });
 });

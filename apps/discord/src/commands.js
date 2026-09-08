@@ -8387,6 +8387,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // mint these on the connector's shared tunnel rather than on this resource,
   // so revoking the resource alone leaves them live (infra#1552).
   const qurlIdsByResource = new Map();
+  const resourcesWithMalformedQurlIds = new Set();
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {
     if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
@@ -8396,7 +8397,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
-    if (typeof item.qurl_id === 'string' && item.qurl_id.length > 0) {
+    const qurlIdRecorded = Object.prototype.hasOwnProperty.call(item, 'qurl_id');
+    if (qurlIdRecorded && (typeof item.qurl_id !== 'string' || item.qurl_id.trim().length === 0)) {
+      // Missing means a legitimate pre-qurl_id legacy row. Present-but-invalid
+      // means we cannot prove that every connector-managed link was revoked.
+      resourcesWithMalformedQurlIds.add(item.resource_id);
+    } else if (qurlIdRecorded) {
       const minted = qurlIdsByResource.get(item.resource_id) || [];
       minted.push(item.qurl_id);
       qurlIdsByResource.set(item.resource_id, minted);
@@ -8409,10 +8415,14 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   const failureUserIds = [];
 
   const results = await batchSettled(resourceEntries, async ([resourceId]) => {
+    if (resourcesWithMalformedQurlIds.has(resourceId)) {
+      throw new Error('Cannot revoke resource with malformed stored token identity');
+    }
     // Revoke the connector-side watermarked views FIRST. If this throws the
     // resource revoke is skipped, so the send stays retryable instead of being
-    // marked revoked while recipient links are still live. A deployment without
-    // render-at-mint answers 503 and this resolves without doing anything.
+    // marked revoked while recipient links are still live. The connector route
+    // remains callable when render-at-mint is off; a missing mapping is the
+    // explicit `already_gone` outcome, never inferred from an HTTP error.
     await revokeMintedLinks(resourceId, qurlIdsByResource.get(resourceId) || [], apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;

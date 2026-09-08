@@ -513,6 +513,156 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
+  describe('revokeMintedLinks — fail-closed response contract', () => {
+    it('does not call the connector when no token ids were recorded', async () => {
+      globalThis.fetch = jest.fn();
+
+      await expect(connector.revokeMintedLinks('res-1', [], 'guild-key'))
+        .resolves.toBe(true);
+
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('sends the caller credential and accepts one ordered outcome per requested token', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          results: [
+            { qurl_id: 'q_one', status: 'revoked' },
+            { qurl_id: 'q_two', status: 'already_gone' },
+          ],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks(
+        'res-1', ['q_one', 'q_two'], 'guild-key',
+      )).resolves.toBe(true);
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        'https://connector.test.local/api/revoke_links',
+        expect.objectContaining({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer guild-key',
+          },
+          body: JSON.stringify({
+            resource_id: 'res-1',
+            qurl_ids: ['q_one', 'q_two'],
+          }),
+        }),
+      );
+    });
+
+    it.each([404, 410, 503])('fails closed on connector HTTP %i', async (status) => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status,
+        text: async () => JSON.stringify({
+          success: false,
+          code: status === 503 ? 'revoke_not_available' : 'not_found',
+          results: [],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .rejects.toMatchObject({
+          message: `Connector revoke_links failed (${status})`,
+          status,
+        });
+    });
+
+    it('rejects a success response that omits a requested outcome', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          results: [{ qurl_id: 'q_one', status: 'revoked' }],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks(
+        'res-1', ['q_one', 'q_two'], 'guild-key',
+      )).rejects.toMatchObject({ unresolvedCount: 1 });
+    });
+
+    it('rejects a success response whose outcome belongs to a different token', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          results: [{ qurl_id: 'q_other', status: 'revoked' }],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .rejects.toMatchObject({ unresolvedCount: 1 });
+    });
+
+    it('rejects a success response with an extra outcome', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          results: [
+            { qurl_id: 'q_one', status: 'revoked' },
+            { qurl_id: 'q_extra', status: 'already_gone' },
+          ],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .rejects.toMatchObject({ unresolvedCount: 1 });
+    });
+
+    it('rejects success false even when every per-token status looks successful', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: false,
+          results: [{ qurl_id: 'q_one', status: 'revoked' }],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .rejects.toMatchObject({ unresolvedCount: 1 });
+    });
+
+    it.each(['refused', 'failed', 'unknown'])(
+      'rejects the per-token %s status',
+      async (status) => {
+        globalThis.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            results: [{ qurl_id: 'q_one', status }],
+          }),
+        });
+
+        await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+          .rejects.toMatchObject({ unresolvedCount: 1 });
+      },
+    );
+
+    it('reports malformed JSON distinctly from a confirmed revoke failure', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => { throw new SyntaxError('bad JSON'); },
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .rejects.toThrow('Connector revoke_links returned invalid JSON');
+    });
+  });
+
   describe('mintLinks — null/missing links guard (line 96)', () => {
     it('throws when result.links is null', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
