@@ -16,6 +16,11 @@ const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
+// TODO(upstream-contract): qurl-integrations-infra's render-at-mint handler has
+// a 55s internal request budget (source GET + tenant probe + service remint).
+// Leave 10s for response transport so the caller does not abort valid work
+// while the connector can still mint shared-tunnel tokens.
+const MINT_LINK_TIMEOUT_MS = 65_000;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -99,7 +104,7 @@ function qurlIdsFromLinks(links) {
   return links.map(link => link.qurl_id);
 }
 
-function throwConnectorErrorFromBody(label, response, {
+function connectorErrorFromBody(label, response, {
   bodyText = '',
   apiCode = null,
   apiDetail = null,
@@ -120,7 +125,11 @@ function throwConnectorErrorFromBody(label, response, {
     err.partialLinkCount = partialQurlIds.length;
     err.partialQurlIds = partialQurlIds;
   }
-  throw err;
+  return err;
+}
+
+function throwConnectorErrorFromBody(label, response, options) {
+  throw connectorErrorFromBody(label, response, options);
 }
 
 async function throwConnectorError(label, response) {
@@ -435,7 +444,7 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(MINT_LINK_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -457,12 +466,32 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         partial_qurl_ids: partialQurlIds,
       });
     }
-    return throwConnectorErrorFromBody('Connector mint_link', response, {
+    const errorOptions = {
       bodyText,
       apiCode,
       apiDetail,
       partialQurlIds,
-    });
+    };
+    const mintError = connectorErrorFromBody('Connector mint_link', response, errorOptions);
+    if (partialQurlIds.length === 0) throw mintError;
+
+    // Preserve the mint failure as the caller-visible error, but first clean up
+    // every connector-managed token the non-2xx response proves was minted.
+    // Otherwise a render failure strands live shared-account tokens and retries
+    // consume quota without any durable send row from which to revoke them.
+    try {
+      await revokeMintedLinks(resourceId, partialQurlIds, apiKey);
+    } catch (cleanupError) {
+      mintError.partialCleanupFailed = true;
+      logger.error('Connector partial mint cleanup failed', {
+        resource_id: resourceId,
+        partial_link_count: partialQurlIds.length,
+        cleanup_error_name: cleanupError?.name,
+        cleanup_status: cleanupError?.status,
+        cleanup_api_code: cleanupError?.apiCode,
+      });
+    }
+    throw mintError;
   }
 
   const result = await response.json();
@@ -489,20 +518,29 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  * so a guild can only ever revoke links derived from its own upload.
  *
  * TODO(upstream-contract): qurl-integrations-infra#1553 keeps this endpoint
- * callable even when render-at-mint is currently disabled. Tokens without a
- * tunnel-mint row return `already_gone`; every requested qurl_id must have one
- * ordered result bearing the same id. A 404, 410, or 503 is never evidence that
- * a historical send lacked connector-managed links, so all non-2xx responses
- * fail closed.
+ * callable even when render-at-mint is currently disabled. On a mint-row miss,
+ * it strongly reads qurl-service under the connector identity: only an
+ * authoritative owner-hidden 404 proves the id is not servable on the shared
+ * tunnel (`already_gone`); 200, transport, and ambiguous responses fail. Every
+ * requested qurl_id has one unique result in an unordered exact set. A 404,
+ * 410, or 503 from this endpoint itself is never evidence that a historical
+ * send lacked connector-managed links, so all non-2xx responses fail closed.
  *
  * @returns {Promise<boolean>} true when the connector revoked (or had nothing to
  *   revoke); throws when links may still be live, so the caller can leave the
  *   send retryable rather than reporting a revoke that did not happen.
  */
 async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
-  const ids = (Array.isArray(qurlIds) ? qurlIds : []).filter(
-    id => typeof id === 'string' && id.length > 0,
-  );
+  if (!Array.isArray(qurlIds)) {
+    throw new Error('Invalid connector revoke token list');
+  }
+  const rawIds = qurlIds;
+  if (rawIds.some(id => typeof id !== 'string' || id.trim().length === 0)) {
+    throw new Error('Invalid connector revoke token identity');
+  }
+  // A repaired/resend row can repeat a token. Revoke each identity once and
+  // require one response outcome per unique requested identity.
+  const ids = [...new Set(rawIds.map(id => id.trim()))];
   if (ids.length === 0) return true;
 
   const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
@@ -525,21 +563,27 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
     throw err;
   }
 
-  // Require one ordered all-clear outcome for every requested id. Checking only
+  // Require one id-keyed all-clear outcome for every requested id. Checking only
   // for bad statuses would accept an empty/short result array and finalize a
-  // send while omitted links may still be live. `refused` is also a failure: it
-  // means the connector could not tie the token to this authorized resource.
+  // send while omitted links may still be live. Results may be reordered, but
+  // duplicate or foreign outcomes violate the exact-coverage contract.
   const results = Array.isArray(parsed?.results) ? parsed.results : [];
   let unresolvedCount = ids.length;
   if (parsed?.success === true && Array.isArray(parsed.results)) {
-    unresolvedCount = ids.reduce((count, id, index) => {
-      const result = results[index];
+    const requested = new Set(ids);
+    const confirmed = new Set();
+    let invalidOutcomeCount = 0;
+    for (const result of results) {
       const statusConfirmed = result?.status === 'revoked' || result?.status === 'already_gone';
-      return count + (result?.qurl_id === id && statusConfirmed ? 0 : 1);
-    }, 0);
-    // Extra outcomes violate the same one-for-one contract. Count them without
-    // exposing any token value in the thrown message or application logs.
-    unresolvedCount += Math.max(0, results.length - ids.length);
+      if (!requested.has(result?.qurl_id) || confirmed.has(result.qurl_id) || !statusConfirmed) {
+        invalidOutcomeCount++;
+      } else {
+        confirmed.add(result.qurl_id);
+      }
+    }
+    // Use the larger count so one foreign/duplicate outcome replacing one
+    // missing requested outcome is reported once rather than double-counted.
+    unresolvedCount = Math.max(ids.length - confirmed.size, invalidOutcomeCount);
   }
   if (unresolvedCount > 0) {
     const err = new Error(`Connector revoke_links did not confirm ${unresolvedCount} link(s)`);

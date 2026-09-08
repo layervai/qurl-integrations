@@ -853,18 +853,76 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(1);
   });
 
-  it('fails closed when a stored token id is present but malformed', async () => {
+  it('revokes valid children and the parent but stays unfinalized on a malformed stored token id', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_good' },
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 42 },
     ]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
-    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
     expect(result.success).toBe(0);
     expect(result.total).toBe(1);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot fully revoke resource with malformed stored token identity',
+      expect.objectContaining({ sendId: 'send-1', malformedTokenCount: 1 }),
+    );
+  });
+
+  it('still attempts the parent revoke when valid-child cleanup fails beside a malformed id', async () => {
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('connector unavailable'));
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_good' },
+      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: { corrupt: true } },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(result.success).toBe(0);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot fully revoke resource with malformed stored token identity',
+      expect.objectContaining({
+        connectorRevokeConfirmed: false,
+        resourceRevokeConfirmed: true,
+      }),
+    );
+  });
+
+  it.each([null, undefined, ''])('treats sparse legacy token value %p as absent', async (qurlId) => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: qurlId },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(result.success).toBe(1);
+  });
+
+  it('retries the same connector ids when parent deletion fails after child revoke', async () => {
+    mockDb.getSendItems.mockResolvedValue([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_aaa' },
+    ]);
+    mockDeleteLink
+      .mockRejectedValueOnce(new Error('qURL resource delete failed'))
+      .mockResolvedValueOnce(undefined);
+
+    const first = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+    const second = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(first.success).toBe(0);
+    expect(second.success).toBe(1);
+    expect(mockRevokeMintedLinks.mock.calls).toEqual([
+      ['res-1', ['q_aaa'], 'apikey'],
+      ['res-1', ['q_aaa'], 'apikey'],
+    ]);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledTimes(1);
   });
 
   it('records revocation intent before DELETEs and marks the send revoked only after every DELETE succeeds', async () => {
