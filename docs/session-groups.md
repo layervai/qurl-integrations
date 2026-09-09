@@ -58,6 +58,27 @@ platform accepts those in batches, so 1000 shares on one machine become cheap.
   code, or failed — derived from that route's phase on the session. The IPC
   `/status` contract is unchanged.
 
+## Runtime request headers
+
+An external supervisor (see the CLI README's
+[External supervision](../apps/cli/README.md#external-supervision)) can attach
+request headers to routes at runtime with `PUT /overlay` on the daemon's
+control socket: a JSON object keyed by Connector ID, each entry the headers
+the daemon adds to every request it forwards to that share's local origin —
+for example a process-random token the origin requires before it serves
+anything. The overlay lives in process memory only. It is never written to
+the registry or any other file, never part of `/status`, `qurl inspect`, or a
+log line, and a restarted daemon starts without one, so the supervisor pushes
+it before it releases the daemon's deferred first reconcile. Each `PUT`
+replaces the whole overlay and triggers one reconcile, which pushes the full
+desired route set to the live session; the session compares each route's
+definition, headers included, and re-registers only the routes that changed,
+under a fresh proxy name, with no new knock and no effect on their siblings —
+the same per-route isolation `restart` has. In `per-share` mode the overlay is
+handed to every group. A route carries at most 16 headers and 1,024 aggregate
+name-and-value bytes, and a non-empty set requires the encrypted tunnel
+transport the daemon always uses.
+
 ## Modes
 
 The single-session model above is the target and the default. The daemon also
