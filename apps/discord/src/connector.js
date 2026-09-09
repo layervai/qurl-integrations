@@ -29,6 +29,8 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // #1553 rejects larger requests atomically. Keep this endpoint contract local
 // rather than coupling connector.js to commands.js's independently tunable
 // TOKENS_PER_RESOURCE; chunking also recovers legacy/corrupt over-cap groups.
+// The 65s deadline applies per chunk: current groups normally need one call,
+// while historical over-cap groups trade bounded additional time for cleanup.
 const REVOKE_LINKS_MAX_IDS = 10;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full

@@ -941,6 +941,9 @@ describe('revokeAllLinks', () => {
         confirmedTokenCount: 0,
       }),
     );
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-1', success: 0, total: 1, unresolvable_recipients: 0,
+    });
   });
 
   it('retries the same connector ids when parent deletion fails after child revoke', async () => {
@@ -2969,6 +2972,44 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         failures: [expect.objectContaining({
           qurl_id_count: 1,
           qurl_ids: ['q_aaaaaaaaaa1'],
+          unidentified_qurl_count: 0,
+        })],
+      }),
+    );
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('keeps the source authorization anchor and identifies a missing fresh child identity', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://q.test/1', resource_id: 'res-new',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('Invalid connector revoke token identity'));
+
+    const result = await handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toMatch(/Failed to save link records/);
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', [''], 'apikey');
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted Add Recipients qURL resources',
+      expect.objectContaining({
+        sendId: 'send-1',
+        reason: 'guarded_transaction_failed',
+        failed_count: 1,
+        failures: [expect.objectContaining({
+          qurl_id_count: 0,
+          qurl_ids: [],
+          unidentified_qurl_count: 1,
         })],
       }),
     );
@@ -3031,6 +3072,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
           resource_ref: resourceIdLogRef(sensitiveResourceId),
           qurl_id_count: 1,
           qurl_ids: ['q_aaaaaaaaaa1'],
+          unidentified_qurl_count: 0,
           error: 'delete failed',
         }],
       }),

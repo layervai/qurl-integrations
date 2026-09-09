@@ -2931,8 +2931,9 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const results = await batchSettled(resourceEntries, async ([resourceId, qurlIds]) => {
     // These are freshly minted connector results rather than legacy store rows,
     // so every child identity must be present. revokeMintedLinks rejects a
-    // missing/malformed id and preserves the source resource as the connector's
-    // authorization anchor for a later operator-assisted retry.
+    // missing/malformed id before network I/O. That is an intentional hard stop:
+    // deleting the source without positive child-revoke evidence would remove
+    // the only authorization/reconciliation anchor for a potentially live view.
     await revokeMintedLinks(resourceId, qurlIds, apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;
@@ -2940,13 +2941,18 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
-      const qurlIds = [...new Set(resourceEntries[index][1].filter(
-        id => typeof id === 'string' && id.length > 0,
-      ))];
+      const recordedQurlIds = resourceEntries[index][1];
+      const qurlIds = [...new Set(recordedQurlIds
+        .filter(id => typeof id === 'string' && id.trim().length > 0)
+        .map(id => id.trim()))];
+      const unidentifiedQurlCount = recordedQurlIds.filter(
+        id => typeof id !== 'string' || id.trim().length === 0,
+      ).length;
       failed.push({
         resource_ref: resourceIdLogRef(resourceEntries[index][0]),
         qurl_id_count: qurlIds.length,
         qurl_ids: qurlIds,
+        unidentified_qurl_count: unidentifiedQurlCount,
         error: result.reason?.message,
       });
     }
@@ -8441,6 +8447,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       // connector's authorization anchor unless that child step succeeds. Even
       // after both steps succeed, keep the send unfinalized because the
       // malformed residue can never be positively confirmed from this row.
+      // TODO(upstream-contract): infra#1553 authorizes a caller-owned source in
+      // active/revoked/consumed/expired state, and qurl-service resource DELETE
+      // is idempotent. Therefore a successful parent delete does not erase the
+      // authorization anchor needed after operators repair the malformed row.
       let connectorRevokeConfirmed = false;
       let resourceRevokeConfirmed = false;
       try {
