@@ -8472,8 +8472,9 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       // after both steps succeed, keep the send unfinalized because the
       // malformed residue can never be positively confirmed from this row.
       // TODO(upstream-contract): infra#1553 authorizes a caller-owned source in
-      // active/revoked/consumed/expired state, and qurl-service resource DELETE
-      // is idempotent. Therefore a successful parent delete does not erase the
+      // active/revoked/consumed/expired state or by an exact owner-visible
+      // resource_tombstoned 410 envelope, and qurl-service resource DELETE is
+      // idempotent. Therefore a successful parent delete does not erase the
       // authorization anchor needed after operators repair the malformed row.
       let connectorRevokeConfirmed = false;
       let resourceRevokeConfirmed = false;
