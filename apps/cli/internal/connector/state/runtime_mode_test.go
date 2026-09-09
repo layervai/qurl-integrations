@@ -125,7 +125,10 @@ func TestEstablishExternalRuntimeModeRejectsPreexistingLifecycleState(t *testing
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := secureStateTestDir(t)
-			if err := os.WriteFile(filepath.Join(dir, name), []byte("occupied"), 0o600); err != nil {
+			// Seed through the package's own writer so the entry carries the
+			// owner-only ACL on Windows; an inherited-ACL agent_state.json is
+			// refused by the directory capability before the freshness check.
+			if err := replaceConnectorResources(dir, filepath.Join(dir, name), []byte("occupied")); err != nil {
 				t.Fatal(err)
 			}
 			err := EstablishExternalRuntimeMode(context.Background(), dir)

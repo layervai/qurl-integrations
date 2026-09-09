@@ -216,3 +216,50 @@ func TestDaemonRunShutdownLeavesCloudStateUntouched(t *testing.T) {
 		t.Fatalf("local share after daemon shutdown = %+v err=%v, want it still desired-on at epoch %d", stored, err, local.ServingEpoch)
 	}
 }
+
+// TestDaemonRunExternalStopDuringDeferredFirstReconcileTouchesNothing pins
+// the window between a supervisor spawning the daemon and its first reload:
+// a daemon stopped while its first reconcile is still deferred exits with the
+// cancellation code having served nothing, made no cloud call, and left the
+// desired-on row exactly as it found it.
+func TestDaemonRunExternalStopDuringDeferredFirstReconcileTouchesNothing(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	if err := connectorstate.EstablishExternalRuntimeMode(context.Background(), stateDir); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := localShareFixture(srv)
+	local.DesiredState = "on"
+	if err := registry.Put(context.Background(), &local); err != nil {
+		t.Fatal(err)
+	}
+	originalBuilder := buildNativeSessionFactory
+	t.Cleanup(func() { buildNativeSessionFactory = originalBuilder })
+	factory := &headlessTestFactory{started: make(chan struct{})}
+	buildNativeSessionFactory = func(context.Context, connectorshare.NativeRuntimeConfig, *v1.ClientCommonConfig, *qurlapi.Config, bool, *connectorstate.LocalShare) (connectordaemon.GroupFactory, error) {
+		return factory, nil
+	}
+	res, status := runDaemonUntilReady(t, stateDir, "--supervision", "external", "--state-dir", stateDir, "--endpoint", srv.URL)
+	if res.code != 130 {
+		t.Fatalf("deferred daemon stop = exit %d stderr %s, want the cancellation exit", res.code, res.stderr.String())
+	}
+	select {
+	case <-factory.started:
+		t.Fatal("the daemon served the desired-on share before its supervisor's first reload")
+	default:
+	}
+	if len(status.Running) != 0 || len(status.Resources) != 0 {
+		t.Fatalf("deferred daemon status = %+v, want no running or diagnosed resource", status)
+	}
+	if requests := srv.Requests(); len(requests) != 0 {
+		t.Fatalf("deferred daemon made cloud requests: %+v", requests)
+	}
+	stored, err := registry.Get(context.Background(), local.ResourceID)
+	if err != nil || stored.DesiredState != "on" || stored.ServingEpoch != local.ServingEpoch {
+		t.Fatalf("local share after the deferred stop = %+v err=%v, want it still desired-on at epoch %d", stored, err, local.ServingEpoch)
+	}
+}
