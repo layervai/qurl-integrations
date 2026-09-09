@@ -17,7 +17,7 @@ const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 // TODO(upstream-contract): qurl-integrations-infra's render-at-mint handler has
-// a 55s internal request budget (source GET + tenant probe + service remint).
+// a 55s internal request budget (source GET/classification + service remint/render).
 // Leave 10s for response transport so the caller does not abort valid work
 // while the connector can still mint shared-tunnel tokens.
 const MINT_LINK_TIMEOUT_MS = 65_000;

@@ -8572,7 +8572,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     users: { success, total },
   });
 
-  // Edit each strict-success recipient's DM to "Alice closed the door"
+  // Replace each strict-success recipient's DM with "Alice closed the door"
   // so they see immediately that the link is dead rather than tapping a
   // Step Through button that now 404s. Per-recipient (one DM per
   // recipient, even if multiple resources fanned out to them) — keep
