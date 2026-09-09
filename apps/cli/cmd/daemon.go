@@ -368,12 +368,18 @@ func runtimeDirLookup(runtimeDir string, lookupEnv func(string) (string, bool)) 
 // before any durable write, so a bad runtime directory fails a start without
 // binding an owner or a share.
 func resolveDaemonPaths(ctx context.Context, opts *globalOpts, stateDirOverride, runtimeDirOverride string) (stateDir, socketPath string, err error) {
-	stateDir, err = supervisedShareStateDir(ctx, opts, stateDirOverride)
+	stateDir, err = opts.resolveShareStateDir(stateDirOverride)
 	if err != nil {
 		return "", "", err
 	}
+	// Resolve the socket before the supervision policy can write anything
+	// durable: a runtime directory the daemon cannot use leaves a fresh
+	// namespace untouched.
 	socketPath, err = connectordaemon.SocketPathForStateDir(stateDir, runtimeDirLookup(runtimeDirOverride, opts.lookupEnv))
 	if err != nil {
+		return "", "", err
+	}
+	if err := applyRuntimeSupervision(ctx, opts, stateDir); err != nil {
 		return "", "", err
 	}
 	return stateDir, socketPath, nil
@@ -478,26 +484,15 @@ func runShareDaemonWithDeployment(ctx context.Context, opts *globalOpts, stateDi
 	return server.Run(ctx)
 }
 
-// supervisedShareStateDir resolves the daemon's state directory and commits
-// or verifies its supervision policy: an external start marks the namespace
-// (idempotently, refusing a natively managed one) and a native start requires
-// an unmarked one, so no daemon serves a namespace under the wrong lifecycle
-// contract.
-func supervisedShareStateDir(ctx context.Context, opts *globalOpts, override string) (string, error) {
-	stateDir, err := opts.resolveShareStateDir(override)
-	if err != nil {
-		return "", err
-	}
+// applyRuntimeSupervision commits or verifies the resolved state directory's
+// supervision policy: an external start marks the namespace (idempotently,
+// refusing a natively managed one) and a native start requires an unmarked
+// one, so no daemon serves a namespace under the wrong lifecycle contract.
+func applyRuntimeSupervision(ctx context.Context, opts *globalOpts, stateDir string) error {
 	if opts.resolvedSupervision == connectorstate.RuntimeSupervisionExternal {
-		if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
-			return "", err
-		}
-		return stateDir, nil
+		return connectorstate.EstablishExternalRuntimeMode(ctx, stateDir)
 	}
-	if err := connectorstate.RequireRuntimeSupervision(stateDir, opts.resolvedSupervision); err != nil {
-		return "", err
-	}
-	return stateDir, nil
+	return connectorstate.RequireRuntimeSupervision(stateDir, opts.resolvedSupervision)
 }
 
 func configuredHeadlessShare(headless *connectorstate.HeadlessConfig) *connectorstate.LocalShare {
