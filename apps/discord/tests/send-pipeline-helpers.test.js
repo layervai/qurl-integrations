@@ -952,6 +952,7 @@ describe('handleAddRecipients', () => {
   let handleAddRecipients;
   let mockDb;
   let mockMintLinks;
+  let mockRevokeMintedLinks;
   let mockDownloadAndUpload;
   let mockReUploadBuffer;
   let mockUploadJsonToConnector;
@@ -1091,6 +1092,7 @@ describe('handleAddRecipients', () => {
     }));
 
     mockMintLinks = jest.fn();
+    mockRevokeMintedLinks = jest.fn().mockResolvedValue(true);
     mockDownloadAndUpload = jest.fn();
     mockReUploadBuffer = jest.fn();
     mockUploadJsonToConnector = jest.fn();
@@ -1099,6 +1101,7 @@ describe('handleAddRecipients', () => {
       downloadAndUpload: mockDownloadAndUpload,
       reUploadBuffer: mockReUploadBuffer,
       mintLinks: mockMintLinks,
+      revokeMintedLinks: mockRevokeMintedLinks,
       uploadJsonToConnector: mockUploadJsonToConnector,
       isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
     }));

@@ -52,6 +52,7 @@ const {
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { resourceIdLogRef } = require('./utils/resource-id');
+const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl, revokeMintedLinks } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
@@ -1731,11 +1732,7 @@ async function mintLinksInBatches({
       if (minted.length > batchSize) {
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
       }
-      if (minted.some(link => (
-        typeof link?.qurl_id !== 'string'
-        || link.qurl_id.trim().length === 0
-        || link.qurl_id.trim() !== link.qurl_id
-      ))) {
+      if (minted.some(link => !hasPersistableQurlIdShape(link?.qurl_id))) {
         // An exact-length response can still be unsafe: qurl_id is the only
         // durable child-revocation identity. Never persist or deliver a link
         // without it; the catch below compensates every identifiable sibling
@@ -1752,10 +1749,10 @@ async function mintLinksInBatches({
         // that can neither be delivered nor reconstructed later.
         throw new Error('Connector mint_link returned a link missing a valid qurl_link');
       }
-      if (new Set(minted.map(link => link.qurl_id)).size !== minted.length) {
+      if (new Set(allLinks.map(link => link.qurl_id)).size !== allLinks.length) {
         throw new Error('Connector mint_link returned a duplicate qurl_id');
       }
-      if (new Set(minted.map(link => link.qurl_link)).size !== minted.length) {
+      if (new Set(allLinks.map(link => link.qurl_link)).size !== allLinks.length) {
         throw new Error('Connector mint_link returned a duplicate qurl_link');
       }
       tokensUsed += batchSize;
@@ -2986,16 +2983,20 @@ function partitionQurlIds(recordedQurlIds) {
   const identified = new Set();
   let unidentifiedQurlCount = 0;
   for (const qurlId of recordedQurlIds) {
-    if (typeof qurlId !== 'string' || qurlId.trim().length === 0) {
+    const normalized = qurlIdForCleanup(qurlId);
+    if (normalized === null) {
       unidentifiedQurlCount += 1;
     } else {
-      identified.add(qurlId.trim());
+      identified.add(normalized);
     }
   }
   return { qurlIds: [...identified], unidentifiedQurlCount };
 }
 
 async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options = {}) {
+  // Callers deliberately await this helper before replying/returning. Detached
+  // compensation can be abandoned during process exit or task drain, widening
+  // the live-grant window after a failed send.
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
   const operationLabel = options.operationLabel || 'Add Recipients';
@@ -3029,12 +3030,17 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
     qurlIds.push(send.qurlId);
     qurlIdsByResource.set(send.resourceId, qurlIds);
   }
-  const resourceEntries = [...qurlIdsByResource.entries()];
+  const resourceEntries = [...qurlIdsByResource.entries()].map(([resourceId, recordedQurlIds]) => ({
+    resourceId,
+    ...partitionQurlIds(recordedQurlIds),
+  }));
   if (resourceEntries.length === 0) return;
 
-  const results = await batchSettled(resourceEntries, async ([resourceId, recordedQurlIds]) => {
-    const { qurlIds, unidentifiedQurlCount } = partitionQurlIds(recordedQurlIds);
-    let connectorRevokeConfirmed = false;
+  const results = await batchSettled(resourceEntries, async ({
+    resourceId, qurlIds, unidentifiedQurlCount,
+  }) => {
+    const connectorRevokeAttempted = qurlIds.length > 0;
+    let connectorRevokeConfirmed = connectorRevokeAttempted ? false : null;
     let resourceRevokeConfirmed = false;
     let failure;
     try {
@@ -3042,8 +3048,10 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
       // output omitted an identity, deleting the caller-owned source afterward
       // still minimizes live access; #1553 keeps that soft-revoked source
       // owner-visible as the authorization anchor for operator reconciliation.
-      await revokeMintedLinks(resourceId, qurlIds, apiKey);
-      connectorRevokeConfirmed = true;
+      if (connectorRevokeAttempted) {
+        await revokeMintedLinks(resourceId, qurlIds, apiKey);
+        connectorRevokeConfirmed = true;
+      }
       await deleteLink(resourceId, apiKey);
       resourceRevokeConfirmed = true;
     } catch (error) {
@@ -3051,6 +3059,7 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
     }
     if (unidentifiedQurlCount > 0 || failure) {
       const error = failure || new Error('Fresh connector link is missing its revoke identity');
+      error.connectorRevokeAttempted = connectorRevokeAttempted;
       error.connectorRevokeConfirmed = connectorRevokeConfirmed;
       error.resourceRevokeConfirmed = resourceRevokeConfirmed;
       throw error;
@@ -3060,14 +3069,16 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
-      const recordedQurlIds = resourceEntries[index][1];
-      const { qurlIds, unidentifiedQurlCount } = partitionQurlIds(recordedQurlIds);
+      const { resourceId, qurlIds, unidentifiedQurlCount } = resourceEntries[index];
       failed.push({
-        resource_ref: resourceIdLogRef(resourceEntries[index][0]),
+        resource_ref: resourceIdLogRef(resourceId),
         qurl_id_count: qurlIds.length,
         qurl_ids: qurlIds,
         unidentified_qurl_count: unidentifiedQurlCount,
-        connector_revoke_confirmed: result.reason?.connectorRevokeConfirmed === true,
+        connector_revoke_attempted: result.reason?.connectorRevokeAttempted === true,
+        connector_revoke_confirmed: typeof result.reason?.connectorRevokeConfirmed === 'boolean'
+          ? result.reason.connectorRevokeConfirmed
+          : null,
         resource_revoke_confirmed: result.reason?.resourceRevokeConfirmed === true,
         error: result.reason?.message,
       });
@@ -3150,6 +3161,9 @@ async function cleanupIncompleteMintBatch({
   const cleanupOperationLabel = cleanupContext.operationLabel
     ? `${cleanupContext.operationLabel} mint batch`
     : 'mint batch';
+  // Intentionally await fail-closed compensation before the caller can reply or
+  // return. A detached cleanup can be abandoned during process exit/task drain,
+  // leaving the very live grants this path exists to minimize.
   await cleanupFreshMintedResources(cleanupRows, apiKey, cleanupContext.sendId, {
     rowsMayHavePersisted: false,
     reason,
@@ -8610,12 +8624,17 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     if (item.qurl_id == null || item.qurl_id === '') {
       continue;
     }
-    if (typeof item.qurl_id !== 'string' || item.qurl_id.trim().length === 0) {
+    const cleanupQurlId = qurlIdForCleanup(item.qurl_id);
+    if (!hasPersistableQurlIdShape(item.qurl_id)) {
       const malformedCount = malformedQurlIdCountsByResource.get(item.resource_id) || 0;
       malformedQurlIdCountsByResource.set(item.resource_id, malformedCount + 1);
-    } else {
+    }
+    // Surrounding whitespace is malformed but still yields a bounded identity
+    // for best-effort revoke. Overlong/corrupt values never enter the request;
+    // #1553 rejects the whole batch above its 4 KiB body cap.
+    if (cleanupQurlId !== null) {
       const minted = qurlIdsByResource.get(item.resource_id) || [];
-      minted.push(item.qurl_id.trim());
+      minted.push(cleanupQurlId);
       qurlIdsByResource.set(item.resource_id, minted);
     }
   }
@@ -8639,11 +8658,14 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
       // resource_tombstoned 410 envelope, and qurl-service resource DELETE is
       // idempotent. Therefore a successful parent delete does not erase the
       // authorization anchor needed after operators repair the malformed row.
-      let connectorRevokeConfirmed = false;
+      const connectorRevokeAttempted = qurlIds.length > 0;
+      let connectorRevokeConfirmed = connectorRevokeAttempted ? false : null;
       let resourceRevokeConfirmed = false;
       try {
-        await revokeMintedLinks(resourceId, qurlIds, apiKey);
-        connectorRevokeConfirmed = true;
+        if (connectorRevokeAttempted) {
+          await revokeMintedLinks(resourceId, qurlIds, apiKey);
+          connectorRevokeConfirmed = true;
+        }
         await deleteLink(resourceId, apiKey);
         resourceRevokeConfirmed = true;
       } finally {
@@ -8654,8 +8676,9 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
           sendId,
           resource_ref: resourceIdLogRef(resourceId),
           malformedTokenCount,
+          connectorRevokeAttempted,
           connectorRevokeConfirmed,
-          confirmedTokenCount: connectorRevokeConfirmed ? new Set(qurlIds).size : 0,
+          confirmedTokenCount: connectorRevokeConfirmed === true ? new Set(qurlIds).size : 0,
           resourceRevokeConfirmed,
         });
       }

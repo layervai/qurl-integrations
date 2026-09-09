@@ -3,6 +3,7 @@ const { QURLClient } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
+const { qurlIdForCleanup } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -533,11 +534,13 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  *
  * TODO(upstream-contract): qurl-integrations-infra#1553 keeps this endpoint
  * callable even when render-at-mint is currently disabled. On a mint-row miss,
- * it strongly reads qurl-service under the connector identity: only an
- * authoritative owner-hidden 404 proves the id is not servable on the shared
- * tunnel (`already_gone`); 200, transport, and ambiguous responses fail. The
- * connector binds every id to the caller-owned source resource before acting,
- * and returns every requested qurl_id exactly once in an unordered unique set.
+ * it strongly reads qurl-service under both identities. An authoritative
+ * owner-hidden service 404 proves `already_gone`; the narrower
+ * `not_connector_managed` outcome additionally requires a canonical caller
+ * 200 bound to this exact source plus that exact service 404. Service 200
+ * (including same-owner credentials), transport, and ambiguous responses fail.
+ * The connector returns every requested qurl_id exactly once in an unordered
+ * unique set.
  * A 404, 410, or 503 from this endpoint itself is never evidence that a
  * historical send lacked connector-managed links, so all non-2xx responses
  * fail closed.
@@ -551,12 +554,13 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   if (!Array.isArray(qurlIds)) {
     throw new Error('Invalid connector revoke token list');
   }
-  if (qurlIds.some(id => typeof id !== 'string' || id.trim().length === 0)) {
+  const normalizedIds = qurlIds.map(qurlIdForCleanup);
+  if (normalizedIds.some(id => id === null)) {
     throw new Error('Invalid connector revoke token identity');
   }
   // A repaired/resend row can repeat a token. Revoke each identity once and
   // require one response outcome per unique requested identity.
-  const ids = [...new Set(qurlIds.map(id => id.trim()))];
+  const ids = [...new Set(normalizedIds)];
   if (ids.length === 0) return true;
 
   for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
@@ -591,7 +595,9 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
       const confirmed = new Set();
       let invalidOutcomeCount = 0;
       for (const result of parsed.results) {
-        const statusConfirmed = result?.status === 'revoked' || result?.status === 'already_gone';
+        const statusConfirmed = result?.status === 'revoked'
+          || result?.status === 'already_gone'
+          || result?.status === 'not_connector_managed';
         if (!requested.has(result?.qurl_id) || confirmed.has(result.qurl_id) || !statusConfirmed) {
           invalidOutcomeCount++;
         } else {

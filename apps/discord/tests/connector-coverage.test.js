@@ -467,7 +467,6 @@ describe('Connector client — coverage boost', () => {
         expect(e.partialLinkCount).toBe(2);
         expect(e.partialQurlIds).toEqual(['q_partial_one', 'q_partial_two']);
         expect(e.partialCleanupConfirmed).toBe(true);
-        expect(e.partialCleanupFailed).toBeUndefined();
       }
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
@@ -690,6 +689,20 @@ describe('Connector client — coverage boost', () => {
       )).resolves.toBe(true);
     });
 
+    it('accepts a typed ordinary-token proof from the connector', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          results: [{ qurl_id: 'q_one', status: 'not_connector_managed' }],
+        }),
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ['q_one'], 'guild-key'))
+        .resolves.toBe(true);
+    });
+
     it('chunks more than ten unique ids to the connector batch cap', async () => {
       const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
       globalThis.fetch = jest.fn().mockImplementation(async (_url, options) => {
@@ -711,6 +724,28 @@ describe('Connector client — coverage boost', () => {
       expect(globalThis.fetch.mock.calls.map(([, options]) => (
         JSON.parse(options.body).qurl_ids
       ))).toEqual([ids.slice(0, 10), ids.slice(10)]);
+    });
+
+    it('keeps a maximum-size ten-id request below the connector 4 KiB body cap', async () => {
+      const ids = Array.from({ length: 10 }, (_, i) => (
+        `q_${'a'.repeat(124)}${i.toString().padStart(2, '0')}`
+      ));
+      globalThis.fetch = jest.fn().mockImplementation(async (_url, options) => {
+        const requested = JSON.parse(options.body).qurl_ids;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            results: requested.map(qurlId => ({ qurl_id: qurlId, status: 'revoked' })),
+          }),
+        };
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key'))
+        .resolves.toBe(true);
+
+      expect(Buffer.byteLength(globalThis.fetch.mock.calls[0][1].body, 'utf8')).toBeLessThanOrEqual(4096);
     });
 
     it('requires every chunk to confirm before reporting a large revoke complete', async () => {
@@ -753,11 +788,21 @@ describe('Connector client — coverage boost', () => {
       expect(JSON.parse(globalThis.fetch.mock.calls[0][1].body).qurl_ids).toEqual(['q_one']);
     });
 
-    it.each([42, {}, '   '])('rejects invalid token id %p before fetch', async (qurlId) => {
+    it.each([42, {}, '   ', 'bad/id', 'at_bearer_like'])('rejects invalid token id %p before fetch', async (qurlId) => {
       globalThis.fetch = jest.fn();
 
       await expect(connector.revokeMintedLinks('res-1', [qurlId], 'guild-key'))
         .rejects.toThrow('Invalid connector revoke token identity');
+
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an overlong token id before fetch', async () => {
+      globalThis.fetch = jest.fn();
+
+      await expect(connector.revokeMintedLinks(
+        'res-1', [`q_${'a'.repeat(200)}`], 'guild-key',
+      )).rejects.toThrow('Invalid connector revoke token identity');
 
       expect(globalThis.fetch).not.toHaveBeenCalled();
     });

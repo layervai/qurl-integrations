@@ -930,20 +930,41 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
       'Cannot fully revoke resource with malformed stored token identity',
       expect.objectContaining({
         malformedTokenCount: 2,
-        connectorRevokeConfirmed: true,
+        connectorRevokeAttempted: false,
+        connectorRevokeConfirmed: null,
         confirmedTokenCount: 0,
       }),
     );
     expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
       send_id: 'send-1', success: 0, total: 1, unresolvable_recipients: 0,
     });
+  });
+
+  it('quarantines an overlong stored token identity without sending an oversized revoke request', async () => {
+    const overlongQurlId = `q_${'a'.repeat(200)}`;
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: 'q_good' },
+      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: overlongQurlId },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', ['q_good'], 'apikey');
+    expect(mockRevokeMintedLinks.mock.calls.flatMap(([, ids]) => ids)).not.toContain(overlongQurlId);
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(result.success).toBe(0);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot fully revoke resource with malformed stored token identity',
+      expect.objectContaining({ malformedTokenCount: 1, confirmedTokenCount: 1 }),
+    );
   });
 
   it('retries the same connector ids when parent deletion fails after child revoke', async () => {
@@ -2191,7 +2212,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
 
     expect(result.msg).toMatch(/Only 1 of 2/);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', [], 'apikey');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to clean up freshly minted Add Recipients mint batch qURL resources',
@@ -2199,7 +2220,8 @@ describe('handleAddRecipients — file path failure modes', () => {
         reason: 'mint_underdelivery',
         failures: [expect.objectContaining({
           unidentified_qurl_count: 1,
-          connector_revoke_confirmed: true,
+          connector_revoke_attempted: false,
+          connector_revoke_confirmed: null,
           resource_revoke_confirmed: true,
         })],
       }),
@@ -3325,6 +3347,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
           qurl_id_count: 1,
           qurl_ids: ['q_aaaaaaaaaa1'],
           unidentified_qurl_count: 0,
+          connector_revoke_attempted: true,
           connector_revoke_confirmed: true,
           resource_revoke_confirmed: false,
           error: 'delete failed',
@@ -3639,7 +3662,6 @@ describe('mintLinksInBatches', () => {
     expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
       'res-1', firstBatch.map(link => link.qurl_id), 'apikey',
     );
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-2', [], 'apikey');
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
     expect(mockDeleteLink).toHaveBeenCalledWith('res-2', 'apikey');
     const res1RevokeOrder = mockRevokeMintedLinks.mock.invocationCallOrder[
@@ -3676,6 +3698,7 @@ describe('mintLinksInBatches', () => {
   it.each([
     ['missing', undefined],
     ['whitespace-only', '   '],
+    ['overlong', `q_${'a'.repeat(200)}`],
     ['null-entry', null],
   ])('rejects an exact-length 2xx mint with a %s qurl_id before it can be persisted or delivered', async (_label, malformedQurlId) => {
     const links = [
@@ -3780,6 +3803,37 @@ describe('mintLinksInBatches', () => {
     expect(mockDeleteLink).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['qurl_id', { qurl_id: 'q_batch_0', qurl_link: 'https://q.test/second-resource' }],
+    ['qurl_link', { qurl_id: 'q_second_resource', qurl_link: 'https://q.test/0' }],
+  ])('rejects a duplicate %s returned by a later mint batch', async (field, duplicateLink) => {
+    const firstBatch = Array.from({ length: 10 }, (_, i) => ({
+      qurl_id: `q_batch_${i}`,
+      qurl_link: `https://q.test/${i}`,
+    }));
+    mockMintLinks
+      .mockResolvedValueOnce(firstBatch)
+      .mockResolvedValueOnce([duplicateLink]);
+    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn,
+      expiresAt: new Date().toISOString(),
+      recipientCount: 11,
+      apiKey: 'apikey',
+    })).rejects.toThrow(`duplicate ${field}`);
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'res-1', firstBatch.map(link => link.qurl_id), 'apikey',
+    );
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'res-2', [duplicateLink.qurl_id], 'apikey',
+    );
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-2', 'apikey');
+  });
+
   it('does not revoke partial children twice when the connector already confirmed compensation', async () => {
     const originalError = Object.assign(new Error('partial mint failed'), {
       partialQurlIds: ['q_partial'],
@@ -3795,8 +3849,7 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     })).rejects.toBe(originalError);
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledTimes(1);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledTimes(1);
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
     expect(logger.error).toHaveBeenCalledWith(
@@ -3900,7 +3953,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
     expect(mockDb.saveSendConfirmState).not.toHaveBeenCalled();
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', [], 'apikey');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledTimes(1);
     expect(interaction.editReply).toHaveBeenCalledWith({
       content: 'Failed to create links. Please try again.',
