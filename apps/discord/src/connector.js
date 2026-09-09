@@ -3,7 +3,7 @@ const { QURLClient } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { validateResourceId, resourceIdLogRef } = require('./utils/resource-id');
-const { qurlIdForCleanup } = require('./utils/qurl-id');
+const { qurlIdForCleanup, hasPersistableQurlIdShape } = require('./utils/qurl-id');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -33,6 +33,7 @@ const REVOKE_LINKS_TIMEOUT_MS = 65_000;
 // The 65s deadline applies per chunk: current groups normally need one call,
 // while historical over-cap groups trade bounded additional time for cleanup.
 const REVOKE_LINKS_MAX_IDS = 10;
+const REVOKE_REQUEST_MAX_BYTES = 4 * 1024;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -102,27 +103,36 @@ function parseConnectorBody(bodyText) {
   return { parsed, apiCode, apiDetail };
 }
 
-function mintedLinksWithId(links) {
-  if (!Array.isArray(links)) return [];
-  return links.filter(link => (
-    link
-    && typeof link === 'object'
-    && typeof link.qurl_id === 'string'
-    && link.qurl_id.length > 0
-  ));
-}
-
-function qurlIdsFromLinks(links) {
-  return links.map(link => link.qurl_id);
+function partitionPartialMintLinks(links) {
+  if (!Array.isArray(links)) {
+    return { partialLinkCount: 0, partialQurlIds: [], partialUnidentifiedQurlCount: 0 };
+  }
+  const partialQurlIds = [];
+  let partialUnidentifiedQurlCount = 0;
+  for (const link of links) {
+    const rawQurlId = link && typeof link === 'object' ? link.qurl_id : undefined;
+    const cleanupQurlId = qurlIdForCleanup(rawQurlId);
+    if (cleanupQurlId !== null) partialQurlIds.push(cleanupQurlId);
+    // A present-but-noncanonical identity can still be useful for a bounded
+    // best-effort revoke, but it is not durable proof that the child is known.
+    if (!hasPersistableQurlIdShape(rawQurlId)) partialUnidentifiedQurlCount += 1;
+  }
+  return {
+    partialLinkCount: links.length,
+    partialQurlIds,
+    partialUnidentifiedQurlCount,
+  };
 }
 
 function connectorErrorFromBody(label, response, {
   bodyText = '',
   apiCode = null,
   apiDetail = null,
+  partialLinkCount = 0,
   partialQurlIds = [],
+  partialUnidentifiedQurlCount = 0,
 } = {}) {
-  if (partialQurlIds.length === 0) {
+  if (partialLinkCount === 0) {
     logger.debug(`${label} error`, {
       status: response.status,
       apiCode,
@@ -133,9 +143,13 @@ function connectorErrorFromBody(label, response, {
   err.status = response.status;
   err.apiCode = apiCode;
   err.apiDetail = apiDetail;
-  if (partialQurlIds.length > 0) {
-    err.partialLinkCount = partialQurlIds.length;
+  if (partialLinkCount > 0) {
+    err.partialLinkCount = partialLinkCount;
     err.partialQurlIds = partialQurlIds;
+    err.partialCleanupConfirmed = false;
+    if (partialUnidentifiedQurlCount > 0) {
+      err.partialUnidentifiedQurlCount = partialUnidentifiedQurlCount;
+    }
   }
   return err;
 }
@@ -465,8 +479,12 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
       bodyText = await response.text();
     } catch { /* network read failed, fall through with empty body */ }
     const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
-    const partialQurlIds = qurlIdsFromLinks(mintedLinksWithId(parsed?.links));
-    if (partialQurlIds.length > 0) {
+    const {
+      partialLinkCount,
+      partialQurlIds,
+      partialUnidentifiedQurlCount,
+    } = partitionPartialMintLinks(parsed?.links);
+    if (partialLinkCount > 0) {
       // TODO(upstream-contract): Best-effort reconciliation signal; connector
       // error bodies must only include qurl_ids for links that were actually minted.
       // qurl_id is the non-secret display/revocation handle, not the bearer
@@ -477,18 +495,21 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
         status: response.status,
         apiCode,
         bodyLen: bodyText.length,
-        partial_link_count: partialQurlIds.length,
+        partial_link_count: partialLinkCount,
         partial_qurl_ids: partialQurlIds,
+        unidentified_qurl_count: partialUnidentifiedQurlCount,
       });
     }
     const errorOptions = {
       bodyText,
       apiCode,
       apiDetail,
+      partialLinkCount,
       partialQurlIds,
+      partialUnidentifiedQurlCount,
     };
     const mintError = connectorErrorFromBody('Connector mint_link', response, errorOptions);
-    if (partialQurlIds.length === 0) throw mintError;
+    if (partialLinkCount === 0 || partialQurlIds.length === 0) throw mintError;
 
     // Preserve the mint failure as the caller-visible error, but first clean up
     // every connector-managed token the non-2xx response proves was minted.
@@ -500,7 +521,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     } catch (cleanupError) {
       logger.error('Connector partial mint cleanup failed', {
         resource_ref: resourceIdLogRef(resourceId),
-        partial_link_count: partialQurlIds.length,
+        partial_link_count: partialLinkCount,
+        unidentified_qurl_count: partialUnidentifiedQurlCount,
         cleanup_error_name: cleanupError?.name,
         cleanup_status: cleanupError?.status,
         cleanup_api_code: cleanupError?.apiCode,
@@ -1265,5 +1287,9 @@ module.exports = {
 // extending production's connector API. Jest sets NODE_ENV=test, matching the
 // precedent in logger.js.
 if (process.env.NODE_ENV === 'test') {
-  module.exports.__testExports = { assertPublicHttpsTarget };
+  module.exports.__testExports = {
+    assertPublicHttpsTarget,
+    REVOKE_LINKS_MAX_IDS,
+    REVOKE_REQUEST_MAX_BYTES,
+  };
 }

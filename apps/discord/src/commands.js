@@ -1763,6 +1763,7 @@ async function mintLinksInBatches({
       resourceIds,
       currentResourceId,
       partialQurlIds: error?.partialQurlIds,
+      partialUnidentifiedQurlCount: error?.partialUnidentifiedQurlCount,
       partialCleanupConfirmed: error?.partialCleanupConfirmed === true,
       apiKey,
       cleanupContext,
@@ -3106,6 +3107,7 @@ async function cleanupIncompleteMintBatch({
   resourceIds,
   currentResourceId,
   partialQurlIds,
+  partialUnidentifiedQurlCount = 0,
   partialCleanupConfirmed,
   apiKey,
   cleanupContext,
@@ -3121,11 +3123,20 @@ async function cleanupIncompleteMintBatch({
       reconciliationRows.push({ resourceId: currentResourceId, qurlId });
     }
   }
+  for (let i = 0; i < partialUnidentifiedQurlCount; i++) {
+    reconciliationRows.push({ resourceId: currentResourceId, qurlId: undefined });
+  }
   // mintLinks already revokes non-2xx partial children inline. Keep those IDs
   // in the reconciliation ledger, but do not make a second revoke request
   // after the connector confirmed the first one. Parent cleanup still runs.
   const cleanupRows = partialCleanupConfirmed
-    ? allLinks.map(link => ({ resourceId: link.resourceId, qurlId: link.qurl_id }))
+    ? [
+      ...allLinks.map(link => ({ resourceId: link.resourceId, qurlId: link.qurl_id })),
+      ...Array.from({ length: partialUnidentifiedQurlCount }, () => ({
+        resourceId: currentResourceId,
+        qurlId: undefined,
+      })),
+    ]
     : reconciliationRows;
 
   const ids = [...new Set(resourceIds.filter(
@@ -8607,7 +8618,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // mint these on the connector's shared tunnel rather than on this resource,
   // so revoking the resource alone leaves them live (infra#1552).
   const qurlIdsByResource = new Map();
-  const malformedQurlIdCountsByResource = new Map();
+  const unidentifiedQurlIdCountsByResource = new Map();
   const invalidResourceRecipientIds = new Set();
   for (const item of items) {
     if (typeof item.resource_id !== 'string' || item.resource_id.trim().length === 0) {
@@ -8617,17 +8628,15 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     const list = byResource.get(item.resource_id) || [];
     list.push(item.recipient_discord_id);
     byResource.set(item.resource_id, list);
-    // The store projection materializes absent sparse attributes as undefined;
-    // null/undefined/exact-empty therefore remain the legitimate legacy path.
-    // Whitespace is present corrupt data, not evidence that no child was ever
-    // minted, and must keep the resource on the malformed fail-closed path.
-    if (item.qurl_id == null || item.qurl_id === '') {
-      continue;
-    }
+    // qurlSendBatchItem omits empty identities from the sparse DynamoDB row.
+    // Therefore null/undefined/exact-empty cannot prove that this is an
+    // ordinary pre-watermark send: a degraded watermarked mint can have the
+    // same stored shape. Treat every absent or malformed value as unidentified
+    // so best-effort parent cleanup cannot finalize the send as fully revoked.
     const cleanupQurlId = qurlIdForCleanup(item.qurl_id);
     if (!hasPersistableQurlIdShape(item.qurl_id)) {
-      const malformedCount = malformedQurlIdCountsByResource.get(item.resource_id) || 0;
-      malformedQurlIdCountsByResource.set(item.resource_id, malformedCount + 1);
+      const unidentifiedCount = unidentifiedQurlIdCountsByResource.get(item.resource_id) || 0;
+      unidentifiedQurlIdCountsByResource.set(item.resource_id, unidentifiedCount + 1);
     }
     // Surrounding whitespace is malformed but still yields a bounded identity
     // for best-effort revoke. Overlong/corrupt values never enter the request;
@@ -8646,18 +8655,18 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
   const results = await batchSettled(resourceEntries, async ([resourceId]) => {
     const qurlIds = qurlIdsByResource.get(resourceId) || [];
-    const malformedTokenCount = malformedQurlIdCountsByResource.get(resourceId) || 0;
-    if (malformedTokenCount > 0) {
+    const unidentifiedTokenCount = unidentifiedQurlIdCountsByResource.get(resourceId) || 0;
+    if (unidentifiedTokenCount > 0) {
       // We cannot identify every possible connector-managed child, but still
       // revoke every well-formed child first. The source resource remains the
       // connector's authorization anchor unless that child step succeeds. Even
       // after both steps succeed, keep the send unfinalized because the
-      // malformed residue can never be positively confirmed from this row.
+      // unidentified residue can never be positively confirmed from this row.
       // TODO(upstream-contract): infra#1553 authorizes a caller-owned source in
       // active/revoked/consumed/expired state or by an exact owner-visible
       // resource_tombstoned 410 envelope, and qurl-service resource DELETE is
       // idempotent. Therefore a successful parent delete does not erase the
-      // authorization anchor needed after operators repair the malformed row.
+      // authorization anchor needed after operators repair the missing or malformed row.
       const connectorRevokeAttempted = qurlIds.length > 0;
       let connectorRevokeConfirmed = connectorRevokeAttempted ? false : null;
       let resourceRevokeConfirmed = false;
@@ -8672,17 +8681,17 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
         // This is distinct from the generic per-resource failure log below: it
         // tells operators that repairing stored token identity is required even
         // when every identifiable revoke happened to succeed.
-        logger.error('Cannot fully revoke resource with malformed stored token identity', {
+        logger.error('Cannot fully revoke resource with missing or malformed stored token identity', {
           sendId,
           resource_ref: resourceIdLogRef(resourceId),
-          malformedTokenCount,
+          unidentifiedTokenCount,
           connectorRevokeAttempted,
           connectorRevokeConfirmed,
           confirmedTokenCount: connectorRevokeConfirmed === true ? new Set(qurlIds).size : 0,
           resourceRevokeConfirmed,
         });
       }
-      throw new Error('Cannot fully confirm revoke with malformed stored token identity');
+      throw new Error('Cannot fully confirm revoke with missing or malformed stored token identity');
     }
     // Revoke the connector-side watermarked views FIRST. If this throws the
     // resource revoke is skipped, so the send stays retryable instead of being

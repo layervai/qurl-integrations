@@ -550,7 +550,7 @@ describe('Connector client — coverage boost', () => {
       }
     });
 
-    it('ignores malformed partial mint links and uses the generic debug path', async () => {
+    it('records malformed partial mint links as unidentified for parent cleanup', async () => {
       const logger = require('../src/logger');
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
@@ -571,24 +571,26 @@ describe('Connector client — coverage boost', () => {
         throw new Error('expected throw');
       } catch (e) {
         expect(e.status).toBe(502);
-        expect(e.partialLinkCount).toBeUndefined();
-        expect(e.partialQurlIds).toBeUndefined();
+        expect(e.partialLinkCount).toBe(3);
+        expect(e.partialQurlIds).toEqual([]);
+        expect(e.partialUnidentifiedQurlCount).toBe(3);
+        expect(e.partialCleanupConfirmed).toBe(false);
       }
 
-      expect(logger.warn).not.toHaveBeenCalledWith(
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
         'Connector mint_link returned partial links on non-2xx',
-        expect.anything(),
-      );
-      expect(logger.debug).toHaveBeenCalledWith(
-        'Connector mint_link error',
         expect.objectContaining({
           status: 502,
-          bodyLen: expect.any(Number),
+          partial_link_count: 3,
+          partial_qurl_ids: [],
+          unidentified_qurl_count: 3,
         }),
       );
     });
 
     it('cleans every identifiable child from a mixed malformed partial response', async () => {
+      const logger = require('../src/logger');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: false,
@@ -599,6 +601,8 @@ describe('Connector client — coverage boost', () => {
             links: [
               { qurl_id: 'q_partial_valid' },
               { qurl_id: '' },
+              { qurl_id: 'bad/id' },
+              { qurl_id: `q_${'a'.repeat(200)}` },
               {},
             ],
           }),
@@ -613,13 +617,25 @@ describe('Connector client — coverage boost', () => {
         });
 
       await expect(connector.mintLinks(
-        'res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 3 },
-      )).rejects.toMatchObject({ partialQurlIds: ['q_partial_valid'] });
+        'res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 5 },
+      )).rejects.toMatchObject({
+        partialQurlIds: ['q_partial_valid'],
+        partialUnidentifiedQurlCount: 4,
+        partialCleanupConfirmed: true,
+      });
 
       expect(JSON.parse(globalThis.fetch.mock.calls[1][1].body)).toEqual({
         resource_id: 'res-1',
         qurl_ids: ['q_partial_valid'],
       });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Connector mint_link returned partial links on non-2xx',
+        expect.objectContaining({
+          partial_qurl_ids: ['q_partial_valid'],
+          unidentified_qurl_count: 4,
+        }),
+      );
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('bad/id');
     });
   });
 
@@ -726,9 +742,16 @@ describe('Connector client — coverage boost', () => {
       ))).toEqual([ids.slice(0, 10), ids.slice(10)]);
     });
 
-    it('keeps a maximum-size ten-id request below the connector 4 KiB body cap', async () => {
-      const ids = Array.from({ length: 10 }, (_, i) => (
-        `q_${'a'.repeat(124)}${i.toString().padStart(2, '0')}`
+    it('keeps a maximum-size request below the connector body cap', async () => {
+      const { MAX_RESOURCE_ID_LENGTH } = require('../src/utils/resource-id');
+      const { MAX_QURL_ID_LENGTH } = require('../src/utils/qurl-id');
+      const {
+        REVOKE_LINKS_MAX_IDS,
+        REVOKE_REQUEST_MAX_BYTES,
+      } = connector.__testExports;
+      const resourceId = `r_${'a'.repeat(MAX_RESOURCE_ID_LENGTH - 2)}`;
+      const ids = Array.from({ length: REVOKE_LINKS_MAX_IDS }, (_, i) => (
+        `q_${'a'.repeat(MAX_QURL_ID_LENGTH - 4)}${i.toString().padStart(2, '0')}`
       ));
       globalThis.fetch = jest.fn().mockImplementation(async (_url, options) => {
         const requested = JSON.parse(options.body).qurl_ids;
@@ -742,10 +765,11 @@ describe('Connector client — coverage boost', () => {
         };
       });
 
-      await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key'))
+      await expect(connector.revokeMintedLinks(resourceId, ids, 'guild-key'))
         .resolves.toBe(true);
 
-      expect(Buffer.byteLength(globalThis.fetch.mock.calls[0][1].body, 'utf8')).toBeLessThanOrEqual(4096);
+      expect(Buffer.byteLength(globalThis.fetch.mock.calls[0][1].body, 'utf8'))
+        .toBeLessThanOrEqual(REVOKE_REQUEST_MAX_BYTES);
     });
 
     it('requires every chunk to confirm before reporting a large revoke complete', async () => {

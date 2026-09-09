@@ -799,6 +799,7 @@ describe('revokeAllLinks', () => {
   const makeItems = (n) => Array.from({ length: n }, (_, i) => ({
     resource_id: `res-${i + 1}`,
     recipient_discord_id: `user-${i + 1}`,
+    qurl_id: `q_item_${i + 1}`,
   }));
 
   it('revokes connector-managed links before deleting their source resource', async () => {
@@ -838,8 +839,7 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
   });
 
-  it('still revokes a legacy resource whose rows have no recorded token ids', async () => {
-    mockRevokeMintedLinks.mockResolvedValueOnce(true);
+  it('deletes an unidentified legacy parent but keeps the send unfinalized', async () => {
     mockDeleteLink.mockResolvedValueOnce(undefined);
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1' },
@@ -847,9 +847,21 @@ describe('revokeAllLinks', () => {
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledTimes(1);
-    expect(result.success).toBe(1);
+    expect(result.success).toBe(0);
+    expect(result.total).toBe(1);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot fully revoke resource with missing or malformed stored token identity',
+      expect.objectContaining({
+        unidentifiedTokenCount: 1,
+        connectorRevokeAttempted: false,
+        connectorRevokeConfirmed: null,
+        confirmedTokenCount: 0,
+        resourceRevokeConfirmed: true,
+      }),
+    );
   });
 
   it('revokes valid children and the parent but stays unfinalized on a malformed stored token id', async () => {
@@ -866,8 +878,8 @@ describe('revokeAllLinks', () => {
     expect(result.total).toBe(1);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with malformed stored token identity',
-      expect.objectContaining({ sendId: 'send-1', malformedTokenCount: 1 }),
+      'Cannot fully revoke resource with missing or malformed stored token identity',
+      expect.objectContaining({ sendId: 'send-1', unidentifiedTokenCount: 1 }),
     );
   });
 
@@ -884,7 +896,7 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with malformed stored token identity',
+      'Cannot fully revoke resource with missing or malformed stored token identity',
       expect.objectContaining({
         connectorRevokeConfirmed: false,
         resourceRevokeConfirmed: false,
@@ -892,16 +904,26 @@ describe('revokeAllLinks', () => {
     );
   });
 
-  it.each([null, undefined, ''])('treats sparse legacy token value %p as absent', async (qurlId) => {
+  it.each([null, undefined, ''])('treats sparse token value %p as unidentified', async (qurlId) => {
     mockDb.getSendItems.mockResolvedValueOnce([
       { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: qurlId },
     ]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
     expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
-    expect(result.success).toBe(1);
+    expect(result.success).toBe(0);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot fully revoke resource with missing or malformed stored token identity',
+      expect.objectContaining({
+        unidentifiedTokenCount: 1,
+        connectorRevokeAttempted: false,
+        connectorRevokeConfirmed: null,
+        resourceRevokeConfirmed: true,
+      }),
+    );
   });
 
   it('treats a whitespace-only stored token as malformed, not legacy-absent', async () => {
@@ -917,8 +939,8 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with malformed stored token identity',
-      expect.objectContaining({ malformedTokenCount: 1, confirmedTokenCount: 1 }),
+      'Cannot fully revoke resource with missing or malformed stored token identity',
+      expect.objectContaining({ unidentifiedTokenCount: 1, confirmedTokenCount: 1 }),
     );
   });
 
@@ -934,9 +956,9 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with malformed stored token identity',
+      'Cannot fully revoke resource with missing or malformed stored token identity',
       expect.objectContaining({
-        malformedTokenCount: 2,
+        unidentifiedTokenCount: 2,
         connectorRevokeAttempted: false,
         connectorRevokeConfirmed: null,
         confirmedTokenCount: 0,
@@ -962,8 +984,8 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(0);
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
-      'Cannot fully revoke resource with malformed stored token identity',
-      expect.objectContaining({ malformedTokenCount: 1, confirmedTokenCount: 1 }),
+      'Cannot fully revoke resource with missing or malformed stored token identity',
+      expect.objectContaining({ unidentifiedTokenCount: 1, confirmedTokenCount: 1 }),
     );
   });
 
@@ -1020,7 +1042,7 @@ describe('revokeAllLinks', () => {
     const sensitiveResourceId = 'at_sensitive-revoke-token';
     mockDb.getSendItems.mockResolvedValueOnce([
       makeItems(2)[0],
-      { resource_id: sensitiveResourceId, recipient_discord_id: 'user-2' },
+      { resource_id: sensitiveResourceId, recipient_discord_id: 'user-2', qurl_id: 'q_sensitive' },
     ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
@@ -1048,11 +1070,11 @@ describe('revokeAllLinks', () => {
     mockDb.getSendItems.mockResolvedValue([
       {
         resource_id: 'res-1', recipient_discord_id: 'user-1', dm_status: 'sent',
-        dm_channel_id: 'channel-1', dm_message_id: 'message-1',
+        dm_channel_id: 'channel-1', dm_message_id: 'message-1', qurl_id: 'q_retry_1',
       },
       {
         resource_id: 'res-2', recipient_discord_id: 'user-2', dm_status: 'sent',
-        dm_channel_id: 'channel-2', dm_message_id: 'message-2',
+        dm_channel_id: 'channel-2', dm_message_id: 'message-2', qurl_id: 'q_retry_2',
       },
     ]);
     mockDeleteLink
@@ -1190,6 +1212,7 @@ describe('revokeAllLinks', () => {
       dm_status: 'sent',
       dm_channel_id: 'channel-1',
       dm_message_id: 'message-1',
+      qurl_id: 'q_finalize_1',
     }]);
     mockDb.markSendRevoking.mockResolvedValueOnce(true);
     mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
@@ -1225,6 +1248,7 @@ describe('revokeAllLinks', () => {
     mockDb.getSendItems.mockResolvedValueOnce([{
       resource_id: 'res-1',
       recipient_discord_id: 'user-1',
+      qurl_id: 'q_finalize_rejected_1',
     }]);
     mockDb.markSendRevoked.mockResolvedValueOnce(false);
     mockDeleteLink.mockResolvedValue(undefined);
@@ -1244,10 +1268,10 @@ describe('revokeAllLinks', () => {
 
   it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-shared', recipient_discord_id: 'u-2' },
-      { resource_id: 'res-shared', recipient_discord_id: 'u-3' },
-      { resource_id: 'res-solo',   recipient_discord_id: 'u-4' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-1', qurl_id: 'q_shared_1' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-2', qurl_id: 'q_shared_2' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-3', qurl_id: 'q_shared_3' },
+      { resource_id: 'res-solo', recipient_discord_id: 'u-4', qurl_id: 'q_solo_4' },
     ]);
     mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1262,8 +1286,8 @@ describe('revokeAllLinks', () => {
 
   it('counts one recipient once when all of their links across resources are revoked', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-a', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-b', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-a', recipient_discord_id: 'u-1', qurl_id: 'q_duplicate_a' },
+      { resource_id: 'res-b', recipient_discord_id: 'u-1', qurl_id: 'q_duplicate_b' },
     ]);
     mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1283,9 +1307,9 @@ describe('revokeAllLinks', () => {
 
   it('groups items by resource_id — shared-resource failure fans out to all sharing recipients', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-shared', recipient_discord_id: 'u-2' },
-      { resource_id: 'res-solo',   recipient_discord_id: 'u-3' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-1', qurl_id: 'q_failure_1' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-2', qurl_id: 'q_failure_2' },
+      { resource_id: 'res-solo', recipient_discord_id: 'u-3', qurl_id: 'q_failure_3' },
     ]);
     mockDeleteLink
       .mockRejectedValueOnce(new Error('already opened'))
@@ -1328,7 +1352,7 @@ describe('revokeAllLinks', () => {
 
   it('keeps malformed rows without resource_id retryable without calling deleteLink', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-ok', recipient_discord_id: 'u-ok' },
+      { resource_id: 'res-ok', recipient_discord_id: 'u-ok', qurl_id: 'q_resource_ok' },
       { resource_id: '   ', recipient_discord_id: 'u-missing' },
     ]);
     mockDeleteLink.mockResolvedValue(undefined);
@@ -1376,9 +1400,9 @@ describe('revokeAllLinks', () => {
 
   it('failure-wins: mixed-outcome recipient (one resource ok, another failed) → failure only', async () => {
     mockDb.getSendItems.mockResolvedValueOnce([
-      { resource_id: 'res-a', recipient_discord_id: 'alice' },  // succeeds
-      { resource_id: 'res-b', recipient_discord_id: 'alice' },  // fails
-      { resource_id: 'res-a', recipient_discord_id: 'bob' },    // succeeds (bob clean)
+      { resource_id: 'res-a', recipient_discord_id: 'alice', qurl_id: 'q_mixed_a' },  // succeeds
+      { resource_id: 'res-b', recipient_discord_id: 'alice', qurl_id: 'q_mixed_b' },  // fails
+      { resource_id: 'res-a', recipient_discord_id: 'bob', qurl_id: 'q_mixed_c' },    // succeeds (bob clean)
     ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)            // res-a
@@ -1401,8 +1425,8 @@ describe('revokeAllLinks', () => {
 
     it('edits the DM of every strict-success recipient with stored channel + message ids', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
-        { resource_id: 'res-2', recipient_discord_id: 'u-2', dm_status: 'sent', dm_channel_id: 'c-2', dm_message_id: 'm-2' },
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1', qurl_id: 'q_edit_1' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-2', dm_status: 'sent', dm_channel_id: 'c-2', dm_message_id: 'm-2', qurl_id: 'q_edit_2' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1418,8 +1442,8 @@ describe('revokeAllLinks', () => {
 
     it('skips recipients whose revoke failed (link was already opened)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-ok',   recipient_discord_id: 'u-ok',   dm_status: 'sent', dm_channel_id: 'c-ok',   dm_message_id: 'm-ok' },
-        { resource_id: 'res-fail', recipient_discord_id: 'u-fail', dm_status: 'sent', dm_channel_id: 'c-fail', dm_message_id: 'm-fail' },
+        { resource_id: 'res-ok', recipient_discord_id: 'u-ok', dm_status: 'sent', dm_channel_id: 'c-ok', dm_message_id: 'm-ok', qurl_id: 'q_edit_ok' },
+        { resource_id: 'res-fail', recipient_discord_id: 'u-fail', dm_status: 'sent', dm_channel_id: 'c-fail', dm_message_id: 'm-fail', qurl_id: 'q_edit_fail' },
       ]);
       mockDeleteLink
         .mockResolvedValueOnce(undefined)
@@ -1433,9 +1457,9 @@ describe('revokeAllLinks', () => {
 
     it('does NOT edit the DM of a mixed-outcome recipient (one of their resources failed to revoke)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-a', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed' },
-        { resource_id: 'res-b', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed' },
-        { resource_id: 'res-c', recipient_discord_id: 'clean', dm_status: 'sent', dm_channel_id: 'c-clean', dm_message_id: 'm-clean' },
+        { resource_id: 'res-a', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed', qurl_id: 'q_within_a' },
+        { resource_id: 'res-b', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed', qurl_id: 'q_within_b' },
+        { resource_id: 'res-c', recipient_discord_id: 'clean', dm_status: 'sent', dm_channel_id: 'c-clean', dm_message_id: 'm-clean', qurl_id: 'q_within_c' },
       ]);
       mockDeleteLink
         .mockResolvedValueOnce(undefined)
@@ -1452,8 +1476,8 @@ describe('revokeAllLinks', () => {
 
     it('does NOT call editDM when every DELETE threw (success === 0)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent', dm_channel_id: 'c-a', dm_message_id: 'm-a' },
-        { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent', dm_channel_id: 'c-b', dm_message_id: 'm-b' },
+        { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent', dm_channel_id: 'c-a', dm_message_id: 'm-a', qurl_id: 'q_all_fail_a' },
+        { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent', dm_channel_id: 'c-b', dm_message_id: 'm-b', qurl_id: 'q_all_fail_b' },
       ]);
       mockDeleteLink.mockRejectedValue(new Error('qURL service down'));
 
@@ -1467,8 +1491,8 @@ describe('revokeAllLinks', () => {
 
     it('emits debug silent-skip log + no info edit log when every strict-success row is legacy', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent' }, // legacy, no refs
-        { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent' }, // legacy, no refs
+        { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent', qurl_id: 'q_legacy_dm_a' }, // legacy, no refs
+        { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent', qurl_id: 'q_legacy_dm_b' }, // legacy, no refs
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1484,8 +1508,8 @@ describe('revokeAllLinks', () => {
 
     it('skips rows with no stored DM refs (legacy sends predating the wire-up)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-new',    recipient_discord_id: 'u-new',    dm_status: 'sent', dm_channel_id: 'c-new', dm_message_id: 'm-new' },
-        { resource_id: 'res-legacy', recipient_discord_id: 'u-legacy', dm_status: 'sent' }, // no channel / message id
+        { resource_id: 'res-new', recipient_discord_id: 'u-new', dm_status: 'sent', dm_channel_id: 'c-new', dm_message_id: 'm-new', qurl_id: 'q_dm_new' },
+        { resource_id: 'res-legacy', recipient_discord_id: 'u-legacy', dm_status: 'sent', qurl_id: 'q_dm_legacy' }, // no channel / message id
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1497,7 +1521,7 @@ describe('revokeAllLinks', () => {
 
     it('skips rows where the DM never delivered (dm_status !== sent)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-failed', recipient_discord_id: 'u-failed', dm_status: 'failed', dm_channel_id: 'c-x', dm_message_id: 'm-x' },
+        { resource_id: 'res-failed', recipient_discord_id: 'u-failed', dm_status: 'failed', dm_channel_id: 'c-x', dm_message_id: 'm-x', qurl_id: 'q_nodm' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1512,7 +1536,7 @@ describe('revokeAllLinks', () => {
       ['ok:false+exp',  () => mockEditDM.mockResolvedValueOnce({ ok: false, expected: true })],
     ])('does not affect revoke success/total when DM edit fails as %s', async (_shape, setupMock) => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1', qurl_id: 'q_edit_error' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
       setupMock();
@@ -1525,9 +1549,9 @@ describe('revokeAllLinks', () => {
 
     it('logs split attempted/edited/expectedFailures/failed counts', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-ok',  dm_status: 'sent', dm_channel_id: 'c-ok',  dm_message_id: 'm-ok' },
-        { resource_id: 'res-2', recipient_discord_id: 'u-exp', dm_status: 'sent', dm_channel_id: 'c-exp', dm_message_id: 'm-exp' },
-        { resource_id: 'res-3', recipient_discord_id: 'u-bad', dm_status: 'sent', dm_channel_id: 'c-bad', dm_message_id: 'm-bad' },
+        { resource_id: 'res-1', recipient_discord_id: 'u-ok', dm_status: 'sent', dm_channel_id: 'c-ok', dm_message_id: 'm-ok', qurl_id: 'q_split_ok' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-exp', dm_status: 'sent', dm_channel_id: 'c-exp', dm_message_id: 'm-exp', qurl_id: 'q_split_exp' },
+        { resource_id: 'res-3', recipient_discord_id: 'u-bad', dm_status: 'sent', dm_channel_id: 'c-bad', dm_message_id: 'm-bad', qurl_id: 'q_split_bad' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
       mockEditDM
@@ -1544,7 +1568,7 @@ describe('revokeAllLinks', () => {
 
     it('renders the fallback alias when senderAlias is omitted (forgotten-4th-arg defense)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1', qurl_id: 'q_no_alias' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
 
@@ -1561,8 +1585,8 @@ describe('revokeAllLinks', () => {
 
     it('de-dupes per recipient when multiple rows share recipient_discord_id', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
-        { resource_id: 'res-2', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1', qurl_id: 'q_dedupe_1' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1', qurl_id: 'q_dedupe_2' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
 
@@ -2757,7 +2781,10 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     mockDb.saveSendConfig.mockResolvedValue(undefined);
     mockDb.getSendItems.mockReset();
     mockDb.getSendItems.mockResolvedValueOnce([
-      { recipient_discord_id: 'u1', resource_id: 'res-initial', dm_channel_id: 'dm-c', dm_message_id: 'dm-m' },
+      {
+        recipient_discord_id: 'u1', resource_id: 'res-initial', qurl_id: 'q_original',
+        dm_channel_id: 'dm-c', dm_message_id: 'dm-m',
+      },
     ]);
     mockDb.markSendRevoked.mockResolvedValue(true);
     mockDeleteLink.mockReset();
@@ -2995,8 +3022,8 @@ describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)'
     const { collect, makeClick } = await setupRevocableSend();
     mockDb.getSendItems.mockReset();
     mockDb.getSendItems.mockResolvedValueOnce([
-      { recipient_discord_id: 'u1', resource_id: 'res-ok', dm_channel_id: 'dm-c', dm_message_id: 'dm-m', dm_status: 'sent' },
-      { recipient_discord_id: 'u2', resource_id: 'res-failed', dm_channel_id: 'dm-c2', dm_message_id: 'dm-m2', dm_status: 'sent' },
+      { recipient_discord_id: 'u1', resource_id: 'res-ok', qurl_id: 'q_stale_ok', dm_channel_id: 'dm-c', dm_message_id: 'dm-m', dm_status: 'sent' },
+      { recipient_discord_id: 'u2', resource_id: 'res-failed', qurl_id: 'q_stale_failed', dm_channel_id: 'dm-c2', dm_message_id: 'dm-m2', dm_status: 'sent' },
     ]);
     mockDeleteLink.mockReset();
     mockDeleteLink
@@ -3856,6 +3883,47 @@ describe('mintLinksInBatches', () => {
       'mintLinksInBatches failed; cleaning up minted resources',
       expect.objectContaining({
         resources: [expect.objectContaining({ qurl_ids: ['q_partial'] })],
+      }),
+    );
+  });
+
+  it('parent-cleans and reports unidentified partial residue without re-revoking confirmed siblings', async () => {
+    const originalError = Object.assign(new Error('partial mint failed'), {
+      partialLinkCount: 2,
+      partialQurlIds: ['q_partial'],
+      partialUnidentifiedQurlCount: 1,
+      partialCleanupConfirmed: true,
+    });
+    mockMintLinks.mockRejectedValueOnce(originalError);
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    })).rejects.toBe(originalError);
+
+    expect(mockRevokeMintedLinks).not.toHaveBeenCalled();
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-1', 'apikey');
+    expect(logger.error).toHaveBeenCalledWith(
+      'mintLinksInBatches failed; cleaning up minted resources',
+      expect.objectContaining({
+        resources: [expect.objectContaining({
+          qurl_ids: ['q_partial'],
+          unidentified_qurl_count: 1,
+        })],
+      }),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted mint batch qURL resources',
+      expect.objectContaining({
+        failures: [expect.objectContaining({
+          connector_revoke_attempted: false,
+          connector_revoke_confirmed: null,
+          resource_revoke_confirmed: true,
+          unidentified_qurl_count: 1,
+        })],
       }),
     );
   });

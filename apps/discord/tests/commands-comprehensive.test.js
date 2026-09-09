@@ -993,9 +993,9 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('runs revoke when deleteFlow wins (deleted=true)', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
-      { resource_id: 'res-3', recipient_discord_id: 'u-3' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_select_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_select_2' },
+      { resource_id: 'res-3', recipient_discord_id: 'u-3', qurl_id: 'q_select_3' },
     ]);
     mockDeleteLink.mockResolvedValue(undefined);
     const interaction = makeSelectInteraction({ values: ['send-99'] });
@@ -1050,8 +1050,8 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('reports a partial revoke as an unconfirmed failure', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_partial_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_partial_2' },
     ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
@@ -1067,7 +1067,7 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('reports successful DELETEs truthfully when the final revoked state write fails', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_finalize_1' },
     ]);
     mockDeleteLink.mockResolvedValue(undefined);
     mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB finalize failed'));
@@ -1100,8 +1100,8 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
   it('retries a temporary DELETE failure and finalizes after the next selection', async () => {
     mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-1', recipient_discord_id: 'u-1', qurl_id: 'q_retry_1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2', qurl_id: 'q_retry_2' },
     ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
