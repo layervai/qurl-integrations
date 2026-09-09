@@ -225,6 +225,46 @@ func (r *LocalShareRegistry) SetDesired(ctx context.Context, id, desired string,
 	return &updated, nil
 }
 
+// Retarget moves one row to a new loopback target under the newer serving
+// epoch the platform returned when the share was restarted. The target and
+// epoch land in one write, so no durable row ever pairs the old target with
+// the new epoch or the new target with the old one. A restart is
+// authoritative desired-on, so the row turns on. The same-epoch guard mirrors
+// Put: a target change at the current epoch would let the session that
+// admitted the old target keep serving under the new one.
+func (r *LocalShareRegistry) Retarget(ctx context.Context, id, target string, epoch uint64) (*LocalShare, error) {
+	var updated LocalShare
+	err := r.update(ctx, func(state *localSharesState) error {
+		key, share, ok := findLocalShare(state.Shares, id)
+		if !ok {
+			return os.ErrNotExist
+		}
+		if epoch <= share.ServingEpoch {
+			return fmt.Errorf("refuse local target change without a newer serving epoch than %d", share.ServingEpoch)
+		}
+		share.TargetURL, share.LocalIP, share.LocalPort = target, "", 0
+		if parsed, err := url.Parse(target); err == nil {
+			// validateLocalShare rejects anything but a literal loopback IP
+			// and a valid port; an unparsable port stays 0 and fails there.
+			share.LocalIP = parsed.Hostname()
+			share.LocalPort, _ = strconv.Atoi(parsed.Port())
+		}
+		share.DesiredState = desiredStateOn
+		share.ServingEpoch = epoch
+		share.UpdatedAt = time.Now().UTC()
+		if err := validateLocalShare(&share); err != nil {
+			return err
+		}
+		state.Shares[key] = share
+		updated = share
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
 // DisableAtCurrentEpoch records a fail-closed local stop without rotating the
 // serving epoch. It is used after either a permanent terminal denial for the
 // current session or an authoritative idempotent cloud-off response. It may
