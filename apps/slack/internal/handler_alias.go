@@ -97,8 +97,8 @@ const (
 // tunnel `$slug` now (the slug→resource_id resolution is the admin act
 // that authorizes the resource for use in the channel). The copy leads
 // with the tunnel-slug form so a sigil-less typo stays actionable, and
-// mentions URLs/resource-ids only parenthetically (the forms migrating
-// admins are most likely to try) rather than asserting the admin typed
+// mentions URLs, CRIDs, and internal handles parenthetically (forms
+// migrating admins may try), rather than asserting the admin typed
 // one. This is intentionally stricter than private-host classification
 // plus an allowlist: no raw URL target is accepted in any deployment,
 // so private-address exceptions cannot bypass the tunnel-only contract.
