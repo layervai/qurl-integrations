@@ -35,10 +35,10 @@ SPEC.loader.exec_module(credentials)
 class FakeAPI:
     def __init__(self) -> None:
         self.owner = "ci-client@clients"
-        self.jwt = "lv_test_" + "a" * 43
+        self.automation_key = "lv_test_" + "a" * 43
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_customer-key"
-        self.auth_token_requests = 0
+        self.identity_checks = 0
         self.api_key_inventory_requests = 0
         self.resource_inventory_requests = 0
         self.retain_revoked_keys = False
@@ -108,8 +108,8 @@ class FakeAPI:
         parsed = urllib.parse.urlsplit(url)
         assert parsed.netloc == "sandbox.example", "unexpected Auth0 request"
         if parsed.path == "/v1/me":
-            if bearer == self.jwt:
-                self.auth_token_requests += 1  # Counts automation identity checks, not token requests.
+            if bearer == self.automation_key:
+                self.identity_checks += 1  # Counts automation identity checks, not token requests.
                 data = {"auth_type": "api_key", "owner_id": self.owner,
                         "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
             elif bearer == self.api_key or bearer in self.issued_api_keys:
@@ -257,7 +257,7 @@ def auth_args(root: pathlib.Path) -> argparse.Namespace:
 
 
 def reconcile_one(args: argparse.Namespace) -> None:
-    endpoint, jwt, _ = credentials.authenticated_owner(
+    endpoint, automation_key, _ = credentials.authenticated_owner(
         args, args.operation_budget_seconds
     )
     run = credentials.RunCleanup(
@@ -269,8 +269,8 @@ def reconcile_one(args: argparse.Namespace) -> None:
     )
     credentials.reconcile_run(
         run,
-        authenticated=(endpoint, jwt),
-        inventory=credentials.reconciliation_inventory(endpoint, jwt),
+        authenticated=(endpoint, automation_key),
+        inventory=credentials.reconciliation_inventory(endpoint, automation_key),
     )
 
 
@@ -404,7 +404,7 @@ def test_scheduled_soak_workflow_contract() -> None:
     )
     assert workflow.count("qurl-cli-ci-credentials.py create-pair") == 2
     assert "qurl-cli-ci-credentials.py create " not in workflow
-    assert "cleanup-jwt" not in SCRIPT.read_text(encoding="utf-8")
+    assert "cleanup-automation_key" not in SCRIPT.read_text(encoding="utf-8")
     assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
     assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
     assert "--require-device-keys" not in workflow
@@ -460,17 +460,17 @@ def test_pair_and_batch_each_validate_one_automation_key() -> None:
                 run_id="1231",
             )
         )
-        assert fake.auth_token_requests == 1
+        assert fake.identity_checks == 1
         assert (primary / "api-key-id").read_text(encoding="utf-8") != (
             failure / "api-key-id"
         ).read_text(encoding="utf-8")
         assert (primary / "api-key").read_text(encoding="utf-8") != (
             failure / "api-key"
         ).read_text(encoding="utf-8")
-        assert not (primary / "cleanup-jwt").exists()
-        assert not (failure / "cleanup-jwt").exists()
+        assert not (primary / "cleanup-automation_key").exists()
+        assert not (failure / "cleanup-automation_key").exists()
 
-        fake.auth_token_requests = 0
+        fake.identity_checks = 0
         credentials.reconcile_batch(
             argparse.Namespace(
                 **vars(args),
@@ -480,7 +480,7 @@ def test_pair_and_batch_each_validate_one_automation_key() -> None:
                 ),
             )
         )
-        assert fake.auth_token_requests == 1
+        assert fake.identity_checks == 1
 
 
 def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run() -> None:
@@ -502,7 +502,7 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
                 pass
             else:
                 raise AssertionError("invalid reconciliation batch was accepted")
-        assert fake.auth_token_requests == 0
+        assert fake.identity_checks == 0
 
         for budget in (0, 3301):
             values = {**vars(args), "operation_budget_seconds": budget}
@@ -517,14 +517,14 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
                 pass
             else:
                 raise AssertionError("invalid reconciliation budget was accepted")
-        assert fake.auth_token_requests == 0
+        assert fake.identity_checks == 0
 
         attempted: list[str] = []
 
         def reconcile(
             run: argparse.Namespace, authenticated=None, inventory=None
         ) -> None:
-            assert authenticated == ("https://sandbox.example", fake.jwt)
+            assert authenticated == ("https://sandbox.example", fake.automation_key)
             assert isinstance(inventory, credentials.ReconciliationInventory)
             attempted.append(run.run_id)
             if run.run_id == "1231":
@@ -541,10 +541,10 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
                 )
             )
         assert attempted == ["1232"]
-        assert fake.auth_token_requests == 1
+        assert fake.identity_checks == 1
 
         attempted.clear()
-        fake.auth_token_requests = 0
+        fake.identity_checks = 0
         diagnostics = io.StringIO()
         with (
             mock.patch.object(credentials, "reconcile_run", reconcile),
@@ -565,7 +565,7 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
             else:
                 raise AssertionError("failed reconciliation batch was accepted")
         assert attempted == ["1231", "1232"]
-        assert fake.auth_token_requests == 1
+        assert fake.identity_checks == 1
         assert (
             "::error::run cleanup failed for linux lane run 1231/2: first run failed"
             in diagnostics.getvalue()
@@ -573,7 +573,7 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
 
         for failure in (OSError("protected path"), UnicodeError("protected value")):
             attempted.clear()
-            fake.auth_token_requests = 0
+            fake.identity_checks = 0
             diagnostics = io.StringIO()
 
             def fail_once(
@@ -605,12 +605,12 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
                         "unexpected local cleanup failure was accepted"
                     )
             assert attempted == ["1231", "1232"]
-            assert fake.auth_token_requests == 1
+            assert fake.identity_checks == 1
             assert "local cleanup error" in diagnostics.getvalue()
             assert "protected" not in diagnostics.getvalue()
 
         attempted.clear()
-        fake.auth_token_requests = 0
+        fake.identity_checks = 0
         fake.api_key_inventory_requests = 0
         fake.resource_inventory_requests = 0
         maximum = tuple(
@@ -622,7 +622,7 @@ def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_ru
                 argparse.Namespace(**vars(args), run_spec=maximum)
             )
         assert len(attempted) == credentials.MAX_RECONCILE_RUNS
-        assert fake.auth_token_requests == 1
+        assert fake.identity_checks == 1
         assert fake.api_key_inventory_requests == 1
         assert fake.resource_inventory_requests == 1
 
@@ -655,7 +655,7 @@ def test_pair_rejects_invalid_input_before_authentication() -> None:
                 pass
             else:
                 raise AssertionError(f"invalid create field {field} was accepted")
-    assert fake.auth_token_requests == 0
+    assert fake.identity_checks == 0
 
 
 def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
@@ -701,7 +701,7 @@ def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
             )
         else:
             raise AssertionError("invalid second customer identity was accepted")
-    assert fake.auth_token_requests == 1
+    assert fake.identity_checks == 1
     assert set(fake.deleted_keys) == {"key_AbCdEf123456", "key_Paired000001"}
     assert fake.keys == {}
 
@@ -736,7 +736,7 @@ def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
             )
         else:
             raise AssertionError("rejected first credential unexpectedly succeeded")
-    assert fake.auth_token_requests == 1
+    assert fake.identity_checks == 1
     assert fake.issued_api_keys == {}
     assert fake.deleted_keys == []
 
@@ -771,15 +771,58 @@ def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
             raise AssertionError("failed inner cleanup was masked")
 
 
+def test_cleanup_budgets_and_batch_caps_stay_consistent() -> None:
+    cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
+    fallback_operation_seconds = 40 * 60
+    cleanup_workflow = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
+    assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == 45
+    assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
+    assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
+    assert f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow
+    # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
+    # most three source runs, for twelve total reconciliations in the largest
+    # mixed recovery request.
+    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60, (
+        "primary inventory budgets no longer leave room for cleanup writes"
+    )
+    resolver_cap = re.search(
+        r"cleanup_cap=([1-9][0-9]*)",
+        cleanup_workflow,
+    )
+    base_lanes = re.search(r"lane_specs=\(([^)\n]+)\)", cleanup_workflow)
+    added_lanes = re.search(r"lane_specs\+=\(([^)\n]+)\)", cleanup_workflow)
+    assert resolver_cap and base_lanes and added_lanes
+    assert "if (( ${#resolved_runs[@]} > cleanup_cap )); then" in cleanup_workflow
+    assert 'resolved_runs=("${resolved_runs[@]: -cleanup_cap}")' in cleanup_workflow
+    max_lanes = len(base_lanes.group(1).split()) + len(added_lanes.group(1).split())
+    assert int(resolver_cap.group(1)) * max_lanes <= credentials.MAX_RECONCILE_RUNS
+    assert (
+        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12
+        < fallback_operation_seconds
+    ), "fallback inventory budgets no longer leave room for cleanup writes"
+    assert (
+        0
+        < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS
+        < (credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
+    )
+
+
 def test_automation_key_identity_and_lifetime_fail_closed() -> None:
     fake = FakeAPI()
     with tempfile.TemporaryDirectory() as raw_root:
         args = auth_args(pathlib.Path(raw_root))
         with mock.patch.object(credentials, "request", fake):
-            assert credentials.authenticated_owner(args, 900) == (args.qurl_endpoint, fake.jwt, fake.owner)
+            assert credentials.authenticated_owner(args, 900) == (args.qurl_endpoint, fake.automation_key, fake.owner)
         valid = {"auth_type": "api_key", "owner_id": fake.owner,
                  "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
+        for expiry in (None, "2099-01-01T00:00:00Z"):
+            info = {**valid["api_key"], "scopes": list(reversed(credentials.REQUIRED_AUTOMATION_SCOPES))}
+            if expiry is not None:
+                info["expires_at"] = expiry
+            with mock.patch.object(credentials, "identity", return_value={**valid, "api_key": info}):
+                assert credentials.authenticated_owner(args, 900)[2] == fake.owner
         for data in (
+            {**valid, "api_key": {**valid["api_key"], "expires_at": None}},
             {**valid, "owner_id": "other-owner"},
             {**valid, "auth_type": "jwt"},
             {**valid, "api_key": {**valid["api_key"], "kind": "device"}},
@@ -863,7 +906,7 @@ def test_bounded_valid_pagination() -> None:
     with mock.patch.object(credentials, "request", fake_request):
         rows = credentials.paged_rows(
             "https://sandbox.example",
-            "jwt",
+            "automation_key",
             "/v1/resources",
             "test",
             status_filter=None,
@@ -902,7 +945,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
         try:
             credentials.paged_rows(
                 "https://sandbox.example",
-                "jwt",
+                "automation_key",
                 "/v1/resources",
                 "test",
                 status_filter=None,
@@ -927,7 +970,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
         try:
             credentials.paged_rows(
                 "https://sandbox.example",
-                "jwt",
+                "automation_key",
                 "/v1/resources",
                 "test",
                 status_filter=None,
@@ -954,7 +997,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
         try:
             credentials.paged_rows(
                 "https://sandbox.example",
-                "jwt",
+                "automation_key",
                 "/v1/resources",
                 "test",
                 status_filter=None,
@@ -990,7 +1033,7 @@ def test_pagination_safety_limits_fail_closed() -> None:
         try:
             credentials.paged_rows(
                 "https://sandbox.example",
-                "jwt",
+                "automation_key",
                 "/v1/resources",
                 "test",
                 status_filter=None,
@@ -1083,7 +1126,7 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
         ):
             try:
                 credentials.retry_connector_resource_delete(
-                    "https://sandbox.example", "jwt", connector_id
+                    "https://sandbox.example", "automation_key", connector_id
                 )
             except credentials.CredentialError:
                 pass
@@ -1107,7 +1150,7 @@ def test_connector_cleanup_lookup_fails_closed() -> None:
 
     with mock.patch.object(credentials, "request", empty_request):
         assert not credentials.retry_connector_resource_delete(
-            "https://sandbox.example", "jwt", connector_id
+            "https://sandbox.example", "automation_key", connector_id
         )
 
 
@@ -1115,13 +1158,13 @@ def test_cleanup_hard_rejections_are_not_retried() -> None:
     connector_id = "connector-cli-journey-v2-415907f85f12d5ffd69c6a62"
     operations = (
         lambda: credentials.retry_revoke(
-            "https://sandbox.example", "jwt", "key_AbCdEf123456"
+            "https://sandbox.example", "automation_key", "key_AbCdEf123456"
         ),
         lambda: credentials.retry_resource_delete(
-            "https://sandbox.example", "jwt", "r_customer_ci"
+            "https://sandbox.example", "automation_key", "r_customer_ci"
         ),
         lambda: credentials.retry_connector_resource_delete(
-            "https://sandbox.example", "jwt", connector_id
+            "https://sandbox.example", "automation_key", connector_id
         ),
     )
     for operation in operations:
@@ -1264,7 +1307,7 @@ def test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal() -> 
     absent.assignments.clear()
     with mock.patch.object(credentials, "request", absent):
         credentials.retry_assignment_retire(
-            "https://sandbox.example", absent.jwt, absent_agent
+            "https://sandbox.example", absent.automation_key, absent_agent
         )
     assert absent.assignment_retire_attempts == [absent_agent]
     assert absent.retired_assignments == []
@@ -1275,7 +1318,7 @@ def test_assignment_absence_is_idempotent_and_permanent_failures_are_fatal() -> 
         with mock.patch.object(credentials, "request", rejected):
             try:
                 credentials.retry_assignment_retire(
-                    "https://sandbox.example", rejected.jwt, absent_agent
+                    "https://sandbox.example", rejected.automation_key, absent_agent
                 )
             except credentials.CredentialError as exc:
                 assert str(exc) == "qURL Connector assignment retirement was rejected"
@@ -1446,6 +1489,7 @@ def main() -> None:
     test_pair_rejects_invalid_input_before_authentication()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_pair_first_create_failure_never_mints_a_recovery_key()
+    test_cleanup_budgets_and_batch_caps_stay_consistent()
     test_automation_key_identity_and_lifetime_fail_closed()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()

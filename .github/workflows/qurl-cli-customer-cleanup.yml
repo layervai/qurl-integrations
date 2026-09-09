@@ -1,6 +1,6 @@
 name: "qURL CLI Customer Cleanup"
 
-# The primary workflow reconciles all lanes with one management token. This
+# The primary workflow reconciles all lanes with one automation key. This
 # trusted fallback runs only when that cleanup did not pass, including after a
 # cancellation. The protected manual entry accepts only verified prior trusted
 # journey runs and exists for bounded recovery of older leaks.
@@ -257,9 +257,9 @@ jobs:
     # Manual recovery accepts at most three exact run attempts. Automatic
     # recovery also keeps at most three unresolved attempts. A scheduled/manual
     # source adds the fourth lane, for at most 12 reconciliations under one
-    # management token and one two-minute owner inventory. The 40-minute token
-    # work budget plus its five-minute expiry margin matches the job timeout;
-    # token mint happens after runner setup.
+    # automation key and one two-minute owner inventory. The 40-minute operation
+    # work budget plus five minutes for runner cleanup matches the job timeout;
+    # identity validation happens after runner setup.
     timeout-minutes: 45
     environment: cli-customer-journey-cleanup
     permissions:
