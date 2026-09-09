@@ -15,7 +15,9 @@ import (
 func TestOpenPlaintextRefusesSealedEnvelope(t *testing.T) {
 	t.Setenv(connectoragentstate.EnvKeyProvider, "")
 	t.Setenv(connectoragentstate.EnvLocalKeyFD, "")
-	dir := t.TempDir()
+	// The directory must already carry the owner-only ACL on Windows, otherwise
+	// the directory capability refuses it before the envelope guard runs.
+	dir := secureStateTestDir(t)
 	sealed := filepath.Join(dir, connectoragentstate.SealedAgentStateFile)
 	if err := os.WriteFile(sealed, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
