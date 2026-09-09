@@ -140,13 +140,17 @@ func TestLoginProjections(t *testing.T) {
 			t.Fatal(err)
 		}
 		var doc struct {
-			DeviceEnrolled bool `json:"device_enrolled"`
+			DeviceKeyID    string `json:"device_key_id"`
+			DeviceEnrolled bool   `json:"device_enrolled"`
 		}
 		if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 			t.Fatal(err)
 		}
 		if !doc.DeviceEnrolled {
 			t.Error("device_enrolled = false, want true")
+		}
+		if doc.DeviceKeyID != "key_outputtest01" {
+			t.Errorf("device_key_id = %q, want the enrolled device key id", doc.DeviceKeyID)
 		}
 	})
 }
