@@ -266,7 +266,7 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      QURL_JOURNEY_OWNER_ID: ${{ vars.QURL_JOURNEY_OWNER_ID }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

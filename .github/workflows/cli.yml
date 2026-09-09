@@ -774,7 +774,7 @@ jobs:
       QURL_JOURNEY_HUB_HOST: ${{ secrets.QURL_JOURNEY_HUB_HOST }}
       QURL_JOURNEY_HUB_PORT: ${{ secrets.QURL_JOURNEY_HUB_PORT }}
       QURL_JOURNEY_HUB_PUBLIC_KEY_B64: ${{ secrets.QURL_JOURNEY_HUB_PUBLIC_KEY_B64 }}
-      QURL_JOURNEY_OWNER_ID: ${{ vars.QURL_JOURNEY_OWNER_ID }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
       QURL_SHARING_RUN_ID: ${{ format('{0}{1}', github.run_id, matrix.lane_id) }}
       QURL_SHARING_RUN_ATTEMPT: ${{ github.run_attempt }}
       QURL_SHARING_RUNTIME: host
@@ -1159,7 +1159,7 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      QURL_JOURNEY_OWNER_ID: ${{ vars.QURL_JOURNEY_OWNER_ID }}
+      QURL_JOURNEY_OWNER_ID: ${{ secrets.QURL_JOURNEY_OWNER_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

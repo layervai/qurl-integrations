@@ -11,7 +11,7 @@ Before enabling the changed workflows:
    authenticated account-management session with these exact scopes:
    `qurl:agent`, `qurl:keys`, `qurl:read`, `qurl:resolve`, `qurl:write`.
 3. Store the key as GitHub environment secret `QURL_JOURNEY_API_KEY`. Set
-   environment variable `QURL_JOURNEY_OWNER_ID` to the matching `/v1/me` owner.
+   environment secret `QURL_JOURNEY_OWNER_ID` to the matching `/v1/me` owner.
    A finite key needs at least three hours remaining when setup starts.
 4. Run all scheduled/release customer lanes and the cleanup workflow. Check that
    the run keys are distinct, device enrollment completes, and cleanup revokes
