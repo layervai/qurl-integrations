@@ -15,6 +15,7 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// Serial because captureDefaultSlog replaces the process-wide logger.
 func TestConnectorInstallModalReportsResourceQuota(t *testing.T) {
 	for _, s3Website := range []bool{false, true} {
 		name := "existing service"
@@ -22,6 +23,7 @@ func TestConnectorInstallModalReportsResourceQuota(t *testing.T) {
 			name = "S3 website"
 		}
 		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultSlog(t)
 			ts := newAdminTestServers(t)
 			ts.seedAdmin(t)
 			var creates, keyMints atomic.Int32
@@ -68,6 +70,11 @@ func TestConnectorInstallModalReportsResourceQuota(t *testing.T) {
 			for _, want := range []string{"protected resource limit", "revoke", "upgrade", "No enrollment token was minted", "ea96b2e6459e6be9"} {
 				if !strings.Contains(message, want) {
 					t.Errorf("quota reply missing %q: %s", want, message)
+				}
+			}
+			for _, attr := range []string{`"request_id":"ea96b2e6459e6be9"`, `"status":403`, `"code":"quota_exceeded"`} {
+				if !logs.contains(attr) {
+					t.Errorf("resource-create log missing %s: %s", attr, logs.String())
 				}
 			}
 			if strings.Contains(message, "private-upstream-detail") {

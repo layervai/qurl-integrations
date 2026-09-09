@@ -508,7 +508,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Description:  defaultS3WebsiteDescription,
 	})
 	if err != nil {
-		log.Error("S3 website install: create/find resource failed", withAPIErrorAttrs(err, "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug))...)
+		log.Error("S3 website install: create/find resource failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug))...)
 		return nil, connectorResourceCreateErrorMessage(err), err
 	}
 	resolvedArgs := *args
