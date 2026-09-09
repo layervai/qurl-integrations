@@ -459,6 +459,9 @@ async function mintLinks(resourceId, {
     if (!privateUpload?.mint_capability || privateUpload.upload_handle !== resourceId) {
       throw new Error('Private upload capability is missing for delegated mint');
     }
+    if (!Number.isSafeInteger(privateSendDeadlineMs) || privateSendDeadlineMs <= Date.now()) {
+      throw new Error('Private mint requires a valid unexpired shared send deadline');
+    }
     const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
     const grants = Array.from({ length: n }, () => ({
       ...(expiresIn === '24h' ? {} : { expires_in: expiresIn }),

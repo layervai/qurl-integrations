@@ -1896,9 +1896,14 @@ async function executeSendPipeline(interaction, {
 }) {
   // One absolute deadline covers every delegated batch in this interaction.
   // Computing it here prevents a large send from receiving a fresh 10-minute
-  // wait budget for each 100-recipient batch.
+  // wait budget for each 100-recipient batch. Recipient resolution before
+  // entry can consume time, so preserve the interaction's cleanup/reply reserve.
   const privateSendDeadlineMs = config.PRIVATE_UPLOAD_QURL
-    ? Date.now() + PRIVATE_SEND_MINT_BUDGET_MS
+    ? Math.min(
+      Date.now() + PRIVATE_SEND_MINT_BUDGET_MS,
+      interaction.createdTimestamp + TIMEOUTS.QURL_REVOKE_WINDOW
+        - PRIVATE_SEND_CLEANUP_BUDGET_MS - 60_000,
+    )
     : undefined;
   // Shared cancel-edit for every entry gate. Fire-and-forget — the
   // throw is the load-bearing signal (test pins + logger.error in
@@ -1923,6 +1928,11 @@ async function executeSendPipeline(interaction, {
     clearCooldown(interaction.user.id);
     cancelEdit();
     throw new ErrorCtor(msg);
+  }
+
+  if (config.PRIVATE_UPLOAD_QURL
+      && (!Number.isSafeInteger(privateSendDeadlineMs) || privateSendDeadlineMs <= Date.now())) {
+    failGate(Error, 'Cannot send — this interaction is expiring. Create a new send instead.');
   }
 
   // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
@@ -3037,28 +3047,38 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   )];
   if (resourceIds.length === 0) return;
 
-  const results = await batchSettled(resourceIds, async (resourceId) => {
-    await deleteLink(resourceId, apiKey);
-    return resourceId;
-  }, 5);
+  const cleanupDeadlineMs = config.PRIVATE_UPLOAD_QURL
+    ? Math.min(Date.now() + PRIVATE_SEND_CLEANUP_BUDGET_MS, options.deadlineMs)
+    : Infinity;
   let failedCount = 0;
   const failureSamples = [];
-  results.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      failedCount++;
-      if (failureSamples.length < 5) {
-        failureSamples.push({
-          resource_ref: resourceIdLogRef(resourceIds[index]),
-          error: result.reason?.message,
-        });
+  let attempted = 0;
+  while (attempted < resourceIds.length && Date.now() < cleanupDeadlineMs) {
+    const batch = resourceIds.slice(attempted, attempted + 5);
+    const results = await batchSettled(batch, async (resourceId) => {
+      await deleteLink(resourceId, apiKey,
+        ...(config.PRIVATE_UPLOAD_QURL ? [{ deadlineMs: cleanupDeadlineMs }] : []));
+    }, 5);
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        failedCount++;
+        if (failureSamples.length < 5) {
+          failureSamples.push({
+            resource_ref: resourceIdLogRef(batch[index]),
+            error: result.reason?.message,
+          });
+        }
       }
-    }
-  });
-  if (failedCount > 0) {
+    });
+    attempted += batch.length;
+  }
+  const unattempted = resourceIds.length - attempted;
+  if (failedCount > 0 || unattempted > 0) {
     logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
       sendId,
       reason: cleanupReason,
       failed_count: failedCount,
+      unattempted_count: unattempted,
       total: resourceIds.length,
       failure_samples: failureSamples,
     });
@@ -3472,6 +3492,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
       rowsMayHavePersisted: false,
       reason: 'pre_persistence_oversized_batch',
+      deadlineMs: privateSendDeadlineMs + PRIVATE_SEND_CLEANUP_BUDGET_MS,
     });
     return {
       msg: 'Cannot add recipients — too many recipients selected. Try fewer recipients.',
@@ -3490,7 +3511,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
       });
-      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+        deadlineMs: privateSendDeadlineMs + PRIVATE_SEND_CLEANUP_BUDGET_MS,
+      });
       return {
         msg: 'Cannot add recipients — this send has already been revoked.',
         newLinks: [], newRecipients: [],
@@ -3507,6 +3530,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // because no DMs were sent and the qURLs no longer grant access.
     await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
       reason: 'guarded_transaction_failed',
+      deadlineMs: privateSendDeadlineMs + PRIVATE_SEND_CLEANUP_BUDGET_MS,
     });
     return {
       msg: 'Failed to save link records. Recipients were not messaged. Please try again.',
