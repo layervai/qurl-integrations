@@ -739,13 +739,7 @@ func (o *globalOpts) openNativeRegisteredClient(
 		if handoffErr != nil {
 			return nil, handoffErr
 		}
-		return qurlapi.NewRegistered(ctx, &qurlapi.Config{
-			BaseURL:      origin,
-			Version:      o.version,
-			Verbose:      o.verboseLogger(),
-			Sleep:        o.sleep,
-			NewRequestID: o.newRequestID,
-		}, store)
+		return o.openRegisteredDeviceClient(ctx, origin, store)
 	}
 	client, err := openDeviceClient()
 	if err != nil {
@@ -761,25 +755,142 @@ func (o *globalOpts) openNativeRegisteredClient(
 	if deviceIdentity == nil {
 		return nil, nil, errors.New("qURL account identity response is empty")
 	}
-	deviceKeyID := ""
-	if deviceIdentity.Key != nil {
-		deviceKeyID = deviceIdentity.Key.KeyID
-	}
 	if bootstrap.identity != nil && bootstrap.identity.OwnerID != deviceIdentity.OwnerID {
 		return nil, nil, &deviceAccountConflictError{
-			stateDir: stateDir, deviceKeyID: deviceKeyID,
+			stateDir: stateDir, deviceKeyID: identityKeyID(deviceIdentity),
 			currentOwner: deviceIdentity.OwnerID, requestedOwner: bootstrap.identity.OwnerID,
 		}
 	}
-	registry, err := o.openShareRegistry(stateDir)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := bindRegisteredDeviceOwner(ctx, registry, stateDir, deviceKeyID, deviceIdentity.OwnerID); err != nil {
+	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
 		return nil, nil, err
 	}
 	o.nativeRuntime = nativeRuntime
 	return client, deviceIdentity, nil
+}
+
+// openNativeExternalRegisteredClient enrolls this machine from a supervisor's
+// one-time token file into an externally supervised namespace, or opens the
+// identity already there. Establishing the external policy is part of the
+// operation: a fresh directory is labeled before anything is written into
+// it, and an already external namespace is accepted as is. The token stays
+// behind the runtime's lazy enrollment provider, so a warm namespace never
+// reads the file, and there is no recovery provider because a one-time token
+// can never become recovery authority.
+func (o *globalOpts) openNativeExternalRegisteredClient(
+	ctx context.Context,
+	tokenPath, stateDir string,
+) (_ qurlapi.Client, _ *qurlapi.Identity, retErr error) {
+	if o.nativeRuntime != nil {
+		return nil, nil, errors.New("registered-device runtime is already open")
+	}
+	hubBootstrap, err := o.resolveHubBootstrap()
+	if err != nil {
+		return nil, nil, err
+	}
+	origin, err := agent.ResourceSDKOrigin(o.resolvedEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read local hostname: %w", err)
+	}
+	if err := connectorstate.EstablishExternalRuntimeMode(ctx, stateDir); err != nil {
+		return nil, nil, err
+	}
+	nativeRuntime, err := o.openNativeRuntime(ctx, connectorshare.NativeRuntimeConfig{
+		StateDir:      stateDir,
+		AgentID:       connectorstate.ConfiguredAgentID(),
+		Hub:           hubBootstrap,
+		Hostname:      hostname,
+		Version:       o.version,
+		ClientBaseURL: origin,
+		EnrollmentCredentialProvider: func(context.Context, qurl.AgentEnrollmentCredentialRequest) (string, error) {
+			return auth.ReadExternalEnrollmentTokenFile(tokenPath)
+		},
+		RefreshMode: connectorRefreshModeAuto,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, nativeRuntime.Close())
+		}
+	}()
+	store, err := nativeRuntime.Handoff()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := requireExternalOwnerScopedAgentState(ctx, store); err != nil {
+		return nil, nil, err
+	}
+	client, err := o.openRegisteredDeviceClient(ctx, origin, store)
+	if err != nil {
+		return nil, nil, err
+	}
+	deviceIdentity, err := client.Me(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if deviceIdentity == nil {
+		return nil, nil, errors.New("qURL account identity response is empty")
+	}
+	if err := o.bindDeviceOwner(ctx, stateDir, deviceIdentity); err != nil {
+		return nil, nil, err
+	}
+	o.nativeRuntime = nativeRuntime
+	return client, deviceIdentity, nil
+}
+
+// requireExternalOwnerScopedAgentState refuses a device a supervisor cannot
+// use: native session operations accept only the owner-scoped agent
+// enrollment kind, and a token minted for target connector yields a
+// credential qurl-go refuses for them forever. The namespace is left as it is
+// for the supervisor to rotate.
+func requireExternalOwnerScopedAgentState(ctx context.Context, store qurl.AgentStateStore) error {
+	persisted, err := store.LoadAgentState(ctx)
+	if err != nil {
+		return err
+	}
+	if persisted == nil || persisted.RegisteredAt == nil || strings.TrimSpace(persisted.DeviceAPIKey) == "" {
+		return fmt.Errorf("%w: device registration is incomplete", auth.ErrDeviceEnrollmentScope)
+	}
+	if kind := qurl.RegistrationKeyKind(strings.TrimSpace(persisted.EnrollmentCredentialKind)); kind != qurl.RegistrationKeyKindBootstrap {
+		return fmt.Errorf("%w: enrolled with credential kind %q, not %q; move the state directory aside and enroll again with a token minted for target agent",
+			auth.ErrDeviceEnrollmentScope, kind, qurl.RegistrationKeyKindBootstrap)
+	}
+	return nil
+}
+
+// openRegisteredDeviceClient builds the narrow REST client around the durable
+// device credential held in store.
+func (o *globalOpts) openRegisteredDeviceClient(ctx context.Context, origin string, store qurl.AgentStateStore) (qurlapi.Client, error) {
+	return qurlapi.NewRegistered(ctx, &qurlapi.Config{
+		BaseURL:      origin,
+		Version:      o.version,
+		Verbose:      o.verboseLogger(),
+		Sleep:        o.sleep,
+		NewRequestID: o.newRequestID,
+	}, store)
+}
+
+// bindDeviceOwner records the authenticated owner in the namespace's registry,
+// refusing a namespace that belongs to another account.
+func (o *globalOpts) bindDeviceOwner(ctx context.Context, stateDir string, deviceIdentity *qurlapi.Identity) error {
+	registry, err := o.openShareRegistry(stateDir)
+	if err != nil {
+		return err
+	}
+	return bindRegisteredDeviceOwner(ctx, registry, stateDir, identityKeyID(deviceIdentity), deviceIdentity.OwnerID)
+}
+
+// identityKeyID is the non-secret identifier of the credential behind id.
+func identityKeyID(id *qurlapi.Identity) string {
+	if id.Key == nil {
+		return ""
+	}
+	return id.Key.KeyID
 }
 
 func repairExplicitLoginDeviceAuthorization(

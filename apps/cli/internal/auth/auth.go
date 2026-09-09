@@ -37,6 +37,9 @@ var (
 	// ErrDeviceAccountConflict rejects reuse of one durable device state
 	// directory across different qURL accounts.
 	ErrDeviceAccountConflict = errors.New("cli: registered device state belongs to a different qURL account")
+	// ErrDeviceEnrollmentScope rejects a registered device whose enrollment is
+	// not the owner-scoped agent kind that native session operations require.
+	ErrDeviceEnrollmentScope = errors.New("cli: registered device enrollment is not owner-scoped")
 )
 
 // Source names where a resolved credential came from.
