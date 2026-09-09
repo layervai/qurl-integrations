@@ -23,12 +23,17 @@ const DaemonJobLabel = "ai.layerv.qurl.share-daemon"
 // daemonJobProtocolVersion identifies the persisted service-manager argument
 // contract. Increment it for each incompatible shape; do not reuse an earlier
 // value even when a later shape resembles it.
-const daemonJobProtocolVersion = "3"
+const daemonJobProtocolVersion = "4"
 
 // JobController installs, upgrades, and signals the per-user daemon job.
 type JobController struct {
-	Manager        connectorservice.UserJobManager
-	IPC            IPCClient
+	Manager connectorservice.UserJobManager
+	IPC     IPCClient
+	// RuntimeDir holds the daemon's control socket. The job passes it
+	// explicitly: a daemon under launchd or systemd does not run in the user's
+	// shell environment, so it must listen exactly where the CLI that installed
+	// it, and every later CLI invocation, resolve the socket.
+	RuntimeDir     string
 	StateDir       string
 	LogDir         string
 	BinaryVersion  string
@@ -45,16 +50,23 @@ type JobController struct {
 }
 
 // NewJobController builds the production native per-user job controller.
-func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
+// lookupEnv resolves the socket address the controller probes and the job
+// carries; see SocketPathForStateDir.
+func NewJobController(stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, resolveHub func() (qurl.HubBootstrap, error), lookupEnv func(string) (string, bool)) (*JobController, error) {
+	socket, err := SocketPathForStateDir(stateDir, lookupEnv)
+	if err != nil {
+		return nil, err
+	}
 	controller := &JobController{
-		Manager:  connectorservice.NewUserJobManager(),
-		IPC:      IPCClient{SocketPath: StateSocketPath(stateDir)},
-		StateDir: stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
+		Manager:    connectorservice.NewUserJobManager(),
+		IPC:        IPCClient{SocketPath: socket},
+		RuntimeDir: filepath.Dir(socket),
+		StateDir:   stateDir, LogDir: logDir, BinaryVersion: strings.TrimSpace(binaryVersion),
 		InvocationPath: os.Args[0], Endpoint: endpoint, ShareGroupMode: mode, ResolveHub: resolveHub, LookPath: exec.LookPath,
 	}
 	controller.ProbeStatus = controller.IPC.Status
 	controller.Reload = controller.IPC.ReloadIfRunning
-	return controller
+	return controller, nil
 }
 
 // Ensure reloads a compatible live daemon or installs the current job definition.
@@ -116,7 +128,8 @@ func (c *JobController) Ensure(ctx context.Context) error {
 }
 
 func (c *JobController) validateController() error {
-	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil {
+	if c == nil || c.Manager == nil || c.LookPath == nil || c.ProbeStatus == nil || c.Reload == nil || c.ResolveHub == nil ||
+		c.RuntimeDir == "" {
 		return errors.New("share daemon job controller is incomplete")
 	}
 	return nil
@@ -155,7 +168,7 @@ func (c *JobController) jobDefinition(hub qurl.HubBootstrap, jobVersion string) 
 	arguments := make([]string, 0, 20)
 	arguments = append(arguments,
 		"--endpoint", c.Endpoint,
-		"daemon", "run", "--state-dir", c.StateDir, "--job-version", jobVersion,
+		"daemon", "run", "--state-dir", c.StateDir, "--runtime-dir", c.RuntimeDir, "--job-version", jobVersion,
 		// The mode is always explicit so the daemon runs in the mode this job
 		// version was computed for, whatever its own environment or config file
 		// would resolve to.

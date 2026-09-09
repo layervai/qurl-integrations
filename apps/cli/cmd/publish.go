@@ -439,10 +439,14 @@ func finishLocalPublish(
 	if err != nil {
 		return compensate(err)
 	}
-	if err := opts.newShareDaemon(stateDir, logDir).Ensure(ctx); err != nil {
+	daemon, err := opts.newShareDaemon(stateDir, logDir)
+	if err != nil {
 		return compensate(err)
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
+	if err := daemon.Ensure(ctx); err != nil {
+		return compensate(err)
+	}
+	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch); err != nil {
 		return err
 	}
 	return printLocalPublishServing(opts, resolved, local)
@@ -493,11 +497,15 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
+	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, opts.lookupEnv)
+	if err != nil {
+		return err
+	}
 	daemonCtx, cancel := context.WithCancel(ctx)
 	cancelDaemon = cancel
 	daemonErr = make(chan error, 1)
 	go func() { daemonErr <- opts.runForegroundDaemon(daemonCtx, opts, stateDir, jobVersion) }()
-	ipc := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	ipc := connectordaemon.IPCClient{SocketPath: socketPath}
 	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- ipc.WaitReady(readyCtx) }()
@@ -513,7 +521,7 @@ func runForegroundLocalPublish(
 	if err != nil {
 		return err
 	}
-	if _, err := waitForSharingWithDiagnostics(ctx, client, local, stateDir, local.ServingEpoch, opts.sharingWaitLimit); err != nil {
+	if _, err := waitForSharingWithDiagnostics(ctx, opts, client, local, stateDir, local.ServingEpoch); err != nil {
 		return err
 	}
 	if err := printLocalPublishServing(opts, resolved, local); err != nil {

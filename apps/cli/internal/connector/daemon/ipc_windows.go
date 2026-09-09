@@ -74,7 +74,14 @@ func dialDaemonIPC(ctx context.Context, path string) (net.Conn, error) {
 
 func validatePlatformIPCPath(string) error { return nil }
 
-func platformStateSocketPath(path string) string { return path }
+// platformSocketPath returns the logical path windowsDaemonPipeName hashes
+// into the named-pipe address. runtimeDir is ignored: a named pipe has no
+// path-length bound, and the Windows EnsureDirMode anchors its ACL on the
+// agent-state file inside the state directory, so a separate runtime directory
+// would only create a stray state envelope.
+func platformSocketPath(stateDir, _ string) (string, error) {
+	return filepath.Join(stateDir, SocketFile), nil
+}
 
 func isUnavailableIPCError(err error) bool {
 	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND)

@@ -857,7 +857,7 @@ func TestDaemonRunDocumentsPublicInputsAndHidesJobSupervisionDetails(t *testing.
 		}
 	}
 	for _, hidden := range []string{
-		"--job-version", "--job-stdout-log", "--job-stderr-log",
+		"--job-version", "--job-stdout-log", "--job-stderr-log", "--runtime-dir",
 		"--hub-host", "--hub-port", "--hub-server-public-key-b64",
 	} {
 		if strings.Contains(res.stdout.String(), hidden) {

@@ -27,9 +27,13 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMPDIR", dir)
 	// Exercise the derived runtime path, not only its string contract: this
 	// state namespace is intentionally too long for sockaddr_un.
-	path := StateSocketPath(filepath.Join(dir, strings.Repeat("state-segment-", 8)))
+	path, err := SocketPathForStateDir(filepath.Join(dir, strings.Repeat("state-segment-", 8)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- (&IPCServer{SocketPath: path, Manager: manager, JobVersion: "1/test"}).Run(ctx) }()
@@ -58,26 +62,30 @@ func TestIPCServerReadinessReloadAndShutdown(t *testing.T) {
 	}
 }
 
-func TestStateSocketPathBoundsLongUnixStateDirectories(t *testing.T) {
-	shortState := filepath.Join(unixIPCRuntimeRoot, "qurl-short-state")
-	if got, want := StateSocketPath(shortState), filepath.Join(shortState, SocketFile); got != want {
-		t.Fatalf("short state socket = %q, want %q", got, want)
+func TestSocketPathBoundsLongUnixStateDirectories(t *testing.T) {
+	root := shortTempRoot(t)
+	shortState := filepath.Join(root, "qurl-short-state")
+	if got, err := SocketPathForStateDir(shortState, nil); err != nil || got != filepath.Join(shortState, SocketFile) {
+		t.Fatalf("short state socket = %q, %v; want %q", got, err, filepath.Join(shortState, SocketFile))
 	}
 
-	longState := filepath.Join(unixIPCRuntimeRoot, strings.Repeat("long-state-segment-", 8))
-	first := StateSocketPath(longState)
-	if first != StateSocketPath(longState) {
+	longState := filepath.Join(root, strings.Repeat("long-state-segment-", 8))
+	first, err := SocketPathForStateDir(longState, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := SocketPathForStateDir(longState, nil); err != nil || again != first {
 		t.Fatal("long state socket path is not deterministic")
 	}
-	if !filepath.IsAbs(first) || len(first) > maxUnixSocketPathBytes || filepath.Base(first) == SocketFile {
+	if !filepath.IsAbs(first) || len(first) > maxUnixSocketPathBytes || filepath.Dir(first) == longState {
 		t.Fatalf("long state socket = %q, want bounded absolute derived path", first)
 	}
-	if first == StateSocketPath(longState+"-other") {
+	if other, err := SocketPathForStateDir(longState+"-other", nil); err != nil || other == first {
 		t.Fatal("different long state namespaces share one socket path")
 	}
 
 	longRelative := strings.Repeat("relative-state-", 8)
-	if got := StateSocketPath(longRelative); filepath.IsAbs(got) {
+	if got, err := SocketPathForStateDir(longRelative, nil); err == nil || got != "" {
 		t.Fatalf("invalid relative state path became valid IPC path %q", got)
 	}
 }

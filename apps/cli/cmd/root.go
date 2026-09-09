@@ -79,7 +79,7 @@ type globalOpts struct {
 	loadLocalShares      func(context.Context) ([]connectorstate.LocalShare, error)
 	readLocalShares      func(context.Context, string) ([]connectorstate.LocalShare, bool, error)
 	openShareRegistry    func(string) (localShareRegistry, error)
-	newShareDaemon       func(string, string) shareDaemonController
+	newShareDaemon       func(string, string) (shareDaemonController, error)
 	preflightTarget      func(context.Context, string, int) error
 	resolveShareStateDir func(string) (string, error)
 	resolveLocalResource localResourceResolver
@@ -263,6 +263,18 @@ QURL_API_KEY for the same one-time bootstrap.`,
 	return cmd, opts
 }
 
+// nativeShareDaemon builds the production per-user background-job controller
+// for one state directory.
+func (o *globalOpts) nativeShareDaemon(stateDir, logDir string) (shareDaemonController, error) {
+	controller, err := connectordaemon.NewJobController(
+		stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolveHubBootstrap, o.lookupEnv,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return controller, nil
+}
+
 func (o *globalOpts) applyDefaults() {
 	if o.configDir == "" {
 		o.configDir = config.DefaultDir()
@@ -307,11 +319,7 @@ func (o *globalOpts) applyDefaults() {
 		}
 	}
 	if o.newShareDaemon == nil {
-		o.newShareDaemon = func(stateDir, logDir string) shareDaemonController {
-			return connectordaemon.NewJobController(
-				stateDir, logDir, o.version, o.resolvedEndpoint, o.resolvedShareGroupMode, o.resolveHubBootstrap,
-			)
-		}
+		o.newShareDaemon = o.nativeShareDaemon
 	}
 	if o.preflightTarget == nil {
 		o.preflightTarget = preflightLocalTarget

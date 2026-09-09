@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	connectordaemon "github.com/layervai/qurl-integrations/apps/cli/internal/connector/daemon"
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -37,6 +38,17 @@ const testAPIKey = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 // owner-only setup path that a real CLI invocation uses. Windows temp
 // directories inherit a broad ACL, so passing t.TempDir() itself would test
 // the intentional fail-closed path instead of a normal installation.
+// stateSocketPath resolves the daemon socket the way a CLI run under the
+// harness's injected environment does: no runtime directory is pinned.
+func stateSocketPath(t *testing.T, stateDir string) string {
+	t.Helper()
+	path, err := connectordaemon.SocketPathForStateDir(stateDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func connectorStateTestDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "connector-state")
@@ -245,9 +257,11 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			g.openShareRegistry = func(string) (localShareRegistry, error) { return o.shareRegistry, nil }
 		}
 		if o.shareDaemonFactory != nil {
-			g.newShareDaemon = o.shareDaemonFactory
+			g.newShareDaemon = func(stateDir, logDir string) (shareDaemonController, error) {
+				return o.shareDaemonFactory(stateDir, logDir), nil
+			}
 		} else if o.shareDaemon != nil {
-			g.newShareDaemon = func(string, string) shareDaemonController { return o.shareDaemon }
+			g.newShareDaemon = func(string, string) (shareDaemonController, error) { return o.shareDaemon, nil }
 		}
 		if o.preflightTarget != nil {
 			g.preflightTarget = o.preflightTarget
