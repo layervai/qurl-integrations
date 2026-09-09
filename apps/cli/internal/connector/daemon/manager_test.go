@@ -1531,6 +1531,60 @@ func TestStatusNeverContainsOverlayValues(t *testing.T) {
 	}
 }
 
+// TestOverlayChangeReRegistersOnlyThatRouteOnTheLiveSession drives the real
+// SessionGroupRunner with two shares and pins the per-route isolation the
+// supervisor's file routes depend on: an overlay for one route re-registers
+// exactly that route under a fresh proxy name, its sibling keeps its single
+// registration, and the change spends no admission and no session.
+func TestOverlayChangeReRegistersOnlyThatRouteOnTheLiveSession(t *testing.T) {
+	registry := &memoryRegistry{shares: map[string]connectorstate.LocalShare{
+		"a": daemonShare("a", 1, "on"),
+		"b": daemonShare("b", 1, "on"),
+	}}
+	admitter := &fakeAdmitter{}
+	sessions := &fakeSessionGroupFactory{}
+	manager, err := NewManager(registry, &NativeGroupFactory{admitter: admitter, sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.retryDelay = func(int) time.Duration { return 20 * time.Millisecond }
+	manager.refusalDelay = manager.retryDelay
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	session := sessions.session(1)
+	if session == nil {
+		t.Fatal("no session group started")
+	}
+	manager.SetOverlay(map[string]map[string]string{"connector-a": {overlayHeader: "t"}})
+	waitManagerCondition(t, func() bool { return len(session.proxyNames("connector-a")) == 2 }, "route a re-registered under a fresh proxy name")
+	waitServing(t, manager, "a")
+	waitServing(t, manager, "b")
+	time.Sleep(50 * time.Millisecond)
+	if names := session.proxyNames("connector-a"); len(names) != 2 || names[0] == names[1] {
+		t.Fatalf("route a registrations = %v, want exactly one re-registration under a fresh name", names)
+	}
+	if names := session.proxyNames("connector-b"); len(names) != 1 {
+		t.Fatalf("route b registrations = %v, want its single original registration untouched by a sibling's overlay", names)
+	}
+	if got := session.RouteStates()["connector-b"].Route.RequestHeaders; got != nil {
+		t.Fatalf("route b carries request headers (digest %q), want none", connectorshare.RequestHeadersDigest(got))
+	}
+	if admitter.admissions() != 1 || sessions.startCount() != 1 {
+		t.Fatalf("admissions/sessions = %d/%d, want the overlay to spend neither", admitter.admissions(), sessions.startCount())
+	}
+}
+
 // TestManagerDeferredFirstReconcileHonorsAnEarlierTrigger pins that a
 // supervisor's reload which lands before Run starts (the IPC server accepts
 // requests concurrently with the manager's start) is not lost: it is the
