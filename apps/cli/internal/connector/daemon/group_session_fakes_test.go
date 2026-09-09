@@ -126,7 +126,7 @@ func (s *fakeGroupSession) install(routes []connectorshare.GroupRoute) {
 	for i := range routes {
 		route := &routes[i]
 		name := fakeProxyName(route, s.admission.SessionID)
-		if current, ok := s.routes[route.RouteID]; ok && current.ProxyName == name && current.Route == *route {
+		if current, ok := s.routes[route.RouteID]; ok && current.ProxyName == name && current.Route.Equal(*route) {
 			next[route.RouteID] = current
 			continue
 		}

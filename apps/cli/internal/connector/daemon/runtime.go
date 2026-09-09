@@ -22,9 +22,15 @@ import (
 var ErrDirectEgressRequired = errors.New("qURL local sharing requires direct egress")
 
 // DefaultFRPCommon builds the daemon's shared immutable FRP client defaults.
+// TLS on the control connection is set explicitly rather than left to FRP's
+// default: qurl-connector refuses a route set carrying runtime request
+// headers on a plaintext transport (or with the local FRP web server on), so
+// a changed default would silently fail every route the overlay names.
 func DefaultFRPCommon(dialTimeoutSeconds, keepaliveSeconds int64) (*v1.ClientCommonConfig, error) {
 	loginFailExit := true
+	tlsEnabled := true
 	common := &v1.ClientCommonConfig{LoginFailExit: &loginFailExit}
+	common.Transport.TLS.Enable = &tlsEnabled
 	common.Transport.DialServerTimeout = dialTimeoutSeconds
 	common.Transport.DialServerKeepAlive = keepaliveSeconds
 	if err := common.Complete(); err != nil {
