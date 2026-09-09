@@ -2940,8 +2940,13 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const failed = [];
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
+      const qurlIds = [...new Set(resourceEntries[index][1].filter(
+        id => typeof id === 'string' && id.length > 0,
+      ))];
       failed.push({
         resource_ref: resourceIdLogRef(resourceEntries[index][0]),
+        qurl_id_count: qurlIds.length,
+        qurl_ids: qurlIds,
         error: result.reason?.message,
       });
     }
@@ -8452,6 +8457,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
           resource_ref: resourceIdLogRef(resourceId),
           malformedTokenCount,
           connectorRevokeConfirmed,
+          confirmedTokenCount: connectorRevokeConfirmed ? new Set(qurlIds).size : 0,
           resourceRevokeConfirmed,
         });
       }

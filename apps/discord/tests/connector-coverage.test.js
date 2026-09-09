@@ -587,6 +587,40 @@ describe('Connector client — coverage boost', () => {
         }),
       );
     });
+
+    it('cleans every identifiable child from a mixed malformed partial response', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 502,
+          text: async () => JSON.stringify({
+            success: false,
+            error: 'render failed after mixed results',
+            links: [
+              { qurl_id: 'q_partial_valid' },
+              { qurl_id: '' },
+              {},
+            ],
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            results: [{ qurl_id: 'q_partial_valid', status: 'revoked' }],
+          }),
+        });
+
+      await expect(connector.mintLinks(
+        'res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 3 },
+      )).rejects.toMatchObject({ partialQurlIds: ['q_partial_valid'] });
+
+      expect(JSON.parse(globalThis.fetch.mock.calls[1][1].body)).toEqual({
+        resource_id: 'res-1',
+        qurl_ids: ['q_partial_valid'],
+      });
+    });
   });
 
   describe('revokeMintedLinks — fail-closed response contract', () => {
@@ -653,6 +687,52 @@ describe('Connector client — coverage boost', () => {
       await expect(connector.revokeMintedLinks(
         'res-1', ['q_one', 'q_two'], 'guild-key',
       )).resolves.toBe(true);
+    });
+
+    it('chunks more than ten unique ids to the connector batch cap', async () => {
+      const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+      globalThis.fetch = jest.fn().mockImplementation(async (_url, options) => {
+        const requested = JSON.parse(options.body).qurl_ids;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            results: requested.map(qurlId => ({ qurl_id: qurlId, status: 'revoked' })),
+          }),
+        };
+      });
+
+      await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key'))
+        .resolves.toBe(true);
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(globalThis.fetch.mock.calls.map(([, options]) => (
+        JSON.parse(options.body).qurl_ids
+      ))).toEqual([ids.slice(0, 10), ids.slice(10)]);
+    });
+
+    it('requires every chunk to confirm before reporting a large revoke complete', async () => {
+      const ids = Array.from({ length: 11 }, (_, i) => `q_${i + 1}`);
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            results: ids.slice(0, 10).map(qurlId => ({ qurl_id: qurlId, status: 'revoked' })),
+          }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, results: [] }),
+        });
+
+      await expect(connector.revokeMintedLinks('res-1', ids, 'guild-key'))
+        .rejects.toMatchObject({ unresolvedCount: 1 });
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
 
     it('deduplicates requested token ids before calling the connector', async () => {

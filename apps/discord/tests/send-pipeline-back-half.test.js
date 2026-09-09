@@ -918,7 +918,28 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
       'Cannot fully revoke resource with malformed stored token identity',
-      expect.objectContaining({ malformedTokenCount: 1 }),
+      expect.objectContaining({ malformedTokenCount: 1, confirmedTokenCount: 1 }),
+    );
+  });
+
+  it('reports zero confirmed children when every stored token identity is malformed', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-1', recipient_discord_id: 'user-1', qurl_id: '   ' },
+      { resource_id: 'res-1', recipient_discord_id: 'user-2', qurl_id: { corrupt: true } },
+    ]);
+
+    const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-1', [], 'apikey');
+    expect(result.success).toBe(0);
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Cannot fully revoke resource with malformed stored token identity',
+      expect.objectContaining({
+        malformedTokenCount: 2,
+        connectorRevokeConfirmed: true,
+        confirmedTokenCount: 0,
+      }),
     );
   });
 
@@ -2945,6 +2966,10 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         sendId: 'send-1',
         reason: 'guarded_transaction_failed',
         failed_count: 1,
+        failures: [expect.objectContaining({
+          qurl_id_count: 1,
+          qurl_ids: ['q_aaaaaaaaaa1'],
+        })],
       }),
     );
     expect(mockSendDM).not.toHaveBeenCalled();
@@ -3002,7 +3027,12 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'revoked_guard',
         failed_count: 1,
         total: 1,
-        failures: [{ resource_ref: resourceIdLogRef(sensitiveResourceId), error: 'delete failed' }],
+        failures: [{
+          resource_ref: resourceIdLogRef(sensitiveResourceId),
+          qurl_id_count: 1,
+          qurl_ids: ['q_aaaaaaaaaa1'],
+          error: 'delete failed',
+        }],
       }),
     );
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(sensitiveResourceId);

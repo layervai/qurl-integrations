@@ -26,6 +26,10 @@ const MINT_LINK_TIMEOUT_MS = 65_000;
 // Match mint's 10s response-transport margin so the caller, rather than an
 // accidental 30s race with the connector's qURL client, owns the outer bound.
 const REVOKE_LINKS_TIMEOUT_MS = 65_000;
+// #1553 rejects larger requests atomically. Keep this endpoint contract local
+// rather than coupling connector.js to commands.js's independently tunable
+// TOKENS_PER_RESOURCE; chunking also recovers legacy/corrupt over-cap groups.
+const REVOKE_LINKS_MAX_IDS = 10;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -553,51 +557,54 @@ async function revokeMintedLinks(resourceId, qurlIds, apiKey) {
   const ids = [...new Set(qurlIds.map(id => id.trim()))];
   if (ids.length === 0) return true;
 
-  const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ resource_id: resourceId, qurl_ids: ids }),
-    signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
-  });
+  for (let offset = 0; offset < ids.length; offset += REVOKE_LINKS_MAX_IDS) {
+    const batchIds = ids.slice(offset, offset + REVOKE_LINKS_MAX_IDS);
+    const response = await fetch(`${config.CONNECTOR_URL}/api/revoke_links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
+      body: JSON.stringify({ resource_id: resourceId, qurl_ids: batchIds }),
+      signal: AbortSignal.timeout(REVOKE_LINKS_TIMEOUT_MS),
+    });
 
-  if (!response.ok) {
-    return throwConnectorError('Connector revoke_links', response);
-  }
-
-  let parsed;
-  try {
-    parsed = await response.json();
-  } catch {
-    const err = new Error('Connector revoke_links returned invalid JSON');
-    err.unresolvedCount = ids.length;
-    throw err;
-  }
-
-  // Require one id-keyed all-clear outcome for every requested id. Checking only
-  // for bad statuses would accept an empty/short result array and finalize a
-  // send while omitted links may still be live. Results may be reordered, but
-  // duplicate or foreign outcomes violate the exact-coverage contract.
-  let unresolvedCount = ids.length;
-  if (parsed?.success === true && Array.isArray(parsed.results)) {
-    const requested = new Set(ids);
-    const confirmed = new Set();
-    let invalidOutcomeCount = 0;
-    for (const result of parsed.results) {
-      const statusConfirmed = result?.status === 'revoked' || result?.status === 'already_gone';
-      if (!requested.has(result?.qurl_id) || confirmed.has(result.qurl_id) || !statusConfirmed) {
-        invalidOutcomeCount++;
-      } else {
-        confirmed.add(result.qurl_id);
-      }
+    if (!response.ok) {
+      return throwConnectorError('Connector revoke_links', response);
     }
-    // Use the larger count so one foreign/duplicate outcome replacing one
-    // missing requested outcome is reported once rather than double-counted.
-    unresolvedCount = Math.max(ids.length - confirmed.size, invalidOutcomeCount);
-  }
-  if (unresolvedCount > 0) {
-    const err = new Error(`Connector revoke_links did not confirm ${unresolvedCount} link(s)`);
-    err.unresolvedCount = unresolvedCount;
-    throw err;
+
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch {
+      const err = new Error('Connector revoke_links returned invalid JSON');
+      err.unresolvedCount = batchIds.length;
+      throw err;
+    }
+
+    // Require one id-keyed all-clear outcome for every requested id. Checking only
+    // for bad statuses would accept an empty/short result array and finalize a
+    // send while omitted links may still be live. Results may be reordered, but
+    // duplicate or foreign outcomes violate the exact-coverage contract.
+    let unresolvedCount = batchIds.length;
+    if (parsed?.success === true && Array.isArray(parsed.results)) {
+      const requested = new Set(batchIds);
+      const confirmed = new Set();
+      let invalidOutcomeCount = 0;
+      for (const result of parsed.results) {
+        const statusConfirmed = result?.status === 'revoked' || result?.status === 'already_gone';
+        if (!requested.has(result?.qurl_id) || confirmed.has(result.qurl_id) || !statusConfirmed) {
+          invalidOutcomeCount++;
+        } else {
+          confirmed.add(result.qurl_id);
+        }
+      }
+      // Use the larger count so one foreign/duplicate outcome replacing one
+      // missing requested outcome is reported once rather than double-counted.
+      unresolvedCount = Math.max(batchIds.length - confirmed.size, invalidOutcomeCount);
+    }
+    if (unresolvedCount > 0) {
+      const err = new Error(`Connector revoke_links did not confirm ${unresolvedCount} link(s)`);
+      err.unresolvedCount = unresolvedCount;
+      throw err;
+    }
   }
   logger.info('Confirmed connector-managed link revoke', {
     resource_ref: resourceIdLogRef(resourceId),
