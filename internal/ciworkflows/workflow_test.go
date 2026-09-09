@@ -293,6 +293,11 @@ func TestCLICustomerJourneyIsConsolidatedAndTrusted(t *testing.T) {
 	}
 
 	journey := workflow.Jobs["journey"]
+	for name, value := range journey.Env {
+		if name == "AUTOMATION_API_KEY" || strings.Contains(fmt.Sprint(value), "secrets.QURL_JOURNEY_API_KEY") {
+			t.Errorf("journey job environment exposes standing authority through %s", name)
+		}
+	}
 	if !slices.Contains(parseWorkflowNeeds(t, "journey", journey.Needs), cliCustomerArtifactsJobID) {
 		t.Error("journey can run without the one artifact build")
 	}

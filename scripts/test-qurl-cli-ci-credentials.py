@@ -799,7 +799,17 @@ def test_cleanup_budgets_and_batch_caps_stay_consistent() -> None:
         fallback_operation_seconds + credentials.RUNNER_CLEANUP_MARGIN_SECONDS
         == 45 * 60
     )
-    assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
+    lane_minutes = [
+        int(value)
+        for value in re.findall(
+            r'"timeout_minutes":([0-9]+)', CLI_WORKFLOW.read_text(encoding="utf-8")
+        )
+    ]
+    assert lane_minutes
+    assert credentials.MIN_AUTOMATION_LIFETIME_SECONDS >= (
+        (max(lane_minutes) + cleanup_minutes) * 60
+        + credentials.RUNNER_CLEANUP_MARGIN_SECONDS
+    ), "setup authority must outlive the longest journey and cleanup"
     assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
     assert (
         f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow

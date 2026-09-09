@@ -21,7 +21,7 @@ from typing import Any
 
 
 MAX_RESPONSE = 64 * 1024
-# Match the primary cleanup job timeout.
+# Conservative setup budget; the three-hour journey lifetime floor is stronger.
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
 # Validate the requested credential lifetime; workflow timeouts bound execution.
 MAX_OPERATION_BUDGET_SECONDS = 55 * 60

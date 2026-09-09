@@ -13,7 +13,11 @@ Before enabling the changed workflows:
    `qurl:agent`, `qurl:keys`, `qurl:read`, `qurl:resolve`, `qurl:write`.
 3. Store the key as GitHub environment secret `QURL_JOURNEY_API_KEY`. Set
    environment secret `QURL_JOURNEY_OWNER_ID` to the matching `/v1/me` owner.
-   A finite key needs at least three hours remaining when setup starts.
+   The value must have `lv_test_` or `lv_live_` followed by 43 base64url characters;
+   a bad paste fails with `automation API key is malformed` before network access.
+   Prefer a finite key with at least three hours remaining when setup starts.
+   Cleanup needs its operation budget plus five minutes: 20 minutes for primary
+   cleanup and 45 minutes for fallback cleanup.
 4. Run all scheduled/release customer lanes and the cleanup workflow. Check that
    the run keys are distinct, device enrollment completes, and cleanup revokes
    only the run's keys and resources. The automation key must survive cleanup.
