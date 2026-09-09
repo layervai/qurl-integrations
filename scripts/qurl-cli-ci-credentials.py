@@ -490,12 +490,23 @@ def authenticated_owner(
     # TODO(upstream-contract): MeApiKey omits expires_at for non-expiring keys.
     # A present null or malformed value is not the non-expiring wire contract.
     if "expires_at" in info:
+        raw = info["expires_at"]
+        if not isinstance(raw, str):
+            raise CredentialError("automation key expiry is malformed")
         try:
-            expiry = datetime.datetime.fromisoformat(info["expires_at"].replace("Z", "+00:00"))
-            if expiry.tzinfo is None or expiry.timestamp() - time.time() < max(operation_budget_seconds + RUNNER_CLEANUP_MARGIN_SECONDS, minimum_lifetime_seconds):
-                raise ValueError("insufficient lifetime")
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise CredentialError("automation key does not have the required lifetime") from exc
+            # Normalize subsecond precision for Python 3.10 as well as newer runners.
+            raw = re.sub(r"\.(\d{1,9})(?=Z|[+-])", lambda match: "." + match[1][:6].ljust(6, "0"), raw)
+            expiry = datetime.datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+        except ValueError as exc:
+            raise CredentialError("automation key expiry is malformed") from exc
+        if expiry.tzinfo is None:
+            raise CredentialError("automation key expiry is malformed")
+        required_lifetime = max(
+            operation_budget_seconds + RUNNER_CLEANUP_MARGIN_SECONDS,
+            minimum_lifetime_seconds,
+        )
+        if expiry.timestamp() - time.time() < required_lifetime:
+            raise CredentialError("automation key does not have the required lifetime")
     return endpoint, key, owner
 
 
@@ -832,7 +843,7 @@ def mint_ordinary_key(endpoint: str, automation_key: str, name: str) -> tuple[st
                 not isinstance(key_id, str)
                 or not KEY_ID.fullmatch(key_id)
                 or not isinstance(api_key, str)
-                or not api_key.startswith(("lv_test_", "lv_live_"))
+                or not API_KEY.fullmatch(api_key)
                 or data.get("kind") != "api_key"
                 or data.get("name") != name
                 or data.get("scopes") != CUSTOMER_SCOPES

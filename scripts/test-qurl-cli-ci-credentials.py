@@ -37,7 +37,7 @@ class FakeAPI:
         self.owner = "ci-client@clients"
         self.automation_key = "lv_test_" + "a" * 43
         self.key_id = "key_AbCdEf123456"
-        self.api_key = "lv_test_customer-key"
+        self.api_key = "lv_test_" + "b" * 43
         self.identity_checks = 0
         self.api_key_inventory_requests = 0
         self.resource_inventory_requests = 0
@@ -140,7 +140,7 @@ class FakeAPI:
             )
             issued = len(self.issued_api_keys)
             key_id = self.key_id if issued == 0 else f"key_Paired{issued:06d}"
-            api_key = self.api_key if issued == 0 else f"lv_test_customer-key-{issued}"
+            api_key = self.api_key if issued == 0 else "lv_test_" + f"{issued:043d}"
             self.issued_api_keys[api_key] = (key_id, api_key)
             row = {
                 "api_key": api_key,
@@ -404,7 +404,7 @@ def test_scheduled_soak_workflow_contract() -> None:
     )
     assert workflow.count("qurl-cli-ci-credentials.py create-pair") == 2
     assert "qurl-cli-ci-credentials.py create " not in workflow
-    assert "cleanup-automation_key" not in SCRIPT.read_text(encoding="utf-8")
+    assert "cleanup-jwt" not in SCRIPT.read_text(encoding="utf-8")
     assert "qurl-cli-ci-credentials.py reconcile-run" not in workflow
     assert workflow.count("qurl-cli-ci-credentials.py reconcile-batch") == 1
     assert "--require-device-keys" not in workflow
@@ -467,8 +467,12 @@ def test_pair_and_batch_each_validate_one_automation_key() -> None:
         assert (primary / "api-key").read_text(encoding="utf-8") != (
             failure / "api-key"
         ).read_text(encoding="utf-8")
-        assert not (primary / "cleanup-automation_key").exists()
-        assert not (failure / "cleanup-automation_key").exists()
+        assert not (primary / "cleanup-jwt").exists()
+        assert not (failure / "cleanup-jwt").exists()
+        for directory in (primary, failure):
+            for child in directory.rglob("*"):
+                if child.is_file():
+                    assert fake.automation_key not in child.read_text(encoding="utf-8")
 
         fake.identity_checks = 0
         credentials.reconcile_batch(
@@ -669,7 +673,7 @@ def test_pair_failure_revokes_both_exact_keys_with_the_same_token() -> None:
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
-        if method == "GET" and bearer == "lv_test_customer-key-1":
+        if method == "GET" and bearer == "lv_test_" + f"{1:043d}":
             return 401, b"{}"
         return fake(url, method, bearer, body, content_type, extra_headers)
 
@@ -776,6 +780,7 @@ def test_cleanup_budgets_and_batch_caps_stay_consistent() -> None:
     fallback_operation_seconds = 40 * 60
     cleanup_workflow = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
     assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == 45
+    assert fallback_operation_seconds <= credentials.MAX_OPERATION_BUDGET_SECONDS
     assert fallback_operation_seconds + credentials.RUNNER_CLEANUP_MARGIN_SECONDS == 45 * 60
     assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
     assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
@@ -814,6 +819,23 @@ def test_automation_key_identity_and_lifetime_fail_closed() -> None:
         args = auth_args(pathlib.Path(raw_root))
         with mock.patch.object(credentials, "request", fake):
             assert credentials.authenticated_owner(args, 900) == (args.qurl_endpoint, fake.automation_key, fake.owner)
+        with mock.patch.object(credentials, "identity", side_effect=AssertionError("invalid input reached network")):
+            for owner in ("", " owner", "owner "):
+                invalid = argparse.Namespace(**{**vars(args), "owner_id": owner})
+                try:
+                    credentials.authenticated_owner(invalid, 900)
+                except credentials.CredentialError as exc:
+                    assert str(exc) == "expected CI owner is required"
+                else:
+                    raise AssertionError("invalid owner accepted")
+            for index, value in enumerate(("lv_test_short", "lv_prod_" + "a" * 43, "lv_test_" + "a" * 44)):
+                invalid = argparse.Namespace(**{**vars(args), "api_key_file": private_file(pathlib.Path(raw_root), f"bad-key-{index}", value)})
+                try:
+                    credentials.authenticated_owner(invalid, 900)
+                except credentials.CredentialError as exc:
+                    assert str(exc) == "automation API key is malformed"
+                else:
+                    raise AssertionError("invalid key accepted")
         valid = {"auth_type": "api_key", "owner_id": fake.owner,
                  "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
         for expiry in (None, "2099-01-01T00:00:00Z"):
