@@ -508,8 +508,8 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Description:  defaultS3WebsiteDescription,
 	})
 	if err != nil {
-		log.Error("S3 website install: create/find resource failed", "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug))
-		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
+		log.Error("S3 website install: create/find resource failed", withAPIErrorAttrs(err, "error", sanitizeLogValue(err.Error()), "slug", sanitizeLogValue(args.Slug))...)
+		return nil, connectorResourceCreateErrorMessage(err), err
 	}
 	resolvedArgs := *args
 	if err := resolvedArgs.pinConnectorResource(resource, h.cfg.ConnectorAPIURL); err != nil {
