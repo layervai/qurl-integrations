@@ -86,6 +86,10 @@ func (*ownerOnlyTestShareRegistry) SetDesired(context.Context, string, string, u
 	return nil, errors.New("unexpected test registry SetDesired")
 }
 
+func (*ownerOnlyTestShareRegistry) Retarget(context.Context, string, string, uint64) (*connectorstate.LocalShare, error) {
+	return nil, errors.New("unexpected test registry Retarget")
+}
+
 func (*ownerOnlyTestShareRegistry) DisableAtCurrentEpoch(context.Context, string, uint64) (*connectorstate.LocalShare, error) {
 	return nil, errors.New("unexpected test registry DisableAtCurrentEpoch")
 }
