@@ -2782,6 +2782,48 @@ describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch
 });
 
 describe('handleAddRecipients — DB failure mid-flow', () => {
+  test.each(['SEND_CONFIG_REVOKED', 'DB_UNAVAILABLE'])('bounds private cleanup after %s and stops new groups at the deadline', async code => {
+    require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    let now = 720_000;
+    const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    mockDb.getGuildQurlCredential.mockResolvedValueOnce({ apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    const uploadHandle = `upl_${'a'.repeat(43)}`;
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: uploadHandle, fileBuffer: new ArrayBuffer(10),
+      private_upload: { upload_handle: uploadHandle, mint_capability: 'qmc1.test' },
+    });
+    mockMintLinks.mockResolvedValueOnce(Array.from({ length: 6 }, (_, i) => ({
+      qurl_id: `q_aaaaaaaaaa${i}`, resource_id: `q_aaaaaaaaaa${i}`, qurl_link: `https://q.test/${i}`,
+    })));
+    mockDb.recordQURLSendBatch.mockImplementationOnce(async () => {
+      now = 820_000;
+      throw Object.assign(new Error('transaction failed'), { code });
+    });
+    mockDeleteLink.mockImplementation(async () => { now = 840_000; });
+    try {
+      await handleAddRecipients('send-cleanup', makeUsersCollection(Array.from({ length: 6 }, (_, i) => ({
+        id: `u${i}`, username: `User${i}`, bot: false,
+      }))), makeInteraction({ guildId: 'guild-1', createdTimestamp: 0 }), 'stale-api-key');
+      expect(mockDeleteLink).toHaveBeenCalledTimes(5);
+      for (const call of mockDeleteLink.mock.calls) {
+        expect(call[2]).toEqual({ deadlineMs: 840_000 });
+      }
+      expect(mockSendDM).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        'Failed to clean up freshly minted Add Recipients qURL resources',
+        expect.objectContaining({ unattempted_count: 1, total: 6 }),
+      );
+    } finally {
+      dateNow.mockRestore();
+      mockDeleteLink.mockReset().mockResolvedValue(undefined);
+    }
+  });
+
   it('aborts before DMs when recordQURLSendBatch fails (no orphan live links)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
@@ -3686,5 +3728,25 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
     const [, message] = mockSendChannelMessage.mock.calls[0];
     expect(message.content).not.toMatch(/\u202E/u);
+  });
+});
+
+describe('executeSendPipeline — private interaction deadline', () => {
+  test.each([720_000, 820_000])('clamps the mint deadline after pre-pipeline work at %i ms', async now => {
+    require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    const dateNow = jest.spyOn(Date, 'now').mockReturnValue(now);
+    mockDownloadAndUpload.mockRejectedValueOnce(new Error('stop after deadline capture'));
+    try {
+      const run = executeSendPipeline(makeInteraction({ createdTimestamp: 0 }), makePipelineParams());
+      if (now === 720_000) {
+        await run;
+        expect(mockDownloadAndUpload.mock.calls[0][6]).toBe(810_000);
+      } else {
+        await expect(run).rejects.toThrow(/interaction.*expir/i);
+        expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+      }
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 });

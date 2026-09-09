@@ -1864,6 +1864,17 @@ describe('Connector client — private delegated mint', () => {
     connector = require('../src/connector');
   });
 
+  test.each([undefined, null, NaN, Infinity, 1, 1.5])('rejects missing or invalid shared private deadline %s before redemption', async privateSendDeadlineMs => {
+    const uploadHandle = `upl_${'a'.repeat(43)}`;
+    await expect(connector.mintLinks(uploadHandle, {
+      expiresIn: '1h', n: 1, apiKey: 'lv_test_example',
+      audienceKeyId: 'key_A1b2C3d4E5f6',
+      privateUpload: { upload_handle: uploadHandle, mint_capability: 'qmc1.test' },
+      privateSendDeadlineMs,
+    })).rejects.toThrow(/deadline/i);
+    expect(redeemDelegatedBatch).not.toHaveBeenCalled();
+  });
+
   it('forwards one deadline and omits the default 24h grant expiry', async () => {
     const uploadHandle = `upl_${'a'.repeat(43)}`;
     const privateUpload = { upload_handle: uploadHandle, mint_capability: 'qmc1.test' };
