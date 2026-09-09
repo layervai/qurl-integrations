@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	connectoragentstate "github.com/layervai/qurl-connector/pkg/agentstate"
@@ -167,5 +168,78 @@ func TestOpenFileProviderStaysPlaintext(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(store.Dir(), AgentStateFile)); err != nil {
 		t.Fatalf("plaintext envelope missing under the explicit file provider: %v", err)
+	}
+}
+
+// TestOpenWithLocalKeyReopensWithinOneProcess pins the descriptor contract a
+// supervisor relies on: it hands every qurl process exactly one wrapping-key
+// descriptor, yet one command opens the sealed envelope several times
+// (publish keeps its registered runtime open while resource discovery opens
+// a second runtime and this store again). The first open consumes the
+// descriptor; every later open, concurrent or after a close, must read the
+// same key from the connector's per-process cache.
+func TestOpenWithLocalKeyReopensWithinOneProcess(t *testing.T) {
+	clearStateEnv(t)
+	dir := sealedStateTestDir(t)
+	useLocalKey(t, 9)
+	first, err := Open(dir)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	saveTestAgentState(t, first)
+
+	loadThrough := func(store *Store) error {
+		sdkStore, err := store.Handoff()
+		if err != nil {
+			return err
+		}
+		state, err := sdkStore.LoadAgentState(context.Background())
+		if err != nil {
+			return err
+		}
+		if state == nil || state.AgentID != "a" {
+			return errors.New("sealed state did not round-trip")
+		}
+		return nil
+	}
+	second, err := Open(dir)
+	if err != nil {
+		t.Fatalf("second open beside the first: %v", err)
+	}
+	if err := loadThrough(second); err != nil {
+		t.Fatalf("second store: %v", err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 3)
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			store, err := Open(dir)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer func() { _ = store.Close() }()
+			errs <- loadThrough(store)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent open: %v", err)
+		}
+	}
+	if err := errors.Join(second.Close(), first.Close()); err != nil {
+		t.Fatal(err)
+	}
+	third, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after every store closed: %v", err)
+	}
+	defer func() { _ = third.Close() }()
+	if err := loadThrough(third); err != nil {
+		t.Fatalf("third store: %v", err)
 	}
 }
