@@ -1668,39 +1668,83 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   Threaded through here (not passed to mintLinks at each call site) because
  *   mintLinks is only reached via this batcher on the real send paths.
  *   Optional/back-compat — omitting it leaves the mint body unchanged.
+ * @param {{sendId?: string, operationLabel?: string}} [opts.cleanupContext] —
+ *   caller identity used only for fail-closed compensation logs.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
+async function mintLinksInBatches({
+  initialResourceId,
+  reuploadFn,
+  expiresAt,
+  recipientCount,
+  apiKey,
+  selfDestructSeconds = null,
+  guildId,
+  cleanupContext = {},
+}) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
+  const resourceIds = [initialResourceId];
   let tokensUsed = 0;
 
-  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
-  // test issues the upload/mint pattern a real send does. Nothing ties the two
-  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
-  // loop as an oracle and diffs the shapes. If the guard, the increment or the
-  // batchSize formula below changes, update that oracle in the same PR or the
-  // load test keeps measuring the old shape while staying green.
-  for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
-    if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-      const re = await reuploadFn();
-      currentResourceId = re.resource_id;
-      tokensUsed = 0;
+  try {
+    // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
+    // test issues the upload/mint pattern a real send does. Nothing ties the two
+    // at compile time — tests/loadtest-mint-batches.test.js re-implements this
+    // loop as an oracle and diffs the shapes. If the guard, the increment or the
+    // batchSize formula below changes, update that oracle in the same PR or the
+    // load test keeps measuring the old shape while staying green.
+    for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
+      if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+        const re = await reuploadFn();
+        currentResourceId = re.resource_id;
+        resourceIds.push(currentResourceId);
+        tokensUsed = 0;
+      }
+      const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
+      const minted = await mintLinks(currentResourceId, {
+        expiresAt,
+        n: batchSize,
+        apiKey,
+        selfDestructSeconds,
+        guildId,
+      });
+      for (const link of minted) {
+        allLinks.push({
+          qurl_link: link.qurl_link,
+          qurl_id: typeof link.qurl_id === 'string' ? link.qurl_id : '',
+          resourceId: currentResourceId,
+        });
+      }
+      if (minted.length < batchSize) {
+        // Preserve the callers' established "Only N of M" response by
+        // returning the short array, but compensate before it can escape.
+        await cleanupIncompleteMintBatch({
+          allLinks,
+          resourceIds,
+          apiKey,
+          cleanupContext,
+          reason: 'mint_underdelivery',
+        });
+        return allLinks;
+      }
+      if (minted.length > batchSize) {
+        throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
+      }
+      tokensUsed += batchSize;
     }
-    const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, {
-      expiresAt,
-      n: batchSize,
+  } catch (error) {
+    await cleanupIncompleteMintBatch({
+      allLinks,
+      resourceIds,
+      currentResourceId,
+      partialQurlIds: error?.partialQurlIds,
       apiKey,
-      selfDestructSeconds,
-      guildId,
+      cleanupContext,
+      reason: 'mint_failed',
+      error,
     });
-    for (const link of minted) {
-      // qurl_id is the join key against qurl.accessed webhooks; empty
-      // string degrades the whole monitor to bare base-msg.
-      allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: currentResourceId });
-    }
-    tokensUsed += batchSize;
+    throw error;
   }
   return allLinks;
 }
@@ -2016,6 +2060,7 @@ async function executeSendPipeline(interaction, {
           // guaranteed non-null here — the /qurl send + /qurl map entry
           // points both DM-reject before reaching the pipeline.
           guildId: interaction.guildId,
+          cleanupContext: { sendId, operationLabel: 'initial send' },
         });
       } finally {
         bufHolder.buf = null;
@@ -2059,6 +2104,7 @@ async function executeSendPipeline(interaction, {
         // today, but threading guild_id keeps the two pipelines symmetric
         // and future-proofs a watermarked map render.
         guildId: interaction.guildId,
+        cleanupContext: { sendId, operationLabel: 'initial send' },
       });
 
       if (allLinks.length < recipients.length) {
@@ -2931,6 +2977,11 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
   // transaction failure is ambiguous enough that deleting freshly minted qURLs
   // is the fail-closed outcome (no DMs have been sent yet).
   const qurlIdsByResource = new Map();
+  for (const resourceId of options.resourceIds || []) {
+    if (typeof resourceId === 'string' && resourceId.length > 0) {
+      qurlIdsByResource.set(resourceId, []);
+    }
+  }
   for (const send of batchSends) {
     if (typeof send.resourceId !== 'string' || send.resourceId.length === 0) continue;
     const qurlIds = qurlIdsByResource.get(send.resourceId) || [];
@@ -3008,6 +3059,69 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
       total: resourceEntries.length,
     });
   }
+}
+
+async function cleanupIncompleteMintBatch({
+  allLinks,
+  resourceIds,
+  currentResourceId,
+  partialQurlIds,
+  apiKey,
+  cleanupContext,
+  reason,
+  error,
+}) {
+  const cleanupRows = allLinks.map(link => ({
+    resourceId: link.resourceId,
+    qurlId: link.qurl_id,
+  }));
+  if (Array.isArray(partialQurlIds)) {
+    for (const qurlId of partialQurlIds) {
+      cleanupRows.push({ resourceId: currentResourceId, qurlId });
+    }
+  }
+
+  const ids = [...new Set(resourceIds.filter(
+    resourceId => typeof resourceId === 'string' && resourceId.length > 0,
+  ))];
+  const ledger = new Map(ids.map(resourceId => [resourceId, []]));
+  for (const row of cleanupRows) {
+    if (!ledger.has(row.resourceId)) continue;
+    ledger.get(row.resourceId).push(row.qurlId);
+  }
+  const resources = [...ledger.entries()].map(([resourceId, recordedQurlIds]) => ({
+    resource_ref: resourceIdLogRef(resourceId),
+    qurl_ids: [...new Set(recordedQurlIds.filter(
+      qurlId => typeof qurlId === 'string' && qurlId.trim().length > 0,
+    ).map(qurlId => qurlId.trim()))],
+    unidentified_qurl_count: recordedQurlIds.filter(
+      qurlId => typeof qurlId !== 'string' || qurlId.trim().length === 0,
+    ).length,
+  }));
+
+  // Log the non-secret reconciliation handles before network cleanup. A
+  // process interruption must not erase the only record of a child minted in
+  // an earlier batch. Bearer qurl_link fragments never enter this ledger.
+  logger.error('mintLinksInBatches failed; cleaning up minted resources', {
+    sendId: cleanupContext.sendId,
+    operation: cleanupContext.operationLabel || 'mint batch',
+    reason,
+    resource_count: resources.length,
+    resources,
+    error_name: error?.name,
+    error_status: error?.status,
+    error_api_code: error?.apiCode,
+  });
+  const cleanupOperationLabel = cleanupContext.operationLabel
+    ? `${cleanupContext.operationLabel} mint batch`
+    : 'mint batch';
+  await cleanupFreshMintedResources(cleanupRows, apiKey, cleanupContext.sendId, {
+    rowsMayHavePersisted: false,
+    reason,
+    operationLabel: cleanupOperationLabel,
+    checkGuardTransaction: false,
+    resourceIds: ids,
+  });
 }
 
 // Handle adding new recipients to an existing send. senderDiscordId is
@@ -3182,6 +3296,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           // the filter would silently drop added recipients (fails closed —
           // no leak — but a real watermark would read "no match").
           guildId: originalInteraction.guildId,
+          cleanupContext: { sendId, operationLabel: 'Add Recipients' },
         });
       } catch (err) {
         // Discord CDN URLs are signed and expire (~24h). If the re-download
@@ -3255,6 +3370,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         selfDestructSeconds: inheritedDestruct,
         // Guild-scope for attribution (#1101) — see the file branch above.
         guildId: originalInteraction.guildId,
+        cleanupContext: { sendId, operationLabel: 'Add Recipients' },
       });
 
       if (allLinks.length < newRecipients.length) {
