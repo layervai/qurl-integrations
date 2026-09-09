@@ -2928,14 +2928,34 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   const resourceEntries = [...qurlIdsByResource.entries()];
   if (resourceEntries.length === 0) return;
 
-  const results = await batchSettled(resourceEntries, async ([resourceId, qurlIds]) => {
-    // These are freshly minted connector results rather than legacy store rows,
-    // so every child identity must be present. revokeMintedLinks rejects a
-    // missing/malformed id before network I/O. That is an intentional hard stop:
-    // deleting the source without positive child-revoke evidence would remove
-    // the only authorization/reconciliation anchor for a potentially live view.
-    await revokeMintedLinks(resourceId, qurlIds, apiKey);
-    await deleteLink(resourceId, apiKey);
+  const results = await batchSettled(resourceEntries, async ([resourceId, recordedQurlIds]) => {
+    const qurlIds = [...new Set(recordedQurlIds
+      .filter(id => typeof id === 'string' && id.trim().length > 0)
+      .map(id => id.trim()))];
+    const unidentifiedQurlCount = recordedQurlIds.filter(
+      id => typeof id !== 'string' || id.trim().length === 0,
+    ).length;
+    let connectorRevokeConfirmed = false;
+    let resourceRevokeConfirmed = false;
+    let failure;
+    try {
+      // Revoke every identifiable child before the parent. If fresh connector
+      // output omitted an identity, deleting the caller-owned source afterward
+      // still minimizes live access; #1553 keeps that soft-revoked source
+      // owner-visible as the authorization anchor for operator reconciliation.
+      await revokeMintedLinks(resourceId, qurlIds, apiKey);
+      connectorRevokeConfirmed = true;
+      await deleteLink(resourceId, apiKey);
+      resourceRevokeConfirmed = true;
+    } catch (error) {
+      failure = error;
+    }
+    if (unidentifiedQurlCount > 0 || failure) {
+      const error = failure || new Error('Fresh connector link is missing its revoke identity');
+      error.connectorRevokeConfirmed = connectorRevokeConfirmed;
+      error.resourceRevokeConfirmed = resourceRevokeConfirmed;
+      throw error;
+    }
     return resourceId;
   }, 5);
   const failed = [];
@@ -2953,6 +2973,10 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
         qurl_id_count: qurlIds.length,
         qurl_ids: qurlIds,
         unidentified_qurl_count: unidentifiedQurlCount,
+        ...(unidentifiedQurlCount > 0 ? {
+          connector_revoke_confirmed: result.reason?.connectorRevokeConfirmed === true,
+          resource_revoke_confirmed: result.reason?.resourceRevokeConfirmed === true,
+        } : {}),
         error: result.reason?.message,
       });
     }

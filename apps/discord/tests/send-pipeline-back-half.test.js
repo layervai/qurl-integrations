@@ -2979,27 +2979,32 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
-  it('keeps the source authorization anchor and identifies a missing fresh child identity', async () => {
+  it('revokes identifiable fresh children and soft-deletes the source when one child identity is missing', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{
-      qurl_link: 'https://q.test/1', resource_id: 'res-new',
-    }]);
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_known', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
+      { qurl_link: 'https://q.test/2', resource_id: 'res-new' },
+    ]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
-    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('Invalid connector revoke token identity'));
 
     const result = await handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      'send-1', makeUsersCollection([
+        { id: 'u1', username: 'Alice', bot: false },
+        { id: 'u2', username: 'Bob', bot: false },
+      ]),
       makeInteraction(), 'apikey',
     );
 
     expect(result.msg).toMatch(/Failed to save link records/);
-    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', [''], 'apikey');
-    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_known'], 'apikey');
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
+    expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to clean up freshly minted Add Recipients qURL resources',
       expect.objectContaining({
@@ -3007,13 +3012,53 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
         reason: 'guarded_transaction_failed',
         failed_count: 1,
         failures: [expect.objectContaining({
-          qurl_id_count: 0,
-          qurl_ids: [],
+          qurl_id_count: 1,
+          qurl_ids: ['q_known'],
           unidentified_qurl_count: 1,
+          connector_revoke_confirmed: true,
+          resource_revoke_confirmed: true,
         })],
       }),
     );
     expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('does not delete a fresh source with missing identity when identifiable child revoke fails', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_id: 'q_known', qurl_link: 'https://q.test/1', resource_id: 'res-new' },
+      { qurl_link: 'https://q.test/2', resource_id: 'res-new' },
+    ]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('connector unavailable'));
+
+    await handleAddRecipients(
+      'send-1', makeUsersCollection([
+        { id: 'u1', username: 'Alice', bot: false },
+        { id: 'u2', username: 'Bob', bot: false },
+      ]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith('res-new', ['q_known'], 'apikey');
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted Add Recipients qURL resources',
+      expect.objectContaining({
+        failed_count: 1,
+        failures: [expect.objectContaining({
+          qurl_ids: ['q_known'],
+          unidentified_qurl_count: 1,
+          connector_revoke_confirmed: false,
+          resource_revoke_confirmed: false,
+        })],
+      }),
+    );
   });
 
   it('reports revoked when recordQURLSendBatch loses the revoked_at condition race', async () => {
