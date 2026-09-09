@@ -160,6 +160,16 @@ func Open(dir string) (*Store, error) {
 		}
 		return &Store{dir: dir, envelope: connectoragentstate.SealedAgentStateFile, owner: sealed}, nil
 	}
+	// A sealed envelope means another owner (for example qURL Desktop, which
+	// supplies a wrapping key over an inherited descriptor) established this
+	// namespace. Writing a plaintext envelope beside it would make the
+	// connector refuse the directory outright, so fail closed here instead.
+	if _, err := os.Lstat(filepath.Join(dir, connectoragentstate.SealedAgentStateFile)); err == nil {
+		return nil, fmt.Errorf("state directory holds a sealed agent state envelope (%s); set %s and %s to open it, or use a different state directory",
+			connectoragentstate.SealedAgentStateFile, connectoragentstate.EnvKeyProvider, connectoragentstate.EnvLocalKeyFD)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect native agent state directory: %w", err)
+	}
 	file, err := qurl.OpenFileAgentState(filepath.Join(dir, AgentStateFile))
 	if err != nil {
 		return nil, fmt.Errorf("initialize plaintext agent state: %w", err)
