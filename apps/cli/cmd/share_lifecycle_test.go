@@ -3313,3 +3313,246 @@ func assertLocalConnectorResourceRetired(t *testing.T, stateDir, connectorID str
 		t.Fatalf("deleted Connector binding found=%t retired=%t err=%v", found, retired, err)
 	}
 }
+
+// TestRestartWithoutTargetKeepsTodaysOutput pins the plain-restart documents
+// byte for byte: a restart that does not move the share must print exactly
+// what it printed before --target existed.
+func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := localShareFixture(srv)
+			seed.DesiredState = "on"
+			if err := registry.Put(context.Background(), &seed); err != nil {
+				t.Fatal(err)
+			}
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodGet, path,
+				sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+				sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+			)
+			srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+			args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID}
+			want := "CRID:           " + srv.Key.CRID + "\n" +
+				"Target:         http://127.0.0.1:3000\n" +
+				"Desired:        on\n" +
+				"Observed:       serving\n" +
+				"Serving epoch:  5\n"
+			if format == "json" {
+				args = append(args, "-o", "json")
+				want = "{\n" +
+					"  \"crid\": \"" + srv.Key.CRID + "\",\n" +
+					"  \"resource_id\": \"" + srv.Key.ResourceID + "\",\n" +
+					"  \"target_url\": \"http://127.0.0.1:3000\",\n" +
+					"  \"desired_state\": \"on\",\n" +
+					"  \"connection_state\": \"serving\",\n" +
+					"  \"serving_epoch\": 5\n" +
+					"}\n"
+			}
+			daemon := &recordingShareDaemon{}
+			res := runCLI(t, &runOpts{
+				args: args,
+				env: map[string]string{
+					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+				},
+				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error { return nil },
+			})
+			if res.code != 0 || res.stderr.Len() != 0 {
+				t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+			}
+			if got := res.stdout.String(); got != want {
+				t.Fatalf("restart stdout changed:\n got: %q\nwant: %q", got, want)
+			}
+			if daemon.ensures != 1 || daemon.reloads != 0 {
+				t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+			}
+		})
+	}
+}
+
+func TestRestartWithTargetMovesShareAtTheReturnedEpoch(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := localShareFixture(srv)
+			seed.DesiredState = "on"
+			if err := registry.Put(context.Background(), &seed); err != nil {
+				t.Fatal(err)
+			}
+			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+			srv.Script(http.MethodGet, path,
+				sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+				sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+			)
+			srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+			args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://localhost:4000"}
+			if format == "json" {
+				args = append(args, "-o", "json")
+			}
+			var preflights []string
+			daemon := &recordingShareDaemon{}
+			res := runCLI(t, &runOpts{
+				args: args,
+				env: map[string]string{
+					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+				},
+				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+				preflightTarget: func(_ context.Context, ip string, port int) error {
+					preflights = append(preflights, net.JoinHostPort(ip, strconv.Itoa(port)))
+					return nil
+				},
+			})
+			if res.code != 0 || res.stderr.Len() != 0 {
+				t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+			}
+			if len(preflights) != 1 || preflights[0] != "127.0.0.1:4000" {
+				t.Fatalf("preflighted %v, want only the destination", preflights)
+			}
+			requests := srv.Requests()
+			if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
+				t.Fatalf("requests = %#v, want GET, restart POST, readiness GET", requests)
+			}
+			if daemon.ensures != 1 || daemon.reloads != 0 {
+				t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+			}
+			stored, err := registry.Get(context.Background(), srv.Key.CRID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.TargetURL != "http://127.0.0.1:4000" || stored.LocalIP != "127.0.0.1" || stored.LocalPort != 4000 ||
+				stored.DesiredState != "on" || stored.ServingEpoch != seed.ServingEpoch+1 {
+				t.Fatalf("moved local state = %+v", stored)
+			}
+			if format == "json" {
+				var doc struct {
+					TargetURL    string `json:"target_url"`
+					ServingEpoch uint64 `json:"serving_epoch"`
+				}
+				if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
+					t.Fatalf("decode restart json: %v\n%s", err, res.stdout.String())
+				}
+				if doc.TargetURL != "http://127.0.0.1:4000" || doc.ServingEpoch != seed.ServingEpoch+1 {
+					t.Fatalf("restart json = %+v", doc)
+				}
+				return
+			}
+			if !strings.Contains(res.stdout.String(), "Target:         http://127.0.0.1:4000\n") || strings.Contains(res.stdout.String(), seed.TargetURL) {
+				t.Fatalf("stdout does not report the destination alone:\n%s", res.stdout.String())
+			}
+		})
+	}
+}
+
+func TestRestartRejectsNonLoopbackTargetBeforeAnyRequest(t *testing.T) {
+	for name, target := range map[string]string{
+		"remote host": "http://192.0.2.1:4000",
+		"https":       "https://127.0.0.1:4000",
+		"path":        "http://127.0.0.1:4000/app",
+		"credentials": "http://me:secret@127.0.0.1:4000",
+		"empty":       "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			stateDir := connectorStateTestDir(t)
+			registry, err := openOwnedTestShareRegistry(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := localShareFixture(srv)
+			seed.DesiredState = "on"
+			if err := registry.Put(context.Background(), &seed); err != nil {
+				t.Fatal(err)
+			}
+			before, err := registry.Get(context.Background(), srv.Key.CRID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preflights := 0
+			daemon := &recordingShareDaemon{}
+			res := runCLI(t, &runOpts{
+				args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", target},
+				env: map[string]string{
+					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+				},
+				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+				preflightTarget: func(context.Context, string, int) error {
+					preflights++
+					return nil
+				},
+			})
+			if res.code != exitcode.Usage || !strings.Contains(res.stderr.String(), "invalid target URL") {
+				t.Fatalf("exit=%d stderr=%q, want usage error", res.code, res.stderr.String())
+			}
+			if len(srv.Requests()) != 0 || preflights != 0 || daemon.ensures != 0 || daemon.reloads != 0 {
+				t.Fatalf("rejected target reached requests/preflight/daemon = %#v/%d/%+v", srv.Requests(), preflights, daemon)
+			}
+			after, err := registry.Get(context.Background(), srv.Key.CRID)
+			if err != nil || after.TargetURL != before.TargetURL || after.ServingEpoch != before.ServingEpoch || !after.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Fatalf("rejected target changed local state: %+v -> %+v, %v", before, after, err)
+			}
+		})
+	}
+}
+
+type failRetargetRegistry struct {
+	localShareRegistry
+	err error
+}
+
+func (r *failRetargetRegistry) Retarget(context.Context, string, string, uint64) (*connectorstate.LocalShare, error) {
+	return nil, r.err
+}
+
+func TestRestartWithTargetCompensatesWhenRegistryRefusesTheMove(t *testing.T) {
+	srv := apitest.NewServer(t)
+	stateDir := connectorStateTestDir(t)
+	baseRegistry, err := openOwnedTestShareRegistry(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := localShareFixture(srv)
+	seed.DesiredState = "on"
+	if err := baseRegistry.Put(context.Background(), &seed); err != nil {
+		t.Fatal(err)
+	}
+	moveErr := errors.New("registry refused the move")
+	path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+	srv.Script(http.MethodGet, path, sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"))
+	srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+	srv.Script(http.MethodPut, path, sharingResponse(t, srv, "off", seed.ServingEpoch+2, "stopped"))
+	daemon := &recordingShareDaemon{}
+	res := runCLI(t, &runOpts{
+		args: []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://127.0.0.1:4000"},
+		env: map[string]string{
+			"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+		},
+		shareRegistry: &failRetargetRegistry{localShareRegistry: baseRegistry, err: moveErr},
+		shareDaemon:   daemon, shareStateDir: stateDir,
+		preflightTarget: func(context.Context, string, int) error { return nil },
+	})
+	if res.code == 0 || !strings.Contains(res.stderr.String(), moveErr.Error()) {
+		t.Fatalf("result code=%d stderr=%s", res.code, res.stderr.String())
+	}
+	requests := srv.Requests()
+	if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodPut {
+		t.Fatalf("requests = %#v, want GET, restart POST, compensating off PUT", requests)
+	}
+	if daemon.ensures != 0 || daemon.reloads != 0 {
+		t.Fatalf("refused move reached daemon handoff: %+v", daemon)
+	}
+	local, err := baseRegistry.Get(context.Background(), srv.Key.CRID)
+	if err != nil || local.DesiredState != "off" || local.ServingEpoch != seed.ServingEpoch+2 || local.TargetURL != seed.TargetURL {
+		t.Fatalf("compensated local state = %+v err=%v", local, err)
+	}
+}
