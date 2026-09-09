@@ -1087,6 +1087,76 @@ func TestAgentBackend_Quota(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_QuotaCanonicalFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		want   []string
+		absent []string
+	}{
+		{
+			name:   "free canonical resources and monthly bytes",
+			body:   `{"plan":"free","rate_limits":{"max_active_resources":10,"max_active_qurls":99,"max_qurls":-1,"max_tokens_per_qurl":-1,"max_data_transfer_bytes":10737418240},"usage":{"active_resources":3,"active_qurls":99,"data_transfer_bytes":1073741824,"qurls_created":20}}`,
+			want:   []string{"Active protected resources: 3 / 10", "Monthly data transfer: 1 GiB / 10 GiB", "qURLs created this period: 20"},
+			absent: []string{"Active qURLs", "99", "qURL limit:", "qURLs per resource:"},
+		},
+		{
+			name:   "legacy fields describe resources",
+			body:   `{"plan":"free","rate_limits":{"max_active_qurls":10},"usage":{"active_qurls":3}}`,
+			want:   []string{"Active protected resources: 3 / 10", "Monthly data transfer: unavailable / unavailable"},
+			absent: []string{"Active qURLs", "unlimited", "created this period: 0"},
+		},
+		{
+			name:   "explicit zero overrides legacy",
+			body:   `{"plan":"free","rate_limits":{"max_active_resources":0,"max_active_qurls":10,"max_data_transfer_bytes":0},"usage":{"active_resources":0,"active_qurls":3,"data_transfer_bytes":0}}`,
+			want:   []string{"Active protected resources: 0 / 0", "Monthly data transfer: 0 bytes / 0 bytes"},
+			absent: []string{"unlimited"},
+		},
+		{
+			name:   "null canonical fields use legacy only where present",
+			body:   `{"plan":"free","rate_limits":{"max_active_resources":null,"max_active_qurls":10,"max_data_transfer_bytes":null},"usage":{"active_resources":null,"active_qurls":3,"data_transfer_bytes":null}}`,
+			want:   []string{"Active protected resources: 3 / 10", "Monthly data transfer: unavailable / unavailable"},
+			absent: []string{"unlimited", "0 bytes"},
+		},
+		{
+			name:   "absent usage is not zero",
+			body:   `{"plan":"free","rate_limits":{"max_active_resources":10,"max_data_transfer_bytes":10737418240}}`,
+			want:   []string{"Active protected resources: unavailable / 10", "Monthly data transfer: unavailable / 10 GiB"},
+			absent: []string{"unlimited", "0 bytes"},
+		},
+		{
+			name: "known unlimited plan",
+			body: `{"plan":"enterprise","rate_limits":{"max_active_resources":-1,"max_data_transfer_bytes":-1},"usage":{"active_resources":3,"data_transfer_bytes":0}}`,
+			want: []string{"Active protected resources: 3 / unlimited", "Monthly data transfer: 0 bytes / unlimited"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":` + tt.body + `}`))
+			}))
+			t.Cleanup(srv.Close)
+			b, _ := newBackendUnderTest(t, false)
+			b.authClient = func(context.Context, string) (*client.Client, error) { return client.New(srv.URL, "k"), nil }
+			out, err := b.Quota(context.Background(), backendTC())
+			if err != nil {
+				t.Fatalf("Quota: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("quota %q missing %q", out, want)
+				}
+			}
+			for _, absent := range tt.absent {
+				if strings.Contains(out, absent) {
+					t.Errorf("quota %q unexpectedly contains %q", out, absent)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentBackend_ChannelScopeMemoizedPerTurn(t *testing.T) {
 	// The backend is built once per turn and reused across the model's tool
 	// calls; the channel scope is invariant within a turn, so it must be read

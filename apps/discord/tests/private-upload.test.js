@@ -4,7 +4,7 @@ const mockOpener = {
   start: jest.fn(),
   close: jest.fn(),
   fetch: jest.fn(),
-  health: jest.fn(() => ({ state: 'running' })),
+  health: jest.fn(() => ({ state: 'ready' })),
 };
 const mockCreatePortalOpener = jest.fn(() => mockOpener);
 const mockKeyPair = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -63,7 +63,7 @@ function readDerS(signature) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockOpener.health.mockReturnValue({ state: 'running' });
+  mockOpener.health.mockReturnValue({ state: 'ready' });
 });
 
 afterEach(async () => {
@@ -438,6 +438,130 @@ test.each([
     expect(error).toEqual(expect.any(Error));
     expect(error.message).toMatch(/duplicate bearer grant/);
     expect(error.partialQurlIds).toEqual(expectedIds);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+function batchAccepted() {
+  const batchId = `dqb_${'f'.repeat(22)}`;
+  return jsonResponse(202, { data: {
+    batch_id: batchId, status: 'queued', item_count: 1, submitted_at: '2026-09-06T21:00:00Z',
+  } }, {
+    Location: `https://api.test.local/v1/delegated-qurl-batches/${batchId}`,
+    ETag: '"queued"', 'Retry-After': '1',
+  });
+}
+
+function batchSucceeded() {
+  return jsonResponse(200, { data: {
+    batch_id: `dqb_${'f'.repeat(22)}`, status: 'succeeded', item_count: 1,
+    submitted_at: '2026-09-06T21:00:00Z',
+    results: [{ index: 0, status: 'succeeded', qurl: {
+      qurl_id: 'q_00000000001', qurl_link: 'https://qurl.site/#at_a', expires_at: '2026-09-06T22:00:00Z',
+    } }],
+  } });
+}
+
+const batchOptions = {
+  credential: { apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6' },
+  grants: [{ one_time_use: true }],
+};
+
+test('ambiguous batch POST without Retry-After replays the same request with bounded backoff', async () => {
+  const realFetch = global.fetch;
+  const sleep = jest.fn();
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse(503, { error: { code: 'mutation_outcome_unknown' } }))
+    .mockResolvedValueOnce(batchAccepted())
+    .mockResolvedValueOnce(batchSucceeded());
+  try {
+    const links = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: Date.now() + 60_000, sleep,
+    });
+    expect(links).toHaveLength(1);
+    expect(sleep.mock.calls).toEqual([[250], [1000]]);
+    const [first, replay] = global.fetch.mock.calls;
+    expect(first[1].body).toBe(replay[1].body);
+    expect(first[1].headers['Idempotency-Key']).toBe(replay[1].headers['Idempotency-Key']);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test.each(['500', '502', '503', '504', '429', 'transport', 'timeout', 'body timeout', 'error body timeout', 'missing 202 headers', 'missing 304 headers'])(
+  'batch poll recovers from %s without resubmitting the mutation', async failure => {
+    const realFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValueOnce(batchAccepted());
+    if (failure === 'transport' || failure === 'timeout') {
+      global.fetch.mockRejectedValueOnce(failure === 'transport'
+        ? new TypeError('fetch failed') : new DOMException('timed out', 'TimeoutError'));
+    } else if (failure === 'body timeout' || failure === 'error body timeout') {
+      global.fetch.mockResolvedValueOnce(new Response(new ReadableStream({
+        start(controller) { controller.error(new DOMException('timed out', 'TimeoutError')); },
+      }), { status: failure === 'body timeout' ? 200 : 503 }));
+    } else if (failure === 'missing 202 headers') {
+      global.fetch.mockResolvedValueOnce(jsonResponse(202, { data: {
+        batch_id: `dqb_${'f'.repeat(22)}`, status: 'running',
+      } }));
+    } else if (failure === 'missing 304 headers') {
+      global.fetch.mockResolvedValueOnce(new Response(null, { status: 304 }));
+    } else {
+      global.fetch.mockResolvedValueOnce(jsonResponse(Number(failure), {}));
+    }
+    global.fetch.mockResolvedValueOnce(batchSucceeded());
+    try {
+      const links = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+        ...batchOptions, deadlineMs: Date.now() + 60_000, sleep: jest.fn(),
+      });
+      expect(links[0].qurl_id).toBe('q_00000000001');
+      expect(global.fetch.mock.calls.filter(([, opts]) => opts.method === 'POST')).toHaveLength(1);
+      expect(global.fetch.mock.calls).toHaveLength(3);
+      expect(global.fetch.mock.calls[2][0]).toBe(global.fetch.mock.calls[1][0]);
+    } finally {
+      global.fetch = realFetch;
+    }
+  },
+);
+
+test('repeated transient batch polls stop at the original deadline', async () => {
+  const realFetch = global.fetch;
+  let now = 1_000;
+  const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => now);
+  global.fetch = jest.fn().mockResolvedValueOnce(batchAccepted())
+    .mockImplementation(async () => jsonResponse(503, {}, { 'Retry-After': '1' }));
+  try {
+    await expect(privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: 3_500, sleep: async ms => { now += ms; },
+    })).rejects.toThrow(/Discord interaction deadline/);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(now).toBe(3_000);
+  } finally {
+    dateNow.mockRestore();
+    global.fetch = realFetch;
+  }
+});
+
+test.each([undefined, '', 'key_short', 'eib_A1b2C3d4E5f6', 'key_A1b2C3d4E5f!'])(
+  'private credentials reject an invalid audience key ID %s before uploading', async keyId => {
+    await expect(privateUpload.uploadPrivate(Buffer.from('hello'), {
+      filename: 'report.txt', contentType: 'text/plain',
+      credential: { apiKey: 'lv_test_example', keyId },
+      authorityExpiresAt: '2026-09-06T22:00:00Z', deadlineMs: Date.now() + 60_000,
+    })).rejects.toThrow(/current external identity binding/);
+    expect(mockOpener.fetch).not.toHaveBeenCalled();
+  },
+);
+
+test.each([401, 403, 404])('batch poll fails closed on HTTP %i without retrying', async status => {
+  const realFetch = global.fetch;
+  global.fetch = jest.fn().mockResolvedValueOnce(batchAccepted())
+    .mockResolvedValueOnce(jsonResponse(status, { error: { code: 'not_authorized' } }));
+  try {
+    await expect(privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: Date.now() + 60_000, sleep: jest.fn(),
+    })).rejects.toMatchObject({ status });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   } finally {
     global.fetch = realFetch;
   }

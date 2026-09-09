@@ -453,9 +453,7 @@ async function redeemDelegatedBatch(upload, {
       lastError = err;
       if (err.noRetry || (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))) throw err;
       if (attempt < MAX_BATCH_ATTEMPTS) {
-        const waitMs = err.status === 503
-          ? requiredRetryAfterMs(err.response)
-          : retryDelayMs(err.response, attempt);
+        const waitMs = retryDelayMs(err.response, attempt);
         if (Date.now() + waitMs > deadlineMs) {
           throw new Error('Delegated qURL batch did not complete before the Discord interaction deadline');
         }
@@ -467,6 +465,9 @@ async function redeemDelegatedBatch(upload, {
   const location = validatedBatchLocation(accepted.response.headers.get('location'), accepted.batchId);
   let etag = requiredEtag(accepted.response);
   let waitMs = requiredRetryAfterMs(accepted.response);
+  let transientFailures = 0;
+  // TODO(upstream-contract): qurl-service batch GETs are idempotent and terminal
+  // responses always include results, even with an unchanged If-None-Match.
   for (let poll = 0; poll < MAX_BATCH_POLLS; poll++) {
     if (Date.now() + waitMs > deadlineMs) {
       throw new Error('Delegated qURL batch did not complete before the Discord interaction deadline');
@@ -474,24 +475,40 @@ async function redeemDelegatedBatch(upload, {
     await sleep(waitMs);
     const pollHeaders = { 'Authorization': `Bearer ${guildCredential.apiKey}`, 'Accept': 'application/json' };
     if (etag) pollHeaders['If-None-Match'] = etag;
-    const response = await fetch(location, {
-      headers: pollHeaders,
-      redirect: 'error',
-      signal: AbortSignal.timeout(requestTimeoutMs(
-        deadlineMs,
-        BATCH_REQUEST_TIMEOUT_MS,
-        'Delegated qURL batch did not complete before the Discord interaction deadline',
-      )),
-    });
+    const timeoutMs = requestTimeoutMs(
+      deadlineMs, BATCH_REQUEST_TIMEOUT_MS,
+      'Delegated qURL batch did not complete before the Discord interaction deadline',
+    );
+    let response;
+    let result;
+    try {
+      response = await fetch(location, {
+        headers: pollHeaders,
+        redirect: 'error',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (response.status === 200 || response.status === 202) result = await response.json();
+      if ([429, 500, 502, 503, 504].includes(response.status)) await response.body?.cancel();
+    } catch (err) {
+      if (!['TypeError', 'TimeoutError', 'AbortError'].includes(err.name)) throw err;
+      waitMs = Math.min(30_000, retryDelayMs(null, Math.min(++transientFailures, 8)));
+      continue;
+    }
+    if ([429, 500, 502, 503, 504].includes(response.status)) {
+      waitMs = retryDelayMs(response, Math.min(++transientFailures, 8));
+      if (!response.headers.has('retry-after')) waitMs = Math.min(30_000, waitMs);
+      continue;
+    }
+    transientFailures = 0;
     if (response.status === 304) {
-      etag = requiredEtag(response);
-      waitMs = requiredRetryAfterMs(response);
+      if (response.headers.has('etag')) etag = requiredEtag(response);
+      waitMs = response.headers.has('retry-after') ? requiredRetryAfterMs(response) : 1000;
       continue;
     }
     if (response.status === 202) {
-      etag = requiredEtag(response);
-      waitMs = requiredRetryAfterMs(response);
-      const pending = await responseJson(response, 'Delegated qURL batch status');
+      if (response.headers.has('etag')) etag = requiredEtag(response);
+      waitMs = response.headers.has('retry-after') ? requiredRetryAfterMs(response) : 1000;
+      const pending = result;
       if (pending?.data?.batch_id !== accepted.batchId
           || !['queued', 'running'].includes(pending?.data?.status)) {
         throw new Error('Delegated qURL batch returned an invalid pending response');
@@ -502,7 +519,6 @@ async function redeemDelegatedBatch(upload, {
       await responseJson(response, 'Delegated qURL batch status');
       throw new Error(`Delegated qURL batch returned an unexpected status (${response.status})`);
     }
-    const result = await responseJson(response, 'Delegated qURL batch status');
     if (result?.data?.batch_id !== accepted.batchId
         || !['succeeded', 'partially_failed', 'failed'].includes(result?.data?.status)
         || result?.data?.item_count !== grants.length

@@ -36,6 +36,7 @@ const {
   AUDIT_EVENTS,
   TRUST,
   PRIVATE_SEND_MINT_BUDGET_MS,
+  PRIVATE_SEND_CLEANUP_BUDGET_MS,
   ddbSendConfigGuardActionCount,
   ddbSendConfigGuardFitsTransaction,
 } = require('./constants');
@@ -832,10 +833,7 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // would otherwise pass a truthy check via prototype access.
 // `git grep isValidExpiry` for call sites.
 function isValidExpiry(v) {
-  return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v)
-    // A persisted public-mode row can outlive a later private-mode rollout.
-    // Do not let its 7-day value cross the private upload authority limit.
-    && (!config.PRIVATE_UPLOAD_QURL || v !== '7d');
+  return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
 
 // Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
@@ -1734,18 +1732,20 @@ async function mintLinksInBatches({
       ...allLinks.map(link => link.qurl_id),
       ...(error.partialQurlIds || []),
     ].filter(id => /^q_[0-9a-f]{11}$/.test(id)))];
-    error.partialLinkCount = qurlIds.length;
-    error.partialQurlIds = qurlIds;
+    const remainingQurlIds = new Set(qurlIds);
+    const cleanupDeadlineMs = Date.now() + PRIVATE_SEND_CLEANUP_BUDGET_MS;
     let failedCount = 0;
     const failureSamples = [];
     let attempted = 0;
-    while (attempted < qurlIds.length && Date.now() < privateSendDeadlineMs) {
+    while (attempted < qurlIds.length && Date.now() < cleanupDeadlineMs) {
       const batch = qurlIds.slice(attempted, attempted + 5);
       const results = await batchSettled(batch, async (qurlId) => {
-        await deleteLink(qurlId, apiKey, { deadlineMs: privateSendDeadlineMs });
+        await deleteLink(qurlId, apiKey, { deadlineMs: cleanupDeadlineMs });
       }, 5);
       results.forEach((result, index) => {
-        if (result.status === 'rejected') {
+        if (result.status === 'fulfilled') {
+          remainingQurlIds.delete(batch[index]);
+        } else {
           failedCount++;
           if (failureSamples.length < 5) {
             failureSamples.push({ resource_ref: resourceIdLogRef(batch[index]), error: result.reason?.message });
@@ -1754,6 +1754,8 @@ async function mintLinksInBatches({
       });
       attempted += batch.length;
     }
+    error.partialQurlIds = [...remainingQurlIds];
+    error.partialLinkCount = remainingQurlIds.size;
     const unattempted = qurlIds.length - attempted;
     if (failedCount > 0 || unattempted > 0) {
       logger.error('Failed to revoke qURLs after a private mint failure', {
@@ -3136,12 +3138,22 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     };
   }
 
-  // Add Recipients is a new Discord interaction. Give all of its delegated
-  // batches one shared deadline; do not inherit or reset the original send's
-  // budget for each batch.
+  // Progress and the result edit the ORIGINAL interaction. Keep its token
+  // alive through bounded cleanup and reserve one minute for delivery/reply.
   const privateSendDeadlineMs = config.PRIVATE_UPLOAD_QURL
-    ? Date.now() + PRIVATE_SEND_MINT_BUDGET_MS
+    ? Math.min(
+      Date.now() + PRIVATE_SEND_MINT_BUDGET_MS,
+      originalInteraction.createdTimestamp + TIMEOUTS.QURL_REVOKE_WINDOW
+        - PRIVATE_SEND_CLEANUP_BUDGET_MS - 60_000,
+    )
     : undefined;
+  if (config.PRIVATE_UPLOAD_QURL
+      && (!Number.isSafeInteger(privateSendDeadlineMs) || privateSendDeadlineMs <= Date.now())) {
+    return {
+      msg: 'Cannot add recipients — this interaction is expiring. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
 
   // Filter out bots and the sender. Convert the Discord Collection to a
   // plain array so later callers (map/forEach over newRecipients[i]) work.

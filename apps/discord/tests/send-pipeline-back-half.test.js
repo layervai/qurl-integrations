@@ -1863,8 +1863,42 @@ describe('handleAddRecipients — pre-flight guards', () => {
     );
   });
 
-  it('refuses a persisted 7d public expiry after private uploads are enabled', async () => {
+  test.each([720_000, 820_000])('private Add Recipients respects the original reply token at %i ms', async now => {
     require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+    const dateNow = jest.spyOn(Date, 'now').mockReturnValue(now);
+    mockDb.getGuildQurlCredential.mockResolvedValueOnce({
+      apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6',
+    });
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '1h',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockRejectedValueOnce(new Error('stop after deadline capture'));
+    try {
+      const result = await handleAddRecipients(
+        'send-private-budget', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+        makeInteraction({ guildId: 'guild-1', createdTimestamp: 0 }), 'stale-api-key',
+      );
+      if (now === 720_000) {
+        // Original token expires at 900s: reserve 30s cleanup + 60s to report.
+        expect(mockDownloadAndUpload.mock.calls[0][6]).toBe(810_000);
+      } else {
+        expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+        expect(result.msg).toMatch(/interaction.*expir/i);
+      }
+      expect(mockMintLinks).not.toHaveBeenCalled();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it('refuses a persisted 7d public expiry after private uploads are enabled', async () => {
+    let privateHandleAddRecipients;
+    jest.isolateModules(() => {
+      require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
+      privateHandleAddRecipients = require('../src/commands')._test.handleAddRecipients;
+    });
     mockDb.getGuildQurlCredential.mockResolvedValueOnce({
       apiKey: 'lv_test_example', keyId: 'key_A1b2C3d4E5f6',
     });
@@ -1875,7 +1909,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
 
-    const result = await handleAddRecipients(
+    const result = await privateHandleAddRecipients(
       'send-private-expiry',
       makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction({ guildId: 'guild-1' }),
@@ -3184,12 +3218,13 @@ describe('mintLinksInBatches', () => {
     }).then(() => null, err => err);
 
     expect(error).toBe(partialError);
-    expect(error.partialQurlIds).toEqual([...firstBatch.map(link => link.qurl_id), partialId]);
+    expect(error.partialQurlIds).toEqual([]);
+    expect(error.partialLinkCount).toBe(0);
     expect(mockDeleteLink).toHaveBeenCalledTimes(101);
-    expect(mockDeleteLink).toHaveBeenCalledWith(partialId, 'lv_test_example', { deadlineMs: privateSendDeadlineMs });
+    expect(mockDeleteLink).toHaveBeenCalledWith(partialId, 'lv_test_example', { deadlineMs: expect.any(Number) });
   });
 
-  it('stops private failure cleanup at the shared send deadline', async () => {
+  it('gives deadline-expired private mints a separate bounded cleanup budget', async () => {
     require('../src/config').PRIVATE_UPLOAD_QURL = 'qurl://private-upload';
     let now = 1_000;
     const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => now);
@@ -3199,8 +3234,11 @@ describe('mintLinksInBatches', () => {
     });
     mockMintLinks
       .mockResolvedValueOnce(firstBatch)
-      .mockRejectedValueOnce(new Error('later batch failed'));
-    mockDeleteLink.mockImplementation(async () => { now = 2_000; });
+      .mockImplementationOnce(async () => { now = 1_500; throw new Error('later batch deadline expired'); });
+    mockDeleteLink.mockImplementation(async (_id, _key, { deadlineMs }) => {
+      expect(deadlineMs).toBe(31_500);
+      now = deadlineMs;
+    });
     const nextHandle = `upl_${'b'.repeat(43)}`;
 
     try {
@@ -3216,7 +3254,7 @@ describe('mintLinksInBatches', () => {
         apiKey: 'lv_test_example',
         audienceKeyId: 'key_A1b2C3d4E5f6',
         privateSendDeadlineMs: 1_500,
-      })).rejects.toThrow(/later batch failed/);
+      })).rejects.toThrow(/later batch deadline expired/);
 
       expect(mockDeleteLink).toHaveBeenCalledTimes(5);
       expect(logger.error).toHaveBeenCalledWith(

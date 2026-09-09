@@ -523,6 +523,18 @@ describe('qURL client — delegated qURL revoke', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves a definitive DELETE denial received at the cleanup deadline', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1_000);
+    globalThis.fetch = jest.fn(async () => {
+      jest.setSystemTime(2_000);
+      return apiError(403, { code: 'forbidden' });
+    });
+    await expect(qurl.deleteLink('q_0123456789a', undefined, { deadlineMs: 2_000 }))
+      .rejects.toMatchObject({ status: 403, apiCode: 'forbidden' });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('bounds an ambiguous delegated DELETE by the caller deadline', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(1_000);

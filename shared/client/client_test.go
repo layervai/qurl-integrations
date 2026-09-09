@@ -243,7 +243,7 @@ func TestGetQuota(t *testing.T) {
 	if got.Plan != "growth" {
 		t.Errorf("got Plan %q, want %q", got.Plan, "growth")
 	}
-	if got.Usage == nil || got.Usage.ActiveQURLs != 45 {
+	if got.Usage == nil || got.Usage.ActiveQURLs == nil || *got.Usage.ActiveQURLs != 45 {
 		t.Errorf("got Usage.ActiveQURLs %v", got.Usage)
 	}
 }

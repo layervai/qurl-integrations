@@ -74,6 +74,8 @@ const TIMEOUTS = {
 // paths five minutes of headroom by limiting all delegated-mint batches in one
 // send to one shared 10-minute deadline.
 const PRIVATE_SEND_MINT_BUDGET_MS = 10 * 60 * 1000;
+// Revocation must still get a bounded attempt after the mint budget expires.
+const PRIVATE_SEND_CLEANUP_BUDGET_MS = 30_000;
 
 // Limits
 const LIMITS = {
@@ -640,6 +642,7 @@ module.exports = {
   ROLE_COLORS,
   TIMEOUTS,
   PRIVATE_SEND_MINT_BUDGET_MS,
+  PRIVATE_SEND_CLEANUP_BUDGET_MS,
   LIMITS,
   DDB_TRANSACTION_MAX_ACTIONS,
   ddbSendConfigGuardActionCount,

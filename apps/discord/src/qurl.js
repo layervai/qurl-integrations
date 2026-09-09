@@ -299,11 +299,11 @@ async function deleteLink(resourceId, apiKey, { deadlineMs } = {}) {
         throw err;
       } catch (err) {
         lastError = err;
-        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
-          throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
-        }
         if (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown')) {
           throw err;
+        }
+        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+          throw new Error('Delegated qURL revoke did not complete before the Discord interaction deadline');
         }
         if (attempt < MAX_RETRIES) {
           const waitMs = retryDelayMs(err.response, attempt);

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -412,14 +413,57 @@ func (b *agentBackend) Quota(ctx context.Context, tc *agent.TurnContext) (string
 	if err != nil {
 		return b.fail("quota", err)
 	}
+	const unknownPlan = "unknown"
 	plan := q.Plan
 	if plan == "" {
-		plan = "unknown"
+		plan = unknownPlan
 	}
-	if q.Usage == nil {
-		return fmt.Sprintf("Plan: %s.", plan), nil
+	usage := q.Usage
+	if usage == nil {
+		usage = &client.UsageInfo{}
 	}
-	return fmt.Sprintf("Plan: %s. Active qURLs: %d. Created this period: %d.", plan, q.Usage.ActiveQURLs, q.Usage.QURLsCreated), nil
+	limits := q.RateLimits
+	if limits == nil {
+		limits = &client.RateLimits{}
+	}
+	active := usage.ActiveResources
+	if active == nil {
+		active = usage.ActiveQURLs
+	}
+	maxActive := limits.MaxActiveResources
+	if maxActive == nil {
+		maxActive = limits.MaxActiveQURLs
+	}
+	out := fmt.Sprintf("Plan: %s. Active protected resources: %s / %s. Monthly data transfer: %s / %s.",
+		plan, quotaCount(active), quotaCount(maxActive), quotaBytes(usage.DataTransferBytes), quotaBytes(limits.MaxDataTransferBytes))
+	if usage.QURLsCreated != nil {
+		out += fmt.Sprintf(" qURLs created this period: %d.", *usage.QURLsCreated)
+	}
+	return out, nil
+}
+
+func quotaCount(value *int) string {
+	if value == nil {
+		return "unavailable"
+	}
+	if *value == -1 {
+		return "unlimited"
+	}
+	return strconv.Itoa(*value)
+}
+
+func quotaBytes(value *int64) string {
+	if value == nil {
+		return "unavailable"
+	}
+	if *value == -1 {
+		return "unlimited"
+	}
+	const gibibyte = 1 << 30
+	if *value >= gibibyte {
+		return fmt.Sprintf("%g GiB", float64(*value)/gibibyte)
+	}
+	return fmt.Sprintf("%d bytes", *value)
 }
 
 // listResourcesPageLimit is the per-page size for the workspace resource list
