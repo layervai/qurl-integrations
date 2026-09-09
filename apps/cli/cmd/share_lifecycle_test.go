@@ -3377,80 +3377,88 @@ func TestRestartWithoutTargetKeepsTodaysOutput(t *testing.T) {
 }
 
 func TestRestartWithTargetMovesShareAtTheReturnedEpoch(t *testing.T) {
+	// The destination follows the local publish rules, so a name resolves to
+	// its canonical loopback origin and an IPv6 loopback literal is kept as one.
+	targets := []struct{ name, target, canonical, ip, preflight string }{
+		{"localhost", "http://localhost:4000", "http://127.0.0.1:4000", "127.0.0.1", "127.0.0.1:4000"},
+		{"ipv6 loopback", "http://[::1]:4000", "http://[::1]:4000", "::1", "[::1]:4000"},
+	}
 	for _, format := range []string{"text", "json"} {
-		t.Run(format, func(t *testing.T) {
-			srv := apitest.NewServer(t)
-			stateDir := connectorStateTestDir(t)
-			registry, err := openOwnedTestShareRegistry(stateDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			seed := localShareFixture(srv)
-			seed.DesiredState = "on"
-			if err := registry.Put(context.Background(), &seed); err != nil {
-				t.Fatal(err)
-			}
-			path := "/v1/resources/" + srv.Key.CRID + "/sharing"
-			srv.Script(http.MethodGet, path,
-				sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
-				sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
-			)
-			srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
-			args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", "http://localhost:4000"}
-			if format == "json" {
-				args = append(args, "-o", "json")
-			}
-			var preflights []string
-			daemon := &recordingShareDaemon{}
-			res := runCLI(t, &runOpts{
-				args: args,
-				env: map[string]string{
-					"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
-				},
-				shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
-				preflightTarget: func(_ context.Context, ip string, port int) error {
-					preflights = append(preflights, net.JoinHostPort(ip, strconv.Itoa(port)))
-					return nil
-				},
+		for _, target := range targets {
+			t.Run(format+"/"+target.name, func(t *testing.T) {
+				srv := apitest.NewServer(t)
+				stateDir := connectorStateTestDir(t)
+				registry, err := openOwnedTestShareRegistry(stateDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seed := localShareFixture(srv)
+				seed.DesiredState = "on"
+				if err := registry.Put(context.Background(), &seed); err != nil {
+					t.Fatal(err)
+				}
+				path := "/v1/resources/" + srv.Key.CRID + "/sharing"
+				srv.Script(http.MethodGet, path,
+					sharingResponse(t, srv, "on", seed.ServingEpoch, "serving"),
+					sharingResponse(t, srv, "on", seed.ServingEpoch+1, "serving"),
+				)
+				srv.Script(http.MethodPost, path+"/restart", sharingResponse(t, srv, "on", seed.ServingEpoch+1, "connecting"))
+				args := []string{"--endpoint", srv.URL, "restart", srv.Key.CRID, "--target", target.target}
+				if format == "json" {
+					args = append(args, "-o", "json")
+				}
+				var preflights []string
+				daemon := &recordingShareDaemon{}
+				res := runCLI(t, &runOpts{
+					args: args,
+					env: map[string]string{
+						"QURL_API_KEY": testAPIKey, "QURL_CONNECTOR_STATE_DIR": stateDir,
+					},
+					shareRegistry: registry, shareDaemon: daemon, shareStateDir: stateDir,
+					preflightTarget: func(_ context.Context, ip string, port int) error {
+						preflights = append(preflights, net.JoinHostPort(ip, strconv.Itoa(port)))
+						return nil
+					},
+				})
+				if res.code != 0 || res.stderr.Len() != 0 {
+					t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
+				}
+				if len(preflights) != 1 || preflights[0] != target.preflight {
+					t.Fatalf("preflighted %v, want only the destination %s", preflights, target.preflight)
+				}
+				requests := srv.Requests()
+				if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
+					t.Fatalf("requests = %#v, want GET, restart POST, readiness GET", requests)
+				}
+				if daemon.ensures != 1 || daemon.reloads != 0 {
+					t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
+				}
+				stored, err := registry.Get(context.Background(), srv.Key.CRID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.TargetURL != target.canonical || stored.LocalIP != target.ip || stored.LocalPort != 4000 ||
+					stored.DesiredState != "on" || stored.ServingEpoch != seed.ServingEpoch+1 {
+					t.Fatalf("moved local state = %+v, want %s at epoch %d", stored, target.canonical, seed.ServingEpoch+1)
+				}
+				if format == "json" {
+					var doc struct {
+						TargetURL    string `json:"target_url"`
+						ServingEpoch uint64 `json:"serving_epoch"`
+					}
+					if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
+						t.Fatalf("decode restart json: %v\n%s", err, res.stdout.String())
+					}
+					if doc.TargetURL != target.canonical || doc.ServingEpoch != seed.ServingEpoch+1 {
+						t.Fatalf("restart json = %+v", doc)
+					}
+					return
+				}
+				if !strings.Contains(res.stdout.String(), "Target:         "+target.canonical+"\n") || strings.Contains(res.stdout.String(), seed.TargetURL) {
+					t.Fatalf("stdout does not report the destination alone:\n%s", res.stdout.String())
+				}
 			})
-			if res.code != 0 || res.stderr.Len() != 0 {
-				t.Fatalf("exit=%d stderr=%q", res.code, res.stderr.String())
-			}
-			if len(preflights) != 1 || preflights[0] != "127.0.0.1:4000" {
-				t.Fatalf("preflighted %v, want only the destination", preflights)
-			}
-			requests := srv.Requests()
-			if len(requests) != 3 || requests[0].Method != http.MethodGet || requests[1].Method != http.MethodPost || requests[2].Method != http.MethodGet {
-				t.Fatalf("requests = %#v, want GET, restart POST, readiness GET", requests)
-			}
-			if daemon.ensures != 1 || daemon.reloads != 0 {
-				t.Fatalf("daemon ensures/reloads = %d/%d, want 1/0", daemon.ensures, daemon.reloads)
-			}
-			stored, err := registry.Get(context.Background(), srv.Key.CRID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if stored.TargetURL != "http://127.0.0.1:4000" || stored.LocalIP != "127.0.0.1" || stored.LocalPort != 4000 ||
-				stored.DesiredState != "on" || stored.ServingEpoch != seed.ServingEpoch+1 {
-				t.Fatalf("moved local state = %+v", stored)
-			}
-			if format == "json" {
-				var doc struct {
-					TargetURL    string `json:"target_url"`
-					ServingEpoch uint64 `json:"serving_epoch"`
-				}
-				if err := json.Unmarshal(res.stdout.Bytes(), &doc); err != nil {
-					t.Fatalf("decode restart json: %v\n%s", err, res.stdout.String())
-				}
-				if doc.TargetURL != "http://127.0.0.1:4000" || doc.ServingEpoch != seed.ServingEpoch+1 {
-					t.Fatalf("restart json = %+v", doc)
-				}
-				return
-			}
-			if !strings.Contains(res.stdout.String(), "Target:         http://127.0.0.1:4000\n") || strings.Contains(res.stdout.String(), seed.TargetURL) {
-				t.Fatalf("stdout does not report the destination alone:\n%s", res.stdout.String())
-			}
-		})
+		}
 	}
 }
 
