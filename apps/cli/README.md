@@ -387,8 +387,10 @@ then follows one lifecycle:
 2. Release the first reconcile with `PUT /overlay` (below) or `POST /reload`
    on the control socket. Every lifecycle command sends a reload as well.
 3. Poll `GET /status`. The document carries `job_version`, `pid`, `running`
-   (resource ID to CRID for every serving route), and `resources`, the same
-   redacted per-share diagnostics `qurl inspect` shows. `pid` is the daemon's
+   (resource ID to CRID for every route the session group manages, one
+   waiting out a retry included), and `resources`, the same redacted
+   per-share diagnostics `qurl inspect` shows; a route is serving only when
+   its `resources` entry says so. `pid` is the daemon's
    own process ID, so a daemon the supervisor found running can be stopped
    like one it spawned.
 4. Stop the daemon with SIGTERM (or SIGINT). It stops its Connector session
