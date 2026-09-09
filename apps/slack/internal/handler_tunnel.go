@@ -715,8 +715,8 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		Description:  defaultTunnelDisplayName(args.Slug),
 	})
 	if err != nil {
-		log.Error("tunnel install: create/find resource failed", "error", err, "slug", sanitizeLogValue(args.Slug))
-		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
+		log.Error("tunnel install: create/find resource failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeLogValue(args.Slug))...)
+		return nil, connectorResourceCreateErrorMessage(err), err
 	}
 	resolvedArgs := *args
 	if err := resolvedArgs.pinTunnelResource(resource, connectorAPIURL); err != nil {
@@ -822,6 +822,22 @@ func sharingInstallFailureMessage(message string, previous *client.SharingState)
 		return message + " Your existing qURL share remains enabled."
 	}
 	return message + " This setup newly enabled sharing, so qURL is turning it back off."
+}
+
+// TODO(upstream-contract): POST /v1/resources returns 403 + quota_exceeded
+// for both protected-resource and monthly data limits. Other pairs stay generic and
+// remain visible in the structured error log.
+const resourceQuotaExceededCode = "quota_exceeded"
+
+// Resource creation does not distinguish which account quota was exceeded.
+// Keep this mapping out of the generic sanitizer: other endpoints have other
+// quotas. Never forward upstream detail into Slack.
+func connectorResourceCreateErrorMessage(err error) string {
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden && apiErr.Code == resourceQuotaExceededCode {
+		return appendSlackReference("Connector setup reached an account quota", apiErr.RequestID) + ". Ask an admin to check quota usage: for the protected resource limit, revoke unused resources; for the monthly data limit, wait for the next calendar month. Contact LayerV about a plan upgrade if you need a higher allowance, then retry setup. No enrollment token was minted."
+	}
+	return sanitizeAPIError(err, "Failed to create or find the qURL Connector resource")
 }
 
 func disableSharingAfterInstallFailure(ctx context.Context, log *slog.Logger, c *client.Client, resourceID, reason string) {
