@@ -2407,6 +2407,20 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
       requestId: 'ddb-request-123',
       errorMessage: 'DDB rejected [REDACTED_URL]',
     }));
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'resource-public-id', ['q_orphaned_link_one', 'q_orphaned_link_two'], 'apikey',
+    );
+    expect(mockDeleteLink).toHaveBeenCalledWith('resource-public-id', 'apikey');
+    expect(mockRevokeMintedLinks.mock.invocationCallOrder[0])
+      .toBeLessThan(mockDeleteLink.mock.invocationCallOrder[0]);
+    expect(logger.info).toHaveBeenCalledWith(
+      'Cleaned up freshly minted initial send qURL resources',
+      expect.objectContaining({
+        sendId: expect.any(String),
+        reason: 'initial_persistence_failed',
+        total: 1,
+      }),
+    );
     const everythingLogged = JSON.stringify([
       logger.error.mock.calls,
       logger.warn.mock.calls,
@@ -2418,6 +2432,89 @@ describe('executeSendPipeline — orphaned qURL log safety', () => {
     expect(everythingLogged).not.toContain('https://qurl.site/#at_secret_bearer_two');
     expect(everythingLogged).not.toContain('at_secret_bearer_one');
     expect(everythingLogged).not.toContain('at_secret_bearer_two');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('preserves the original persistence failure when initial child cleanup is unconfirmed', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([{
+      qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+      resource_id: 'resource-public-id',
+      qurl_id: 'q_orphaned_link_one',
+    }]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DDB unavailable'));
+    mockRevokeMintedLinks.mockRejectedValueOnce(new Error('connector unavailable'));
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'resource-public-id', ['q_orphaned_link_one'], 'apikey',
+    );
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted initial send qURL resources',
+      expect.objectContaining({
+        reason: 'initial_persistence_failed',
+        failed_count: 1,
+        failures: [expect.objectContaining({
+          qurl_ids: ['q_orphaned_link_one'],
+          unidentified_qurl_count: 0,
+          error: 'connector unavailable',
+        })],
+      }),
+    );
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: 'Failed to save link records. Links were not sent. Please try again.',
+    });
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('minimizes initial-send access and reports an unidentified child after persistence failure', async () => {
+    const interaction = makeInteraction();
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'resource-public-id',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      {
+        qurl_link: 'https://qurl.link/#at_secret_bearer_one',
+        resource_id: 'resource-public-id',
+        qurl_id: 'q_orphaned_link_one',
+      },
+      {
+        qurl_link: 'https://qurl.link/#at_secret_bearer_two',
+        resource_id: 'resource-public-id',
+      },
+    ]);
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DDB unavailable'));
+
+    await executeSendPipeline(interaction, makePipelineParams({
+      recipients: [
+        { id: 'u1', username: 'u1' },
+        { id: 'u2', username: 'u2' },
+      ],
+    }));
+
+    expect(mockRevokeMintedLinks).toHaveBeenCalledWith(
+      'resource-public-id', ['q_orphaned_link_one'], 'apikey',
+    );
+    expect(mockDeleteLink).toHaveBeenCalledWith('resource-public-id', 'apikey');
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted initial send qURL resources',
+      expect.objectContaining({
+        reason: 'initial_persistence_failed',
+        failures: [expect.objectContaining({
+          qurl_ids: ['q_orphaned_link_one'],
+          unidentified_qurl_count: 1,
+          connector_revoke_confirmed: true,
+          resource_revoke_confirmed: true,
+        })],
+      }),
+    );
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 

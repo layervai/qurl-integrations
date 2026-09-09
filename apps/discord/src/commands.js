@@ -2200,6 +2200,16 @@ async function executeSendPipeline(interaction, {
       linkCount: qurlLinks.length,
       orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlId: l.qurlId })),
     });
+    // The write can fail after one or more unguarded BatchWrite chunks have
+    // committed. Revoke every freshly minted child/resource regardless: rows
+    // that did land then point at dead grants, while rows that did not land no
+    // longer leave live untracked grants. The helper logs unresolved residue
+    // but never replaces this persistence failure or the user-facing outcome.
+    await cleanupFreshMintedResources(qurlLinks, apiKey, sendId, {
+      reason: 'initial_persistence_failed',
+      operationLabel: 'initial send',
+      checkGuardTransaction: false,
+    });
     clearCooldown(interaction.user.id);
     return interaction.editReply({
       content: 'Failed to save link records. Links were not sent. Please try again.',
@@ -2898,17 +2908,19 @@ async function executeSendPipeline(interaction, {
   }
 }
 
-async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
-  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
-  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
+  const operationLabel = options.operationLabel || 'Add Recipients';
+  const checkGuardTransaction = options.checkGuardTransaction !== false;
+  const txnActionCount = checkGuardTransaction ? ddbSendConfigGuardActionCount(batchSends) : null;
+  if (checkGuardTransaction && rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
     // Unreachable by construction for today's Add Recipients flow: oversized
     // batches fail before DDB, and revoked errors only come from a single
     // transaction. If a future caller violates that invariant, still revoke
     // the freshly minted qURLs; rows may point at deleted resources, but no DMs
     // have been sent and the grants fail closed.
-    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
+    logger.error(`Cleaning up oversized ${operationLabel} batch after possible persistence`, {
       sendId,
       send_count: batchSends.length,
       txn_actions: txnActionCount,
@@ -2982,7 +2994,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
     }
   });
   if (failed.length > 0) {
-    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+    logger.error(`Failed to clean up freshly minted ${operationLabel} qURL resources`, {
       sendId,
       reason: cleanupReason,
       failed_count: failed.length,
@@ -2990,7 +3002,7 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
       failures: failed,
     });
   } else {
-    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+    logger.info(`Cleaned up freshly minted ${operationLabel} qURL resources`, {
       sendId,
       reason: cleanupReason,
       total: resourceEntries.length,
@@ -3348,7 +3360,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       send_count: batchSends.length,
       txn_actions: ddbSendConfigGuardActionCount(batchSends),
     });
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshMintedResources(batchSends, apiKey, sendId, {
       rowsMayHavePersisted: false,
       reason: 'pre_persistence_oversized_batch',
     });
@@ -3369,7 +3381,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
         sendId, error: err.message, linkCount: batchSends.length,
       });
-      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      await cleanupFreshMintedResources(batchSends, apiKey, sendId);
       return {
         msg: 'Cannot add recipients — this send has already been revoked.',
         newLinks: [], newRecipients: [],
@@ -3384,7 +3396,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // retry actually committed but its response was lost, this cleanup can
     // leave rows pointing at deleted resources; that is still fail-closed
     // because no DMs were sent and the qURLs no longer grant access.
-    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+    await cleanupFreshMintedResources(batchSends, apiKey, sendId, {
       reason: 'guarded_transaction_failed',
     });
     return {
