@@ -134,3 +134,30 @@ func TestReadExternalEnrollmentTokenFileRejectsWrongOwnerWhenPrivileged(t *testi
 		t.Fatal(err)
 	}
 }
+
+// TestReadExternalEnrollmentTokenFileRejectsSymlinkSwap pins the descriptor
+// pinning against the classic swap: the path becomes a symlink to another
+// private token between the no-follow open and the re-inspection. The
+// opened descriptor is refused rather than read, and neither value is named.
+func TestReadExternalEnrollmentTokenFileRejectsSymlinkSwap(t *testing.T) {
+	path := writeExternalEnrollmentToken(t, []byte("first-secret-value"), 0o400)
+	other := writeExternalEnrollmentToken(t, []byte("second-secret-value"), 0o400)
+	original := statExternalEnrollmentTokenPath
+	t.Cleanup(func() { statExternalEnrollmentTokenPath = original })
+	statExternalEnrollmentTokenPath = func(name string) (os.FileInfo, error) {
+		if err := os.Remove(name); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(other, name); err != nil {
+			return nil, err
+		}
+		return os.Lstat(name)
+	}
+	_, err := ReadExternalEnrollmentTokenFile(path)
+	if err == nil || !strings.Contains(err.Error(), "changed while opening") {
+		t.Fatalf("symlink swap error = %v, want the changed-while-opening refusal", err)
+	}
+	if strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("token leaked in error: %v", err)
+	}
+}
