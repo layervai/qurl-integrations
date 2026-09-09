@@ -776,6 +776,7 @@ def test_cleanup_budgets_and_batch_caps_stay_consistent() -> None:
     fallback_operation_seconds = 40 * 60
     cleanup_workflow = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
     assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == 45
+    assert fallback_operation_seconds + credentials.RUNNER_CLEANUP_MARGIN_SECONDS == 45 * 60
     assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
     assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
     assert f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow
@@ -821,8 +822,27 @@ def test_automation_key_identity_and_lifetime_fail_closed() -> None:
                 info["expires_at"] = expiry
             with mock.patch.object(credentials, "identity", return_value={**valid, "api_key": info}):
                 assert credentials.authenticated_owner(args, 900)[2] == fake.owner
+        fixed_now = 2_000_000_000
+        for minimum, remaining, accepted in (
+            (0, 1199, False), (0, 1200, True),
+            (credentials.MIN_AUTOMATION_LIFETIME_SECONDS, 10799, False),
+            (credentials.MIN_AUTOMATION_LIFETIME_SECONDS, 10800, True),
+        ):
+            expiry = credentials.datetime.datetime.fromtimestamp(fixed_now + remaining, credentials.datetime.timezone.utc).isoformat()
+            data = {**valid, "api_key": {**valid["api_key"], "expires_at": expiry}}
+            with mock.patch.object(credentials, "identity", return_value=data), mock.patch.object(credentials.time, "time", return_value=fixed_now):
+                try:
+                    credentials.authenticated_owner(args, 900, minimum_lifetime_seconds=minimum)
+                except credentials.CredentialError as exc:
+                    assert not accepted and str(exc) == "automation key does not have the required lifetime"
+                else:
+                    assert accepted
+        fractional = {**valid, "api_key": {**valid["api_key"], "expires_at": "2099-01-01T00:00:00.123456789Z"}}
+        with mock.patch.object(credentials, "identity", return_value=fractional):
+            assert credentials.authenticated_owner(args, 900)[2] == fake.owner
         for data in (
             {**valid, "api_key": {**valid["api_key"], "expires_at": None}},
+            {**valid, "api_key": {**valid["api_key"], "expires_at": "2099-01-01T00:00:00"}},
             {**valid, "owner_id": "other-owner"},
             {**valid, "auth_type": "jwt"},
             {**valid, "api_key": {**valid["api_key"], "kind": "device"}},

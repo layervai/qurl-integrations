@@ -758,6 +758,7 @@ jobs:
     # Hermetic CLI gates still run on every relevant pull request and push.
     # The credentialed deployment journey runs daily and on explicit demand;
     # running it for every main push exhausted the Auth0 M2M token allowance.
+    # Credential provisioning and rotation: docs/ci-api-keys.md.
     if: github.ref == 'refs/heads/main' && contains(fromJson('["schedule","workflow_dispatch"]'), github.event_name) && needs.changes.outputs.cli == 'true' && needs.customer-artifacts.result == 'success'
     strategy:
       fail-fast: false

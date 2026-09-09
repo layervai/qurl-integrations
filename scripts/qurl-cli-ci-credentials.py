@@ -26,6 +26,7 @@ REQUIRED_AUTOMATION_SCOPES = ["qurl:agent", "qurl:keys", "qurl:read", "qurl:reso
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
 # Leave five minutes outside the longest allowed operation for runner cleanup.
 MAX_OPERATION_BUDGET_SECONDS = 55 * 60
+RUNNER_CLEANUP_MARGIN_SECONDS = 5 * 60
 # Cover setup, customer execution, and cleanup without near-expiry authority.
 MIN_AUTOMATION_LIFETIME_SECONDS = 3 * 60 * 60
 # TODO(upstream-contract): qurl-service generates 32-byte base64url API secrets.
@@ -465,7 +466,7 @@ def paged_rows(
 
 
 def authenticated_owner(
-    args: argparse.Namespace, operation_budget_seconds: int
+    args: argparse.Namespace, operation_budget_seconds: int, *, minimum_lifetime_seconds: int = 0
 ) -> tuple[str, str, str]:
     endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
     if type(operation_budget_seconds) is not int or not 0 < operation_budget_seconds <= MAX_OPERATION_BUDGET_SECONDS:
@@ -480,7 +481,8 @@ def authenticated_owner(
     info = data.get("api_key")
     if (data.get("auth_type") != "api_key" or data.get("owner_id") != owner
             or not isinstance(info, dict) or info.get("kind") != "api_key"
-            or not KEY_ID.fullmatch(str(info.get("key_id", "")))
+            or not isinstance(info.get("key_id"), str)
+            or not KEY_ID.fullmatch(info["key_id"])
             or not isinstance(info.get("scopes"), list)
             or not all(isinstance(scope, str) for scope in info["scopes"])
             or sorted(info["scopes"]) != REQUIRED_AUTOMATION_SCOPES):
@@ -490,7 +492,7 @@ def authenticated_owner(
     if "expires_at" in info:
         try:
             expiry = datetime.datetime.fromisoformat(info["expires_at"].replace("Z", "+00:00"))
-            if expiry.tzinfo is None or expiry.timestamp() - time.time() < max(operation_budget_seconds, MIN_AUTOMATION_LIFETIME_SECONDS):
+            if expiry.tzinfo is None or expiry.timestamp() - time.time() < max(operation_budget_seconds + RUNNER_CLEANUP_MARGIN_SECONDS, minimum_lifetime_seconds):
                 raise ValueError("insufficient lifetime")
         except (ValueError, TypeError, AttributeError) as exc:
             raise CredentialError("automation key does not have the required lifetime") from exc
@@ -980,7 +982,7 @@ def create_pair(args: argparse.Namespace) -> None:
     ):
         raise CredentialError("customer credential directories must be distinct")
     endpoint, automation_key, expected_owner = authenticated_owner(
-        args, CREATE_PAIR_BUDGET_SECONDS
+        args, CREATE_PAIR_BUDGET_SECONDS, minimum_lifetime_seconds=MIN_AUTOMATION_LIFETIME_SECONDS
     )
     directories = {credential.purpose: credential.output_dir for credential in requests}
     completed_purposes: list[str] = []
