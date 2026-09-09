@@ -6,6 +6,7 @@ const {
   sign,
 } = require('crypto');
 const { createPortalOpener } = require('@layervai/qurl/node');
+const { QURLClient, DelegatedBatchOutcomeUnknownError } = require('@layervai/qurl');
 
 const config = require('./config');
 const { PRIVATE_SEND_MINT_BUDGET_MS } = require('./constants');
@@ -369,29 +370,6 @@ function requestTimeoutMs(deadlineMs, maximumMs, deadlineMessage) {
   return Math.min(maximumMs, remainingMs);
 }
 
-function requiredEtag(response) {
-  const value = response.headers.get('etag');
-  if (!value || value.length > 96) throw new Error('Delegated qURL batch returned an invalid ETag header');
-  return value;
-}
-
-function validatedBatchLocation(value, batchId) {
-  let location;
-  let endpoint;
-  try {
-    location = new URL(value);
-    endpoint = new URL(config.QURL_ENDPOINT);
-  } catch {
-    throw new Error('Delegated qURL batch returned an invalid Location header');
-  }
-  if (location.origin !== endpoint.origin || location.username || location.password
-      || location.search || location.hash
-      || location.pathname !== `/v1/delegated-qurl-batches/${batchId}`) {
-    throw new Error('Delegated qURL batch returned an invalid Location header');
-  }
-  return location.toString();
-}
-
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -407,125 +385,68 @@ async function redeemDelegatedBatch(upload, {
     throw new Error('QURL_LINK_DOMAIN is required for delegated qURL batches');
   }
   const guildCredential = requirePrivateCredential(credential);
-  const body = JSON.stringify({ mint_capability: upload.mint_capability, grants });
-  const headers = {
-    'Authorization': `Bearer ${guildCredential.apiKey}`,
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Idempotency-Key': idempotencyKey,
-  };
-  let accepted;
-  let lastError;
-  for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt++) {
-    try {
-      const response = await fetch(`${config.QURL_ENDPOINT}/v1/delegated-qurl-batches`, {
-        method: 'POST',
-        headers,
-        body,
-        redirect: 'error',
-        signal: AbortSignal.timeout(requestTimeoutMs(
-          deadlineMs,
-          BATCH_REQUEST_TIMEOUT_MS,
-          'Delegated qURL batch did not complete before the Discord interaction deadline',
-        )),
-      });
-      if (response.status === 202) {
-        const result = await responseJson(response, 'Delegated qURL batch');
-        const data = result?.data;
-        if (!/^dqb_[A-Za-z0-9_-]{22}$/.test(data?.batch_id || '')
-            || data?.status !== 'queued' || data?.item_count !== grants.length
-            || !isCanonicalUtcSecond(data?.submitted_at)) {
-          throw new Error('Delegated qURL batch returned an invalid acceptance response');
-        }
-        accepted = { response, batchId: data.batch_id };
-        break;
-      }
-      if (response.ok) {
-        const err = new Error(`Delegated qURL batch returned an unexpected success status (${response.status})`);
-        err.noRetry = true;
-        throw err;
-      }
-      await responseJson(response, 'Delegated qURL batch');
-    } catch (err) {
-      lastError = err;
-      if (err.noRetry || (err.status && !(err.status === 503 && err.apiCode === 'mutation_outcome_unknown'))) throw err;
-      if (attempt < MAX_BATCH_ATTEMPTS) {
-        const waitMs = retryDelayMs(err.response, attempt);
-        if (Date.now() + waitMs > deadlineMs) {
-          throw new Error('Delegated qURL batch did not complete before the Discord interaction deadline');
-        }
-        await sleep(waitMs);
-      }
-    }
-  }
-  if (!accepted) throw lastError || new Error('Delegated qURL batch was not accepted');
-  const location = validatedBatchLocation(accepted.response.headers.get('location'), accepted.batchId);
-  let etag = accepted.response.headers.has('etag') ? requiredEtag(accepted.response) : null;
-  let waitMs = retryDelayMs(accepted.response, 1, 1000);
-  let transientFailures = 0;
-  // TODO(upstream-contract): qurl-service batch GETs are idempotent and terminal
-  // responses always include results, even with an unchanged If-None-Match.
-  for (let poll = 0; poll < MAX_BATCH_POLLS; poll++) {
-    if (Date.now() + waitMs > deadlineMs) {
+  const client = new QURLClient({
+    apiKey: guildCredential.apiKey,
+    baseUrl: config.QURL_ENDPOINT,
+    maxRetries: 0,
+    timeout: BATCH_REQUEST_TIMEOUT_MS,
+    fetch: (url, init) => {
+      const signal = AbortSignal.timeout(requestTimeoutMs(deadlineMs, BATCH_REQUEST_TIMEOUT_MS,
+        'Delegated qURL batch did not complete before the Discord interaction deadline'));
+      return fetch(url, { ...init, redirect: 'error',
+        signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal });
+    },
+  });
+  const input = { mint_capability: upload.mint_capability, grants };
+  const wait = async milliseconds => {
+    if (Date.now() + milliseconds > deadlineMs) {
       throw new Error('Delegated qURL batch did not complete before the Discord interaction deadline');
     }
-    await sleep(waitMs);
-    const pollHeaders = { 'Authorization': `Bearer ${guildCredential.apiKey}`, 'Accept': 'application/json' };
-    if (etag) pollHeaders['If-None-Match'] = etag;
-    const timeoutMs = requestTimeoutMs(
-      deadlineMs, BATCH_REQUEST_TIMEOUT_MS,
-      'Delegated qURL batch did not complete before the Discord interaction deadline',
-    );
-    let response;
+    await sleep(milliseconds);
+  };
+  const retryWait = (seconds, fallback) => Number.isFinite(seconds) && seconds > 0
+    ? seconds * 1000 : fallback;
+  let accepted;
+  for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt++) {
+    try {
+      accepted = await client.createDelegatedQurlBatch(input, { idempotencyKey });
+      break;
+    } catch (error) {
+      const cause = error.cause || error;
+      if (!(error instanceof DelegatedBatchOutcomeUnknownError)
+          || (cause.status >= 200 && cause.status < 300 && cause.status !== 202)
+          || (cause.status >= 400 && !(cause.status === 503 && cause.code === 'mutation_outcome_unknown'))
+          || attempt === MAX_BATCH_ATTEMPTS) throw error;
+      await wait(retryWait(cause.retryAfter, RETRY_BACKOFF_BASE_MS * (2 ** (attempt - 1))));
+    }
+  }
+  let etag = accepted.etag;
+  let waitMs = retryWait(accepted.retry_after, 1000);
+  let transientFailures = 0;
+  for (let poll = 0; poll < MAX_BATCH_POLLS; poll++) {
+    await wait(waitMs);
     let result;
     try {
-      response = await fetch(location, {
-        headers: pollHeaders,
-        redirect: 'error',
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (response.status === 200 || response.status === 202) result = await response.json();
-      if ([429, 500, 502, 503, 504].includes(response.status)) await response.body?.cancel();
-    } catch (err) {
-      if (!['TypeError', 'TimeoutError', 'AbortError'].includes(err.name)) throw err;
-      waitMs = Math.min(30_000, retryDelayMs(null, Math.min(++transientFailures, 8)));
-      continue;
-    }
-    if ([429, 500, 502, 503, 504].includes(response.status)) {
-      waitMs = retryDelayMs(response, Math.min(++transientFailures, 8));
-      if (!response.headers.has('retry-after')) waitMs = Math.min(30_000, waitMs);
+      result = await client.getDelegatedQurlBatch(accepted.batch_id, etag ? { etag } : undefined);
+    } catch (error) {
+      if (error.partialQurlIds) {
+        error.partialLinkCount = error.partialQurlIds.length;
+        throw error;
+      }
+      if (!['network_error', 'timeout', 'unexpected_response'].includes(error.code)
+          && ![429, 500, 502, 503, 504].includes(error.status)) throw error;
+      waitMs = retryWait(error.retryAfter,
+        Math.min(30_000, RETRY_BACKOFF_BASE_MS * (2 ** (Math.min(++transientFailures, 8) - 1))));
       continue;
     }
     transientFailures = 0;
-    if (response.status === 304) {
-      if (response.headers.has('etag')) etag = requiredEtag(response);
-      waitMs = retryDelayMs(response, 1, 1000);
+    if (result.http_status !== 200) {
+      etag = result.etag || etag;
+      waitMs = retryWait(result.retry_after, 1000);
       continue;
     }
-    if (response.status === 202) {
-      if (response.headers.has('etag')) etag = requiredEtag(response);
-      waitMs = retryDelayMs(response, 1, 1000);
-      const pending = result;
-      if (pending?.data?.batch_id !== accepted.batchId
-          || !['queued', 'running'].includes(pending?.data?.status)) {
-        throw new Error('Delegated qURL batch returned an invalid pending response');
-      }
-      continue;
-    }
-    if (response.status !== 200) {
-      await responseJson(response, 'Delegated qURL batch status');
-      throw new Error(`Delegated qURL batch returned an unexpected status (${response.status})`);
-    }
-    if (result?.data?.batch_id !== accepted.batchId
-        || !['succeeded', 'partially_failed', 'failed'].includes(result?.data?.status)
-        || result?.data?.item_count !== grants.length
-        || !isCanonicalUtcSecond(result?.data?.submitted_at)) {
-      throw new Error('Delegated qURL batch returned an invalid terminal response');
-    }
-    const items = result?.data?.results;
-    if (!Array.isArray(items) || items.length !== grants.length) {
-      throw new Error('Delegated qURL batch returned an invalid terminal response');
-    }
+    if (result.item_count !== grants.length) throw new Error('Delegated qURL batch returned an invalid terminal response');
+    const items = result.results;
     const partialQurlIds = [...new Set(items
       .filter(item => item?.status === 'succeeded' && /^q_[0-9a-f]{11}$/.test(item?.qurl?.qurl_id || ''))
       .map(item => item.qurl.qurl_id))];
@@ -562,7 +483,7 @@ async function redeemDelegatedBatch(upload, {
       seenQurlLinks.add(qurlLink.href);
       return { ...item.qurl, resource_id: item.qurl.qurl_id };
     });
-    if (result.data.status !== 'succeeded') {
+    if (result.status !== 'succeeded') {
       const err = new Error('Delegated qURL batch did not fully succeed');
       err.apiCode = 'delegated_batch_item_failed';
       err.partialLinkCount = partialQurlIds.length;
