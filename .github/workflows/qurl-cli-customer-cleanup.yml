@@ -1,5 +1,6 @@
 name: "qURL CLI Customer Cleanup"
 
+# Credential provisioning and rotation: docs/ci-api-keys.md.
 # The primary workflow reconciles all lanes with one automation key. This
 # trusted fallback runs only when that cleanup did not pass, including after a
 # cancellation. The protected manual entry accepts only verified prior trusted

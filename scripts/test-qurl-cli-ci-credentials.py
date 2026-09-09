@@ -109,9 +109,18 @@ class FakeAPI:
         assert parsed.netloc == "sandbox.example", "unexpected Auth0 request"
         if parsed.path == "/v1/me":
             if bearer == self.automation_key:
-                self.identity_checks += 1  # Counts automation identity checks, not token requests.
-                data = {"auth_type": "api_key", "owner_id": self.owner,
-                        "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
+                self.identity_checks += (
+                    1  # Counts automation identity checks, not token requests.
+                )
+                data = {
+                    "auth_type": "api_key",
+                    "owner_id": self.owner,
+                    "api_key": {
+                        "kind": "api_key",
+                        "key_id": "key_Automation12",
+                        "scopes": credentials.REQUIRED_AUTOMATION_SCOPES,
+                    },
+                }
             elif bearer == self.api_key or bearer in self.issued_api_keys:
                 key_id, api_key = self.issued_api_keys.get(
                     bearer, (self.key_id, self.api_key)
@@ -222,9 +231,12 @@ class FakeAPI:
                 return 200, json.dumps({"data": [] if row is None else [row]}).encode()
             self.resource_inventory_requests += 1
             assert query == {"limit": [str(credentials.INVENTORY_PAGE_SIZE)]}
-            return 200, json.dumps(
-                {"data": self.resources, "meta": {"has_more": False}}
-            ).encode()
+            return (
+                200,
+                json.dumps(
+                    {"data": self.resources, "meta": {"has_more": False}}
+                ).encode(),
+            )
         if parsed.path.startswith("/v1/resources/") and method == "DELETE":
             resource_id = urllib.parse.unquote(parsed.path.rsplit("/", 1)[1])
             assert not resource_id.startswith("connector-cli-journey-v2-")
@@ -487,7 +499,9 @@ def test_pair_and_batch_each_validate_one_automation_key() -> None:
         assert fake.identity_checks == 1
 
 
-def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run() -> None:
+def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run() -> (
+    None
+):
     fake = FakeAPI()
     with (
         tempfile.TemporaryDirectory() as raw_root,
@@ -781,16 +795,21 @@ def test_cleanup_budgets_and_batch_caps_stay_consistent() -> None:
     cleanup_workflow = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
     assert workflow_timeout_minutes(CUSTOMER_CLEANUP_WORKFLOW, "cleanup") == 45
     assert fallback_operation_seconds <= credentials.MAX_OPERATION_BUDGET_SECONDS
-    assert fallback_operation_seconds + credentials.RUNNER_CLEANUP_MARGIN_SECONDS == 45 * 60
+    assert (
+        fallback_operation_seconds + credentials.RUNNER_CLEANUP_MARGIN_SECONDS
+        == 45 * 60
+    )
     assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
     assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
-    assert f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow
+    assert (
+        f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow
+    )
     # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
     # most three source runs, for twelve total reconciliations in the largest
     # mixed recovery request.
-    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60, (
-        "primary inventory budgets no longer leave room for cleanup writes"
-    )
+    assert (
+        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60
+    ), "primary inventory budgets no longer leave room for cleanup writes"
     resolver_cap = re.search(
         r"cleanup_cap=([1-9][0-9]*)",
         cleanup_workflow,
@@ -803,8 +822,7 @@ def test_cleanup_budgets_and_batch_caps_stay_consistent() -> None:
     max_lanes = len(base_lanes.group(1).split()) + len(added_lanes.group(1).split())
     assert int(resolver_cap.group(1)) * max_lanes <= credentials.MAX_RECONCILE_RUNS
     assert (
-        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12
-        < fallback_operation_seconds
+        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12 < fallback_operation_seconds
     ), "fallback inventory budgets no longer leave room for cleanup writes"
     assert (
         0
@@ -818,8 +836,16 @@ def test_automation_key_identity_and_lifetime_fail_closed() -> None:
     with tempfile.TemporaryDirectory() as raw_root:
         args = auth_args(pathlib.Path(raw_root))
         with mock.patch.object(credentials, "request", fake):
-            assert credentials.authenticated_owner(args, 900) == (args.qurl_endpoint, fake.automation_key, fake.owner)
-        with mock.patch.object(credentials, "identity", side_effect=AssertionError("invalid input reached network")):
+            assert credentials.authenticated_owner(args, 900) == (
+                args.qurl_endpoint,
+                fake.automation_key,
+                fake.owner,
+            )
+        with mock.patch.object(
+            credentials,
+            "identity",
+            side_effect=AssertionError("invalid input reached network"),
+        ):
             for owner in ("", " owner", "owner "):
                 invalid = argparse.Namespace(**{**vars(args), "owner_id": owner})
                 try:
@@ -828,48 +854,130 @@ def test_automation_key_identity_and_lifetime_fail_closed() -> None:
                     assert str(exc) == "expected CI owner is required"
                 else:
                     raise AssertionError("invalid owner accepted")
-            for index, value in enumerate(("lv_test_short", "lv_prod_" + "a" * 43, "lv_test_" + "a" * 44)):
-                invalid = argparse.Namespace(**{**vars(args), "api_key_file": private_file(pathlib.Path(raw_root), f"bad-key-{index}", value)})
+            for index, value in enumerate(
+                ("lv_test_short", "lv_prod_" + "a" * 43, "lv_test_" + "a" * 44)
+            ):
+                invalid = argparse.Namespace(
+                    **{
+                        **vars(args),
+                        "api_key_file": private_file(
+                            pathlib.Path(raw_root), f"bad-key-{index}", value
+                        ),
+                    }
+                )
                 try:
                     credentials.authenticated_owner(invalid, 900)
                 except credentials.CredentialError as exc:
                     assert str(exc) == "automation API key is malformed"
                 else:
                     raise AssertionError("invalid key accepted")
-        valid = {"auth_type": "api_key", "owner_id": fake.owner,
-                 "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
+        valid = {
+            "auth_type": "api_key",
+            "owner_id": fake.owner,
+            "api_key": {
+                "kind": "api_key",
+                "key_id": "key_Automation12",
+                "scopes": credentials.REQUIRED_AUTOMATION_SCOPES,
+            },
+        }
         for expiry in (None, "2099-01-01T00:00:00Z"):
-            info = {**valid["api_key"], "scopes": list(reversed(credentials.REQUIRED_AUTOMATION_SCOPES))}
+            info = {
+                **valid["api_key"],
+                "scopes": list(reversed(credentials.REQUIRED_AUTOMATION_SCOPES)),
+            }
             if expiry is not None:
                 info["expires_at"] = expiry
-            with mock.patch.object(credentials, "identity", return_value={**valid, "api_key": info}):
+            with mock.patch.object(
+                credentials, "identity", return_value={**valid, "api_key": info}
+            ):
                 assert credentials.authenticated_owner(args, 900)[2] == fake.owner
         fixed_now = 2_000_000_000
         for minimum, remaining, accepted in (
-            (0, 1199, False), (0, 1200, True),
+            (0, 1199, False),
+            (0, 1200, True),
             (credentials.MIN_AUTOMATION_LIFETIME_SECONDS, 10799, False),
             (credentials.MIN_AUTOMATION_LIFETIME_SECONDS, 10800, True),
         ):
-            expiry = credentials.datetime.datetime.fromtimestamp(fixed_now + remaining, credentials.datetime.timezone.utc).isoformat()
+            expiry = credentials.datetime.datetime.fromtimestamp(
+                fixed_now + remaining, credentials.datetime.timezone.utc
+            ).isoformat()
             data = {**valid, "api_key": {**valid["api_key"], "expires_at": expiry}}
-            with mock.patch.object(credentials, "identity", return_value=data), mock.patch.object(credentials.time, "time", return_value=fixed_now):
+            with (
+                mock.patch.object(credentials, "identity", return_value=data),
+                mock.patch.object(credentials.time, "time", return_value=fixed_now),
+            ):
                 try:
-                    credentials.authenticated_owner(args, 900, minimum_lifetime_seconds=minimum)
+                    credentials.authenticated_owner(
+                        args, 900, minimum_lifetime_seconds=minimum
+                    )
                 except credentials.CredentialError as exc:
-                    assert not accepted and str(exc) == "automation key does not have the required lifetime"
+                    assert (
+                        not accepted
+                        and str(exc)
+                        == "automation key does not have the required lifetime"
+                    )
                 else:
                     assert accepted
-        fractional = {**valid, "api_key": {**valid["api_key"], "expires_at": "2099-01-01T00:00:00.123456789Z"}}
+        primary = pathlib.Path(raw_root) / "finite-primary"
+        failure = pathlib.Path(raw_root) / "finite-failure"
+        primary.mkdir(mode=0o700)
+        failure.mkdir(mode=0o700)
+        two_hours = credentials.datetime.datetime.fromtimestamp(
+            fixed_now + 7200, credentials.datetime.timezone.utc
+        ).isoformat()
+        finite = {**valid, "api_key": {**valid["api_key"], "expires_at": two_hours}}
+        with (
+            mock.patch.object(credentials, "identity", return_value=finite),
+            mock.patch.object(credentials.time, "time", return_value=fixed_now),
+            mock.patch.object(
+                credentials,
+                "request",
+                side_effect=AssertionError("short-lived parent minted a child"),
+            ),
+        ):
+            try:
+                credentials.create_pair(
+                    argparse.Namespace(
+                        **vars(args),
+                        primary_output_dir=primary,
+                        failure_output_dir=failure,
+                        lane="linux",
+                        run_attempt="2",
+                        run_id="1231",
+                    )
+                )
+            except credentials.CredentialError as exc:
+                assert str(exc) == "automation key does not have the required lifetime"
+            else:
+                raise AssertionError(
+                    "create_pair omitted its three-hour lifetime floor"
+                )
+        fractional = {
+            **valid,
+            "api_key": {
+                **valid["api_key"],
+                "expires_at": "2099-01-01T00:00:00.123456789Z",
+            },
+        }
         with mock.patch.object(credentials, "identity", return_value=fractional):
             assert credentials.authenticated_owner(args, 900)[2] == fake.owner
         for data in (
             {**valid, "api_key": {**valid["api_key"], "expires_at": None}},
-            {**valid, "api_key": {**valid["api_key"], "expires_at": "2099-01-01T00:00:00"}},
+            {
+                **valid,
+                "api_key": {**valid["api_key"], "expires_at": "2099-01-01T00:00:00"},
+            },
             {**valid, "owner_id": "other-owner"},
             {**valid, "auth_type": "jwt"},
             {**valid, "api_key": {**valid["api_key"], "kind": "device"}},
-            {**valid, "api_key": {**valid["api_key"], "scopes": credentials.CUSTOMER_SCOPES}},
-            {**valid, "api_key": {**valid["api_key"], "expires_at": "2000-01-01T00:00:00Z"}},
+            {
+                **valid,
+                "api_key": {**valid["api_key"], "scopes": credentials.CUSTOMER_SCOPES},
+            },
+            {
+                **valid,
+                "api_key": {**valid["api_key"], "expires_at": "2000-01-01T00:00:00Z"},
+            },
         ):
             with mock.patch.object(credentials, "identity", return_value=data):
                 try:
@@ -976,12 +1084,15 @@ def test_pagination_safety_limits_fail_closed() -> None:
         del url, bearer, body, content_type, extra_headers
         assert method == "GET"
         calls += 1
-        return 200, json.dumps(
-            {
-                "data": [{"resource_id": f"r_{calls}"}],
-                "meta": {"has_more": True, "next_cursor": f"cursor-{calls}"},
-            }
-        ).encode()
+        return (
+            200,
+            json.dumps(
+                {
+                    "data": [{"resource_id": f"r_{calls}"}],
+                    "meta": {"has_more": True, "next_cursor": f"cursor-{calls}"},
+                }
+            ).encode(),
+        )
 
     with mock.patch.object(credentials, "request", endless_request):
         try:
@@ -1055,12 +1166,15 @@ def test_pagination_safety_limits_fail_closed() -> None:
     def first_page_request(*_args: object, **_kwargs: object) -> tuple[int, bytes]:
         nonlocal calls
         calls += 1
-        return 200, json.dumps(
-            {
-                "data": [{"resource_id": "r_1"}],
-                "meta": {"has_more": True, "next_cursor": "next"},
-            }
-        ).encode()
+        return (
+            200,
+            json.dumps(
+                {
+                    "data": [{"resource_id": "r_1"}],
+                    "meta": {"has_more": True, "next_cursor": "next"},
+                }
+            ).encode(),
+        )
 
     with (
         mock.patch.object(credentials, "request", first_page_request),
