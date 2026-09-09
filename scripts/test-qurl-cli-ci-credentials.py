@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import importlib.util
 import io
@@ -33,30 +32,10 @@ sys.modules[SPEC.name] = credentials
 SPEC.loader.exec_module(credentials)
 
 
-def encoded(value: dict[str, object]) -> str:
-    raw = json.dumps(value, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
-
 class FakeAPI:
     def __init__(self) -> None:
-        now = int(time.time())
         self.owner = "ci-client@clients"
-        self.jwt = (
-            "header."
-            + encoded(
-                {
-                    "aud": "https://sandbox.example",
-                    "exp": now + 4000,
-                    "gty": "client-credentials",
-                    "iat": now,
-                    "iss": "https://auth.example/",
-                    "scope": "qurl:agent qurl:read qurl:write",
-                    "sub": self.owner,
-                }
-            )
-            + ".signature"
-        )
+        self.jwt = "lv_test_" + "a" * 43
         self.key_id = "key_AbCdEf123456"
         self.api_key = "lv_test_customer-key"
         self.auth_token_requests = 0
@@ -127,18 +106,12 @@ class FakeAPI:
         extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         parsed = urllib.parse.urlsplit(url)
-        if parsed.netloc == "auth.example":
-            self.auth_token_requests += 1
-            form = urllib.parse.parse_qs((body or b"").decode())
-            assert method == "POST"
-            assert content_type == "application/x-www-form-urlencoded"
-            assert form["scope"] == ["qurl:agent qurl:read qurl:write"]
-            return 200, json.dumps(
-                {"access_token": self.jwt, "token_type": "Bearer"}
-            ).encode()
+        assert parsed.netloc == "sandbox.example", "unexpected Auth0 request"
         if parsed.path == "/v1/me":
             if bearer == self.jwt:
-                data = {"auth_type": "jwt", "owner_id": self.owner}
+                self.auth_token_requests += 1  # Counts automation identity checks, not token requests.
+                data = {"auth_type": "api_key", "owner_id": self.owner,
+                        "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
             elif bearer == self.api_key or bearer in self.issued_api_keys:
                 key_id, api_key = self.issued_api_keys.get(
                     bearer, (self.key_id, self.api_key)
@@ -276,11 +249,9 @@ def private_file(root: pathlib.Path, name: str, value: str) -> pathlib.Path:
 
 def auth_args(root: pathlib.Path) -> argparse.Namespace:
     return argparse.Namespace(
-        audience="https://sandbox.example",
-        client_id_file=private_file(root, "client-id", "ci-client"),
-        client_secret_file=private_file(root, "client-secret", "client-secret"),
+        api_key_file=private_file(root, "api-key", "lv_test_" + "a" * 43),
+        owner_id="ci-client@clients",
         qurl_endpoint="https://sandbox.example",
-        token_endpoint="https://auth.example/oauth/token",
         operation_budget_seconds=15 * 60,
     )
 
@@ -467,7 +438,7 @@ def test_scheduled_soak_workflow_contract() -> None:
     assert '.conclusion == "success"' in cleanup
 
 
-def test_pair_and_batch_each_request_one_auth0_token() -> None:
+def test_pair_and_batch_each_validate_one_automation_key() -> None:
     fake = FakeAPI()
     with (
         tempfile.TemporaryDirectory() as raw_root,
@@ -512,7 +483,7 @@ def test_pair_and_batch_each_request_one_auth0_token() -> None:
         assert fake.auth_token_requests == 1
 
 
-def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> None:
+def test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run() -> None:
     fake = FakeAPI()
     with (
         tempfile.TemporaryDirectory() as raw_root,
@@ -656,7 +627,7 @@ def test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run() -> No
         assert fake.resource_inventory_requests == 1
 
 
-def test_pair_rejects_invalid_input_before_auth0() -> None:
+def test_pair_rejects_invalid_input_before_authentication() -> None:
     fake = FakeAPI()
     with (
         tempfile.TemporaryDirectory() as raw_root,
@@ -800,119 +771,28 @@ def test_pair_first_create_failure_never_mints_a_recovery_key() -> None:
             raise AssertionError("failed inner cleanup was masked")
 
 
-def test_auth0_token_remaining_lifetime_matches_each_command_budget() -> None:
-    fixed_now = 2_000_000_000
-    cleanup_minutes = workflow_timeout_minutes(CLI_WORKFLOW, "journey-cleanup")
-    fallback_cleanup_minutes = workflow_timeout_minutes(
-        CUSTOMER_CLEANUP_WORKFLOW, "cleanup"
-    )
-    fallback_operation_seconds = 40 * 60
-    cleanup_workflow = CUSTOMER_CLEANUP_WORKFLOW.read_text(encoding="utf-8")
-    assert fallback_cleanup_minutes == 45
-    assert (
-        fallback_operation_seconds + credentials.M2M_EXPIRY_MARGIN_SECONDS
-        == fallback_cleanup_minutes * 60
-    )
-    assert credentials.CREATE_PAIR_BUDGET_SECONDS == cleanup_minutes * 60
-    assert "--operation-budget-seconds 900" in CLI_WORKFLOW.read_text(encoding="utf-8")
-    assert (
-        f"--operation-budget-seconds {fallback_operation_seconds}" in cleanup_workflow
-    )
-    assert credentials.M2M_EXPIRY_MARGIN_SECONDS == 5 * 60
-    assert (
-        fallback_operation_seconds
-        + credentials.M2M_EXPIRY_MARGIN_SECONDS
-        + credentials.AUTH0_ISSUANCE_SKEW_SECONDS
-        <= credentials.AUTH0_M2M_TOKEN_LIFETIME_SECONDS
-    ), "fallback cleanup no longer fits inside the CI Auth0 M2M token lifetime"
-    # Scheduled/manual runs add the Linux soak lane. The fallback accepts at
-    # most three source runs, for twelve total reconciliations in the largest
-    # mixed recovery request.
-    assert credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 4 < cleanup_minutes * 60, (
-        "primary inventory budgets no longer leave room for cleanup writes"
-    )
-    resolver_cap = re.search(
-        r"cleanup_cap=([1-9][0-9]*)",
-        cleanup_workflow,
-    )
-    base_lanes = re.search(r"lane_specs=\(([^)\n]+)\)", cleanup_workflow)
-    added_lanes = re.search(r"lane_specs\+=\(([^)\n]+)\)", cleanup_workflow)
-    assert resolver_cap and base_lanes and added_lanes
-    assert "if (( ${#resolved_runs[@]} > cleanup_cap )); then" in cleanup_workflow
-    assert 'resolved_runs=("${resolved_runs[@]: -cleanup_cap}")' in cleanup_workflow
-    max_lanes = len(base_lanes.group(1).split()) + len(added_lanes.group(1).split())
-    assert int(resolver_cap.group(1)) * max_lanes <= credentials.MAX_RECONCILE_RUNS
-    assert (
-        credentials.RECONCILE_INVENTORY_BUDGET_SECONDS * 12
-        < fallback_operation_seconds
-    ), "fallback inventory budgets no longer leave room for cleanup writes"
-    assert (
-        0
-        < credentials.RESOURCE_INVENTORY_RESERVE_SECONDS
-        < (credentials.RECONCILE_INVENTORY_BUDGET_SECONDS)
-    )
-
-    def token(remaining_seconds: int, issued_ago: int = 0) -> str:
-        return (
-            "header."
-            + encoded(
-                {
-                    "aud": "https://sandbox.example",
-                    "exp": fixed_now + remaining_seconds,
-                    "gty": "client-credentials",
-                    "iat": fixed_now - issued_ago,
-                    "iss": "https://auth.example/",
-                    "scope": "qurl:agent qurl:read qurl:write",
-                    "sub": "ci-client@clients",
-                }
-            )
-            + ".signature"
-        )
-
-    def token_response(value: str) -> tuple[int, bytes]:
-        return 200, json.dumps({"access_token": value, "token_type": "Bearer"}).encode()
-
+def test_automation_key_identity_and_lifetime_fail_closed() -> None:
+    fake = FakeAPI()
     with tempfile.TemporaryDirectory() as raw_root:
         args = auth_args(pathlib.Path(raw_root))
-        for remaining_seconds, issued_ago, budget in (
-            (3599, 1, credentials.CREATE_PAIR_BUDGET_SECONDS),
-            (1200, 0, credentials.CREATE_PAIR_BUDGET_SECONDS),
-            (3000, 0, fallback_cleanup_minutes * 60),
+        with mock.patch.object(credentials, "request", fake):
+            assert credentials.authenticated_owner(args, 900) == (args.qurl_endpoint, fake.jwt, fake.owner)
+        valid = {"auth_type": "api_key", "owner_id": fake.owner,
+                 "api_key": {"kind": "api_key", "key_id": "key_Automation12", "scopes": credentials.REQUIRED_AUTOMATION_SCOPES}}
+        for data in (
+            {**valid, "owner_id": "other-owner"},
+            {**valid, "auth_type": "jwt"},
+            {**valid, "api_key": {**valid["api_key"], "kind": "device"}},
+            {**valid, "api_key": {**valid["api_key"], "scopes": credentials.CUSTOMER_SCOPES}},
+            {**valid, "api_key": {**valid["api_key"], "expires_at": "2000-01-01T00:00:00Z"}},
         ):
-            value = token(remaining_seconds, issued_ago)
-            with (
-                mock.patch.object(
-                    credentials, "request", return_value=token_response(value)
-                ),
-                mock.patch.object(credentials.time, "time", return_value=fixed_now),
-            ):
-                assert credentials.auth0_token(args, budget) == (
-                    value,
-                    "ci-client@clients",
-                )
-
-        for remaining_seconds, budget in (
-            (1199, credentials.CREATE_PAIR_BUDGET_SECONDS),
-            (2999, fallback_cleanup_minutes * 60),
-        ):
-            with (
-                mock.patch.object(
-                    credentials,
-                    "request",
-                    return_value=token_response(token(remaining_seconds)),
-                ),
-                mock.patch.object(credentials.time, "time", return_value=fixed_now),
-            ):
+            with mock.patch.object(credentials, "identity", return_value=data):
                 try:
-                    credentials.auth0_token(args, budget)
-                except credentials.CredentialError as exc:
-                    assert str(exc) == (
-                        "Auth0 token does not have the required CI management lifetime"
-                    )
+                    credentials.authenticated_owner(args, 900)
+                except credentials.CredentialError:
+                    pass
                 else:
-                    raise AssertionError(
-                        f"{remaining_seconds}-second Auth0 token was accepted"
-                    )
+                    raise AssertionError("invalid automation authority accepted")
 
 
 def add_run_credentials(fake: FakeAPI) -> tuple[str, str, str, str]:
@@ -1561,12 +1441,12 @@ def test_unhashable_inventory_fields_remain_bounded() -> None:
 
 def main() -> None:
     test_scheduled_soak_workflow_contract()
-    test_pair_and_batch_each_request_one_auth0_token()
-    test_batch_rejects_invalid_input_before_auth0_and_attempts_every_run()
-    test_pair_rejects_invalid_input_before_auth0()
+    test_pair_and_batch_each_validate_one_automation_key()
+    test_batch_rejects_invalid_input_before_authentication_and_attempts_every_run()
+    test_pair_rejects_invalid_input_before_authentication()
     test_pair_failure_revokes_both_exact_keys_with_the_same_token()
     test_pair_first_create_failure_never_mints_a_recovery_key()
-    test_auth0_token_remaining_lifetime_matches_each_command_budget()
+    test_automation_key_identity_and_lifetime_fail_closed()
     test_bounded_valid_pagination()
     test_pagination_safety_limits_fail_closed()
     test_reconciliation_reserves_time_for_resource_inventory()

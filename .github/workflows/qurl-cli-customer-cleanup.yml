@@ -266,7 +266,7 @@ jobs:
       contents: read
     env:
       QURL_ENDPOINT: ${{ secrets.QURL_JOURNEY_ENDPOINT }}
-      AUTH_TOKEN_ENDPOINT: ${{ secrets.QURL_JOURNEY_AUTH_TOKEN_ENDPOINT }}
+      QURL_JOURNEY_OWNER_ID: ${{ vars.QURL_JOURNEY_OWNER_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -278,8 +278,7 @@ jobs:
 
       - name: Revoke exact-run resources and credentials
         env:
-          AUTH_CLIENT_ID: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_ID }}
-          AUTH_CLIENT_SECRET: ${{ secrets.QURL_JOURNEY_AUTH_CLIENT_SECRET }}
+          AUTOMATION_API_KEY: ${{ secrets.QURL_JOURNEY_API_KEY }}
           INCLUDE_SOAK: ${{ needs.resolve.outputs.include_soak }}
           SOURCE_RUNS: ${{ needs.resolve.outputs.source_runs }}
         run: |
@@ -293,9 +292,8 @@ jobs:
           cleanup() { scripts/remove-sensitive-tree.sh "$client_dir"; }
           trap cleanup EXIT
           mkdir -m 0700 "$client_dir"
-          (umask 077; printf %s "$AUTH_CLIENT_ID" >"$client_dir/client-id")
-          (umask 077; printf %s "$AUTH_CLIENT_SECRET" >"$client_dir/client-secret")
-          unset AUTH_CLIENT_ID AUTH_CLIENT_SECRET
+          (umask 077; printf %s "$AUTOMATION_API_KEY" >"$client_dir/api-key")
+          unset AUTOMATION_API_KEY
           batch_args=()
           IFS=, read -ra run_specs <<<"$SOURCE_RUNS"
           for run_spec in "${run_specs[@]}"; do
@@ -310,7 +308,6 @@ jobs:
             done
           done
           python3 scripts/qurl-cli-ci-credentials.py reconcile-batch \
-            --token-endpoint "$AUTH_TOKEN_ENDPOINT" --audience "$QURL_ENDPOINT" \
-            --qurl-endpoint "$QURL_ENDPOINT" --client-id-file "$client_dir/client-id" \
-            --client-secret-file "$client_dir/client-secret" \
+            --qurl-endpoint "$QURL_ENDPOINT" --api-key-file "$client_dir/api-key" \
+            --owner-id "$QURL_JOURNEY_OWNER_ID" \
             --operation-budget-seconds 2400 "${batch_args[@]}"

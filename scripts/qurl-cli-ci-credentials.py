@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
+import datetime
 import hashlib
 import json
 import os
@@ -21,17 +21,8 @@ from typing import Any
 
 
 MAX_RESPONSE = 64 * 1024
-REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
-# TODO(upstream-contract): the CI Auth0 tenant issues one-hour M2M tokens. The
-# minimum below leaves nine minutes after issuance skew before that expiry.
-AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
-AUTH0_ISSUANCE_SKEW_SECONDS = 60
-# An M2M token is consumed only by one trusted setup or reconciliation command.
-# The setup command removes it before the customer journey starts. A cleanup
-# command reuses one token for its bounded batch and never exposes that token to
-# a customer process. The lifetime is independent of the 110-minute soak lane.
+REQUIRED_AUTOMATION_SCOPES = ["qurl:agent", "qurl:keys", "qurl:read", "qurl:resolve", "qurl:write"]
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
-M2M_EXPIRY_MARGIN_SECONDS = 5 * 60
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
@@ -224,100 +215,6 @@ def json_object(raw: bytes, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CredentialError(f"{label} is not a JSON object")
     return value
-
-
-def jwt_claims(token: str) -> dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise CredentialError("Auth0 access token is not a JWT")
-    try:
-        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
-    except ValueError as exc:
-        raise CredentialError("Auth0 access token payload is malformed") from exc
-    return json_object(payload, "Auth0 access token payload")
-
-
-def effective_scopes(claims: dict[str, Any]) -> frozenset[str]:
-    values: list[str] = []
-    scope = claims.get("scope", "")
-    if not isinstance(scope, str):
-        raise CredentialError("Auth0 access token scope is malformed")
-    values.extend(filter(None, scope.split(" ")))
-    for field in ("permissions", "https://layerv.ai/permissions"):
-        permissions = claims.get(field, [])
-        if not isinstance(permissions, list) or any(
-            not isinstance(item, str) for item in permissions
-        ):
-            raise CredentialError("Auth0 access token permissions are malformed")
-        values.extend(permissions)
-    return frozenset(values)
-
-
-def auth0_token(
-    args: argparse.Namespace, operation_budget_seconds: int
-) -> tuple[str, str]:
-    if (
-        not isinstance(operation_budget_seconds, int)
-        or isinstance(operation_budget_seconds, bool)
-        or operation_budget_seconds <= 0
-        or operation_budget_seconds + M2M_EXPIRY_MARGIN_SECONDS
-        > AUTH0_M2M_TOKEN_LIFETIME_SECONDS
-    ):
-        raise CredentialError("Auth0 operation budget is invalid")
-    client_id = private_value(args.client_id_file, "Auth0 client ID")
-    client_secret = private_value(args.client_secret_file, "Auth0 client secret")
-    form = urllib.parse.urlencode(
-        {
-            "audience": args.audience,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "grant_type": "client_credentials",
-            "scope": " ".join(sorted(REQUIRED_M2M_SCOPES)),
-        }
-    ).encode("ascii")
-    status, raw = request(
-        args.token_endpoint,
-        "POST",
-        body=form,
-        content_type="application/x-www-form-urlencoded",
-    )
-    if status != 200:
-        raise CredentialError("Auth0 client credential was rejected")
-    response = json_object(raw, "Auth0 token response")
-    token = response.get("access_token")
-    if response.get("token_type") != "Bearer" or not isinstance(token, str):
-        raise CredentialError("Auth0 did not return one bearer token")
-    claims = jwt_claims(token)
-    now = int(time.time())
-    parsed_endpoint = urllib.parse.urlsplit(args.token_endpoint)
-    expected_issuer = f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}/"
-    audience = claims.get("aud")
-    if audience != args.audience and audience != [args.audience]:
-        raise CredentialError("Auth0 token audience does not match the qURL API")
-    if (
-        claims.get("gty") != "client-credentials"
-        or claims.get("sub") != f"{client_id}@clients"
-        or claims.get("iss") != expected_issuer
-    ):
-        raise CredentialError("Auth0 token is not owned by the CI client")
-    issued = claims.get("iat")
-    expires = claims.get("exp")
-    if (
-        not isinstance(issued, int)
-        or isinstance(issued, bool)
-        or not isinstance(expires, int)
-        or isinstance(expires, bool)
-        or issued > now + AUTH0_ISSUANCE_SKEW_SECONDS
-        or now - issued > AUTH0_ISSUANCE_SKEW_SECONDS
-        or expires - now < operation_budget_seconds + M2M_EXPIRY_MARGIN_SECONDS
-        or expires - issued > 2 * AUTH0_M2M_TOKEN_LIFETIME_SECONDS
-    ):
-        raise CredentialError(
-            "Auth0 token does not have the required CI management lifetime"
-        )
-    if effective_scopes(claims) != REQUIRED_M2M_SCOPES:
-        raise CredentialError("Auth0 token does not have the exact CI scope set")
-    return token, claims["sub"]
 
 
 def qurl_json(
@@ -564,12 +461,29 @@ def authenticated_owner(
     args: argparse.Namespace, operation_budget_seconds: int
 ) -> tuple[str, str, str]:
     endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
-    args.token_endpoint = https_origin(args.token_endpoint, "Auth0 token endpoint")
-    jwt, expected_owner = auth0_token(args, operation_budget_seconds)
-    m2m = identity(endpoint, jwt)
-    if m2m.get("auth_type") != "jwt" or m2m.get("owner_id") != expected_owner:
-        raise CredentialError("qURL rejected the dedicated CI owner")
-    return endpoint, jwt, expected_owner
+    if type(operation_budget_seconds) is not int or not 0 < operation_budget_seconds <= 3300:
+        raise CredentialError("automation operation budget is invalid")
+    key = private_value(args.api_key_file, "automation API key")
+    if not re.fullmatch(r"lv_(?:live|test)_[A-Za-z0-9_-]{43}", key):
+        raise CredentialError("automation API key is malformed")
+    owner = args.owner_id
+    if not owner or owner != owner.strip():
+        raise CredentialError("expected CI owner is required")
+    data = identity(endpoint, key)
+    info = data.get("api_key")
+    if (data.get("auth_type") != "api_key" or data.get("owner_id") != owner
+            or not isinstance(info, dict) or info.get("kind") != "api_key"
+            or not KEY_ID.fullmatch(str(info.get("key_id", "")))
+            or info.get("scopes") != REQUIRED_AUTOMATION_SCOPES):
+        raise CredentialError("qURL rejected the dedicated CI automation key")
+    if "expires_at" in info:
+        try:
+            expiry = datetime.datetime.fromisoformat(info["expires_at"].replace("Z", "+00:00"))
+            if expiry.tzinfo is None or expiry.timestamp() - time.time() < max(operation_budget_seconds, 3 * 3600):
+                raise ValueError("insufficient lifetime")
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise CredentialError("automation key does not have the required lifetime") from exc
+    return endpoint, key, owner
 
 
 def run_description(args: RunCleanup) -> str:
@@ -723,7 +637,7 @@ def reconcile_run(
     def record_failure(category: str) -> None:
         failures[category] = failures.get(category, 0) + 1
 
-    # Revoke run credentials before resource cleanup. The trusted M2M token,
+    # Revoke run credentials before resource cleanup. The trusted automation key,
     # not a customer or device key, authorizes every resource deletion below.
     # Validate each exact target before deletion, attempt every valid target,
     # and retain only redacted failure categories for the final error.
@@ -873,7 +787,7 @@ def reconcile_batch(args: argparse.Namespace) -> None:
         raise CredentialError(
             f"batch cleanup did not converge for {failures} of {len(parsed)} runs"
         )
-    print(f"reconciled {len(parsed)} runs with one management token")
+    print(f"reconciled {len(parsed)} runs with one automation key")
 
 
 def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
@@ -1097,7 +1011,7 @@ def create_pair(args: argparse.Namespace) -> None:
         raise CredentialError(
             "credential-pair creation failed; every created key was revoked"
         ) from exc
-    print("created two isolated run-scoped customer API keys with one management token")
+    print("created two isolated run-scoped customer API keys with one automation key")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1109,11 +1023,9 @@ def parser() -> argparse.ArgumentParser:
         create_pair_parser,
         reconcile_batch_parser,
     ):
-        current.add_argument("--token-endpoint", required=True)
-        current.add_argument("--audience", required=True)
         current.add_argument("--qurl-endpoint", required=True)
-        current.add_argument("--client-id-file", type=pathlib.Path, required=True)
-        current.add_argument("--client-secret-file", type=pathlib.Path, required=True)
+        current.add_argument("--api-key-file", type=pathlib.Path, required=True)
+        current.add_argument("--owner-id", required=True)
     create_pair_parser.add_argument(
         "--primary-output-dir", type=pathlib.Path, required=True
     )
