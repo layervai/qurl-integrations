@@ -8696,9 +8696,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     // Revoke the connector-side watermarked views FIRST. If this throws the
     // resource revoke is skipped, so the send stays retryable instead of being
     // marked revoked while recipient links are still live. The connector route
-    // remains callable when render-at-mint is off; a mapping miss is confirmed
-    // against the shared tunnel before the explicit `already_gone` outcome,
-    // never inferred from an HTTP error.
+    // remains callable when render-at-mint is off. A mapping miss confirms only
+    // the dual-proof `not_connector_managed` outcome; `already_gone` is reserved
+    // for a mapped child with exact dead-token and service-absence proofs. No
+    // confirmation is ever inferred from this endpoint's HTTP status alone.
     await revokeMintedLinks(resourceId, qurlIds, apiKey);
     await deleteLink(resourceId, apiKey);
     return resourceId;

@@ -556,11 +556,12 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  *
  * TODO(upstream-contract): qurl-integrations-infra#1553 keeps this endpoint
  * callable even when render-at-mint is currently disabled. On a mint-row miss,
- * it strongly reads qurl-service under both identities. An authoritative
- * owner-hidden service 404 proves `already_gone`; the narrower
- * `not_connector_managed` outcome additionally requires a canonical caller
- * 200 bound to this exact source plus that exact service 404. Service 200
- * (including same-owner credentials), transport, and ambiguous responses fail.
+ * it strongly reads qurl-service under both identities: only a canonical caller
+ * 200 bound to this exact source plus an authoritative owner-hidden service 404
+ * proves `not_connector_managed`. `already_gone` is reserved for a mapped
+ * child whose DELETE returns the exact dead-token 404/410 proof and whose
+ * service lookup also proves it absent. Service 200 (including same-owner
+ * credentials), transport, and ambiguous responses fail.
  * The connector returns every requested qurl_id exactly once in an unordered
  * unique set.
  * A 404, 410, or 503 from this endpoint itself is never evidence that a
