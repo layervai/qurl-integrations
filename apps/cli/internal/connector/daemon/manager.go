@@ -46,6 +46,12 @@ const (
 // shutdown path.
 const defaultRunnerStopTimeout = 10 * time.Second
 
+// defaultFirstReconcileBound caps a deferred first reconcile. An external
+// supervisor that died between spawning the daemon and its first reload must
+// not leave the daemon idle forever; after the bound the daemon serves its
+// durable state as it would have without the deferral.
+const defaultFirstReconcileBound = 30 * time.Second
+
 const (
 	diagnosticStateStarting = "starting"
 	diagnosticStateRetrying = "retrying"
@@ -127,6 +133,13 @@ type Manager struct {
 	registry Registry
 	factory  GroupFactory
 
+	// DeferFirstReconcile holds the first reconcile until Trigger releases it
+	// or firstReconcileBound elapses. An external supervisor sets it so the
+	// process-memory state it pushes over IPC is in place before any route is
+	// served. Set before Run.
+	DeferFirstReconcile bool
+	firstReconcileBound time.Duration
+
 	mu          sync.Mutex
 	tracked     map[string]trackedShare       // resource ID -> applied definition
 	routeToRes  map[string]string             // group route ID -> resource ID
@@ -202,6 +215,7 @@ func NewManager(registry Registry, factory GroupFactory) (*Manager, error) {
 		diagnostics: map[string]ResourceDiagnostic{}, retry: map[string]int{}, refusals: map[string]int{},
 		persisting:                 map[string]struct{}{},
 		trigger:                    make(chan struct{}, 1),
+		firstReconcileBound:        defaultFirstReconcileBound,
 		resourceGonePersistTimeout: 5 * time.Second,
 		runnerStopTimeout:          defaultRunnerStopTimeout,
 		routePushTimeout:           10 * time.Second,
@@ -229,6 +243,11 @@ func (m *Manager) Run(ctx context.Context) (retErr error) {
 		defer cancel()
 		retErr = errors.Join(retErr, m.stopRunner(stopCtx))
 	}()
+	if m.DeferFirstReconcile {
+		if err := awaitFirstReconcile(ctx, m.trigger, m.firstReconcileBound); err != nil {
+			return err
+		}
+	}
 	if err := m.Reconcile(ctx); err != nil {
 		return err
 	}
@@ -242,6 +261,21 @@ func (m *Manager) Run(ctx context.Context) (retErr error) {
 			}
 		}
 	}
+}
+
+// awaitFirstReconcile blocks a deferred first reconcile until the supervisor's
+// first Trigger, the bound, or cancellation. A Trigger that arrived before Run
+// started is already buffered and releases it immediately.
+func awaitFirstReconcile(ctx context.Context, trigger <-chan struct{}, bound time.Duration) error {
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-trigger:
+	case <-timer.C:
+	}
+	return nil
 }
 
 // Reconcile applies one crash-safe desired-state snapshot. It computes the

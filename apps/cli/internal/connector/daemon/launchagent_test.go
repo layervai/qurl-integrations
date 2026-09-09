@@ -12,6 +12,8 @@ import (
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	qurl "github.com/layervai/qurl-go/qurl"
+
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 const testHubKey = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -52,7 +54,7 @@ func TestJobControllerAbsentOwnerPersistsStableInstalledCommandPath(t *testing.T
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(name string) (string, error) {
@@ -115,7 +117,7 @@ func TestJobControllerPersistsCurrentArtifactInsteadOfOldQURLOnPath(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			manager := &recordingJobManager{}
 			controller := NewJobController(filepath.Join(dir, "state", test.name), filepath.Join(dir, "logs", test.name),
-				"2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+				"2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 			controller.Manager = manager
 			controller.InvocationPath = test.invocation
 			controller.LookPath = func(name string) (string, error) {
@@ -150,7 +152,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 	dir := t.TempDir()
 	currentBinary := filepath.Join(dir, "candidate", "qurl-candidate")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl-candidate"
 	controller.LookPath = func(name string) (string, error) {
@@ -173,7 +175,7 @@ func TestJobControllerResolvesExactBareInvocationName(t *testing.T) {
 func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = " qurl"
 	controller.LookPath = func(string) (string, error) {
@@ -195,7 +197,7 @@ func TestJobControllerRejectsNonCanonicalInvocationPath(t *testing.T) {
 func TestJobControllerCompatibleForegroundOwnerReloadsWithoutNativeManager(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, func() (qurl.HubBootstrap, error) {
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for a compatible live owner")
 		return qurl.HubBootstrap{}, nil
 	})
@@ -224,7 +226,7 @@ func TestJobControllerInstallsWhenCompatibleOwnerExitsBeforeReload(t *testing.T)
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -248,7 +250,7 @@ func TestJobControllerVersionChangeReloadsDefinitionInsteadOfLiveIPC(t *testing.
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -275,7 +277,7 @@ func TestJobControllerRejectsIncompatibleForegroundOwnerWithoutStartingSecondDae
 	dir := t.TempDir()
 	foreground := connectorservice.ServiceStatus{Installed: false, Running: false}
 	manager := &recordingJobManager{status: &foreground}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, func() (qurl.HubBootstrap, error) {
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for an incompatible foreground owner")
 		return qurl.HubBootstrap{}, nil
 	})
@@ -304,7 +306,7 @@ func TestJobControllerTreatsLoadedJobAsOwnershipBeforeIPCInitialization(t *testi
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -341,7 +343,7 @@ func TestJobControllerRejectsSecretBearingOrMalformedDeploymentState(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
 			manager := &recordingJobManager{}
-			controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", test.endpoint, GroupModeSingle, test.resolve)
+			controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", test.endpoint, GroupModeSingle, connectorstate.RuntimeSupervisionNative, test.resolve)
 			controller.Manager = manager
 			controller.LookPath = func(string) (string, error) {
 				t.Fatal("qurl path lookup ran before deployment state validation")
@@ -391,7 +393,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	dir := t.TempDir()
 	binaryPath := filepath.Join(dir, "bin", "qurl")
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModePerShare, testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModePerShare, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.InvocationPath = "qurl"
 	controller.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -416,7 +418,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 	}
 
 	// Switching back is the same definition change in the other direction.
-	back := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, testHubResolver)
+	back := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver)
 	back.Manager = manager
 	back.InvocationPath = "qurl"
 	back.LookPath = func(string) (string, error) { return binaryPath, nil }
@@ -438,7 +440,7 @@ func TestJobControllerModeChangeReplacesResidentDaemonLikeAVersionChange(t *test
 func TestJobControllerSameModeResidentDaemonReloadsLive(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModePerShare, func() (qurl.HubBootstrap, error) {
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupModePerShare, connectorstate.RuntimeSupervisionNative, func() (qurl.HubBootstrap, error) {
 		t.Fatal("Hub resolution ran for a compatible live owner")
 		return qurl.HubBootstrap{}, nil
 	})
@@ -463,7 +465,7 @@ func TestJobControllerSameModeResidentDaemonReloadsLive(t *testing.T) {
 func TestJobControllerRefusesToInstallAnUnknownMode(t *testing.T) {
 	dir := t.TempDir()
 	manager := &recordingJobManager{}
-	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupMode("both"), testHubResolver)
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.sandbox.layerv.xyz", GroupMode("both"), connectorstate.RuntimeSupervisionNative, testHubResolver)
 	controller.Manager = manager
 	controller.LookPath = func(string) (string, error) { return filepath.Join(dir, "bin", "qurl"), nil }
 	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
@@ -474,5 +476,115 @@ func TestJobControllerRefusesToInstallAnUnknownMode(t *testing.T) {
 	}
 	if len(manager.jobs) != 0 || len(manager.replaced) != 0 {
 		t.Fatalf("unknown mode installed jobs: ensure=%d replace=%d", len(manager.jobs), len(manager.replaced))
+	}
+}
+
+// externalTestController is a JobController in external supervision whose
+// native job manager, Hub resolver, and PATH lookup all fail the test if they
+// are touched: an external daemon is its supervisor's process, never the
+// CLI's.
+func externalTestController(t *testing.T, manager *recordingJobManager) *JobController {
+	t.Helper()
+	dir := t.TempDir()
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.5.0", "https://api.example.com",
+		GroupModeSingle, connectorstate.RuntimeSupervisionExternal, func() (qurl.HubBootstrap, error) {
+			t.Fatal("Hub resolution ran under external supervision")
+			return qurl.HubBootstrap{}, nil
+		})
+	controller.Manager = manager
+	controller.LookPath = func(string) (string, error) {
+		t.Fatal("qurl path lookup ran under external supervision")
+		return "", nil
+	}
+	return controller
+}
+
+func TestEnsureExternalReloadsMatchedDaemon(t *testing.T) {
+	manager := &recordingJobManager{statusErr: errors.New("native job manager consulted under external supervision")}
+	controller := externalTestController(t, manager)
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+		return IPCStatus{JobVersion: "3/2.5.0", Pid: 4242}, true, nil
+	}
+	reloads := 0
+	controller.Reload = func(context.Context) (bool, error) { reloads++; return true, nil }
+	if err := controller.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 0 || reloads != 1 {
+		t.Fatalf("external matched daemon ensure/replace/status/reload = %d/%d/%d/%d, want 0/0/0/1", len(manager.jobs), len(manager.replaced), manager.statusCalls, reloads)
+	}
+}
+
+func TestEnsureExternalNotRunningFailsWithoutInstall(t *testing.T) {
+	manager := &recordingJobManager{statusErr: errors.New("native job manager consulted under external supervision")}
+	controller := externalTestController(t, manager)
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
+	controller.Reload = func(context.Context) (bool, error) {
+		t.Fatal("reload ran without a live daemon")
+		return false, nil
+	}
+	err := controller.Ensure(context.Background())
+	if !errors.Is(err, ErrExternalDaemonNotRunning) {
+		t.Fatalf("Ensure error = %v, want ErrExternalDaemonNotRunning", err)
+	}
+	if !strings.Contains(err.Error(), "qurl daemon run --supervision external") {
+		t.Fatalf("Ensure error = %v, want the supervisor's start command", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 0 {
+		t.Fatalf("external absent daemon ensure/replace/status = %d/%d/%d, want 0/0/0", len(manager.jobs), len(manager.replaced), manager.statusCalls)
+	}
+}
+
+// TestEnsureExternalCompatibleOwnerExitingBeforeReloadIsNotRunning pins the
+// race the native path resolves by installing: under external supervision the
+// same race is reported, never repaired.
+func TestEnsureExternalCompatibleOwnerExitingBeforeReloadIsNotRunning(t *testing.T) {
+	manager := &recordingJobManager{}
+	controller := externalTestController(t, manager)
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+		return IPCStatus{JobVersion: "3/2.5.0"}, true, nil
+	}
+	controller.Reload = func(context.Context) (bool, error) { return false, nil }
+	if err := controller.Ensure(context.Background()); !errors.Is(err, ErrExternalDaemonNotRunning) {
+		t.Fatalf("Ensure error = %v, want ErrExternalDaemonNotRunning", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 0 {
+		t.Fatalf("exited external owner ensure/replace/status = %d/%d/%d, want 0/0/0", len(manager.jobs), len(manager.replaced), manager.statusCalls)
+	}
+}
+
+func TestEnsureExternalMismatchedDaemonIsReportedNotReplaced(t *testing.T) {
+	manager := &recordingJobManager{statusErr: errors.New("native job manager consulted under external supervision")}
+	controller := externalTestController(t, manager)
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) {
+		return IPCStatus{JobVersion: "3/2.4.0"}, true, nil
+	}
+	controller.Reload = func(context.Context) (bool, error) {
+		t.Fatal("reload ran for a daemon on another job definition")
+		return false, nil
+	}
+	err := controller.Ensure(context.Background())
+	if err == nil || errors.Is(err, ErrExternalDaemonNotRunning) || !strings.Contains(err.Error(), "restart the externally supervised daemon") {
+		t.Fatalf("Ensure error = %v, want a definition mismatch that names the supervisor's restart", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 || manager.statusCalls != 0 {
+		t.Fatalf("mismatched external daemon ensure/replace/status = %d/%d/%d, want 0/0/0", len(manager.jobs), len(manager.replaced), manager.statusCalls)
+	}
+}
+
+func TestJobControllerRefusesAnUnknownSupervision(t *testing.T) {
+	dir := t.TempDir()
+	manager := &recordingJobManager{}
+	controller := NewJobController(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "2.4.0", "https://api.example.com", GroupModeSingle, connectorstate.RuntimeSupervision(""), testHubResolver)
+	controller.Manager = manager
+	controller.LookPath = func(string) (string, error) { return filepath.Join(dir, "bin", "qurl"), nil }
+	controller.ProbeStatus = func(context.Context) (IPCStatus, bool, error) { return IPCStatus{}, false, nil }
+	controller.Reload = func(context.Context) (bool, error) { t.Fatal("unexpected reload"); return false, nil }
+	err := controller.Ensure(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid daemon supervision") {
+		t.Fatalf("Ensure error = %v, want invalid-supervision rejection", err)
+	}
+	if len(manager.jobs) != 0 || len(manager.replaced) != 0 {
+		t.Fatalf("unknown supervision installed jobs: ensure=%d replace=%d", len(manager.jobs), len(manager.replaced))
 	}
 }

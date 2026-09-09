@@ -362,6 +362,9 @@ func validateRestartAdvance(prior, result *qurlapi.Sharing) error {
 // needs no matching local share, log path, or daemon controller. Registered
 // device state and its owner-bound registry are still required for authentication.
 func stopShare(ctx context.Context, opts *globalOpts, id string) error {
+	if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+		return err
+	}
 	localLookup := lookupLocalShare(ctx, opts, id)
 	if err := rejectLocalConnectorIDFromShare(localLookup.share, id, "stop"); err != nil {
 		return err
@@ -491,6 +494,9 @@ func rejectLocalConnectorIDFromShare(local *connectorstate.LocalShare, id, actio
 func openShareControl(opts *globalOpts) (localShareRegistry, shareDaemonController, string, error) {
 	stateDir, err := opts.resolveShareStateDir("")
 	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := opts.requireRuntimeSupervision(stateDir); err != nil {
 		return nil, nil, "", err
 	}
 	registry, err := opts.openShareRegistry(stateDir)
