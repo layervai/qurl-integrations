@@ -104,7 +104,7 @@ const (
 // so private-address exceptions cannot bypass the tunnel-only contract.
 // Distinct from [msgAliasTargetInvalid], which fires once a
 // `$`-prefixed target fails the tunnel-slug grammar.
-const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a qURL Connector ID — `/qurl-admin set-alias $<alias> $<id>`. (Raw URLs and resource IDs aren't supported targets.)"
+const msgAliasTargetNotTunnel = "`/qurl-admin set-alias` points an alias at a qURL Connector ID — `/qurl-admin set-alias $<alias> $<id>`. (Raw URLs, CRIDs, and internal handles aren't supported targets.)"
 
 // aliasArgs is the parsed shape of a `/qurl-admin set-alias $a <target>` or
 // `/qurl-admin unset-alias $a` text body. Kept as a separate value type so
