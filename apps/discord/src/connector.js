@@ -495,8 +495,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     // consume quota without any durable send row from which to revoke them.
     try {
       await revokeMintedLinks(resourceId, partialQurlIds, apiKey);
+      mintError.partialCleanupConfirmed = true;
     } catch (cleanupError) {
-      mintError.partialCleanupFailed = true;
       logger.error('Connector partial mint cleanup failed', {
         resource_ref: resourceIdLogRef(resourceId),
         partial_link_count: partialQurlIds.length,

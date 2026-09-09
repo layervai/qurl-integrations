@@ -466,6 +466,8 @@ describe('Connector client — coverage boost', () => {
         expect(e.status).toBe(502);
         expect(e.partialLinkCount).toBe(2);
         expect(e.partialQurlIds).toEqual(['q_partial_one', 'q_partial_two']);
+        expect(e.partialCleanupConfirmed).toBe(true);
+        expect(e.partialCleanupFailed).toBeUndefined();
       }
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(2);
@@ -518,7 +520,6 @@ describe('Connector client — coverage boost', () => {
         message: 'Connector mint_link failed (502)',
         status: 502,
         partialQurlIds: ['q_partial_one'],
-        partialCleanupFailed: true,
       });
 
       expect(logger.error).toHaveBeenCalledWith(

@@ -1711,8 +1711,8 @@ async function mintLinksInBatches({
       });
       for (const link of minted) {
         allLinks.push({
-          qurl_link: link.qurl_link,
-          qurl_id: typeof link.qurl_id === 'string' ? link.qurl_id : '',
+          qurl_link: link?.qurl_link,
+          qurl_id: typeof link?.qurl_id === 'string' ? link.qurl_id : '',
           resourceId: currentResourceId,
         });
       }
@@ -1731,6 +1731,33 @@ async function mintLinksInBatches({
       if (minted.length > batchSize) {
         throw new Error(`Connector mint_link returned ${minted.length} links for a ${batchSize}-link batch`);
       }
+      if (minted.some(link => (
+        typeof link?.qurl_id !== 'string'
+        || link.qurl_id.trim().length === 0
+        || link.qurl_id.trim() !== link.qurl_id
+      ))) {
+        // An exact-length response can still be unsafe: qurl_id is the only
+        // durable child-revocation identity. Never persist or deliver a link
+        // without it; the catch below compensates every identifiable sibling
+        // before deleting the parent resource.
+        throw new Error('Connector mint_link returned a link missing a valid qurl_id');
+      }
+      if (minted.some(link => (
+        typeof link?.qurl_link !== 'string'
+        || link.qurl_link.trim().length === 0
+        || link.qurl_link.trim() !== link.qurl_link
+      ))) {
+        // qurl_link is the write-once delivery credential. If it is absent or
+        // malformed, revoke the identified child instead of persisting a row
+        // that can neither be delivered nor reconstructed later.
+        throw new Error('Connector mint_link returned a link missing a valid qurl_link');
+      }
+      if (new Set(minted.map(link => link.qurl_id)).size !== minted.length) {
+        throw new Error('Connector mint_link returned a duplicate qurl_id');
+      }
+      if (new Set(minted.map(link => link.qurl_link)).size !== minted.length) {
+        throw new Error('Connector mint_link returned a duplicate qurl_link');
+      }
       tokensUsed += batchSize;
     }
   } catch (error) {
@@ -1739,6 +1766,7 @@ async function mintLinksInBatches({
       resourceIds,
       currentResourceId,
       partialQurlIds: error?.partialQurlIds,
+      partialCleanupConfirmed: error?.partialCleanupConfirmed === true,
       apiKey,
       cleanupContext,
       reason: 'mint_failed',
@@ -2954,6 +2982,19 @@ async function executeSendPipeline(interaction, {
   }
 }
 
+function partitionQurlIds(recordedQurlIds) {
+  const identified = new Set();
+  let unidentifiedQurlCount = 0;
+  for (const qurlId of recordedQurlIds) {
+    if (typeof qurlId !== 'string' || qurlId.trim().length === 0) {
+      unidentifiedQurlCount += 1;
+    } else {
+      identified.add(qurlId.trim());
+    }
+  }
+  return { qurlIds: [...identified], unidentifiedQurlCount };
+}
+
 async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options = {}) {
   const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
   const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
@@ -2992,12 +3033,7 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
   if (resourceEntries.length === 0) return;
 
   const results = await batchSettled(resourceEntries, async ([resourceId, recordedQurlIds]) => {
-    const qurlIds = [...new Set(recordedQurlIds
-      .filter(id => typeof id === 'string' && id.trim().length > 0)
-      .map(id => id.trim()))];
-    const unidentifiedQurlCount = recordedQurlIds.filter(
-      id => typeof id !== 'string' || id.trim().length === 0,
-    ).length;
+    const { qurlIds, unidentifiedQurlCount } = partitionQurlIds(recordedQurlIds);
     let connectorRevokeConfirmed = false;
     let resourceRevokeConfirmed = false;
     let failure;
@@ -3025,21 +3061,14 @@ async function cleanupFreshMintedResources(batchSends, apiKey, sendId, options =
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
       const recordedQurlIds = resourceEntries[index][1];
-      const qurlIds = [...new Set(recordedQurlIds
-        .filter(id => typeof id === 'string' && id.trim().length > 0)
-        .map(id => id.trim()))];
-      const unidentifiedQurlCount = recordedQurlIds.filter(
-        id => typeof id !== 'string' || id.trim().length === 0,
-      ).length;
+      const { qurlIds, unidentifiedQurlCount } = partitionQurlIds(recordedQurlIds);
       failed.push({
         resource_ref: resourceIdLogRef(resourceEntries[index][0]),
         qurl_id_count: qurlIds.length,
         qurl_ids: qurlIds,
         unidentified_qurl_count: unidentifiedQurlCount,
-        ...(unidentifiedQurlCount > 0 ? {
-          connector_revoke_confirmed: result.reason?.connectorRevokeConfirmed === true,
-          resource_revoke_confirmed: result.reason?.resourceRevokeConfirmed === true,
-        } : {}),
+        connector_revoke_confirmed: result.reason?.connectorRevokeConfirmed === true,
+        resource_revoke_confirmed: result.reason?.resourceRevokeConfirmed === true,
         error: result.reason?.message,
       });
     }
@@ -3066,38 +3095,44 @@ async function cleanupIncompleteMintBatch({
   resourceIds,
   currentResourceId,
   partialQurlIds,
+  partialCleanupConfirmed,
   apiKey,
   cleanupContext,
   reason,
   error,
 }) {
-  const cleanupRows = allLinks.map(link => ({
+  const reconciliationRows = allLinks.map(link => ({
     resourceId: link.resourceId,
     qurlId: link.qurl_id,
   }));
   if (Array.isArray(partialQurlIds)) {
     for (const qurlId of partialQurlIds) {
-      cleanupRows.push({ resourceId: currentResourceId, qurlId });
+      reconciliationRows.push({ resourceId: currentResourceId, qurlId });
     }
   }
+  // mintLinks already revokes non-2xx partial children inline. Keep those IDs
+  // in the reconciliation ledger, but do not make a second revoke request
+  // after the connector confirmed the first one. Parent cleanup still runs.
+  const cleanupRows = partialCleanupConfirmed
+    ? allLinks.map(link => ({ resourceId: link.resourceId, qurlId: link.qurl_id }))
+    : reconciliationRows;
 
   const ids = [...new Set(resourceIds.filter(
     resourceId => typeof resourceId === 'string' && resourceId.length > 0,
   ))];
   const ledger = new Map(ids.map(resourceId => [resourceId, []]));
-  for (const row of cleanupRows) {
+  for (const row of reconciliationRows) {
     if (!ledger.has(row.resourceId)) continue;
     ledger.get(row.resourceId).push(row.qurlId);
   }
-  const resources = [...ledger.entries()].map(([resourceId, recordedQurlIds]) => ({
-    resource_ref: resourceIdLogRef(resourceId),
-    qurl_ids: [...new Set(recordedQurlIds.filter(
-      qurlId => typeof qurlId === 'string' && qurlId.trim().length > 0,
-    ).map(qurlId => qurlId.trim()))],
-    unidentified_qurl_count: recordedQurlIds.filter(
-      qurlId => typeof qurlId !== 'string' || qurlId.trim().length === 0,
-    ).length,
-  }));
+  const resources = [...ledger.entries()].map(([resourceId, recordedQurlIds]) => {
+    const { qurlIds, unidentifiedQurlCount } = partitionQurlIds(recordedQurlIds);
+    return {
+      resource_ref: resourceIdLogRef(resourceId),
+      qurl_ids: qurlIds,
+      unidentified_qurl_count: unidentifiedQurlCount,
+    };
+  });
 
   // Log the non-secret reconciliation handles before network cleanup. A
   // process interruption must not erase the only record of a child minted in
