@@ -14,10 +14,13 @@ import (
 
 // ShareManager is the reconciler the daemon's IPC server drives, whichever
 // GroupMode built it: Run owns every session group until ctx ends, Trigger
-// requests a coalesced reconcile, and Running and Diagnostics feed /status.
+// requests a coalesced reconcile, SetOverlay replaces the runtime
+// request-header overlay (see Manager.SetOverlay), and Running and
+// Diagnostics feed /status.
 type ShareManager interface {
 	Run(context.Context) error
 	Trigger()
+	SetOverlay(map[string]map[string]string)
 	Running() map[string]string
 	Diagnostics() map[string]ResourceDiagnostic
 }
@@ -86,6 +89,10 @@ type PerShareManager struct {
 
 	mu     sync.Mutex
 	groups map[string]*shareGroup // resource ID -> its group
+	// overlay is the runtime request-header overlay every group is handed:
+	// the live ones on SetOverlay, a new one as it starts. Process memory
+	// only, as Manager.overlay.
+	overlay map[string]map[string]string
 	// retiring holds removed groups that outlived groupStopTimeout. A resource
 	// whose prior group is still retiring is not re-admitted until that group
 	// has finished, so two live sessions are never signed for one resource.
@@ -145,6 +152,20 @@ func (m *PerShareManager) Trigger() {
 	case m.trigger <- struct{}{}:
 	default:
 	}
+}
+
+// SetOverlay replaces the overlay on this manager and every live group, then
+// requests a reconcile so a deferred first reconcile is released. The fan-out
+// runs under m.mu so two replacements cannot reach the groups in different
+// orders; a group Manager's own lock is only ever taken beneath this one.
+func (m *PerShareManager) SetOverlay(overlay map[string]map[string]string) {
+	m.mu.Lock()
+	m.overlay = cloneOverlay(overlay)
+	for _, group := range m.groups {
+		group.manager.SetOverlay(m.overlay)
+	}
+	m.mu.Unlock()
+	m.Trigger()
 }
 
 // Run reconciles until ctx ends. Every exit path stops every group so a
@@ -308,6 +329,7 @@ func (m *PerShareManager) startGroupLocked(share *connectorstate.LocalShare) (*s
 	if m.configure != nil {
 		m.configure(manager)
 	}
+	manager.storeOverlay(m.overlay)
 	parent := m.lifetime
 	if parent == nil {
 		parent = context.Background()

@@ -2,17 +2,21 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	connectorshare "github.com/layervai/qurl-connector/pkg/share"
 
 	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
@@ -35,7 +39,7 @@ func StateSocketPath(stateDir string) string {
 var ErrAlreadyRunning = errors.New("qURL share daemon is already running")
 
 var probeIPCStatus = func(c IPCClient, ctx context.Context) (*http.Response, bool, error) {
-	return c.do(ctx, http.MethodGet, "/status")
+	return c.do(ctx, http.MethodGet, "/status", nil)
 }
 
 // The Unix socket path becomes visible between bind and the immediate chmod
@@ -43,7 +47,8 @@ var probeIPCStatus = func(c IPCClient, ctx context.Context) (*http.Response, boo
 // status and reload calls still fail closed on it.
 var errIPCSocketRestrictionPending = errors.New("share daemon socket restriction is not complete")
 
-// IPCServer exposes daemon status and reconciliation over an owner-only socket.
+// IPCServer exposes daemon status, reconciliation, and the runtime
+// request-header overlay over an owner-only socket.
 type IPCServer struct {
 	SocketPath string
 	Manager    ShareManager
@@ -84,6 +89,17 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 			JobVersion: s.JobVersion, Pid: os.Getpid(), Running: s.Manager.Running(), Resources: s.Manager.Diagnostics(),
 		})
 	})
+	mux.HandleFunc("PUT /overlay", func(w http.ResponseWriter, r *http.Request) {
+		overlay, err := decodeIPCOverlay(http.MaxBytesReader(w, r.Body, maxIPCOverlayBytes))
+		if err != nil {
+			// err is fixed text (see decodeIPCOverlay), never the request.
+			slog.WarnContext(r.Context(), "share daemon rejected a runtime overlay update", "reason", err)
+			http.Error(w, ipcOverlayRejected, http.StatusBadRequest)
+			return
+		}
+		s.Manager.SetOverlay(overlay)
+		w.WriteHeader(http.StatusNoContent)
+	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
@@ -106,6 +122,64 @@ func (s *IPCServer) Run(ctx context.Context) (retErr error) {
 		}
 		return errors.Join(err, managerErr)
 	}
+}
+
+// maxIPCOverlayBytes bounds a PUT /overlay body. A route's headers encode in
+// under 2 KiB at the runtime limits, so this holds an overlay for every route
+// a supervisor realistically pushes while staying finite.
+const maxIPCOverlayBytes = 64 * 1024
+
+// ipcOverlayRejected is the whole body of a refused overlay update. It is
+// fixed text: no header name or value from the request is ever echoed.
+const ipcOverlayRejected = `share daemon overlay was rejected: send JSON {"route_request_headers":{"<connector_id>":{"Name":"value"}}} under 64 KiB with no unknown fields, at most 16 valid non-reserved request headers and 1,024 name and value bytes per route`
+
+// ipcOverlay is the PUT /overlay body: runtime request headers keyed by the
+// Connector ID of the share they ride on. Each request replaces the whole
+// overlay; a route the body does not name loses its headers.
+type ipcOverlay struct {
+	RouteRequestHeaders map[string]map[string]string `json:"route_request_headers"`
+}
+
+var (
+	errIPCOverlayMalformed = errors.New("overlay body is not the expected JSON shape")
+	errIPCOverlayTooLarge  = errors.New("overlay body exceeds the size limit")
+)
+
+// decodeIPCOverlay reads one PUT /overlay body under the strict shape the
+// daemon accepts. Every error is fixed text — the request's header names and
+// values reach neither a response nor a log line — which is also why the
+// JSON decoder's own error (it can quote an unknown field) is never returned.
+func decodeIPCOverlay(reader io.Reader) (map[string]map[string]string, error) {
+	var body ipcOverlay
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return nil, errIPCOverlayTooLarge
+		}
+		return nil, errIPCOverlayMalformed
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errIPCOverlayMalformed
+	}
+	if body.RouteRequestHeaders == nil {
+		return nil, errIPCOverlayMalformed
+	}
+	for connectorID, headers := range body.RouteRequestHeaders {
+		if connectorID == "" || connectorID != strings.TrimSpace(connectorID) {
+			return nil, errIPCOverlayMalformed
+		}
+		// TODO(upstream-contract): ValidateRequestHeaders' errors are fixed
+		// strings naming no header (qurl-connector pkg/share); that is what
+		// lets the daemon log the reason. TestOverlayIPCRejectsOversizedAndUnknownFields
+		// pins it from this side.
+		if err := connectorshare.ValidateRequestHeaders(headers); err != nil {
+			return nil, fmt.Errorf("validate overlay request headers: %w", err)
+		}
+	}
+	return body.RouteRequestHeaders, nil
 }
 
 const ipcRequestTimeout = 5 * time.Second
@@ -132,7 +206,7 @@ type IPCStatus struct {
 
 // Status reads the daemon handshake without starting it.
 func (c IPCClient) Status(ctx context.Context) (IPCStatus, bool, error) {
-	response, running, err := c.do(ctx, http.MethodGet, "/status")
+	response, running, err := c.do(ctx, http.MethodGet, "/status", nil)
 	if err != nil || !running {
 		return IPCStatus{}, running, err
 	}
@@ -244,7 +318,7 @@ func validDiagnosticCode(code string) bool {
 
 // ReloadIfRunning requests reconciliation without starting an absent daemon.
 func (c IPCClient) ReloadIfRunning(ctx context.Context) (bool, error) {
-	response, running, err := c.do(ctx, http.MethodPost, "/reload")
+	response, running, err := c.do(ctx, http.MethodPost, "/reload", nil)
 	if err != nil || !running {
 		return running, err
 	}
@@ -252,6 +326,30 @@ func (c IPCClient) ReloadIfRunning(ctx context.Context) (bool, error) {
 	if response.StatusCode != http.StatusNoContent {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return true, fmt.Errorf("share daemon reload returned HTTP %d", response.StatusCode)
+	}
+	return true, nil
+}
+
+// SetOverlay replaces the daemon's runtime request-header overlay (Connector
+// ID to header set; nil clears it) without starting an absent daemon. The
+// daemon validates the body; a refusal surfaces as an error carrying its
+// fixed reason and never the headers.
+func (c IPCClient) SetOverlay(ctx context.Context, overlay map[string]map[string]string) (bool, error) {
+	if overlay == nil {
+		overlay = map[string]map[string]string{}
+	}
+	payload, err := json.Marshal(ipcOverlay{RouteRequestHeaders: overlay})
+	if err != nil {
+		return false, fmt.Errorf("encode share daemon overlay: %w", err)
+	}
+	response, running, err := c.do(ctx, http.MethodPut, "/overlay", payload)
+	if err != nil || !running {
+		return running, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusNoContent {
+		reason, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return true, fmt.Errorf("share daemon overlay returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(reason)))
 	}
 	return true, nil
 }
@@ -297,7 +395,8 @@ func (c IPCClient) WaitReady(ctx context.Context) error {
 	}
 }
 
-func (c IPCClient) do(ctx context.Context, method, path string) (*http.Response, bool, error) {
+// do sends one request; a nil body sends none, a non-nil body is JSON.
+func (c IPCClient) do(ctx context.Context, method, path string, body []byte) (*http.Response, bool, error) {
 	socket, err := validateSocketPath(c.SocketPath)
 	if err != nil {
 		return nil, false, err
@@ -306,9 +405,16 @@ func (c IPCClient) do(ctx context.Context, method, path string) (*http.Response,
 		return dialDaemonIPC(ctx, socket)
 	}}
 	defer transport.CloseIdleConnections()
-	request, err := http.NewRequestWithContext(ctx, method, "http://qurl.local"+path, http.NoBody)
+	var reader io.Reader = http.NoBody
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, "http://qurl.local"+path, reader)
 	if err != nil {
 		return nil, true, err
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
 	}
 	timeout := c.requestTimeout
 	if timeout <= 0 {
