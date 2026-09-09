@@ -37,7 +37,7 @@ func runDaemonUntilReady(t *testing.T, stateDir string, args ...string) (*runRes
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := connectordaemon.IPCClient{SocketPath: connectordaemon.StateSocketPath(stateDir)}
+	client := connectordaemon.IPCClient{SocketPath: stateSocketPath(t, stateDir)}
 	statuses := make(chan connectordaemon.IPCStatus, 1)
 	go func() {
 		defer cancel()

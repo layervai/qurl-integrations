@@ -155,3 +155,14 @@ func windowsEmptyManager(t *testing.T) *Manager {
 	}
 	return manager
 }
+
+func TestWindowsSocketPathIgnoresRuntimeDirAndRejectsRelativeStateDir(t *testing.T) {
+	stateDir := `C:\Users\Builder\AppData\Local\qurl\connector-v2`
+	got, err := SocketPathForStateDir(stateDir, lookupEnvFrom(map[string]string{RuntimeDirEnv: `C:\rt`}))
+	if err != nil || got != filepath.Join(stateDir, SocketFile) {
+		t.Fatalf("got %q err %v, want the state-directory pipe path", got, err)
+	}
+	if got, err := SocketPathForStateDir(`relative\state`, nil); err == nil || got != "" {
+		t.Fatalf("relative state dir resolved to %q, want an error", got)
+	}
+}

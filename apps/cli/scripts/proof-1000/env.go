@@ -88,8 +88,12 @@ func resolveEnvironment(ctx context.Context, opts *options) (*environment, error
 	if err != nil {
 		return nil, err
 	}
+	socketPath, err := connectordaemon.SocketPathForStateDir(stateDir, os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
 	env := &environment{
-		StateDir: stateDir, SocketPath: connectordaemon.StateSocketPath(stateDir), LogDir: logDir,
+		StateDir: stateDir, SocketPath: socketPath, LogDir: logDir,
 		QurlBin: opts.qurlBin, ConsumeBin: opts.consumeBin, GOOS: runtime.GOOS, maxProbes: opts.maxProbes,
 	}
 	agent, err := readLaunchAgent(ctx)

@@ -28,3 +28,10 @@ func shortTempDir(t *testing.T) string {
 	}
 	return dir
 }
+
+func lookupEnvFrom(env map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
+	}
+}
