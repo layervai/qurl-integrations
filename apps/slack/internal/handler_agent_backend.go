@@ -461,7 +461,7 @@ func quotaBytes(value *int64) string {
 	}
 	const gibibyte = 1 << 30
 	if *value >= gibibyte {
-		return fmt.Sprintf("%g GiB", float64(*value)/gibibyte)
+		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", float64(*value)/gibibyte), "0"), ".") + " GiB"
 	}
 	return fmt.Sprintf("%d bytes", *value)
 }

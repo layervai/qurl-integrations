@@ -566,3 +566,115 @@ test.each([401, 403, 404])('batch poll fails closed on HTTP %i without retrying'
     global.fetch = realFetch;
   }
 });
+
+test.each(['etag', 'retry-after', 'both'])('polls an accepted batch missing %s advisory headers', async missing => {
+  const accepted = batchAccepted();
+  if (missing === 'etag' || missing === 'both') accepted.headers.delete('etag');
+  if (missing === 'retry-after' || missing === 'both') accepted.headers.delete('retry-after');
+  const realFetch = global.fetch;
+  global.fetch = jest.fn().mockResolvedValueOnce(accepted).mockResolvedValueOnce(batchSucceeded());
+  try {
+    const links = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: Date.now() + 60_000, sleep: jest.fn(),
+    });
+    expect(links[0].qurl_id).toBe('q_00000000001');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    if (missing !== 'retry-after') expect(global.fetch.mock.calls[1][1].headers).not.toHaveProperty('If-None-Match');
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test.each([
+  ['0', 250],
+  ['Wed, 09 Sep 2026 12:00:02 GMT', 2000],
+  ['damaged', 250],
+])('ambiguous POST Retry-After %s keeps same mutation identity', async (header, expectedWait) => {
+  const realFetch = global.fetch;
+  const dateNow = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-09T12:00:00Z'));
+  const sleep = jest.fn();
+  global.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse(503, { error: { code: 'mutation_outcome_unknown' } }, { 'Retry-After': header }))
+    .mockResolvedValueOnce(batchAccepted()).mockResolvedValueOnce(batchSucceeded());
+  try {
+    const links = await privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: Date.now() + 60_000, sleep,
+    });
+    expect(links).toHaveLength(1);
+    expect(sleep.mock.calls[0]).toEqual([expectedWait]);
+    const [first, replay] = global.fetch.mock.calls;
+    expect(first[1].body).toBe(replay[1].body);
+    expect(first[1].headers['Idempotency-Key']).toBe(replay[1].headers['Idempotency-Key']);
+  } finally {
+    dateNow.mockRestore();
+    global.fetch = realFetch;
+  }
+});
+
+test.each([
+  ['文'.repeat(61), '文'.repeat(60)],
+  ['a'.repeat(179) + '🙂', 'a'.repeat(179)],
+  ['🙂'.repeat(46), '🙂'.repeat(45)],
+  [' \u200Be\u0301\uE000\u2028\u2029 ', 'é'],
+  ['\u200B', 'unnamed_file'],
+])('normalizes private cosmetic filename %s before signing', async (filename, expected) => {
+  let sentHeaders;
+  mockOpener.fetch.mockImplementationOnce(async builder => {
+    sentHeaders = builder(new URL('https://127.0.0.1:48123/internal/v1/uploads')).headers;
+    return jsonResponse(201, { data: {
+      upload_handle: `upl_${'a'.repeat(43)}`, mint_capability: 'qmc1.test',
+      mint_capability_expires_at: '2026-09-06T21:15:00Z',
+      authority_expires_at: UPLOAD_VECTOR.authorityExpiresAt,
+    } });
+  });
+  await privateUpload.uploadPrivate(Buffer.from('hello'), {
+    filename, contentType: 'text/plain', credential: batchOptions.credential,
+    viewerTtlSeconds: 30, authorityExpiresAt: UPLOAD_VECTOR.authorityExpiresAt,
+    requestId: UPLOAD_VECTOR.requestId, deadlineMs: Date.now() + 60_000,
+  });
+  expect(Buffer.from(sentHeaders['X-LayerV-Filename-B64'], 'base64url').toString('utf8')).toBe(expected);
+  const canonical = canonicalUploadMessage({
+    ...UPLOAD_VECTOR, filename: expected,
+    timestamp: sentHeaders['X-LayerV-Timestamp'], nonce: sentHeaders['X-LayerV-Nonce'],
+  });
+  expect(crypto.verify('sha256', canonical, mockKeyPair.publicKey,
+    Buffer.from(sentHeaders['X-LayerV-Upload-Signature'], 'base64url'))).toBe(true);
+});
+
+test.each([202, 304, 503])('poll status %i tolerates a damaged Retry-After', async status => {
+  const realFetch = global.fetch;
+  const pending = status === 304 ? new Response(null, { status })
+    : status === 202 ? batchAccepted() : jsonResponse(status, {});
+  pending.headers.set('Retry-After', 'damaged');
+  const sleep = jest.fn();
+  global.fetch = jest.fn().mockResolvedValueOnce(batchAccepted())
+    .mockResolvedValueOnce(pending).mockResolvedValueOnce(batchSucceeded());
+  try {
+    await expect(privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: Date.now() + 60_000, sleep,
+    })).resolves.toHaveLength(1);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls[1][0]).toBeGreaterThan(0);
+    expect(sleep.mock.calls[1][0]).toBeLessThanOrEqual(1000);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('caps fallback poll backoff when repeated Retry-After headers are damaged', async () => {
+  const realFetch = global.fetch;
+  let polls = 0;
+  global.fetch = jest.fn(async (_url, options) => {
+    if (options.method === 'POST') return batchAccepted();
+    return polls++ < 9 ? jsonResponse(503, {}, { 'Retry-After': 'damaged' }) : batchSucceeded();
+  });
+  const sleep = jest.fn();
+  try {
+    await expect(privateUpload.redeemDelegatedBatch({ mint_capability: 'qmc1.test' }, {
+      ...batchOptions, deadlineMs: Date.now() + 60_000, sleep,
+    })).resolves.toHaveLength(1);
+    expect(Math.max(...sleep.mock.calls.map(([ms]) => ms))).toBe(30_000);
+  } finally {
+    global.fetch = realFetch;
+  }
+});

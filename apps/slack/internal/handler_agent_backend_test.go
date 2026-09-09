@@ -1101,6 +1101,11 @@ func TestAgentBackend_QuotaCanonicalFields(t *testing.T) {
 			absent: []string{"Active qURLs", "99", "qURL limit:", "qURLs per resource:"},
 		},
 		{
+			name: "rounds non-integral GiB usage for display",
+			body: `{"plan":"free","rate_limits":{"max_data_transfer_bytes":10737418240},"usage":{"data_transfer_bytes":1234567890}}`,
+			want: []string{"Monthly data transfer: 1.15 GiB / 10 GiB"},
+		},
+		{
 			name:   "legacy fields describe resources",
 			body:   `{"plan":"free","rate_limits":{"max_active_qurls":10},"usage":{"active_qurls":3}}`,
 			want:   []string{"Active protected resources: 3 / 10", "Monthly data transfer: unavailable / unavailable"},

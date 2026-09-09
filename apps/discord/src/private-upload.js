@@ -127,14 +127,19 @@ function canonicalViewerTtl(value) {
 }
 
 function canonicalFilename(value) {
-  const filename = String(value ?? '').normalize('NFC');
-  const bytes = Buffer.byteLength(filename, 'utf8');
-  if (bytes < 1 || bytes > 180 || filename === '.' || filename === '..'
-      || /[\\/\p{Cc}\p{Cf}\p{Co}\p{Zl}\p{Zp}]/u.test(filename)
-      || /^\s|\s$/u.test(filename)) {
-    throw new Error('private upload filename is outside the v1 contract');
+  // TODO(upstream-contract): Connector privateupload accepts NFC display names
+  // of 1..180 UTF-8 bytes without these classes. Normalize cosmetic metadata
+  // before it enters either the signed message or the transport header.
+  const cleaned = String(value ?? '').replace(/[\\/\p{Cc}\p{Cf}\p{Co}\p{Zl}\p{Zp}]/gu, '').normalize('NFC').trim();
+  let filename = '';
+  let bytes = 0;
+  for (const point of cleaned) {
+    bytes += Buffer.byteLength(point, 'utf8');
+    if (bytes > 180) break;
+    filename += point;
   }
-  return filename;
+  filename = filename.trim();
+  return !filename || filename === '.' || filename === '..' ? 'unnamed_file' : filename;
 }
 
 function authorityFor(target) {
@@ -345,25 +350,17 @@ async function uploadPrivate(bodyInput, {
   throw lastError;
 }
 
-function requiredRetryAfterMs(response) {
-  const raw = response.headers.get('retry-after');
-  if (!/^[1-9][0-9]*$/.test(raw || '')) {
-    throw new Error('Delegated qURL batch returned an invalid Retry-After header');
+function retryDelayMs(response, attempt, fallbackMs = Math.min(30_000, RETRY_BACKOFF_BASE_MS * (2 ** (attempt - 1)))) {
+  const raw = response?.headers?.get('retry-after')?.trim();
+  let milliseconds;
+  if (/^\d+$/.test(raw || '')) {
+    milliseconds = Number(raw) * 1000;
+  } else if (/^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(raw || '')) {
+    milliseconds = Date.parse(raw) - Date.now();
   }
-  const seconds = Number(raw);
-  const milliseconds = seconds * 1000;
-  if (!Number.isSafeInteger(milliseconds)) {
-    throw new Error('Delegated qURL batch returned an invalid Retry-After header');
-  }
-  return milliseconds;
-}
-
-function retryDelayMs(response, attempt) {
-  const raw = response?.headers?.get('retry-after');
-  if (raw != null) {
-    return requiredRetryAfterMs(response);
-  }
-  return RETRY_BACKOFF_BASE_MS * (2 ** (attempt - 1));
+  // Retry-After is advisory. Missing/damaged values, zero, and elapsed dates
+  // retain a positive bounded backoff; callers still enforce the send deadline.
+  return Number.isSafeInteger(milliseconds) && milliseconds > 0 ? milliseconds : fallbackMs;
 }
 
 function requestTimeoutMs(deadlineMs, maximumMs, deadlineMessage) {
@@ -463,8 +460,8 @@ async function redeemDelegatedBatch(upload, {
   }
   if (!accepted) throw lastError || new Error('Delegated qURL batch was not accepted');
   const location = validatedBatchLocation(accepted.response.headers.get('location'), accepted.batchId);
-  let etag = requiredEtag(accepted.response);
-  let waitMs = requiredRetryAfterMs(accepted.response);
+  let etag = accepted.response.headers.has('etag') ? requiredEtag(accepted.response) : null;
+  let waitMs = retryDelayMs(accepted.response, 1, 1000);
   let transientFailures = 0;
   // TODO(upstream-contract): qurl-service batch GETs are idempotent and terminal
   // responses always include results, even with an unchanged If-None-Match.
@@ -502,12 +499,12 @@ async function redeemDelegatedBatch(upload, {
     transientFailures = 0;
     if (response.status === 304) {
       if (response.headers.has('etag')) etag = requiredEtag(response);
-      waitMs = response.headers.has('retry-after') ? requiredRetryAfterMs(response) : 1000;
+      waitMs = retryDelayMs(response, 1, 1000);
       continue;
     }
     if (response.status === 202) {
       if (response.headers.has('etag')) etag = requiredEtag(response);
-      waitMs = response.headers.has('retry-after') ? requiredRetryAfterMs(response) : 1000;
+      waitMs = retryDelayMs(response, 1, 1000);
       const pending = result;
       if (pending?.data?.batch_id !== accepted.batchId
           || !['queued', 'running'].includes(pending?.data?.status)) {
