@@ -52,6 +52,11 @@ scripts and pipelines must pass --yes.`,
 				}
 			}
 
+			// Deletion is committed remotely first; check the namespace's
+			// supervision before it so a mismatch never half-applies.
+			if err := opts.requireRuntimeSupervisionIfNamespace(); err != nil {
+				return err
+			}
 			client, err := opts.newClient(cmd.Context())
 			if err != nil {
 				return err

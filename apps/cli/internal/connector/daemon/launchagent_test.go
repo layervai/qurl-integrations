@@ -13,6 +13,8 @@ import (
 
 	connectorservice "github.com/layervai/qurl-connector/pkg/service"
 	qurl "github.com/layervai/qurl-go/qurl"
+
+	connectorstate "github.com/layervai/qurl-integrations/apps/cli/internal/connector/state"
 )
 
 const testHubKey = "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -480,7 +482,7 @@ func TestJobControllerRefusesToInstallAnUnknownMode(t *testing.T) {
 
 func newTestJobController(t *testing.T, stateDir, logDir, binaryVersion, endpoint string, mode GroupMode, resolveHub func() (qurl.HubBootstrap, error)) *JobController {
 	t.Helper()
-	controller, err := NewJobController(stateDir, logDir, binaryVersion, endpoint, mode, resolveHub, nil)
+	controller, err := NewJobController(stateDir, logDir, binaryVersion, endpoint, mode, connectorstate.RuntimeSupervisionNative, resolveHub, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +493,7 @@ func TestJobControllerCarriesTheResolvedRuntimeDir(t *testing.T) {
 	base := filepath.Dir(shortTempDir(t))
 	stateDir, runtimeDir := filepath.Join(base, "state"), filepath.Join(base, "rt")
 	controller, err := NewJobController(stateDir, filepath.Join(base, "logs"), "2.4.0", "https://api.example.test",
-		GroupModeSingle, testHubResolver, lookupEnvFrom(map[string]string{RuntimeDirEnv: runtimeDir}))
+		GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, lookupEnvFrom(map[string]string{RuntimeDirEnv: runtimeDir}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +524,7 @@ func TestJobControllerCarriesTheResolvedRuntimeDir(t *testing.T) {
 	}
 
 	_, err = NewJobController(stateDir, filepath.Join(base, "logs"), "2.4.0", "https://api.example.test",
-		GroupModeSingle, testHubResolver, lookupEnvFrom(map[string]string{RuntimeDirEnv: "relative"}))
+		GroupModeSingle, connectorstate.RuntimeSupervisionNative, testHubResolver, lookupEnvFrom(map[string]string{RuntimeDirEnv: "relative"}))
 	if err == nil {
 		t.Fatal("relative runtime dir built a job controller")
 	}
