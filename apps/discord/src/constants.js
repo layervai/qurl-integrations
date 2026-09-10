@@ -221,6 +221,13 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+  // Emitted when Discord OAuth setup rebinds an existing guild to a
+  // different configured_by admin. TODO(upstream-contract): keep
+  // qurl-integrations-infra's qurl_setup_admin_changed CloudWatch
+  // filter/alarm in sync with this string. Direct rebinds only: deleting the
+  // configuration first has no prior administrator to compare. Guild/admin
+  // IDs are forensic fields, never CloudWatch metric dimensions.
+  QURL_SETUP_ADMIN_CHANGED: 'qurl_setup_admin_changed',
 
   // Emitted by gateway-health.js on every /health response that
   // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
