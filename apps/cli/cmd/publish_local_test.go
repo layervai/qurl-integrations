@@ -320,3 +320,25 @@ func TestLocalPublishReuseConflictExplainsDeleteRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalPublishQuotaExplainsAccountLimits(t *testing.T) {
+	srv := apitest.NewServer(t)
+	res := runCLI(t, &runOpts{
+		args:            []string{"--endpoint", srv.URL, "publish", "http://127.0.0.1:3000", "--id", "quota-test"},
+		env:             map[string]string{"QURL_API_KEY": testAPIKey},
+		shareStateDir:   connectorStateTestDir(t),
+		preflightTarget: func(context.Context, string, int) error { return nil },
+		localResource: func(context.Context, *connectorshare.NativeRuntimeConfig, func(string) (string, error)) (*agent.ResolvedResource, error) {
+			return nil, errors.Join(qurl.ErrConnectorResourceQuotaExceeded, &qurl.ConnectorResourceDiscoveryError{Code: "52504"})
+		},
+	})
+	if res.code != exitcode.Forbidden {
+		t.Fatalf("publish = %d, want %d: %s", res.code, exitcode.Forbidden, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	for _, want := range []string{"reached a plan limit", "across all API keys", "qurl list --status active", "monthly data usage", "52504"} {
+		if !strings.Contains(res.stderr.String(), want) {
+			t.Fatalf("quota refusal lacks %q: %s", want, res.stderr.String())
+		}
+	}
+}

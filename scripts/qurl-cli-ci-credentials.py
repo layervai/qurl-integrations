@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Create and revoke one short-lived qURL CLI CI credential."""
+"""Create and revoke short-lived qURL CLI CI credentials with a dedicated API key."""
 
 from __future__ import annotations
 
 import argparse
-import base64
+import datetime
 import hashlib
 import json
 import os
@@ -21,18 +21,18 @@ from typing import Any
 
 
 MAX_RESPONSE = 64 * 1024
-REQUIRED_M2M_SCOPES = frozenset({"qurl:agent", "qurl:read", "qurl:write"})
-# TODO(upstream-contract): the CI Auth0 tenant issues one-hour M2M tokens. The
-# minimum below leaves nine minutes after issuance skew before that expiry.
-AUTH0_M2M_TOKEN_LIFETIME_SECONDS = 60 * 60
-AUTH0_ISSUANCE_SKEW_SECONDS = 60
-# An M2M token is consumed only by one trusted setup or reconciliation command.
-# The setup command removes it before the customer journey starts. A cleanup
-# command reuses one token for its bounded batch and never exposes that token to
-# a customer process. The lifetime is independent of the 110-minute soak lane.
+# Conservative setup budget; the three-hour journey lifetime floor is stronger.
 CREATE_PAIR_BUDGET_SECONDS = 15 * 60
-M2M_EXPIRY_MARGIN_SECONDS = 5 * 60
+# Validate the requested credential lifetime; workflow timeouts bound execution.
+MAX_OPERATION_BUDGET_SECONDS = 55 * 60
+RUNNER_CLEANUP_MARGIN_SECONDS = 5 * 60
+# Cover setup, customer execution, and cleanup without near-expiry authority.
+MIN_AUTOMATION_LIFETIME_SECONDS = 3 * 60 * 60
+# TODO(upstream-contract): qurl-service generates 32-byte base64url API secrets.
+API_KEY = re.compile(r"lv_(?:live|test)_[A-Za-z0-9_-]{43}\Z")
 CUSTOMER_SCOPES = ["qurl:agent", "qurl:read", "qurl:resolve", "qurl:write"]
+# The parent must hold every child scope plus explicit key-management authority.
+REQUIRED_AUTOMATION_SCOPES = sorted([*CUSTOMER_SCOPES, "qurl:keys"])
 DEVICE_SCOPES = ["qurl:read", "qurl:resolve", "qurl:write"]
 KEY_ID = re.compile(r"key_[A-Za-z0-9]{12}\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,18}\Z")
@@ -118,7 +118,9 @@ class ReconciliationInventory:
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001,ANN201
+    def redirect_request(
+        self, req, fp, code, msg, headers, newurl
+    ):  # noqa: ANN001,ANN201
         return None
 
 
@@ -226,100 +228,6 @@ def json_object(raw: bytes, label: str) -> dict[str, Any]:
     return value
 
 
-def jwt_claims(token: str) -> dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise CredentialError("Auth0 access token is not a JWT")
-    try:
-        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
-    except ValueError as exc:
-        raise CredentialError("Auth0 access token payload is malformed") from exc
-    return json_object(payload, "Auth0 access token payload")
-
-
-def effective_scopes(claims: dict[str, Any]) -> frozenset[str]:
-    values: list[str] = []
-    scope = claims.get("scope", "")
-    if not isinstance(scope, str):
-        raise CredentialError("Auth0 access token scope is malformed")
-    values.extend(filter(None, scope.split(" ")))
-    for field in ("permissions", "https://layerv.ai/permissions"):
-        permissions = claims.get(field, [])
-        if not isinstance(permissions, list) or any(
-            not isinstance(item, str) for item in permissions
-        ):
-            raise CredentialError("Auth0 access token permissions are malformed")
-        values.extend(permissions)
-    return frozenset(values)
-
-
-def auth0_token(
-    args: argparse.Namespace, operation_budget_seconds: int
-) -> tuple[str, str]:
-    if (
-        not isinstance(operation_budget_seconds, int)
-        or isinstance(operation_budget_seconds, bool)
-        or operation_budget_seconds <= 0
-        or operation_budget_seconds + M2M_EXPIRY_MARGIN_SECONDS
-        > AUTH0_M2M_TOKEN_LIFETIME_SECONDS
-    ):
-        raise CredentialError("Auth0 operation budget is invalid")
-    client_id = private_value(args.client_id_file, "Auth0 client ID")
-    client_secret = private_value(args.client_secret_file, "Auth0 client secret")
-    form = urllib.parse.urlencode(
-        {
-            "audience": args.audience,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "grant_type": "client_credentials",
-            "scope": " ".join(sorted(REQUIRED_M2M_SCOPES)),
-        }
-    ).encode("ascii")
-    status, raw = request(
-        args.token_endpoint,
-        "POST",
-        body=form,
-        content_type="application/x-www-form-urlencoded",
-    )
-    if status != 200:
-        raise CredentialError("Auth0 client credential was rejected")
-    response = json_object(raw, "Auth0 token response")
-    token = response.get("access_token")
-    if response.get("token_type") != "Bearer" or not isinstance(token, str):
-        raise CredentialError("Auth0 did not return one bearer token")
-    claims = jwt_claims(token)
-    now = int(time.time())
-    parsed_endpoint = urllib.parse.urlsplit(args.token_endpoint)
-    expected_issuer = f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}/"
-    audience = claims.get("aud")
-    if audience != args.audience and audience != [args.audience]:
-        raise CredentialError("Auth0 token audience does not match the qURL API")
-    if (
-        claims.get("gty") != "client-credentials"
-        or claims.get("sub") != f"{client_id}@clients"
-        or claims.get("iss") != expected_issuer
-    ):
-        raise CredentialError("Auth0 token is not owned by the CI client")
-    issued = claims.get("iat")
-    expires = claims.get("exp")
-    if (
-        not isinstance(issued, int)
-        or isinstance(issued, bool)
-        or not isinstance(expires, int)
-        or isinstance(expires, bool)
-        or issued > now + AUTH0_ISSUANCE_SKEW_SECONDS
-        or now - issued > AUTH0_ISSUANCE_SKEW_SECONDS
-        or expires - now < operation_budget_seconds + M2M_EXPIRY_MARGIN_SECONDS
-        or expires - issued > 2 * AUTH0_M2M_TOKEN_LIFETIME_SECONDS
-    ):
-        raise CredentialError(
-            "Auth0 token does not have the required CI management lifetime"
-        )
-    if effective_scopes(claims) != REQUIRED_M2M_SCOPES:
-        raise CredentialError("Auth0 token does not have the exact CI scope set")
-    return token, claims["sub"]
-
-
 def qurl_json(
     endpoint: str,
     token: str,
@@ -353,13 +261,13 @@ def identity(endpoint: str, token: str) -> dict[str, Any]:
     return response["data"]
 
 
-def retry_revoke(endpoint: str, jwt: str, key_id: str) -> None:
+def retry_revoke(endpoint: str, automation_key: str, key_id: str) -> None:
     last_error: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
         try:
             status, _ = qurl_json(
                 endpoint,
-                jwt,
+                automation_key,
                 "DELETE",
                 "/v1/api-keys/" + urllib.parse.quote(key_id, safe=""),
             )
@@ -378,7 +286,7 @@ def retry_revoke(endpoint: str, jwt: str, key_id: str) -> None:
     ) from last_error
 
 
-def retry_assignment_retire(endpoint: str, jwt: str, agent_id: str) -> None:
+def retry_assignment_retire(endpoint: str, automation_key: str, agent_id: str) -> None:
     if not RUN_AGENT_ID.fullmatch(agent_id):
         raise CredentialError("run Connector assignment ID is malformed")
     last_error: Exception | None = None
@@ -386,7 +294,7 @@ def retry_assignment_retire(endpoint: str, jwt: str, agent_id: str) -> None:
         try:
             status, _ = qurl_json(
                 endpoint,
-                jwt,
+                automation_key,
                 "DELETE",
                 "/v1/connectors/agents/"
                 + urllib.parse.quote(agent_id, safe="")
@@ -413,7 +321,7 @@ def retry_assignment_retire(endpoint: str, jwt: str, agent_id: str) -> None:
     ) from last_error
 
 
-def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
+def retry_resource_delete(endpoint: str, automation_key: str, resource_id: str) -> None:
     if not resource_id or len(resource_id) > 512 or resource_id != resource_id.strip():
         raise CredentialError("resource cleanup ID is malformed")
     last_error: Exception | None = None
@@ -421,7 +329,7 @@ def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
         try:
             status, _ = qurl_json(
                 endpoint,
-                jwt,
+                automation_key,
                 "DELETE",
                 "/v1/resources/" + urllib.parse.quote(resource_id, safe=""),
             )
@@ -442,7 +350,9 @@ def retry_resource_delete(endpoint: str, jwt: str, resource_id: str) -> None:
     ) from last_error
 
 
-def retry_connector_resource_delete(endpoint: str, jwt: str, connector_id: str) -> bool:
+def retry_connector_resource_delete(
+    endpoint: str, automation_key: str, connector_id: str
+) -> bool:
     if not RUN_CONNECTOR_ID.fullmatch(connector_id):
         raise CredentialError("run Connector cleanup ID is malformed")
     last_error: Exception | None = None
@@ -450,7 +360,9 @@ def retry_connector_resource_delete(endpoint: str, jwt: str, connector_id: str) 
     for attempt in range(MAX_ATTEMPTS):
         try:
             query = urllib.parse.urlencode({"slug": connector_id})
-            status, response = qurl_json(endpoint, jwt, "GET", "/v1/resources?" + query)
+            status, response = qurl_json(
+                endpoint, automation_key, "GET", "/v1/resources?" + query
+            )
         except CredentialError as exc:
             last_error = exc
         else:
@@ -494,13 +406,13 @@ def retry_connector_resource_delete(endpoint: str, jwt: str, connector_id: str) 
         raise CredentialError(
             "qURL Connector cleanup lookup did not converge after bounded retries"
         ) from last_error
-    retry_resource_delete(endpoint, jwt, resource_id)
+    retry_resource_delete(endpoint, automation_key, resource_id)
     return True
 
 
 def paged_rows(
     endpoint: str,
-    jwt: str,
+    automation_key: str,
     path: str,
     label: str,
     status_filter: str | None,
@@ -526,7 +438,7 @@ def paged_rows(
         if cursor:
             query["cursor"] = cursor
         status, response = qurl_json(
-            endpoint, jwt, "GET", path + "?" + urllib.parse.urlencode(query)
+            endpoint, automation_key, "GET", path + "?" + urllib.parse.urlencode(query)
         )
         pages += 1
         if time.monotonic() >= deadline:
@@ -560,16 +472,69 @@ def paged_rows(
         cursor = next_cursor
 
 
+def key_expiry_timestamp(raw: Any, label: str = "automation key") -> float:
+    if not isinstance(raw, str):
+        raise CredentialError(f"{label} expiry is malformed")
+    try:
+        # Normalize subsecond precision for Python 3.10 as well as newer runners.
+        raw = re.sub(
+            r"\.(\d{1,9})(?=Z|[+-])",
+            lambda match: "." + match[1][:6].ljust(6, "0"),
+            raw,
+        )
+        expiry = datetime.datetime.fromisoformat(
+            raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        )
+    except ValueError as exc:
+        raise CredentialError(f"{label} expiry is malformed") from exc
+    if expiry.tzinfo is None:
+        raise CredentialError(f"{label} expiry is malformed")
+    return expiry.timestamp()
+
+
 def authenticated_owner(
-    args: argparse.Namespace, operation_budget_seconds: int
+    args: argparse.Namespace,
+    operation_budget_seconds: int,
+    *,
+    minimum_lifetime_seconds: int = 0,
 ) -> tuple[str, str, str]:
     endpoint = https_origin(args.qurl_endpoint, "qURL endpoint")
-    args.token_endpoint = https_origin(args.token_endpoint, "Auth0 token endpoint")
-    jwt, expected_owner = auth0_token(args, operation_budget_seconds)
-    m2m = identity(endpoint, jwt)
-    if m2m.get("auth_type") != "jwt" or m2m.get("owner_id") != expected_owner:
-        raise CredentialError("qURL rejected the dedicated CI owner")
-    return endpoint, jwt, expected_owner
+    if (
+        type(operation_budget_seconds) is not int
+        or not 0 < operation_budget_seconds <= MAX_OPERATION_BUDGET_SECONDS
+    ):
+        raise CredentialError("automation operation budget is invalid")
+    key = private_value(args.api_key_file, "automation API key")
+    if not API_KEY.fullmatch(key):
+        raise CredentialError("automation API key is malformed")
+    owner = args.owner_id
+    if not owner or owner != owner.strip():
+        raise CredentialError("expected CI owner is required")
+    data = identity(endpoint, key)
+    info = data.get("api_key")
+    if (
+        data.get("auth_type") != "api_key"
+        or data.get("owner_id") != owner
+        or not isinstance(info, dict)
+        or info.get("kind") != "api_key"
+        or not isinstance(info.get("key_id"), str)
+        or not KEY_ID.fullmatch(info["key_id"])
+        or not isinstance(info.get("scopes"), list)
+        or not all(isinstance(scope, str) for scope in info["scopes"])
+        or sorted(info["scopes"]) != REQUIRED_AUTOMATION_SCOPES
+    ):
+        raise CredentialError("qURL rejected the dedicated CI automation key")
+    # TODO(upstream-contract): MeApiKey omits expires_at for non-expiring keys.
+    # A present null or malformed value is not the non-expiring wire contract.
+    if "expires_at" in info:
+        expiry = key_expiry_timestamp(info["expires_at"])
+        required_lifetime = max(
+            operation_budget_seconds + RUNNER_CLEANUP_MARGIN_SECONDS,
+            minimum_lifetime_seconds,
+        )
+        if expiry - time.time() < required_lifetime:
+            raise CredentialError("automation key does not have the required lifetime")
+    return endpoint, key, owner
 
 
 def run_description(args: RunCleanup) -> str:
@@ -653,7 +618,9 @@ def cleanup_label_codes(args: RunCleanup) -> tuple[str, ...]:
     return tuple(codes[label] for label in cleanup_labels(args))
 
 
-def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory:
+def reconciliation_inventory(
+    endpoint: str, automation_key: str
+) -> ReconciliationInventory:
     """Load one bounded snapshot without suppressing either inventory attempt."""
     inventory_deadline = time.monotonic() + RECONCILE_INVENTORY_BUDGET_SECONDS
     credential_deadline = inventory_deadline - RESOURCE_INVENTORY_RESERVE_SECONDS
@@ -667,7 +634,7 @@ def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory
         credential_rows = tuple(
             paged_rows(
                 endpoint,
-                jwt,
+                automation_key,
                 "/v1/api-keys",
                 "qURL credential cleanup",
                 status_filter="active",
@@ -686,7 +653,7 @@ def reconciliation_inventory(endpoint: str, jwt: str) -> ReconciliationInventory
         resource_rows = tuple(
             paged_rows(
                 endpoint,
-                jwt,
+                automation_key,
                 "/v1/resources",
                 "qURL resource cleanup",
                 status_filter=None,
@@ -716,14 +683,14 @@ def reconcile_run(
     credential_names = run_credential_names(args)
     device_key_names = run_device_key_names(args)
     connector_ids = run_connector_ids(args)
-    endpoint, jwt = authenticated
+    endpoint, automation_key = authenticated
 
     failures: dict[str, int] = {}
 
     def record_failure(category: str) -> None:
         failures[category] = failures.get(category, 0) + 1
 
-    # Revoke run credentials before resource cleanup. The trusted M2M token,
+    # Revoke run credentials before resource cleanup. The trusted automation key,
     # not a customer or device key, authorizes every resource deletion below.
     # Validate each exact target before deletion, attempt every valid target,
     # and retain only redacted failure categories for the final error.
@@ -765,7 +732,7 @@ def reconcile_run(
     unique_key_ids = sorted(set(key_ids))
     for key_id in unique_key_ids:
         try:
-            retry_revoke(endpoint, jwt, key_id)
+            retry_revoke(endpoint, automation_key, key_id)
         except CredentialError:
             record_failure("credential_revoke")
 
@@ -775,7 +742,7 @@ def reconcile_run(
     # even when a runner stopped before it recorded local state.
     for agent_id in sorted(run_agent_ids(args)):
         try:
-            retry_assignment_retire(endpoint, jwt, agent_id)
+            retry_assignment_retire(endpoint, automation_key, agent_id)
         except CredentialError:
             record_failure("assignment_retire")
 
@@ -785,7 +752,7 @@ def reconcile_run(
     connector_resources = 0
     for connector_id in sorted(connector_ids):
         try:
-            if retry_connector_resource_delete(endpoint, jwt, connector_id):
+            if retry_connector_resource_delete(endpoint, automation_key, connector_id):
                 connector_resources += 1
         except CredentialError:
             record_failure("connector_resource")
@@ -806,7 +773,7 @@ def reconcile_run(
     unique_resource_ids = list(dict.fromkeys(resource_ids))
     for resource_id in unique_resource_ids:
         try:
-            retry_resource_delete(endpoint, jwt, resource_id)
+            retry_resource_delete(endpoint, automation_key, resource_id)
         except CredentialError:
             record_failure("resource_delete")
 
@@ -847,12 +814,16 @@ def reconcile_batch(args: argparse.Namespace) -> None:
             )
         )
 
-    endpoint, jwt, _ = authenticated_owner(args, args.operation_budget_seconds)
-    inventory = reconciliation_inventory(endpoint, jwt)
+    endpoint, automation_key, _ = authenticated_owner(
+        args, args.operation_budget_seconds
+    )
+    inventory = reconciliation_inventory(endpoint, automation_key)
     failures = 0
     for run in parsed:
         try:
-            reconcile_run(run, authenticated=(endpoint, jwt), inventory=inventory)
+            reconcile_run(
+                run, authenticated=(endpoint, automation_key), inventory=inventory
+            )
         except CredentialError as exc:
             failures += 1
             print(
@@ -873,10 +844,10 @@ def reconcile_batch(args: argparse.Namespace) -> None:
         raise CredentialError(
             f"batch cleanup did not converge for {failures} of {len(parsed)} runs"
         )
-    print(f"reconciled {len(parsed)} runs with one management token")
+    print(f"reconciled {len(parsed)} runs with one automation key")
 
 
-def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
+def mint_ordinary_key(endpoint: str, automation_key: str, name: str) -> tuple[str, str]:
     idempotency = "qurl-cli-ci-" + hashlib.sha256(name.encode("ascii")).hexdigest()
     body = {"kind": "api_key", "name": name, "scopes": CUSTOMER_SCOPES}
     last_error: Exception | None = None
@@ -884,7 +855,7 @@ def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
         try:
             status, response = qurl_json(
                 endpoint,
-                jwt,
+                automation_key,
                 "POST",
                 "/v1/api-keys",
                 body,
@@ -905,7 +876,7 @@ def mint_ordinary_key(endpoint: str, jwt: str, name: str) -> tuple[str, str]:
                 not isinstance(key_id, str)
                 or not KEY_ID.fullmatch(key_id)
                 or not isinstance(api_key, str)
-                or not api_key.startswith(("lv_test_", "lv_live_"))
+                or not API_KEY.fullmatch(api_key)
                 or data.get("kind") != "api_key"
                 or data.get("name") != name
                 or data.get("scopes") != CUSTOMER_SCOPES
@@ -945,7 +916,7 @@ def prepare_output_directory(path: pathlib.Path) -> None:
 
 def revoke_named_credential(
     endpoint: str,
-    jwt: str,
+    automation_key: str,
     name: str,
     key_id_path: pathlib.Path,
 ) -> None:
@@ -958,14 +929,14 @@ def revoke_named_credential(
     else:
         # A create response can be lost after the service commits it. Repeat
         # the same idempotent POST to recover that exact key ID, then revoke it.
-        key_id, _ = mint_ordinary_key(endpoint, jwt, name)
+        key_id, _ = mint_ordinary_key(endpoint, automation_key, name)
         write_private(key_id_path, key_id)
-    retry_revoke(endpoint, jwt, key_id)
+    retry_revoke(endpoint, automation_key, key_id)
 
 
 def revoke_recorded_credential(
     endpoint: str,
-    jwt: str,
+    automation_key: str,
     name: str,
     key_id_path: pathlib.Path,
 ) -> None:
@@ -975,7 +946,7 @@ def revoke_recorded_credential(
     key_id = private_value(key_id_path, "API key ID")
     if not KEY_ID.fullmatch(key_id):
         raise CredentialError("API key ID is malformed")
-    retry_revoke(endpoint, jwt, key_id)
+    retry_revoke(endpoint, automation_key, key_id)
 
 
 def validate_create_args(args: argparse.Namespace) -> None:
@@ -992,13 +963,13 @@ def validate_create_args(args: argparse.Namespace) -> None:
 def create_with_auth(
     args: argparse.Namespace | CredentialCreate,
     endpoint: str,
-    jwt: str,
+    automation_key: str,
     expected_owner: str,
 ) -> None:
     name = run_credential_name(args.run_id, args.run_attempt, args.lane, args.purpose)
     prepare_output_directory(args.output_dir)
     try:
-        key_id, api_key = mint_ordinary_key(endpoint, jwt, name)
+        key_id, api_key = mint_ordinary_key(endpoint, automation_key, name)
         write_private(args.output_dir / "api-key-id", key_id)
         customer = identity(endpoint, api_key)
         customer_key = customer.get("api_key")
@@ -1011,10 +982,20 @@ def create_with_auth(
             or customer_key.get("scopes") != CUSTOMER_SCOPES
         ):
             raise CredentialError("minted API key does not belong to the CI owner")
+        # TODO(upstream-contract): /v1/me exposes the child's finite expiry.
+        # Check only after recording its ID, so any rejection can revoke it.
+        remaining = (
+            key_expiry_timestamp(customer_key.get("expires_at"), "child key")
+            - time.time()
+        )
+        if not 0 < remaining <= 24 * 60 * 60:
+            raise CredentialError("qURL returned an invalid child-key lifetime")
         write_private(args.output_dir / "api-key", api_key)
     except (OSError, CredentialError) as exc:
         try:
-            revoke_named_credential(endpoint, jwt, name, args.output_dir / "api-key-id")
+            revoke_named_credential(
+                endpoint, automation_key, name, args.output_dir / "api-key-id"
+            )
         except (OSError, CredentialError) as cleanup_exc:
             raise CleanupConvergenceError(
                 "credential creation failed and bounded revoke did not converge"
@@ -1054,14 +1035,16 @@ def create_pair(args: argparse.Namespace) -> None:
         or failure_path in primary_path.parents
     ):
         raise CredentialError("customer credential directories must be distinct")
-    endpoint, jwt, expected_owner = authenticated_owner(
-        args, CREATE_PAIR_BUDGET_SECONDS
+    endpoint, automation_key, expected_owner = authenticated_owner(
+        args,
+        CREATE_PAIR_BUDGET_SECONDS,
+        minimum_lifetime_seconds=MIN_AUTOMATION_LIFETIME_SECONDS,
     )
     directories = {credential.purpose: credential.output_dir for credential in requests}
     completed_purposes: list[str] = []
     try:
         for credential in requests:
-            create_with_auth(credential, endpoint, jwt, expected_owner)
+            create_with_auth(credential, endpoint, automation_key, expected_owner)
             completed_purposes.append(credential.purpose)
         primary_id = private_value(
             args.primary_output_dir / "api-key-id", "primary API key ID"
@@ -1086,7 +1069,7 @@ def create_pair(args: argparse.Namespace) -> None:
                     args.run_id, args.run_attempt, args.lane, purpose
                 )
                 revoke_recorded_credential(
-                    endpoint, jwt, name, directory / "api-key-id"
+                    endpoint, automation_key, name, directory / "api-key-id"
                 )
             except (OSError, CredentialError):
                 cleanup_failed = True
@@ -1097,7 +1080,7 @@ def create_pair(args: argparse.Namespace) -> None:
         raise CredentialError(
             "credential-pair creation failed; every created key was revoked"
         ) from exc
-    print("created two isolated run-scoped customer API keys with one management token")
+    print("created two isolated run-scoped customer API keys with one automation key")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1109,11 +1092,9 @@ def parser() -> argparse.ArgumentParser:
         create_pair_parser,
         reconcile_batch_parser,
     ):
-        current.add_argument("--token-endpoint", required=True)
-        current.add_argument("--audience", required=True)
         current.add_argument("--qurl-endpoint", required=True)
-        current.add_argument("--client-id-file", type=pathlib.Path, required=True)
-        current.add_argument("--client-secret-file", type=pathlib.Path, required=True)
+        current.add_argument("--api-key-file", type=pathlib.Path, required=True)
+        current.add_argument("--owner-id", required=True)
     create_pair_parser.add_argument(
         "--primary-output-dir", type=pathlib.Path, required=True
     )

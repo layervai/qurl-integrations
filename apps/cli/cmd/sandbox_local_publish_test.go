@@ -154,8 +154,8 @@ func TestSandboxFullCustomerLifecyclePhaseContract(t *testing.T) {
 // The main CLI workflow runs this tagged test with one exact customer CLI
 // artifact. It creates a native device in a fresh state directory and records
 // that device for the workflow's terminal cleanup. The test does not receive
-// M2M authority there; terminal cleanup mints a fresh token after it fences the
-// tested process. A direct operator run can supply a cleanup JWT to revoke the
+// standing automation authority there; terminal cleanup uses the protected parent
+// API key after it fences the tested process. A direct operator run can supply an interactive cleanup JWT to revoke the
 // device in the test's own cleanup. That JWT must represent the same owner as
 // QURL_API_KEY. Run explicitly:
 //
